@@ -51,8 +51,8 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Record exact source identity
         run: |
-          commit="$(git rev-parse HEAD)"
-          tree="$(git rev-parse 'HEAD^{tree}')"
+          commit="$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)"
+          tree="$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse 'HEAD^{tree}')"
           printf 'Commit: `%s`\nTree: `%s`\n' "$commit" "$tree" >> "$GITHUB_STEP_SUMMARY"
       - uses: ./.github/actions/setup-pnpm
         with:
