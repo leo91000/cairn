@@ -799,6 +799,8 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
+      - name: Reclaim unused Android SDK build packages
+        run: node scripts/android-emulator-sdk.mjs prune
       - name: Enable emulator acceleration
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -806,7 +808,10 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - uses: ./.github/actions/setup-android-emulator
         with:
-          build-packages: ''
+          build-packages: 'build-tools;37.0.0 platforms;android-36'
+      # The pinned runner refreshes these packages again; its hook checks after that install and AVD creation.
+      - name: Check emulator userdata disk headroom
+        run: node scripts/android-emulator-sdk.mjs preflight
       - name: Observe native responses, network restart and revocation
         env:
           ANDROID_SCENARIO: ${{ matrix.scenario }}
@@ -817,6 +822,7 @@ jobs:
           target: google_apis
           profile: pixel_6
           disable-animations: true
+          pre-emulator-launch-script: node scripts/android-emulator-sdk.mjs preflight
           script: |
             python3 tests/network-bench.py "$ANDROID_SCENARIO" --android --output "test-results/android-direct/$ANDROID_SCENARIO.json"
       - uses: actions/upload-artifact@v7.0.1
