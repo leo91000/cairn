@@ -368,9 +368,14 @@ fn gate(
         ("POST", ["chats", id, "messages"])
         | ("PUT", ["chats", id, "messages", _])
         | ("POST", ["chats", id, "questions", _, "answer" | "cancel"])
-        | ("POST", ["chats", id, "new-session" | "compact" | "coding-agent"]) => {
-            require_chat(db, identity, id)
-        }
+        | (
+            "POST",
+            [
+                "chats",
+                id,
+                "new-session" | "compact" | "coding-agent" | "resume",
+            ],
+        ) => require_chat(db, identity, id),
         ("POST", ["chats", id, "pause"]) if body["paused"] != true => {
             require_chat(db, identity, id)
         }

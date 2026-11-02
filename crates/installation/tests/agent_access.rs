@@ -247,6 +247,7 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
             format!("/api/chats/{chat}/coding-agent"),
             json!({ "provider": "claude" }),
         ),
+        ("POST", format!("/api/chats/{chat}/resume"), json!({})),
         ("POST", format!("/api/runs/{run}/resume"), json!({})),
         ("POST", format!("/api/runs/{run}/chat"), json!({})),
         ("POST", format!("/api/runs/{run}/cleanup"), json!({})),
