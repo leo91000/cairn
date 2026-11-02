@@ -7,17 +7,19 @@ import { defineConfig } from 'vite'
 import { webBuildId } from './build-id'
 
 const pdfRoot = path.dirname(fileURLToPath(import.meta.resolve('pdfjs-dist/package.json')))
+const buildId = webBuildId(fileURLToPath(new URL('../..', import.meta.url)))
 const pdfVersion = JSON.parse(readFileSync(path.join(pdfRoot, 'package.json'), 'utf8')).version
 const pdfAssets = ['cmaps', 'standard_fonts', 'wasm'].flatMap(directory => readdirSync(path.join(pdfRoot, directory)).map(name => ({ source: path.join(pdfRoot, directory, name), target: `pdfjs/${pdfVersion}/${directory}/${name}` })))
 
 export default defineConfig({
   root: fileURLToPath(new URL('.', import.meta.url)),
   define: {
-    __CAIRN_WEB_BUILD_ID__: JSON.stringify(webBuildId(fileURLToPath(new URL('../..', import.meta.url)))),
+    __CAIRN_WEB_BUILD_ID__: JSON.stringify(buildId),
   },
   plugins: [vue(), tailwindcss(), {
     name: 'local-pdf-assets',
     generateBundle() {
+      this.emitFile({ type: 'asset', fileName: 'web-build.json', source: JSON.stringify({ buildId }) })
       for (const asset of pdfAssets)
         this.emitFile({ type: 'asset', fileName: asset.target, source: readFileSync(asset.source) })
     },

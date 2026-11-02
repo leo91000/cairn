@@ -14,6 +14,19 @@ preference. See ADR-0043. Coverage: model/monitor/uploader/build identity unit t
 Beacon telemetry integration tests, browser account/settings diagnostics journeys;
 existing Android diagnostics tests cover its unchanged native implementation.
 
+## Web deployment recovery (2026-11-02)
+
+An open web tab checks its frontend build on focus, visibility changes and once a
+minute while visible. A new build or a failed lazy page load offers an explicit
+reload, preserving the requested route, query and fragment. It never refreshes
+automatically over unsaved edits. A failed initial page still shows the recovery
+notice. This repairs browser asset loading; Android bundles its screens in the
+APK and retains its native update flow described in [updates](UPDATES.md).
+Public MCP and `cairn_installation` do not load browser assets, so their existing
+capabilities and permissions are unchanged. Coverage: web update unit tests and
+Chromium/WebKit journeys against production chunks, including a deployment
+between two distinct builds.
+
 ## Mermaid diagrams in Markdown (2026-10-29)
 
 Both layouts reserve the asymmetric flag notch when sizing multiline node labels.

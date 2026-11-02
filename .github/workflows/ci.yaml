@@ -10,6 +10,11 @@ on:
         description: Run backend tests and doctests without release resolution or image jobs
         type: boolean
         default: false
+      backend-qualification:
+        description: Run physical backend migration in a separate job after the backend suite
+        type: choice
+        options: [none, backend-migration]
+        default: none
       browser-workers:
         description: Workers per browser group for performance comparisons
         type: choice
@@ -193,7 +198,7 @@ jobs:
           --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     needs: resolve
-    if: always() && !cancelled() && (inputs.backend-only == true || (needs.resolve.result == 'success' && (needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')))
+    if: always() && !cancelled() && (inputs.backend-only == true || (needs.resolve.result == 'success' && (inputs.backend-qualification == 'backend-migration' || needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -303,6 +308,33 @@ jobs:
         if: always()
         with:
           phase: after-build
+  backend-migration-qualification:
+    needs: backend
+    if: always() && !cancelled() && inputs.backend-qualification == 'backend-migration' && needs.backend.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          cache: true
+      - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
+      - name: Install native test dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
+      - name: Qualify physical backend migration from this commit
+        run: |
+          set -o pipefail
+          python3 -m venv .node-s3-test
+          .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli blake3==1.0.8
+          PATH="$PWD/.node-s3-test/bin:$PATH" .node-s3-test/bin/python scripts/tests/node_s3_test.py --case backend_migration_keeps_chat_and_files_both_directions_and_preserves_source_on_failure 2>&1 | tee backend-migration-tests.log
+          python3 - <<'PYTHON'
+          import pathlib, re
+          result = pathlib.Path('backend-migration-tests.log').read_text()
+          assert re.search(r'^test result: ok\. 1 passed; 0 failed; 0 ignored;', result, re.MULTILINE), 'Expected exactly one passing physical backend migration test'
+          PYTHON
   node-checks:
     services:
       postgres:
@@ -531,7 +563,7 @@ jobs:
     timeout-minutes: 25
     container:
       # Match @playwright/test; browsers and system libraries are already installed.
-      image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
+      image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f
       options: --init --ipc=host
     defaults:
       run:
@@ -1137,8 +1169,8 @@ jobs:
   publish:
     # The Intel nested Android test needs hardware GitHub does not provide; it runs locally
     # before releases when Android or runner changes need it (docs/DEPLOYMENT.md) and does not gate CI.
-    needs: [resolve, build, quality, rust-check, backend, node-checks, browser, network-bench, native-runtime, android-direct-build, android-direct, image, beacon-image]
-    if: always() && !cancelled() && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.rust-check.result == 'success' && needs.backend.result == 'success' && needs.node-checks.result == 'success' && needs.build.result == 'success' && needs.browser.result == 'success' && needs.network-bench.result == 'success' && needs.native-runtime.result == 'success' && needs.android-direct-build.result == 'success' && needs.android-direct.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true' && needs.beacon-image.result == 'success' && needs.beacon-image.outputs.published == 'true'
+    needs: [resolve, build, quality, rust-check, backend, backend-migration-qualification, node-checks, browser, network-bench, native-runtime, android-direct-build, android-direct, image, beacon-image]
+    if: always() && !cancelled() && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.rust-check.result == 'success' && needs.backend.result == 'success' && (inputs.backend-qualification != 'backend-migration' || needs.backend-migration-qualification.result == 'success') && needs.node-checks.result == 'success' && needs.build.result == 'success' && needs.browser.result == 'success' && needs.network-bench.result == 'success' && needs.native-runtime.result == 'success' && needs.android-direct-build.result == 'success' && needs.android-direct.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true' && needs.beacon-image.result == 'success' && needs.beacon-image.outputs.published == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -1186,8 +1218,8 @@ jobs:
           retention-days: 90
           overwrite: true
   promote:
-    needs: resolve
-    if: needs.resolve.outputs.reuse == 'true'
+    needs: [resolve, backend-migration-qualification]
+    if: always() && !cancelled() && needs.resolve.outputs.reuse == 'true' && (inputs.backend-qualification != 'backend-migration' || needs.backend-migration-qualification.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

@@ -10,6 +10,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{
+    future::Future,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -23,10 +24,19 @@ pub(crate) const STORAGE: &str = "ublk-rootless-v1";
 
 pub(crate) const DISK_BUSY: &str = "Native disk is active.";
 
-pub fn exists(state: &Path, run: &str) -> Result<bool> {
-    Ok(storage::runtime::exists(&environment::directory(
-        state, run,
-    )?))
+pub async fn exists(state: &Path, run: &str) -> Result<bool> {
+    let path = environment::directory(state, run)?.join("lazy/journal-v2.sqlite");
+    exists_from_metadata(tokio::fs::metadata(path)).await
+}
+
+pub(super) async fn exists_from_metadata(
+    metadata: impl Future<Output = std::io::Result<std::fs::Metadata>>,
+) -> Result<bool> {
+    match metadata.await {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Resume the retained journal as-is even if a manager grant arrived before a
@@ -762,7 +772,20 @@ impl Drop for Mounted {
 }
 
 pub async fn status(state: &Path, run: &str) -> Result<Value> {
-    let volume = storage::runtime::load(&environment::directory(state, run)?).await?;
+    let directory = environment::directory(state, run)?;
+    match tokio::fs::metadata(directory.join("lazy/journal-v2.sqlite")).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(json!({
+                "mode": "native",
+                "availability": "unavailable",
+                "reason": crate::native::MISSING_NATIVE_JOURNAL_CODE
+            }));
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    let volume = storage::runtime::load(&directory).await?;
     let mut status = volume.inspect().await?;
     status["paused"] = volume.paused().into();
     Ok(status)
@@ -1077,7 +1100,7 @@ pub async fn action(state: &Path, run: &str, delete: bool) -> Result<Vec<String>
 /// prefix so a final request cannot accidentally acknowledge an older turn.
 pub async fn recover_completed(state: &Path, run: &str, attempt: &str) -> Result<()> {
     let root = workspace::directory(state, run)?;
-    if !root.join("block-initialized").exists() || !exists(state, run)? {
+    if !root.join("block-initialized").exists() || !exists(state, run).await? {
         return Ok(());
     }
     let lease = environment::lock(state, run, "Native journal recovery is still owned.").await?;
@@ -1117,6 +1140,41 @@ mod tests {
         ] {
             assert_eq!(completion.exit_code(previous), expected);
         }
+    }
+
+    #[tokio::test]
+    async fn missing_native_journal_status_is_typed_without_opening_sqlite() {
+        let state = tempfile::tempdir().unwrap();
+        let run = crate::config::id();
+        let journal = environment::directory(state.path(), &run)
+            .unwrap()
+            .join("lazy/journal-v2.sqlite");
+
+        let first_status = status(state.path(), &run).await.unwrap();
+        let repeated = status(state.path(), &run).await.unwrap();
+
+        assert_eq!(first_status["mode"], "native");
+        assert_eq!(first_status["availability"], "unavailable");
+        assert_eq!(first_status["reason"], "missing_native_journal");
+        assert_eq!(repeated, first_status);
+        assert!(!journal.exists());
+    }
+
+    #[tokio::test]
+    async fn malformed_native_journal_is_not_reported_as_missing() {
+        let state = tempfile::tempdir().unwrap();
+        let run = crate::config::id();
+        let directory = environment::directory(state.path(), &run).unwrap();
+        tokio::fs::create_dir_all(directory.join("lazy"))
+            .await
+            .unwrap();
+        tokio::fs::write(directory.join("lazy/journal-v2.sqlite"), b"not sqlite")
+            .await
+            .unwrap();
+
+        let error = status(state.path(), &run).await.unwrap_err();
+
+        assert_eq!(error.status, 500);
     }
 
     #[tokio::test]
