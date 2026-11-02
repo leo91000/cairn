@@ -99,6 +99,6 @@ pub struct NativeConfigurationSnapshot {
     pub provider: AgentProvider,
     pub document: String,
     pub revision: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub configured_paths: Vec<String>,
 }

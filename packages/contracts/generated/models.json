@@ -6611,6 +6611,7 @@
       "description": "Frozen per message. Contains editable settings only, never credentials.",
       "properties": {
         "configuredPaths": {
+          "default": [],
           "items": {
             "type": "string"
           },
@@ -6630,7 +6631,8 @@
       "required": [
         "provider",
         "document",
-        "revision"
+        "revision",
+        "configuredPaths"
       ],
       "type": "object"
     },

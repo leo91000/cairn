@@ -6,8 +6,7 @@ import kotlinx.serialization.Serializable
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class NativeConfigurationSnapshot(
-    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
-    val configuredPaths: List<String>? = null,
+    val configuredPaths: List<String> = listOf(),
     val document: String,
     val provider: String,
     val revision: String,

@@ -8,5 +8,5 @@ export interface NativeConfigurationSnapshot {
   provider: AgentProvider
   document: string
   revision: string
-  configuredPaths?: Array<string>
+  configuredPaths: Array<string>
 }
