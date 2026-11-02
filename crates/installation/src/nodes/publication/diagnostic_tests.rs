@@ -986,6 +986,186 @@ fn publication_failure_context_keeps_status_only_412_unknown_without_error_text(
 }
 
 #[tokio::test]
+async fn completed_capture_distinguishes_missing_journal_from_legacy_conflict() {
+    let root = tempfile::tempdir().unwrap();
+    let missing_journal = Arc::new(AtomicBool::new(true));
+    let node = Router::new().fallback({
+        let missing_journal = missing_journal.clone();
+        move |request: Request| {
+            let missing_journal = missing_journal.clone();
+            async move {
+                assert!(request.uri().path().ends_with("/snapshot-completed"));
+                let body = if missing_journal.load(Ordering::Relaxed) {
+                    json!({
+                        "error": "Conversation has no native journal.",
+                        "code": "missing_native_journal"
+                    })
+                } else {
+                    json!({ "error": "legacy node conflict" })
+                };
+                (StatusCode::CONFLICT, axum::Json(body)).into_response()
+            }
+        }
+    });
+    let (base, server) = peer(node).await;
+    let s = service(root.path()).await;
+    let run = json!({
+        "id": id(),
+        "status": "cancelled",
+        "backup": {
+            "requestedRevision": 2,
+            "acknowledgedRevision": 1,
+            "blockEnvelope": 3
+        }
+    });
+
+    let missing = super::request_snapshot(
+        &s,
+        &run,
+        &base,
+        &id(),
+        "fixture",
+        super::CaptureProtocol::Direct,
+        &crate::authorization::Authorization::default(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(missing.status, 409);
+    assert_eq!(missing.message, "Conversation has no native journal.");
+
+    missing_journal.store(false, Ordering::Relaxed);
+    let legacy = super::request_snapshot(
+        &s,
+        &run,
+        &base,
+        &id(),
+        "fixture",
+        super::CaptureProtocol::Direct,
+        &crate::authorization::Authorization::default(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(legacy.status, 425);
+    assert_eq!(legacy.message, "Waiting for completed generation capture.");
+
+    server.abort();
+    s.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn missing_journal_publication_failure_preserves_the_last_good_baseline_and_request() {
+    use crate::{
+        agent_fixture::StoreAgentFixture, node_fixture::StoreNodeFixture, run_fixture::DbRunFixture,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let run_id = id();
+    let runner_id = id();
+    let last_good_backup = id();
+    let last_good_snapshot = id();
+    let expected_last_good_backup = last_good_backup.clone();
+    let expected_last_good_snapshot = last_good_snapshot.clone();
+    let controller = Router::new().fallback(|request: Request| async move {
+        assert!(request.uri().path().ends_with("/snapshot-completed"));
+        (
+            StatusCode::CONFLICT,
+            axum::Json(json!({
+                "error": "Conversation has no native journal.",
+                "code": "missing_native_journal"
+            })),
+        )
+            .into_response()
+    });
+    let (controller, controller_task) = peer(controller).await;
+    let s = service_with_runner(root.path(), controller).await;
+    let node_id = super::super::LOCAL_NODE_ID;
+    let logical_endpoint = "https://missing-journal-fixture.invalid";
+    tokio::fs::write(
+        s.config.data_dir.join("storage-s3.json"),
+        json!({
+            "bucket": "diagnostics",
+            "endpoint": logical_endpoint,
+            "region": "us-east-1"
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    s.store
+        .put_node_fixture(json!({ "id": node_id, "revoked": false }))
+        .await
+        .unwrap();
+    s.store
+        .put_agent_fixture(json!({
+            "id": crate::config::MAIN_AGENT_ID,
+            "access": { "nodes": [node_id] }
+        }))
+        .await
+        .unwrap();
+
+    let (saved_run, saved_node, saved_runner, saved_checkpoint_run) = (
+        run_id.clone(),
+        node_id.to_owned(),
+        runner_id.clone(),
+        run_id.clone(),
+    );
+    s.store
+        .transaction(move |db| {
+            db.add_run_fixture(
+                &json!({
+                    "id": saved_run,
+                    "taskId": id(),
+                    "status": "cancelled",
+                    "createdAt": 0,
+                    "nodeId": saved_node,
+                    "isolated": true,
+                    "snapshot": { "agent": { "id": crate::config::MAIN_AGENT_ID } },
+                    "storage": { "mode": "on-demand", "dirtyBytes": 4096, "localBytes": 8192 },
+                    "backup": {
+                        "status": "ready",
+                        "id": last_good_backup,
+                        "snapshotId": last_good_snapshot,
+                        "capturedAt": now(),
+                        "blockEnvelope": 3,
+                        "requestedRevision": 2,
+                        "acknowledgedRevision": 1
+                    }
+                }),
+                None,
+            )?;
+            db.save_checkpoint_boundary(
+                &saved_checkpoint_run,
+                &json!({
+                    "nodeId": saved_node,
+                    "runnerId": saved_runner
+                }),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let attempt_run = s.store.run(&run_id).await.unwrap();
+    super::attempt(&s, &attempt_run).await;
+
+    let backup = s.store.run(&run_id).await.unwrap()["backup"].clone();
+    assert_eq!(backup["status"], "error");
+    assert_eq!(backup["error"], "Conversation has no native journal.");
+    assert_eq!(
+        backup["lastFailureContext"]["category"],
+        "missing_native_journal"
+    );
+    assert_eq!(backup["lastFailureContext"]["managerStatus"], 409);
+    assert_eq!(backup["requestedRevision"], 2);
+    assert_eq!(backup["acknowledgedRevision"], 1);
+    assert_eq!(backup["id"], expected_last_good_backup);
+    assert_eq!(backup["snapshotId"], expected_last_good_snapshot);
+
+    controller_task.abort();
+    s.shutdown.cancel();
+}
+
+#[tokio::test]
 async fn attempt_persists_bounded_failure_context_and_retains_it_after_recovery() {
     use crate::{
         agent_fixture::StoreAgentFixture, node_fixture::StoreNodeFixture, run_fixture::DbRunFixture,

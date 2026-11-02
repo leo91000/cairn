@@ -1120,6 +1120,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_native_journal_status_is_typed_without_opening_sqlite() {
+        let state = tempfile::tempdir().unwrap();
+        let run = crate::config::id();
+        let journal = environment::directory(state.path(), &run)
+            .unwrap()
+            .join("lazy/journal-v2.sqlite");
+
+        let status = status(state.path(), &run).await.unwrap();
+
+        assert_eq!(status["mode"], "native");
+        assert_eq!(status["availability"], "unavailable");
+        assert_eq!(status["reason"], "missing_native_journal");
+        assert!(!journal.exists());
+    }
+
+    #[tokio::test]
+    async fn malformed_native_journal_is_not_reported_as_missing() {
+        let state = tempfile::tempdir().unwrap();
+        let run = crate::config::id();
+        let directory = environment::directory(state.path(), &run).unwrap();
+        tokio::fs::create_dir_all(directory.join("lazy"))
+            .await
+            .unwrap();
+        tokio::fs::write(directory.join("lazy/journal-v2.sqlite"), b"not sqlite")
+            .await
+            .unwrap();
+
+        let error = status(state.path(), &run).await.unwrap_err();
+
+        assert_eq!(error.status, 500);
+    }
+
+    #[tokio::test]
     async fn native_disks_resume_with_current_tools_and_keep_the_platform_boundary() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("runtime.json");
