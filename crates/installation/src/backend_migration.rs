@@ -670,6 +670,17 @@ impl Service {
             checkpoint["completed"] = true.into();
             for key in ["process", "settled", "controllerRecoveries"] { checkpoint[key] = Value::Null; }
             db.save_checkpoint_boundary(&run_id, &checkpoint)?;
+            // This boundary replaces the backup pointer. Preserve only the
+            // historical diagnosis; the migration owns the new pointer/status.
+            let mut migrated_backup = json!({
+                "id": point["id"],
+                "snapshotId": point["snapshotId"],
+                "capturedAt": point["capturedAt"],
+                "status": "ready"
+            });
+            if let Some(context) = current["backup"].get("lastFailureContext") {
+                migrated_backup["lastFailureContext"] = context.clone();
+            }
             let mut patch = crate::runs::RunChanges {
                 snapshot: Some(serde_json::from_value(proposed["snapshot"].clone())?),
                 session_id : Some(None),
@@ -691,12 +702,7 @@ impl Service {
                     "backendMigration": null,
                     "backendMigrationError": null,
                     "storage": { "mode": nodes::ON_DEMAND },
-                    "backup": {
-                        "id": point["id"],
-                        "snapshotId": point["snapshotId"],
-                        "capturedAt": point["capturedAt"],
-                        "status": "ready"
-                    }
+                    "backup": migrated_backup
                 })),
                 ..Default::default()
             };
