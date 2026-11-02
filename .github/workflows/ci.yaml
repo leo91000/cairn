@@ -808,7 +808,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - uses: ./.github/actions/setup-android-emulator
         with:
-          build-packages: 'build-tools;37.0.0 platforms;android-36'
+          build-packages: build-tools;37.0.0 platforms;android-36
       # The pinned runner refreshes these packages again; its hook checks after that install and AVD creation.
       - name: Check emulator userdata disk headroom
         run: node scripts/android-emulator-sdk.mjs preflight
