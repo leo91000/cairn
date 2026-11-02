@@ -21,6 +21,10 @@ malformed metadata, expiring domain keys, dangling public links and invalid
 version/size constraints fail the transaction. Original rows, schema and version
 remain intact for repair and retry. Other KV data is preserved.
 
+Key, title and group constraints count UTF-8 bytes, matching the publication
+validator. SQLite's text length stops at U+0000; the constraints therefore count
+the value cast to BLOB, preserving legal leading NULs and multibyte strings.
+
 Stop the previous manager and retain a consistent database/WAL backup before an
 upgrade. An older binary cannot open schema 25: recovery requires the retained
 backup or a compatible forward fix. This PR authorizes no production action.
@@ -39,6 +43,10 @@ retained timeline card originates in the actual v22 event writer. Additional
 synthetic project, plugin instance, contribution/resource grant and credential
 supplier rows are explicitly seeded with SQL into that actual previous schema
 and survive reopening through the previous Store. No production data is used.
+Two additional artifact records, with a leading NUL in the key or title, are
+persisted through that previous binary's real `Db::set` writer and reopened at
+version24. This is the writer used by its publisher; the publication validator's
+bounded-string function is unchanged. Qualification retains those exact values.
 The run projection view, progress, timeline, placement and contribution tables,
 and every unrelated row/schema object must also survive. It checks metadata and
 unrelated rows, nullable

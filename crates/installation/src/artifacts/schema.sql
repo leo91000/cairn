@@ -1,6 +1,6 @@
 CREATE TABLE artifacts(
  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
- key TEXT NOT NULL CHECK(length(key) BETWEEN 1 AND 160),
+ key TEXT NOT NULL CHECK(length(CAST(key AS BLOB)) BETWEEN 1 AND 160),
  PRIMARY KEY(run_id,key)
 ) WITHOUT ROWID;
 CREATE TABLE artifact_versions(
@@ -9,9 +9,9 @@ CREATE TABLE artifact_versions(
  key TEXT NOT NULL,
  version INTEGER NOT NULL CHECK(version BETWEEN 1 AND 9007199254740991),
  message_id TEXT,
- title TEXT NOT NULL CHECK(length(title) BETWEEN 1 AND 160),
+ title TEXT NOT NULL CHECK(length(CAST(title AS BLOB)) BETWEEN 1 AND 160),
  name TEXT NOT NULL,
- group_name TEXT NOT NULL CHECK(length(group_name)<=160),
+ group_name TEXT NOT NULL CHECK(length(CAST(group_name AS BLOB))<=160),
  kind TEXT NOT NULL CHECK(kind IN ('image','video','audio','pdf','markdown','code','file')),
  media_type TEXT NOT NULL,
  size INTEGER NOT NULL CHECK(size BETWEEN 0 AND 536870912),

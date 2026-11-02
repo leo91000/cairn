@@ -317,6 +317,49 @@ fn anonymous_get(path: &str) -> Request<Body> {
 }
 
 #[tokio::test]
+async fn publication_preserves_legal_control_characters_and_utf8_byte_bounds() {
+    let f = Fixture::new().await;
+    let longest = format!("\0{}a", "é".repeat(79));
+    assert_eq!(longest.len(), 160);
+    for (key, title, group) in [
+        ("\0report", "NUL key", "\0Release"),
+        ("nul-title", "\0report", "\0Release"),
+        (longest.as_str(), longest.as_str(), longest.as_str()),
+    ] {
+        let artifact = f
+            .publish(&json!({
+                "path": "/tmp/report.md",
+                "title": title,
+                "key": key,
+                "group": group,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(artifact["key"], key);
+        assert_eq!(artifact["title"], title);
+        assert_eq!(artifact["group"], group);
+        assert_eq!(
+            body(download(&f.s, &f.run, &artifact, None).await).await,
+            "# First revision\n"
+        );
+    }
+    let too_long = format!("\0{}", "é".repeat(80));
+    assert_eq!(too_long.len(), 161);
+    for field in ["key", "title", "group"] {
+        let mut args = json!({
+            "path": "/tmp/report.md",
+            "title": "Bounds",
+            "key": "bounds",
+            "group": "",
+        });
+        args[field] = too_long.clone().into();
+        assert_eq!(f.publish(&args).await.unwrap_err().status, 400);
+    }
+    assert_eq!(f.listed().await.len(), 3);
+    f.server.abort();
+}
+
+#[tokio::test]
 async fn publication_is_idempotent_versioned_and_readable_after_restart_without_a_vm() {
     let f = Fixture::new().await;
     let s = &f.s;

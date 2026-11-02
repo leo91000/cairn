@@ -104,7 +104,13 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
         })
         .await
         .unwrap();
-    assert_eq!(versions.len(), 3);
+    assert_eq!(versions.len(), 5);
+    assert!(versions.iter().any(|version| version.key.starts_with('\0')));
+    assert!(
+        versions
+            .iter()
+            .any(|version| version.title.starts_with('\0'))
+    );
     let mut duplicate_link = versions
         .iter()
         .find(|version| version.public_token.is_none())
@@ -229,7 +235,7 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
     );
     drop(store);
     let reopened = Store::open(root.path()).unwrap();
-    assert_eq!(reopened.artifacts(Some(RUN)).await.unwrap().len(), 3);
+    assert_eq!(reopened.artifacts(Some(RUN)).await.unwrap().len(), 5);
 }
 
 #[test]

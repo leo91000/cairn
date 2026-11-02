@@ -1,5 +1,6 @@
--- Synthetic previous database upgraded by real Store 66fc690b05fad7fd6cf142a845b1ce5c3c8cd884 to schema24.
--- Unrelated retained contribution/resource/supplier rows are SQL-seeded test data.
+-- Synthetic real v24 Store/database; see the migration qualification recipe.
+-- Leading NUL key/title rows written by actual v24 Db::set (66fc690b).
+-- Unrelated retained project/instance/grant/supplier rows are SQL-seeded test data.
 PRAGMA foreign_keys=OFF;
 BEGIN TRANSACTION;
 CREATE TABLE account_dismissals(
@@ -465,6 +466,8 @@ INSERT INTO "kv" VALUES('artifact:00000000-0000-4000-8000-000000000010:00000000-
 INSERT INTO "kv" VALUES('skill-source:global/guide','{"folder":"skills/guide","importedAt":1700000000000,"instance":"00000000-0000-4000-8000-000000000d99","label":"Example skill","location":{"ref":"main","repository":"example/skills"},"pluginId":"github","revision":"bundle-revision-1","source":"repository","url":"https://example.invalid/skills","version":"revision-1"}',NULL);
 INSERT INTO "kv" VALUES('unrelated-a16-proof','{"unchanged":true}',NULL);
 INSERT INTO "kv" VALUES('skill-source:00000000-0000-4000-8000-000000000dad/guide','{"folder":"skills/guide","importedAt":1700000000000,"instance":"00000000-0000-4000-8000-000000000d99","label":"Example skill","location":{"ref":"main","repository":"example/skills"},"pluginId":"github","revision":"bundle-revision-1","source":"repository","url":"https://example.invalid/skills","version":"revision-1"}',NULL);
+INSERT INTO "kv" VALUES('artifact:00000000-0000-4000-8000-000000000010:00000000-0000-4000-8000-000000000e92','{"createdAt":1700000000002,"digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","excerpt":"Texte de synthèse","group":"review","id":"00000000-0000-4000-8000-000000000e92","key":"\u0000report","kind":"markdown","mediaType":"text/markdown","messageId":null,"name":"report.md","previewStatus":"none","publicToken":null,"publicUrl":null,"runId":"00000000-0000-4000-8000-000000000010","size":18,"title":"Retained NUL key","url":"/api/runs/00000000-0000-4000-8000-000000000010/artifacts/00000000-0000-4000-8000-000000000e92","version":1,"visibility":"private"}',NULL);
+INSERT INTO "kv" VALUES('artifact:00000000-0000-4000-8000-000000000010:00000000-0000-4000-8000-000000000e93','{"createdAt":1700000000002,"digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","excerpt":"Texte de synthèse","group":"review","id":"00000000-0000-4000-8000-000000000e93","key":"retained-nul-title","kind":"markdown","mediaType":"text/markdown","messageId":null,"name":"report.md","previewStatus":"none","publicToken":null,"publicUrl":null,"runId":"00000000-0000-4000-8000-000000000010","size":18,"title":"\u0000report","url":"/api/runs/00000000-0000-4000-8000-000000000010/artifacts/00000000-0000-4000-8000-000000000e93","version":1,"visibility":"private"}',NULL);
 CREATE TABLE mcp_args(server_id TEXT NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 99),value TEXT NOT NULL CHECK(length(value)<=4000),PRIMARY KEY(server_id,position)) WITHOUT ROWID;
 CREATE TABLE mcp_credentials(server_id TEXT PRIMARY KEY NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,ciphertext BLOB NOT NULL CHECK(length(ciphertext)>=28)) WITHOUT ROWID;
 CREATE TABLE mcp_discovery_cache(server_id TEXT PRIMARY KEY NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,tools TEXT NOT NULL CHECK(json_valid(tools) AND json_type(tools)='array'));
