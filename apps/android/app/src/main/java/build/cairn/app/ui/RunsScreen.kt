@@ -172,6 +172,10 @@ fun RunScreen(
                 ?.let { canDirectChat(state.usableAgents, it, chats) }
                 ?: canUseAgent(state.usableAgents, current.snapshot?.agent?.id)
         } ?: true
+    // A delegated conversation can be directed through its requester, but cleanup needs
+    // access to the run's own agent.
+    val canCleanUpWorktree =
+        run?.let { canUseAgent(state.usableAgents, it.snapshot?.agent?.id) } ?: false
     val events = live.events
     val more = live.catchingUp
     val timelineKeys = remember(id) { TimelineKeys() }
@@ -584,7 +588,7 @@ fun RunScreen(
                             // Cleaning up needs access to the run's agent (ADR-0075).
                             if (
                                 !current.active &&
-                                    directable &&
+                                    canCleanUpWorktree &&
                                     current.workspace != null &&
                                     !current.isolated &&
                                     (current.snapshot?.task?.worktree == true)

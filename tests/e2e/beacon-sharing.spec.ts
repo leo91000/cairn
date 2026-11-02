@@ -208,11 +208,87 @@ test('owner shares an installation and member works without management controls'
     expect(taskResponse.status()).toBe(200)
     const task = await taskResponse.json()
     expect(task.authorId).toBe(memberSession.account.id)
+    const ownerSession = await (await page.request.get(`${url}/api/account/session`)).json()
+    const privateAgent = seed!.agent({ name: 'Private delegated agent' })
+    const requestingResponse = await page.request.post(`${apiRoot}/chats`, {
+      headers: { 'origin': url, 'x-csrf-token': ownerSession.csrf },
+      data: { agentId: agents[0].id },
+    })
+    expect(requestingResponse.ok()).toBe(true)
+    const requesting = await requestingResponse.json()
+    const runCreatedAt = Date.now()
+    const requestingRunId = randomUUID()
+    seed!.store.addRun({
+      id: requestingRunId,
+      taskId: requesting.id,
+      status: 'succeeded',
+      trigger: 'chat',
+      createdAt: runCreatedAt,
+      startedAt: runCreatedAt - 1000,
+      finishedAt: runCreatedAt,
+      snapshot: {
+        agent: { id: agents[0].id },
+        task: {
+          id: requesting.id,
+          name: 'Conversation demandeuse',
+          prompt: 'Lancer une vérification déléguée.',
+          agentId: agents[0].id,
+          worktree: false,
+        },
+      },
+    })
+    seed!.store.put('chats', {
+      id: requesting.id,
+      runId: requestingRunId,
+      status: 'succeeded',
+      finishedAt: runCreatedAt,
+    })
+    const delegatedResponse = await page.request.post(`${apiRoot}/chats`, {
+      headers: { 'origin': url, 'x-csrf-token': ownerSession.csrf },
+      data: { agentId: privateAgent.id },
+    })
+    expect(delegatedResponse.ok()).toBe(true)
+    const delegated = await delegatedResponse.json()
+    const cleanupRunId = randomUUID()
+    seed!.store.addRun({
+      id: cleanupRunId,
+      taskId: delegated.id,
+      status: 'failed',
+      trigger: 'chat',
+      createdAt: runCreatedAt,
+      startedAt: runCreatedAt - 1000,
+      finishedAt: runCreatedAt,
+      workspace: '/fixture/private-worktree',
+      snapshot: {
+        agent: { id: privateAgent.id },
+        task: {
+          id: delegated.id,
+          name: 'Private delegated work',
+          prompt: 'Review the private workspace.',
+          agentId: privateAgent.id,
+          worktree: true,
+        },
+      },
+    })
+    seed!.store.put('chats', {
+      id: delegated.id,
+      requestedBy: { runId: requestingRunId, chatId: requesting.id, requestId: null },
+      runId: cleanupRunId,
+      status: 'failed',
+      finishedAt: runCreatedAt,
+    })
+    await member.goto(`${installationUrl}runs/${cleanupRunId}`)
+    await expect(member.getByRole('heading', { name: 'Private delegated work', exact: true })).toBeVisible()
+    await member.getByRole('button', { name: 'Result', exact: true }).click()
+    await expect(member.getByRole('heading', { name: 'Original instructions', exact: true })).toBeVisible()
+    await expect(member.getByRole('button', { name: 'Clean up worktree', exact: true })).toHaveCount(0)
+    await page.goto(`${installationUrl}runs/${cleanupRunId}`)
+    await page.getByRole('button', { name: 'Result', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Clean up worktree', exact: true })).toBeVisible()
     await member.goto(`${installationUrl}tasks?task=${task.id}`)
     await member.getByRole('button', { name: 'Mission actions', exact: true }).click()
     await expect(member.getByRole('menuitem', { name: 'Delete', exact: true })).toHaveCount(0)
     await expect(member.getByRole('menuitem', { name: 'Duplicate (paused)', exact: true })).toBeVisible()
-    const ownerSession = await (await page.request.get(`${url}/api/account/session`)).json()
     const ownerTaskResponse = await page.request.post(`${apiRoot}/tasks`, {
       headers: { 'origin': url, 'x-csrf-token': ownerSession.csrf },
       data: {

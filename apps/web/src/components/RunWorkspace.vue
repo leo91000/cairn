@@ -112,6 +112,11 @@ const directable = computed(() => {
   const chat = chatList.value.find(chat => chat.id === run.value!.taskId)
   return chat ? canDirectChat(state.usableAgents, chat, chatList.value) : canUseAgent(state.usableAgents, run.value.snapshot?.agent?.id)
 })
+// A delegated conversation can be readable through its requester, but cleanup needs
+// access to the run's own agent.
+const canCleanUpWorktree = computed(() =>
+  !!run.value && canUseAgent(state.usableAgents, run.value.snapshot?.agent?.id),
+)
 // A retry starts the task again as it is now, on its current agent.
 const retryable = computed(() => {
   const current = run.value && state.tasks.find(task => task.id === run.value!.taskId)
@@ -336,7 +341,7 @@ async function copy() {
           <RunDetails
             :run="run"
             :active="!!active"
-            :directable="directable"
+            :can-clean-up-worktree="canCleanUpWorktree"
             @cleanup="confirmCleanup = true"
           />
         </div>
@@ -344,7 +349,7 @@ async function copy() {
           <RunDetails
             :run="run"
             :active="!!active"
-            :directable="directable"
+            :can-clean-up-worktree="canCleanUpWorktree"
             @cleanup="confirmCleanup = true"
           />
         </div>

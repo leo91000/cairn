@@ -3,8 +3,8 @@ import type { Run } from '../../../../packages/contracts/contracts'
 import { duration } from '../api'
 import UiButton from './UiButton.vue'
 
-// Cleaning up needs access to the run's agent, like directing it (ADR-0075).
-defineProps<{ run: Run, active: boolean, directable: boolean }>()
+// A delegated conversation may be directed through its requester, but cleanup needs the run's agent.
+defineProps<{ run: Run, active: boolean, canCleanUpWorktree: boolean }>()
 const emit = defineEmits<{ cleanup: [] }>()
 </script>
 
@@ -24,7 +24,7 @@ const emit = defineEmits<{ cleanup: [] }>()
       Starting commit <code :title="entry.revision || undefined">{{ entry.revision?.slice(0, 12) }}</code>
     </p>
     <UiButton
-      v-if="directable && !active && run.workspace && run.snapshot.task.worktree && !run.isolated"
+      v-if="canCleanUpWorktree && !active && run.workspace && run.snapshot.task.worktree && !run.isolated"
       size="small"
       @click="emit('cleanup')"
     >
