@@ -1072,13 +1072,14 @@ abstract class AgentPageCases {
                 .onNodeWithContentDescription("Type de ressource channel")
                 .performScrollTo()
                 .performClick()
-            compose
-                .onNodeWithContentDescription("Rechercher des ressources")
-                .performTextInput("support")
             waitForText("Team › #support")
             compose.mainClock.advanceTimeBy(500)
             compose.onNodeWithContentDescription("Team › #support").performScrollTo()
             capture("agent-plugin-grants-resource-picker")
+            compose
+                .onNodeWithContentDescription("Rechercher des ressources")
+                .performTextInput("support")
+            waitForText("Team › #support")
             compose.onNodeWithContentDescription("Team › #support").performClick()
             val resourceSearch = compose.onNodeWithContentDescription("Rechercher des ressources")
             resourceSearch.performTextClearance()
