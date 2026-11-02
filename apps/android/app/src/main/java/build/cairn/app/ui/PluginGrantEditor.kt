@@ -27,6 +27,11 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 
+internal const val MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION = 100
+
+internal fun canSelectPluginResourceRoot(selectedCount: Int, alreadySelected: Boolean): Boolean =
+    alreadySelected || selectedCount < MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION
+
 @Composable
 fun PluginGrantEditor(
     api: CairnApi,
@@ -406,6 +411,11 @@ private fun ResourceGrantPicker(
             "Racines et descendants sélectionnés uniquement. Chaque type restreint doit correspondre ; les autres types restent libres.",
         style = MaterialTheme.typography.bodySmall,
     )
+    Text(
+        "${selected.size}/$MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION radicaux sélectionnés pour cette contribution. Maximum 100 ; retirez-en un pour en choisir un autre.",
+        Modifier.testTag("plugin-resource-root-count"),
+        style = MaterialTheme.typography.bodySmall,
+    )
     selected.forEach { item ->
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
@@ -506,8 +516,12 @@ private fun ResourceGrantPicker(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(
                             ref in selected,
-                            { change(if (it) selected + ref else selected - ref) },
+                            { checked ->
+                                if (canSelectPluginResourceRoot(selected.size, ref in selected))
+                                    change(if (checked) selected + ref else selected - ref)
+                            },
                             modifier = Modifier.semantics { contentDescription = path },
+                            enabled = canSelectPluginResourceRoot(selected.size, ref in selected),
                         )
                         Text(path, Modifier.weight(1f))
                     }

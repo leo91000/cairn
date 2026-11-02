@@ -10,6 +10,7 @@ import {
 } from 'vue'
 import { listPluginResources } from '../../../../packages/contracts/generated/listPluginResources'
 import { resolvePluginResource } from '../../../../packages/contracts/generated/resolvePluginResource'
+import { canSelectPluginResourceRoot, MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION } from '../plugin-grants'
 import { pluginRequest } from '../plugin-operations'
 import UiButton from './UiButton.vue'
 
@@ -80,7 +81,20 @@ async function load() {
 }
 
 function toggle(item: PluginResourceRef) {
-  selected.value = selected.value.some(held => key(held) === key(item)) ? selected.value.filter(held => key(held) !== key(item)) : [...selected.value, { resourceType: item.resourceType, id: item.id }]
+  const alreadySelected = selected.value.some(held => key(held) === key(item))
+  if (!canSelectPluginResourceRoot(selected.value.length, alreadySelected))
+    return
+
+  selected.value = alreadySelected
+    ? selected.value.filter(held => key(held) !== key(item))
+    : [...selected.value, { resourceType: item.resourceType, id: item.id }]
+}
+
+function canSelect(item: PluginResourceRef) {
+  return canSelectPluginResourceRoot(
+    selected.value.length,
+    selected.value.some(held => key(held) === key(item)),
+  )
 }
 
 watch(() => [props.pluginId, props.instanceId, type.value, query.value], () => {
@@ -100,6 +114,9 @@ onBeforeUnmount(() => generation++)
     </legend>
     <p class="text-xs text-muted">
       {{ selected.length ? 'Only selected roots and their descendants are covered. Each restricted type must match; other types stay unrestricted.' : 'All resources. Choose a resource to restrict this contribution.' }}
+    </p>
+    <p class="text-xs text-muted" role="status">
+      {{ selected.length }}/{{ MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION }} resource roots selected for this contribution. Maximum 100; remove a root to select another.
     </p>
     <ul v-if="selected.length" class="grid gap-1">
       <li v-for="item in selected" :key="key(item)" class="flex flex-wrap items-center gap-2 text-xs">
@@ -122,6 +139,7 @@ onBeforeUnmount(() => generation++)
           type="checkbox"
           class="mt-0.5 size-4! shrink-0"
           :checked="selected.some(held => key(held) === key(item))"
+          :disabled="!canSelect(item)"
           @change="toggle(item)"
         >
         <span class="min-w-0 break-words">{{ paths[key(item)] || item.name }}</span>

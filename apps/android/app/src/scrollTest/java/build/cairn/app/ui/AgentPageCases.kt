@@ -1087,6 +1087,7 @@ abstract class AgentPageCases {
             resourceSearch.performTextInput("support")
             waitForText("Team › #support")
             compose.onNodeWithContentDescription("Team › #support").assertIsOn()
+            capture("agent-plugin-grants-resource-picker")
             compose.onNodeWithText("Terminé").performClick()
             compose.mainClock.autoAdvance = true
 
@@ -1112,6 +1113,7 @@ abstract class AgentPageCases {
             compose
                 .onNodeWithText("Fournisseurs d’identifiants de run : Automation", substring = true)
                 .assertExists()
+            capture("agent-plugin-grants-review")
             confirmReview()
             compose.waitUntil(15000) { fixture.grantSaves.size == 1 }
 
@@ -1332,6 +1334,7 @@ abstract class AgentPageCases {
     fun aFailedGrantReadAfterConflictCannotSaveTheStaleDraft() {
         journey(release.id) { fixture ->
             open(AgentSection.Plugins)
+            waitForDescription("Accès à Support : full")
             compose
                 .onNodeWithContentDescription("Accès à Support : full")
                 .performScrollTo()
@@ -1364,6 +1367,14 @@ abstract class AgentPageCases {
                 fixture.grantSaves.size,
             )
         }
+    }
+
+    @Test
+    fun resourcePickerCapsRootsAtTheBackendLimitButAllowsRemoval() {
+        assertEquals(100, MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION)
+        assertTrue(canSelectPluginResourceRoot(99, alreadySelected = false))
+        assertFalse(canSelectPluginResourceRoot(100, alreadySelected = false))
+        assertTrue(canSelectPluginResourceRoot(100, alreadySelected = true))
     }
 
     @Test

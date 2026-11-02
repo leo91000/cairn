@@ -6,7 +6,7 @@ import {
   workspacePath,
 } from './fixtures'
 
-test('contribution grants use resource ancestry, review, conflicts and explicit credential suppliers', async ({ page, workspace }) => {
+test('contribution grants use resource ancestry, review, conflicts and explicit credential suppliers', async ({ page, workspace }, testInfo) => {
   test.setTimeout(120000)
   const prepare = async (path: string, body: unknown) => {
     const started = await workspace.api(path, 'POST', body)
@@ -114,6 +114,7 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   await automation.selectOption('full')
   await page.getByLabel('Supply run credentials from Automation', { exact: true }).check()
   await expect(page.getByText('Current supplier: Automation.', { exact: false }).first()).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-editor.png'), fullPage: true })
   const original = await workspace.api(`/api/agents/${agent.id}/plugin-grants`)
   expect(original.grants).toEqual([])
   await page.setViewportSize({ width: 320, height: 844 })
@@ -122,6 +123,7 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   const review = page.getByRole('dialog', { name: 'Review before saving' })
   await expect(review).toContainText('channel support and descendants')
   await expect(review).toContainText('Run credential suppliers: Automation')
+  await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-review.png'), fullPage: true })
   await review.getByRole('button', { name: 'Back to editing' }).click()
   expect((await workspace.api(`/api/agents/${agent.id}/plugin-grants`)).grants).toEqual([])
   // A concurrent profile edit shares the grant revision. Reload preserves this grant draft.

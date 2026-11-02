@@ -2,13 +2,22 @@ import type { PluginManifest } from '../../../packages/contracts/generated/types
 import type { GrantDraft } from '../src/plugin-grants'
 import { expect, it } from 'vitest'
 import {
+  canSelectPluginResourceRoot,
   chooseCredentialSupplier,
   contributions,
   grantDescription,
   grantKey,
+  MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION,
   removeGrant,
   selectableResourceTypes,
 } from '../src/plugin-grants'
+
+it('caps resource roots per contribution at the backend limit while allowing removal', () => {
+  expect(MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION).toBe(100)
+  expect(canSelectPluginResourceRoot(99, false)).toBe(true)
+  expect(canSelectPluginResourceRoot(100, false)).toBe(false)
+  expect(canSelectPluginResourceRoot(100, true)).toBe(true)
+})
 
 const before: GrantDraft = {
   grants: [

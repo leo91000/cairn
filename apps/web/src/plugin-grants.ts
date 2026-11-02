@@ -6,6 +6,12 @@ import type { PluginResourceType } from '../../../packages/contracts/generated/t
 export type GrantDraft = Pick<AgentPluginGrants, 'grants' | 'runCredentialInstances'>
 export type Contribution = PluginContributionGrant & { description: string, resourceTypes: string[] }
 
+export const MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION = 100
+
+export function canSelectPluginResourceRoot(selectedCount: number, alreadySelected: boolean): boolean {
+  return alreadySelected || selectedCount < MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION
+}
+
 function isAncestorOrSelf(types: PluginResourceType[], ancestor: string, child: string): boolean {
   let current: string | null | undefined = child
   const visited = new Set<string>()
