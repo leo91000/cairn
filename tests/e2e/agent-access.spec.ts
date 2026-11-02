@@ -735,7 +735,7 @@ test('a held plugin grant whose package cannot give agents access is shown, coun
   await expect(unavailable).toHaveCount(0)
 
   const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${agent.id}/plugin-grants`))
-  await saveAgent(page, true)
+  await saveAgent(page)
   expect((await saving).postDataJSON().grants).toEqual([])
 })
 
