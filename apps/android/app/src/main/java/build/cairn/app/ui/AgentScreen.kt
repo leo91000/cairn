@@ -33,12 +33,16 @@ import build.cairn.app.data.*
 import build.cairn.contracts.AgentInput
 import build.cairn.contracts.CreateAgentInput
 import build.cairn.contracts.ListAgentsInput
+import build.cairn.contracts.PluginGrantAccess
 import build.cairn.contracts.ReplaceAgentInput
+import build.cairn.contracts.ReplaceAgentPluginGrantsInput
 import build.cairn.contracts.createAgent
 import build.cairn.contracts.deleteAgent
+import build.cairn.contracts.getAgentPluginGrants
 import build.cairn.contracts.listAgents
 import build.cairn.contracts.previewAgent
 import build.cairn.contracts.replaceAgent
+import build.cairn.contracts.replaceAgentPluginGrants
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
@@ -115,6 +119,18 @@ private fun AgentPage(
 ) {
     var baseline by rememberSaveable(saver = agentSaver()) { mutableStateOf(loaded) }
     var draft by rememberSaveable(saver = draftSaver()) { mutableStateOf(AgentDraft(loaded)) }
+    var savedGrantsJson by rememberSaveable {
+        mutableStateOf(wireJson.encodeToString(PluginGrantDraft.serializer(), PluginGrantDraft()))
+    }
+    var grantsJson by rememberSaveable { mutableStateOf(savedGrantsJson) }
+    val savedGrants = wireJson.decodeFromString(PluginGrantDraft.serializer(), savedGrantsJson)
+    val grants = wireJson.decodeFromString(PluginGrantDraft.serializer(), grantsJson)
+    var grantsLoaded by rememberSaveable { mutableStateOf(creating) }
+    var grantsError by remember { mutableStateOf<String?>(null) }
+    var grantsAttempt by remember { mutableIntStateOf(0) }
+    fun editGrants(value: PluginGrantDraft) {
+        grantsJson = wireJson.encodeToString(PluginGrantDraft.serializer(), value)
+    }
     var section by rememberSaveable { mutableStateOf<String?>(null) }
     var nodes by remember { mutableStateOf<List<ExecutionNode>>(emptyList()) }
     var nodesLoaded by remember { mutableStateOf(false) }
@@ -164,7 +180,34 @@ private fun AgentPage(
         }
     }
 
-    val changes = agentChanges(baseline, draft)
+    LaunchedEffect(agentId, grantsAttempt) {
+        if (creating || grantsLoaded) return@LaunchedEffect
+        try {
+            val currentGrants = vm.api.getAgentPluginGrants(AgentInput(agentId))
+            if (currentGrants.revision != baseline.revision)
+                throw ApiException(
+                    409,
+                    "L’agent a changé. Rechargez-le avant de modifier ses droits.",
+                )
+            savedGrantsJson =
+                wireJson.encodeToString(PluginGrantDraft.serializer(), currentGrants.draft())
+            grantsJson = savedGrantsJson
+            grantsLoaded = true
+            grantsError = null
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            grantsError = e.message
+            if (e is ApiException && e.status == 409) {
+                conflict = true
+                saveError = "L’agent a changé. Rechargez-le avant de modifier ses droits."
+            }
+        }
+    }
+    val grantChanges = grants.key() != savedGrants.key()
+    val changes =
+        (agentChanges(baseline, draft) +
+                if (grantChanges) listOf(AgentSection.Plugins) else emptyList())
+            .distinct()
     val dirty = changes.isNotEmpty()
     // A newer saved version replaces an untouched page; a modified draft keeps its base so a
     // concurrent save is detected by the server.
@@ -189,7 +232,11 @@ private fun AgentPage(
             skillsLoaded = state.agents.isNotEmpty(),
         )
     val errors = agentErrors(draft)
-    val issues = agentIssues(draft.agent, resources)
+    val displayDraft =
+        if (grantsLoaded)
+            draft.copy(agent = draft.agent.copy(plugins = grants.grants.map { it.instanceId }))
+        else draft
+    val issues = agentIssues(displayDraft.agent, resources)
     val current = AgentSection.entries.find { it.name == section }
 
     fun update(change: (Agent) -> Agent) {
@@ -218,7 +265,7 @@ private fun AgentPage(
     ) {
         // A profile already saved (only its reload failed) is not sent again.
         val profilePending = (creating && creation.id.isBlank()) || profileChanged(baseline, edited)
-        val saved: Agent =
+        var saved: Agent =
             when {
                 !profilePending -> baseline
                 creating -> {
@@ -293,6 +340,30 @@ private fun AgentPage(
 
         baseline = saved
         draft = AgentDraft(saved)
+        if (grantChanges) {
+            val updated =
+                vm.api.replaceAgentPluginGrants(
+                    ReplaceAgentPluginGrantsInput(
+                        saved.id,
+                        grants.grants,
+                        saved.revision,
+                        grants.runCredentialInstances,
+                    )
+                )
+            savedGrantsJson =
+                wireJson.encodeToString(PluginGrantDraft.serializer(), updated.draft())
+            grantsJson = savedGrantsJson
+            saved =
+                saved.copy(
+                    revision = updated.revision,
+                    plugins =
+                        updated.grants
+                            .filter { it.access is PluginGrantAccess.A }
+                            .map { it.instanceId },
+                )
+            baseline = saved
+            draft = AgentDraft(saved)
+        }
         try {
             vm.refresh()
         } catch (e: Exception) {
@@ -345,7 +416,7 @@ private fun AgentPage(
                         edited,
                         resources,
                         preview,
-                    )
+                    ) + pluginGrantReview(savedGrants, grants, catalog)
                 if (needsReview(lines, preview)) {
                     val suspended = preview?.suspendedDelegations().orEmpty()
                     reapprove = preview?.preselectedReapprovals().orEmpty()
@@ -375,6 +446,14 @@ private fun AgentPage(
                     fresh.mcps.map { it.id }.toSet().takeIf { refreshed && fresh.isOwner }
                 draft = draft.rebased(baseline, theirs, freshMcps)
                 baseline = theirs
+                val freshGrants = vm.api.getAgentPluginGrants(AgentInput(agentId))
+                if (freshGrants.revision != theirs.revision)
+                    throw ApiException(409, "L’agent a changé pendant le rechargement. Réessayez.")
+                savedGrantsJson =
+                    wireJson.encodeToString(PluginGrantDraft.serializer(), freshGrants.draft())
+                if (!grantChanges) grantsJson = savedGrantsJson
+                grantsLoaded = true
+                grantsError = null
                 // Machines and plugin instances may have changed elsewhere too; until read again
                 // they are unknown.
                 nodesAttempt++
@@ -413,7 +492,7 @@ private fun AgentPage(
                 when (current) {
                     null ->
                         AgentOverview(
-                            draft,
+                            displayDraft,
                             resources,
                             creating,
                             issues,
@@ -454,14 +533,37 @@ private fun AgentPage(
                                 ::access,
                             )
                     AgentSection.Plugins ->
-                        PluginsSection(
-                            draft.agent,
-                            catalog,
-                            catalogFailed,
-                            retry = { catalogAttempt++ },
-                            navigate = { navigate(it) },
-                            change = ::update,
-                        )
+                        if (catalog == null || !grantsLoaded) {
+                            Text(
+                                grantsError
+                                    ?: if (catalogFailed) "Impossible de charger les plugins."
+                                    else "Chargement des droits…"
+                            )
+                            val held =
+                                if (grantsLoaded) grants.grants.map { it.instanceId }
+                                else draft.agent.plugins
+                            if (held.isNotEmpty())
+                                Text(
+                                    if (held.size == 1) "1 instance accordée :"
+                                    else "${held.size} instances accordées :"
+                                )
+                            held.forEach { Text(it) }
+                            TextButton({
+                                catalogAttempt++
+                                grantsAttempt++
+                            }) {
+                                Text("Réessayer")
+                            }
+                        } else {
+                            PluginGrantEditor(
+                                vm.api,
+                                catalog!!,
+                                grants,
+                                ::editGrants,
+                                agentId,
+                                navigate,
+                            )
+                        }
                     AgentSection.Nodes ->
                         NodesSection(
                             draft.agent,
@@ -515,6 +617,7 @@ private fun AgentPage(
                     if (creating) discarding = true
                     else {
                         draft = AgentDraft(baseline)
+                        grantsJson = savedGrantsJson
                         saveError = null
                         conflict = false
                     }
@@ -1535,174 +1638,6 @@ private fun SwitchRow(
                 else SwitchDefaults.colors(),
         )
     }
-}
-
-@Composable
-private fun PluginsSection(
-    agent: Agent,
-    catalog: PluginCatalog?,
-    failed: Boolean,
-    retry: () -> Unit,
-    navigate: (String) -> Unit,
-    change: ((Agent) -> Agent) -> Unit,
-) {
-    if (catalog == null) {
-        if (!failed) {
-            LinearProgressIndicator(Modifier.fillMaxWidth())
-            return
-        }
-        // Grants are kept as they are: nothing can be checked, granted or removed until it loads.
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "Impossible de charger les plugins. Leurs accès ne peuvent pas être modifiés pour l’instant.",
-                Modifier.weight(1f),
-                color = MaterialTheme.colorScheme.error,
-            )
-            TextButton(onClick = retry) { Text("Réessayer") }
-        }
-        if (agent.plugins.isNotEmpty()) {
-            Note(
-                if (agent.plugins.size == 1) "1 instance accordée :"
-                else "${agent.plugins.size} instances accordées :"
-            )
-            agent.plugins.forEach { Text(it, style = MaterialTheme.typography.bodyMedium) }
-        }
-        return
-    }
-    val granted = agent.plugins
-    val groups = catalog.agentGrantable()
-    // Held grants whose package no longer gives agents anything: kept, but shown to be removed.
-    val unavailable = catalog.unavailableGrants(granted)
-    if (groups.isEmpty())
-        Empty(
-            "Aucun plugin ne donne d’accès aux agents",
-            "Ajoutez un compte de service 1Password ou une instance de plugin pour l’accorder ici.",
-        )
-    groups.forEach { (entry, connections) ->
-        val onePassword = entry.id == "onepassword"
-        Panel {
-            Text(
-                if (onePassword) "${entry.name} · comptes de service" else entry.name,
-                Modifier.semantics { heading() },
-                style = MaterialTheme.typography.titleMedium,
-            )
-            Note(
-                if (onePassword) "Lecture seule · aucun accès par défaut, Main compris"
-                else
-                    entry.manifest?.agentAccess?.description?.ifBlank { null }
-                        ?: "Outils, commandes et instructions apportés par chaque instance"
-            )
-            connections.forEach { connection ->
-                val on = connection.id in granted
-                val failed = connection.status.state in setOf("error", "failed")
-                Column {
-                    SwitchRow(
-                        connection.name,
-                        when {
-                            on && !connection.enabled ->
-                                "L’accès est conservé, mais l’agent ne peut rien utiliser tant que ${if (onePassword) "le compte" else "l’instance"} reste désactivé${if (onePassword) "" else "e"}."
-                            !connection.enabled ->
-                                "Non accordé · désactivé${if (onePassword) "" else "e"}"
-                            on -> "Accordé"
-                            else -> "Non accordé"
-                        },
-                        on,
-                        enabled = true,
-                        description = "Accès à ${connection.name}",
-                    ) { allowed ->
-                        change {
-                            it.copy(
-                                plugins =
-                                    if (allowed) (it.plugins + connection.id).distinct()
-                                    else it.plugins - connection.id
-                            )
-                        }
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        ToneChip(
-                            when {
-                                !connection.enabled ->
-                                    PluginBadge(
-                                        if (onePassword) "Compte désactivé" else "Désactivée",
-                                        PluginTone.WARNING,
-                                    )
-                                failed -> PluginBadge("Test échoué", PluginTone.ATTENTION)
-                                else -> PluginBadge("Actif", PluginTone.OK)
-                            }
-                        )
-                        Spacer(Modifier.weight(1f))
-                        TextButton(onClick = { navigate("plugins/${segment(entry.id)}") }) {
-                            Text(if (onePassword) "Configurer le compte ↗" else "Configurer ↗")
-                        }
-                    }
-                }
-            }
-            if (onePassword)
-                Note(
-                    "Avec un compte accordé, l’agent peut lister les coffres, les éléments et les noms de champs, puis lire une valeur avec cairn plugin onepassword read. Il ne peut ni créer, ni modifier, ni supprimer. Ce que le compte voit se règle dans 1Password : créez un autre compte de service pour d’autres droits. Retirer l’accès bloque immédiatement les lectures suivantes ; un secret déjà lu ne peut pas être rappelé."
-                )
-            else Note("Effectif immédiatement, y compris dans les conversations en cours.")
-        }
-    }
-    unavailable.forEach { connection ->
-        val plugin = catalog.packages.find { it.id == connection.pluginId }?.name
-        Column(Modifier.fillMaxWidth().testTag("agent-plugin-unavailable-${connection.id}")) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    connection.name + (plugin?.let { " · $it" } ?: ""),
-                    Modifier.weight(1f),
-                    style = MaterialTheme.typography.titleSmall,
-                )
-                ToneChip(PluginBadge("Indisponible", PluginTone.ATTENTION))
-                TextButton(
-                    onClick = { change { it.copy(plugins = it.plugins - connection.id) } },
-                    modifier =
-                        Modifier.semantics {
-                            contentDescription = "Retirer ${connection.name}"
-                        },
-                ) {
-                    Text("Retirer")
-                }
-            }
-            Note(
-                "Ce plugin ne donne plus d’accès aux agents (version non approuvée, invalide ou sans accès agent). L’accès est conservé, mais ne donne rien tant qu’il ne redevient pas disponible."
-            )
-        }
-    }
-    val missing = granted.filter { id -> catalog.connections.none { it.id == id } }
-    missing.forEach { id ->
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Instance supprimée", Modifier.weight(1f))
-            ToneChip(PluginBadge("Introuvable", PluginTone.ATTENTION))
-            TextButton(onClick = { change { it.copy(plugins = it.plugins - id) } }) {
-                Text("Retirer")
-            }
-        }
-    }
-    val delegations = catalog.connections.filter { agent.id.isNotBlank() && it.agentId == agent.id }
-    if (delegations.isNotEmpty())
-        Panel {
-            Text("Délégations", style = MaterialTheme.typography.titleMedium)
-            delegations.forEach { connection ->
-                val plugin = catalog.packages.find { it.id == connection.pluginId }?.name
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "Répond en tant que cet agent sur « ${connection.name} »" +
-                            (plugin?.let { " ($it)" } ?: ""),
-                        Modifier.weight(1f),
-                    )
-                    ToneChip(PluginBadge("Réglé sur l’instance", PluginTone.MUTED))
-                }
-                TextButton(onClick = { navigate("plugins/${segment(connection.pluginId)}") }) {
-                    Text("Ouvrir ↗")
-                }
-            }
-            Note(
-                "Modifier les accès de cet agent suspend ces bots jusqu’à leur reconfirmation (vous pourrez les réapprouver en enregistrant)."
-            )
-        }
-    if (groups.isEmpty() && delegations.isEmpty() && unavailable.isEmpty())
-        TextButton(onClick = { navigate("plugins") }) { Text("Ouvrir les plugins ›") }
 }
 
 private fun nodeStatus(node: ExecutionNode): PluginBadge =

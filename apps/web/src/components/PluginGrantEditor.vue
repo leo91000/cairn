@@ -1,0 +1,104 @@
+<script setup lang="ts">
+import type { PluginManifest } from '../../../../packages/contracts/generated/typescript/PluginManifest'
+import type { GrantDraft } from '../plugin-grants'
+import { computed, ref } from 'vue'
+import { contributions, removeGrant, selectableResourceTypes } from '../plugin-grants'
+import PluginResourcePicker from './PluginResourcePicker.vue'
+
+const props = defineProps<{
+  manifest: PluginManifest
+  instanceId: string
+  instanceName: string
+  supplierName: string
+}>()
+const draft = defineModel<GrantDraft>({ required: true })
+const grant = computed(() => draft.value.grants.find(item => item.instanceId === props.instanceId))
+const selectedMode = ref(grant.value?.access.type === 'selected')
+const mode = computed(() => grant.value?.access.type ?? (selectedMode.value ? 'selected' : 'none'))
+const available = computed(() => contributions(props.manifest))
+
+function setMode(value: string) {
+  selectedMode.value = value === 'selected'
+  const next = removeGrant(draft.value, props.instanceId)
+  if (value === 'full')
+    next.grants.push({ instanceId: props.instanceId, access: { type: 'full' } })
+  draft.value = next
+}
+
+function update(item: typeof available.value[number], on: boolean, resources = item.resources) {
+  const held = grant.value?.access
+  const selected = held?.type === 'selected' ? held.contributions.filter(value => value.kind !== item.kind || value.name !== item.name) : []
+  const next = removeGrant(draft.value, props.instanceId)
+  if (on)
+    selected.push({ kind: item.kind, name: item.name, resources })
+  if (selected.length)
+    next.grants.push({ instanceId: props.instanceId, access: { type: 'selected', contributions: selected } })
+  if ((draft.value.runCredentialInstances.includes(props.instanceId) || (on && item.kind === 'runCredentials')) && selected.some(item => item.kind === 'runCredentials'))
+    next.runCredentialInstances.push(props.instanceId)
+  draft.value = next
+}
+
+function held(item: typeof available.value[number]) {
+  return grant.value?.access.type === 'selected' ? grant.value.access.contributions.find(value => value.kind === item.kind && value.name === item.name) : undefined
+}
+
+function supplier(on: boolean) {
+  const ids = draft.value.runCredentialInstances.filter(id => id !== props.instanceId)
+  // The parent removes the previous supplying instance of this package.
+  draft.value = { ...draft.value, runCredentialInstances: on ? [...ids, props.instanceId] : ids }
+}
+</script>
+
+<template>
+  <div class="grid w-full gap-3">
+    <label>Access to {{ instanceName }}<select :aria-label="`Access to ${instanceName}`" :value="mode" @change="setMode(($event.target as HTMLSelectElement).value)"><option value="none">No access</option><option value="full">Full access</option><option value="selected">Choose contributions</option></select></label>
+    <p v-if="mode === 'full'" class="text-xs text-muted">
+      All current and future contributions. Run credentials require the explicit supplier choice below. Shared setup steps are available only with full access.
+    </p>
+    <div v-if="mode === 'selected'" class="grid gap-3">
+      <p class="text-xs text-muted">
+        Only checked contributions are granted. New contributions stay off. Nothing is granted until you save.
+      </p>
+      <div v-for="item in available" :key="`${item.kind}:${item.name}`" class="grid gap-2 rounded-lg border border-line p-3">
+        <label class="flex flex-row! items-start gap-2! text-sm font-normal!">
+          <input
+            type="checkbox"
+            class="mt-1 size-4!"
+            :checked="!!held(item)"
+            :aria-label="`${item.kind} ${item.name || instanceName}`"
+            @change="update(item, ($event.target as HTMLInputElement).checked)"
+          >
+          <span><strong>{{ item.kind }} {{ item.name }}</strong><small class="block text-xs text-muted">{{ item.description }}</small></span>
+        </label>
+        <PluginResourcePicker
+          v-if="held(item) && ['tool', 'command', 'hook'].includes(item.kind) && item.resourceTypes.length"
+          :model-value="held(item)!.resources"
+          :plugin-id="manifest.id"
+          :instance-id="instanceId"
+          :types="selectableResourceTypes(manifest.resources ?? [], item.resourceTypes)"
+          @update:model-value="update(item, true, $event)"
+        />
+        <p v-else-if="held(item)" class="text-xs text-muted">
+          {{ item.kind === 'condition' ? 'No resource restriction. Waiting remains limited by project access.' : 'No resource restriction.' }}
+        </p>
+      </div>
+    </div>
+    <template v-if="manifest.runCredentials">
+      <p class="rounded-lg bg-warning-surface p-3 text-xs text-warning">
+        Run credentials give direct access to everything this service account can do and void tool resource restrictions. One instance per plugin package supplies them. Current supplier: {{ supplierName || 'None' }}.
+      </p>
+      <label v-if="mode === 'full'" class="flex flex-row! items-start gap-2! text-sm font-normal!">
+        <input
+          type="checkbox"
+          class="mt-1 size-4!"
+          :checked="draft.runCredentialInstances.includes(instanceId)"
+          @change="supplier(($event.target as HTMLInputElement).checked)"
+        >
+        Supply run credentials from {{ instanceName }}
+      </label>
+      <p class="text-xs text-muted">
+        Removing this supplier leaves no credentials until you choose another instance. Full access to other instances does not supply credentials.
+      </p>
+    </template>
+  </div>
+</template>

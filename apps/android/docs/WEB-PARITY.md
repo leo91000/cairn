@@ -539,3 +539,30 @@ Public MCP and `cairn_installation` add `list_run_artifacts`, `read_run_artifact
 and `set_run_artifact_visibility` without a conversation ID or conversion. Reads
 retain bounded chunks and checksums; execution grants remain revocable. No visual
 redesign or Beacon account capability is added.
+
+### Agent contribution grants (ADR-0075 D, #513)
+
+Both agent pages edit per-instance full access (including future contributions) or
+selected tools, commands, hooks, instructions, conditions, project/skill sources
+and run credentials. Searchable resource pickers use the resource listing and
+resolution APIs, show server › channel › thread ancestry and pagination, and
+retain selected roots across searches/types. Roots cover descendants; other types
+remain unrestricted. Web embeds the picker; Android uses a native scrollable
+Material dialog. Both explain immediate effects, full-only shared setup reuse,
+project-bounded waits, and credentials voiding tool resource restrictions.
+
+The credential supplier is explicit, at most one instance per package. Selecting
+the credentials contribution selects its supplier; moving it removes the previous
+selected credentials contribution but retains other contributions. Revoking it
+never selects a replacement automatically. Both keep changes in the agent-page
+draft, include them in sensitive review, and support discard, revision conflicts,
+reload and retry after a profile save followed by a failed grant save. Profile
+settings and contribution grants use their existing separate revision-checked
+APIs; a successful profile save remains saved if the grant save fails.
+
+Public MCP already reads/replaces these grants and lists/resolves resources;
+`cairn_installation` retains read/reduce-only authority. No authorization or API
+contract changes are introduced. Account access remains owner-only in the apps.
+Coverage: `plugin-grants.test.ts`, the agent-access and isolated agent-grants
+browser journeys, and native `PluginGrantsTest` / shared agent-page JVM and
+device cases.

@@ -13,6 +13,7 @@ import type {
   SectionId,
   SelectionItem,
 } from '../agent-access'
+import type { GrantDraft } from '../plugin-grants'
 import type { Catalog } from '../plugins'
 import {
   computed,
@@ -27,10 +28,12 @@ import { providers as codingAgents } from '../../../../packages/contracts/accoun
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
 import { createAgent } from '../../../../packages/contracts/generated/createAgent'
 import { deleteAgent } from '../../../../packages/contracts/generated/deleteAgent'
+import { getAgentPluginGrants } from '../../../../packages/contracts/generated/getAgentPluginGrants'
 import { listAgents } from '../../../../packages/contracts/generated/listAgents'
 import { listPluginPackages } from '../../../../packages/contracts/generated/listPluginPackages'
 import { previewAgent } from '../../../../packages/contracts/generated/previewAgent'
 import { replaceAgent } from '../../../../packages/contracts/generated/replaceAgent'
+import { replaceAgentPluginGrants } from '../../../../packages/contracts/generated/replaceAgentPluginGrants'
 import { LOCAL_NODE_ID } from '../../../../packages/contracts/nodes'
 import {
   alwaysAvailable,
@@ -87,6 +90,7 @@ import {
   Trash2,
   TriangleAlert,
 } from '../icons'
+import { grantDescription, grantKey } from '../plugin-grants'
 import { useResourceSave } from '../resourceSave'
 import { buttonBase, buttonSizes, buttonVariants } from '../ui'
 
@@ -125,6 +129,10 @@ const loaded = ref(false)
 const loadError = ref('')
 const notFound = ref(false)
 const agent = ref<Agent | null>(null)
+const grants = ref<GrantDraft>({ grants: [], runCredentialInstances: [] })
+const savedGrants = ref<GrantDraft>({ grants: [], runCredentialInstances: [] })
+const grantsChanged = computed(() => grantKey(grants.value) !== grantKey(savedGrants.value))
+const grantsError = ref('')
 const saved = ref<AgentDraft>(newAgentDraft())
 const draft = ref<AgentDraft>(newAgentDraft())
 const nodes = ref<ExecutionNode[]>([])
@@ -164,7 +172,7 @@ const access = computed(() => draft.value.access)
 const backend = computed(() => backendOf(access.value))
 // Nodes of the agent's execution backend, the only ones it can be granted.
 const availableNodes = computed(() => nodesFor(nodes.value, backend.value))
-const changed = computed(() => changes(saved.value, draft.value))
+const changed = computed(() => [...new Set([...changes(saved.value, draft.value), ...(grantsChanged.value ? ['plugins' as const] : [])])])
 const dirty = computed(() => loaded.value && !notFound.value && changed.value.length > 0)
 const issues = computed(() => loaded.value ? findIssues(draft.value, context.value, isMain.value, isNew.value ? null : id.value) : [])
 
@@ -213,7 +221,7 @@ const exclusiveNodes = computed(() => effectiveExclusive(draft.value, nodes.valu
 const delegations = computed(() => isNew.value ? [] : catalog.value.connections.filter(connection => connection.agentId === id.value))
 const pluginSummary = computed(() => {
   const counts = new Map<string, number>()
-  for (const granted of draft.value.plugins) {
+  for (const granted of grants.value.grants.map(item => item.instanceId)) {
     const connection = catalog.value.connections.find(item => item.id === granted)
     const name = catalog.value.packages.find(entry => entry.id === connection?.pluginId)?.manifest?.name ?? 'Plugin'
     counts.set(name, (counts.get(name) ?? 0) + 1)
@@ -236,7 +244,7 @@ const summaries = computed<Record<SectionId, { short: string, long: string }>>((
   mcps: !isMain.value && !state.workspaceLoaded ? { short: 'Unavailable', long: 'Not loaded' } : { short: isMain.value ? 'Fixed' : short(access.value.mcps, state.mcps.length), long: isMain.value ? 'All, including future' : `${selectionSummary(access.value.mcps, state.mcps.length)}${limitedMcps.value.length ? ` · tools limited on ${limitedMcps.value.length}` : ''}${disabledMcps.value.length ? ` · ${disabledMcps.value.length} disabled` : ''}` },
   plugins: catalogError.value
     ? { short: 'Unavailable', long: 'Not loaded' }
-    : { short: draft.value.plugins.length ? String(draft.value.plugins.length) : 'None', long: pluginSummary.value || 'None' },
+    : { short: grants.value.grants.length ? String(grants.value.grants.length) : 'None', long: pluginSummary.value || 'None' },
   nodes: nodesError.value
     ? { short: 'Unavailable', long: 'Not loaded' }
     : { short: `${backend.value === 'native' ? 'Native · ' : ''}${short(access.value.nodes, availableNodes.value.length)}`, long: `${backend.value === 'native' ? 'Native process · ' : ''}${selectionSummary(access.value.nodes, availableNodes.value.length)}${exclusiveNodes.value.length ? ` · exclusive on ${exclusiveNodes.value.length}` : ''}` },
@@ -278,8 +286,8 @@ const overview = computed(() => [
         section: 'plugins' as const,
         title: 'Secrets & plugins',
         summary: catalogError.value ? 'Not loaded' : pluginSummary.value || 'No access',
-        detail: catalogError.value ? 'Plugins could not be loaded' : [names(draft.value.plugins, connectionName), ...delegations.value.map(item => `Answers on ${item.name} (delegation)`)].filter(Boolean).join(' · ') || 'No plugin access by default, including Main',
-        chip: catalogError.value ? { tone: 'unavailable' as const, label: 'Unavailable' } : draft.value.plugins.length ? { tone: 'granted' as const, label: 'Granted' } : { tone: 'none' as const, label: 'None' },
+        detail: catalogError.value ? 'Plugins could not be loaded' : [names(grants.value.grants.map(item => item.instanceId), connectionName), ...delegations.value.map(item => `Answers on ${item.name} (delegation)`)].filter(Boolean).join(' · ') || 'No plugin access by default, including Main',
+        chip: catalogError.value ? { tone: 'unavailable' as const, label: 'Unavailable' } : grants.value.grants.length ? { tone: 'granted' as const, label: 'Granted' } : { tone: 'none' as const, label: 'None' },
       },
     ],
   },
@@ -459,6 +467,38 @@ async function retryNodes() {
   }
 }
 
+async function loadGrants(): Promise<boolean> {
+  if (isNew.value && !agent.value)
+    return true
+  try {
+    const result = await getAgentPluginGrants(api, { agentId: agent.value?.id ?? id.value })
+    if (agent.value && result.revision !== agent.value.revision) {
+      conflict.value = true
+      serverError.value = 'Agent changed while loading plugin access. Reload before editing grants.'
+      throw new Error(serverError.value)
+    }
+
+    savedGrants.value = structuredClone(result)
+    grants.value = structuredClone(result)
+    grantsError.value = ''
+    return true
+  }
+  catch (e) {
+    grantsError.value = (e as Error).message
+    return false
+  }
+}
+
+function grantReviewLines(): ReviewLine[] {
+  if (!grantsChanged.value)
+    return []
+  const ids = new Set([...savedGrants.value.grants, ...grants.value.grants].map(item => item.instanceId))
+  return [
+    ...[...ids].filter(instance => grantDescription(savedGrants.value, instance) !== grantDescription(grants.value, instance)).map(instance => ({ kind: 'secret' as const, section: 'plugins' as const, text: `${connectionName(instance)}: ${grantDescription(grants.value, instance)}. Effective immediately, including running conversations.` })),
+    ...(JSON.stringify(savedGrants.value.runCredentialInstances) !== JSON.stringify(grants.value.runCredentialInstances) ? [{ kind: 'secret' as const, section: 'plugins' as const, text: `Run credential suppliers: ${grants.value.runCredentialInstances.map(connectionName).join(', ') || 'None'}. Credentials void tool resource restrictions.` }] : []),
+  ]
+}
+
 async function load() {
   loadError.value = ''
   loaded.value = false
@@ -487,6 +527,7 @@ async function load() {
       }
 
       apply(found)
+      await loadGrants()
       void loadSuspension()
     }
   }
@@ -540,15 +581,15 @@ async function requestSave() {
     return
   }
 
-  let lines = reviewLines(saved.value, draft.value, context.value)
+  let lines = [...reviewLines(saved.value, draft.value, context.value), ...grantReviewLines()]
   let effects: DelegationEffect[] = []
   let current: Preview | null = null
-  if (!isNew.value && changes(saved.value, draft.value).length) {
+  if (!isNew.value && changed.value.length) {
     busy.value = true
     try {
       // The server says which queued or running work and which delegations the change affects.
       const preview = await previewAgent(api, body())
-      lines = reviewLines(saved.value, draft.value, context.value, preview.runs)
+      lines = [...reviewLines(saved.value, draft.value, context.value, preview.runs), ...grantReviewLines()]
       effects = preview.delegations.filter(item => item.suspended)
       current = preview
     }
@@ -619,6 +660,21 @@ async function commit(reapprove: string[]) {
     else {
       result = agent.value!
     }
+
+    agent.value = result
+    saved.value = draftOf(result)
+    draft.value = draftOf(result)
+    if (grantsChanged.value) {
+      const updated = await replaceAgentPluginGrants(api, {
+        agentId: result.id,
+        revision: result.revision,
+        grants: grants.value.grants,
+        runCredentialInstances: grants.value.runCredentialInstances,
+      })
+      savedGrants.value = structuredClone(updated)
+      grants.value = structuredClone(updated)
+      result = { ...result, revision: updated.revision, plugins: updated.grants.filter(item => item.access.type === 'full').map(item => item.instanceId) }
+    }
   }
   catch (e) {
     failed(e)
@@ -645,12 +701,10 @@ async function commit(reapprove: string[]) {
   // The saved profile and its revision advance now. A created agent stays on this draft until the
   // workspace is reloaded too: retrying then updates the same agent instead of creating another one.
   agent.value = result
-  if (profileChanged) {
-    saved.value = draftOf(result)
-    draft.value = draftOf(result)
-    fieldErrors.value = {}
-    attempted.value = false
-  }
+  saved.value = draftOf(result)
+  draft.value = draftOf(result)
+  fieldErrors.value = {}
+  attempted.value = false
 
   let completed = false
   try {
@@ -702,6 +756,13 @@ async function reloadAgent() {
     const mine = draft.value
     agent.value = found
     saved.value = draftOf(found)
+    const mineGrants = structuredClone(JSON.parse(JSON.stringify(grants.value)))
+    const keepGrantEdits = grantsChanged.value
+    const grantsReloaded = await loadGrants()
+    if (!grantsReloaded)
+      return
+    if (keepGrantEdits)
+      grants.value = mineGrants
     const rebased = rebaseDraft(base, mine, saved.value)
     // Tool choices of deleted MCP connections are dropped.
     if (state.workspaceLoaded && state.installationRole === 'owner')
@@ -720,6 +781,7 @@ async function reloadAgent() {
 }
 
 function discard() {
+  grants.value = structuredClone(JSON.parse(JSON.stringify(savedGrants.value)))
   draft.value = structuredClone(JSON.parse(JSON.stringify(saved.value)))
   fieldErrors.value = {}
   attempted.value = false
@@ -1086,9 +1148,9 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
           </template>
 
           <template v-else-if="section === 'plugins'">
-            <div v-if="catalogError" class="grid gap-3 rounded-xl border border-line bg-surface p-5" role="alert">
+            <div v-if="catalogError || grantsError" class="grid gap-3 rounded-xl border border-line bg-surface p-5" role="alert">
               <p class="text-sm">
-                Plugins could not be loaded, so this agent’s plugin access cannot be shown or changed. {{ catalogError }}
+                Plugins could not be loaded, so this agent’s plugin access cannot be shown or changed. {{ catalogError || grantsError }}
               </p>
               <ul v-if="draft.plugins.length" class="grid gap-1 text-sm text-muted" aria-label="Held plugin access">
                 <li v-for="grant in draft.plugins" :key="grant">
@@ -1096,14 +1158,14 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
                 </li>
               </ul>
               <div>
-                <UiButton size="small" :disabled="catalogLoading" @click="retryCatalog">
+                <UiButton size="small" :disabled="catalogLoading" @click="retryCatalog(); loadGrants()">
                   {{ catalogLoading ? 'Loading…' : 'Try again' }}
                 </UiButton>
               </div>
             </div>
             <AgentPluginsSection
               v-else
-              v-model:plugins="draft.plugins"
+              v-model:grants="grants"
               :agent-id="isNew ? null : id"
               :packages="catalog.packages"
               :connections="catalog.connections"
