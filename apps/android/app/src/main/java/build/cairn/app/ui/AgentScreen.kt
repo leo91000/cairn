@@ -529,6 +529,8 @@ private fun AgentPage(
                             errors.keys + listOfNotNull(errorSection),
                             changes.toSet(),
                             state.modelCatalog("codex").models,
+                            grantsLoaded,
+                            grantsError,
                         ) {
                             section = it.name
                         }
@@ -941,6 +943,8 @@ private fun AgentOverview(
     changed: Set<AgentSection>,
     /** Codex's catalog, to name the agent's speed as its model runs it. */
     codexModels: List<CodingAgentModel>,
+    grantsLoaded: Boolean,
+    grantsError: String?,
     open: (AgentSection) -> Unit,
 ) {
     val agent = draft.agent
@@ -1030,11 +1034,20 @@ private fun AgentOverview(
         }
         OverviewRow(
             AgentSection.Plugins,
-            if (plugins.isBlank()) if (main) "· même pour Main" else "" else plugins,
-            error = AgentSection.Plugins in errors,
+            when {
+                grantsError != null -> "Indisponible"
+                !grantsLoaded -> "Chargement…"
+                plugins.isBlank() -> if (main) "· même pour Main" else ""
+                else -> plugins
+            },
+            error = AgentSection.Plugins in errors || grantsError != null,
             changed = AgentSection.Plugins in changed,
             chips = {
-                if (plugins.isBlank()) ToneChip(PluginBadge("Aucun accès", PluginTone.MUTED))
+                when {
+                    grantsError != null -> ToneChip(PluginBadge("Indisponible", PluginTone.WARNING))
+                    !grantsLoaded -> ToneChip(PluginBadge("Chargement…", PluginTone.MUTED))
+                    plugins.isBlank() -> ToneChip(PluginBadge("Aucun accès", PluginTone.MUTED))
+                }
             },
         ) {
             open(AgentSection.Plugins)

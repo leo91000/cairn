@@ -242,7 +242,7 @@ const summaries = computed<Record<SectionId, { short: string, long: string }>>((
   projects: !isMain.value && !state.workspaceLoaded ? { short: 'Unavailable', long: 'Not loaded' } : { short: isMain.value ? 'Fixed' : short(access.value.projects, state.projects.length), long: isMain.value ? 'All, including future' : selectionSummary(access.value.projects, state.projects.length) },
   skills: !isMain.value && !state.workspaceLoaded ? { short: 'Unavailable', long: 'Not loaded' } : { short: isMain.value ? 'Fixed' : short(access.value.skills, permittedSkills.value.length), long: isMain.value ? 'All, including future' : selectionSummary(access.value.skills, permittedSkills.value.length) },
   mcps: !isMain.value && !state.workspaceLoaded ? { short: 'Unavailable', long: 'Not loaded' } : { short: isMain.value ? 'Fixed' : short(access.value.mcps, state.mcps.length), long: isMain.value ? 'All, including future' : `${selectionSummary(access.value.mcps, state.mcps.length)}${limitedMcps.value.length ? ` · tools limited on ${limitedMcps.value.length}` : ''}${disabledMcps.value.length ? ` · ${disabledMcps.value.length} disabled` : ''}` },
-  plugins: catalogError.value
+  plugins: catalogError.value || grantsError.value
     ? { short: 'Unavailable', long: 'Not loaded' }
     : { short: grants.value.grants.length ? String(grants.value.grants.length) : 'None', long: pluginSummary.value || 'None' },
   nodes: nodesError.value
@@ -285,9 +285,9 @@ const overview = computed(() => [
         id: 'plugins',
         section: 'plugins' as const,
         title: 'Secrets & plugins',
-        summary: catalogError.value ? 'Not loaded' : pluginSummary.value || 'No access',
-        detail: catalogError.value ? 'Plugins could not be loaded' : [names(grants.value.grants.map(item => item.instanceId), connectionName), ...delegations.value.map(item => `Answers on ${item.name} (delegation)`)].filter(Boolean).join(' · ') || 'No plugin access by default, including Main',
-        chip: catalogError.value ? { tone: 'unavailable' as const, label: 'Unavailable' } : grants.value.grants.length ? { tone: 'granted' as const, label: 'Granted' } : { tone: 'none' as const, label: 'None' },
+        summary: catalogError.value || grantsError.value ? 'Not loaded' : pluginSummary.value || 'No access',
+        detail: catalogError.value || grantsError.value ? 'Plugin access could not be loaded' : [names(grants.value.grants.map(item => item.instanceId), connectionName), ...delegations.value.map(item => `Answers on ${item.name} (delegation)`)].filter(Boolean).join(' · ') || 'No plugin access by default, including Main',
+        chip: catalogError.value || grantsError.value ? { tone: 'unavailable' as const, label: 'Unavailable' } : grants.value.grants.length ? { tone: 'granted' as const, label: 'Granted' } : { tone: 'none' as const, label: 'None' },
       },
     ],
   },
@@ -467,12 +467,12 @@ async function retryNodes() {
   }
 }
 
-async function loadGrants(): Promise<boolean> {
+async function loadGrants(expectedAgent = agent.value): Promise<boolean> {
   if (isNew.value && !agent.value)
     return true
   try {
-    const result = await getAgentPluginGrants(api, { agentId: agent.value?.id ?? id.value })
-    if (agent.value && result.revision !== agent.value.revision) {
+    const result = await getAgentPluginGrants(api, { agentId: expectedAgent?.id ?? id.value })
+    if (expectedAgent && result.revision !== expectedAgent.revision) {
       conflict.value = true
       serverError.value = 'Agent changed while loading plugin access. Reload before editing grants.'
       throw new Error(serverError.value)
@@ -754,14 +754,15 @@ async function reloadAgent() {
 
     const base = saved.value
     const mine = draft.value
-    agent.value = found
-    saved.value = draftOf(found)
     const baseGrants = structuredClone(JSON.parse(JSON.stringify(savedGrants.value)))
     const mineGrants = structuredClone(JSON.parse(JSON.stringify(grants.value)))
     const keepGrantEdits = grantsChanged.value
-    const grantsReloaded = await loadGrants()
+    const grantsReloaded = await loadGrants(found)
     if (!grantsReloaded)
       return
+
+    agent.value = found
+    saved.value = draftOf(found)
     if (keepGrantEdits) {
       const mergedGrants = mergeGrantDrafts(
         baseGrants,

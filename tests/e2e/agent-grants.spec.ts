@@ -90,6 +90,38 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   const second = (await instance('Automation')).instance.id
   const remote = (await instance('Review')).instance.id
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Resource reviewer' })
+  await page.addInitScript((agentId) => {
+    Object.defineProperty(window, 'RTCPeerConnection', { configurable: true, value: undefined })
+
+    type GrantReadTestWindow = Window & {
+      __failNextAgentGrantRead: () => void
+      __agentGrantReadFailed: boolean
+    }
+
+    const testWindow = window as unknown as GrantReadTestWindow
+    let failNextRead = false
+    const originalFetch = window.fetch.bind(window)
+    testWindow.__agentGrantReadFailed = false
+    testWindow.__failNextAgentGrantRead = () => {
+      failNextRead = true
+    }
+
+    window.fetch = async (input, init) => {
+      const requestUrl = input instanceof Request ? input.url : String(input)
+      const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
+      const path = new URL(requestUrl, window.location.href).pathname
+      if (failNextRead && method.toUpperCase() === 'GET' && path.endsWith(`/api/agents/${agentId}/plugin-grants`)) {
+        failNextRead = false
+        testWindow.__agentGrantReadFailed = true
+        return new Response(JSON.stringify({ error: 'Plugin grant state unavailable' }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+
+      return originalFetch(input, init)
+    }
+  }, agent.id)
   await page.goto(workspacePath(`/agents/${agent.id}?section=plugins`))
   await authenticateWorkspace(page)
   const grantUi = page.getByRole('region', { name: 'Grant UI' })
@@ -116,6 +148,9 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   await page.getByLabel('Supply run credentials from Automation', { exact: true }).check()
   await expect(page.getByText('Current supplier: Automation.', { exact: false }).first()).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-editor.png'), fullPage: true })
+  await page.setViewportSize({ width: 1440, height: 1000 })
+  await page.getByRole('group', { name: 'Resource restrictions' }).first().scrollIntoViewIfNeeded()
+  await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-resource-picker.png'), fullPage: true })
   const original = await workspace.api(`/api/agents/${agent.id}/plugin-grants`)
   expect(original.grants).toEqual([])
   await page.setViewportSize({ width: 320, height: 844 })
@@ -161,4 +196,52 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   expect((await workspace.api(`/api/agents/${agent.id}/plugin-grants`)).runCredentialInstances).toEqual([])
   await page.goto(workspacePath('/agents'))
   await expect(page.getByText('Selected plugin access', { exact: false })).toBeVisible()
+
+  const initialGrantRead = page.waitForResponse(response =>
+    response.url().endsWith(`/api/agents/${agent.id}/plugin-grants`)
+    && response.request().method() === 'GET'
+    && response.ok(),
+  )
+  await page.goto(workspacePath(`/agents/${agent.id}?section=identity`))
+  await authenticateWorkspace(page)
+  await initialGrantRead
+  await page.getByLabel('Name', { exact: true }).fill('Local name after retry')
+  await workspace.api(`/api/agents/${agent.id}`, 'PUT', { description: 'Remote description survives retry' })
+  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Reload', exact: true })).toBeVisible()
+  await page.evaluate(() => {
+    const testWindow = window as unknown as Window & { __failNextAgentGrantRead: () => void }
+    testWindow.__failNextAgentGrantRead()
+  })
+  await page.getByRole('button', { name: 'Reload', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => {
+    const testWindow = window as unknown as Window & { __agentGrantReadFailed: boolean }
+    return testWindow.__agentGrantReadFailed
+  })).toBe(true)
+  await expect(page.getByRole('alert')).toContainText('changed elsewhere')
+  await expect(page.getByRole('button', { name: 'Reload', exact: true })).toBeEnabled()
+  await page.getByRole('button', { name: 'Reload', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Reload', exact: true })).toHaveCount(0)
+  await expect(page.getByLabel('Name', { exact: true })).toHaveValue('Local name after retry')
+  await expect(page.getByLabel('Description', { exact: true })).toHaveValue('Remote description survives retry')
+  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Local name after retry', exact: true })).toBeVisible()
+  const savedAgent = await workspace.api(`/api/agents/${agent.id}`)
+  expect(savedAgent).toMatchObject({ name: 'Local name after retry', description: 'Remote description survives retry' })
+})
+
+test('agent overview shows plugin access as unavailable when the grant read fails', async ({ page, workspace }) => {
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Grant summary reader' })
+  await page.route(`**/api/agents/${agent.id}/plugin-grants`, route => route.fulfill({
+    status: 503,
+    contentType: 'application/json',
+    body: JSON.stringify({ error: 'Plugin grant state unavailable' }),
+  }))
+  await page.goto(workspacePath(`/agents/${agent.id}`))
+  await authenticateWorkspace(page)
+
+  const plugins = page.getByRole('button', { name: /Secrets & plugins/ })
+  await expect(plugins).toContainText('Plugin access could not be loaded')
+  await expect(plugins).toContainText('Unavailable')
+  await expect(plugins).not.toContainText('No plugin access by default')
 })

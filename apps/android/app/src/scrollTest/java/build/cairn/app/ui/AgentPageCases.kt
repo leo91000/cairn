@@ -779,6 +779,9 @@ abstract class AgentPageCases {
             compose.onNodeWithTag("agent-section-Github").assertDoesNotExist()
             // Fixed rows do not open: Android used to offer restrictions the server rejects.
             compose.onNodeWithTag("agent-section-Projects").assertHasNoClickAction()
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithText("Aucun accès").fetchSemanticsNodes().isNotEmpty()
+            }
             compose.onNodeWithText("Aucun accès").assertExists()
             capture("agent-main")
 
@@ -1366,6 +1369,27 @@ abstract class AgentPageCases {
                 1,
                 fixture.grantSaves.size,
             )
+        }
+    }
+
+    @Test
+    fun aGrantReadFailureShowsPluginAccessAsUnavailableInOverview() {
+        journey(
+            release.id,
+            prepare = { fixture ->
+                fixture.failGrantReads.set(true)
+            },
+        ) {
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodesWithContentDescription("Secrets & plugins, Indisponible, à corriger")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose
+                .onNodeWithContentDescription("Secrets & plugins, Indisponible, à corriger")
+                .assertExists()
+            compose.onNodeWithText("Aucun accès").assertDoesNotExist()
         }
     }
 
