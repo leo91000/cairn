@@ -29,6 +29,41 @@ import {
 
 const repositoryRoot = fileURLToPath(new URL('../..', import.meta.url))
 const workflow = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
+const pinnedEmulatorRunner = 'reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d'
+
+// Mirrors lib/script-parser.js at the pinned action commit (SHA-256 6d162ab4384c2ef9c261b5cc4dfb8947f69cab75b98fedb0ee34275619c170ff).
+function parsePinnedActionScript(rawScript) {
+  return rawScript.trim().split(/\r\n|\n|\r/).map(value => value.trim()).filter(value => !value.startsWith('#') && value.length > 0)
+}
+
+function runPinnedActionCommands(commands, environment) {
+  for (const command of commands) {
+    const result = spawnSync('sh', ['-c', command], {
+      cwd: repositoryRoot,
+      encoding: 'utf8',
+      env: environment,
+      timeout: 5000,
+    })
+    if (result.error)
+      throw result.error
+    if (result.status !== 0)
+      return result.status
+  }
+
+  return 0
+}
+
+function readCallLog(filePath) {
+  try {
+    const value = readFileSync(filePath, 'utf8').trim()
+    return value ? value.split('\n') : []
+  }
+  catch (error) {
+    if (error.code === 'ENOENT')
+      return []
+    throw error
+  }
+}
 
 function procStat(pid, comm, ppid, startTicks) {
   const fields = Array.from({ length: 20 }).fill('0')
@@ -298,7 +333,7 @@ describe('android action closure observer', () => {
     }
   })
 
-  it.each([0, 7, 23])('preserves the Python scenario exit code %s through the exact workflow wrapper', (pythonExitCode) => {
+  it.each([0, 7, 23])('preserves Python exit code %s through the pinned parser and per-command sh caller', (pythonExitCode) => {
     const step = workflow.jobs['android-direct'].steps.find(candidate => candidate.name === 'Observe native responses, network restart and revocation')
     const script = step.with.script
     const temporaryDirectory = mkdtempSync(path.join(os.tmpdir(), 'cairn-observer-wrapper-'))
@@ -308,27 +343,31 @@ describe('android action closure observer', () => {
     try {
       const fakePython = path.join(binDirectory, 'python3')
       const fakeNode = path.join(binDirectory, 'node')
-      writeFileSync(fakePython, '#!/bin/sh\nexit "$FAKE_PYTHON_EXIT"\n')
-      writeFileSync(fakeNode, '#!/bin/sh\nexit 91\n')
+      const callLog = path.join(temporaryDirectory, 'calls.log')
+      writeFileSync(fakePython, '#!/bin/sh\nprintf "python:%s\\n" "$ANDROID_SCENARIO" >> "$WRAPPER_CALL_LOG"\nexit "$FAKE_PYTHON_EXIT"\n')
+      writeFileSync(fakeNode, '#!/bin/sh\ncase "$*" in\n  *android-action-observer.mjs*) printf "observer\\n" >> "$WRAPPER_CALL_LOG"; exit "$FAKE_OBSERVER_EXIT" ;;\n  *action-runner-sentinel*) printf "sentinel\\n" >> "$WRAPPER_CALL_LOG"; exit 0 ;;\n  *) printf "unexpected-node\\n" >> "$WRAPPER_CALL_LOG"; exit 0 ;;\nesac\n')
       chmodSync(fakePython, 0o700)
       chmodSync(fakeNode, 0o700)
 
-      const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', script], {
-        cwd: repositoryRoot,
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          ANDROID_SCENARIO: 'same-lan',
-          FAKE_PYTHON_EXIT: String(pythonExitCode),
-          PATH: `${binDirectory}:/usr/bin:/bin`,
-        },
-        timeout: 5000,
+      const commands = parsePinnedActionScript(script)
+      const status = runPinnedActionCommands([...commands, 'node action-runner-sentinel'], {
+        ...process.env,
+        ANDROID_SCENARIO: 'same-lan',
+        FAKE_OBSERVER_EXIT: '91',
+        FAKE_PYTHON_EXIT: String(pythonExitCode),
+        PATH: `${binDirectory}:/usr/bin:/bin`,
+        WRAPPER_CALL_LOG: callLog,
       })
+      const calls = readCallLog(callLog)
 
-      expect(script.indexOf('python3 tests/network-bench.py')).toBeLessThan(script.indexOf('node scripts/android-action-observer.mjs start'))
-      expect(script).toContain('scenario_status=$?')
-      expect(result.status).toBe(pythonExitCode)
-      expect(result.error).toBeUndefined()
+      expect(step.uses).toBe(pinnedEmulatorRunner)
+      if (commands.length !== 1)
+        expect(calls).toEqual([])
+      expect(commands).toHaveLength(1)
+      expect(status).toBe(pythonExitCode)
+      expect(calls).toEqual(pythonExitCode === 0
+        ? ['python:same-lan', 'observer', 'sentinel']
+        : ['python:same-lan', 'observer'])
     }
     finally {
       rmSync(temporaryDirectory, { recursive: true, force: true })

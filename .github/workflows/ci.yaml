@@ -823,14 +823,9 @@ jobs:
           profile: pixel_6
           disable-animations: true
           pre-emulator-launch-script: node scripts/android-emulator-sdk.mjs preflight
-          script: |
-            if python3 tests/network-bench.py "$ANDROID_SCENARIO" --android --output "test-results/android-direct/$ANDROID_SCENARIO.json"; then
-              scenario_status=0
-            else
-              scenario_status=$?
-            fi
-
-            node scripts/android-action-observer.mjs start test-results/android-direct/closure-observation || true
+          script: >-
+            if python3 tests/network-bench.py "$ANDROID_SCENARIO" --android --output "test-results/android-direct/$ANDROID_SCENARIO.json"; then scenario_status=0; else scenario_status=$?; fi;
+            node scripts/android-action-observer.mjs start test-results/android-direct/closure-observation || true;
             exit "$scenario_status"
       - uses: actions/upload-artifact@v7.0.1
         if: always()
