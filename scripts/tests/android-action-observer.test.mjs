@@ -7,6 +7,7 @@ import {
   readFileSync,
   readlinkSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -79,12 +80,15 @@ function createProcEntry(root, {
   ppid = 1,
   startTicks = pid,
   fds = [],
+  executablePath,
 }) {
   const processDirectory = path.join(root, String(pid))
   const fdDirectory = path.join(processDirectory, 'fd')
   mkdirSync(fdDirectory, { recursive: true })
   writeFileSync(path.join(processDirectory, 'stat'), procStat(pid, comm, ppid, startTicks))
   writeFileSync(path.join(processDirectory, 'comm'), `${comm}\n`)
+  if (executablePath)
+    symlinkSync(executablePath, path.join(processDirectory, 'exe'))
   for (const [fd, target] of fds) {
     symlinkSync(target, path.join(fdDirectory, String(fd)))
   }
@@ -227,6 +231,77 @@ describe('android action closure observer', () => {
     }
   })
 
+  it('selects Node 24 MainThread ancestors and rejects unrelated MainThread processes', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'cairn-observer-node24-'))
+    const nodeExecutable = path.join(root, 'node')
+    const pythonExecutable = path.join(root, 'python3')
+    try {
+      mkdirSync(path.join(root, 'self'))
+      writeFileSync(nodeExecutable, '')
+      writeFileSync(pythonExecutable, '')
+      createProcEntry(root, {
+        pid: process.pid,
+        comm: 'node',
+        ppid: 100,
+        startTicks: 1234,
+      })
+      createProcEntry(root, {
+        pid: 100,
+        comm: 'bash',
+        ppid: 101,
+        startTicks: 2000,
+      })
+      createProcEntry(root, {
+        pid: 101,
+        comm: 'MainThread',
+        ppid: 1,
+        startTicks: 3000,
+        executablePath: nodeExecutable,
+      })
+      createProcEntry(root, {
+        pid: 102,
+        comm: 'MainThread',
+        ppid: 1,
+        startTicks: 4000,
+        executablePath: pythonExecutable,
+      })
+
+      expect(findActionNodeAncestor(root)).toEqual({ pid: 101, startTicks: '3000' })
+      const snapshot = collectSnapshot({
+        procRoot: root,
+        actionNode: { pid: 101, startTicks: '3000' },
+        sampleIndex: 0,
+        scheduledOffsetMs: 0,
+        elapsedMs: 0,
+      })
+      expect(snapshot.processes.map(process => [process.pid, process.comm])).toEqual([
+        [101, 'MainThread'],
+        [100, 'bash'],
+      ])
+      expect(JSON.stringify(snapshot)).not.toContain(nodeExecutable)
+      expect(JSON.stringify(snapshot)).not.toContain(pythonExecutable)
+    }
+    finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('records an unavailable startup status when no action ancestor is available', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'cairn-observer-start-status-'))
+    const outputDirectory = path.join(root, 'snapshots')
+    try {
+      expect(startObservation({ outputDirectory, actionNode: null })).toBeNull()
+
+      const status = JSON.parse(readFileSync(path.join(outputDirectory, 'observer-status.json'), 'utf8'))
+      expect(status).toEqual({ schema: 1, status: 'ancestor-not-found' })
+      expect(statSync(path.join(outputDirectory, 'observer-status.json')).mode & 0o777).toBe(0o600)
+      expect(JSON.stringify(status)).not.toMatch(/(?:argv|env|path|command|secret)/i)
+    }
+    finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it('marks a reused action PID by its changed start ticks', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'cairn-observer-reused-pid-'))
     try {
@@ -306,12 +381,14 @@ describe('android action closure observer', () => {
 
       const firstSnapshotPath = await waitForFile(outputDirectory, 'sample-000.json')
       const snapshot = JSON.parse(readFileSync(firstSnapshotPath, 'utf8'))
+      const status = JSON.parse(readFileSync(path.join(outputDirectory, 'observer-status.json'), 'utf8'))
       expect(snapshot.actionNode).toEqual({
         pid: target.pid,
         startTicks: targetStartTicks,
         status: 'present',
       })
       expect(snapshot.processes.some(process => process.pid === target.pid && process.comm === 'node')).toBe(true)
+      expect(status).toEqual({ schema: 1, status: 'first-sample-written', sampleIndex: 0 })
       expect(readFileSync(firstSnapshotPath).length).toBeGreaterThan(0)
       expect((await import('node:fs')).statSync(firstSnapshotPath).mode & 0o777).toBe(0o600)
 

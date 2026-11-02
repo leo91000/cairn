@@ -8,6 +8,7 @@ import {
   openSync,
   readFileSync,
   readlinkSync,
+  renameSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -23,6 +24,7 @@ export const MAX_RECORDED_PROCESS_COUNT = 128
 const MAX_PROC_ENTRIES = 1024
 const MAX_FD_ENTRIES = 512
 const STDIO_FDS = ['0', '1', '2']
+const NODE24_MAIN_THREAD_COMM = 'MainThread'
 const scriptPath = fileURLToPath(import.meta.url)
 
 function errorKind(error) {
@@ -61,10 +63,33 @@ function readStat(procRoot, pid) {
   return parseProcStat(readFileSync(path.join(procRoot, String(pid), 'stat'), 'utf8'))
 }
 
-function isWhitelisted(comm) {
+function isNode24MainThread(procRoot, stat) {
+  if (stat.comm !== NODE24_MAIN_THREAD_COMM)
+    return false
+
+  try {
+    const executable = readlinkSync(path.join(procRoot, String(stat.pid), 'exe'))
+    if (path.basename(executable) !== 'node')
+      return false
+
+    const current = readStat(procRoot, stat.pid)
+    return current?.comm === NODE24_MAIN_THREAD_COMM && current.startTicks === stat.startTicks
+  }
+  catch {
+    return false
+  }
+}
+
+function isActionNode(procRoot, stat) {
+  return stat.comm === 'node' || isNode24MainThread(procRoot, stat)
+}
+
+function isWhitelisted(procRoot, stat) {
+  const { comm } = stat
   if (!/^[\w.-]{1,15}$/.test(comm))
     return false
-  return ['node', 'sh', 'bash', 'dash', 'adb', 'emulator'].includes(comm)
+  return isActionNode(procRoot, stat)
+    || ['sh', 'bash', 'dash', 'adb', 'emulator'].includes(comm)
     || comm.startsWith('emulator-')
     || comm.startsWith('emulator_')
     || comm.startsWith('qemu-system-')
@@ -243,7 +268,7 @@ export function collectSnapshot({
   let processScan = listing.status
 
   const append = (stat, actionProcess = false) => {
-    if (!stat || seen.has(stat.pid) || stat.pid === process.pid || (!actionProcess && excluded.has(stat.pid)) || !isWhitelisted(stat.comm))
+    if (!stat || seen.has(stat.pid) || stat.pid === process.pid || (!actionProcess && excluded.has(stat.pid)) || !isWhitelisted(procRoot, stat))
       return
     if (records.length >= MAX_RECORDED_PROCESS_COUNT) {
       processScan = 'limit-reached'
@@ -309,7 +334,7 @@ export function findActionNodeAncestor(procRoot = '/proc') {
 
     if (!parent)
       return null
-    if (parent.comm === 'node')
+    if (isActionNode(procRoot, parent))
       return { pid: parent.pid, startTicks: parent.startTicks }
     pid = parent.ppid
   }
@@ -321,19 +346,75 @@ export function startObservation({
   outputDirectory = path.join('test-results', 'android-direct', 'closure-observation'),
   actionNode = findActionNodeAncestor(),
 } = {}) {
-  if (!actionNode || !Number.isSafeInteger(actionNode.pid) || !/^\d+$/.test(actionNode.startTicks))
+  if (!actionNode) {
+    writeObserverStatus(outputDirectory, 'ancestor-not-found')
     return null
-  const observer = spawn(process.execPath, [
-    scriptPath,
-    'observe',
-    String(actionNode.pid),
-    actionNode.startTicks,
-    path.resolve(outputDirectory),
-    String(process.pid),
-  ], { detached: true, stdio: 'ignore', env: {} })
-  observer.once('error', () => {})
+  }
+
+  if (!Number.isSafeInteger(actionNode.pid) || actionNode.pid < 1 || !/^\d+$/.test(actionNode.startTicks)) {
+    writeObserverStatus(outputDirectory, 'invalid-target')
+    return null
+  }
+
+  writeObserverStatus(outputDirectory, 'sampler-starting')
+  let observer
+  try {
+    observer = spawn(process.execPath, [
+      scriptPath,
+      'observe',
+      String(actionNode.pid),
+      actionNode.startTicks,
+      path.resolve(outputDirectory),
+      String(process.pid),
+    ], { detached: true, stdio: 'ignore', env: {} })
+  }
+  catch {
+    writeObserverStatus(outputDirectory, 'sampler-start-failed')
+    return null
+  }
+
+  observer.once('error', () => writeObserverStatus(outputDirectory, 'sampler-start-failed'))
   observer.unref()
   return observer
+}
+
+function writeObserverStatus(directory, status, sampleIndex) {
+  const receipt = { schema: 1, status }
+  if (Number.isSafeInteger(sampleIndex) && sampleIndex >= 0 && sampleIndex < SAMPLE_OFFSETS_MS.length)
+    receipt.sampleIndex = sampleIndex
+
+  let descriptor
+  let pending
+  try {
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+    const filename = path.join(directory, 'observer-status.json')
+    pending = path.join(directory, `.observer-status.pending-${process.pid}-${status}-${sampleIndex ?? 'startup'}`)
+    descriptor = openSync(pending, 'wx', 0o600)
+    writeFileSync(descriptor, `${JSON.stringify(receipt)}\n`)
+    fsyncSync(descriptor)
+    closeSync(descriptor)
+    descriptor = undefined
+    renameSync(pending, filename)
+    pending = undefined
+  }
+  catch {
+    // Observer receipts are best-effort and must not affect the Android scenario.
+  }
+  finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor)
+      }
+      catch {}
+    }
+
+    if (pending) {
+      try {
+        unlinkSync(pending)
+      }
+      catch {}
+    }
+  }
 }
 
 function writeSnapshot(directory, index, snapshot) {
@@ -381,8 +462,12 @@ async function observe(actionNode, outputDirectory, excludedPids) {
       writeSnapshot(outputDirectory, index, snapshot)
     }
     catch {
+      writeObserverStatus(outputDirectory, 'sample-write-failed', index)
       return
     }
+
+    if (index === 0)
+      writeObserverStatus(outputDirectory, 'first-sample-written', index)
 
     if (snapshot.actionNode.status === 'absent' || snapshot.actionNode.status === 'reused')
       return
@@ -408,6 +493,8 @@ async function runCli() {
   const excludedPid = Number(excludedPidArgument)
   if (!Number.isSafeInteger(pid) || pid < 1 || !Number.isSafeInteger(excludedPid) || excludedPid < 1)
     return
+
+  writeObserverStatus(outputDirectory, 'sampler-started')
   await observe({ pid, startTicks }, outputDirectory, [excludedPid])
 }
 
