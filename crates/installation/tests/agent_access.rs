@@ -538,10 +538,23 @@ async fn a_delegated_task_follows_its_requesting_conversation_until_it_is_delete
         json!({ "agentId": MAIN_AGENT_ID }),
     )
     .await;
+    let delegated_run = cairn_installation::config::id();
+    let run = json!({
+        "id": delegated_run,
+        "taskId": delegated["id"],
+        "createdAt": 0,
+        "status": "failed",
+        "snapshot": { "agent": { "id": MAIN_AGENT_ID } },
+    });
+    s.store
+        .transaction(move |db| db.add_run_fixture(&run, None).map(|_| ()))
+        .await
+        .unwrap();
     let mut record = s
         .conversation_boundary(delegated["id"].as_str().unwrap())
         .await
         .unwrap();
+    record["runId"] = delegated_run.clone().into();
     record["requestedBy"] =
         json!({ "runId": cairn_installation::config::id(), "chatId": requesting["id"] });
     s.store.save_conversation_boundary(record).await.unwrap();
@@ -555,6 +568,10 @@ async fn a_delegated_task_follows_its_requesting_conversation_until_it_is_delete
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{sent}");
+
+    let cleanup = format!("/api/runs/{delegated_run}/cleanup");
+    let (status, _) = member(&s, "POST", &cleanup, json!({})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 
     // Deleting it, or restoring it once deleted, still needs its own agent.
     let detail = format!("/api/chats/{}", delegated["id"].as_str().unwrap());

@@ -231,6 +231,15 @@ fn require_run(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result
     require_agent(db, identity, crate::nodes::run_agent(&run))
 }
 
+fn require_run_cleanup(
+    db: &Db<'_>,
+    identity: &InstallationIdentity,
+    id: &str,
+) -> Result<Admission> {
+    let run = required(db.run(id)?, "Run not found")?;
+    require_agent(db, identity, crate::nodes::run_agent(&run))
+}
+
 fn require_task(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result<Admission> {
     let task = required(db.mission(id)?, "Mission not found")?;
     require_agent(db, identity, &task.settings.agent_id.to_string())
@@ -387,8 +396,10 @@ fn gate(
                 None => require_run(db, identity, id),
             }
         }
-        // Cleaning up a run's workspace ends its « continue in chat », like a deletion.
-        ("POST", ["runs", id, "resume" | "chat" | "cleanup"]) => require_run(db, identity, id),
+        ("POST", ["runs", id, "resume" | "chat"]) => require_run(db, identity, id),
+        // Cleanup deletes the workspace belonging to this run's agent. Delegated access
+        // through a requesting conversation only authorizes directing the delegated chat.
+        ("POST", ["runs", id, "cleanup"]) => require_run_cleanup(db, identity, id),
         // A missing agent is left to the command's own validation.
         ("POST", ["tasks"]) => match body["settings"]["agentId"].as_str() {
             Some(agent) => require_agent(db, identity, agent),
