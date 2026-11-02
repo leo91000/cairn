@@ -513,17 +513,23 @@ fn descendant(manifest: &Manifest, kind: &str, ancestor: &str) -> bool {
 }
 
 fn designated<'a>(input: &'a Value, path: &str) -> Result<Vec<&'a str>> {
-    let mut nodes = vec![input];
+    let mut nodes = vec![(input, false)];
     for part in path.trim_start_matches('/').split('/') {
         let key = part.replace("~1", "/").replace("~0", "~");
         let mut next = Vec::new();
-        for node in nodes {
-            if part == "*"
-                && let Some(items) = node.as_array()
-            {
-                next.extend(items);
+        for (node, must_resolve) in nodes {
+            if part == "*" {
+                if let Some(items) = node.as_array() {
+                    next.extend(items.iter().map(|item| (item, true)));
+                } else if let Some(value) = node.get(&key) {
+                    next.push((value, must_resolve));
+                } else if must_resolve {
+                    return Err(denied());
+                }
             } else if let Some(value) = node.get(&key) {
-                next.push(value);
+                next.push((value, must_resolve));
+            } else if must_resolve {
+                return Err(denied());
             }
         }
         nodes = next;
@@ -533,8 +539,9 @@ fn designated<'a>(input: &'a Value, path: &str) -> Result<Vec<&'a str>> {
     }
     nodes
         .into_iter()
-        .map(|v| {
-            v.as_str()
+        .map(|(value, _)| {
+            value
+                .as_str()
                 .filter(|id| !id.is_empty() && id.len() <= 200 && !id.chars().any(char::is_control))
                 .ok_or_else(denied)
         })

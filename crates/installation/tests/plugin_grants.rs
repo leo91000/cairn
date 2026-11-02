@@ -89,6 +89,12 @@ async fn tools_commands_and_hooks_resolve_every_designation_and_reject_contradic
                 { "channel": "general" },
             ],
         }),
+        json!({
+            "items": [
+                { "channel": "support" },
+                {},
+            ],
+        }),
         json!({"channel":""}),
         json!({"author":"support"}),
     ] {
