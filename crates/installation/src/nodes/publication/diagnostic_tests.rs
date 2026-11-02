@@ -1340,6 +1340,150 @@ async fn native_storage_refresh_marks_missing_metrics_stale_then_clears_on_recov
     s.shutdown.cancel();
 }
 
+async fn apply_delayed_storage_refresh_pair(
+    s: &Service,
+    run: &Value,
+    first_status: Value,
+    second_status: Value,
+) {
+    let (started, wait_until_started) = tokio::sync::oneshot::channel();
+    let (release, wait_until_released) = tokio::sync::oneshot::channel();
+    let first_status = async move {
+        let _ = started.send(());
+        wait_until_released
+            .await
+            .map_err(crate::error::Error::internal)?;
+        Ok(first_status)
+    };
+    let mut first = Box::pin(super::super::storage::refresh_with_status(
+        s,
+        run,
+        first_status,
+    ));
+
+    assert!(futures_util::poll!(first.as_mut()).is_pending());
+    wait_until_started.await.unwrap();
+
+    let mut second = Box::pin(super::super::storage::refresh_with_status(
+        s,
+        run,
+        std::future::ready(Ok(second_status)),
+    ));
+    let second_completed = match futures_util::poll!(second.as_mut()) {
+        std::task::Poll::Ready(result) => {
+            result.unwrap();
+            true
+        }
+        std::task::Poll::Pending => false,
+    };
+
+    release.send(()).unwrap();
+    if second_completed {
+        first.await.unwrap();
+    } else {
+        let (first, second) = tokio::join!(first.as_mut(), second.as_mut());
+        first.unwrap();
+        second.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn concurrent_native_storage_refreshes_preserve_observation_order() {
+    use crate::run_fixture::DbRunFixture;
+
+    let root = tempfile::tempdir().unwrap();
+    let s = service(root.path()).await;
+    let run_id = id();
+    let saved_run = run_id.clone();
+    let node_id = super::super::LOCAL_NODE_ID;
+    s.store
+        .transaction(move |db| {
+            db.add_run_fixture(
+                &json!({
+                    "id": saved_run,
+                    "taskId": id(),
+                    "status": "cancelled",
+                    "createdAt": 0,
+                    "nodeId": node_id,
+                    "isolated": true,
+                    "snapshot": { "agent": { "id": crate::config::MAIN_AGENT_ID } },
+                    "storage": {
+                        "mode": "native",
+                        "availability": "unavailable",
+                        "availabilityReason": "missing_native_journal",
+                        "metricsAvailability": "stale",
+                        "dirtyBytes": 4096,
+                        "localBytes": 8192
+                    },
+                    "backup": {
+                        "status": "error",
+                        "id": "last-good-backup",
+                        "snapshotId": "last-good-snapshot",
+                        "requestedRevision": 2,
+                        "acknowledgedRevision": 1
+                    }
+                }),
+                None,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let run = s.store.run(&run_id).await.unwrap();
+
+    apply_delayed_storage_refresh_pair(
+        &s,
+        &run,
+        json!({
+            "mode": "native",
+            "availability": "unavailable",
+            "reason": "missing_native_journal"
+        }),
+        json!({
+            "mode": "native",
+            "dirtyBytes": 0,
+            "localBytes": 16384,
+            "activeLocalBytes": 2048
+        }),
+    )
+    .await;
+    let recovered = s.store.run(&run_id).await.unwrap();
+    assert_eq!(recovered["storage"]["localBytes"], 16384);
+    assert!(recovered["storage"].get("availability").is_none());
+    assert!(recovered["storage"].get("metricsAvailability").is_none());
+    assert_eq!(recovered["backup"]["id"], "last-good-backup");
+    assert_eq!(recovered["backup"]["snapshotId"], "last-good-snapshot");
+    assert_eq!(recovered["backup"]["requestedRevision"], 2);
+    assert_eq!(recovered["backup"]["acknowledgedRevision"], 1);
+
+    apply_delayed_storage_refresh_pair(
+        &s,
+        &run,
+        json!({
+            "mode": "native",
+            "dirtyBytes": 0,
+            "localBytes": 32768,
+            "activeLocalBytes": 4096
+        }),
+        json!({
+            "mode": "native",
+            "availability": "unavailable",
+            "reason": "missing_native_journal"
+        }),
+    )
+    .await;
+    let unavailable = s.store.run(&run_id).await.unwrap();
+    assert_eq!(unavailable["storage"]["localBytes"], 32768);
+    assert_eq!(unavailable["storage"]["availability"], "unavailable");
+    assert_eq!(unavailable["storage"]["metricsAvailability"], "stale");
+    assert_eq!(unavailable["backup"]["id"], "last-good-backup");
+    assert_eq!(unavailable["backup"]["snapshotId"], "last-good-snapshot");
+    assert_eq!(unavailable["backup"]["requestedRevision"], 2);
+    assert_eq!(unavailable["backup"]["acknowledgedRevision"], 1);
+
+    s.shutdown.cancel();
+}
+
 #[tokio::test]
 async fn attempt_persists_bounded_failure_context_and_retains_it_after_recovery() {
     use crate::{

@@ -8,7 +8,7 @@ use crate::{
 };
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 async fn controller(s: &Service, run: &str, operation: &str, value: &Value) -> Result<Value> {
     let base = super::transport::url(s, run).await?;
@@ -108,7 +108,18 @@ fn monitored_runs(db: &mut Db<'_>) -> Result<Vec<Value>> {
 /// Records the node's journal status, and the publication it has acknowledged.
 pub async fn refresh(s: &Service, run: &Value) -> Result<()> {
     let id = text(run, "id");
-    let status = controller(s, id, "storage-status", &json!({})).await?;
+    let request = json!({});
+    let status = controller(s, id, "storage-status", &request);
+    refresh_with_status(s, run, status).await
+}
+
+pub(super) async fn refresh_with_status(
+    s: &Service,
+    run: &Value,
+    status: impl Future<Output = Result<Value>>,
+) -> Result<()> {
+    let id = text(run, "id");
+    let status = status.await?;
     if status["mode"] == "native" {
         if status["availability"] == "unavailable" {
             if status["reason"] != crate::native::MISSING_NATIVE_JOURNAL_CODE {
