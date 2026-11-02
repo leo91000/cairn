@@ -762,7 +762,20 @@ impl Drop for Mounted {
 }
 
 pub async fn status(state: &Path, run: &str) -> Result<Value> {
-    let volume = storage::runtime::load(&environment::directory(state, run)?).await?;
+    let directory = environment::directory(state, run)?;
+    match tokio::fs::metadata(directory.join("lazy/journal-v2.sqlite")).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(json!({
+                "mode": "native",
+                "availability": "unavailable",
+                "reason": crate::native::MISSING_NATIVE_JOURNAL_CODE
+            }));
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    let volume = storage::runtime::load(&directory).await?;
     let mut status = volume.inspect().await?;
     status["paused"] = volume.paused().into();
     Ok(status)
@@ -1128,10 +1141,12 @@ mod tests {
             .join("lazy/journal-v2.sqlite");
 
         let status = status(state.path(), &run).await.unwrap();
+        let repeated = status(state.path(), &run).await.unwrap();
 
         assert_eq!(status["mode"], "native");
         assert_eq!(status["availability"], "unavailable");
         assert_eq!(status["reason"], "missing_native_journal");
+        assert_eq!(repeated, status);
         assert!(!journal.exists());
     }
 

@@ -994,7 +994,10 @@ async fn completed_capture_distinguishes_missing_journal_from_legacy_conflict() 
         move |request: Request| {
             let missing_journal = missing_journal.clone();
             async move {
-                assert!(request.uri().path().ends_with("/snapshot-completed"));
+                assert!(
+                    request.uri().path().ends_with("/snapshot-completed")
+                        || request.uri().path().ends_with("/snapshot")
+                );
                 let body = if missing_journal.load(Ordering::Relaxed) {
                     json!({
                         "error": "Conversation has no native journal.",
@@ -1031,6 +1034,10 @@ async fn completed_capture_distinguishes_missing_journal_from_legacy_conflict() 
     .await
     .unwrap_err();
     assert_eq!(missing.status, 409);
+    assert_eq!(
+        missing.code.as_deref(),
+        Some(crate::native::MISSING_NATIVE_JOURNAL_CODE)
+    );
     assert_eq!(missing.message, "Conversation has no native journal.");
 
     missing_journal.store(false, Ordering::Relaxed);
@@ -1047,6 +1054,27 @@ async fn completed_capture_distinguishes_missing_journal_from_legacy_conflict() 
     .unwrap_err();
     assert_eq!(legacy.status, 425);
     assert_eq!(legacy.message, "Waiting for completed generation capture.");
+
+    missing_journal.store(true, Ordering::Relaxed);
+    let mut older_envelope = run.clone();
+    older_envelope["backup"]["id"] = id().into();
+    older_envelope["backup"]["blockEnvelope"] = 2.into();
+    let missing_legacy_protocol = super::request_snapshot(
+        &s,
+        &older_envelope,
+        &base,
+        &id(),
+        "fixture",
+        super::CaptureProtocol::Direct,
+        &crate::authorization::Authorization::default(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(missing_legacy_protocol.status, 409);
+    assert_eq!(
+        missing_legacy_protocol.code.as_deref(),
+        Some(crate::native::MISSING_NATIVE_JOURNAL_CODE)
+    );
 
     server.abort();
     s.shutdown.cancel();
@@ -1102,12 +1130,26 @@ async fn missing_journal_publication_failure_preserves_the_last_good_baseline_an
         }))
         .await
         .unwrap();
-
-    let (saved_run, saved_node, saved_runner, saved_checkpoint_run) = (
+    let (
+        saved_run,
+        saved_node,
+        saved_runner,
+        saved_checkpoint_run,
+        saved_point_run,
+        saved_point_node,
+        saved_backup_id,
+        saved_snapshot_id,
+        saved_endpoint,
+    ) = (
         run_id.clone(),
         node_id.to_owned(),
         runner_id.clone(),
         run_id.clone(),
+        run_id.clone(),
+        node_id.to_owned(),
+        last_good_backup.clone(),
+        last_good_snapshot.clone(),
+        logical_endpoint.to_owned(),
     );
     s.store
         .transaction(move |db| {
@@ -1132,6 +1174,19 @@ async fn missing_journal_publication_failure_preserves_the_last_good_baseline_an
                     }
                 }),
                 None,
+            )?;
+            db.put(
+                "node-backups",
+                &json!({
+                    "id": saved_backup_id,
+                    "runId": saved_point_run,
+                    "nodeId": saved_point_node,
+                    "destination": "s3",
+                    "endpoint": saved_endpoint,
+                    "bucket": "diagnostics",
+                    "snapshotId": saved_snapshot_id,
+                    "capturedAt": now()
+                }),
             )?;
             db.save_checkpoint_boundary(
                 &saved_checkpoint_run,
@@ -1162,6 +1217,126 @@ async fn missing_journal_publication_failure_preserves_the_last_good_baseline_an
     assert_eq!(backup["snapshotId"], expected_last_good_snapshot);
 
     controller_task.abort();
+    s.shutdown.cancel();
+}
+
+#[tokio::test]
+async fn native_storage_refresh_marks_missing_metrics_stale_then_clears_on_recovery() {
+    use crate::{node_fixture::StoreNodeFixture, run_fixture::DbRunFixture};
+
+    let root = tempfile::tempdir().unwrap();
+    let run_id = id();
+    let runner_id = id();
+    let node_id = super::super::LOCAL_NODE_ID;
+    let missing_journal = Arc::new(AtomicBool::new(true));
+    let controller = Router::new().fallback({
+        let missing_journal = missing_journal.clone();
+        let run_id = run_id.clone();
+        move |request: Request| {
+            let (missing_journal, run_id) = (missing_journal.clone(), run_id.clone());
+            async move {
+                assert_eq!(
+                    request.uri().path(),
+                    format!("/disks/{run_id}/storage-status")
+                );
+                let status = if missing_journal.load(Ordering::Relaxed) {
+                    json!({
+                        "mode": "native",
+                        "availability": "unavailable",
+                        "reason": "missing_native_journal"
+                    })
+                } else {
+                    json!({
+                        "mode": "native",
+                        "dirtyBytes": 0,
+                        "localBytes": 16384,
+                        "activeLocalBytes": 2048
+                    })
+                };
+                axum::Json(status).into_response()
+            }
+        }
+    });
+    let (controller, server) = peer(controller).await;
+    let s = service_with_runner(root.path(), controller).await;
+    s.store
+        .put_node_fixture(json!({ "id": node_id, "revoked": false }))
+        .await
+        .unwrap();
+
+    let (saved_run, saved_checkpoint_run, saved_node, saved_runner) = (
+        run_id.clone(),
+        run_id.clone(),
+        node_id.to_owned(),
+        runner_id.clone(),
+    );
+    s.store
+        .transaction(move |db| {
+            db.add_run_fixture(
+                &json!({
+                    "id": saved_run,
+                    "taskId": id(),
+                    "status": "cancelled",
+                    "createdAt": 0,
+                    "nodeId": saved_node,
+                    "isolated": true,
+                    "snapshot": { "agent": { "id": crate::config::MAIN_AGENT_ID } },
+                    "storage": {
+                        "mode": "native",
+                        "availability": "unavailable",
+                        "availabilityReason": "missing_native_journal",
+                        "metricsAvailability": "stale",
+                        "dirtyBytes": 4096,
+                        "localBytes": 8192
+                    },
+                    "backup": {
+                        "status": "error",
+                        "id": "last-good-backup",
+                        "snapshotId": "last-good-snapshot",
+                        "requestedRevision": 2,
+                        "acknowledgedRevision": 1
+                    }
+                }),
+                None,
+            )?;
+            db.save_checkpoint_boundary(
+                &saved_checkpoint_run,
+                &json!({
+                    "nodeId": saved_node,
+                    "runnerId": saved_runner
+                }),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let missing = s.store.run(&run_id).await.unwrap();
+    super::super::storage::refresh(&s, &missing).await.unwrap();
+    let recorded = s.store.run(&run_id).await.unwrap();
+    assert_eq!(recorded["storage"]["dirtyBytes"], 4096);
+    assert_eq!(recorded["storage"]["localBytes"], 8192);
+    assert_eq!(recorded["storage"]["metricsAvailability"], "stale");
+    assert_eq!(
+        recorded["storage"]["availabilityReason"],
+        "missing_native_journal"
+    );
+    assert_eq!(recorded["backup"]["requestedRevision"], 2);
+    assert_eq!(recorded["backup"]["acknowledgedRevision"], 1);
+
+    missing_journal.store(false, Ordering::Relaxed);
+    super::super::storage::refresh(&s, &recorded).await.unwrap();
+    let recovered = s.store.run(&run_id).await.unwrap();
+    assert_eq!(recovered["storage"]["dirtyBytes"], 0);
+    assert_eq!(recovered["storage"]["localBytes"], 16384);
+    assert!(recovered["storage"].get("availability").is_none());
+    assert!(recovered["storage"].get("metricsAvailability").is_none());
+    assert_eq!(recovered["backup"]["requestedRevision"], 2);
+    assert_eq!(recovered["backup"]["acknowledgedRevision"], 1);
+    assert_eq!(recovered["backup"]["id"], "last-good-backup");
+    assert_eq!(recovered["backup"]["snapshotId"], "last-good-snapshot");
+
+    server.abort();
     s.shutdown.cancel();
 }
 

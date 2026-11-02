@@ -26,6 +26,8 @@ pub(crate) use service::native_budget;
 pub use service::serve;
 pub use watchdog::serve as watchdog;
 
+pub(crate) const MISSING_NATIVE_JOURNAL_CODE: &str = "missing_native_journal";
+
 pub fn enabled() -> bool {
     std::env::var("CAIRN_NODE_BACKEND").is_ok_and(|value| value == "native")
 }

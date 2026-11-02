@@ -110,6 +110,22 @@ pub async fn refresh(s: &Service, run: &Value) -> Result<()> {
     let id = text(run, "id");
     let status = controller(s, id, "storage-status", &json!({})).await?;
     if status["mode"] == "native" {
+        if status["availability"] == "unavailable" {
+            if status["reason"] != crate::native::MISSING_NATIVE_JOURNAL_CODE {
+                return Err(Error::unavailable(
+                    "Node reported an unsupported native storage availability reason.",
+                ));
+            }
+            let (id, node, status) = (
+                id.to_owned(),
+                super::owner_node(run).to_owned(),
+                status.clone(),
+            );
+            return s
+                .store
+                .transaction(move |db| record_missing_native_journal(db, &id, &node, &status))
+                .await;
+        }
         let (id, node, status) = (
             id.to_owned(),
             super::owner_node(run).to_owned(),
@@ -135,6 +151,30 @@ pub async fn refresh(s: &Service, run: &Value) -> Result<()> {
     s.store
         .transaction(move |db| record_status(db, &id, &node, &status, point.as_ref(), revision))
         .await
+}
+
+/// Record that the node could not inspect the journal without replacing its last known metrics.
+fn record_missing_native_journal(db: &Db<'_>, id: &str, node: &str, status: &Value) -> Result<()> {
+    let Some(current) = db.run(id)? else {
+        return Ok(());
+    };
+    if super::owner_node(&current) != node {
+        return Ok(());
+    }
+
+    let storage = storage_with_missing_native_journal(&current["storage"], status);
+    db.update_run_boundary(id, &json!({ "storage": storage }))?;
+    Ok(())
+}
+
+fn storage_with_missing_native_journal(current: &Value, status: &Value) -> Value {
+    let mut storage = current.as_object().cloned().unwrap_or_default();
+    storage.insert("mode".into(), "native".into());
+    storage.insert("availability".into(), "unavailable".into());
+    storage.insert("availabilityReason".into(), status["reason"].clone());
+    storage.insert("metricsAvailability".into(), "stale".into());
+    storage.insert("availabilityObservedAt".into(), crate::config::now().into());
+    Value::Object(storage)
 }
 
 /// The publication the node reports as mounted, if it belongs to this run and node.
@@ -204,4 +244,36 @@ fn record_status(
     db.update_run_boundary(id, &patch)?;
     record_volume(db, id, node, status)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_native_journal_marks_last_good_metrics_stale_without_zeroing_them() {
+        let previous = json!({
+            "mode": "native",
+            "dirtyBytes": 4096,
+            "localBytes": 8192,
+            "activeLocalBytes": 1024,
+            "published": { "backupId": "last-good" }
+        });
+        let response = json!({
+            "mode": "native",
+            "availability": "unavailable",
+            "reason": crate::native::MISSING_NATIVE_JOURNAL_CODE
+        });
+
+        let recorded = storage_with_missing_native_journal(&previous, &response);
+
+        assert_eq!(recorded["dirtyBytes"], 4096);
+        assert_eq!(recorded["localBytes"], 8192);
+        assert_eq!(recorded["activeLocalBytes"], 1024);
+        assert_eq!(recorded["published"]["backupId"], "last-good");
+        assert_eq!(recorded["availability"], "unavailable");
+        assert_eq!(recorded["availabilityReason"], "missing_native_journal");
+        assert_eq!(recorded["metricsAvailability"], "stale");
+        assert!(recorded["availabilityObservedAt"].as_i64().unwrap() > 0);
+    }
 }

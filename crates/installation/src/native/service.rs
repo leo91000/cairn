@@ -1434,7 +1434,11 @@ impl Controller {
             )
             .await;
         }
-        Err(Error::conflict("Conversation has no native journal."))
+        Err(Error::coded(
+            409,
+            crate::native::MISSING_NATIVE_JOURNAL_CODE,
+            "Conversation has no native journal.",
+        ))
     }
 
     async fn abort_disk(&self, id: &str) -> Result<()> {
@@ -2501,6 +2505,21 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stopped_snapshot_tags_a_missing_native_journal() {
+        let (_fixture, controller) = fixture().await;
+        let run = crate::config::id();
+
+        let error = controller.stopped_snapshot(&run, false).await.unwrap_err();
+
+        assert_eq!(error.status, 409);
+        assert_eq!(
+            error.code.as_deref(),
+            Some(crate::native::MISSING_NATIVE_JOURNAL_CODE)
+        );
+        assert_eq!(error.message, "Conversation has no native journal.");
+    }
 
     #[tokio::test]
     async fn native_budget_validates_persisted_protocol_and_keeps_fresh_bootstrap() {

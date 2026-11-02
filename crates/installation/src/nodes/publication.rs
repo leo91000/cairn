@@ -301,8 +301,11 @@ async fn capture_owned(
 
     // A capture continuing from a baseline may rely on blocks the master no longer
     // holds: forget the baseline so the next capture copies the whole disk. A VM that
-    // is not ready yet (425) keeps its baseline.
-    let failed = result.as_ref().is_err_and(|error| error.status != 425);
+    // is not ready yet (425) or has no journal keeps its last good baseline.
+    let failed = result.as_ref().is_err_and(|error| {
+        error.status != 425
+            && error.code.as_deref() != Some(crate::native::MISSING_NATIVE_JOURNAL_CODE)
+    });
     if failed
         && run["backup"]["snapshotId"].is_string()
         && let Err(error) = forget_baseline(s, text(run, "id")).await
@@ -534,7 +537,9 @@ async fn request_snapshot(
             return response.json().await.map_err(Error::internal);
         }
         if response.status() == reqwest::StatusCode::CONFLICT {
-            return Err(Error::new(425, "Waiting for completed generation capture."));
+            return Err(
+                snapshot_conflict(response, "Waiting for completed generation capture.").await,
+            );
         }
         if response.status().as_u16() != 412 {
             return Err(Error::unavailable(
@@ -574,10 +579,11 @@ async fn request_snapshot(
     if response.status() == reqwest::StatusCode::CONFLICT {
         // Startup, shutdown and an overlapping capture are temporary ownership
         // conflicts. Keep them distinct from broken storage or S3 configuration.
-        return Err(Error::new(
-            425,
+        return Err(snapshot_conflict(
+            response,
             "Waiting for the VM to be ready for synchronization.",
-        ));
+        )
+        .await);
     }
     if !response.status().is_success() {
         return Err(Error::unavailable(
@@ -585,6 +591,18 @@ async fn request_snapshot(
         ));
     }
     response.json().await.map_err(Error::internal)
+}
+
+async fn snapshot_conflict(response: reqwest::Response, waiting_message: &str) -> Error {
+    let body = response.json::<Value>().await.unwrap_or_default();
+    if body["code"] == crate::native::MISSING_NATIVE_JOURNAL_CODE {
+        let message = body["error"]
+            .as_str()
+            .filter(|message| !message.is_empty())
+            .unwrap_or("Native journal is unavailable.");
+        return Error::coded(409, crate::native::MISSING_NATIVE_JOURNAL_CODE, message);
+    }
+    Error::new(425, waiting_message)
 }
 
 fn snapshot_request(run: &Value, stopped: bool) -> Value {
@@ -1796,12 +1814,14 @@ pub async fn attempt(s: &Service, run: &Value) {
     // Patch the current state transactionally, never overwrite it with the caller's old pointer.
     // This records the historical latest failure. Success and 425 clear the active
     // error but intentionally leave this context intact; only a later failure replaces it.
-    let failure = json!({
+    let mut failure = json!({
         "status": BackupStatus::Error,
         "error": error.message,
-        "snapshotId": null,
         "lastFailureContext": last_failure_context
     });
+    if error.code.as_deref() != Some(crate::native::MISSING_NATIVE_JOURNAL_CODE) {
+        failure["snapshotId"] = Value::Null;
+    }
     if let Err(error) = update_status(s, run_id, failure).await {
         tracing::warn!(error = %error, "failed to record synchronization failure");
     }
@@ -1813,7 +1833,13 @@ fn failure_context(run: &Value, error: &Error) -> Value {
     let mut context = json!({
         "observedAtMs": now(),
         "phase": "publication",
-        "category": "unknown",
+        "category": if error.code.as_deref()
+            == Some(crate::native::MISSING_NATIVE_JOURNAL_CODE)
+        {
+            crate::native::MISSING_NATIVE_JOURNAL_CODE
+        } else {
+            "unknown"
+        },
         "managerStatus": error.status
     });
     // Label this as the attempt input; capture may read a newer live revision.
