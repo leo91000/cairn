@@ -7,11 +7,21 @@ describe('health-watch provider failure classification', () => {
       .toBe('provider_capacity')
   })
 
-  it('recognizes the structured Codex overload code without serializing the error', () => {
-    const error = { codexErrorInfo: 'serverOverloaded', message: 'private detail' }
+  it('recognizes a standalone overload code and returns no raw error text', () => {
+    const error = 'Selected model is at capacity. private-context-marker'
+    const category = classifyFailure(error)
 
-    expect(classifyFailure(error)).toBe('provider_capacity')
-    expect(JSON.stringify(classifyFailure(error))).not.toContain('private detail')
+    expect(category).toBe('provider_capacity')
+    expect(classifyFailure('serverOverloaded')).toBe('provider_capacity')
+    expect(JSON.stringify(category)).not.toContain('private-context-marker')
+  })
+
+  it('does not infer provider capacity from conflicting object-shaped errors', () => {
+    expect(classifyFailure({
+      codexErrorInfo: 'serverOverloaded',
+      httpStatusCode: 401,
+      message: 'Selected model is at capacity. Unauthorized',
+    })).toBe('other')
   })
 
   it('does not treat general node or disk capacity as provider model capacity', () => {

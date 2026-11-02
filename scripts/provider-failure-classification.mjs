@@ -4,17 +4,12 @@ const timeoutFailure = /timeout|timed out/i
 const authorizationFailure = /\b(?:unauthori[sz]ed|forbidden|authentication|401|403)\b/i
 const accountLimit = /\b(?:insufficient_quota|(?:quota|usage[ _-]limit|rate[ _-]limit)[ _-](?:exceeded|exhausted|reached)|(?:reached|exceeded|exhausted)(?: your| the)? (?:quota|usage limit|rate limit))\b/i
 const providerCapacity = /\b(?:selected\s+)?model\s+is\s+at\s+capacity\b/i
-const providerOverloadedCode = /\bserverOverloaded\b/i
-
-function hasStructuredProviderOverload(error) {
-  return error !== null && typeof error === 'object'
-    && Object.hasOwn(error, 'codexErrorInfo')
-    && error.codexErrorInfo === 'serverOverloaded'
-}
+const providerOverloadedCode = /^\s*serverOverloaded\s*$/i
 
 // Return only a bounded category; callers must not persist or emit the source error.
-export function classifyFailure(error) {
-  const message = typeof error === 'string' ? error : ''
+// This contract classifies the persisted error string; it does not interpret structured objects.
+export function classifyFailure(errorText) {
+  const message = typeof errorText === 'string' ? errorText : ''
 
   if (workspaceTimeout.test(message))
     return 'workspace_timeout'
@@ -26,7 +21,7 @@ export function classifyFailure(error) {
     return 'other'
   if (accountLimit.test(message))
     return 'account'
-  if (hasStructuredProviderOverload(error) || providerCapacity.test(message) || providerOverloadedCode.test(message))
+  if (providerCapacity.test(message) || providerOverloadedCode.test(message))
     return 'provider_capacity'
 
   return 'other'
