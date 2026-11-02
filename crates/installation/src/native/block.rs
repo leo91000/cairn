@@ -1100,7 +1100,7 @@ pub async fn action(state: &Path, run: &str, delete: bool) -> Result<Vec<String>
 /// prefix so a final request cannot accidentally acknowledge an older turn.
 pub async fn recover_completed(state: &Path, run: &str, attempt: &str) -> Result<()> {
     let root = workspace::directory(state, run)?;
-    if !root.join("block-initialized").exists() || !exists(state, run)? {
+    if !root.join("block-initialized").exists() || !exists(state, run).await? {
         return Ok(());
     }
     let lease = environment::lock(state, run, "Native journal recovery is still owned.").await?;
