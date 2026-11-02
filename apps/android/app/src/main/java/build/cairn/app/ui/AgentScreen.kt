@@ -391,7 +391,7 @@ private fun AgentPage(
         errorSection = if (conflict) null else sectionOfError(error.message.orEmpty())
     }
     fun save() {
-        if (saving || errors.isNotEmpty()) return
+        if (saving || conflict || errors.isNotEmpty()) return
         val edited = draft.resolved()
         saving = true
         saveError = null
@@ -434,6 +434,7 @@ private fun AgentPage(
         saving = true
         scope.launch {
             try {
+                val base = baseline
                 val theirs =
                     vm.api.listAgents(build.cairn.contracts.ListAgentsInput()).agents.find {
                         it.id == agentId
@@ -444,14 +445,19 @@ private fun AgentPage(
                 val fresh = vm.state.value
                 val freshMcps =
                     fresh.mcps.map { it.id }.toSet().takeIf { refreshed && fresh.isOwner }
-                draft = draft.rebased(baseline, theirs, freshMcps)
-                baseline = theirs
                 val freshGrants = vm.api.getAgentPluginGrants(AgentInput(agentId))
                 if (freshGrants.revision != theirs.revision)
                     throw ApiException(409, "L’agent a changé pendant le rechargement. Réessayez.")
-                savedGrantsJson =
+
+                // Do not rebase onto a profile revision until its matching grants are known too.
+                val rebasedDraft = draft.rebased(base, theirs, freshMcps)
+                val keepGrantEdits = grantChanges
+                val refreshedGrantsJson =
                     wireJson.encodeToString(PluginGrantDraft.serializer(), freshGrants.draft())
-                if (!grantChanges) grantsJson = savedGrantsJson
+                baseline = theirs
+                draft = rebasedDraft
+                savedGrantsJson = refreshedGrantsJson
+                if (!keepGrantEdits) grantsJson = refreshedGrantsJson
                 grantsLoaded = true
                 grantsError = null
                 // Machines and plugin instances may have changed elsewhere too; until read again
@@ -461,7 +467,14 @@ private fun AgentPage(
                 saveError = null
                 conflict = false
             } catch (e: Exception) {
-                fail(e)
+                if (e is CancellationException) throw e
+                // A failed refresh leaves both the draft's base and the current grant state
+                // unknown.
+                conflict = true
+                grantsLoaded = false
+                grantsError = e.message
+                errorSection = null
+                saveError = e.message ?: "Impossible de confirmer les droits actuels. Réessayez."
             } finally {
                 saving = false
             }
@@ -1140,7 +1153,11 @@ private fun SaveBar(
                     TextButton(onClick = discard, enabled = !saving) { Text("Annuler") }
                 Button(
                     onClick = save,
-                    enabled = !saving && errors.isEmpty() && (count > 0 || creating || retryable),
+                    enabled =
+                        !saving &&
+                            !conflict &&
+                            errors.isEmpty() &&
+                            (count > 0 || creating || retryable),
                 ) {
                     Text(if (creating) "Créer l’agent" else "Enregistrer")
                 }

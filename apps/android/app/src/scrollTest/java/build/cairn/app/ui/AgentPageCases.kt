@@ -303,6 +303,8 @@ abstract class AgentPageCases {
         /** The installation's MCP connections, as `GET /mcps` returns them. */
         val mcps: AtomicReference<String> = AtomicReference("[]"),
         val grantSaves: CopyOnWriteArrayList<JsonObject> = CopyOnWriteArrayList(),
+        /** The next read of an agent's plugin grants fails. */
+        val failGrantReads: AtomicBoolean = AtomicBoolean(false),
     )
 
     private fun fixture(): Fixture {
@@ -317,6 +319,7 @@ abstract class AgentPageCases {
         val failRefresh = AtomicBoolean(false)
         val failNodes = AtomicBoolean(false)
         val failPlugins = AtomicBoolean(false)
+        val failGrantReads = AtomicBoolean(false)
         val mcps = AtomicReference("[]")
         val server = MockWebServer()
         server.dispatcher =
@@ -329,6 +332,15 @@ abstract class AgentPageCases {
                     val text = request.body.readUtf8()
                     val response = MockResponse().setHeader("Content-Type", "application/json")
                     if (path.endsWith("/plugin-grants")) {
+                        if (request.method == "GET" && failGrantReads.getAndSet(false))
+                            return response
+                                .setResponseCode(503)
+                                .setBody(
+                                    nodeWireFixture(
+                                        request.path,
+                                        """{"error":"Plugin grant state unavailable"}""",
+                                    )
+                                )
                         val agent =
                             agents.get().first {
                                 it.id ==
@@ -641,6 +653,7 @@ abstract class AgentPageCases {
             failPlugins,
             mcps,
             grantSaves,
+            failGrantReads,
         )
     }
 
@@ -1312,6 +1325,44 @@ abstract class AgentPageCases {
             compose.onNodeWithText("Linear").performClick()
             compose.onNodeWithTag("agent-save-bar").assertDoesNotExist()
             compose.onNodeWithText("Outils : 2 activés sur la connexion · 1 choisis").assertExists()
+        }
+    }
+
+    @Test
+    fun aFailedGrantReadAfterConflictCannotSaveTheStaleDraft() {
+        journey(release.id) { fixture ->
+            open(AgentSection.Plugins)
+            compose
+                .onNodeWithContentDescription("Accès à Support : full")
+                .performScrollTo()
+                .performClick()
+
+            // Another owner removed grants and advanced the shared revision.
+            fixture.agents.set(
+                fixture.agents.get().map {
+                    if (it.id == release.id)
+                        it.copy(
+                            description = "Changed elsewhere",
+                            plugins = emptyList(),
+                            revision = "r2",
+                        )
+                    else it
+                }
+            )
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            waitForText("Cet agent a été modifié ailleurs", substring = true)
+            assertEquals(1, fixture.grantSaves.size)
+
+            fixture.failGrantReads.set(true)
+            compose.onNodeWithText("Recharger").performClick()
+            waitForText("Plugin grant state unavailable", substring = true)
+            compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+            assertEquals(
+                "A retry must not overwrite the newer grant state.",
+                1,
+                fixture.grantSaves.size,
+            )
         }
     }
 
