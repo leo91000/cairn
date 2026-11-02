@@ -1090,9 +1090,9 @@ abstract class AgentPageCases {
             resourceSearch.performTextInput("support")
             waitForText("Team › #support")
             compose.onNodeWithContentDescription("Team › #support").assertIsOn()
-            capture("agent-plugin-grants-resource-picker")
             compose.onNodeWithText("Terminé").performClick()
             compose.mainClock.autoAdvance = true
+            capture("agent-plugin-grants-editor")
 
             compose
                 .onNodeWithContentDescription("Accès à Automation : full")

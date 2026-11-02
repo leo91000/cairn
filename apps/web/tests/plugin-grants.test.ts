@@ -53,7 +53,16 @@ it('rebases concurrent grant additions and independent resource roots', () => {
           contributions: [{ kind: 'tool', name: 'read', resources: [{ resourceType: 'channel', id: 'support' }, { resourceType: 'server', id: 'team' }] }],
         },
       },
-      { instanceId: 'review', access: { type: 'selected', contributions: [{ kind: 'hook', name: 'message', resources: [] }] } },
+      {
+        instanceId: 'review',
+        access: {
+          type: 'selected',
+          contributions: [
+            { kind: 'hook', name: 'message', resources: [] },
+            { kind: 'runCredentials', name: '', resources: [] },
+          ],
+        },
+      },
     ],
     runCredentialInstances: ['review'],
   }
@@ -78,12 +87,58 @@ it('rebases concurrent grant additions and independent resource roots', () => {
 
 it('keeps credential suppliers for unknown instances distinct while rebasing', () => {
   const merged = mergeGrantDrafts(
-    { grants: [], runCredentialInstances: [] },
-    { grants: [], runCredentialInstances: ['support'] },
-    { grants: [], runCredentialInstances: ['automation'] },
+    {
+      grants: [
+        { instanceId: 'support', access: { type: 'full' } },
+        { instanceId: 'automation', access: { type: 'full' } },
+      ],
+      runCredentialInstances: [],
+    },
+    {
+      grants: [
+        { instanceId: 'support', access: { type: 'full' } },
+        { instanceId: 'automation', access: { type: 'full' } },
+      ],
+      runCredentialInstances: ['support'],
+    },
+    {
+      grants: [
+        { instanceId: 'support', access: { type: 'full' } },
+        { instanceId: 'automation', access: { type: 'full' } },
+      ],
+      runCredentialInstances: ['automation'],
+    },
   )
 
   expect(merged.runCredentialInstances).toEqual(['automation', 'support'])
+})
+
+it('drops a locally selected supplier when a concurrent edit revokes its grant', () => {
+  const base: GrantDraft = {
+    grants: [{ instanceId: 'automation', access: { type: 'full' } }],
+    runCredentialInstances: [],
+  }
+  const mine: GrantDraft = { ...base, runCredentialInstances: ['automation'] }
+  const theirs: GrantDraft = { grants: [], runCredentialInstances: [] }
+
+  expect(mergeGrantDrafts(base, mine, theirs)).toEqual(theirs)
+})
+
+it('drops a supplier when a concurrent edit removes its run-credentials permission', () => {
+  const base: GrantDraft = {
+    grants: [{ instanceId: 'automation', access: { type: 'full' } }],
+    runCredentialInstances: [],
+  }
+  const mine: GrantDraft = { ...base, runCredentialInstances: ['automation'] }
+  const theirs: GrantDraft = {
+    grants: [{
+      instanceId: 'automation',
+      access: { type: 'selected', contributions: [{ kind: 'tool', name: 'read', resources: [] }] },
+    }],
+    runCredentialInstances: [],
+  }
+
+  expect(mergeGrantDrafts(base, mine, theirs)).toEqual(theirs)
 })
 
 const before: GrantDraft = {

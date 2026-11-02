@@ -243,15 +243,23 @@ fun mergePluginGrantDrafts(
         )
     }
 
-    return PluginGrantDraft(
-        grants,
+    val grantsByInstance = grants.associateBy { it.instanceId }
+    val mergedSuppliers =
         mergeCredentialSuppliers(
             base.runCredentialInstances,
             mine.runCredentialInstances,
             theirs.runCredentialInstances,
             packageByInstance,
-        ),
-    )
+        )
+    val runCredentialInstances = mergedSuppliers.filter { instanceId ->
+        when (val access = grantsByInstance[instanceId]?.access) {
+            is PluginGrantAccess.A -> true
+            is PluginGrantAccess.B -> access.contributions.any { it.kind == "runCredentials" }
+            null -> false
+        }
+    }
+
+    return PluginGrantDraft(grants, runCredentialInstances)
 }
 
 data class GrantContribution(

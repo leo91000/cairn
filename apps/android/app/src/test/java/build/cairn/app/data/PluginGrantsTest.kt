@@ -125,7 +125,10 @@ class PluginGrantsTest {
                     ),
                     PluginInstanceGrant(
                         PluginGrantAccess.B(
-                            listOf(PluginContributionGrant("hook", "message", emptyList()))
+                            listOf(
+                                PluginContributionGrant("hook", "message", emptyList()),
+                                PluginContributionGrant("runCredentials", "", emptyList()),
+                            )
                         ),
                         otherPackage,
                     ),
@@ -162,14 +165,63 @@ class PluginGrantsTest {
 
     @Test
     fun rebasingKeepsSuppliersForUnknownInstancesDistinct() {
+        val grants =
+            listOf(
+                PluginInstanceGrant(PluginGrantAccess.A(), support),
+                PluginInstanceGrant(PluginGrantAccess.A(), automation),
+            )
         val merged =
             mergePluginGrantDrafts(
-                PluginGrantDraft(),
-                PluginGrantDraft(runCredentialInstances = listOf(support)),
-                PluginGrantDraft(runCredentialInstances = listOf(automation)),
+                PluginGrantDraft(grants),
+                PluginGrantDraft(grants, listOf(support)),
+                PluginGrantDraft(grants, listOf(automation)),
             )
 
         assertEquals(setOf(automation, support), merged.runCredentialInstances.toSet())
+    }
+
+    @Test
+    fun rebasingDropsSupplierWhenConcurrentEditRevokesItsGrant() {
+        val base =
+            PluginGrantDraft(
+                grants = listOf(PluginInstanceGrant(PluginGrantAccess.A(), automation))
+            )
+        val mine = base.copy(runCredentialInstances = listOf(automation))
+        val theirs = PluginGrantDraft()
+
+        val merged =
+            mergePluginGrantDrafts(
+                base,
+                mine,
+                theirs,
+                mapOf(automation to "automation-package"),
+            )
+
+        assertEquals(theirs, merged)
+    }
+
+    @Test
+    fun rebasingDropsSupplierWhenConcurrentEditRemovesCredentialPermission() {
+        val tool = PluginContributionGrant("tool", "read", emptyList())
+        val base =
+            PluginGrantDraft(
+                grants = listOf(PluginInstanceGrant(PluginGrantAccess.A(), automation))
+            )
+        val mine = base.copy(runCredentialInstances = listOf(automation))
+        val theirs =
+            PluginGrantDraft(
+                grants = listOf(PluginInstanceGrant(PluginGrantAccess.B(listOf(tool)), automation))
+            )
+
+        val merged =
+            mergePluginGrantDrafts(
+                base,
+                mine,
+                theirs,
+                mapOf(automation to "automation-package"),
+            )
+
+        assertEquals(theirs, merged)
     }
 
     @Test

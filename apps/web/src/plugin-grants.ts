@@ -145,14 +145,23 @@ export function mergeGrantDrafts(
     return merged ? [merged] : []
   })
 
+  const grantsByInstance = new Map(grants.map(grant => [grant.instanceId, grant]))
+  const mergedSuppliers = mergeCredentialSuppliers(
+    base.runCredentialInstances,
+    mine.runCredentialInstances,
+    theirs.runCredentialInstances,
+    packageByInstance,
+  )
+  const runCredentialInstances = mergedSuppliers.filter((instanceId) => {
+    const grant = grantsByInstance.get(instanceId)
+    return grant?.access.type === 'full'
+      || (grant?.access.type === 'selected'
+        && grant.access.contributions.some(contribution => contribution.kind === 'runCredentials'))
+  })
+
   return {
     grants,
-    runCredentialInstances: mergeCredentialSuppliers(
-      base.runCredentialInstances,
-      mine.runCredentialInstances,
-      theirs.runCredentialInstances,
-      packageByInstance,
-    ),
+    runCredentialInstances,
   }
 }
 
