@@ -1,0 +1,98 @@
+name: WebKit dependency regression
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/ci.yaml
+      - .github/workflows/pr.yaml
+      - .github/workflows/webkit-dependency-regression.yaml
+      - package.json
+      - pnpm-lock.yaml
+      - playwright.config.ts
+      - scripts/qualify-beacon-sql-fixture.ts
+      - scripts/tests/ci-coverage.test.mjs
+      - tests/e2e/live.spec.ts
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: webkit-dependency-regression-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  webkit:
+    name: WebKit bootstrap regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@postgres:5432/cairn_beacon_test
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_USER: cairn
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: cairn_beacon_test
+        options: >-
+          --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f
+      options: --init --ipc=host
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Record exact source identity
+        run: |
+          commit="$(git rev-parse HEAD)"
+          tree="$(git rev-parse 'HEAD^{tree}')"
+          printf 'Commit: `%s`\nTree: `%s`\n' "$commit" "$tree" >> "$GITHUB_STEP_SUMMARY"
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          cache: true
+      - name: Check browser image version
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs'
+          const installed = JSON.parse(readFileSync('node_modules/@playwright/test/package.json', 'utf8')).version
+          const preinstalled = JSON.parse(readFileSync('/ms-playwright/.docker-info', 'utf8')).driverVersion
+          if (installed !== preinstalled)
+            throw new Error(`Update the pinned browser image: Playwright package ${installed}, image ${preinstalled}`)
+          JS
+      - name: Install the pinned Rust toolchain and test dependencies
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends build-essential curl libclang-dev libssl-dev pkg-config postgresql-client
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Build the browser fixtures and web assets
+        run: |
+          cargo build --locked -p cairn-installation --bin cairn --example worker_fixture --example browser_fixture
+          cargo build --locked -p cairn-beacon --bin cairn-beacon --example beacon_sql_fixture
+          pnpm exec vite build --config apps/web/vite.config.ts
+      - name: Qualify the isolated Postgres fixture
+        run: pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts
+      - name: Run the affected WebKit live test
+        timeout-minutes: 10
+        env:
+          DEBUG: pw:browser
+        run: |
+          set -o pipefail
+          pnpm test:e2e tests/e2e/live.spec.ts --project=layout-webkit-live --grep 'two independent clients follow deltas, recover offline, refresh mid-answer and survive a server restart' --workers=2 --fail-on-flaky-tests 2>&1 | tee webkit-browser-debug.log
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: webkit-bootstrap-evidence
+          path: |
+            playwright-report/
+            test-results/
+            docs/screenshots/
+            webkit-browser-debug.log
+          retention-days: 14
