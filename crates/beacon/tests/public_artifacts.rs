@@ -414,7 +414,12 @@ async fn admitted_artifact_reads_recheck_public_authorization() {
 
 #[tokio::test]
 async fn artifact_reads_recheck_public_authorization_after_preparation() {
-    use axum::{Json, Router, extract::State, http::HeaderMap, routing::post};
+    use axum::{
+        Json, Router,
+        extract::{OriginalUri, State},
+        http::HeaderMap,
+        routing::post,
+    };
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -432,16 +437,18 @@ async fn artifact_reads_recheck_public_authorization_after_preparation() {
 
     async fn check(
         State(gate): State<CheckGate>,
+        OriginalUri(uri): OriginalUri,
         headers: HeaderMap,
         Json(input): Json<Value>,
     ) -> Json<bool> {
-        if gate.calls.fetch_add(1, Ordering::SeqCst) == 1 {
+        let read_check = uri.path().ends_with("/mcp-authorization");
+        if read_check && gate.calls.fetch_add(1, Ordering::SeqCst) == 1 {
             gate.reached.notify_one();
             gate.release.notified().await;
         }
         let allowed = gate
             .client
-            .post(&gate.target)
+            .post(format!("{}{}", gate.target, uri.path()))
             .header("authorization", headers["authorization"].to_str().unwrap())
             .json(&input)
             .send()
@@ -480,14 +487,21 @@ async fn artifact_reads_recheck_public_authorization_after_preparation() {
             let release = Arc::new(Notify::new());
             let gate = CheckGate {
                 client: relay.app.client.clone(),
-                target: format!("{}{path}", relay.app.url),
+                target: relay.app.url.clone(),
                 calls: calls.clone(),
                 reached: reached.clone(),
                 release: release.clone(),
             };
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let origin = format!("http://{}", listener.local_addr().unwrap());
-            let router = Router::new().route(&path, post(check)).with_state(gate);
+            // The shared authority also checks the public read scope through
+            // the plugin endpoint. Forward both real Beacon decisions, holding
+            // only the second artifact-read check after result preparation.
+            let plugin_path = format!("/api/relay/{installation}/plugin-mcp-authorization");
+            let router = Router::new()
+                .route(&path, post(check))
+                .route(&plugin_path, post(check))
+                .with_state(gate);
             let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
 
             // Observe the real Beacon decision without replacing its grant
