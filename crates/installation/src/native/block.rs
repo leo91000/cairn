@@ -10,6 +10,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use std::{
+    future::Future,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -23,10 +24,19 @@ pub(crate) const STORAGE: &str = "ublk-rootless-v1";
 
 pub(crate) const DISK_BUSY: &str = "Native disk is active.";
 
-pub fn exists(state: &Path, run: &str) -> Result<bool> {
-    Ok(storage::runtime::exists(&environment::directory(
-        state, run,
-    )?))
+pub async fn exists(state: &Path, run: &str) -> Result<bool> {
+    let path = environment::directory(state, run)?.join("lazy/journal-v2.sqlite");
+    exists_from_metadata(tokio::fs::metadata(path)).await
+}
+
+pub(super) async fn exists_from_metadata(
+    metadata: impl Future<Output = std::io::Result<std::fs::Metadata>>,
+) -> Result<bool> {
+    match metadata.await {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Resume the retained journal as-is even if a manager grant arrived before a
@@ -1140,13 +1150,13 @@ mod tests {
             .unwrap()
             .join("lazy/journal-v2.sqlite");
 
-        let status = status(state.path(), &run).await.unwrap();
+        let first_status = status(state.path(), &run).await.unwrap();
         let repeated = status(state.path(), &run).await.unwrap();
 
-        assert_eq!(status["mode"], "native");
-        assert_eq!(status["availability"], "unavailable");
-        assert_eq!(status["reason"], "missing_native_journal");
-        assert_eq!(repeated, status);
+        assert_eq!(first_status["mode"], "native");
+        assert_eq!(first_status["availability"], "unavailable");
+        assert_eq!(first_status["reason"], "missing_native_journal");
+        assert_eq!(repeated, first_status);
         assert!(!journal.exists());
     }
 

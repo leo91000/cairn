@@ -27,6 +27,7 @@ use bytes::Bytes;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
+    future::Future,
     os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::Arc,
@@ -1343,13 +1344,13 @@ impl Controller {
     async fn check_preparation_space(&self, plan: &Value) -> Result<()> {
         let run = text(plan, "runId");
         let root = workspace::directory(&self.state, run)?;
-        let current = if block::exists(&self.state, run)? {
+        let has_journal = block::exists(&self.state, run).await?;
+        let current = if has_journal {
             0
         } else {
             disk::bytes_if_present(&root.join("data")).await?
         };
-        let assigned_base =
-            block::exists(&self.state, run)? && root.join("file-owner.json").exists();
+        let assigned_base = has_journal && root.join("file-owner.json").exists();
         let seed = if assigned_base {
             0
         } else if !root.join("initialized").exists()
@@ -1407,8 +1408,18 @@ impl Controller {
     }
 
     async fn stopped_snapshot(&self, run: &str, force: bool) -> Result<Value> {
+        self.stopped_snapshot_with(run, force, block::exists(&self.state, run))
+            .await
+    }
+
+    async fn stopped_snapshot_with(
+        &self,
+        run: &str,
+        force: bool,
+        journal_exists: impl Future<Output = Result<bool>>,
+    ) -> Result<Value> {
         let _disk = disk::lock(&self.state).await?;
-        if block::exists(&self.state, run)? {
+        if journal_exists.await? {
             let root = workspace::directory(&self.state, run)?;
             if !root.join("block-initialized").exists() {
                 return Err(Error::conflict(
@@ -1986,7 +1997,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                     .map(|attempt| (attempt.run.clone(), attempt.stop.clone()))
             };
             if let Some((run, stop)) = active
-                && block::exists(&controller.state, &run)?
+                && block::exists(&controller.state, &run).await?
             {
                 let value = input(request, 16384).await?;
                 let mounted = controller
@@ -2519,6 +2530,25 @@ mod tests {
             Some(crate::native::MISSING_NATIVE_JOURNAL_CODE)
         );
         assert_eq!(error.message, "Conversation has no native journal.");
+    }
+
+    #[tokio::test]
+    async fn stopped_snapshot_propagates_native_journal_metadata_errors() {
+        let (_fixture, controller) = fixture().await;
+        let run = crate::config::id();
+        let metadata_error = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "journal metadata is inaccessible",
+        );
+        let journal_exists = block::exists_from_metadata(std::future::ready(Err(metadata_error)));
+
+        let error = controller
+            .stopped_snapshot_with(&run, false, journal_exists)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.status, 500);
+        assert_eq!(error.code, None);
     }
 
     #[tokio::test]

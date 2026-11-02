@@ -104,6 +104,7 @@ impl Error {
             status: 400,
             message: message.into(),
             oauth: Some(code.into()),
+            code: None,
         }
     }
 
