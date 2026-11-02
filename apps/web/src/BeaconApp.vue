@@ -43,6 +43,7 @@ import ThemeControl from './components/ThemeControl.vue'
 import UiAlert from './components/UiAlert.vue'
 import UiButton from './components/UiButton.vue'
 import VirtualSelect from './components/VirtualSelect.vue'
+import WebUpdateNotice from './components/WebUpdateNotice.vue'
 import { restoreInstallationDrafts, transferInstallationDrafts } from './draft-transfer'
 import { Settings } from './icons'
 import { installationKey } from './installation-context'
@@ -778,6 +779,7 @@ onMounted(async () => {
 </script>
 
 <template>
+  <WebUpdateNotice />
   <PrivacyPolicy v-if="privacyPage" />
   <main v-else-if="session?.authenticated && pluginCallbackPage" class="min-h-dvh bg-canvas text-ink px-6 py-10">
     <PluginOAuthCallback :parameters="pluginCallbackParameters" />
