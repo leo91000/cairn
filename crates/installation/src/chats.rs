@@ -2063,6 +2063,8 @@ provider,model,reasoning,speed,mode,status,created_at,question_id FROM retained_
                             "snapshot": { "agent": { "provider": "codex" } },
                         });
                         let run = db.add_run_fixture(&run, None)?;
+                        let profile = serde_json::from_value(run["snapshot"]["agent"].clone())?;
+                        db.save_agent(&profile)?;
                         db.event("run", &EventKind::ChatUser, "Context to preserve", None)?;
                         let chat = json!({
                             "id": "chat",

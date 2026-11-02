@@ -300,6 +300,7 @@ async fn long_engine_item_ids_survive_migration_and_live_updates() {
     let store = Store::open(root.path()).unwrap();
     assert_eq!(version(&db), crate::store::DATABASE_VERSION);
     let mut after = tables(&db);
+    assert_eq!(after.remove("coding_agent_configurations"), Some(vec![]));
     for table in [
         "plugin_contribution_grants",
         "plugin_grant_resources",
@@ -447,6 +448,7 @@ async fn upgrade_builds_the_timeline_from_retained_events_and_changes_nothing_el
     let store = Store::open(root.path()).unwrap();
     assert_eq!(version(&db), crate::store::DATABASE_VERSION);
     let mut after = tables(&db);
+    assert_eq!(after.remove("coding_agent_configurations"), Some(vec![]));
     for table in [
         "plugin_contribution_grants",
         "plugin_grant_resources",
