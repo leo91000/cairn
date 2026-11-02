@@ -858,15 +858,16 @@ async fn old_controller_drain_retries_lost_put_and_ack_across_restart_without_di
 }
 
 #[test]
-fn publication_failure_context_classifies_412_without_retaining_error_text() {
+fn publication_failure_context_keeps_status_only_412_unknown_without_error_text() {
     let run = json!({ "backup": { "requestedRevision": 9 } });
     let error = crate::error::Error::new(412, "untrusted detail must not be copied");
 
     let context = super::failure_context(&run, &error);
 
-    assert_eq!(context["category"], "capture_conflict");
+    assert_eq!(context["phase"], "publication");
+    assert_eq!(context["category"], "unknown");
     assert_eq!(context["managerStatus"], 412);
-    assert_eq!(context["requestedRevision"], 9);
+    assert_eq!(context["inputRequestedRevision"], 9);
     assert!(context.get("message").is_none());
 }
 
@@ -1021,10 +1022,10 @@ async fn attempt_persists_bounded_failure_context_and_retains_it_after_recovery(
     assert_eq!(backup["requestedRevision"], 8);
     assert_eq!(backup["acknowledgedRevision"], 8);
     let first_context = backup["lastFailureContext"].clone();
-    assert_eq!(first_context["phase"], "capture");
+    assert_eq!(first_context["phase"], "publication");
     assert_eq!(first_context["category"], "unknown");
     assert_eq!(first_context["managerStatus"], 503);
-    assert_eq!(first_context["requestedRevision"], 7);
+    assert_eq!(first_context["inputRequestedRevision"], 7);
     assert!(
         first_context["observedAtMs"]
             .as_i64()
@@ -1039,7 +1040,7 @@ async fn attempt_persists_bounded_failure_context_and_retains_it_after_recovery(
                 "phase",
                 "category",
                 "managerStatus",
-                "requestedRevision"
+                "inputRequestedRevision"
             ]
             .contains(&key.as_str())
         );
@@ -1057,15 +1058,18 @@ async fn attempt_persists_bounded_failure_context_and_retains_it_after_recovery(
         .update_run_boundary(&run_id, json!({ "environmentState": "expired" }))
         .await
         .unwrap();
+    // This manager 409 is caused by expiration before snapshot capture, so status
+    // alone must leave the category unknown and must not produce a new alert.
     super::attempt(&s, &attempt_run).await;
     let conflicted = s.store.run(&run_id).await.unwrap();
     let conflict_context = conflicted["backup"]["lastFailureContext"].clone();
     assert_eq!(conflicted["backup"]["status"], "error");
     assert_eq!(conflicted["backup"]["requestedRevision"], 8);
     assert_eq!(conflicted["backup"]["acknowledgedRevision"], 8);
-    assert_eq!(conflict_context["category"], "capture_conflict");
+    assert_eq!(conflict_context["phase"], "publication");
+    assert_eq!(conflict_context["category"], "unknown");
     assert_eq!(conflict_context["managerStatus"], 409);
-    assert_eq!(conflict_context["requestedRevision"], 7);
+    assert_eq!(conflict_context["inputRequestedRevision"], 7);
     let events_after_conflict = {
         let run_id = run_id.clone();
         s.store

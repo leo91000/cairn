@@ -1689,20 +1689,18 @@ pub async fn attempt(s: &Service, run: &Value) {
     }
 }
 
+// `attempt` observes the whole publication operation; its errors have no typed
+// inner phase or failure cause, so status alone must not narrow either field.
 fn failure_context(run: &Value, error: &Error) -> Value {
-    let category = if error.status == 409 || error.status == 412 {
-        "capture_conflict"
-    } else {
-        "unknown"
-    };
     let mut context = json!({
         "observedAtMs": now(),
-        "phase": "capture",
-        "category": category,
+        "phase": "publication",
+        "category": "unknown",
         "managerStatus": error.status
     });
+    // Label this as the attempt input; capture may read a newer live revision.
     if let Some(revision) = run["backup"]["requestedRevision"].as_u64() {
-        context["requestedRevision"] = revision.into();
+        context["inputRequestedRevision"] = revision.into();
     }
     context
 }
