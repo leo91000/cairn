@@ -52,25 +52,74 @@ describe('parallel CI coverage', () => {
     expect(quality.jobs.quality.steps.some(step => step.run === 'pnpm validate:pr contracts')).toBe(true)
   })
 
-  it('opts into one physical migration case after the normal backend suite without changing ordinary CI', () => {
+  it('runs the selected physical migration case in a separate bounded job after the backend suite', () => {
     const input = quality.on.workflow_dispatch.inputs['backend-qualification']
     expect(input).toEqual({
-      description: 'Optional physical backend qualification after the backend suite',
+      description: 'Run physical backend migration in a separate job after the backend suite',
       type: 'choice',
       options: ['none', 'backend-migration'],
       default: 'none',
     })
 
     const backend = quality.jobs.backend
-    const normal = backend.steps.findIndex(step => step.run?.includes('--nextest --test-threads'))
-    const selected = backend.steps.findIndex(step => step.name === 'Qualify physical backend migration with the same compiled source')
-    expect(selected).toBeGreaterThan(normal)
-    const step = backend.steps[selected]
-    const enabled = step.if.replaceAll('inputs.backend-qualification', 'selection')
-    for (const selection of [undefined, '', 'none', 'other', 'backend-migration']) {
-      expect(runInNewContext(enabled, { selection }, { timeout: 1000 })).toBe(selection === 'backend-migration')
+    expect(backend['timeout-minutes']).toBe(30)
+    expect(backend.steps.some(step => step.name === 'Qualify physical backend migration from this commit')).toBe(false)
+    expect(backend.steps.some(step => step.run?.includes('--nextest --test-threads'))).toBe(true)
+    expect(backend.steps.some(step => step.name === 'Measure the bounded bootstrap observer without filesystem work')).toBe(true)
+    expect(backend.steps.some(step => step.name === 'Qualify native backend namespace isolation with ordinary private bind mounts')).toBe(true)
+    expect(backend.steps.some(step => step.name === 'Check Rust documentation examples')).toBe(true)
+    expect(backend.steps.some(step => step.name === 'Qualify the resolved OpenCode release against its native adapter')).toBe(true)
+    expect(backend.steps.some(step => step.name === 'Qualify the resolved Claude Code release against its native adapter')).toBe(true)
+    expect(backend.steps.some(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'before-build')).toBe(true)
+    expect(backend.steps.some(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'after-build')).toBe(true)
+
+    const selected = quality.jobs['backend-migration-qualification']
+    expect(selected.needs).toBe('backend')
+    expect(selected['timeout-minutes']).toBe(30)
+    expect(selected.if).not.toContain('needs.resolve')
+    expect(backend.if).toContain('inputs.backend-only == true')
+    const backendCondition = backend.if
+      .replaceAll('inputs.backend-only', 'backendOnly')
+      .replaceAll('inputs.backend-qualification', 'selection')
+      .replace(/\bneeds\.([a-z0-9-]+)\b/g, (_match, name) => `needs[${JSON.stringify(name)}]`)
+    const runsBackend = (backendOnly, selection, resolveResult, reuse) => runInNewContext(backendCondition, {
+      backendOnly,
+      selection,
+      needs: { resolve: { result: resolveResult, outputs: { reuse } } },
+      github: { ref: 'refs/heads/feature' },
+      always: () => true,
+      cancelled: () => false,
+    }, { timeout: 1000 })
+    expect(runsBackend(false, 'backend-migration', 'success', 'true')).toBe(true)
+    expect(runsBackend(false, 'none', 'success', 'true')).toBe(false)
+    expect(runsBackend(false, 'none', 'success', 'false')).toBe(true)
+    expect(runsBackend(true, 'none', 'skipped', '')).toBe(true)
+    expect(runsBackend(false, 'backend-migration', 'failure', 'true')).toBe(false)
+    const enabled = selected.if.replaceAll('inputs.backend-qualification', 'selection')
+    for (const [selection, backendResult, expected] of [
+      ['backend-migration', 'success', true],
+      ['backend-migration', 'failure', false],
+      ['backend-migration', 'skipped', false],
+      ['backend-migration', 'cancelled', false],
+      ['none', 'success', false],
+      [undefined, 'success', false],
+    ]) {
+      expect(runInNewContext(enabled, {
+        selection,
+        needs: { backend: { result: backendResult } },
+        always: () => true,
+        cancelled: () => false,
+      }, { timeout: 1000 })).toBe(expected)
     }
 
+    expect(selected.steps[0].uses).toBe('actions/checkout@v7.0.1')
+    expect(selected.steps[1]).toEqual({ uses: './.github/actions/setup-pnpm', with: { cache: true } })
+    expect(selected.steps[2].run).toBe('rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1')
+    expect(selected.steps[3].run).toBe('sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot')
+    expect(selected.env).toEqual({ CARGO_PROFILE_DEV_DEBUG: '0', CARGO_INCREMENTAL: '0' })
+    expect(selected.steps.some(step => step.uses?.startsWith('actions/download-artifact@'))).toBe(false)
+    const step = selected.steps.find(step => step.name === 'Qualify physical backend migration from this commit')
+    expect(step).toBeDefined()
     expect(step.run).toContain('set -o pipefail')
     expect(step.run).toContain('\'moto[server]==5.2.3\' awscli blake3==1.0.8')
     expect(step.run).toContain('scripts/tests/node_s3_test.py --case backend_migration_keeps_chat_and_files_both_directions_and_preserves_source_on_failure')
@@ -78,7 +127,77 @@ describe('parallel CI coverage', () => {
     expect(step.run).not.toContain('${{')
     expect(step.run).not.toContain('CAIRN_TEST_REUSED_BUILD')
     expect(step.run).not.toContain('--archive-file')
-    expect(backend['timeout-minutes']).toBe(30)
+  })
+
+  it('requires the selected physical qualification for image publication and bypasses it when unselected', () => {
+    const publish = quality.jobs.publish
+    expect(publish.needs).toContain('backend-migration-qualification')
+    expect(publish.if).toContain("inputs.backend-qualification != 'backend-migration' || needs.backend-migration-qualification.result == 'success'")
+
+    const expression = publish.if
+      .replaceAll('inputs.backend-qualification', 'selection')
+      .replace(/\bneeds\.([a-z0-9-]+)\b/g, (_match, name) => `needs[${JSON.stringify(name)}]`)
+    const baseNeeds = {
+      resolve: { outputs: { reuse: 'false' } },
+      build: { result: 'success' },
+      quality: { result: 'success' },
+      'rust-check': { result: 'success' },
+      backend: { result: 'success' },
+      'node-checks': { result: 'success' },
+      browser: { result: 'success' },
+      'network-bench': { result: 'success' },
+      'native-runtime': { result: 'success' },
+      'android-direct-build': { result: 'success' },
+      'android-direct': { result: 'success' },
+      image: { result: 'success', outputs: { published: 'true' } },
+      'beacon-image': { result: 'success', outputs: { published: 'true' } },
+    }
+    const canPublish = (selection, migrationResult, backendResult = 'success', reuse = 'false') => runInNewContext(expression, {
+      selection,
+      needs: {
+        ...baseNeeds,
+        resolve: { outputs: { reuse } },
+        backend: { result: backendResult },
+        'backend-migration-qualification': { result: migrationResult },
+      },
+      always: () => true,
+      cancelled: () => false,
+    }, { timeout: 1000 })
+
+    expect(canPublish('backend-migration', 'success')).toBe(true)
+    expect(canPublish('backend-migration', 'failure')).toBe(false)
+    expect(canPublish('backend-migration', 'skipped')).toBe(false)
+    expect(canPublish('none', 'skipped')).toBe(true)
+    expect(canPublish(undefined, 'skipped')).toBe(true)
+    expect(canPublish(undefined, 'skipped', 'success', 'true')).toBe(false)
+  })
+
+  it('requires the selected physical qualification before re-promoting a reused image', () => {
+    const promote = quality.jobs.promote
+    expect(promote.needs).toContain('resolve')
+    expect(promote.needs).toContain('backend-migration-qualification')
+    expect(promote.if).toContain("needs.resolve.outputs.reuse == 'true'")
+    expect(promote.if).toContain("inputs.backend-qualification != 'backend-migration' || needs.backend-migration-qualification.result == 'success'")
+
+    const expression = promote.if
+      .replaceAll('inputs.backend-qualification', 'selection')
+      .replace(/\bneeds\.([a-z0-9-]+)\b/g, (_match, name) => `needs[${JSON.stringify(name)}]`)
+    const canPromote = (selection, migrationResult, reuse) => runInNewContext(expression, {
+      selection,
+      needs: {
+        resolve: { outputs: { reuse } },
+        'backend-migration-qualification': { result: migrationResult },
+      },
+      always: () => true,
+      cancelled: () => false,
+    }, { timeout: 1000 })
+
+    expect(canPromote('backend-migration', 'success', 'true')).toBe(true)
+    expect(canPromote('backend-migration', 'failure', 'true')).toBe(false)
+    expect(canPromote('backend-migration', 'skipped', 'true')).toBe(false)
+    expect(canPromote('none', 'skipped', 'true')).toBe(true)
+    expect(canPromote(undefined, 'skipped', 'true')).toBe(true)
+    expect(canPromote('backend-migration', 'success', 'false')).toBe(false)
   })
 
   it('keeps the PR browser lane conditional, read-only and limited to the saved-chat journey', () => {
