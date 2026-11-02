@@ -1076,6 +1076,7 @@ abstract class AgentPageCases {
                 .onNodeWithContentDescription("Rechercher des ressources")
                 .performTextInput("support")
             waitForText("Team › #support")
+            compose.mainClock.advanceTimeBy(500)
             compose.onNodeWithContentDescription("Team › #support").performScrollTo()
             capture("agent-plugin-grants-resource-picker")
             compose.onNodeWithContentDescription("Team › #support").performClick()
