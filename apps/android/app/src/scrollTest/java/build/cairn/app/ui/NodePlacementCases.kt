@@ -780,7 +780,8 @@ abstract class NodePlacementCases {
                         .fetchSemanticsNodes()
                         .isNotEmpty()
                 }
-                compose.onNodeWithText("Résultat").performClick()
+                compose.onNodeWithContentDescription("Options de l’exécution").performClick()
+                compose.onNodeWithText("Mission et détails").performClick()
                 compose.onNodeWithText("Espace de travail").assertExists()
                 compose.onNodeWithText("Nettoyer le worktree").assertDoesNotExist()
             } finally {
