@@ -186,7 +186,7 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
   const review = page.getByRole('dialog', { name: 'Review before saving' })
   await expect(review).toContainText('channel support and descendants')
-  await expect(review).toContainText('Run credential suppliers: Automation')
+  await expect(review).toContainText('Run credential suppliers: Grant UI “Automation”')
   await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-review.png'), fullPage: true })
   await review.getByRole('button', { name: 'Back to editing' }).click()
   // This instance is created after the page's initial catalog read, so only a fresh catalog can

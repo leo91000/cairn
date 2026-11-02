@@ -1099,6 +1099,7 @@ abstract class AgentPageCases {
             compose.onNodeWithText("Terminé").performClick()
             compose.mainClock.autoAdvance = true
             compose.onNodeWithText("Team › #support et descendants").assertExists()
+            compose.onNodeWithText("Team › #support et descendants").performScrollTo()
             capture("agent-plugin-grants-editor")
 
             compose

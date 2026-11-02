@@ -212,7 +212,13 @@ function chip(value: string[] | null): { tone: ChipTone, label: string } {
 }
 
 const projectName = (project: string) => state.projects.find(item => item.id === project)?.name ?? 'Removed project'
-const connectionName = (connection: string) => catalog.value.connections.find(item => item.id === connection)?.name ?? 'Removed instance'
+
+function connectionName(id: string) {
+  const connection = catalog.value.connections.find(item => item.id === id)
+  const plugin = catalog.value.packages.find(entry => entry.id === connection?.pluginId)
+  return `${plugin?.manifest?.name ?? 'Plugin'} “${connection?.name ?? 'Removed instance'}”`
+}
+
 const provider = computed(() => codingAgents[draft.value.provider] ?? codingAgents.codex)
 const modes = computed(() => sandboxOptionsFor(backendOf(access.value)))
 const sandbox = computed(() => modes.value.find(option => option.value === access.value.sandbox) ?? modes.value[0]!)
@@ -494,7 +500,33 @@ function grantReviewLines(): ReviewLine[] {
     return []
   const ids = new Set([...savedGrants.value.grants, ...grants.value.grants].map(item => item.instanceId))
   return [
-    ...[...ids].filter(instance => grantDescription(savedGrants.value, instance) !== grantDescription(grants.value, instance)).map(instance => ({ kind: 'secret' as const, section: 'plugins' as const, text: `${connectionName(instance)}: ${grantDescription(grants.value, instance)}. Effective immediately, including running conversations.` })),
+    ...[...ids].filter(instance => grantDescription(savedGrants.value, instance) !== grantDescription(grants.value, instance)).map((instance) => {
+      const previous = savedGrants.value.grants.find(item => item.instanceId === instance)
+      const current = grants.value.grants.find(item => item.instanceId === instance)
+      const description = grantDescription(grants.value, instance)
+
+      if (!previous && current) {
+        return {
+          kind: 'secret' as const,
+          section: 'plugins' as const,
+          text: `Added: ${connectionName(instance)} — effective immediately, including in running conversations. Access: ${description}.`,
+        }
+      }
+
+      if (previous && !current) {
+        return {
+          kind: 'reduction' as const,
+          section: 'plugins' as const,
+          text: `Removed: ${connectionName(instance)} access. Effective immediately, including running conversations.`,
+        }
+      }
+
+      return {
+        kind: 'secret' as const,
+        section: 'plugins' as const,
+        text: `${connectionName(instance)}: ${description}. Effective immediately, including running conversations.`,
+      }
+    }),
     ...(JSON.stringify(savedGrants.value.runCredentialInstances) !== JSON.stringify(grants.value.runCredentialInstances) ? [{ kind: 'secret' as const, section: 'plugins' as const, text: `Run credential suppliers: ${grants.value.runCredentialInstances.map(connectionName).join(', ') || 'None'}. Credentials void tool resource restrictions.` }] : []),
   ]
 }

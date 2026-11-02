@@ -347,7 +347,7 @@ fun pluginGrantReview(
                 val name = catalog?.connections?.find { it.id == id }?.name ?: id
                 add(
                     ReviewLine(
-                        ReviewKind.Power,
+                        ReviewKind.Access,
                         "$name : ${after.description(id)}. Effectif immédiatement, y compris dans les conversations en cours.",
                     )
                 )
@@ -360,7 +360,7 @@ fun pluginGrantReview(
             }
         add(
             ReviewLine(
-                ReviewKind.Power,
+                ReviewKind.Access,
                 "Fournisseurs d’identifiants de run : ${names.joinToString().ifBlank { "Aucun" }}. Les identifiants rendent vaines les restrictions de ressource des outils.",
             )
         )

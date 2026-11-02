@@ -391,10 +391,12 @@ class PluginGrantsTest {
             )
 
         val text = pluginGrantReview(before, after, catalog = null).joinToString(" ") { it.text }
+        val kinds = pluginGrantReview(before, after, catalog = null).map { it.kind }
 
         assertTrue(text.contains("channel support et descendants"))
         assertTrue(text.contains("Fournisseurs d’identifiants de run"))
         assertTrue(text.contains("rendent vaines les restrictions de ressource"))
+        assertEquals(listOf(ReviewKind.Access, ReviewKind.Access), kinds)
     }
 
     @Test
