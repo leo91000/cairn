@@ -1,4 +1,5 @@
--- Real Store/event writer 1bf0a055: actual v21 fixture upgraded offline to schema22, then one retained timeline recorded; all data/credentials synthetic.
+-- Synthetic previous database upgraded by real Store 66fc690b05fad7fd6cf142a845b1ce5c3c8cd884 to schema24.
+-- Unrelated retained contribution/resource/supplier rows are SQL-seeded test data.
 PRAGMA foreign_keys=OFF;
 BEGIN TRANSACTION;
 CREATE TABLE account_dismissals(
@@ -211,6 +212,19 @@ INSERT INTO "attachments" VALUES('00000000-0000-4000-8000-000000000011','ec5a395
 INSERT INTO "attachments" VALUES('00000000-0000-4000-8000-000000000012','ec5a395f-3940-4b8d-9f57-1530018c717f','ten-megabytes.txt',10485760,'application/octet-stream','file','462a12a876c0364e4f1f3d12ed33dcae125f1198010ff78d8f4c3f4de0412d49',1793335880119,NULL,NULL,'00000000-0000-4000-8000-000000000012');
 INSERT INTO "attachments" VALUES('00000000-0000-4000-8000-000000000013','ec5a395f-3940-4b8d-9f57-1530018c717f','ten-megabytes.txt',10485760,'application/octet-stream','file','462a12a876c0364e4f1f3d12ed33dcae125f1198010ff78d8f4c3f4de0412d49',1793335880421,NULL,NULL,'00000000-0000-4000-8000-000000000013');
 INSERT INTO "attachments" VALUES('00000000-0000-4000-8000-000000000014','ec5a395f-3940-4b8d-9f57-1530018c717f','ten-megabytes.txt',10485760,'application/octet-stream','file','462a12a876c0364e4f1f3d12ed33dcae125f1198010ff78d8f4c3f4de0412d49',1793335880623,NULL,NULL,'00000000-0000-4000-8000-000000000014');
+CREATE TABLE attempts(
+    id TEXT PRIMARY KEY NOT NULL REFERENCES placements(id) ON DELETE CASCADE,
+    lease_expires_at INTEGER CHECK(lease_expires_at BETWEEN 0 AND 9007199254740991),
+    released INTEGER NOT NULL CHECK(released IN (0,1)),
+    native_mode TEXT CHECK(native_mode IN ('protected','administrator')),
+    native_generation TEXT,
+    additional_disk_mi_b INTEGER NOT NULL CHECK(additional_disk_mi_b BETWEEN 0 AND 1099511627776),
+    disk_materialized INTEGER NOT NULL CHECK(disk_materialized IN (0,1)),
+    released_at INTEGER CHECK(released_at BETWEEN 0 AND 9007199254740991),
+    lease_required INTEGER NOT NULL CHECK(lease_required IN (0,1)),
+    lease_duration_ms INTEGER CHECK(lease_duration_ms BETWEEN 0 AND 9007199254740991),
+    CHECK(native_mode IS NOT NULL OR native_generation IS NULL)
+) WITHOUT ROWID;
 CREATE TABLE audit(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at INTEGER NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL);
 INSERT INTO "audit" VALUES(777,42,'probe','{}');
 INSERT INTO "audit" VALUES(778,1793349324156,'task.saved','{"id":"2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578"}');
@@ -363,6 +377,53 @@ CREATE TABLE durable_wakeups(
 INSERT INTO "durable_wakeups" VALUES(1,'00000000-0000-4000-8000-000000000071',NULL,'wake-v15','turn-v15','synthetic grouped upgrade fixture',3600,123,3600123,'all',NULL,NULL,NULL,NULL,NULL,NULL,NULL);
 CREATE TABLE events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),type TEXT NOT NULL CHECK(length(type)>0),text TEXT NOT NULL,payload TEXT CHECK(payload IS NULL OR json_valid(payload)));
 INSERT INTO "events" VALUES(1,'00000000-0000-4000-8000-000000000010',1793477898624,'item.completed','Retained synthetic timeline','{"item":{"id":"retained-metadata-answer","text":"Retained synthetic timeline","type":"agent_message"}}');
+CREATE TABLE exclusive_members(
+    reservation_id TEXT NOT NULL REFERENCES exclusive_reservations(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK(position BETWEEN 0 AND 15),
+    run_id TEXT NOT NULL,
+    live_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL CHECK(live_run_id IS NULL OR live_run_id=run_id),
+    attempt_id TEXT NOT NULL,
+    live_attempt_id TEXT REFERENCES attempts(id) ON DELETE SET NULL CHECK(live_attempt_id IS NULL OR live_attempt_id=attempt_id),
+    PRIMARY KEY(reservation_id,position), UNIQUE(reservation_id,run_id)
+) WITHOUT ROWID;
+CREATE TABLE exclusive_paused_runs(
+    reservation_id TEXT NOT NULL REFERENCES exclusive_reservations(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK(position>=0),
+    run_id TEXT NOT NULL,
+    live_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL CHECK(live_run_id IS NULL OR live_run_id=run_id),
+    PRIMARY KEY(reservation_id,position)
+) WITHOUT ROWID;
+CREATE TABLE exclusive_reservations(
+    id TEXT PRIMARY KEY NOT NULL,
+    node_id TEXT NOT NULL REFERENCES nodes(id),
+    owner_run_id TEXT NOT NULL,
+    live_owner_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL CHECK(live_owner_run_id IS NULL OR live_owner_run_id=owner_run_id),
+    owner_attempt_id TEXT NOT NULL,
+    live_owner_attempt_id TEXT REFERENCES attempts(id) ON DELETE SET NULL CHECK(live_owner_attempt_id IS NULL OR live_owner_attempt_id=owner_attempt_id),
+    message_id TEXT,
+    reason TEXT NOT NULL CHECK(length(CAST(trim(reason) AS BLOB))>=1),
+    duration_seconds INTEGER NOT NULL CHECK(duration_seconds BETWEEN 1 AND 900),
+    wait_seconds INTEGER NOT NULL CHECK(wait_seconds BETWEEN 0 AND 3600),
+    acquisition_timeout_seconds INTEGER NOT NULL CHECK(acquisition_timeout_seconds BETWEEN 1 AND 3600),
+    minimum_memory_mi_b INTEGER NOT NULL CHECK(minimum_memory_mi_b BETWEEN 0 AND 1073741824),
+    created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),
+    queue_order INTEGER NOT NULL UNIQUE CHECK(queue_order BETWEEN 1 AND 9007199254740991),
+    wait_until INTEGER NOT NULL CHECK(wait_until BETWEEN 0 AND 9007199254740991),
+    state TEXT NOT NULL CHECK(state IN ('queued','acquiring','acquired','releasing','released','failed','expired')),
+    epoch INTEGER CHECK(epoch BETWEEN 1 AND 9007199254740991),
+    expires_at INTEGER CHECK(expires_at BETWEEN 0 AND 9007199254740991),
+    requested_expires_at INTEGER CHECK(requested_expires_at BETWEEN 0 AND 9007199254740991),
+    acquisition_started_at INTEGER CHECK(acquisition_started_at BETWEEN 0 AND 9007199254740991),
+    acquired_at INTEGER CHECK(acquired_at BETWEEN 0 AND 9007199254740991),
+    release_requested_at INTEGER CHECK(release_requested_at BETWEEN 0 AND 9007199254740991),
+    error TEXT
+);
+CREATE TABLE exclusive_sequence(
+    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+    queue_order INTEGER NOT NULL CHECK(queue_order BETWEEN 0 AND 9007199254740991),
+    epoch INTEGER NOT NULL CHECK(epoch BETWEEN 0 AND 9007199254740991)
+);
+INSERT INTO "exclusive_sequence" VALUES(1,0,0);
 CREATE TABLE external_delegations(
  instance_id TEXT PRIMARY KEY NOT NULL REFERENCES plugin_instances(id) ON DELETE CASCADE,
  agent_id TEXT NOT NULL REFERENCES agents(id),
@@ -548,7 +609,6 @@ CREATE TABLE nodes(
     native_mode_proposal TEXT CHECK(native_mode_proposal IS NULL OR json_valid(native_mode_proposal)),
     native_mode_status TEXT CHECK(native_mode_status IS NULL OR native_mode_status IN ('pending','applied','failed')),
     exclusive_reservations INTEGER NOT NULL CHECK(exclusive_reservations IN (0,1)),
-    exclusive_reservation TEXT CHECK(exclusive_reservation IS NULL OR json_valid(exclusive_reservation)),
     usage TEXT CHECK(usage IS NULL OR json_valid(usage)),
     budget_error TEXT ,
     pressure TEXT ,
@@ -574,6 +634,21 @@ CREATE TABLE nodes(
     disk_capacity TEXT CHECK(disk_capacity IS NULL OR json_valid(disk_capacity)),
     updated_at INTEGER NOT NULL
 );
+CREATE TABLE placements(
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id)>0),
+    run_id TEXT NOT NULL,
+    -- Keep historical ownership when its conversation is purged, like the old records.
+    live_run_id TEXT REFERENCES runs(id) ON DELETE SET NULL CHECK(live_run_id IS NULL OR live_run_id=run_id),
+    node_id TEXT NOT NULL CHECK(length(node_id)>0),
+    -- The virtual development runner is usable before its first inventory observation.
+    inventory_node_id TEXT GENERATED ALWAYS AS (nullif(node_id,'00000000-0000-4000-8000-000000000002')) VIRTUAL REFERENCES nodes(id),
+    role TEXT NOT NULL CHECK(role IN ('execution','destination')),
+    cpu INTEGER NOT NULL CHECK(cpu BETWEEN 1 AND 4096),
+    memory_mi_b INTEGER NOT NULL CHECK(memory_mi_b BETWEEN 128 AND 1073741824),
+    disk_mi_b INTEGER NOT NULL CHECK(disk_mi_b BETWEEN 0 AND 1099511627776),
+    runtime_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991)
+) WITHOUT ROWID;
 CREATE TABLE plugin_activity(
  id TEXT PRIMARY KEY NOT NULL CHECK(length(id)=36),
  delivery_id TEXT NOT NULL,
@@ -597,6 +672,21 @@ INSERT INTO "plugin_approvals" VALUES('discord','0.4.1','8e2b1bce01952660db7def4
 INSERT INTO "plugin_approvals" VALUES('github','1.0.0','4668e988287568e4c4b04216bd0ec985b6d67ed9eb5ccb5b748f1d0cdc97200d');
 INSERT INTO "plugin_approvals" VALUES('gmail','1.0.0','14b19aec94da4792bcecd51991785ae625db51c527aaa840f6bea93ac2626122');
 INSERT INTO "plugin_approvals" VALUES('onepassword','1.2.0','fd009de7b31b24d2f47581f1165a9de3250f28b4c90b09f33f5f6e5a8c6e2798');
+CREATE TABLE plugin_contribution_grants(
+ agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+ instance_id TEXT NOT NULL REFERENCES plugin_instances(id) ON DELETE CASCADE,
+ kind TEXT NOT NULL CHECK(kind IN ('tool','command','hook','runCredentials','instructions','condition','projectSource','skillSource')),
+ name TEXT NOT NULL CHECK(length(name)<=200),
+ PRIMARY KEY(agent_id,instance_id,kind,name)
+) WITHOUT ROWID;
+INSERT INTO "plugin_contribution_grants" VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000e90','tool','a16-retained-fixture');
+CREATE TABLE plugin_credential_suppliers(
+ agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+ plugin_id TEXT NOT NULL REFERENCES plugin_packages(id) ON DELETE CASCADE,
+ instance_id TEXT REFERENCES plugin_instances(id) ON DELETE SET NULL,
+ PRIMARY KEY(agent_id,plugin_id)
+) WITHOUT ROWID;
+INSERT INTO "plugin_credential_suppliers" VALUES('00000000-0000-4000-8000-000000000001','discord','00000000-0000-4000-8000-000000000e90');
 CREATE TABLE plugin_deliveries(
  id TEXT PRIMARY KEY NOT NULL,
  instance_id TEXT NOT NULL REFERENCES plugin_instances(id) ON DELETE CASCADE,
@@ -624,6 +714,17 @@ CREATE TABLE plugin_events(
  created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),
  next_attempt_at INTEGER NOT NULL CHECK(next_attempt_at BETWEEN 0 AND 9007199254740991)
 ) WITHOUT ROWID;
+CREATE TABLE plugin_grant_resources(
+ agent_id TEXT NOT NULL,
+ instance_id TEXT NOT NULL,
+ kind TEXT NOT NULL,
+ name TEXT NOT NULL,
+ resource_type TEXT NOT NULL CHECK(length(resource_type) BETWEEN 1 AND 40),
+ resource_id TEXT NOT NULL CHECK(length(resource_id) BETWEEN 1 AND 200),
+ PRIMARY KEY(agent_id,instance_id,kind,name,resource_type,resource_id),
+ FOREIGN KEY(agent_id,instance_id,kind,name) REFERENCES plugin_contribution_grants(agent_id,instance_id,kind,name) ON DELETE CASCADE
+) WITHOUT ROWID;
+INSERT INTO "plugin_grant_resources" VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000e90','tool','a16-retained-fixture','project','00000000-0000-4000-8000-000000000e91');
 CREATE TABLE plugin_hook_events(
  id TEXT PRIMARY KEY NOT NULL,
  instance_id TEXT NOT NULL REFERENCES plugin_instances(id) ON DELETE CASCADE,
@@ -661,6 +762,7 @@ CREATE TABLE plugin_instances(
  state_message TEXT,
  state_updated_at INTEGER
 ) WITHOUT ROWID;
+INSERT INTO "plugin_instances" VALUES('00000000-0000-4000-8000-000000000e90','discord','A16 retained grant fixture',1,'fixture-revision','{}','[]',NULL,1,'disconnected',NULL,NULL);
 CREATE TABLE plugin_packages(
  id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 80),
  active_version TEXT,
@@ -726,6 +828,7 @@ CREATE TABLE projects(
     CHECK((source_plugin_id IS NULL AND source_name IS NULL AND source_instance_id IS NULL AND source_item_id IS NULL)
        OR (source_plugin_id IS NOT NULL AND source_name IS NOT NULL AND source_instance_id IS NOT NULL AND source_item_id IS NOT NULL))
 );
+INSERT INTO "projects" VALUES('00000000-0000-4000-8000-000000000e91','A16 retained project fixture','/synthetic/a16-v24','local','main','','local',NULL,NULL,NULL,NULL,'fixture-revision',1,1);
 CREATE TABLE question_answer_choices(
     message_id TEXT NOT NULL,
     field_id TEXT NOT NULL,
@@ -796,7 +899,7 @@ CREATE TABLE question_options(
 ) WITHOUT ROWID;
 INSERT INTO "question_options" VALUES(1,'field','second',0,'Second','retained order',1);
 INSERT INTO "question_options" VALUES(1,'field','first',1,'First','',0);
-CREATE TABLE "records"(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('agentAccounts','chats','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+CREATE TABLE "records"(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('agentAccounts','chats','node-exclusive-requests','node-attempts','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE TABLE remote_deletions(id TEXT PRIMARY KEY,location TEXT NOT NULL,key TEXT NOT NULL,prefix INTEGER NOT NULL DEFAULT 0,retry_at INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE run_checkpoints(run_id TEXT PRIMARY KEY NOT NULL REFERENCES runs(id) ON DELETE CASCADE,state TEXT NOT NULL CHECK(json_valid(state) AND json_type(state)='object'));
 INSERT INTO "run_checkpoints" VALUES('00000000-0000-4000-8000-000000000010','{}');
@@ -838,20 +941,20 @@ CREATE TABLE runs(
   provider TEXT GENERATED ALWAYS AS (json_extract(snapshot,'$.agent.provider')) STORED,
   snapshot TEXT CHECK(snapshot IS NULL OR json_valid(snapshot)),
   boundary TEXT NOT NULL CHECK(json_valid(boundary) AND json_type(boundary)='object' AND json_type(boundary,'$.snapshot') IS NULL),
-  dedupe TEXT UNIQUE,
+  dedupe TEXT UNIQUE, placement_node_id TEXT, placement_node_state TEXT CHECK(placement_node_state IN ('pausing','saving','restoring','resuming','updating','waiting-for-node')), placement_pinned_node_id TEXT, placement_preferred_node_id TEXT, placement_target_node_id TEXT, placement_required_tags TEXT CHECK(placement_required_tags IS NULL OR (json_valid(placement_required_tags) AND json_type(placement_required_tags)='array')), placement_resources TEXT CHECK(placement_resources IS NULL OR json_valid(placement_resources)), placement_native_mode TEXT CHECK(placement_native_mode IS NULL OR json_valid(placement_native_mode)), placement_native_mode_interruption TEXT, placement_execution_backend TEXT CHECK(placement_execution_backend IN ('native','firecracker')), placement_move_request TEXT CHECK(placement_move_request IS NULL OR json_valid(placement_move_request)), placement_move_reservation TEXT REFERENCES attempts(id) DEFERRABLE INITIALLY DEFERRED, placement_movement_error TEXT, placement_suspended_by_exclusive TEXT CHECK(placement_suspended_by_exclusive IS NULL OR json_valid(placement_suspended_by_exclusive)),
   CHECK((retry_attempt IS NULL AND retry_limit IS NULL AND retry_cause IS NULL AND retry_next_at IS NULL AND retry_started_at IS NULL AND retry_deadline_at IS NULL) OR (retry_attempt IS NOT NULL AND retry_limit IS NOT NULL AND retry_cause IS NOT NULL)),
   CHECK(retry_deadline_at IS NULL OR retry_started_at IS NULL OR retry_deadline_at>=retry_started_at)
 );
-INSERT INTO "runs" VALUES('00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-000000000011',NULL,'interrupted','',1700000000001,NULL,NULL,'',NULL,'synthetic-session',NULL,NULL,1,1,3,NULL,'00000000-0000-4000-8000-000000000001','Retained Codex',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'{}',NULL);
+INSERT INTO "runs" VALUES('00000000-0000-4000-8000-000000000010','00000000-0000-4000-8000-000000000011',NULL,'interrupted','',1700000000001,NULL,NULL,'',NULL,'synthetic-session',NULL,NULL,1,1,3,NULL,'00000000-0000-4000-8000-000000000001','Retained Codex',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'{}',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL);
 INSERT INTO "runs" VALUES('00000000-0000-4000-8000-0000000000c0','2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578',NULL,'succeeded','schedule',1761799999500,NULL,1761800000000,'## Done
 
-Synthetic **summary**.',NULL,NULL,NULL,NULL,0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'{"agent":{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"00000000-0000-4000-8000-000000000001","instructions":"","model":"","name":"Fixture","nodePriorities":[],"plugins":[],"provider":"codex","reasoning":"high","revision":"fixture","speed":"","timeoutMinutes":0},"availableProjects":[],"delegation":null,"project":null,"projects":[],"skills":[],"task":{"agentId":"00000000-0000-4000-8000-000000000001","archived":false,"authorAccessId":null,"authorId":null,"authorRemoved":false,"createdAt":null,"cron":null,"enabled":true,"id":"00000000-0000-4000-8000-000000000003","name":"Fixture","nativeAuthorityNodes":[],"nativeParentAccess":null,"nativeParentRunId":null,"nativePluginGrants":null,"nativePrincipals":[],"nativeProvenanceUnknown":false,"nextRun":null,"projectId":null,"prompt":"Fixture","revision":null,"scheduleFailure":null,"scheduleWaitReason":null,"skills":null,"tags":[],"timezone":"Europe/Paris","worktree":true}}','{"outcome":{"reason":"Synthetic wait.","status":"blocked"}}',NULL);
+Synthetic **summary**.',NULL,NULL,NULL,NULL,0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'{"agent":{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"00000000-0000-4000-8000-000000000001","instructions":"","model":"","name":"Fixture","nodePriorities":[],"plugins":[],"provider":"codex","reasoning":"high","revision":"fixture","speed":"","timeoutMinutes":0},"availableProjects":[],"delegation":null,"project":null,"projects":[],"skills":[],"task":{"agentId":"00000000-0000-4000-8000-000000000001","archived":false,"authorAccessId":null,"authorId":null,"authorRemoved":false,"createdAt":null,"cron":null,"enabled":true,"id":"00000000-0000-4000-8000-000000000003","name":"Fixture","nativeAuthorityNodes":[],"nativeParentAccess":null,"nativeParentRunId":null,"nativePluginGrants":null,"nativePrincipals":[],"nativeProvenanceUnknown":false,"nextRun":null,"projectId":null,"prompt":"Fixture","revision":null,"scheduleFailure":null,"scheduleWaitReason":null,"skills":null,"tags":[],"timezone":"Europe/Paris","worktree":true}}','{"outcome":{"reason":"Synthetic wait.","status":"blocked"}}',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL);
 INSERT INTO "runs" VALUES('00000000-0000-4000-8000-0000000000c1','af845025-26ed-4d44-9617-8698c8619638',NULL,'succeeded','schedule',1761800000500,NULL,1761800001000,'## Done
 
-Synthetic **summary**.',NULL,NULL,NULL,NULL,0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'{"agent":{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"00000000-0000-4000-8000-000000000001","instructions":"","model":"","name":"Fixture","nodePriorities":[],"plugins":[],"provider":"codex","reasoning":"high","revision":"fixture","speed":"","timeoutMinutes":0},"availableProjects":[],"delegation":null,"project":null,"projects":[],"skills":[],"task":{"agentId":"00000000-0000-4000-8000-000000000001","archived":false,"authorAccessId":null,"authorId":null,"authorRemoved":false,"createdAt":null,"cron":null,"enabled":true,"id":"00000000-0000-4000-8000-000000000003","name":"Fixture","nativeAuthorityNodes":[],"nativeParentAccess":null,"nativeParentRunId":null,"nativePluginGrants":null,"nativePrincipals":[],"nativeProvenanceUnknown":false,"nextRun":null,"projectId":null,"prompt":"Fixture","revision":null,"scheduleFailure":null,"scheduleWaitReason":null,"skills":null,"tags":[],"timezone":"Europe/Paris","worktree":true}}','{"outcome":{"reason":"Synthetic wait.","status":"needs_input"}}',NULL);
+Synthetic **summary**.',NULL,NULL,NULL,NULL,0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'{"agent":{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"00000000-0000-4000-8000-000000000001","instructions":"","model":"","name":"Fixture","nodePriorities":[],"plugins":[],"provider":"codex","reasoning":"high","revision":"fixture","speed":"","timeoutMinutes":0},"availableProjects":[],"delegation":null,"project":null,"projects":[],"skills":[],"task":{"agentId":"00000000-0000-4000-8000-000000000001","archived":false,"authorAccessId":null,"authorId":null,"authorRemoved":false,"createdAt":null,"cron":null,"enabled":true,"id":"00000000-0000-4000-8000-000000000003","name":"Fixture","nativeAuthorityNodes":[],"nativeParentAccess":null,"nativeParentRunId":null,"nativePluginGrants":null,"nativePrincipals":[],"nativeProvenanceUnknown":false,"nextRun":null,"projectId":null,"prompt":"Fixture","revision":null,"scheduleFailure":null,"scheduleWaitReason":null,"skills":null,"tags":[],"timezone":"Europe/Paris","worktree":true}}','{"outcome":{"reason":"Synthetic wait.","status":"needs_input"}}',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL);
 INSERT INTO "runs" VALUES('00000000-0000-4000-8000-0000000000c2','7fa07f2a-2bff-464a-bc93-ec72e7306769',NULL,'succeeded','schedule',1761800001500,NULL,1761800002000,'## Done
 
-Synthetic **summary**.',NULL,NULL,NULL,NULL,0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'{"agent":{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"00000000-0000-4000-8000-000000000001","instructions":"","model":"","name":"Fixture","nodePriorities":[],"plugins":[],"provider":"codex","reasoning":"high","revision":"fixture","speed":"","timeoutMinutes":0},"availableProjects":[],"delegation":null,"project":null,"projects":[],"skills":[],"task":{"agentId":"00000000-0000-4000-8000-000000000001","archived":false,"authorAccessId":null,"authorId":null,"authorRemoved":false,"createdAt":null,"cron":null,"enabled":true,"id":"00000000-0000-4000-8000-000000000003","name":"Fixture","nativeAuthorityNodes":[],"nativeParentAccess":null,"nativeParentRunId":null,"nativePluginGrants":null,"nativePrincipals":[],"nativeProvenanceUnknown":false,"nextRun":null,"projectId":null,"prompt":"Fixture","revision":null,"scheduleFailure":null,"scheduleWaitReason":null,"skills":null,"tags":[],"timezone":"Europe/Paris","worktree":true}}','{"outcome":{"reason":"Synthetic wait.","status":"blocked"}}',NULL);
+Synthetic **summary**.',NULL,NULL,NULL,NULL,0,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'{"agent":{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"00000000-0000-4000-8000-000000000001","instructions":"","model":"","name":"Fixture","nodePriorities":[],"plugins":[],"provider":"codex","reasoning":"high","revision":"fixture","speed":"","timeoutMinutes":0},"availableProjects":[],"delegation":null,"project":null,"projects":[],"skills":[],"task":{"agentId":"00000000-0000-4000-8000-000000000001","archived":false,"authorAccessId":null,"authorId":null,"authorRemoved":false,"createdAt":null,"cron":null,"enabled":true,"id":"00000000-0000-4000-8000-000000000003","name":"Fixture","nativeAuthorityNodes":[],"nativeParentAccess":null,"nativeParentRunId":null,"nativePluginGrants":null,"nativePrincipals":[],"nativeProvenanceUnknown":false,"nextRun":null,"projectId":null,"prompt":"Fixture","revision":null,"scheduleFailure":null,"scheduleWaitReason":null,"skills":null,"tags":[],"timezone":"Europe/Paris","worktree":true}}','{"outcome":{"reason":"Synthetic wait.","status":"blocked"}}',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL);
 CREATE TABLE shared_objects(id TEXT PRIMARY KEY,destination TEXT NOT NULL,hash TEXT NOT NULL,size INTEGER NOT NULL,location TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','ready','invalid','deleting')),unused_at INTEGER,retry_at INTEGER NOT NULL DEFAULT 0);
 INSERT INTO "shared_objects" VALUES('synthetic-object','synthetic-bucket','synthetic-hash',4096,'{}','ready',NULL,0);
 CREATE TABLE shared_publications(id TEXT PRIMARY KEY,run_id TEXT NOT NULL);
@@ -973,8 +1076,6 @@ CREATE INDEX conversations_updated ON conversations(persisted_at DESC,id);
 CREATE INDEX chat_messages_chat ON chat_messages(chat_id,created_at);
 CREATE INDEX chat_messages_pending ON chat_messages(chat_id,status,created_at);
 CREATE UNIQUE INDEX conversation_engine_switch_current ON conversation_engine_switches(chat_id) WHERE is_current=1;
-CREATE INDEX records_kind ON records(kind,updated_at DESC);
-CREATE INDEX records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
 CREATE INDEX chat_questions_chat ON chat_questions(chat_id,created_at,id);
 CREATE INDEX chat_questions_run ON chat_questions(run_id,status);
 CREATE UNIQUE INDEX durable_wakeups_chat ON durable_wakeups(chat_id) WHERE chat_id IS NOT NULL;
@@ -982,9 +1083,40 @@ CREATE UNIQUE INDEX durable_wakeups_mission ON durable_wakeups(mission_run_id) W
 CREATE UNIQUE INDEX conversation_lineage_request ON conversation_lineage(requester_chat_id,request_id);
 CREATE INDEX attachments_order ON attachments(chat_id,created_at,id);
 CREATE INDEX attachment_reservations_expiry ON attachment_reservations(expires_at);
+CREATE INDEX plugin_hook_events_instance ON plugin_hook_events(instance_id,created_at,id);
+CREATE INDEX plugin_hook_receipts_expiry ON plugin_hook_receipts(expires_at);
+CREATE INDEX timeline_entries_position ON timeline_entries(run_id,position);
+CREATE INDEX timeline_entries_revision ON timeline_entries(run_id,revision);
+CREATE INDEX placements_run ON placements(run_id);
+CREATE INDEX placements_live_run ON placements(live_run_id) WHERE live_run_id IS NOT NULL;
+CREATE INDEX placements_node ON placements(node_id);
+CREATE INDEX attempts_released ON attempts(released_at);
+CREATE INDEX exclusive_live_owner_run ON exclusive_reservations(live_owner_run_id) WHERE live_owner_run_id IS NOT NULL;
+CREATE INDEX exclusive_live_owner_attempt ON exclusive_reservations(live_owner_attempt_id) WHERE live_owner_attempt_id IS NOT NULL;
+CREATE INDEX exclusive_pending ON exclusive_reservations(node_id,queue_order) WHERE state IN ('queued','acquiring','acquired','releasing');
+CREATE INDEX exclusive_owner ON exclusive_reservations(owner_run_id,created_at DESC);
+CREATE INDEX exclusive_members_live_run ON exclusive_members(live_run_id) WHERE live_run_id IS NOT NULL;
+CREATE INDEX exclusive_members_live_attempt ON exclusive_members(live_attempt_id) WHERE live_attempt_id IS NOT NULL;
+CREATE INDEX exclusive_paused_live_run ON exclusive_paused_runs(live_run_id) WHERE live_run_id IS NOT NULL;
+CREATE INDEX runs_placement_node ON runs(placement_node_id);
+CREATE INDEX runs_placement_move_reservation ON runs(placement_move_reservation) WHERE placement_move_reservation IS NOT NULL;
 CREATE VIEW run_views AS SELECT runs.*,
   json_set(boundary,'$.snapshot',json(snapshot),'$.summary',summary,
 
+  '$.nodeId',placement_node_id,
+  '$.nodeState',placement_node_state,
+  '$.pinnedNodeId',placement_pinned_node_id,
+  '$.preferredNodeId',placement_preferred_node_id,
+  '$.targetNodeId',placement_target_node_id,
+  '$.requiredTags',json(placement_required_tags),
+  '$.resources',json(placement_resources),
+  '$.nativeMode',json(placement_native_mode),
+  '$.nativeModeInterruption',placement_native_mode_interruption,
+  '$.executionBackend',placement_execution_backend,
+  '$.moveRequest',json(placement_move_request),
+  '$.moveReservation',placement_move_reservation,
+  '$.movementError',placement_movement_error,
+  '$.suspendedByExclusive',json(placement_suspended_by_exclusive),
   '$.id',id,
   '$.taskId',task_id,
   '$.projectId',project_id,
@@ -1011,6 +1143,20 @@ CREATE VIEW run_views AS SELECT runs.*,
 ) AS data,
   json_set(boundary,
 
+  '$.nodeId',placement_node_id,
+  '$.nodeState',placement_node_state,
+  '$.pinnedNodeId',placement_pinned_node_id,
+  '$.preferredNodeId',placement_preferred_node_id,
+  '$.targetNodeId',placement_target_node_id,
+  '$.requiredTags',json(placement_required_tags),
+  '$.resources',json(placement_resources),
+  '$.nativeMode',json(placement_native_mode),
+  '$.nativeModeInterruption',placement_native_mode_interruption,
+  '$.executionBackend',placement_execution_backend,
+  '$.moveRequest',json(placement_move_request),
+  '$.moveReservation',placement_move_reservation,
+  '$.movementError',placement_movement_error,
+  '$.suspendedByExclusive',json(placement_suspended_by_exclusive),
   '$.id',id,
   '$.taskId',task_id,
   '$.projectId',project_id,
@@ -1036,12 +1182,11 @@ CREATE VIEW run_views AS SELECT runs.*,
   '$.retry',json(CASE WHEN retry_attempt IS NULL THEN NULL ELSE json_object('attempt',retry_attempt,'limit',retry_limit,'nextAttemptAt',retry_next_at,'startedAt',retry_started_at,'deadlineAt',retry_deadline_at,'cause',json(retry_cause)) END)
 ,'$.taskName',task_name,'$.agentName',agent_name,'$.provider',provider) AS summary_data
 FROM runs;
-CREATE INDEX plugin_hook_events_instance ON plugin_hook_events(instance_id,created_at,id);
-CREATE INDEX plugin_hook_receipts_expiry ON plugin_hook_receipts(expires_at);
-CREATE INDEX timeline_entries_position ON timeline_entries(run_id,position);
-CREATE INDEX timeline_entries_revision ON timeline_entries(run_id,revision);
+CREATE INDEX records_kind ON records(kind,updated_at DESC);
+CREATE INDEX records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
+CREATE INDEX plugin_contribution_instances ON plugin_contribution_grants(instance_id,agent_id);
 DELETE FROM "sqlite_sequence";
 INSERT INTO "sqlite_sequence" VALUES('audit',780);
 INSERT INTO "sqlite_sequence" VALUES('events',1);
 COMMIT;
-PRAGMA user_version=22;
+PRAGMA user_version=24;

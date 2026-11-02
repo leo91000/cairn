@@ -30,11 +30,16 @@ release; synthetic qualification does not replace it.
 ## Qualification
 
 `deliverable_metadata_migration` restores the committed synthetic SQL snapshot
-produced by the real Store at `1bf0a055`: the existing synthetic v18 database
-(with artifact versions, a public link and skill sources written by the real
-`b3ebdc4b` fixture) upgraded through the actual v19, v21 and v22 binaries. The
-same preceding event writer records a retained synthetic timeline card. The
-run projection view, plugin hook queues, progress and timeline projection tables,
+produced by the real v24 Store from main `c2e72b39` (the test-only #661
+commit uses identical native sources). It upgrades the retained synthetic v22
+database offline through the released placement and contribution-grant steps,
+then reopens it with all rows and schema objects unchanged. Artifact versions,
+a public link and skill sources originate in the real `b3ebdc4b` writer; the
+retained timeline card originates in the actual v22 event writer. Additional
+synthetic project, plugin instance, contribution/resource grant and credential
+supplier rows are explicitly seeded with SQL into that actual previous schema
+and survive reopening through the previous Store. No production data is used.
+The run projection view, progress, timeline, placement and contribution tables,
 and every unrelated row/schema object must also survive. It checks metadata and
 unrelated rows, nullable
 references for removed resources, the resulting FK/quick checks, reopening and

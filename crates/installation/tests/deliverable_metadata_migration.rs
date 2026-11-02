@@ -1,4 +1,4 @@
-//! Frozen by the real v24 Store (current main), retaining metadata from the preceding fixture.
+//! Real v24 Store (c2e72b39 sources) upgraded synthetic metadata; unrelated grant rows are SQL-seeded.
 use cairn_installation::store::Store;
 use rusqlite::{Connection, types::Value as SqlValue};
 use serde_json::Value;
