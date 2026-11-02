@@ -2,6 +2,7 @@
 import type { CSSProperties } from 'vue'
 import type { Provider } from '../../../../packages/contracts/accounts'
 import type { CodingAgentModel } from '../../../../packages/contracts/models'
+import type { ResumeReasoningIntent } from '../speeds'
 import {
   computed,
   nextTick,
@@ -33,6 +34,7 @@ import { modelCatalogs } from '../models'
 import {
   effectiveSpeed,
   offersSpeed,
+  pickerAppliedSpeed,
   showsSpeed,
   speedTier,
 } from '../speeds'
@@ -57,6 +59,9 @@ const props = withDefaults(defineProps<{
   defaultSource: 'agent',
   variant: 'pill',
 })
+const emit = defineEmits<{
+  reasoningChoice: [choice: ResumeReasoningIntent]
+}>()
 const provider = defineModel<Provider>('provider', { default: 'codex' })
 const model = defineModel<string>('model', { default: '' })
 const reasoning = defineModel<string>('reasoning', { default: '' })
@@ -96,7 +101,7 @@ const currentSpeed = computed(() => effectiveSpeed(speed.value, inheritedSpeed.v
 const speedShown = computed(() => showsSpeed(provider.value, selected.value, speed.value || inheritedSpeed.value))
 const speedOffered = computed(() => offersSpeed(selected.value, currentSpeed.value))
 // A speed the model lacks runs at standard speed, so the trigger never claims it.
-const appliedSpeed = computed(() => speedShown.value && speedOffered.value ? currentSpeed.value : STANDARD_SPEED)
+const appliedSpeed = computed(() => pickerAppliedSpeed(provider.value, selected.value, speed.value, inheritedSpeed.value))
 const appliedTier = computed(() => speedTier(selected.value, appliedSpeed.value))
 // A speed not every account confirms, or a model whose speeds are unknown, is only requested.
 const speedTag = computed(() => appliedSpeed.value === STANDARD_SPEED
@@ -155,7 +160,7 @@ const choices = computed(() => [
 ])
 
 watch([provider, () => catalog.value.models, () => props.defaultModel], () => {
-  if (current.value.requiresModel && !model.value && !(props.inherit && props.defaultModel)) {
+  if (current.value.requiresModel && !model.value && !props.inherit) {
     model.value = catalog.value.models.find(item => item.isDefault && !item.hidden)?.model
       || catalog.value.models.find(item => !item.hidden)?.model || ''
   }
@@ -168,6 +173,7 @@ const unsupported = computed(() => !!reasoning.value && !!selected.value && !eff
 function chooseProvider(value: Provider) {
   if (value === provider.value)
     return
+  emit('reasoningChoice', { kind: 'untouched' })
   provider.value = value
   model.value = ''
   reasoning.value = ''
@@ -178,6 +184,7 @@ function chooseProvider(value: Provider) {
 function chooseModel(option: { value: string, chosen: boolean }) {
   if (option.chosen)
     return
+  emit('reasoningChoice', { kind: 'untouched' })
   model.value = option.value
   reasoning.value = ''
 }
@@ -185,8 +192,19 @@ function chooseModel(option: { value: string, chosen: boolean }) {
 // Switching between routes of one model keeps a reasoning level they share.
 function chooseRoute(value: string) {
   const effort = effectiveEffort.value
+  emit('reasoningChoice', { kind: 'untouched' })
   model.value = value
   reasoning.value = efforts.value.some(option => option.reasoningEffort === effort) ? effort : ''
+}
+
+function chooseDefaultReasoning() {
+  reasoning.value = ''
+  emit('reasoningChoice', model.value ? { kind: 'model-default' } : { kind: 'untouched' })
+}
+
+function chooseReasoningEffort(value: string) {
+  reasoning.value = value
+  emit('reasoningChoice', { kind: 'effort', value })
 }
 
 function place() {
@@ -467,7 +485,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
                       :aria-checked="!reasoning"
                       class="effort-chip"
                       :disabled="disabled"
-                      @click="reasoning = ''"
+                      @click="chooseDefaultReasoning"
                     >
                       <Icon v-if="!reasoning" :name="Check" :size="12" />{{ defaultOwner }} default{{ defaultEffort ? ` · ${effortLabel(defaultEffort)}` : '' }}
                     </button>
@@ -479,7 +497,7 @@ onBeforeUnmount(() => removeEventListener('resize', place))
                       :aria-checked="reasoning === effort.reasoningEffort"
                       class="effort-chip"
                       :disabled="disabled"
-                      @click="reasoning = effort.reasoningEffort"
+                      @click="chooseReasoningEffort(effort.reasoningEffort)"
                     >
                       {{ effortLabel(effort.reasoningEffort) }}
                     </button>
