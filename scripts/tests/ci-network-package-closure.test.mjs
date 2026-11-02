@@ -276,7 +276,12 @@ describe('pinned network package closure', () => {
     }
   })
 
-  it.each(['bad-hash', 'too-large', 'http-error'])('rejects acquisition %s without publishing a manifest', async (scenario) => {
+  it.each([
+    ['bad-hash', 'INTEGRITY_FAILED'],
+    ['too-large', 'SIZE_MISMATCH'],
+    ['too-small', 'INTEGRITY_FAILED'],
+    ['http-error', 'DOWNLOAD_FAILED'],
+  ])('rejects acquisition %s without publishing a manifest or falling back', async (scenario, code) => {
     const value = fixture()
     try {
       const requests = []
@@ -287,11 +292,13 @@ describe('pinned network package closure', () => {
           return new Response('denied', { status: 403 })
         const bytes = scenario === 'too-large'
           ? Buffer.alloc(firstEntry.bytes + 1, 'x')
-          : Buffer.alloc(firstEntry.bytes, 'x')
+          : scenario === 'too-small'
+            ? Buffer.alloc(firstEntry.bytes - 1, 'x')
+            : Buffer.alloc(firstEntry.bytes, 'x')
         return new Response(bytes)
       }
 
-      await expect(acquireNetworkPackages(value.directory, { ...value, fetchPackage })).rejects.toThrow(/^CI_NETWORK_PACKAGES_/)
+      await expect(acquireNetworkPackages(value.directory, { ...value, fetchPackage })).rejects.toThrow(`CI_NETWORK_PACKAGES_${code}`)
 
       expect(requests).toEqual([archiveUrl(firstEntry.url)])
       expect(() => readFileSync(path.join(value.directory, 'manifest.json'))).toThrow()

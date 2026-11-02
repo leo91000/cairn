@@ -179,7 +179,7 @@ export async function acquireNetworkPackages(directory, {
       const contents = Buffer.concat(chunks)
       if (bytes !== entry.bytes) {
         reportSource(report, 'source-integrity-failed', entry, source, response.status, 'size')
-        fail('SIZE_MISMATCH')
+        fail('INTEGRITY_FAILED')
       }
 
       if (digest(contents) !== entry.sha256) {
