@@ -6092,6 +6092,7 @@ async fn opencode_hidden_auto_resume_rejects_omission_and_selection_but_keeps_pi
             run["status"] == RunStatus::Cancelled && run["resumeAvailable"] == true
         })
         .await;
+    fixture.until_worker_quiescent().await;
     let checkpoint_before = fixture.checkpoint(&run_id).await;
     fixture.stop(false).await;
     s.store

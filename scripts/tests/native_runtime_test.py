@@ -214,6 +214,7 @@ def main():
             assert host.trusted_mapping_helper(target, bit)
         metrics['mappingHelpers'] = 'Root-owned distribution copies with only CAP_SETUID/CAP_SETGID effective, no setuid bit; host originals unchanged.'
         host.INSTALL = previous_install
+        progress('host-tool-setup-complete')
         (root / 'disposable-fixture').touch()
         data, state = root / 'data', root / 'state'
         tools = root / 'versions/synthetic/tools'
@@ -341,6 +342,7 @@ def main():
         def create():
             run = str(uuid.uuid4())
             runs.append(run)
+            progress('fixture-create-before')
             contexts[run] = manager('create', run=run)
             # Warm local blocks can hide a missing current node acknowledgement.
             # Exercise the real cold-read authorization before mounting any disk.
@@ -354,6 +356,7 @@ def main():
             with host.HTTP.open(request, timeout=30) as response:
                 assert json.load(response)['renewed'] is True, 'Native fixture disk grant is not authorized.'
             seed(run)
+            progress('fixture-create-complete')
             return run
 
         def managed(run):
@@ -515,8 +518,11 @@ def main():
             (data / 'runner-plans' / (attempt + '.json')).write_text(json.dumps(plan))
             manager('checkpoint', run=run, attempt=attempt)
             api('/runs/' + attempt + '/lease', {'remainingMs': lease})
+            progress('attempt-checkpointed')
             startup = time.perf_counter()
+            progress('run-admission-before')
             api('/runs/' + attempt)
+            progress('run-admission-returned')
             def execution_ready():
                 if (state / (attempt + '.exit')).exists():
                     return True
@@ -525,6 +531,7 @@ def main():
 
             eventually(execution_ready, timeout=600 if docker_script else 60)
             startup_ms = (time.perf_counter() - startup) * 1000
+            progress('attempt-ready')
             if (state / (attempt + '.exit')).exists() and read_controller_result(state / (attempt + '.exit'))['StatusCode'] != 0:
                 for record in (state / (attempt + '.log')).read_text().splitlines():
                     event = json.loads(record)
@@ -674,6 +681,7 @@ def main():
             run = create()
             other = create()
             start_controller()
+            progress('fixture-controller-ready')
             first = start(run, lease=45000, measure='nativeRetained')
             fenced(run, first)
             # A terminal ext4 flush failure must retain a crash prefix and finish
@@ -866,6 +874,7 @@ def main():
                 assert error.code == 409
             else:
                 raise AssertionError('Eviction removed unpublished journal writes.')
+            progress('storage-growth-pressure-complete')
             manager('restore', run=run, backupId=point['backupId'])
             restored = start(run)
             # The next start expects the retained 'changed' value. A no-op
@@ -888,6 +897,7 @@ def main():
             final = start(run, long=False)
             fenced(run, final)
             assert read_controller_result(state / (final + '.exit'))['StatusCode'] == 0
+            progress('restore-crash-recovery-complete')
             # Close the earlier disk while a later backend remains runnable.
             # CLONE_NEWNS alone copies the earlier mount into that backend,
             # causing DEL_DEV to block and retain every physical slot.
@@ -911,6 +921,7 @@ def main():
                 assert error.code == 409
             else:
                 raise AssertionError('Completed attempt restarted.')
+            progress('concurrent-retirement-complete')
             # Real host administration and both directions of a multi-conversation
             # transition. This runs only on the disposable CI VM guarded above.
             api('/node-budget', dict(limits=dict(diskMiB=4096, cpu=2, memoryMiB=1024), slots=2))
@@ -966,6 +977,7 @@ def main():
                 concurrentConversations=2, rootDescendantsStopped=True,
                 protectedAfterAdministrator=True, filesPreserved=True, hostChangesRetained=True,
                 pendingCrashFailsClosed=True, generationRetry=True)
+            progress('native-mode-transition-complete')
             manager('publish', run=run)
             if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
                 import socket

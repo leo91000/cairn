@@ -11,6 +11,8 @@ use common::StoreAgentFixture;
 use common::StoreMissionFixture;
 
 mod common;
+#[path = "native_nodes/lineage_cycles.rs"]
+mod lineage_cycles;
 
 use axum::{
     Router,
