@@ -7,6 +7,13 @@ describe('health-watch provider failure classification', () => {
       .toBe('provider_capacity')
   })
 
+  it('requires the model-capacity phrase to begin the error text', () => {
+    expect(classifyFailure('Wrapper says: selected model is at capacity; retrying unrelated operation'))
+      .toBe('other')
+    expect(classifyFailure('  SELECTED\tMODEL is at capacity. private-context-marker'))
+      .toBe('provider_capacity')
+  })
+
   it('recognizes a standalone overload code and returns no raw error text', () => {
     const error = 'Selected model is at capacity. private-context-marker'
     const category = classifyFailure(error)

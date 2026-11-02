@@ -63,7 +63,7 @@ describe('parallel CI coverage', () => {
       POSTGRES_PASSWORD: 'test-only',
       POSTGRES_DB: 'cairn_beacon_test',
     })
-    expect(browser.container.image).toBe('mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27')
+    expect(browser.container.image).toBe('mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f')
 
     const build = browser.steps.find(step => step.name === 'Build the manager fixtures and web assets')
     expect(build.run.trim().split('\n').map(line => line.trim())).toEqual([
