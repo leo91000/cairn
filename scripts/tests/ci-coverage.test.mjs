@@ -132,32 +132,32 @@ describe('parallel CI coverage', () => {
   it('requires the selected physical qualification for image publication and bypasses it when unselected', () => {
     const publish = quality.jobs.publish
     expect(publish.needs).toContain('backend-migration-qualification')
-    expect(publish.if).toContain("inputs.backend-qualification != 'backend-migration' || needs.backend-migration-qualification.result == 'success'")
+    expect(publish.if).toContain('inputs.backend-qualification != \'backend-migration\' || needs.backend-migration-qualification.result == \'success\'')
 
     const expression = publish.if
       .replaceAll('inputs.backend-qualification', 'selection')
       .replace(/\bneeds\.([a-z0-9-]+)\b/g, (_match, name) => `needs[${JSON.stringify(name)}]`)
     const baseNeeds = {
-      resolve: { outputs: { reuse: 'false' } },
-      build: { result: 'success' },
-      quality: { result: 'success' },
+      'resolve': { outputs: { reuse: 'false' } },
+      'build': { result: 'success' },
+      'quality': { result: 'success' },
       'rust-check': { result: 'success' },
-      backend: { result: 'success' },
+      'backend': { result: 'success' },
       'node-checks': { result: 'success' },
-      browser: { result: 'success' },
+      'browser': { result: 'success' },
       'network-bench': { result: 'success' },
       'native-runtime': { result: 'success' },
       'android-direct-build': { result: 'success' },
       'android-direct': { result: 'success' },
-      image: { result: 'success', outputs: { published: 'true' } },
+      'image': { result: 'success', outputs: { published: 'true' } },
       'beacon-image': { result: 'success', outputs: { published: 'true' } },
     }
     const canPublish = (selection, migrationResult, backendResult = 'success', reuse = 'false') => runInNewContext(expression, {
       selection,
       needs: {
         ...baseNeeds,
-        resolve: { outputs: { reuse } },
-        backend: { result: backendResult },
+        'resolve': { outputs: { reuse } },
+        'backend': { result: backendResult },
         'backend-migration-qualification': { result: migrationResult },
       },
       always: () => true,
@@ -176,8 +176,8 @@ describe('parallel CI coverage', () => {
     const promote = quality.jobs.promote
     expect(promote.needs).toContain('resolve')
     expect(promote.needs).toContain('backend-migration-qualification')
-    expect(promote.if).toContain("needs.resolve.outputs.reuse == 'true'")
-    expect(promote.if).toContain("inputs.backend-qualification != 'backend-migration' || needs.backend-migration-qualification.result == 'success'")
+    expect(promote.if).toContain('needs.resolve.outputs.reuse == \'true\'')
+    expect(promote.if).toContain('inputs.backend-qualification != \'backend-migration\' || needs.backend-migration-qualification.result == \'success\'')
 
     const expression = promote.if
       .replaceAll('inputs.backend-qualification', 'selection')
@@ -185,7 +185,7 @@ describe('parallel CI coverage', () => {
     const canPromote = (selection, migrationResult, reuse) => runInNewContext(expression, {
       selection,
       needs: {
-        resolve: { outputs: { reuse } },
+        'resolve': { outputs: { reuse } },
         'backend-migration-qualification': { result: migrationResult },
       },
       always: () => true,
