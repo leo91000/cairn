@@ -856,3 +856,256 @@ async fn old_controller_drain_retries_lost_put_and_ack_across_restart_without_di
     controller_task.abort();
     provider_task.abort();
 }
+
+#[test]
+fn publication_failure_context_classifies_412_without_retaining_error_text() {
+    let run = json!({ "backup": { "requestedRevision": 9 } });
+    let error = crate::error::Error::new(412, "untrusted detail must not be copied");
+
+    let context = super::failure_context(&run, &error);
+
+    assert_eq!(context["category"], "capture_conflict");
+    assert_eq!(context["managerStatus"], 412);
+    assert_eq!(context["requestedRevision"], 9);
+    assert!(context.get("message").is_none());
+}
+
+#[tokio::test]
+async fn attempt_persists_bounded_failure_context_and_retains_it_after_recovery() {
+    use crate::{
+        agent_fixture::StoreAgentFixture, node_fixture::StoreNodeFixture, run_fixture::DbRunFixture,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let run_id = id();
+    let runner_id = id();
+    let snapshot_id = id();
+    let node_id = super::super::LOCAL_NODE_ID;
+    let manifest = json!({
+        "version": 1,
+        "size": 4096,
+        "blockSize": snapshots::BLOCK,
+        "blocks": [{ "offset": 0, "size": 4096, "hash": null }],
+        "onDemand": false,
+        "generation": 1,
+        "capturedAt": now()
+    });
+    let wait_for_snapshot = Arc::new(AtomicBool::new(false));
+    let controller = Router::new().fallback({
+        let (manifest, run_id, snapshot_id, wait_for_snapshot) = (
+            manifest.clone(),
+            run_id.clone(),
+            snapshot_id.clone(),
+            wait_for_snapshot.clone(),
+        );
+        move |request: Request| {
+            let (manifest, run_id, snapshot_id, wait_for_snapshot) = (
+                manifest.clone(),
+                run_id.clone(),
+                snapshot_id.clone(),
+                wait_for_snapshot.clone(),
+            );
+            async move {
+                let path = request.uri().path();
+                if path == format!("/disks/{run_id}/snapshot") {
+                    if wait_for_snapshot.load(Ordering::Relaxed) {
+                        return StatusCode::CONFLICT.into_response();
+                    }
+                    return axum::Json(json!({
+                        "id": snapshot_id,
+                        "manifest": manifest,
+                        "grantId": id()
+                    }))
+                    .into_response();
+                }
+                if path == format!("/snapshots/{snapshot_id}/discard") {
+                    return StatusCode::NO_CONTENT.into_response();
+                }
+                panic!("unexpected publication fixture route: {path}");
+            }
+        }
+    });
+    let (controller, controller_task) = peer(controller).await;
+
+    let fail_upload = Arc::new(AtomicBool::new(true));
+    let provider = Router::new().fallback({
+        let fail_upload = fail_upload.clone();
+        move |request: Request| {
+            let fail_upload = fail_upload.clone();
+            async move {
+                assert_eq!(request.method(), "PUT");
+                let _ = to_bytes(request.into_body(), 1_000_000).await.unwrap();
+                if fail_upload.load(Ordering::Relaxed) {
+                    StatusCode::SERVICE_UNAVAILABLE.into_response()
+                } else {
+                    StatusCode::OK.into_response()
+                }
+            }
+        }
+    });
+    let (provider, provider_task) = peer(provider).await;
+
+    let s = service_with_runner(root.path(), controller).await;
+    let logical_endpoint = "https://publication-context-fixture.invalid";
+    tokio::fs::write(
+        s.config.data_dir.join("storage-s3.json"),
+        json!({
+            "bucket": "diagnostics",
+            "endpoint": logical_endpoint,
+            "region": "us-east-1"
+        })
+        .to_string(),
+    )
+    .await
+    .unwrap();
+    let _storage =
+        fixture_storage_at(&provider, logical_endpoint, "diagnostics", s.hot_s3.clone()).await;
+    s.store
+        .put_node_fixture(json!({ "id": node_id, "revoked": false }))
+        .await
+        .unwrap();
+    s.store
+        .put_agent_fixture(json!({
+            "id": crate::config::MAIN_AGENT_ID,
+            "access": { "nodes": [node_id] }
+        }))
+        .await
+        .unwrap();
+
+    let (saved_run, saved_runner, saved_node) =
+        (run_id.clone(), runner_id.clone(), node_id.to_owned());
+    s.store
+        .transaction(move |db| {
+            let record_run = saved_run.clone();
+            let record_node = saved_node.clone();
+            db.add_run_fixture(
+                &json!({
+                    "id": record_run,
+                    "taskId": id(),
+                    "status": "succeeded",
+                    "createdAt": 0,
+                    "nodeId": record_node,
+                    "isolated": true,
+                    "snapshot": { "agent": { "id": crate::config::MAIN_AGENT_ID } },
+                    "backup": {
+                        "status": "ready",
+                        "requestedRevision": 8,
+                        "acknowledgedRevision": 8
+                    }
+                }),
+                None,
+            )?;
+            db.save_checkpoint_boundary(
+                &saved_run,
+                &json!({
+                    "nodeId": saved_node,
+                    "runnerId": saved_runner
+                }),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let mut attempt_run = s.store.run(&run_id).await.unwrap();
+    assert!(attempt_run["backup"].get("lastFailureContext").is_none());
+    attempt_run["backup"]["requestedRevision"] = 7.into();
+
+    // The attempt receives revision 7 while its fresh publication read sees revision 8.
+    // Context must identify the attempt input, never sample a newer live value.
+    super::attempt(&s, &attempt_run).await;
+    let failed = s.store.run(&run_id).await.unwrap();
+    let backup = &failed["backup"];
+    assert_eq!(backup["status"], "error");
+    assert!(backup["error"].as_str().is_some());
+    assert_eq!(backup["requestedRevision"], 8);
+    assert_eq!(backup["acknowledgedRevision"], 8);
+    let first_context = backup["lastFailureContext"].clone();
+    assert_eq!(first_context["phase"], "capture");
+    assert_eq!(first_context["category"], "unknown");
+    assert_eq!(first_context["managerStatus"], 503);
+    assert_eq!(first_context["requestedRevision"], 7);
+    assert!(
+        first_context["observedAtMs"]
+            .as_i64()
+            .is_some_and(|value| value > 0)
+    );
+    let context = first_context.as_object().unwrap();
+    assert_eq!(context.len(), 5);
+    for key in context.keys() {
+        assert!(
+            [
+                "observedAtMs",
+                "phase",
+                "category",
+                "managerStatus",
+                "requestedRevision"
+            ]
+            .contains(&key.as_str())
+        );
+    }
+
+    let events_after_failure = {
+        let run_id = run_id.clone();
+        s.store
+            .read(move |db| Ok(db.events_fixture(&run_id, 0, 100)?.len()))
+            .await
+            .unwrap()
+    };
+
+    s.store
+        .update_run_boundary(&run_id, json!({ "environmentState": "expired" }))
+        .await
+        .unwrap();
+    super::attempt(&s, &attempt_run).await;
+    let conflicted = s.store.run(&run_id).await.unwrap();
+    let conflict_context = conflicted["backup"]["lastFailureContext"].clone();
+    assert_eq!(conflicted["backup"]["status"], "error");
+    assert_eq!(conflicted["backup"]["requestedRevision"], 8);
+    assert_eq!(conflicted["backup"]["acknowledgedRevision"], 8);
+    assert_eq!(conflict_context["category"], "capture_conflict");
+    assert_eq!(conflict_context["managerStatus"], 409);
+    assert_eq!(conflict_context["requestedRevision"], 7);
+    let events_after_conflict = {
+        let run_id = run_id.clone();
+        s.store
+            .read(move |db| Ok(db.events_fixture(&run_id, 0, 100)?.len()))
+            .await
+            .unwrap()
+    };
+    assert_eq!(events_after_conflict, events_after_failure);
+
+    s.store
+        .update_run_boundary(&run_id, json!({ "environmentState": null }))
+        .await
+        .unwrap();
+    wait_for_snapshot.store(true, Ordering::Relaxed);
+    super::attempt(&s, &attempt_run).await;
+    let pending = s.store.run(&run_id).await.unwrap();
+    assert_eq!(pending["backup"]["status"], "pending");
+    assert_eq!(pending["backup"]["requestedRevision"], 8);
+    assert_eq!(pending["backup"]["acknowledgedRevision"], 8);
+    assert!(pending["backup"]["error"].is_null());
+    assert_eq!(pending["backup"]["lastFailureContext"], conflict_context);
+    let events_after_pending = {
+        let run_id = run_id.clone();
+        s.store
+            .read(move |db| Ok(db.events_fixture(&run_id, 0, 100)?.len()))
+            .await
+            .unwrap()
+    };
+    assert_eq!(events_after_pending, events_after_failure);
+
+    wait_for_snapshot.store(false, Ordering::Relaxed);
+    fail_upload.store(false, Ordering::Relaxed);
+    super::attempt(&s, &attempt_run).await;
+    let recovered = s.store.run(&run_id).await.unwrap();
+    assert_eq!(recovered["backup"]["status"], "ready");
+    assert_eq!(recovered["backup"]["requestedRevision"], 8);
+    assert_eq!(recovered["backup"]["acknowledgedRevision"], 8);
+    assert!(recovered["backup"]["error"].is_null());
+    assert_eq!(recovered["backup"]["lastFailureContext"], conflict_context);
+
+    controller_task.abort();
+    provider_task.abort();
+}

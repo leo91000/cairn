@@ -1653,6 +1653,8 @@ pub async fn attempt(s: &Service, run: &Value) {
         return;
     }
 
+    let last_failure_context = failure_context(run, &error);
+
     // Nothing to save yet.
     if error.status != 409 && error.status != 412 {
         let body = format!(
@@ -1674,14 +1676,35 @@ pub async fn attempt(s: &Service, run: &Value) {
 
     // Publication may have committed before its controller acknowledgement failed.
     // Patch the current state transactionally, never overwrite it with the caller's old pointer.
+    // This records the historical latest failure. Success and 425 clear the active
+    // error but intentionally leave this context intact; only a later failure replaces it.
     let failure = json!({
         "status": BackupStatus::Error,
         "error": error.message,
-        "snapshotId": null
+        "snapshotId": null,
+        "lastFailureContext": last_failure_context
     });
     if let Err(error) = update_status(s, run_id, failure).await {
         tracing::warn!(error = %error, "failed to record synchronization failure");
     }
+}
+
+fn failure_context(run: &Value, error: &Error) -> Value {
+    let category = if error.status == 409 || error.status == 412 {
+        "capture_conflict"
+    } else {
+        "unknown"
+    };
+    let mut context = json!({
+        "observedAtMs": now(),
+        "phase": "capture",
+        "category": category,
+        "managerStatus": error.status
+    });
+    if let Some(revision) = run["backup"]["requestedRevision"].as_u64() {
+        context["requestedRevision"] = revision.into();
+    }
+    context
 }
 
 /// Durable, coalesced demand. The scheduler owns uploads, independently of the
