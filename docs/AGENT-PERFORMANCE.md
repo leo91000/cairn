@@ -361,6 +361,58 @@ existing bounded diagnostic recording path. Logs never include prompts, tool
 commands, arguments, outputs, paths, URLs, credentials, arbitrary item types or
 error text.
 
+## Slow SQLite transactions
+
+`operation=database_transaction` describes a completed `Store.transaction`
+whose measured time is at least 250 milliseconds. It separates the writer's
+`BEGIN IMMEDIATE` (`begin_us`), application closure (`body_us`) and
+`Transaction::commit` (`commit_us`). Each phase has a same-thread CPU duration
+and an explicit `*_cpu_available` flag; unavailable or unreached CPU samples
+are zero with a false flag. These bookends include small timing costs. Wall
+time can include filesystem waits, lock contention and scheduler preemption;
+the report alone does not identify which of them caused a pause.
+
+`total_us` excludes admission to the actor queue. `other_us` covers time outside
+the three measured phases, including change notification after a successful
+commit. The outcome is `committed`, `begin_error`, `body_error`, `commit_error`
+or `aborted` during unwinding. A body failure's implicit rollback cleanup remains
+in its body measurement; a failed commit's cleanup remains in its commit
+measurement. `committed` means the SQLite call succeeded, not that an abandoned
+caller received its result. Existing actor reports count abandoned replies.
+
+Only the bounded compile-time caller name, fixed labels and numeric timings are
+sent to the existing diagnostic worker. There is one report per slow completed
+transaction, no SQL, error message, captured value, private span context or
+connection on the worker. `diagnostic_queue_us` and the global
+`diagnostic_dropped_reports_total` expose delayed or dropped diagnostics.
+Worker admission remains nonblocking; a blocked output writer or panicking
+delivery callback cannot hold the transaction's result or the next SQLite job.
+There is no production flush, shutdown replay or delivery guarantee.
+
+These records do not describe transactions still running, startup migrations,
+direct `rusqlite::Transaction` calls outside `Store.transaction`, or implicit
+autocommits in `Store.write`. They change no transaction ordering, timeout,
+checkpoint, durability, stored value or change-notification policy.
+
+Measure the actual queue and no-op immediate-transaction path on Linux with:
+
+```sh
+CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 pnpm test:backend -p cairn-installation --lib store::performance::measurement::measure_transaction_cost_sampling_overhead -- --ignored --nocapture --test-threads=1
+```
+
+The fixture alternates four enabled/disabled pairs after warmup, with 20,000
+transactions per observation, in-memory SQLite and a sink subscriber. Queue,
+closure dispatch and actor teardown are included; initialization is excluded.
+The enabled/disabled comparison also includes existing caller-CPU observation.
+To attribute this change's incremental cost, compare the old and new source
+with the identical fixture, compiler flags and host conditions. Retain every
+observation and separate no-op overhead from real storage or production latency.
+
+Record exact reference/candidate identities, host conditions and every measured
+observation in the PR description. Keep raw evidence in temporary files or CI
+artifacts. Separate test-profile observer cost from release-profile overhead and
+production storage latency.
+
 ## Reading a slow run
 
 1. Find `run_id`, then the affected `attempt_id` and turn.

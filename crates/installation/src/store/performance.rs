@@ -5,11 +5,13 @@ use std::time::{Duration, Instant};
 mod cache;
 mod callers;
 mod cpu;
+mod transaction;
 mod wal;
 
 use cache::Cache;
 use callers::{Callers, Totals};
 pub(super) use cpu::CpuTime;
+pub(super) use transaction::TransactionTimings;
 use wal::Wal;
 
 #[cfg(test)]

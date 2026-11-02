@@ -35,6 +35,7 @@ const SHARED_V1: &str = "shared-v1";
 const DIRECT_PUBLICATIONS: usize = 16;
 
 mod direct_reader;
+mod direct_receipt;
 
 fn legacy_publication(run: &Value) -> bool {
     run["backup"]["id"].is_string() && run["backup"]["blockEnvelope"] != 3
@@ -910,18 +911,7 @@ impl Publication<'_> {
                     "Direct publication receipt does not match its plan.",
                 ));
             }
-            self.s
-                .store
-                .write(move |db| {
-                    for object in ids {
-                        db.0.execute(
-                            "UPDATE direct_storage_grants SET settled=1 WHERE object=?1",
-                            [object],
-                        )?;
-                    }
-                    Ok(())
-                })
-                .await?;
+            direct_receipt::settle(&self.s.store, ids).await?;
             uploaded += receipt.plaintext_bytes;
         }
         reader.close(self).await?;

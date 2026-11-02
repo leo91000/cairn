@@ -37,10 +37,18 @@ async fn sample(enabled: bool, jobs: usize, lane: &'static str) -> (u128, u128) 
     let actor = std::thread::spawn(move || {
         tracing::dispatcher::with_default(&dispatcher, || {
             let mut connection = Connection::open_in_memory().unwrap();
-            let mut metrics = Metrics::new(lane, 0, &connection);
+            let actor_lane = if lane == "transaction" { "write" } else { lane };
+            let mut metrics = Metrics::new(actor_lane, 0, &connection);
             ready.send(()).unwrap();
-            for _ in 0..jobs {
+            for index in 0..jobs {
                 let completed = receiver.blocking_recv().unwrap()(&mut connection);
+                if index == 0 {
+                    assert_eq!(
+                        completed.cpu.is_some(),
+                        enabled,
+                        "CPU sampling must match the selected diagnostic mode"
+                    );
+                }
                 metrics.record(&completed, &connection);
             }
         });
@@ -55,10 +63,11 @@ async fn sample(enabled: bool, jobs: usize, lane: &'static str) -> (u128, u128) 
     let cpu = process_cpu_micros();
     let started = Instant::now();
     for _ in 0..jobs {
-        let value = if lane == "write" {
-            store.write(|_| Ok(1)).await.unwrap()
-        } else {
-            store.read(|_| Ok(1)).await.unwrap()
+        let value = match lane {
+            "write" => store.write(|_| Ok(1)).await.unwrap(),
+            "read" => store.read(|_| Ok(1)).await.unwrap(),
+            "transaction" => store.transaction(|_| Ok(1)).await.unwrap(),
+            _ => panic!("Unknown measurement lane"),
         };
         assert_eq!(value, 1);
     }
@@ -79,11 +88,22 @@ async fn measure_reader_cost_sampling_overhead() {
     measure_lane("read").await;
 }
 
+#[tokio::test]
+#[ignore = "explicit transaction phase overhead measurement; run alone"]
+async fn measure_transaction_cost_sampling_overhead() {
+    measure_lane("transaction").await;
+}
+
 async fn measure_lane(lane: &'static str) {
     const JOBS: usize = 20_000;
     for enabled in [false, true] {
         sample(enabled, 1000, lane).await;
     }
+    let workload = if lane == "transaction" {
+        "actual Store queue and no-op immediate transaction, in-memory SQLite"
+    } else {
+        "actual Store queue and no-op closure, in-memory SQLite"
+    };
     for pair in 0..4 {
         let order = if pair % 2 == 0 {
             [false, true]
@@ -99,12 +119,13 @@ async fn measure_lane(lane: &'static str) {
                     "lane": lane,
                     "pair": pair,
                     "enabled": enabled,
+                    "cpuSamplingVerified": true,
                     "jobs": JOBS,
                     "elapsedMicros": elapsed,
                     "processCpuMicros": cpu,
                     "sqlite": rusqlite::version(),
                     "profile": "test profile selected by Cargo; record flags separately",
-                    "workload": "actual Store queue and no-op closure, in-memory SQLite",
+                    "workload": workload,
                     "timing": "initialization excluded; loop and actor teardown included",
                     "limits": "local observation, not application latency or production CPU",
                 })
