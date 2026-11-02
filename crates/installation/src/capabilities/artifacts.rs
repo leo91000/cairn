@@ -16,6 +16,8 @@ async fn recheck_read(
     credential: Option<&str>,
     run: String,
 ) -> Result<()> {
+    // External delegation coverage can change without a local revision change.
+    authority.recheck(s).await?;
     if let Some(credential) = credential {
         crate::relay::authorize_read_mcp(s, credential).await?;
     }
@@ -107,7 +109,17 @@ impl ArtifactOperation {
             }
             _ => None,
         };
-        let mut authority = Authority::new(s, context, self.scope, false).await?;
+        let authority = Authority::new(s, context, self.scope, false).await?;
+        self.invoke_admitted(s, input, authority, credential).await
+    }
+
+    async fn invoke_admitted(
+        &self,
+        s: &Service,
+        input: Value,
+        mut authority: Authority,
+        credential: Option<String>,
+    ) -> Result<Value> {
         if let Some(credential) = &credential {
             crate::relay::authorize_read_mcp(s, credential).await?;
         }
@@ -214,5 +226,70 @@ impl ArtifactOperation {
                 .await
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugin_grant_fixture::Fixture;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn admitted_artifact_reads_recheck_external_delegation_before_returning_private_data() {
+        let (f, bearer) = Fixture::delegated_manager().await;
+        let id = uuid::Uuid::new_v4().to_string();
+        let bytes = b"private delegated artifact";
+        let artifact = crate::common::deliverable(&f.run, &id, &json!({ "size": bytes.len() }));
+        f.s.store
+            .transaction(move |db| db.insert_artifact(&artifact))
+            .await
+            .unwrap();
+        let directory = f.s.config.data_dir.join("artifacts");
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+        tokio::fs::write(directory.join(&id), bytes).await.unwrap();
+
+        let mut exposed = Vec::new();
+        for name in ["list_run_artifacts", "read_run_artifact"] {
+            f.moved_parent.store(false, Ordering::SeqCst);
+            let operation = artifact_operation(name).unwrap();
+            let input = if name == "list_run_artifacts" {
+                json!({ "runId": f.run })
+            } else {
+                json!({ "runId": f.run, "artifactId": id })
+            };
+            let context = || ResumeContext::Installation(bearer.clone());
+            let valid = operation
+                .invoke(&f.s, input.clone(), context())
+                .await
+                .unwrap();
+            if name == "list_run_artifacts" {
+                assert_eq!(valid["artifacts"][0]["id"], id);
+            } else {
+                assert_eq!(
+                    STANDARD.decode(valid["data"].as_str().unwrap()).unwrap(),
+                    bytes
+                );
+            }
+
+            let admitted = Authority::new(&f.s, context(), "read", false)
+                .await
+                .unwrap();
+            // External ancestry changes after admission. All SQLite grants and
+            // revisions remain valid, so the local guard alone still succeeds.
+            f.moved_parent.store(true, Ordering::SeqCst);
+            let local = admitted.clone();
+            f.s.store.read(move |db| local.authorize(db)).await.unwrap();
+            let result = operation.invoke_admitted(&f.s, input, admitted, None).await;
+            match result {
+                Err(error) => assert_eq!(error.status, 403, "{name}"),
+                Ok(_) => exposed.push(name),
+            }
+        }
+        f.s.shutdown.cancel();
+        assert!(
+            exposed.is_empty(),
+            "private metadata or bytes escaped stale delegated authority: {exposed:?}"
+        );
     }
 }
