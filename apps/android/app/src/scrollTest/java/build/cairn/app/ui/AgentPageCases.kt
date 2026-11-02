@@ -25,6 +25,7 @@ import build.cairn.contracts.PluginResourceType
 import build.cairn.contracts.PluginRunCredentials
 import build.cairn.contracts.PluginTool
 import build.cairn.contracts.ResolvePluginResourceOutput
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -305,12 +306,15 @@ abstract class AgentPageCases {
         val grantSaves: CopyOnWriteArrayList<JsonObject> = CopyOnWriteArrayList(),
         /** The next read of an agent's plugin grants fails. */
         val failGrantReads: AtomicBoolean = AtomicBoolean(false),
+        val pluginCatalog: AtomicReference<PluginCatalog>,
+        val grantState: ConcurrentHashMap<String, build.cairn.contracts.AgentPluginGrants>,
     )
 
     private fun fixture(): Fixture {
         val saved = CopyOnWriteArrayList<Pair<String, JsonObject>>()
         val grantSaves = CopyOnWriteArrayList<JsonObject>()
-        val grantState = mutableMapOf<String, build.cairn.contracts.AgentPluginGrants>()
+        val grantState = ConcurrentHashMap<String, build.cairn.contracts.AgentPluginGrants>()
+        val pluginCatalog = AtomicReference(catalog)
         val agents = AtomicReference(listOf(main, release))
         val conflict = AtomicBoolean(false)
         val loseCreation = AtomicBoolean(false)
@@ -611,7 +615,7 @@ abstract class AgentPageCases {
                             path == "/skills" ->
                                 """[{"name":"review","scope":"global"},{"name":"lint","scope":"2450c72e-6174-56da-b0fc-b06868e8e8e5"}]"""
                             path == "/nodes" -> nodes
-                            path == "/plugins" -> wireJson.encodeToString(catalog)
+                            path == "/plugins" -> wireJson.encodeToString(pluginCatalog.get())
                             path == "/api/installations" -> beaconInstallationsFixture()
                             path == "/api/account/session" -> beaconAccountFixture("fixture")
                             path.endsWith("/models") -> """{"models":[]}"""
@@ -654,6 +658,8 @@ abstract class AgentPageCases {
             mcps,
             grantSaves,
             failGrantReads,
+            pluginCatalog,
+            grantState,
         )
     }
 
@@ -1368,6 +1374,116 @@ abstract class AgentPageCases {
                 "A retry must not overwrite the newer grant state.",
                 1,
                 fixture.grantSaves.size,
+            )
+        }
+    }
+
+    @Test
+    fun conflictReloadUsesFreshPackageMappingAndKeepsDraftRetryableWhenCatalogFails() {
+        val support = "66666666-6666-4666-8666-666666666666"
+        val automation = "77777777-7777-4777-8777-777777777777"
+        val review = "88888888-8888-4888-8888-888888888888"
+        journey(
+            release.id,
+            prepare = { fixture ->
+                fixture.grantState[release.id] =
+                    build.cairn.contracts.AgentPluginGrants(
+                        release.id,
+                        listOf(
+                            build.cairn.contracts.PluginInstanceGrant(
+                                build.cairn.contracts.PluginGrantAccess.A(),
+                                support,
+                            )
+                        ),
+                        release.revision,
+                        listOf(support),
+                    )
+            },
+        ) { fixture ->
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Support : full")
+            compose
+                .onNodeWithContentDescription("Accès à Automation : full")
+                .performScrollTo()
+                .performClick()
+            compose
+                .onNodeWithContentDescription("Fournir les identifiants depuis Automation")
+                .performScrollTo()
+                .performClick()
+
+            val reviewConnection =
+                PluginConnection(
+                    id = review,
+                    pluginId = "grant-ui",
+                    name = "Review",
+                    settings = JsonObject(emptyMap()),
+                    status = PluginStatus(state = "ready"),
+                    usage = PluginUsage(),
+                    enabled = true,
+                )
+            fixture.pluginCatalog.set(
+                fixture.pluginCatalog
+                    .get()
+                    .copy(connections = fixture.pluginCatalog.get().connections + reviewConnection)
+            )
+            fixture.grantState[release.id] =
+                build.cairn.contracts.AgentPluginGrants(
+                    release.id,
+                    listOf(
+                        build.cairn.contracts.PluginInstanceGrant(
+                            build.cairn.contracts.PluginGrantAccess.A(),
+                            support,
+                        ),
+                        build.cairn.contracts.PluginInstanceGrant(
+                            build.cairn.contracts.PluginGrantAccess.A(),
+                            review,
+                        ),
+                    ),
+                    "r2",
+                    listOf(review),
+                )
+            fixture.agents.set(
+                fixture.agents.get().map {
+                    if (it.id == release.id)
+                        it.copy(plugins = listOf(support, review), revision = "r2")
+                    else it
+                }
+            )
+            fixture.conflict.set(true)
+
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            waitForText("Cet agent a été modifié ailleurs", substring = true)
+
+            fixture.failPlugins.set(true)
+            compose.onNodeWithText("Recharger").performClick()
+            waitForText("Plugins indisponibles", substring = true)
+            compose.onNodeWithText("Recharger").assertIsEnabled()
+            compose
+                .onNodeWithContentDescription("Fournir les identifiants depuis Automation")
+                .assertIsOn()
+
+            fixture.failPlugins.set(false)
+            compose.onNodeWithText("Recharger").performClick()
+            compose.waitUntil(15000) {
+                compose.onAllNodesWithText("Recharger").fetchSemanticsNodes().isEmpty()
+            }
+            waitForDescription("Accès à Review : full")
+            compose
+                .onNodeWithContentDescription("Fournir les identifiants depuis Automation")
+                .assertIsOn()
+            compose
+                .onNodeWithContentDescription("Fournir les identifiants depuis Review")
+                .assertIsOff()
+
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            compose.waitUntil(15000) { fixture.grantSaves.isNotEmpty() }
+            assertEquals(
+                listOf(automation),
+                fixture.grantSaves.last()["runCredentialInstances"]!!.jsonArray.map {
+                    it.jsonPrimitive.content
+                },
             )
         }
     }

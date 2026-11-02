@@ -736,11 +736,17 @@ async function commit(reapprove: string[]) {
 // the draft, every other value takes the newer one, and the newer revision becomes the base.
 async function reloadAgent() {
   const target = isNew.value ? creation.savedId.value : id.value
+  const keepGrantEdits = grantsChanged.value
   busy.value = true
   try {
     // Nodes, plugins and MCP connections may have changed too, as the agent did.
     // The workspace refresh brings the agents too; they are only fetched alone if it fails.
     const [refreshed, nodeList, plugins] = await Promise.all([refresh().then(() => true, () => false), loadNodes(), loadCatalog()])
+    // Supplier merging needs the current package mapping. If it is unavailable, keep the local
+    // draft intact and let the owner retry instead of treating a new instance as a new package.
+    if (keepGrantEdits && !plugins)
+      throw new Error(catalogError.value || 'Plugins could not be loaded. Retry the reload.')
+
     const agents = refreshed ? state.agents : await listAgents(api, {}).then(output => output.agents)
     if (nodeList)
       nodes.value = nodeList
@@ -756,7 +762,6 @@ async function reloadAgent() {
     const mine = draft.value
     const baseGrants = structuredClone(JSON.parse(JSON.stringify(savedGrants.value)))
     const mineGrants = structuredClone(JSON.parse(JSON.stringify(grants.value)))
-    const keepGrantEdits = grantsChanged.value
     const grantsReloaded = await loadGrants(found)
     if (!grantsReloaded)
       return
@@ -768,7 +773,7 @@ async function reloadAgent() {
         baseGrants,
         mineGrants,
         savedGrants.value,
-        new Map(catalog.value.connections.map(connection => [connection.id, connection.pluginId])),
+        new Map(plugins!.connections.map(connection => [connection.id, connection.pluginId])),
       )
       grants.value = mergedGrants
     }

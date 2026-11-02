@@ -431,8 +431,10 @@ private fun AgentPage(
         }
     }
     fun reload() {
+        val keepGrantEdits = grantChanges
         saving = true
         scope.launch {
+            var attemptedFreshGrantRead = false
             try {
                 val base = baseline
                 val theirs =
@@ -445,6 +447,11 @@ private fun AgentPage(
                 val fresh = vm.state.value
                 val freshMcps =
                     fresh.mcps.map { it.id }.toSet().takeIf { refreshed && fresh.isOwner }
+                // Supplier merging depends on the current instance-to-package mapping. Do not
+                // guess when a concurrently added instance is missing from the stale catalog.
+                val freshCatalog =
+                    if (keepGrantEdits) vm.api.get<PluginCatalog>("/plugins") else null
+                attemptedFreshGrantRead = true
                 val freshGrants = vm.api.getAgentPluginGrants(AgentInput(agentId))
                 if (freshGrants.revision != theirs.revision)
                     throw ApiException(409, "L’agent a changé pendant le rechargement. Réessayez.")
@@ -456,13 +463,10 @@ private fun AgentPage(
                 val localGrants = grants
                 val refreshedGrantsJson =
                     wireJson.encodeToString(PluginGrantDraft.serializer(), freshGrants.draft())
-                baseline = theirs
-                draft = rebasedDraft
-                savedGrantsJson = refreshedGrantsJson
-                grantsJson =
+                val rebasedGrantsJson =
                     if (keepGrantEdits) {
                         val packageByInstance =
-                            catalog?.connections.orEmpty().associate { it.id to it.pluginId }
+                            freshCatalog!!.connections.associate { it.id to it.pluginId }
                         wireJson.encodeToString(
                             PluginGrantDraft.serializer(),
                             mergePluginGrantDrafts(
@@ -475,20 +479,25 @@ private fun AgentPage(
                     } else {
                         refreshedGrantsJson
                     }
+                baseline = theirs
+                draft = rebasedDraft
+                savedGrantsJson = refreshedGrantsJson
+                grantsJson = rebasedGrantsJson
                 grantsLoaded = true
                 grantsError = null
+                if (freshCatalog != null) catalog = freshCatalog
                 // Machines and plugin instances may have changed elsewhere too; until read again
                 // they are unknown.
                 nodesAttempt++
-                catalogAttempt++
+                if (!keepGrantEdits) catalogAttempt++
                 saveError = null
                 conflict = false
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 // A failed refresh leaves both the draft's base and the current grant state
-                // unknown.
+                // unknown. A catalog failure leaves the local grant draft intact and retryable.
                 conflict = true
-                grantsLoaded = false
+                if (attemptedFreshGrantRead) grantsLoaded = false
                 grantsError = e.message
                 errorSection = null
                 saveError = e.message ?: "Impossible de confirmer les droits actuels. Réessayez."

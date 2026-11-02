@@ -88,28 +88,50 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   })
   const first = (await instance('Support')).instance.id
   const second = (await instance('Automation')).instance.id
-  const remote = (await instance('Review')).instance.id
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Resource reviewer' })
+  await workspace.api(`/api/agents/${agent.id}/plugin-grants`, 'PUT', {
+    agentId: agent.id,
+    revision: agent.revision,
+    grants: [{ instanceId: first, access: { type: 'full' } }],
+    runCredentialInstances: [first],
+  })
   await page.addInitScript((agentId) => {
     Object.defineProperty(window, 'RTCPeerConnection', { configurable: true, value: undefined })
 
     type GrantReadTestWindow = Window & {
       __failNextAgentGrantRead: () => void
       __agentGrantReadFailed: boolean
+      __failNextPluginCatalogRead: () => void
+      __pluginCatalogReadFailed: boolean
     }
 
     const testWindow = window as unknown as GrantReadTestWindow
     let failNextRead = false
+    let failNextCatalogRead = false
     const originalFetch = window.fetch.bind(window)
     testWindow.__agentGrantReadFailed = false
+    testWindow.__pluginCatalogReadFailed = false
     testWindow.__failNextAgentGrantRead = () => {
       failNextRead = true
+    }
+
+    testWindow.__failNextPluginCatalogRead = () => {
+      failNextCatalogRead = true
     }
 
     window.fetch = async (input, init) => {
       const requestUrl = input instanceof Request ? input.url : String(input)
       const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
       const path = new URL(requestUrl, window.location.href).pathname
+      if (failNextCatalogRead && method.toUpperCase() === 'GET' && path.endsWith('/api/plugins')) {
+        failNextCatalogRead = false
+        testWindow.__pluginCatalogReadFailed = true
+        return new Response(JSON.stringify({ error: 'Plugins could not be loaded' }), {
+          status: 503,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+
       if (failNextRead && method.toUpperCase() === 'GET' && path.endsWith(`/api/agents/${agentId}/plugin-grants`)) {
         failNextRead = false
         testWindow.__agentGrantReadFailed = true
@@ -152,7 +174,7 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   await page.getByRole('group', { name: 'Resource restrictions' }).first().scrollIntoViewIfNeeded()
   await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-resource-picker.png'), fullPage: true })
   const original = await workspace.api(`/api/agents/${agent.id}/plugin-grants`)
-  expect(original.grants).toEqual([])
+  expect(original.grants).toEqual([{ instanceId: first, access: { type: 'full' } }])
   await page.setViewportSize({ width: 320, height: 844 })
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
@@ -161,23 +183,44 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   await expect(review).toContainText('Run credential suppliers: Automation')
   await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-review.png'), fullPage: true })
   await review.getByRole('button', { name: 'Back to editing' }).click()
+  // This instance is created after the page's initial catalog read, so only a fresh catalog can
+  // identify it as another instance of the same package during the conflict rebase.
+  const remote = (await instance('Review')).instance.id
   await workspace.api(`/api/agents/${agent.id}/plugin-grants`, 'PUT', {
     agentId: agent.id,
     revision: original.revision,
-    grants: [{ instanceId: remote, access: { type: 'selected', contributions: [{ kind: 'tool', name: 'grant_ui_read', resources: [] }] } }],
-    runCredentialInstances: [],
+    grants: [
+      { instanceId: first, access: { type: 'full' } },
+      { instanceId: remote, access: { type: 'full' } },
+    ],
+    runCredentialInstances: [remote],
   })
   const concurrentGrant = await workspace.api(`/api/agents/${agent.id}/plugin-grants`)
-  expect(concurrentGrant.grants).toHaveLength(1)
-  expect(concurrentGrant.grants[0]).toMatchObject({ instanceId: remote })
+  expect(concurrentGrant.grants).toHaveLength(2)
+  expect(concurrentGrant.grants).toContainEqual(expect.objectContaining({ instanceId: remote }))
   // A concurrent profile edit shares the grant revision. Reload preserves this grant draft.
   await workspace.api(`/api/agents/${agent.id}`, 'PUT', { description: 'Changed elsewhere' })
   const afterProfileEdit = await workspace.api(`/api/agents/${agent.id}/plugin-grants`)
   expect(afterProfileEdit.grants).toContainEqual(concurrentGrant.grants[0])
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
+  await page.evaluate(() => {
+    const testWindow = window as unknown as Window & { __failNextPluginCatalogRead: () => void }
+    testWindow.__failNextPluginCatalogRead()
+  })
+  // Keep both the conflict and local supplier draft retryable while the current package mapping
+  // is unavailable.
+  await page.getByRole('button', { name: 'Reload', exact: true }).click()
+  await expect.poll(() => page.evaluate(() => {
+    const testWindow = window as unknown as Window & { __pluginCatalogReadFailed: boolean }
+    return testWindow.__pluginCatalogReadFailed
+  })).toBe(true)
+  await expect(page.getByRole('button', { name: 'Reload', exact: true })).toBeEnabled()
+  await expect(page.getByLabel('Supply run credentials from Automation', { exact: true })).toBeChecked()
   await page.getByRole('button', { name: 'Reload', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Reload', exact: true })).toHaveCount(0)
-  await expect(page.getByRole('combobox', { name: 'Access to Review' })).toHaveValue('selected')
+  await expect(page.getByRole('combobox', { name: 'Access to Review' })).toHaveValue('full')
+  await expect(page.getByLabel('Supply run credentials from Automation', { exact: true })).toBeChecked()
+  await expect(page.getByLabel('Supply run credentials from Review', { exact: true })).not.toBeChecked()
   await saveAgent(page, true)
   const saved = await workspace.api(`/api/agents/${agent.id}/plugin-grants`)
   expect(saved.grants).toEqual(expect.arrayContaining([
@@ -187,7 +230,7 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   expect(saved.runCredentialInstances).toEqual([second])
   expect(saved.grants).toContainEqual({
     instanceId: remote,
-    access: { type: 'selected', contributions: [{ kind: 'tool', name: 'grant_ui_read', resources: [] }] },
+    access: { type: 'full' },
   })
   await page.reload()
   await expect(support).toHaveValue('selected')

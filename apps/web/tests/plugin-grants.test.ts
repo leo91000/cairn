@@ -113,6 +113,42 @@ it('keeps credential suppliers for unknown instances distinct while rebasing', (
   expect(merged.runCredentialInstances).toEqual(['automation', 'support'])
 })
 
+it('rebases same-package suppliers to the local choice when a new instance is in the catalog', () => {
+  const base: GrantDraft = {
+    grants: [
+      { instanceId: 'support', access: { type: 'full' } },
+    ],
+    runCredentialInstances: ['support'],
+  }
+  const mine: GrantDraft = {
+    grants: [
+      { instanceId: 'support', access: { type: 'full' } },
+      { instanceId: 'automation', access: { type: 'full' } },
+    ],
+    runCredentialInstances: ['automation'],
+  }
+  const theirs: GrantDraft = {
+    grants: [
+      { instanceId: 'support', access: { type: 'full' } },
+      { instanceId: 'review', access: { type: 'full' } },
+    ],
+    runCredentialInstances: ['review'],
+  }
+
+  const merged = mergeGrantDrafts(
+    base,
+    mine,
+    theirs,
+    new Map([
+      ['support', 'grant-ui'],
+      ['automation', 'grant-ui'],
+      ['review', 'grant-ui'],
+    ]),
+  )
+
+  expect(merged.runCredentialInstances).toEqual(['automation'])
+})
+
 it('drops a locally selected supplier when a concurrent edit revokes its grant', () => {
   const base: GrantDraft = {
     grants: [{ instanceId: 'automation', access: { type: 'full' } }],

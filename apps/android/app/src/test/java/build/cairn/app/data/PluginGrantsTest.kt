@@ -181,6 +181,48 @@ class PluginGrantsTest {
     }
 
     @Test
+    fun rebasingKeepsOneSupplierWhenConcurrentChangesChooseDifferentInstancesOfTheSamePackage() {
+        val review = "44444444-4444-4444-8444-444444444444"
+        val base =
+            PluginGrantDraft(
+                grants = listOf(PluginInstanceGrant(PluginGrantAccess.A(), support)),
+                runCredentialInstances = listOf(support),
+            )
+        val mine =
+            PluginGrantDraft(
+                grants =
+                    listOf(
+                        PluginInstanceGrant(PluginGrantAccess.A(), support),
+                        PluginInstanceGrant(PluginGrantAccess.A(), automation),
+                    ),
+                runCredentialInstances = listOf(automation),
+            )
+        val theirs =
+            PluginGrantDraft(
+                grants =
+                    listOf(
+                        PluginInstanceGrant(PluginGrantAccess.A(), support),
+                        PluginInstanceGrant(PluginGrantAccess.A(), review),
+                    ),
+                runCredentialInstances = listOf(review),
+            )
+
+        val merged =
+            mergePluginGrantDrafts(
+                base,
+                mine,
+                theirs,
+                mapOf(
+                    support to "grant-ui",
+                    automation to "grant-ui",
+                    review to "grant-ui",
+                ),
+            )
+
+        assertEquals(listOf(automation), merged.runCredentialInstances)
+    }
+
+    @Test
     fun rebasingDropsSupplierWhenConcurrentEditRevokesItsGrant() {
         val base =
             PluginGrantDraft(
