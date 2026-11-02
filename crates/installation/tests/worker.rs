@@ -5828,6 +5828,7 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
             run["status"] == RunStatus::Cancelled && run["resumeAvailable"] == true
         })
         .await;
+    fixture.until_worker_quiescent().await;
     let checkpoint_before = fixture.checkpoint(&run_id).await;
     fixture.stop(false).await;
     s.store
@@ -6457,6 +6458,7 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
             run["status"] == RunStatus::Cancelled && run["resumeAvailable"] == true
         })
         .await;
+    fixture.until_worker_quiescent().await;
     let checkpoint_before = fixture.checkpoint(&run_id).await;
     assert!(checkpoint_before["prepared"].is_object());
     let checkpoint_generation_before = checkpoint_before.get("generation").cloned();
@@ -6823,6 +6825,7 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
             run["status"] == RunStatus::Cancelled && run["resumeAvailable"] == true
         })
         .await;
+    fixture.until_worker_quiescent().await;
     assert_eq!(
         later_turn_stopped["chatExecution"]["messageId"],
         later_turn_id
@@ -7113,6 +7116,7 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
             run["status"] == RunStatus::Cancelled && run["resumeAvailable"] == true
         })
         .await;
+    fixture.until_worker_quiescent().await;
     assert_eq!(
         default_model_before["sessionId"],
         default_model_running["sessionId"]
@@ -7246,6 +7250,7 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
             run["status"] == RunStatus::Cancelled && run["resumeAvailable"] == true
         })
         .await;
+    fixture.until_worker_quiescent().await;
     let preserved_checkpoint_before = fixture.checkpoint(&preserved_model_run_id).await;
     let preserved_generation_before = preserved_checkpoint_before.get("generation").cloned();
     let preserved_plan_count_before_resume = controller.plans.lock().await.len();
@@ -7391,6 +7396,7 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
             run["status"] == RunStatus::Cancelled && run["resumeAvailable"] == true
         })
         .await;
+    fixture.until_worker_quiescent().await;
     let alias_checkpoint_before = fixture.checkpoint(&alias_run_id).await;
     let alias_generation_before = alias_checkpoint_before.get("generation").cloned();
 
