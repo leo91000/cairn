@@ -14,6 +14,11 @@ the saved backend; ordinary node moves keep these checks.
 
 ## Ownership and shutdown
 
+The inherited-mount mechanism below is superseded by
+[ADR-0077](0077-native-close-with-independent-backend-namespaces.md): backends
+now enter an immutable clean startup namespace, allowing post-execution physical
+close outside the global gate while retaining conversation ownership.
+
 The native controller shares the system manager's mount namespace so systemd can
 resolve stable bind sources under Cairn's root-private state directory. A source
 through `/proc/<controller>/root` is insufficient: systemd canonicalizes it and

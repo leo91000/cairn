@@ -47,15 +47,15 @@ pub(crate) const SUSPENDED: &str =
 const DENIED: &str =
     "You don't have access to this agent. Ask the installation owner to give you access.";
 
-/// Version 18 to 19. Existing memberships keep the existing agents.
+/// Version 24 to 25. Existing memberships keep the existing agents.
 pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Recheck under the write lock: another startup may have completed the upgrade.
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == 19 {
+    if version == 25 {
         return Ok(());
     }
-    if version != 18 {
+    if version != 24 {
         return Err(Error::bad(
             "Unexpected installation database version during upgrade.",
         ));
@@ -67,7 +67,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Db(&tx).set(ROLLOUT, &json!({ "agentIds": agents }), None)?;
-    tx.pragma_update(None, "user_version", 19)?;
+    tx.pragma_update(None, "user_version", 25)?;
     tx.commit()?;
     Ok(())
 }
@@ -713,7 +713,7 @@ mod tests {
                 "CREATE TABLE agents(id TEXT PRIMARY KEY);
              INSERT INTO agents VALUES('existing');
              CREATE TABLE kv(key TEXT PRIMARY KEY,data TEXT NOT NULL,expires INTEGER);
-             PRAGMA user_version=18;",
+             PRAGMA user_version=24;",
             )
             .unwrap();
         upgrade(&mut connection).unwrap();

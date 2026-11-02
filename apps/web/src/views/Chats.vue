@@ -6,9 +6,11 @@ import type {
   ChatDetail,
   ChatMessage,
 } from '../../../../packages/contracts/chats'
+import type { ResumeExecutionSelection } from '../../../../packages/contracts/generated/typescript/ResumeExecutionSelection'
 import type { DraftState } from '../attachments'
 import type { LiveWait } from '../chat-wait'
 import type { CachedHistory } from '../history-cache'
+import type { ResumeReasoningIntent } from '../speeds'
 import {
   computed,
   inject,
@@ -28,11 +30,11 @@ import { deleteChatMessage } from '../../../../packages/contracts/generated/dele
 import { editChatMessage } from '../../../../packages/contracts/generated/editChatMessage'
 import { restartChatSession } from '../../../../packages/contracts/generated/restartChatSession'
 import { restoreChat } from '../../../../packages/contracts/generated/restoreChat'
-import { resumeRun } from '../../../../packages/contracts/generated/resume-run'
+import { resumeChat } from '../../../../packages/contracts/generated/resumeChat'
 import { sendChatMessage } from '../../../../packages/contracts/generated/sendChatMessage'
 import { setChatPaused } from '../../../../packages/contracts/generated/setChatPaused'
 import { stopChat } from '../../../../packages/contracts/generated/stopChat'
-import { failureReason, sameReason, stopEcho } from '../activity'
+import { sameReason } from '../activity'
 import {
   canDirectChat,
   canUseAgent,
@@ -54,7 +56,7 @@ import {
 } from '../attachments'
 import { chatDelivery, chatWaitNotice, scheduledWakeup } from '../chat-delivery'
 import { chatListCarried, chatList as chats, publishChats } from '../chat-list'
-import { chatQuota, isQuotaMessage, quotaHiddenEvents } from '../chat-quota'
+import { chatQuota, isQuotaMessage } from '../chat-quota'
 import { liveWakeup, waitStatus } from '../chat-wait'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import AgentAvatar from '../components/AgentAvatar.vue'
@@ -117,11 +119,82 @@ import { useRetryState } from '../run-retry'
 import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
 import { backgroundWait } from '../signal'
 import { chatSkills } from '../skill-mentions'
+import {
+  needsResumeSelection,
+  pickerAppliedSpeed,
+
+  resumeSelectionReasoning,
+  resumeSelectionSpeed,
+} from '../speeds'
 import { delegatedChatsKey, openSubagentKey, subagentState } from '../subagents'
 import { iconButton } from '../ui'
 import { useLiveRun } from '../use-live-run'
 import { workspaceActionsKey } from '../workspace-actions'
 import { chatPath } from '../workspace-links'
+
+type ResumeDiagnosticStage
+  = | 'handler-entered'
+    | 'guard-no-detail'
+    | 'guard-busy'
+    | 'run-state'
+    | 'selection-start'
+    | 'catalog-state'
+    | 'selection-ready'
+    | 'resume-attempt'
+    | 'resume-returned'
+    | 'pause-attempt'
+    | 'pause-returned'
+    | 'caught'
+
+type ResumeDiagnosticRunStatus = 'missing' | 'other' | 'queued' | 'running' | 'failed' | 'interrupted' | 'cancelled' | 'succeeded' | 'idle'
+
+interface ResumeDiagnosticRecord {
+  stage: ResumeDiagnosticStage
+  runStatus?: ResumeDiagnosticRunStatus
+  resumeAvailable?: boolean
+  provider?: Provider | 'other'
+  catalogPresent?: boolean
+}
+
+type ResumeDiagnosticWindow = Window & {
+  __cairnTestResumeDiagnostic?: (record: ResumeDiagnosticRecord) => void
+}
+
+const resumeDiagnosticEnabled = import.meta.env.VITE_CAIRN_TEST_RESUME_DIAGNOSTICS === 'true'
+let resumeDiagnosticCount = 0
+
+function reportResumeDiagnostic(record: ResumeDiagnosticRecord) {
+  if (!resumeDiagnosticEnabled || resumeDiagnosticCount >= 16)
+    return
+  resumeDiagnosticCount++
+  try {
+    (window as ResumeDiagnosticWindow).__cairnTestResumeDiagnostic?.(record)
+  }
+  catch {
+    // The optional test probe must never affect the resume action.
+  }
+}
+
+function resumeDiagnosticRunStatus(status?: string): ResumeDiagnosticRunStatus {
+  switch (status) {
+    case 'queued':
+    case 'running':
+    case 'failed':
+    case 'interrupted':
+    case 'cancelled':
+    case 'succeeded':
+    case 'idle':
+      return status
+    default:
+      return status ? 'other' : 'missing'
+  }
+}
+
+function resumeDiagnosticProvider(provider: string): Provider | 'other' {
+  if (provider === 'codex' || provider === 'claude' || provider === 'opencode')
+    return provider
+  return 'other'
+}
 
 const router = useRouter()
 const route = useRoute()
@@ -178,12 +251,41 @@ const live = useLiveRun(() => streamPath.value, {
 // so the Fil keeps working even when the conversation cannot.
 watch(live.carriesList, value => chatListCarried.value = value, { immediate: true, flush: 'sync' })
 onBeforeUnmount(() => chatListCarried.value = false)
-const { events, connectionNotice, catchingUp } = live
+const {
+  events,
+  timeline,
+  connectionNotice,
+  catchingUp,
+} = live
 const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])
 const draft = ref('')
 const model = ref('')
 const reasoning = ref('')
 const speed = ref('')
+const resumeReasoningIntent = ref<ResumeReasoningIntent>({ kind: 'untouched' })
+const resumeReasoningContext = computed(() => {
+  const chat = detail.value
+  const run = chat?.run
+  const agent = run?.snapshot.agent
+  return JSON.stringify([
+    chat?.id ?? '',
+    run?.id ?? '',
+    run?.chatExecution?.messageId ?? '',
+    agent?.id ?? '',
+    agent?.provider ?? '',
+    agent?.model ?? '',
+    agent?.reasoning ?? '',
+    agent?.speed ?? '',
+  ])
+})
+watch(resumeReasoningContext, () => {
+  resumeReasoningIntent.value = { kind: 'untouched' }
+}, { flush: 'sync' })
+
+function setResumeReasoningIntent(intent: ResumeReasoningIntent) {
+  resumeReasoningIntent.value = intent
+}
+
 // Names queued messages' speeds; the composer's picker keeps this catalog current.
 const codexModels = computed(() => modelCatalogs.codex.catalog.models)
 const provider = ref<'' | Provider>('')
@@ -259,7 +361,7 @@ function switcherAnchor() {
 const readOnly = computed(() => !!detail.value && !canDirectChat(state.usableAgents, detail.value, chats.value))
 const error = ref('')
 const dismissedError = ref(false)
-const quota = computed(() => chatQuota(detail.value?.run, events.value))
+const quota = computed(() => chatQuota(detail.value?.run, timeline.value))
 const visibleError = computed(() => {
   if (error.value)
     return error.value
@@ -276,9 +378,8 @@ const errorShown = computed(() => {
   const reason = run?.status === 'failed' ? run.error : undefined
   if (error.value || detail.value?.error || !reason)
     return false
-  // Quota bookkeeping hides some failures from the conversation: they show nothing.
-  const hidden = quotaHiddenEvents(events.value)
-  return events.value.some(event => event.runId === run?.id && !hidden.has(`${event.runId}:${event.id}`) && sameReason(failureReason(event) ?? '', reason) && !stopEcho(event))
+  // The server hides usage-limit bookkeeping and the adapter's stop echoes: they show nothing.
+  return timeline.value.some(card => card.runId === run?.id && card.content.kind === 'notice' && card.content.notice.code === 'failure' && card.content.notice.prominent && sameReason(card.content.notice.detail ?? '', reason))
 })
 watch(() => [visibleError.value, detail.value?.id, detail.value?.run?.finishedAt], () => {
   dismissedError.value = false
@@ -430,7 +531,7 @@ const liveWait = computed<LiveWait | undefined>(() => detail.value
       busy: busy.value,
     }
   : undefined)
-const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(events.value)?.tasks.length ?? 0 : 0)
+const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(timeline.value)?.tasks.length ?? 0 : 0)
 const chatStatus = computed(() => {
   if (quota.value && !detail.value?.paused)
     return 'Waiting for quota'
@@ -458,11 +559,11 @@ const chatStatus = computed(() => {
   return 'Ready'
 })
 const outgoing = ref<ChatMessage | null>(null)
-const delivery = computed(() => chatDelivery(detail.value, events.value, outgoing.value))
+const delivery = computed(() => chatDelivery(detail.value, timeline.value, outgoing.value))
 const pending = computed(() => delivery.value.queued)
 const responding = computed(() => active.value || delivery.value.sending.length > 0)
-watch(events, (items) => {
-  if (outgoing.value && items.some(event => event.type === 'chat.user' && event.payload?.messageId === outgoing.value?.id))
+watch(timeline, (cards) => {
+  if (outgoing.value && cards.some(card => card.content.kind === 'userMessage' && card.content.messageId === outgoing.value?.id))
     outgoing.value = null
 })
 const selectedAgent = computed(() => state.agents.find(agent => agent.id === (detail.value?.agentId || agentId.value)))
@@ -482,6 +583,7 @@ const currentProvider = computed(() => detail.value?.run?.snapshot.agent.provide
 const chosenProvider = computed({
   get: () => provider.value || currentProvider.value,
   set: (value: Provider) => {
+    resumeReasoningIntent.value = { kind: 'untouched' }
     provider.value = value
     model.value = ''
     reasoning.value = ''
@@ -569,6 +671,7 @@ function newConversation() {
   provider.value = ''
   model.value = ''
   reasoning.value = ''
+  resumeReasoningIntent.value = { kind: 'untouched' }
   speed.value = ''
   agentId.value = defaultAgent(state.usableAgents, state.agents)
   projectId.value = ''
@@ -720,17 +823,97 @@ async function action(name: 'pause' | 'stop' | 'restore' | 'new-session' | 'comp
 }
 
 async function resumeQuota() {
+  reportResumeDiagnostic({ stage: 'handler-entered' })
   const chat = detail.value
-  if (!chat || busy.value)
+  if (!chat) {
+    reportResumeDiagnostic({ stage: 'guard-no-detail' })
     return
+  }
+
+  if (busy.value) {
+    reportResumeDiagnostic({ stage: 'guard-busy' })
+    return
+  }
+
   busy.value = true
   error.value = ''
   try {
-    if (chat.run?.status === 'failed')
-      await resumeRun(api, { runId: chat.run.id })
+    const run = chat.run
+    const diagnosticProvider = chosenProvider.value
+    reportResumeDiagnostic({
+      stage: 'run-state',
+      runStatus: resumeDiagnosticRunStatus(run?.status),
+      resumeAvailable: run?.resumeAvailable === true,
+      provider: resumeDiagnosticProvider(diagnosticProvider),
+    })
+    if (run && ['failed', 'interrupted', 'cancelled'].includes(run.status)) {
+      const turnId = run.chatExecution?.messageId
+      let selection: ResumeExecutionSelection | undefined
+      if (run.resumeAvailable) {
+        reportResumeDiagnostic({ stage: 'selection-start' })
+        const savedAgent = run.snapshot?.agent
+        const catalog = modelCatalogs[chosenProvider.value].catalog.models
+        reportResumeDiagnostic({
+          stage: 'catalog-state',
+          catalogPresent: catalog.length > 0,
+        })
+        const selectedModel = model.value || savedAgent?.model || catalog.find(item => item.isDefault)?.model || ''
+        const modelRow = (name: string) => catalog.find(item => item.model === name || item.routes?.some(route => route.model === name))
+          || (!name ? catalog.find(item => item.isDefault) : undefined)
+        // A catalog default stays display-only until the picker changes the model draft.
+        const selectedModelChanged = !!model.value && model.value !== (savedAgent?.model || '')
+        const selectedReasoning = resumeSelectionReasoning(
+          resumeReasoningIntent.value,
+          reasoning.value,
+          savedAgent?.reasoning || '',
+          selectedModelChanged,
+          modelRow(selectedModel)?.defaultReasoningEffort || '',
+        )
+        const selectedDisplayedSpeed = savedAgent
+          ? pickerAppliedSpeed(chosenProvider.value, modelRow(selectedModel), speed.value, savedAgent.speed)
+          : ''
+        const selectedSpeed = savedAgent
+          ? resumeSelectionSpeed(chosenProvider.value, modelRow(selectedModel), speed.value, savedAgent.speed)
+          : ''
+        const preserveModel = savedAgent?.model === '' && !model.value
+        const selectionModel = preserveModel ? savedAgent.model : selectedModel
+        selection = savedAgent
+          && chosenProvider.value === savedAgent.provider
+          && !!turnId
+          && needsResumeSelection(
+            selectionModel,
+            selectedReasoning,
+            selectedDisplayedSpeed,
+            savedAgent.model,
+            savedAgent.reasoning,
+            savedAgent.speed,
+          )
+          ? {
+              model: selectionModel,
+              reasoning: selectedReasoning,
+              speed: selectedSpeed,
+              ...(preserveModel ? { preserveModel: true } : {}),
+            }
+          : undefined
+        reportResumeDiagnostic({ stage: 'selection-ready' })
+      }
+
+      reportResumeDiagnostic({ stage: 'resume-attempt' })
+      await resumeChat(api, {
+        chatId: chat.id,
+        runId: run.id,
+        turnId,
+        selection,
+      })
+      reportResumeDiagnostic({ stage: 'resume-returned' })
+    }
+
+    reportResumeDiagnostic({ stage: 'pause-attempt' })
     await setChatPaused(api, { chatId: chat.id, paused: false })
+    reportResumeDiagnostic({ stage: 'pause-returned' })
   }
   catch (e) {
+    reportResumeDiagnostic({ stage: 'caught' })
     error.value = (e as Error).message
   }
   finally { busy.value = false }
@@ -755,6 +938,7 @@ function edit(message: ChatMessage) {
   }
 
   editing.value = message.id
+  resumeReasoningIntent.value = { kind: 'untouched' }
   clearAttachments()
   attachments.value = [...(message.attachments ?? [])]
   draft.value = message.text
@@ -778,6 +962,7 @@ watch(chatId, (id) => {
   provider.value = ''
   model.value = ''
   reasoning.value = ''
+  resumeReasoningIntent.value = { kind: 'untouched' }
   speed.value = ''
   submission = undefined
   const destinationId = createdChat && createdChat.slug === id ? createdChat.id : selectedChatId.value
@@ -1157,6 +1342,7 @@ function key(event: KeyboardEvent) {
             :outcome="detail?.run?.status === 'succeeded' ? detail.run.outcome : null"
             :sending="delivery.sending"
             :events="events"
+            :timeline="timeline"
             :read-only="readOnly"
             :quota="quota"
             :chat-id="detail?.id"
@@ -1448,6 +1634,7 @@ function key(event: KeyboardEvent) {
                       :default-source="inheritConversation ? 'conversation' : 'agent'"
                       :switching="switchingProvider"
                       :disabled="busy || readOnly || noAgent"
+                      @reasoning-choice="setResumeReasoningIntent"
                     />
                   </div>
                   <!-- As on Android: steer while typing during a reply, stop when the field is empty, otherwise send.

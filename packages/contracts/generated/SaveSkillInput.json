@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "content": {
+      "maxLength": 100000,
+      "type": "string"
+    },
+    "name": {
+      "maxLength": 64,
+      "type": "string"
+    },
+    "scope": {
+      "default": "global",
+      "maxLength": 100,
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "content"
+  ],
+  "title": "SaveSkillInput",
+  "type": "object"
+}

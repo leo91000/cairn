@@ -3,6 +3,7 @@ package build.cairn.app.data
 /** Older pages belong to one displayed history/epoch, independently of stream collection. */
 internal class OlderPages {
     private var events = emptyList<RunEvent>()
+    private var cards = emptyList<TimelineCard>()
     private var history: String? = null
     private var epoch = 0
     private var oldest: Long? = null
@@ -11,6 +12,7 @@ internal class OlderPages {
     private fun revalidate(snapshot: LiveSnapshot) {
         if (snapshot.history != history || snapshot.epoch != epoch) {
             events = emptyList()
+            cards = emptyList()
             oldest = null
             history = snapshot.history
             epoch = snapshot.epoch
@@ -22,6 +24,7 @@ internal class OlderPages {
         val boundary = oldest ?: return snapshot
         return snapshot.copy(
             events = mergeHistory(events, snapshot.events),
+            entries = mergeCards(cards, snapshot.entries),
             oldest = boundary,
             hasOlder = hasOlder,
         )
@@ -46,6 +49,7 @@ internal class OlderPages {
 
         revalidate(snapshot)
         events = mergeHistory(page.events, events)
+        cards = mergeCards(page.entries, cards)
         oldest = page.oldest
         hasOlder = page.hasOlder
         return display(snapshot)

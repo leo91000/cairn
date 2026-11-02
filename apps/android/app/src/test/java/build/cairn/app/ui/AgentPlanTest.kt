@@ -159,7 +159,7 @@ class AgentPlanTest {
     @Test
     fun `the plan shows once where it was written then each change where it happened`() {
         val timeline =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     user("Add session expiry"),
                     plan("plan:turn", "Explore" to "in_progress", "Migrate" to "pending") {
@@ -218,7 +218,7 @@ class AgentPlanTest {
     @Test
     fun `one card stays when an agent repeats the list that finished the plan`() {
         val timeline =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     plan("todo-1", "Explore" to "in_progress"),
                     plan("todo-2", "Explore" to "completed"),
@@ -234,7 +234,7 @@ class AgentPlanTest {
     @Test
     fun `a finished or replaced plan gives way to a new one`() {
         val timeline =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     plan("first", "Explore" to "completed"),
                     plan("second", "Explore" to "in_progress"),
@@ -264,7 +264,7 @@ class AgentPlanTest {
             val initial = update("Implementing A", "Initial approach.")
             val revised = update("Implementing B", "Revised approach.")
             val repeated = update("Implementing B", "Revised approach.")
-            val timeline = timelineEntries(listOf(initial, revised, repeated), chat = true)
+            val timeline = fixtureEntries(listOf(initial, revised, repeated), chat = true)
 
             assertEquals(listOf("plan"), kinds(timeline))
             val card = timeline.single().plan!!
@@ -280,7 +280,7 @@ class AgentPlanTest {
     @Test
     fun `empty and failed updates are left out and a subagent plan stays among its steps`() {
         val timeline =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     plan("announced"),
                     plan("failed", "Explore" to "pending") { put("status", "failed") },
@@ -306,14 +306,14 @@ class AgentPlanTest {
     @Test
     fun `a child plan stays among tools when its parent is outside the loaded history`() {
         val child = plan("child", "Review" to "in_progress") { put("parent_id", "older-parent") }
-        val childOnly = timelineEntries(listOf(child), chat = true)
+        val childOnly = fixtureEntries(listOf(child), chat = true)
 
         assertEquals(listOf("group"), kinds(childOnly))
         assertEquals(listOf(child), childOnly.single().events)
         assertNull(currentPlan(childOnly))
 
         val timeline =
-            timelineEntries(
+            fixtureEntries(
                 listOf(plan("root", "Implement" to "in_progress"), child),
                 chat = true,
             )
@@ -330,12 +330,12 @@ class AgentPlanTest {
             )
         assertEquals(
             listOf("Explore", "Migrate"),
-            currentPlan(timelineEntries(working, chat = true))?.steps?.map { it.text },
+            currentPlan(fixtureEntries(working, chat = true))?.steps?.map { it.text },
         )
 
         // A new message leaves the earlier plan behind until the agent changes it again.
         val followUp = working + user("Also update the docs")
-        assertNull(currentPlan(timelineEntries(followUp, chat = true)))
+        assertNull(currentPlan(fixtureEntries(followUp, chat = true)))
         val resumed =
             followUp +
                 plan(
@@ -346,15 +346,15 @@ class AgentPlanTest {
                 )
         assertEquals(
             listOf(PlanStepState.DONE, PlanStepState.DONE, PlanStepState.ACTIVE),
-            currentPlan(timelineEntries(resumed, chat = true))?.steps?.map { it.state },
+            currentPlan(fixtureEntries(resumed, chat = true))?.steps?.map { it.state },
         )
         // The new request gets its own card instead of rewriting the earlier one further up.
         assertEquals(
             listOf("message", "plan", "message", "plan"),
-            kinds(timelineEntries(resumed, chat = true)),
+            kinds(fixtureEntries(resumed, chat = true)),
         )
 
         val finished = working + plan("plan", "Explore" to "completed", "Migrate" to "completed")
-        assertNull(currentPlan(timelineEntries(finished, chat = true)))
+        assertNull(currentPlan(fixtureEntries(finished, chat = true)))
     }
 }

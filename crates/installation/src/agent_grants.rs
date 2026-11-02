@@ -141,6 +141,9 @@ pub(crate) fn set_instance_agents(db: &Db<'_>, instance: &str, agents: &[String]
         }
         agent.revision = crate::config::id();
         db.save_agent(&agent)?;
+        if granted {
+            db.choose_setup_credential_supplier(&agent.id.to_string(), instance)?;
+        }
     }
     Ok(())
 }
@@ -597,6 +600,7 @@ impl Db<'_> {
                 statement.execute(rusqlite::params![id, value, position as i64])?;
             }
         }
+        self.sync_full_plugin_grants(&id, &agent.settings.plugins)?;
         self.0
             .prepare_cached("DELETE FROM agent_mcp_selections WHERE agent_id=?")?
             .execute([&id])?;

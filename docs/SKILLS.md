@@ -164,7 +164,7 @@ them.
 ### `GET /skills/:scope/:name/archive?offset=0&revision=…`
 
 Exports a `.zip` whose single top-level folder is the skill. A response carries
-at most 4 MiB:
+at most 512 KiB of decoded archive bytes:
 
 `{ "filename": "review.zip", "revision": "4f1c…", "size": 9123, "offset": 0, "content": "<base64>" }`
 

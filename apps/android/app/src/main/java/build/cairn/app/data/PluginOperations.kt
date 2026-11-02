@@ -28,6 +28,13 @@ suspend fun CairnApi.pluginOperation(
             "completed" -> {
                 val result = contractJson.encodeToJsonElement(operation.result!!).jsonObject
                 return when (result["kind"]?.jsonPrimitive?.content) {
+                    "project" -> result.getValue("project")
+                    "sourceProjects",
+                    "resourcePage" -> result.getValue("page")
+                    "resourceAncestry" -> result.getValue("resolution")
+                    "skillImport" -> result.getValue("imported")
+                    "skillSource" -> result.getValue("status")
+                    "skillBundle" -> result.getValue("bundle")
                     "package" -> result.getValue("version")
                     "program" -> result.getValue("program")
                     "management" -> {
@@ -50,7 +57,7 @@ suspend fun CairnApi.pluginOperation(
             "failed",
             "cancelled" ->
                 throw ApiException(
-                    502,
+                    operation.errorStatus?.toInt() ?: 502,
                     operation.error ?: "La préparation du plugin a échoué.",
                     explained = true,
                 )

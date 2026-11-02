@@ -40,7 +40,11 @@ fn observation(node: &Value) -> Option<Observation> {
 
 /// Current physical capacity and separately reported unpublished append history.
 /// These are overlapping measurements, not pieces of an additive pie chart.
-pub(super) fn accounting(db: &Db<'_>, node: &Value, attempts: &[Value]) -> Result<Value> {
+pub(super) fn accounting(
+    db: &Db<'_>,
+    node: &Value,
+    attempts: &[super::attempts::Attempt],
+) -> Result<Value> {
     let Some(sample) = observation(node) else {
         return Ok(Value::Null);
     };
@@ -48,7 +52,7 @@ pub(super) fn accounting(db: &Db<'_>, node: &Value, attempts: &[Value]) -> Resul
     // to sum one storage field. Keep JSON text so u64 values retain their precision.
     let dirty_bytes = db.json_rows(
         "SELECT coalesce(boundary -> '$.storage.dirtyBytes','null') FROM runs
-         WHERE json_extract(boundary,'$.nodeId')=?
+         WHERE placement_node_id=?
          AND json_extract(boundary,'$.storage.mode')='on-demand'",
         [text(node, "id")],
     )?;
@@ -80,20 +84,17 @@ pub(super) fn accounting(db: &Db<'_>, node: &Value, attempts: &[Value]) -> Resul
 /// Attribution includes only exclusively owned payloads, on the same accounting
 /// basis as total usage, capped by live consumption and allocated backing.
 /// Shared prepared-base inodes receive no double credit.
-fn unused(attempts: &[Value], node: &Value, sample: &Observation) -> (u64, u64) {
+fn unused(attempts: &[super::attempts::Attempt], node: &Value, sample: &Observation) -> (u64, u64) {
     let mut credit_left = sample.used_bytes;
     let mut promised = 0u64;
     for attempt in attempts
         .iter()
-        .filter(|a| a["nodeId"] == node["id"] && super::is_active_attempt(a))
+        .filter(|a| a.node_id == node["id"] && super::is_active_attempt(a))
     {
-        let allowance = attempt["resources"]["diskMiB"]
-            .as_u64()
-            .unwrap_or(32768)
-            .saturating_mul(MIB);
+        let allowance = attempt.resources.disk_mi_b.saturating_mul(MIB);
         let credit = sample
             .owned_bytes
-            .get(text(attempt, "id"))
+            .get(&attempt.id)
             .copied()
             .unwrap_or(0)
             .min(allowance)
@@ -104,7 +105,7 @@ fn unused(attempts: &[Value], node: &Value, sample: &Observation) -> (u64, u64) 
     (promised, credit_left)
 }
 
-pub(crate) fn fits(node: &Value, attempts: &[Value], additional: u64) -> bool {
+pub(crate) fn fits(node: &Value, attempts: &[super::attempts::Attempt], additional: u64) -> bool {
     let Some(sample) = observation(node) else {
         return false;
     };
@@ -133,7 +134,7 @@ pub(crate) fn fits(node: &Value, attempts: &[Value], additional: u64) -> bool {
 /// backing. Credit shares the same total-usage cap as active promises.
 pub(crate) fn admission_fits(
     node: &Value,
-    attempts: &[Value],
+    attempts: &[super::attempts::Attempt],
     run: &str,
     allowance: u64,
     reuse: bool,
@@ -147,7 +148,7 @@ pub(crate) fn admission_fits(
 
 pub(super) fn admission_bytes(
     node: &Value,
-    attempts: &[Value],
+    attempts: &[super::attempts::Attempt],
     run: &str,
     allowance: u64,
     reuse: bool,
@@ -199,26 +200,24 @@ pub(crate) fn report(db: &Db<'_>, node: &mut Value, body: &Value) -> Result<Valu
     let requests = std::mem::take(&mut sample.requests);
     node["diskGrowthProtocol"] = 1.into();
     node["diskCapacity"] = serde_json::to_value(&sample)?;
-    let mut attempts = db.list("node-attempts")?;
+    let mut attempts = db.attempts()?;
     let waiting = super::placement::waiting_disk_bytes(db, node, &attempts)?;
     let mut grants = Vec::new();
     for request in requests {
-        let Some(index) = attempts.iter().position(|a| a["id"] == request.attempt_id) else {
+        let Some(index) = attempts.iter().position(|a| a.id == request.attempt_id) else {
             continue;
         };
         let attempt = &attempts[index];
-        let run_id = text(attempt, "runId");
+        let run_id = &attempt.run_id;
         let Some(run) = db.run(run_id)? else { continue };
         let checkpoint = super::db_checkpoint(db, run_id)?;
         let agent = db
             .agent_snapshot(super::run_agent(&run))?
             .unwrap_or_default();
-        if attempt["nodeId"] != node["id"]
+        if attempt.node_id != node["id"]
             || !super::is_active_attempt(attempt)
-            || attempt["leaseExpiresAt"]
-                .as_i64()
-                .is_none_or(|until| until <= now())
-            || checkpoint["runnerId"] != attempt["id"]
+            || attempt.lease_expires_at.is_none_or(|until| until <= now())
+            || checkpoint["runnerId"] != attempt.id
             || checkpoint["nodeId"] != node["id"]
             || node["executionReady"] != true
             || run["status"] != "running"
@@ -228,7 +227,7 @@ pub(crate) fn report(db: &Db<'_>, node: &mut Value, body: &Value) -> Result<Valu
         {
             continue;
         }
-        let current = attempt["resources"]["diskMiB"].as_u64().unwrap_or(32768);
+        let current = attempt.resources.disk_mi_b;
         let next = current
             .checked_add(STEP_MIB)
             .filter(|next| next.saturating_mul(MIB) <= MAX_BYTES);
@@ -261,13 +260,21 @@ pub(crate) fn report(db: &Db<'_>, node: &mut Value, body: &Value) -> Result<Valu
     Ok(json!({ "protocol": 1, "grants": grants }))
 }
 
-fn persist_grant(db: &Db<'_>, attempt: &mut Value, allowance: u64) -> Result<()> {
-    attempt["resources"]["diskMiB"] = allowance.into();
-    db.put("node-attempts", attempt)?;
-    let run_id = text(attempt, "runId");
-    let mut run = db.run(run_id)?.unwrap();
-    run["resources"]["diskMiB"] = allowance.into();
-    db.update_run_boundary(run_id, &json!({ "resources": run["resources"] }))?;
+fn persist_grant(
+    db: &Db<'_>,
+    attempt: &mut super::attempts::Attempt,
+    allowance: u64,
+) -> Result<()> {
+    attempt.resources.disk_mi_b = allowance;
+    db.save_attempt(attempt)?;
+    let run_id = &attempt.run_id;
+    db.update_run_placement(
+        run_id,
+        crate::nodes::run_placement::PlacementChanges {
+            resources: Some(Some(attempt.resources.clone())),
+            ..Default::default()
+        },
+    )?;
     Ok(())
 }
 
@@ -287,8 +294,12 @@ mod tests {
     #[test]
     fn admission_and_growth_protect_unused_promises_and_host_reserve() {
         let mut node = node();
-        let attempts =
-            vec![json!({ "id": "one", "nodeId": "node", "resources": { "diskMiB": 32768 } })];
+        let attempts = vec![
+            crate::attempt_fixture::attempt(
+                &json!({ "id": "one", "nodeId": "node", "resources": { "diskMiB": 32768 } }),
+            )
+            .unwrap(),
+        ];
         // 20 used + (32 - 10) promised + 32 newcomer + 5 pool reserve = 79 GiB.
         assert!(fits(&node, &attempts, 32 * 1024 * MIB));
         assert!(!fits(&node, &attempts, 64 * 1024 * MIB));
@@ -314,7 +325,10 @@ mod tests {
             true
         ));
         assert!(!admission_fits(&node, &[], "resuming", 31_000 * MIB, false));
-        let attempts = [json!({ "id": "one", "nodeId": "node", "resources": { "diskMiB": 256 } })];
+        let attempts = [crate::attempt_fixture::attempt(
+            &json!({ "id": "one", "nodeId": "node", "resources": { "diskMiB": 256 } }),
+        )
+        .unwrap()];
         node["diskCapacity"]["ownedBytes"] = json!({ "one": 256 * MIB });
         assert!(!admission_fits(
             &node,
@@ -345,11 +359,20 @@ mod tests {
     #[test]
     fn shared_inodes_and_unknown_footprints_cannot_create_capacity() {
         let node = node();
-        let mut attempts =
-            vec![json!({ "id": "one", "nodeId": "node", "resources": { "diskMiB": 32768 } })];
-        attempts.push(json!({ "id": "two", "nodeId": "node", "resources": { "diskMiB": 32768 } }));
+        let mut attempts = vec![
+            crate::attempt_fixture::attempt(
+                &json!({ "id": "one", "nodeId": "node", "resources": { "diskMiB": 32768 } }),
+            )
+            .unwrap(),
+        ];
+        attempts.push(
+            crate::attempt_fixture::attempt(
+                &json!({ "id": "two", "nodeId": "node", "resources": { "diskMiB": 32768 } }),
+            )
+            .unwrap(),
+        );
         assert!(!fits(&node, &attempts, 32 * 1024 * MIB));
-        attempts[0]["released"] = true.into();
+        attempts[0].released = true;
         assert!(fits(&node, &attempts, 32 * 1024 * MIB));
     }
 }

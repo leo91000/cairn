@@ -107,6 +107,40 @@ impl Fixture {
             .unwrap()
     }
 
+    async fn large_card(&self, preview: &Value) -> Value {
+        let snapshot = &preview["snapshot"];
+        let mut offset = 0_u64;
+        let mut checksum = String::new();
+        let mut content = String::new();
+        loop {
+            let body = json!({"snapshot": snapshot, "offset": offset, "sha256": if checksum.is_empty() { None } else { Some(&checksum) }});
+            let response = reqwest::Client::new()
+                .post(format!(
+                    "{}/api/runs/{}/timeline-content",
+                    self.url, self.run
+                ))
+                .header("x-test-relay-token", &self.token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = response.bytes().await.unwrap();
+            assert!(bytes.len() <= 256 * 1024);
+            let part: Value = serde_json::from_slice(&bytes).unwrap();
+            checksum = part["sha256"].as_str().unwrap().to_owned();
+            content.push_str(part["data"].as_str().unwrap());
+            let Some(next) = part["nextOffset"].as_u64() else {
+                break;
+            };
+            assert!(next > offset);
+            offset = next;
+        }
+        let card: Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(card["id"], snapshot["id"]);
+        card
+    }
+
     /// Appends `count` output events to the run in one transaction.
     async fn append(&self, count: usize) {
         let run = self.run.clone();
@@ -128,6 +162,232 @@ impl Drop for Fixture {
         self.service.shutdown.cancel();
         self.server.abort();
     }
+}
+
+#[tokio::test]
+async fn many_updated_cards_are_delivered_in_bounded_batches_after_reconnect() {
+    let f = Fixture::new().await;
+    let mut initial = f.open(0).await;
+    let (_, first) = initial.batch().await;
+    let history = first["history"].as_str().unwrap().to_owned();
+    drop(initial);
+
+    let run = f.run.clone();
+    f.service.store.transaction(move |db| {
+        for index in 0..40 {
+            let payload = json!({"item": {"id": format!("message-{index}"), "type": "agent_message", "text": "x".repeat(16 * 1024)}});
+            db.event(&run, &EventKind::ItemUpdated, "", Some(&payload))?;
+        }
+        Ok(())
+    }).await.unwrap();
+    let before = *ids(&f).await.last().unwrap();
+    f.service
+        .store
+        .event(&f.run, &EventKind::TurnCompleted, "Done", None)
+        .await
+        .unwrap();
+    let path = format!(
+        "/api/runs/{}/stream?after={before}&history={history}",
+        f.run
+    );
+    let mut interrupted = f.open_path(&path, None).await;
+    let (partial_cursor, partial) = interrupted.batch().await;
+    assert_eq!(partial_cursor, before);
+    assert_eq!(partial["more"], true);
+    assert!(serde_json::to_vec(&partial["entries"]).unwrap().len() <= 256 * 1024);
+    drop(interrupted);
+
+    let mut resumed = f.open_path(&path, None).await;
+    let mut ids = std::collections::BTreeSet::new();
+    let mut wrote_later = false;
+    let mut saw_later = false;
+    loop {
+        let (_, batch) = resumed.batch().await;
+        assert!(serde_json::to_vec(&batch["entries"]).unwrap().len() <= 256 * 1024);
+        for change in batch["entries"].as_array().unwrap() {
+            if let Some(id) = change["entry"]["id"].as_str()
+                && id.starts_with("message:")
+            {
+                ids.insert(id.to_owned());
+            }
+            if change["entry"]["content"]["text"] == "changed while delivering" {
+                saw_later = true;
+            }
+        }
+        if !wrote_later {
+            let payload = json!({"item": {"id": "message-39", "type": "agent_message", "text": "changed while delivering"}});
+            f.service
+                .store
+                .event(&f.run, &EventKind::ItemUpdated, "", Some(payload))
+                .await
+                .unwrap();
+            wrote_later = true;
+        }
+        if batch["more"] == false && saw_later {
+            break;
+        }
+    }
+    assert_eq!(ids.len(), 40);
+}
+
+#[tokio::test]
+async fn older_history_pages_bound_hydrated_cards_without_losing_positions() {
+    let f = Fixture::new().await;
+    let mut initial = f.open(0).await;
+    let (_, first) = initial.batch().await;
+    let history = first["history"].as_str().unwrap().to_owned();
+    drop(initial);
+    let run = f.run.clone();
+    f.service.store.transaction(move |db| {
+        for index in 0..40 {
+            let payload = json!({"item": {"id": format!("history-{index}"), "type": "agent_message", "text": "start"}});
+            db.event(&run, &EventKind::ItemUpdated, "", Some(&payload))?;
+        }
+        Ok(())
+    }).await.unwrap();
+    let mut before = *ids(&f).await.last().unwrap() + 1;
+    let run = f.run.clone();
+    f.service.store.transaction(move |db| {
+        for index in 0..40 {
+            let payload = json!({"item": {"id": format!("history-{index}"), "type": "agent_message", "text": "x".repeat(16 * 1024)}});
+            db.event(&run, &EventKind::ItemUpdated, "", Some(&payload))?;
+        }
+        Ok(())
+    }).await.unwrap();
+    let mut received = std::collections::BTreeSet::new();
+    loop {
+        let response = f
+            .history(&format!("before={before}&history={history}"))
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let page: Value = response.json().await.unwrap();
+        assert!(serde_json::to_vec(&page["entries"]).unwrap().len() <= 256 * 1024);
+        for entry in page["entries"].as_array().unwrap() {
+            if let Some(id) = entry["id"].as_str()
+                && id.starts_with("message:")
+            {
+                assert!(received.insert(id.to_owned()));
+            }
+        }
+        if page["hasOlder"] == false {
+            break;
+        }
+        let next = page["oldest"].as_i64().unwrap();
+        assert!(next < before);
+        before = next;
+    }
+    assert_eq!(received.len(), 40);
+}
+
+#[tokio::test]
+async fn oversized_card_chunks_remain_stable_when_the_reply_changes() {
+    let f = Fixture::new().await;
+    let payload =
+        json!({"item": {"id": "large", "type": "agent_message", "text": "🦊".repeat(100_000)}});
+    f.service
+        .store
+        .event(&f.run, &EventKind::ItemUpdated, "", Some(payload))
+        .await
+        .unwrap();
+    let mut stream = f.open(0).await;
+    let preview = loop {
+        let (_, batch) = stream.batch().await;
+        assert!(serde_json::to_vec(&batch).unwrap().len() < 256 * 1024);
+        if let Some(preview) = batch["largeEntries"]
+            .as_array()
+            .and_then(|entries| entries.first())
+        {
+            break preview.clone();
+        }
+    };
+    assert_eq!(preview["snapshot"]["content"]["kind"], "agentMessage");
+    let url = format!("{}/api/runs/{}/timeline-content", f.url, f.run);
+    let client = reqwest::Client::new();
+    let first = client
+        .post(&url)
+        .header("x-test-relay-token", &f.token)
+        .json(&json!({"snapshot": preview["snapshot"], "offset": 0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let chunk: Value = first.json().await.unwrap();
+    let next = chunk["nextOffset"].as_u64().unwrap();
+    let sha = chunk["sha256"].as_str().unwrap();
+    f.service
+        .store
+        .event(
+            &f.run,
+            &EventKind::ItemUpdated,
+            "",
+            Some(json!({"item": {"id": "large", "type": "agent_message", "text": "changed"}})),
+        )
+        .await
+        .unwrap();
+    let second = client
+        .post(url)
+        .header("x-test-relay-token", &f.token)
+        .json(&json!({"snapshot": preview["snapshot"], "offset": next, "sha256": sha}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+    let second: Value = second.json().await.unwrap();
+    assert_eq!(second["sha256"], sha);
+    let original = f.large_card(&preview).await;
+    assert_eq!(original["content"]["text"], "🦊".repeat(100_000));
+}
+
+#[tokio::test]
+async fn oversized_notice_arguments_are_recovered_from_their_source() {
+    let f = Fixture::new().await;
+    let task = "long task ".repeat(30_000);
+    f.service
+        .store
+        .event(
+            &f.run,
+            &EventKind::TurnWaiting,
+            "Waiting",
+            Some(json!({"tasks": [{"description": task}]})),
+        )
+        .await
+        .unwrap();
+    let run = f.run.clone();
+    let stored = f
+        .service
+        .store
+        .read(move |db| {
+            Ok(db.0.query_row(
+                "SELECT content FROM timeline_entries WHERE run_id=? AND kind='notice' ORDER BY position DESC LIMIT 1",
+                [run],
+                |row| row.get::<_, String>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert!(stored.len() < 4096);
+    assert!(!stored.contains("long task"));
+    let mut stream = f.open(0).await;
+    let reference = loop {
+        let (_, batch) = stream.batch().await;
+        assert!(serde_json::to_vec(&batch).unwrap().len() < 256 * 1024);
+        if let Some(reference) = batch["largeEntries"]
+            .as_array()
+            .and_then(|entries| entries.first())
+        {
+            break reference.clone();
+        }
+    };
+    assert_eq!(
+        reference["snapshot"]["content"]["notice"]["code"],
+        "backgroundTasks"
+    );
+    let card = f.large_card(&reference).await;
+    let task = "long task ".repeat(30_000);
+    assert_eq!(
+        card["content"]["notice"]["tasks"][0].as_str(),
+        Some(task.trim())
+    );
 }
 
 async fn serve(service: Arc<Service>) -> (String, tokio::task::JoinHandle<()>) {
@@ -462,10 +722,10 @@ async fn resuming_past_replaced_text_snapshots_keeps_the_cached_history() {
         .await
         .unwrap();
     let all = ids(&f).await;
-    let replaced = all[all.len() - 1302..all.len() - 2].to_vec();
+    let replaced = all[all.len() - 1302..all.len() - 1].to_vec();
 
-    // Following or not, the catch-up is the tool call, the final answer, the turn's
-    // end and any later output: none of the 1300 replaced snapshots.
+    // Following or not, the catch-up is the tool call, the turn's end and any later
+    // output, with the answer as one timeline card: none of its 1301 snapshots.
     for following in ["&recent=1", ""] {
         let expected: Vec<i64> = ids(&f)
             .await
@@ -485,8 +745,16 @@ async fn resuming_past_replaced_text_snapshots_keeps_the_cached_history() {
         assert_eq!(batch["more"], false);
         assert!(batch.get("oldest").is_none());
         assert_eq!(event_ids(&batch["events"]), expected);
+        let answer = batch["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|change| change["entry"]["content"]["kind"] == "agentMessage")
+            .unwrap();
+        assert_eq!(answer["kind"], "upsert");
+        assert_eq!(answer["entry"]["content"]["state"], "done");
         assert!(
-            batch["events"][1]["payload"]["item"]["text"]
+            answer["entry"]["content"]["text"]
                 .as_str()
                 .unwrap()
                 .ends_with("word 1300 ")
@@ -870,20 +1138,31 @@ async fn wire_deltas_reestablish_baselines_after_reconnect_and_keep_rest_compati
             .unwrap();
     };
     publish("Bonjour 👋").await;
+    // The reply crosses the wire as its timeline card, never as raw snapshots.
     let (cursor, first) = stream.batch().await;
-    assert_eq!(first["events"][0]["payload"]["item"]["text"], "Bonjour 👋");
+    assert!(first["events"].as_array().unwrap().is_empty());
+    assert_eq!(first["entries"][0]["kind"], "upsert");
+    assert_eq!(
+        first["entries"][0]["entry"]["content"]["text"],
+        "Bonjour 👋"
+    );
     publish("Bonjour 👋 café").await;
     let (_, second) = stream.batch().await;
-    assert_eq!(second["events"][0]["payload"]["item"]["delta"], " café");
-    assert!(second["events"][0]["payload"]["item"]["text"].is_null());
+    assert_eq!(second["entries"][0]["kind"], "append");
+    assert_eq!(second["entries"][0]["text"], " café");
+    // A new connection establishes its own baseline with the whole card.
     let mut resumed = f.open(cursor).await;
+    let resumed = resumed.batch().await.1;
+    assert_eq!(resumed["entries"][0]["kind"], "upsert");
     assert_eq!(
-        resumed.batch().await.1["events"][0]["payload"]["item"]["text"],
+        resumed["entries"][0]["entry"]["content"]["text"],
         "Bonjour 👋 café"
     );
     publish("Corrected message").await;
+    let corrected = stream.batch().await.1;
+    assert_eq!(corrected["entries"][0]["kind"], "upsert");
     assert_eq!(
-        stream.batch().await.1["events"][0]["payload"]["item"]["text"],
+        corrected["entries"][0]["entry"]["content"]["text"],
         "Corrected message"
     );
     let run = f.run.clone();
@@ -1273,7 +1552,8 @@ async fn profile_long_answer_delivery_with_small_wire_deltas() {
             publish(&content).await;
             let (_, batch) = stream.batch().await;
             times.push(start.elapsed().as_secs_f64() * 1000.0);
-            assert_eq!(batch["events"][0]["payload"]["item"]["delta"], suffix);
+            assert_eq!(batch["entries"][0]["kind"], "append");
+            assert_eq!(batch["entries"][0]["text"], suffix);
             bytes.push(serde_json::to_vec(&batch).unwrap().len());
         }
         times.sort_by(f64::total_cmp);
@@ -1326,31 +1606,59 @@ async fn backwards_pages_skip_superseded_long_answers_but_keep_reused_ids_in_old
         .open_path(&format!("/api/runs/{}/stream?window=1", f.run), None)
         .await;
     let (_, first) = stream.batch().await;
-    assert_eq!(first["events"].as_array().unwrap().len(), 1);
+    // The window holds only the latest snapshot; the reply arrives as its complete card,
+    // although it first appeared before the window.
+    assert!(first["events"].as_array().unwrap().is_empty());
+    let reply = f.large_card(&first["largeEntries"][0]).await;
+    assert!(reply["content"]["text"].as_str().unwrap().ends_with("-79"));
+    assert!(reply["position"].as_i64().unwrap() < first["oldest"].as_i64().unwrap());
+    assert_eq!(first["hasOlder"], true);
+    let mut before = first["oldest"].as_i64().unwrap();
+    let history = first["history"].as_str().unwrap();
+    let mut events = Vec::new();
+    let mut cards = Vec::new();
+    loop {
+        let page: Value = f
+            .history(&format!("before={before}&history={history}"))
+            .await
+            .json()
+            .await
+            .unwrap();
+        events.extend(page["events"].as_array().unwrap().iter().cloned());
+        cards.extend(page["entries"].as_array().unwrap().iter().cloned());
+        if let Some(large) = page["largeEntries"].as_array() {
+            for preview in large {
+                cards.push(f.large_card(preview).await);
+            }
+        }
+        if page["hasOlder"] == false {
+            break;
+        }
+        let next = page["oldest"].as_i64().unwrap();
+        assert!(next < before);
+        before = next;
+    }
+    assert!(events.iter().any(|e| e["text"] == "Older question"));
     assert!(
-        first["events"][0]["payload"]["item"]["text"]
+        events
+            .iter()
+            .all(|e| e["payload"]["item"]["type"] != "agent_message")
+    );
+    // The reused item ID stays two replies, one per turn, each with its latest text.
+    let mut replies: Vec<_> = cards
+        .iter()
+        .filter(|card| card["content"]["kind"] == "agentMessage")
+        .collect();
+    replies.sort_by_key(|card| card["position"].as_i64().unwrap());
+    assert_eq!(replies.len(), 2);
+    assert_eq!(replies[0]["content"]["text"], "previous turn");
+    assert_ne!(replies[0]["id"], replies[1]["id"]);
+    assert!(
+        replies[1]["content"]["text"]
             .as_str()
             .unwrap()
             .ends_with("-79")
     );
-    assert_eq!(first["hasOlder"], true);
-    let before = first["oldest"].as_i64().unwrap();
-    let history = first["history"].as_str().unwrap();
-    let page: Value = f
-        .history(&format!("before={before}&history={history}"))
-        .await
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(page["hasOlder"], false);
-    let events = page["events"].as_array().unwrap();
-    assert!(events.iter().any(|e| e["text"] == "Older question"));
-    let messages: Vec<_> = events
-        .iter()
-        .filter(|e| e["payload"]["item"]["type"] == "agent_message")
-        .collect();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["payload"]["item"]["text"], "previous turn");
 }
 
 /// Process CPU time, including the SQLite actor threads, in milliseconds.
@@ -1658,7 +1966,7 @@ async fn typed_history_get_keeps_native_history_readable_to_members_after_agent_
         .unwrap();
     let response = reqwest::Client::new()
         .get(format!(
-            "{}/api/runs/{}/history?history=v1:{}:{first}",
+            "{}/api/runs/{}/history?history=v2:{}:{first}",
             fixture.url, fixture.run, fixture.run
         ))
         .header("x-test-relay-token", text(&token, "value"))

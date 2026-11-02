@@ -5,6 +5,7 @@ import {
   it,
   vi,
 } from 'vitest'
+import { state } from '../src/api'
 import { liveConnection } from '../src/live-connection'
 
 class Source extends EventTarget {
@@ -24,6 +25,7 @@ class Source extends EventTarget {
 
 beforeEach(() => {
   vi.useFakeTimers()
+  state.redirecting = false
   Source.instances = []
   vi.stubGlobal('EventSource', Source)
   vi.stubGlobal('window', new EventTarget())
@@ -56,6 +58,43 @@ it('resumes only accepted batches and ignores callbacks from a replaced connecti
   document.dispatchEvent(new Event('visibilitychange'))
   vi.advanceTimersByTime(60000)
   expect(Source.instances).toHaveLength(2)
+})
+
+it('does not advance the cursor while an oversized card is still loading', async () => {
+  let complete: (() => void) | undefined
+  const accept = vi.fn().mockImplementationOnce(() => new Promise<void>((resolve) => {
+    complete = resolve
+  }))
+  const connection = liveConnection('/runs/r/stream', accept, vi.fn(), { cursor: 7, history: 'v2:r:1' })
+  const first = Source.instances[0]
+  first.batch('9', '{"events":[],"reset":false,"more":false,"history":"v2:r:1"}')
+  first.onerror?.()
+  vi.advanceTimersByTime(500)
+  expect(Source.instances[1].url).toContain('after=7')
+  complete?.()
+  await Promise.resolve()
+  Source.instances[1].batch('10', '{"events":[],"reset":false,"more":false,"history":"v2:r:1"}')
+  expect(accept).toHaveBeenCalledTimes(2)
+  connection.close()
+})
+
+it('accepts later frames only after an oversized card completes', async () => {
+  let complete: (() => void) | undefined
+  const accept = vi.fn().mockImplementationOnce(() => new Promise<void>((resolve) => {
+    complete = resolve
+  }))
+  const connection = liveConnection('/runs/r/stream', accept, vi.fn())
+  const source = Source.instances[0]
+  source.batch('1')
+  source.batch('2')
+  expect(accept).toHaveBeenCalledTimes(1)
+  complete?.()
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(accept).toHaveBeenCalledTimes(2)
+  expect(accept.mock.calls.map(call => call[1])).toEqual([1, 2])
+  connection.close()
 })
 
 it('announces every opening before creating a source so the caller can free its stream slot', () => {
@@ -153,4 +192,24 @@ it('replays from zero with a reset when a cached consumer baseline is invalid', 
   Source.instances[1].batch('10', '{"events":[],"reset":false,"more":true,"history":"v1:r:1"}')
   expect(accept.mock.calls[1][0].reset).toBe(true)
   connection.close()
+})
+
+it('suspends live streams during navigation and resumes even when direct remains unavailable', () => {
+  const connection = liveConnection('/chats/stream', vi.fn(), vi.fn())
+  expect(Source.instances).toHaveLength(1)
+  state.redirecting = true
+  expect(Source.instances[0].closed).toBe(true)
+
+  window.dispatchEvent(new Event('cairn-transport-change'))
+  window.dispatchEvent(new Event('online'))
+  window.dispatchEvent(new Event('pageshow'))
+  vi.advanceTimersByTime(60000)
+  expect(Source.instances).toHaveLength(1)
+
+  state.redirecting = false
+  expect(Source.instances).toHaveLength(2)
+  connection.close()
+  state.redirecting = true
+  state.redirecting = false
+  expect(Source.instances).toHaveLength(2)
 })

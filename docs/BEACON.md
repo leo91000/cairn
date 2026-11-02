@@ -342,7 +342,7 @@ membership snapshot determines which members retain access to existing agents. I
 Beacon outage delays that snapshot, members present when it succeeds are included,
 even if they joined or were re-invited during the gap. Memberships added after the
 snapshot and all later re-invitations receive no automatic access. An unavailable or
-missing policy leaves rollout pending; see [migration 0019](migrations/0019-agent-account-access.md).
+missing policy leaves rollout pending; see [migration 0025](migrations/0025-agent-account-access.md).
 
 Starting,
 continuing (sending or editing a queued message, attaching files, resuming a paused

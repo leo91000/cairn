@@ -1,7 +1,6 @@
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import type { ActivityEntry } from '../src/activity'
 import { describe, expect, it } from 'vitest'
-import { activityEntries } from '../src/activity'
 import {
   continuesPlan,
   currentPlan,
@@ -10,6 +9,7 @@ import {
   planProgress,
   planSteps,
 } from '../src/agent-plan'
+import { fixtureEntries } from './timeline-fixture'
 
 let id = 0
 
@@ -107,7 +107,7 @@ describe('agent plan', () => {
   })
 
   it('shows the plan once where the agent wrote it, then each change where it happened', () => {
-    const entries = activityEntries([
+    const entries = fixtureEntries([
       user('Add session expiry'),
       plan('plan:turn', [['Explore', 'in_progress'], ['Migrate', 'pending']], { explanation: 'Data model first.' }),
       command('rg -n session src'),
@@ -141,7 +141,7 @@ describe('agent plan', () => {
   })
 
   it('keeps one card when an agent repeats the list that finished the plan', () => {
-    const entries = activityEntries([
+    const entries = fixtureEntries([
       plan('todo-1', [['Explore', 'in_progress']]),
       plan('todo-2', [['Explore', 'completed']]),
       // Claude Code repeats the list when the call completes, once the plan is already finished.
@@ -155,7 +155,7 @@ describe('agent plan', () => {
     const initial = plan('plan', [['Implement', status, 'Implementing A']], { explanation: 'Initial approach.' })
     const revised = plan('plan', [['Implement', status, 'Implementing B']], { explanation: 'Revised approach.' })
     const repeated = plan('plan', [['Implement', status, 'Implementing B']], { explanation: 'Revised approach.' })
-    const entries = activityEntries([initial, revised, repeated], true)
+    const entries = fixtureEntries([initial, revised, repeated], true)
 
     expect(kinds(entries)).toEqual(['plan'])
     const card = entries[0] as Extract<ActivityEntry, { kind: 'plan' }>
@@ -168,7 +168,7 @@ describe('agent plan', () => {
   })
 
   it('starts a new plan once the previous one is finished or replaced', () => {
-    const entries = activityEntries([
+    const entries = fixtureEntries([
       plan('first', [['Explore', 'completed']]),
       plan('second', [['Explore', 'in_progress']]),
       plan('third', [['Something else', 'pending']]),
@@ -186,7 +186,7 @@ describe('agent plan', () => {
         status: 'in_progress',
       },
     })
-    const entries = activityEntries([
+    const entries = fixtureEntries([
       plan('announced', []),
       plan('failed', [['Explore', 'pending']], { status: 'failed' }),
       spawn,
@@ -202,14 +202,14 @@ describe('agent plan', () => {
 
   it('keeps a child plan among tools when its parent is outside the loaded history', () => {
     const child = plan('child', [['Review', 'in_progress']], { parent_id: 'older-parent' })
-    const childOnly = activityEntries([child], true)
+    const childOnly = fixtureEntries([child], true)
 
     expect(kinds(childOnly)).toEqual(['group'])
     const group = childOnly[0] as Extract<ActivityEntry, { kind: 'group' }>
     expect(group.artifacts[0]!.tasks).toEqual([{ text: 'Review', completed: false }])
     expect(currentPlan(childOnly)).toBeUndefined()
 
-    const entries = activityEntries([plan('root', [['Implement', 'in_progress']]), child], true)
+    const entries = fixtureEntries([plan('root', [['Implement', 'in_progress']]), child], true)
     expect(kinds(entries)).toEqual(['plan', 'group'])
     expect(currentPlan(entries)?.steps.map(step => step.text)).toEqual(['Implement'])
   })
@@ -219,17 +219,17 @@ describe('agent plan', () => {
       user('Add session expiry'),
       plan('plan', [['Explore', 'completed'], ['Migrate', 'in_progress', 'Adding the migration']]),
     ]
-    expect(currentPlan(activityEntries(working, true))?.steps.map(step => step.text)).toEqual(['Explore', 'Migrate'])
+    expect(currentPlan(fixtureEntries(working, true))?.steps.map(step => step.text)).toEqual(['Explore', 'Migrate'])
 
     // A new message leaves the earlier plan behind until the agent changes it again.
     const followUp = [...working, user('Also update the docs')]
-    expect(currentPlan(activityEntries(followUp, true))).toBeUndefined()
+    expect(currentPlan(fixtureEntries(followUp, true))).toBeUndefined()
     const resumed = [...followUp, plan('plan', [['Explore', 'completed'], ['Migrate', 'completed'], ['Docs', 'in_progress']])]
-    expect(currentPlan(activityEntries(resumed, true))?.steps.map(step => step.state)).toEqual(['done', 'done', 'active'])
+    expect(currentPlan(fixtureEntries(resumed, true))?.steps.map(step => step.state)).toEqual(['done', 'done', 'active'])
     // The new request gets its own card instead of rewriting the earlier one further up.
-    expect(kinds(activityEntries(resumed, true))).toEqual(['message', 'plan', 'message', 'plan'])
+    expect(kinds(fixtureEntries(resumed, true))).toEqual(['message', 'plan', 'message', 'plan'])
 
     const finished = [...working, plan('plan', [['Explore', 'completed'], ['Migrate', 'completed']])]
-    expect(currentPlan(activityEntries(finished, true))).toBeUndefined()
+    expect(currentPlan(fixtureEntries(finished, true))).toBeUndefined()
   })
 })

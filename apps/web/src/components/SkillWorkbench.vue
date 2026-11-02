@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { SkillArchiveChunk, SkillBundle, SkillFileContent } from '../../../../packages/contracts/contracts'
+import type { SkillBundle } from '../../../../packages/contracts/contracts'
 import type { DraftFile, PickedFile } from '../skill-bundle'
 import { twMerge } from 'tailwind-merge'
 import {
@@ -9,6 +9,10 @@ import {
   ref,
   watch,
 } from 'vue'
+import { editSkillFiles } from '../../../../packages/contracts/generated/editSkillFiles'
+import { exportSkillArchive } from '../../../../packages/contracts/generated/exportSkillArchive'
+import { readSkillBundle } from '../../../../packages/contracts/generated/readSkillBundle'
+import { readSkillFile } from '../../../../packages/contracts/generated/readSkillFile'
 import {
   api,
   ApiError,
@@ -233,7 +237,7 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    applyBundle(await api<SkillBundle>(`${base.value}/bundle`))
+    applyBundle(await readSkillBundle(api, { scope: scope.value, name: name.value }))
   }
   catch (e) {
     error.value = (e as Error).message
@@ -253,7 +257,7 @@ async function ensureContent(path: string | null) {
   const destination = base.value
   fileLoading.value = origin
   try {
-    const result = await api<SkillFileContent>(`${destination}/file?path=${encodeURIComponent(origin)}`)
+    const result = await readSkillFile(api, { scope: scope.value, name: name.value, path: origin })
     if (bundle.value?.revision !== revision || base.value !== destination)
       return
     const current = draft.value.find(entry => entry.origin === origin)
@@ -580,7 +584,12 @@ async function exportArchive() {
   downloading.value = true
   error.value = ''
   try {
-    const archive = await downloadArchive(async (offset, revision) => api<SkillArchiveChunk>(`${base.value}/archive?offset=${offset}${revision ? `&revision=${encodeURIComponent(revision)}` : ''}`))
+    const archive = await downloadArchive(async (offset, revision) => exportSkillArchive(api, {
+      scope: scope.value,
+      name: name.value,
+      offset,
+      revision,
+    }))
     saveBytes(archive.bytes, archive.filename, 'application/zip')
     notify(`Downloaded ${archive.filename}`)
   }
@@ -612,7 +621,7 @@ async function save() {
   if (!batch.length)
     return
 
-  const destination = base.value
+  const target = { scope: scope.value, name: name.value }
   const revision = bundle.value?.revision ?? null
   saving.value = 'Saving…'
   const carry = draft.value.map(file => ({ ...file }))
@@ -625,10 +634,7 @@ async function save() {
         saving.value = done < total ? `Uploading ${done + 1} of ${total}…` : 'Saving…'
       },
     })
-    const result = await api<SkillBundle>(`${destination}/bundle`, {
-      method: 'POST',
-      body: JSON.stringify({ base: revision, changes: staged }),
-    })
+    const result = await editSkillFiles(api, { ...target, base: revision, changes: staged })
     const created = creating.value
     applyBundle(result, carry)
     notify(created ? 'Skill created' : 'Skill saved')

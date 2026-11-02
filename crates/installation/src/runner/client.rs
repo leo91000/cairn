@@ -109,10 +109,8 @@ impl Controller {
         Ok(logs)
     }
 
-    async fn wait(&self) -> Result<i32> {
-        Ok(wait_for_exit(&self.http, &self.url, &self.token)
-            .await?
-            .code)
+    async fn wait(&self) -> Result<ControllerResult> {
+        wait_for_exit(&self.http, &self.url, &self.token).await
     }
 
     async fn output(&self) -> Result<()> {
@@ -138,11 +136,26 @@ impl Controller {
                 .await?;
             stdout.flush().await?;
         }
+        if let Ok(result) = &status
+            && result.physical_finalized
+        {
+            // Emit only after output has drained, so this trusted controller
+            // observation cannot interleave with an incomplete provider frame.
+            let event = json!({
+                "type": "runner.finalized",
+                "attemptId": self.url.rsplit('/').next(),
+                "physicalFinalized": true,
+                "finalizationFailed": result.finalization_failed,
+            });
+            tokio::io::stdout()
+                .write_all(format!("\n{event}\n").as_bytes())
+                .await?;
+        }
         // Preserve the last complete frames even when the next one was cut.
         let _ = tokio::io::stdout().flush().await;
         let _ = tokio::io::stderr().flush().await;
         match status {
-            Ok(code) => Ok(code),
+            Ok(result) => Ok(result.code),
             Err(error) => Err(error),
         }
     }
@@ -229,10 +242,10 @@ where
 
 /// A failed channel cannot truncate its intact peer. Output readers bound
 /// transport inactivity per record, so an actively draining backlog can finish.
-async fn collect_completion(
+async fn collect_completion<T>(
     output: impl Future<Output = Result<()>>,
-    status: impl Future<Output = Result<i32>>,
-) -> (Result<()>, Result<i32>) {
+    status: impl Future<Output = Result<T>>,
+) -> (Result<()>, Result<T>) {
     tokio::pin!(output, status);
     tokio::select! {
         output = &mut output => {
@@ -256,6 +269,7 @@ async fn collect_completion(
 pub(crate) struct ControllerResult {
     pub code: i32,
     pub finalization_failed: bool,
+    pub physical_finalized: bool,
 }
 
 pub(crate) async fn wait_for_exit(
@@ -286,6 +300,8 @@ pub(crate) async fn wait_for_exit(
     Ok(ControllerResult {
         code,
         finalization_failed,
+        physical_finalized: value["PhysicalFinalized"] == true
+            && value["FinalizationFailed"] != true,
     })
 }
 
@@ -520,7 +536,7 @@ mod tests {
     async fn failed_wait_never_truncates_an_intact_attempt_output_channel() {
         let started = tokio::time::Instant::now();
         let duration = RECONCILE_TIMEOUT * 2;
-        let (output, status) = collect_completion(
+        let (output, status) = collect_completion::<i32>(
             async {
                 tokio::time::sleep(duration).await;
                 Ok(())
@@ -621,6 +637,48 @@ mod tests {
         ] {
             let message = startup_rejection(StatusCode::SERVICE_UNAVAILABLE, Some(reason));
             assert!(message.starts_with(crate::nodes::placement::NO_CAPACITY));
+        }
+    }
+}
+
+#[cfg(test)]
+mod physical_result_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn exit_code_and_legacy_markers_never_substitute_for_a_physical_certificate() {
+        use axum::{Router, routing::post};
+        for (value, confirmed) in [
+            (json!({"StatusCode":0}), false),
+            (json!({"StatusCode":0,"PhysicalFinalized":false}), false),
+            (json!({"StatusCode":17,"PhysicalFinalized":true}), true),
+            (json!({"StatusCode":143,"PhysicalFinalized":true}), true),
+            (
+                json!({"StatusCode":70,"PhysicalFinalized":true,"FinalizationFailed":true}),
+                false,
+            ),
+        ] {
+            let app = Router::new().route(
+                "/wait",
+                post(move || {
+                    let value = value.clone();
+                    async move { axum::Json(value) }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let result = wait_for_exit(
+                &reqwest::Client::new(),
+                &format!("http://{address}"),
+                "fixture",
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.physical_finalized, confirmed);
+            server.abort();
         }
     }
 }

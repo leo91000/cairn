@@ -19,7 +19,7 @@ import org.robolectric.annotation.Config
 class HistoryCacheWriterTest {
     @get:Rule val directory = TemporaryFolder()
 
-    private fun record(cursor: Long, history: String = "v1:fixture:1") =
+    private fun record(cursor: Long, history: String = "v2:fixture:1") =
         CachedHistory(
             cursor,
             history,
@@ -83,7 +83,7 @@ class HistoryCacheWriterTest {
         cache.save("chat", record(9), true)
         cache.flush("chat")
         assertEquals(10L, cache.read("chat")?.cursor)
-        cache.save("chat", record(1, "v1:new-run:1"), true)
+        cache.save("chat", record(1, "v2:new-run:1"), true)
         assertEquals(1L, cache.read("chat")?.cursor)
     }
 
@@ -278,7 +278,7 @@ class HistoryCacheWriterTest {
             writer.flush()
             val disk = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
             assertEquals(position, disk.read("chat")?.position)
-            writer.offer(record(3, "v1:other:1"), cache.generation)
+            writer.offer(record(3, "v2:other:1"), cache.generation)
             writer.flush()
             assertNull(cache.read("chat")?.position)
             // A terminal removal invalidates work already registered by a reader.

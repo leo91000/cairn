@@ -1,6 +1,8 @@
 import type { Page } from '@playwright/test'
 import type { ListProjectsOutput } from '../../packages/contracts/generated/typescript/ListProjectsOutput'
 import type { Workspace } from './fixtures'
+import { once } from 'node:events'
+import { createServer } from 'node:http'
 import {
   signIn as authenticateWorkspace,
   createAgent,
@@ -13,6 +15,7 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+import { withSettledRoutes } from './route-lifecycle'
 
 const MAIN_AGENT_ID = '00000000-0000-4000-8000-000000000001'
 
@@ -572,85 +575,87 @@ test('recovering a created agent keeps its revision, so a concurrent change is a
 })
 
 test('tool choices stay visible and editable when every MCP connection is granted', async ({ page, workspace }) => {
-  const mcp = await workspace.api('/api/mcps', 'POST', {
-    name: 'Design tools',
-    transport: 'http',
-    url: 'http://127.0.0.1:9/mcp',
-    allowPrivateNetwork: true,
+  await withSettledRoutes(page, async () => {
+    const mcp = await workspace.api('/api/mcps', 'POST', {
+      name: 'Design tools',
+      transport: 'http',
+      url: 'http://127.0.0.1:9/mcp',
+      allowPrivateNetwork: true,
+    })
+    const agent = await workspace.api('/api/agents', 'POST', { name: 'Limited MCP user', access: { mcps: null, mcpTools: { [mcp.id]: ['echo'] } } })
+    await useRelayForHttpMocks(page)
+    // The connection reports two discovered tools.
+    await page.route('**/api/mcps', async (route) => {
+      if (route.request().method() !== 'GET') {
+        await route.continue()
+        return
+      }
+
+      const response = await route.fetch()
+      const list = (await response.json()).mcps.map((item: { id: string }) => item.id === mcp.id
+        ? { ...item, tools: [{ name: 'echo', inputSchema: { type: 'object' } }, { name: 'search', inputSchema: { type: 'object' } }] }
+        : item)
+      await route.fulfill({ response, json: { mcps: list } })
+    })
+    await page.goto(workspacePath(`/agents/${agent.id}?section=mcps`))
+    await authenticateWorkspace(page)
+    const group = page.getByRole('group', { name: 'MCP connections access' })
+    await expect(group.getByRole('button', { name: 'All, including future', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    const connection = page.getByRole('listitem', { name: 'Design tools' })
+    await expect(connection).toContainText('Tools · 2 enabled on the connection · 1 chosen')
+    const bar = page.getByRole('region', { name: 'Unsaved changes' })
+    await expect(bar).toHaveCount(0)
+
+    await connection.locator('summary').click()
+    await expect(connection.getByLabel('echo', { exact: true })).toBeChecked()
+    await connection.getByLabel('search', { exact: true }).check()
+    await expect(bar).toContainText('1 unsaved change')
+    await saveAgent(page)
+    const saved = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
+    expect(saved.access.mcps).toBeNull()
+    expect(saved.access.mcpTools).toEqual({ [mcp.id]: ['echo', 'search'] })
+
+    // Choosing starts with no connection selected, as for projects and skills and on Android;
+    // switching back keeps the tool choices.
+    await group.getByRole('button', { name: 'Choose', exact: true }).click()
+    await expect(page.getByLabel('Design tools', { exact: true })).not.toBeChecked()
+    await group.getByRole('button', { name: 'All, including future', exact: true }).click()
+    await expect(connection).toContainText('2 chosen')
+    await expect(bar).toHaveCount(0)
+    // Leaving "All enabled tools" starts with no tool chosen.
+    await connection.locator('details').evaluate((element) => {
+      (element as HTMLDetailsElement).open = true
+    })
+    await connection.getByLabel('All enabled tools', { exact: true }).check()
+    await expect(connection).toContainText('all enabled tools')
+    await connection.getByLabel('All enabled tools', { exact: true }).uncheck()
+    await expect(connection).toContainText('0 chosen')
+    await expect(connection.getByLabel('echo', { exact: true })).not.toBeChecked()
+    await expect(connection.getByLabel('search', { exact: true })).not.toBeChecked()
+    await connection.getByLabel('echo', { exact: true }).check()
+    await connection.getByLabel('search', { exact: true }).check()
+    await expect(bar).toHaveCount(0)
+    await page.getByRole('link', { name: 'Overview', exact: true }).click()
+    await expect(page.getByRole('button', { name: /^MCP & tools/ })).toContainText('Tools limited on Design tools')
+
+    // Unticking a connection keeps its tool choices until saving: ticking it again restores them.
+    await openAgentSection(page, 'MCP & tools')
+    await group.getByRole('button', { name: 'Choose', exact: true }).click()
+    const restriction = page.getByText('2 enabled on the connection · 2 chosen').first()
+    await page.getByLabel('Design tools', { exact: true }).check()
+    await expect(restriction).toBeVisible()
+    await page.getByLabel('Design tools', { exact: true }).uncheck()
+    await page.getByLabel('Design tools', { exact: true }).check()
+    await expect(restriction).toBeVisible()
+    await page.getByLabel('Design tools', { exact: true }).uncheck()
+
+    // Choosing no connection saves: tool choices of connections no longer granted are not sent.
+    const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${agent.id}`))
+    await bar.getByRole('button', { name: 'Save', exact: true }).click()
+    expect((await saving).postDataJSON().settings.access).toMatchObject({ mcps: [], mcpTools: {} })
+    await expect(bar).toHaveCount(0)
+    expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access).toMatchObject({ mcps: [], mcpTools: {} })
   })
-  const agent = await workspace.api('/api/agents', 'POST', { name: 'Limited MCP user', access: { mcps: null, mcpTools: { [mcp.id]: ['echo'] } } })
-  await useRelayForHttpMocks(page)
-  // The connection reports two discovered tools.
-  await page.route('**/api/mcps', async (route) => {
-    if (route.request().method() !== 'GET') {
-      await route.continue()
-      return
-    }
-
-    const response = await route.fetch()
-    const list = (await response.json()).mcps.map((item: { id: string }) => item.id === mcp.id
-      ? { ...item, tools: [{ name: 'echo', inputSchema: { type: 'object' } }, { name: 'search', inputSchema: { type: 'object' } }] }
-      : item)
-    await route.fulfill({ response, json: { mcps: list } })
-  })
-  await page.goto(workspacePath(`/agents/${agent.id}?section=mcps`))
-  await authenticateWorkspace(page)
-  const group = page.getByRole('group', { name: 'MCP connections access' })
-  await expect(group.getByRole('button', { name: 'All, including future', exact: true })).toHaveAttribute('aria-pressed', 'true')
-  const connection = page.getByRole('listitem', { name: 'Design tools' })
-  await expect(connection).toContainText('Tools · 2 enabled on the connection · 1 chosen')
-  const bar = page.getByRole('region', { name: 'Unsaved changes' })
-  await expect(bar).toHaveCount(0)
-
-  await connection.locator('summary').click()
-  await expect(connection.getByLabel('echo', { exact: true })).toBeChecked()
-  await connection.getByLabel('search', { exact: true }).check()
-  await expect(bar).toContainText('1 unsaved change')
-  await saveAgent(page)
-  const saved = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
-  expect(saved.access.mcps).toBeNull()
-  expect(saved.access.mcpTools).toEqual({ [mcp.id]: ['echo', 'search'] })
-
-  // Choosing starts with no connection selected, as for projects and skills and on Android;
-  // switching back keeps the tool choices.
-  await group.getByRole('button', { name: 'Choose', exact: true }).click()
-  await expect(page.getByLabel('Design tools', { exact: true })).not.toBeChecked()
-  await group.getByRole('button', { name: 'All, including future', exact: true }).click()
-  await expect(connection).toContainText('2 chosen')
-  await expect(bar).toHaveCount(0)
-  // Leaving "All enabled tools" starts with no tool chosen.
-  await connection.locator('details').evaluate((element) => {
-    (element as HTMLDetailsElement).open = true
-  })
-  await connection.getByLabel('All enabled tools', { exact: true }).check()
-  await expect(connection).toContainText('all enabled tools')
-  await connection.getByLabel('All enabled tools', { exact: true }).uncheck()
-  await expect(connection).toContainText('0 chosen')
-  await expect(connection.getByLabel('echo', { exact: true })).not.toBeChecked()
-  await expect(connection.getByLabel('search', { exact: true })).not.toBeChecked()
-  await connection.getByLabel('echo', { exact: true }).check()
-  await connection.getByLabel('search', { exact: true }).check()
-  await expect(bar).toHaveCount(0)
-  await page.getByRole('link', { name: 'Overview', exact: true }).click()
-  await expect(page.getByRole('button', { name: /^MCP & tools/ })).toContainText('Tools limited on Design tools')
-
-  // Unticking a connection keeps its tool choices until saving: ticking it again restores them.
-  await openAgentSection(page, 'MCP & tools')
-  await group.getByRole('button', { name: 'Choose', exact: true }).click()
-  const restriction = page.getByText('2 enabled on the connection · 2 chosen').first()
-  await page.getByLabel('Design tools', { exact: true }).check()
-  await expect(restriction).toBeVisible()
-  await page.getByLabel('Design tools', { exact: true }).uncheck()
-  await page.getByLabel('Design tools', { exact: true }).check()
-  await expect(restriction).toBeVisible()
-  await page.getByLabel('Design tools', { exact: true }).uncheck()
-
-  // Choosing no connection saves: tool choices of connections no longer granted are not sent.
-  const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${agent.id}`))
-  await bar.getByRole('button', { name: 'Save', exact: true }).click()
-  expect((await saving).postDataJSON().settings.access).toMatchObject({ mcps: [], mcpTools: {} })
-  await expect(bar).toHaveCount(0)
-  expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access).toMatchObject({ mcps: [], mcpTools: {} })
 })
 
 test('a held plugin grant whose package cannot give agents access is shown, counted and removable', async ({ page, workspace }) => {
@@ -1050,3 +1055,87 @@ test('a missing agent preview keeps edits unsaved and reports the error', async 
   const stored = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
   expect(stored.description).not.toBe('Unsaved edits')
 })
+
+const routeLifecycleTest = test.extend<{
+  pendingResponse: { url: string, received: Promise<void>, release: () => void }
+}>({
+  // Playwright requires a destructuring pattern for fixture dependencies.
+  // eslint-disable-next-line no-empty-pattern
+  pendingResponse: async ({}, use) => {
+    const received = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const server = createServer(async (request, response) => {
+      if (request.url === '/pending') {
+        received.resolve()
+        await release.promise
+        response.writeHead(200, { 'content-type': 'application/json' }).end('{}')
+        return
+      }
+
+      response.writeHead(200, { 'content-type': 'text/html' }).end('<!doctype html><title>Route lifecycle</title>')
+    })
+    try {
+      server.listen(0, '127.0.0.1')
+      await once(server, 'listening')
+      await use({
+        url: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+        received: received.promise,
+        release: () => release.resolve(),
+      })
+    }
+    finally {
+      release.resolve()
+      server.closeAllConnections()
+      if (server.listening)
+        await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+    }
+  },
+})
+
+for (const outcome of ['success', 'assertion failure']) {
+  routeLifecycleTest(`HTTP mock scopes settle pending fetches before page teardown on ${outcome}`, async ({ page, pendingResponse }) => {
+    const bodyFinished = Promise.withResolvers<void>()
+    let fulfilled = false
+    let scopeFinished = false
+    let failure: unknown
+    const expectedFailure = new Error('Controlled UI assertion failure')
+    const scope = withSettledRoutes(page, async () => {
+      await page.route('**/pending', async (route) => {
+        const response = await route.fetch()
+        await route.fulfill({ response })
+        fulfilled = true
+      })
+      await page.goto(pendingResponse.url)
+      await page.evaluate(() => {
+        void fetch('/pending')
+      })
+      await pendingResponse.received
+      bodyFinished.resolve()
+      if (outcome === 'assertion failure')
+        throw expectedFailure
+    })
+    const completion = scope.then(
+      () => { scopeFinished = true },
+      (error) => {
+        scopeFinished = true
+        failure = error
+      },
+    )
+    try {
+      await Promise.race([bodyFinished.promise, completion])
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(scopeFinished).toBe(false)
+      pendingResponse.release()
+      await completion
+      await page.close()
+      expect(fulfilled).toBe(true)
+      expect(failure).toBe(outcome === 'assertion failure' ? expectedFailure : undefined)
+    }
+    finally {
+      pendingResponse.release()
+      await completion
+      if (!page.isClosed())
+        await page.unrouteAll({ behavior: 'wait' })
+    }
+  })
+}

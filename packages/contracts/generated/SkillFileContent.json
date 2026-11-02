@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "content": {
+      "default": "",
+      "type": "string"
+    },
+    "encoding": {
+      "default": "utf-8",
+      "pattern": "^(utf-8|base64)$",
+      "type": "string"
+    },
+    "executable": {
+      "default": false,
+      "type": "boolean"
+    },
+    "size": {
+      "default": 0,
+      "format": "uint64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "title": "SkillFileContent",
+  "type": "object"
+}

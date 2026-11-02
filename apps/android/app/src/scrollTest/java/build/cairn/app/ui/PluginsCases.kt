@@ -1370,7 +1370,7 @@ abstract class PluginsCases {
                                     result =
                                         if (polls.get() % 2 == 1) null
                                         else
-                                            build.cairn.contracts.PluginOperationResult.B(
+                                            build.cairn.contracts.PluginOperationResult.G(
                                                 program.get()
                                             ),
                                     error = null,

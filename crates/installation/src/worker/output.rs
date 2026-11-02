@@ -9,6 +9,12 @@ use tokio::{
     time::Instant,
 };
 
+mod telemetry;
+
+#[cfg(test)]
+pub(super) use telemetry::{Capture as SummaryCapture, Probe};
+pub(super) use telemetry::{Publisher, Reports};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OutputKind {
     Stdout,
@@ -74,7 +80,7 @@ const DIAGNOSTIC_FRAGMENT_LIMIT: usize = 8192;
 // A target name mentioned in another logger's message is still a diagnostic.
 static AGENT_PERFORMANCE_RECORD: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(
-        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+(?:TRACE|DEBUG|INFO|WARN|ERROR)\s+(?:[A-Za-z_][A-Za-z0-9_]*\{[^{}\r\n]*\}:\s*)*cairn_performance: ",
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+(?P<level>TRACE|DEBUG|INFO|WARN|ERROR)\s+(?:[A-Za-z_][A-Za-z0-9_]*\{[^{}\r\n]*\}:\s*)*cairn_performance: ",
     )
     .unwrap()
 });
@@ -90,7 +96,7 @@ const NOTICE_LIMIT: usize = 4_000;
 /// Event types that are always recorded. Clients use turn markers to scope reused message IDs,
 /// show the latest context usage, and show the engine's retries and usage limits in the
 /// conversation.
-const CONVERSATION_EVENTS: [&str; 10] = [
+const CONVERSATION_EVENTS: [&str; 11] = [
     "thread.started",
     "context.usage",
     "turn.started",
@@ -99,6 +105,7 @@ const CONVERSATION_EVENTS: [&str; 10] = [
     "turn.waiting",
     "error",
     "runner.failed",
+    "runner.finalized",
     "engine.retry",
     "provider.limit",
 ];
@@ -118,7 +125,7 @@ pub(super) async fn read_output(
     secrets: Vec<String>,
 ) {
     if diagnostic {
-        return read_diagnostics(reader, events).await;
+        return read_diagnostics(reader, events, None).await;
     }
 
     let mut bytes = [0; 8192];
@@ -163,13 +170,26 @@ pub(super) async fn read_output(
 
 /// Forwards agent stderr by whole lines, so styling and performance records are
 /// recognized intact. A long fragment without a line end is still forwarded.
-async fn read_diagnostics(mut reader: impl AsyncRead + Unpin, events: mpsc::Sender<Output>) {
+pub(super) async fn read_agent_diagnostics(
+    reader: impl AsyncRead + Unpin,
+    events: mpsc::Sender<Output>,
+    telemetry: telemetry::Publisher,
+) {
+    read_diagnostics(reader, events, Some(telemetry)).await;
+}
+
+async fn read_diagnostics(
+    mut reader: impl AsyncRead + Unpin,
+    events: mpsc::Sender<Output>,
+    mut telemetry: Option<telemetry::Publisher>,
+) {
     let mut bytes = [0; 8192];
     let mut pending = Vec::new();
     let mut styling = run_output::TerminalStyling::default();
-    loop {
+    let eof = loop {
         let n = match reader.read(&mut bytes).await {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break true,
+            Err(_) => break false,
             Ok(n) => n,
         };
         styling.push(&bytes[..n], &mut pending);
@@ -189,27 +209,40 @@ async fn read_diagnostics(mut reader: impl AsyncRead + Unpin, events: mpsc::Send
             None => continue,
         };
         let lines: Vec<u8> = pending.drain(..complete).collect();
-        if !forward_diagnostics(&lines, &events).await {
+        if !forward_diagnostics(&lines, &events, &mut telemetry).await {
             return;
         }
+    };
+    // The receiver only disappears once the run stopped listening.
+    if !pending.is_empty() && !forward_diagnostics(&pending, &events, &mut telemetry).await {
+        return;
     }
-    if !pending.is_empty() {
-        // The receiver only disappears once the run stopped listening.
-        forward_diagnostics(&pending, &events).await;
+    if let Some(telemetry) = &mut telemetry {
+        telemetry.finish(eof);
     }
 }
 
 /// Sends readable diagnostics to the run. The agent process's own performance
 /// records belong to the manager log, like the worker's.
-async fn forward_diagnostics(bytes: &[u8], events: &mpsc::Sender<Output>) -> bool {
+async fn forward_diagnostics(
+    bytes: &[u8],
+    events: &mpsc::Sender<Output>,
+    telemetry: &mut Option<telemetry::Publisher>,
+) -> bool {
     let text = String::from_utf8_lossy(bytes);
     let mut diagnostics = String::new();
     let mut lines = text.split_inclusive(['\r', '\n']).peekable();
     while let Some(line) = lines.next() {
         if AGENT_PERFORMANCE_RECORD.is_match(line) {
+            let aggregated = telemetry
+                .as_mut()
+                .is_some_and(|metrics| metrics.observe(line));
             // CRLF is one terminator; do not leave its LF as an empty diagnostic.
             if line.ends_with('\r') && lines.peek() == Some(&"\n") {
                 lines.next();
+            }
+            if aggregated {
+                continue;
             }
             if events
                 .send(Output::performance(line.trim_end().to_owned()))
@@ -249,7 +282,11 @@ pub(super) async fn record(
         record_raw(s, id, "diagnostic", raw, secrets, log_total).await?;
         return Ok(false);
     }
+    if raw.trim().is_empty() {
+        return Ok(false);
+    }
     let Ok(event) = serde_json::from_str::<Value>(raw) else {
+        checkpoint.mark_progress_incomplete().await?;
         record_raw(s, id, "output", raw, secrets, log_total).await?;
         return Ok(false);
     };
@@ -286,26 +323,7 @@ pub(super) async fn record(
         return Ok(false);
     }
     if event["type"] == "runner.output_interrupted" {
-        let id = id.to_owned();
-        checkpoint
-            .update_and_publish_if(
-                |c| {
-                    if c.output_interrupted == Some(true) {
-                        return false;
-                    }
-                    c.output_interrupted = Some(true);
-                    true
-                },
-                move |db| {
-                    db.event(
-                        &id,
-                        &EventKind::Status,
-                        "Execution output was interrupted; some activity may be missing.",
-                        None,
-                    )
-                },
-            )
-            .await?;
+        mark_output_interrupted(checkpoint).await?;
         return Ok(false);
     }
     if event["type"] == "runner.start_rejected" {
@@ -343,6 +361,10 @@ pub(super) async fn record(
     if handle_chat_control(s, id, &event).await? {
         return Ok(false);
     }
+    if !super::progress::known_frame(&event) {
+        // Even an exhausted log budget cannot certify an unsupported protocol.
+        checkpoint.mark_progress_incomplete().await?;
+    }
     let exhausted = run_output::exhausted(&event);
     // Every activity item has its own detail limit, regardless of earlier output.
     let conversation = event["item"]["type"] == "agent_message"
@@ -374,6 +396,32 @@ pub(super) async fn record(
         let _ = crate::chat_titles::enqueue(s, id).await;
     }
     Ok(exhausted)
+}
+
+/// The trusted relay explicitly reports lost output. Other unsupported frames
+/// affect monitoring coverage only, without changing provider/replay policy.
+async fn mark_output_interrupted(checkpoint: &Checkpoint) -> Result<()> {
+    if checkpoint
+        .read(|saved| saved.output_interrupted == Some(true))
+        .await
+    {
+        return Ok(());
+    }
+    let id = checkpoint.id.clone();
+    checkpoint
+        .decide(move |saved, db| {
+            if saved.output_interrupted == Some(true) {
+                return Ok(());
+            }
+            saved.output_interrupted = Some(true);
+            db.event(
+                &id,
+                &EventKind::Status,
+                "Execution output was interrupted; some activity may be missing.",
+                None,
+            )
+        })
+        .await
 }
 
 async fn record_raw(
@@ -480,6 +528,7 @@ async fn apply_event(
                 run: changed.then_some(changes),
                 failure: failure.map(|(message, cause)| (message, cause, provider_failure)),
                 completed,
+                progress_complete: super::progress::same_semantics(event, stored),
                 last_message: message,
             },
         )

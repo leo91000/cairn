@@ -1486,7 +1486,7 @@ internal fun FormSheet(
 @Composable
 private fun ChangesSheet(
     draft: SkillDraft,
-    changes: List<SkillChange>,
+    changes: List<DraftSkillChange>,
     close: () -> Unit,
     discard: () -> Unit,
 ) {
@@ -1517,7 +1517,7 @@ private fun ChangesSheet(
             changes.forEach { change ->
                 val (icon, label, color) =
                     when (change) {
-                        is SkillChange.Write ->
+                        is DraftSkillChange.Write ->
                             Triple(
                                 CairnIcons.Pencil,
                                 if (draft.file(change.path)?.origin == null)
@@ -1525,19 +1525,19 @@ private fun ChangesSheet(
                                 else "Contenu de ${change.path}",
                                 signal.success,
                             )
-                        is SkillChange.Delete ->
+                        is DraftSkillChange.Delete ->
                             Triple(
                                 CairnIcons.Trash,
                                 "Suppression de ${change.path}",
                                 signal.attention,
                             )
-                        is SkillChange.Move ->
+                        is DraftSkillChange.Move ->
                             Triple(
                                 CairnIcons.Move,
                                 "${change.from} → ${change.to}",
                                 MaterialTheme.colorScheme.primary,
                             )
-                        is SkillChange.Mode ->
+                        is DraftSkillChange.Mode ->
                             Triple(
                                 CairnIcons.Terminal,
                                 "${change.path} ${if (change.executable) "devient exécutable" else "n’est plus exécutable"}",

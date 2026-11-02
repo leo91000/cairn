@@ -1041,6 +1041,22 @@ class DirectTransportTest {
     }
 
     @Test
+    fun `immutable timeline snapshot reads replay on relay after direct loss`() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{}"))
+            server.start()
+            val api = CairnApi(server.url("/"), MemoryVault(), installationId = "test")
+            api.transport.attach(
+                DirectChannel({ _, _, _ -> throw IOException("acknowledgement lost") }, {})
+            )
+            val payload = body("offset" to "0")
+            assertEquals("{}", api.request("POST", "/runs/run/timeline-content", payload))
+            assertEquals(payload.toString(), server.takeRequest().body.readUtf8())
+            assertEquals("relay", api.transport.route.value)
+        }
+    }
+
+    @Test
     fun `binary resources remain on relay while direct is attached`() = runTest {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("image"))
@@ -1113,10 +1129,33 @@ class DirectTransportTest {
         runBlocking {
             for (failure in listOf("closed", "corrupt", "credit", "end", "timeout")) {
                 MockWebServer().use { server ->
+                    val waitCard =
+                        TimelineCard(
+                            id = "notice:7",
+                            runId = "r1",
+                            position = 7,
+                            revision = 7,
+                            source = 7,
+                            turn = 0,
+                            attempt = 0,
+                            createdAt = 7,
+                            updatedAt = 7,
+                            content =
+                                build.cairn.contracts.TimelineContent.C(
+                                    build.cairn.contracts.TimelineNotice(
+                                        code = "backgroundTasks",
+                                        state = "info",
+                                        prominent = false,
+                                        tasks = listOf("Vérifier la CI"),
+                                        taskIds = listOf(""),
+                                        waitingSince = 7,
+                                    )
+                                ),
+                        )
                     fun sse(cursor: Long, events: List<RunEvent>) =
                         "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(LiveBatch(events, LiveState(run = Run(id = "r1",
 status = "running",
-taskId = "",)), false, false, history = "h1",))}\n\n"
+taskId = "",)), false, false, history = "h1", entries = listOf(build.cairn.contracts.TimelineChange.A(waitCard)),))}\n\n"
                     val first =
                         RunEvent(
                             id = 7,
@@ -1243,8 +1282,8 @@ taskId = "",)), false, false, history = "h1",))}\n\n"
                     assertEquals(listOf(7L, 8L), final.events.map { it.id })
                     assertEquals(listOf("direct", "relay"), final.events.map { it.text })
                     assertEquals(
-                        build.cairn.app.ui.BackgroundWait(listOf("Vérifier la CI"), 7),
-                        build.cairn.app.ui.backgroundWait(final.events),
+                        build.cairn.app.ui.BackgroundWait(listOf("Vérifier la CI"), 7, listOf("")),
+                        build.cairn.app.ui.backgroundWait(final.entries),
                     )
                     assertEquals(
                         "/api/installations/test/api/runs/r1/stream?after=7&history=h1&window=1&recent=1",

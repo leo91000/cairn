@@ -88,7 +88,7 @@ class SubagentViewsTest {
             },
         )
 
-    private val team = timelineEntries(events, chat = true).single().agents
+    private val team = fixtureEntries(events, chat = true).single().agents
 
     @Test
     fun `a team lists its subagents and opens one's full activity`() {
@@ -172,7 +172,7 @@ class SubagentViewsTest {
             )
         val recent = listOf(subagent("item.started", "Review"))
         val keys = TimelineKeys()
-        var entries by mutableStateOf(keys.stabilize("h", timelineEntries(recent, chat = true)))
+        var entries by mutableStateOf(keys.stabilize("h", fixtureEntries(recent, chat = true)))
         val original = entries.single().key
         val list = LazyListState()
         compose.setContent {
@@ -191,7 +191,7 @@ class SubagentViewsTest {
         compose.onAllNodesWithTag("subagent").assertCountEquals(0)
         compose.runOnIdle { runBlocking { list.scrollToItem(0, 8) } }
         compose.runOnIdle {
-            entries = keys.stabilize("h", timelineEntries(older + recent, chat = true))
+            entries = keys.stabilize("h", fixtureEntries(older + recent, chat = true))
         }
         compose.onNodeWithText("2 sous-agents").assertIsDisplayed()
         compose.onAllNodesWithTag("subagent").assertCountEquals(0)

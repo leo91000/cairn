@@ -78,9 +78,13 @@ abstract class SkillMentionCases {
                 if (noSkills) emptyList()
                 else
                     listOf(
-                        Skill("review", "Relire les changements en cours", usageCount = 3),
-                        Skill("deploy", "Publier une version"),
-                        Skill("broken", "Invalide", valid = false),
+                        Skill(
+                            name = "review",
+                            description = "Relire les changements en cours",
+                            usageCount = 3,
+                        ),
+                        Skill(name = "deploy", description = "Publier une version"),
+                        Skill(name = "broken", description = "Invalide", valid = false),
                     )
             val history =
                 listOf(
@@ -100,7 +104,7 @@ abstract class SkillMentionCases {
                                 "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream"
                         ) {
                             val frame =
-                                "event: batch\nid: 1\ndata: ${wireJson.encodeToString(LiveBatch(history, LiveState(chat = chat, run = run), true, false))}\n\n"
+                                "event: batch\nid: 1\ndata: ${wireJson.encodeToString(timelineBatch(history, LiveState(chat = chat, run = run), true, false))}\n\n"
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
                                 .setBody(frame + ": keepalive\n\n".repeat(10000))

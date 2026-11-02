@@ -189,6 +189,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
     private inner class Attempt(private val attemptGeneration: Long) {
         val failed = CompletableDeferred<Unit>()
         private val opened = CompletableDeferred<Unit>()
+        private val localDescriptionReady = CompletableDeferred<Unit>()
         private val expires = AtomicLong()
         private val candidates = Channel<JsonObject>(16)
         private val workers =
@@ -392,6 +393,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                     SessionDescription(SessionDescription.Type.OFFER, sdp),
                 )
             }
+            localDescriptionReady.complete(Unit)
             workers.launch {
                 try {
                     for (candidate in candidates) {
@@ -510,6 +512,9 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                                     when (incoming["kind"]!!.jsonPrimitive.content) {
                                         "answer" -> {
                                             require(!answered)
+                                            // A fast answer can precede the offer's HTTP ack.
+                                            // libwebrtc requires the local offer before its answer.
+                                            localDescriptionReady.await()
                                             description {
                                                 peer!!.setRemoteDescription(
                                                     it,

@@ -26,6 +26,7 @@ impl Controller {
             value["activeRuns"] = active.len().into();
         }
         value["telemetryAgeMs"] = age.map(|age| age.as_millis() as u64).into();
+        value["bootstrapObservation"] = self.bootstrap.health();
         value
     }
 

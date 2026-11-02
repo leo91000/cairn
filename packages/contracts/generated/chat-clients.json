@@ -101,6 +101,13 @@
     "path": "/chats/{chatId}/restore"
   },
   {
+    "input": "ResumeChatInput",
+    "method": "POST",
+    "name": "resumeChat",
+    "output": "Run",
+    "path": "/chats/{chatId}/resume"
+  },
+  {
     "input": "ConfirmChatInput",
     "method": "DELETE",
     "name": "deleteChat",

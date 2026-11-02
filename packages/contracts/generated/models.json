@@ -168,6 +168,22 @@
         }
       ]
     },
+    "AccountNotice": {
+      "properties": {
+        "agent": {
+          "description": "The engine's product name, as Cairn's status reported it.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent",
+        "name"
+      ],
+      "type": "object"
+    },
     "AccountProviderInput": {
       "additionalProperties": false,
       "properties": {
@@ -499,6 +515,63 @@
       },
       "type": "object"
     },
+    "AcquireExclusiveInput": {
+      "additionalProperties": false,
+      "properties": {
+        "acquisitionTimeoutSeconds": {
+          "default": 300,
+          "format": "uint64",
+          "maximum": 3600,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "durationSeconds": {
+          "format": "uint64",
+          "maximum": 900,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "memberRunIds": {
+          "default": [],
+          "items": {
+            "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 16,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "minimumAvailableMemoryMiB": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 1073741824,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        "waitSeconds": {
+          "default": 300,
+          "format": "uint64",
+          "maximum": 3600,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "durationSeconds",
+        "waitSeconds",
+        "acquisitionTimeoutSeconds",
+        "reason",
+        "memberRunIds",
+        "minimumAvailableMemoryMiB"
+      ],
+      "type": "object"
+    },
     "ActivatePluginPackageInput": {
       "additionalProperties": false,
       "properties": {
@@ -750,6 +823,40 @@
       },
       "required": [
         "agentId"
+      ],
+      "type": "object"
+    },
+    "AgentPluginGrants": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "grants": {
+          "items": {
+            "$ref": "#/definitions/PluginInstanceGrant"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "description": "Shares the agent profile revision, so old profile editors cannot overwrite a change.",
+          "type": "string"
+        },
+        "runCredentialInstances": {
+          "description": "At most one supplying instance per package. A full grant alone is insufficient.",
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "agentId",
+        "revision",
+        "grants",
+        "runCredentialInstances"
       ],
       "type": "object"
     },
@@ -1422,13 +1529,15 @@
           "type": "string"
         },
         "suspendedByExclusive": {
-          "additionalProperties": true,
-          "default": null,
-          "type": [
-            "object",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExclusiveReservation"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "x-kotlin-type": "ExclusiveReservation"
+          "default": null
         },
         "title": {
           "default": "",
@@ -2461,6 +2570,24 @@
       ],
       "type": "object"
     },
+    "ConfigurePlacementInput": {
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        },
+        "selection": {
+          "$ref": "#/definitions/PlacementSelection"
+        }
+      },
+      "required": [
+        "runId",
+        "selection"
+      ],
+      "type": "object"
+    },
     "ConfirmChatInput": {
       "additionalProperties": false,
       "properties": {
@@ -2629,6 +2756,35 @@
           "type": "boolean"
         }
       },
+      "type": "object"
+    },
+    "ConversationPlacement": {
+      "additionalProperties": false,
+      "properties": {
+        "nodes": {
+          "items": {
+            "$ref": "#/definitions/ExecutionNode"
+          },
+          "type": "array"
+        },
+        "pinnedNodeId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preferredNodeId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "nodes"
+      ],
       "type": "object"
     },
     "ConversationRequester": {
@@ -3057,6 +3213,18 @@
       ],
       "type": "object"
     },
+    "DeleteSkillOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "deleted"
+      ],
+      "type": "object"
+    },
     "EditChatMessage": {
       "additionalProperties": false,
       "properties": {
@@ -3134,6 +3302,94 @@
       ],
       "type": "object"
     },
+    "EditSkillFilesInput": {
+      "additionalProperties": false,
+      "properties": {
+        "base": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "changes": {
+          "items": {
+            "$ref": "#/definitions/SkillChange"
+          },
+          "maxItems": 2000,
+          "minItems": 1,
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "scope": {
+          "default": "global",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "name",
+        "base",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "EngineRetry": {
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "delayMs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "httpStatus": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "maxRetries": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "noResponse": {
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "The engine's reason code, such as `overloaded` or `rate_limit`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attempt",
+        "maxRetries",
+        "reason",
+        "httpStatus",
+        "delayMs",
+        "noResponse"
+      ],
+      "type": "object"
+    },
     "EventPreview": {
       "properties": {
         "createdAt": {
@@ -3168,6 +3424,92 @@
         "id",
         "runId",
         "createdAt"
+      ],
+      "type": "object"
+    },
+    "ExclusiveReservation": {
+      "additionalProperties": false,
+      "properties": {
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expiresAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "minimumAvailableMemoryMiB": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "nodeId": {
+          "type": "string"
+        },
+        "ownerRunId": {
+          "type": "string"
+        },
+        "pausedRunIds": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "renewalPending": {
+          "default": false,
+          "type": "boolean"
+        },
+        "state": {
+          "pattern": "^(queued|acquiring|acquired|releasing|released|failed|expired)$",
+          "type": "string"
+        },
+        "waitUntil": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "nodeId",
+        "ownerRunId",
+        "reason",
+        "state"
+      ],
+      "type": "object"
+    },
+    "ExclusiveStatusOutput": {
+      "additionalProperties": false,
+      "description": "An object result is accepted by both legacy and current MCP tool codecs.",
+      "properties": {
+        "reservations": {
+          "items": {
+            "$ref": "#/definitions/ExclusiveReservation"
+          },
+          "maxItems": 20,
+          "type": "array"
+        }
+      },
+      "required": [
+        "reservations"
       ],
       "type": "object"
     },
@@ -3244,13 +3586,15 @@
           "type": "array"
         },
         "exclusiveReservation": {
-          "additionalProperties": true,
-          "default": null,
-          "type": [
-            "object",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExclusiveReservation"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "x-kotlin-type": "ExclusiveReservation"
+          "default": null
         },
         "exclusiveReservations": {
           "default": false,
@@ -3484,6 +3828,78 @@
       ],
       "type": "object"
     },
+    "ExecutionResources": {
+      "additionalProperties": false,
+      "description": "Execution allowances after node reserves are deducted. Configured node\nbudgets retain NodeResources' separate 128 MiB disk minimum.",
+      "properties": {
+        "cpu": {
+          "format": "uint32",
+          "maximum": 4096,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "diskMiB": {
+          "format": "uint64",
+          "maximum": 1099511627776,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "memoryMiB": {
+          "format": "uint64",
+          "maximum": 1073741824,
+          "minimum": 128,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpu",
+        "memoryMiB",
+        "diskMiB"
+      ],
+      "type": "object"
+    },
+    "ExportSkillArchiveInput": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "offset": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "name",
+        "offset"
+      ],
+      "type": "object"
+    },
+    "ForgetSkillSourceOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "detached": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "detached"
+      ],
+      "type": "object"
+    },
     "GetChatInput": {
       "additionalProperties": false,
       "properties": {
@@ -3555,6 +3971,20 @@
       "additionalProperties": false,
       "type": "object"
     },
+    "GetPlacementInput": {
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId"
+      ],
+      "type": "object"
+    },
     "GetRunInput": {
       "additionalProperties": false,
       "properties": {
@@ -3583,6 +4013,14 @@
     },
     "HistoryPage": {
       "properties": {
+        "entries": {
+          "default": [],
+          "description": "Timeline cards that first appeared within this page or last changed in it.",
+          "items": {
+            "$ref": "#/definitions/TimelineEntry"
+          },
+          "type": "array"
+        },
         "events": {
           "items": {
             "$ref": "#/definitions/RunEvent"
@@ -3595,6 +4033,13 @@
         "history": {
           "type": "string"
         },
+        "largeEntries": {
+          "description": "Oversized timeline cards, fetched in bounded chunks before this page is applied.",
+          "items": {
+            "$ref": "#/definitions/LargeTimelineReference"
+          },
+          "type": "array"
+        },
         "oldest": {
           "format": "int64",
           "type": "integer"
@@ -3602,11 +4047,133 @@
       },
       "required": [
         "events",
+        "entries",
         "history",
         "oldest",
         "hasOlder"
       ],
       "type": "object"
+    },
+    "ImportProjectInput": {
+      "additionalProperties": false,
+      "properties": {
+        "baseBranch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "maxLength": 200,
+          "type": "string"
+        },
+        "instance": {
+          "maxLength": 100,
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pluginId": {
+          "maxLength": 100,
+          "type": "string"
+        },
+        "source": {
+          "maxLength": 100,
+          "type": "string"
+        }
+      },
+      "required": [
+        "pluginId",
+        "source",
+        "instance",
+        "id"
+      ],
+      "type": "object"
+    },
+    "ImportSkillInput": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "scope": {
+              "type": "string"
+            },
+            "source": {
+              "const": "archive",
+              "type": "string"
+            },
+            "upload": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "scope",
+            "upload"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "folder": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "instance": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "location": {
+              "additionalProperties": true,
+              "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+              "type": "object",
+              "x-cairn-json-object": true
+            },
+            "pluginId": {
+              "type": "string"
+            },
+            "scope": {
+              "type": "string"
+            },
+            "skillSource": {
+              "type": "string"
+            },
+            "source": {
+              "const": "plugin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "source",
+            "scope",
+            "pluginId",
+            "skillSource",
+            "location"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "InstallPluginPackageInput": {
       "additionalProperties": false,
@@ -3739,6 +4306,18 @@
         "release",
         "archiveSha256",
         "binarySha256"
+      ],
+      "type": "object"
+    },
+    "LargeTimelineReference": {
+      "description": "Metadata for an oversized card. Its source-backed fields are fetched from\nthe immutable source event before the client applies this snapshot.",
+      "properties": {
+        "snapshot": {
+          "$ref": "#/definitions/TimelineEntry"
+        }
+      },
+      "required": [
+        "snapshot"
       ],
       "type": "object"
     },
@@ -4022,6 +4601,65 @@
       ],
       "type": "object"
     },
+    "ListPluginResourcesInput": {
+      "additionalProperties": false,
+      "properties": {
+        "instanceId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "page": {
+          "default": 1,
+          "format": "int64",
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "query": {
+          "default": "",
+          "type": "string"
+        },
+        "resourceType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pluginId",
+        "instanceId",
+        "resourceType",
+        "page",
+        "query"
+      ],
+      "type": "object"
+    },
+    "ListPluginResourcesOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/definitions/PluginResource"
+          },
+          "type": "array"
+        },
+        "nextPage": {
+          "format": "int64",
+          "maximum": 10000,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "items",
+        "nextPage"
+      ],
+      "type": "object"
+    },
     "ListProjectsInput": {
       "additionalProperties": false,
       "type": "object"
@@ -4080,6 +4718,55 @@
         "offset",
         "status",
         "taskId"
+      ],
+      "type": "object"
+    },
+    "ListSkillsInput": {
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ListSourceProjectsInput": {
+      "additionalProperties": false,
+      "properties": {
+        "instance": {
+          "maxLength": 100,
+          "type": "string"
+        },
+        "page": {
+          "default": 1,
+          "format": "uint32",
+          "maximum": 10000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "pluginId": {
+          "maxLength": 100,
+          "type": "string"
+        },
+        "query": {
+          "default": "",
+          "maxLength": 200,
+          "type": "string"
+        },
+        "source": {
+          "maxLength": 100,
+          "type": "string"
+        }
+      },
+      "required": [
+        "pluginId",
+        "source",
+        "instance",
+        "page",
+        "query"
       ],
       "type": "object"
     },
@@ -5581,6 +6268,63 @@
       },
       "type": "object"
     },
+    "MoveToNodeInput": {
+      "additionalProperties": false,
+      "properties": {
+        "nodeId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "requiredTags": {
+          "items": {
+            "maxLength": 40,
+            "minLength": 1,
+            "pattern": "^(?!.*[^A-Za-z0-9_:./-]).+$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        },
+        "waitSeconds": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 3600,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "runId",
+        "nodeId",
+        "waitSeconds"
+      ],
+      "type": "object"
+    },
+    "MoveToNodeOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "nodeId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "nodeId"
+      ],
+      "type": "object"
+    },
     "NativeAffectedAgent": {
       "properties": {
         "id": {
@@ -6231,6 +6975,78 @@
       ],
       "type": "object"
     },
+    "NodeMoveOperation": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errorStatus": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MoveToNodeOutput"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "pattern": "^(running|completed|failed|cancelled)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "state",
+        "result",
+        "error",
+        "errorStatus"
+      ],
+      "type": "object"
+    },
+    "NodeMoveOperationInput": {
+      "additionalProperties": false,
+      "properties": {
+        "operationId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operationId"
+      ],
+      "type": "object"
+    },
+    "NodeMoveStarted": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "type": "object"
+    },
     "NodeResources": {
       "additionalProperties": false,
       "properties": {
@@ -6593,6 +7409,30 @@
       ],
       "type": "object"
     },
+    "PlacementSelection": {
+      "additionalProperties": false,
+      "properties": {
+        "pinnedNodeId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preferredNodeId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "pinnedNodeId",
+        "preferredNodeId"
+      ],
+      "type": "object"
+    },
     "PluginActionInput": {
       "additionalProperties": false,
       "properties": {
@@ -6718,6 +7558,13 @@
         "required": {
           "default": false,
           "type": "boolean"
+        },
+        "resourceType": {
+          "description": "The resource type identified by this argument.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -7106,6 +7953,34 @@
       ],
       "type": "object"
     },
+    "PluginContributionGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "pattern": "^(tool|command|hook|runCredentials|instructions|condition|projectSource|skillSource)$",
+          "type": "string"
+        },
+        "name": {
+          "description": "Empty for instructions and runCredentials, which are single contributions.",
+          "maxLength": 200,
+          "type": "string"
+        },
+        "resources": {
+          "description": "Empty means unrestricted. Each listed type restricts that type and descendants.",
+          "items": {
+            "$ref": "#/definitions/PluginResourceRef"
+          },
+          "maxItems": 100,
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "resources"
+      ],
+      "type": "object"
+    },
     "PluginCredential": {
       "additionalProperties": false,
       "description": "How the host injects a connection's secret into authorized HTTP requests.\nPlugin code never receives the secret itself.",
@@ -7405,6 +8280,87 @@
       ],
       "type": "object"
     },
+    "PluginGrantAccess": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "full",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "contributions": {
+              "items": {
+                "$ref": "#/definitions/PluginContributionGrant"
+              },
+              "maxItems": 500,
+              "minItems": 1,
+              "type": "array"
+            },
+            "type": {
+              "const": "selected",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "contributions"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PluginHook": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "payloadSchema": true,
+        "resourceFields": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginResourceField"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "payloadSchema"
+      ],
+      "type": "object"
+    },
+    "PluginInstanceGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "access": {
+          "$ref": "#/definitions/PluginGrantAccess"
+        },
+        "instanceId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "instanceId",
+        "access"
+      ],
+      "type": "object"
+    },
     "PluginInstanceInput": {
       "additionalProperties": false,
       "properties": {
@@ -7521,6 +8477,13 @@
           "description": "One sentence shown in the owner's plugin catalogue.",
           "type": "string"
         },
+        "hooks": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginHook"
+          },
+          "type": "array"
+        },
         "hosts": {
           "default": [],
           "description": "Hostnames reachable through `http` (HTTPS) and `socket` (WSS). `*.example.com`\ncovers every subdomain of `example.com`, not the domain itself.",
@@ -7577,6 +8540,13 @@
           "description": "Projects the owner can import through the `projects` handler.",
           "items": {
             "$ref": "#/definitions/PluginProjectSource"
+          },
+          "type": "array"
+        },
+        "resources": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginResourceType"
           },
           "type": "array"
         },
@@ -7718,6 +8688,15 @@
             "null"
           ]
         },
+        "errorStatus": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "id": {
           "type": "string"
         },
@@ -7758,6 +8737,91 @@
     },
     "PluginOperationResult": {
       "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "project",
+              "type": "string"
+            },
+            "project": {
+              "$ref": "#/definitions/Project"
+            }
+          },
+          "required": [
+            "kind",
+            "project"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "sourceProjects",
+              "type": "string"
+            },
+            "page": {
+              "$ref": "#/definitions/PluginProjectPage"
+            }
+          },
+          "required": [
+            "kind",
+            "page"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "imported": {
+              "$ref": "#/definitions/SkillImport"
+            },
+            "kind": {
+              "const": "skillImport",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "imported"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "skillSource",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/definitions/SkillSourceStatus"
+            }
+          },
+          "required": [
+            "kind",
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "bundle": {
+              "$ref": "#/definitions/SkillBundle"
+            },
+            "kind": {
+              "const": "skillBundle",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "bundle"
+          ],
+          "type": "object"
+        },
         {
           "additionalProperties": false,
           "properties": {
@@ -7810,6 +8874,40 @@
             "kind",
             "output",
             "wrapped"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "resourcePage",
+              "type": "string"
+            },
+            "page": {
+              "$ref": "#/definitions/ListPluginResourcesOutput"
+            }
+          },
+          "required": [
+            "kind",
+            "page"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "resourceAncestry",
+              "type": "string"
+            },
+            "resolution": {
+              "$ref": "#/definitions/ResolvePluginResourceOutput"
+            }
+          },
+          "required": [
+            "kind",
+            "resolution"
           ],
           "type": "object"
         }
@@ -7998,6 +9096,90 @@
         }
       ]
     },
+    "PluginProject": {
+      "additionalProperties": false,
+      "properties": {
+        "badges": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "defaultBranch": {
+          "default": "",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "imported": {
+          "default": false,
+          "type": "boolean"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "projectName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "description",
+        "defaultBranch",
+        "badges",
+        "imported"
+      ],
+      "type": "object"
+    },
+    "PluginProjectPage": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/definitions/PluginProject"
+          },
+          "type": "array"
+        },
+        "nextPage": {
+          "format": "uint32",
+          "maximum": 10000,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "items",
+        "nextPage"
+      ],
+      "type": "object"
+    },
     "PluginProjectSource": {
       "additionalProperties": false,
       "description": "Where the owner imports projects from: the `projects` handler lists and resolves them.",
@@ -8054,6 +9236,94 @@
         "name",
         "mentions",
         "updatedAt"
+      ],
+      "type": "object"
+    },
+    "PluginResource": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PluginResourceRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "resourceType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "resourceType",
+        "id",
+        "name",
+        "parent"
+      ],
+      "type": "object"
+    },
+    "PluginResourceField": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "JSON Pointer through properties; `*` traverses array items.",
+          "type": "string"
+        },
+        "resourceType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "resourceType"
+      ],
+      "type": "object"
+    },
+    "PluginResourceRef": {
+      "additionalProperties": false,
+      "description": "A resource identity is scoped to a plugin instance and a declared type.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "resourceType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "resourceType",
+        "id"
+      ],
+      "type": "object"
+    },
+    "PluginResourceType": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parentType": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "description"
       ],
       "type": "object"
     },
@@ -8255,6 +9525,13 @@
         "inputSchema": true,
         "name": {
           "type": "string"
+        },
+        "resourceFields": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginResourceField"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -8739,6 +10016,34 @@
       ],
       "type": "object"
     },
+    "QuotaFailure": {
+      "properties": {
+        "current": {
+          "description": "The latest limit of the current turn or execution, until work moves on.",
+          "type": "boolean"
+        },
+        "message": {
+          "description": "The engine's own report of the limit.",
+          "type": "string"
+        },
+        "resetsAt": {
+          "description": "When the engine said the limit resets.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "message",
+        "resetsAt",
+        "current"
+      ],
+      "type": "object"
+    },
     "ReadChatContentInput": {
       "additionalProperties": false,
       "properties": {
@@ -8769,6 +10074,36 @@
       ],
       "type": "object"
     },
+    "ReadLargeTimelineInput": {
+      "additionalProperties": false,
+      "description": "Reads the original source-backed content for a referenced card snapshot.",
+      "properties": {
+        "offset": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sha256": {
+          "default": null,
+          "pattern": "^[0-9a-f]{64}$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "snapshot": {
+          "$ref": "#/definitions/TimelineEntry"
+        }
+      },
+      "required": [
+        "snapshot",
+        "offset",
+        "sha256"
+      ],
+      "type": "object"
+    },
     "ReadMark": {
       "additionalProperties": false,
       "properties": {
@@ -8792,6 +10127,15 @@
     "ReadRunContentInput": {
       "additionalProperties": false,
       "properties": {
+        "entryId": {
+          "description": "Read a complete interpreted timeline card instead of a raw event.",
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "eventId": {
           "format": "int64",
           "maximum": 9007199254740991,
@@ -8820,6 +10164,17 @@
             "string",
             "null"
           ]
+        },
+        "timelineSnapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TimelineEntry"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Immutable card reference returned with a truncated timeline preview."
         }
       },
       "required": [
@@ -8854,6 +10209,99 @@
         "runId",
         "before",
         "history"
+      ],
+      "type": "object"
+    },
+    "ReadRunTimelineInput": {
+      "additionalProperties": false,
+      "properties": {
+        "before": {
+          "default": 9007199254740991,
+          "description": "Cards that first appeared before this position; the newest page by default.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "changes": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TimelineCursor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Resume the change feed from a cursor returned by this operation."
+        },
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        },
+        "snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TimelineCursor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Keep the first page's cursor while loading older pages, then read changes\nfrom that cursor. Older cards can reflect changes made during pagination."
+        }
+      },
+      "required": [
+        "runId",
+        "before",
+        "changes",
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "ReadSkillFileInput": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "name",
+        "path"
+      ],
+      "type": "object"
+    },
+    "ReadSkillInput": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "default": "global",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "name"
       ],
       "type": "object"
     },
@@ -8951,6 +10399,19 @@
         }
       ]
     },
+    "ReleaseExclusiveInput": {
+      "additionalProperties": false,
+      "properties": {
+        "reservationId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reservationId"
+      ],
+      "type": "object"
+    },
     "RenameChatInput": {
       "additionalProperties": false,
       "properties": {
@@ -9041,6 +10502,40 @@
       ],
       "type": "object"
     },
+    "ReplaceAgentPluginGrantsInput": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "grants": {
+          "items": {
+            "$ref": "#/definitions/PluginInstanceGrant"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "runCredentialInstances": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        }
+      },
+      "required": [
+        "agentId",
+        "revision",
+        "grants",
+        "runCredentialInstances"
+      ],
+      "type": "object"
+    },
     "ReplaceMissionInput": {
       "additionalProperties": false,
       "properties": {
@@ -9083,6 +10578,119 @@
       ],
       "type": "object"
     },
+    "ResolvePluginResourceInput": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "instanceId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "resourceType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pluginId",
+        "instanceId",
+        "resourceType",
+        "id"
+      ],
+      "type": "object"
+    },
+    "ResolvePluginResourceOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "ancestors": {
+          "description": "Nearest parent first, through the root. Cairn resolves each parent itself.",
+          "items": {
+            "$ref": "#/definitions/PluginResource"
+          },
+          "type": "array"
+        },
+        "resource": {
+          "$ref": "#/definitions/PluginResource"
+        }
+      },
+      "required": [
+        "resource",
+        "ancestors"
+      ],
+      "type": "object"
+    },
+    "ResumeChatInput": {
+      "additionalProperties": false,
+      "properties": {
+        "chatId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ResumeExecutionSelection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "turnId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "chatId"
+      ],
+      "type": "object"
+    },
+    "ResumeExecutionSelection": {
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "maxLength": 120,
+          "type": "string"
+        },
+        "preserveModel": {
+          "default": false,
+          "type": "boolean"
+        },
+        "reasoning": {
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
+        "speed": {
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "reasoning",
+        "speed"
+      ],
+      "type": "object"
+    },
     "ResumeRunError": {
       "additionalProperties": false,
       "properties": {
@@ -9102,6 +10710,24 @@
           "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
           "format": "uuid",
           "type": "string"
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ResumeExecutionSelection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "turnId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -9412,7 +11038,7 @@
         "resources": {
           "anyOf": [
             {
-              "$ref": "#/definitions/NodeResources"
+              "$ref": "#/definitions/ExecutionResources"
             },
             {
               "type": "null"
@@ -9500,13 +11126,15 @@
           "type": "string"
         },
         "suspendedByExclusive": {
-          "additionalProperties": true,
-          "default": null,
-          "type": [
-            "object",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExclusiveReservation"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "x-kotlin-type": "ExclusiveReservation"
+          "default": null
         },
         "taskId": {
           "type": "string"
@@ -9580,6 +11208,12 @@
         },
         "encoding": {
           "type": "string"
+        },
+        "entryId": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "eventId": {
           "format": "int64",
@@ -9667,6 +11301,10 @@
         },
         "text": {
           "type": "string"
+        },
+        "timeline": {
+          "description": "The timeline presents this event. Clients render it only through its\ncard and read it as a boundary of families that are not converted yet.",
+          "type": "boolean"
         },
         "type": {
           "type": "string"
@@ -10392,6 +12030,44 @@
       ],
       "type": "object"
     },
+    "RunTimelineOutput": {
+      "description": "Tool windows use the same cards with explicit previews for oversized content.",
+      "properties": {
+        "changeCursor": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TimelineCursor"
+            }
+          ],
+          "description": "Save the first page's cursor, then request changes after loading the pages."
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/definitions/TimelineEntryPage"
+          },
+          "type": "array"
+        },
+        "hasMoreChanges": {
+          "type": "boolean"
+        },
+        "hasOlder": {
+          "type": "boolean"
+        },
+        "oldest": {
+          "description": "Pass as `before` for the previous page while hasOlder is true.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "entries",
+        "oldest",
+        "hasOlder",
+        "changeCursor",
+        "hasMoreChanges"
+      ],
+      "type": "object"
+    },
     "RunWorkspace": {
       "properties": {
         "kind": {
@@ -10415,6 +12091,30 @@
         "projectId",
         "path",
         "kind"
+      ],
+      "type": "object"
+    },
+    "SaveSkillInput": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "maxLength": 100000,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 64,
+          "type": "string"
+        },
+        "scope": {
+          "default": "global",
+          "maxLength": 100,
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "name",
+        "content"
       ],
       "type": "object"
     },
@@ -10775,6 +12475,652 @@
       ],
       "type": "object"
     },
+    "Skill": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "content": {
+          "default": "",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "executables": {
+          "default": 0,
+          "format": "uint32",
+          "maximum": 2147483647,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files": {
+          "default": 0,
+          "format": "uint32",
+          "maximum": 2147483647,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "path": {
+          "default": "",
+          "type": "string"
+        },
+        "scope": {
+          "default": "global",
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SkillSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "usageCount": {
+          "default": 0,
+          "format": "uint32",
+          "maximum": 2147483647,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "valid": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "scope",
+        "content",
+        "path",
+        "valid",
+        "usageCount",
+        "files",
+        "bytes",
+        "executables"
+      ],
+      "type": "object"
+    },
+    "SkillArchiveChunk": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "default": "",
+          "type": "string"
+        },
+        "filename": {
+          "default": "",
+          "type": "string"
+        },
+        "offset": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "revision": {
+          "default": "",
+          "type": "string"
+        },
+        "size": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "filename",
+        "revision",
+        "size",
+        "offset",
+        "content"
+      ],
+      "type": "object"
+    },
+    "SkillBundle": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "files": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/SkillFile"
+          },
+          "type": "array"
+        },
+        "limits": {
+          "$ref": "#/definitions/SkillLimits"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "revision": {
+          "default": "",
+          "type": "string"
+        },
+        "scope": {
+          "default": "global",
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SkillSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "scope",
+        "name",
+        "revision",
+        "files",
+        "limits",
+        "source"
+      ],
+      "type": "object"
+    },
+    "SkillChange": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "encoding": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "executable": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "op": {
+              "const": "write",
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            },
+            "upload": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "delete",
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "op": {
+              "const": "move",
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "from",
+            "to"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "executable": {
+              "type": "boolean"
+            },
+            "op": {
+              "const": "mode",
+              "type": "string"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "path",
+            "executable"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "SkillDiffLine": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "default": "",
+          "pattern": "^(context|added|removed|gap)$",
+          "type": "string"
+        },
+        "text": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "text"
+      ],
+      "type": "object"
+    },
+    "SkillFile": {
+      "additionalProperties": false,
+      "properties": {
+        "executable": {
+          "default": false,
+          "type": "boolean"
+        },
+        "path": {
+          "default": "",
+          "type": "string"
+        },
+        "size": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "text": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "size",
+        "executable",
+        "text"
+      ],
+      "type": "object"
+    },
+    "SkillFileContent": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "default": "",
+          "type": "string"
+        },
+        "encoding": {
+          "default": "utf-8",
+          "pattern": "^(utf-8|base64)$",
+          "type": "string"
+        },
+        "executable": {
+          "default": false,
+          "type": "boolean"
+        },
+        "size": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "content",
+        "encoding",
+        "size",
+        "executable"
+      ],
+      "type": "object"
+    },
+    "SkillImport": {
+      "additionalProperties": false,
+      "properties": {
+        "candidates": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "imported": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SkillBundle"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "imported",
+        "candidates"
+      ],
+      "type": "object"
+    },
+    "SkillInput": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 64,
+          "type": "string"
+        },
+        "scope": {
+          "default": "global",
+          "maxLength": 100,
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "name"
+      ],
+      "type": "object"
+    },
+    "SkillLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "bundleBytes": {
+          "default": 16777216,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fileBytes": {
+          "default": 4194304,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files": {
+          "default": 500,
+          "format": "uint32",
+          "maximum": 2147483647,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "uploadBytes": {
+          "default": 5242880,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "fileBytes",
+        "bundleBytes",
+        "files",
+        "uploadBytes"
+      ],
+      "type": "object"
+    },
+    "SkillMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description"
+      ],
+      "type": "object"
+    },
+    "SkillSource": {
+      "additionalProperties": false,
+      "properties": {
+        "folder": {
+          "default": "",
+          "type": "string"
+        },
+        "importedAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "instance": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "default": "",
+          "type": "string"
+        },
+        "location": {
+          "additionalProperties": true,
+          "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+          "type": "object",
+          "x-cairn-json-object": true
+        },
+        "modified": {
+          "default": false,
+          "type": "boolean"
+        },
+        "pluginId": {
+          "default": "",
+          "type": "string"
+        },
+        "source": {
+          "default": "",
+          "type": "string"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "pluginId",
+        "source",
+        "label",
+        "location",
+        "folder",
+        "version",
+        "importedAt",
+        "modified"
+      ],
+      "type": "object"
+    },
+    "SkillSourceChange": {
+      "additionalProperties": false,
+      "properties": {
+        "binary": {
+          "default": false,
+          "type": "boolean"
+        },
+        "lines": {
+          "items": {
+            "$ref": "#/definitions/SkillDiffLine"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "path": {
+          "default": "",
+          "type": "string"
+        },
+        "status": {
+          "default": "",
+          "pattern": "^(added|removed|modified)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "status",
+        "binary"
+      ],
+      "type": "object"
+    },
+    "SkillSourceStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "changes": {
+          "items": {
+            "$ref": "#/definitions/SkillSourceChange"
+          },
+          "type": "array"
+        },
+        "current": {
+          "type": "boolean"
+        },
+        "latest": {
+          "$ref": "#/definitions/SkillSourceVersion"
+        },
+        "source": {
+          "$ref": "#/definitions/SkillSource"
+        }
+      },
+      "required": [
+        "source",
+        "latest",
+        "current",
+        "changes"
+      ],
+      "type": "object"
+    },
+    "SkillSourceVersion": {
+      "additionalProperties": false,
+      "properties": {
+        "date": {
+          "default": "",
+          "type": "string"
+        },
+        "message": {
+          "default": "",
+          "type": "string"
+        },
+        "version": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "message",
+        "date"
+      ],
+      "type": "object"
+    },
+    "SkillUpload": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "size": {
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "size"
+      ],
+      "type": "object"
+    },
+    "StageSkillUploadInput": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "maxLength": 6990508,
+          "type": "string"
+        }
+      },
+      "required": [
+        "content"
+      ],
+      "type": "object"
+    },
     "StaleDisks": {
       "additionalProperties": false,
       "properties": {
@@ -10953,6 +13299,557 @@
         }
       ]
     },
+    "TimelineChange": {
+      "description": "A live change of one card. A stream sends `append` only for a reply whose text\ngrows after the text it already delivered; any other change sends the card.",
+      "oneOf": [
+        {
+          "properties": {
+            "entry": {
+              "$ref": "#/definitions/TimelineEntry"
+            },
+            "kind": {
+              "const": "upsert",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "entry"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "append",
+              "type": "string"
+            },
+            "revision": {
+              "format": "int64",
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "source": {
+              "format": "int64",
+              "maximum": 9007199254740991,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "text": {
+              "type": "string"
+            },
+            "updatedAt": {
+              "format": "int64",
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "revision",
+            "source",
+            "updatedAt",
+            "text"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TimelineContent": {
+      "oneOf": [
+        {
+          "description": "A message the person sent, as delivered to the agent. A private answer\narrives as its placeholder; the answer itself never enters the timeline.",
+          "properties": {
+            "attachments": {
+              "items": {
+                "$ref": "#/definitions/ChatAttachment"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "const": "userMessage",
+              "type": "string"
+            },
+            "messageId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "questionId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sentAt": {
+              "description": "When the person sent it, at or before its delivery.",
+              "format": "int64",
+              "maximum": 9007199254740991,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "text",
+            "sentAt",
+            "attachments"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The agent's reply. Successive snapshots of the same reply replace its text.",
+          "properties": {
+            "echo": {
+              "description": "The reply only repeats a failure or usage limit the conversation already\nreports; a conversation omits it, the run log keeps it.",
+              "type": "boolean"
+            },
+            "itemId": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "agentMessage",
+              "type": "string"
+            },
+            "state": {
+              "pattern": "^(running|done|info|error|stopped)$",
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "via": {
+              "description": "The model provider that wrote this reply, when the engine chose among several.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "itemId",
+            "text",
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "notice",
+              "type": "string"
+            },
+            "notice": {
+              "$ref": "#/definitions/TimelineNotice"
+            }
+          },
+          "required": [
+            "kind",
+            "notice"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TimelineCursor": {
+      "additionalProperties": false,
+      "description": "A cursor over card revisions, bound to the retained event history.",
+      "properties": {
+        "history": {
+          "type": "string"
+        },
+        "id": {
+          "description": "None means all cards at this revision have been delivered.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "revision",
+        "id",
+        "history"
+      ],
+      "type": "object"
+    },
+    "TimelineEntry": {
+      "description": "One card of a run's timeline. Its identity is stable across pages, turns and\nreconnections; a newer revision of the same card replaces the older one.",
+      "properties": {
+        "attempt": {
+          "description": "Execution attempts Cairn started before the card, after the first one.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "content": {
+          "$ref": "#/definitions/TimelineContent"
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "position": {
+          "description": "Event sequence where the card first appeared. Pages are ordered by position.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "revision": {
+          "description": "Change cursor: the event sequence of the card's latest change, distinct\nfrom its position. A card changed by a later event keeps its position.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "source": {
+          "description": "The event holding the card's current content; read it whole with read_run_content.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "turn": {
+          "description": "Engine turns started before the card, counted from the run's first event.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "runId",
+        "position",
+        "revision",
+        "source",
+        "turn",
+        "attempt",
+        "createdAt",
+        "updatedAt",
+        "content"
+      ],
+      "type": "object"
+    },
+    "TimelineEntryPage": {
+      "oneOf": [
+        {
+          "properties": {
+            "entry": {
+              "$ref": "#/definitions/TimelineEntry"
+            },
+            "kind": {
+              "const": "complete",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "entry"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Read the card using its entryId and snapshot with read_run_content.",
+          "properties": {
+            "kind": {
+              "const": "truncated",
+              "type": "string"
+            },
+            "preview": {
+              "$ref": "#/definitions/TimelinePreview"
+            },
+            "totalBytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "preview",
+            "totalBytes"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TimelineNotice": {
+      "description": "What a lifecycle, error or retry card reports. Clients localize the code and\nits arguments; `detail` is only ever content reported by the work itself.",
+      "properties": {
+        "account": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountNotice"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "code": {
+          "pattern": "^(sessionStarted|turnStarted|turnCompleted|backgroundTasks|runStatus|accountSelected|speed|failure|error|connection|retryScheduled|engineRetry|usageLimit|engineNotice|diagnostic)$",
+          "type": "string"
+        },
+        "detail": {
+          "description": "The engine's or worker's own words, such as a failure reason or stderr.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "engineRetry": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EngineRetry"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "level": {
+          "description": "An engine notice's level, as the engine reports it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "description": "Where a failure was reported: the turn, the run, the engine or the runner.",
+          "pattern": "^(turn|run|engine|runner)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prominent": {
+          "description": "A conversation shows the card. Other cards remain in the run log only.",
+          "type": "boolean"
+        },
+        "quota": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/QuotaFailure"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The engine stopped on the account's usage limit."
+        },
+        "recovered": {
+          "description": "Work continued after this interruption or engine retry.",
+          "type": "boolean"
+        },
+        "retried": {
+          "description": "Automatic retries Cairn made before this failure repeated.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retry": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TimelineRetry"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Cairn scheduled this retry of the failure; it has not started yet."
+        },
+        "speed": {
+          "pattern": "^(standard|confirmed|unconfirmed)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "pattern": "^(running|done|info|error|stopped)$",
+          "type": "string"
+        },
+        "status": {
+          "description": "The run status a `runStatus` card reports.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "taskIds": {
+          "description": "Source task IDs aligned with `tasks`; an empty ID denotes an unspecified ID.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tasks": {
+          "description": "Background tasks a turn waits for.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TokenUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "usageLimit": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UsageLimit"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "waitingSince": {
+          "description": "Start of the current uninterrupted background wait, or absent after work resumes.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "state",
+        "prominent"
+      ],
+      "type": "object"
+    },
+    "TimelinePreview": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "description": "The card's kind: userMessage, agentMessage or notice.",
+          "type": "string"
+        },
+        "position": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "revision": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "snapshot": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TimelineEntry"
+            }
+          ],
+          "description": "Source-backed snapshot for stable chunk reads while the card changes."
+        },
+        "source": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "position",
+        "revision",
+        "source",
+        "kind",
+        "text",
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "TimelineRetry": {
+      "properties": {
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "limit": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "attempt",
+        "limit"
+      ],
+      "type": "object"
+    },
+    "TokenUsage": {
+      "properties": {
+        "inputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "outputTokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "inputTokens",
+        "outputTokens"
+      ],
+      "type": "object"
+    },
     "UpdateMcpInput": {
       "additionalProperties": false,
       "properties": {
@@ -11015,6 +13912,32 @@
       ],
       "type": "object"
     },
+    "UpdateSkillSourceInput": {
+      "additionalProperties": false,
+      "properties": {
+        "base": {
+          "maxLength": 64,
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "version": {
+          "maxLength": 200,
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "name",
+        "version",
+        "base"
+      ],
+      "type": "object"
+    },
     "UploadChatAttachmentInput": {
       "additionalProperties": false,
       "properties": {
@@ -11058,6 +13981,40 @@
       },
       "required": [
         "agentIds"
+      ],
+      "type": "object"
+    },
+    "UsageLimit": {
+      "properties": {
+        "blocked": {
+          "type": "boolean"
+        },
+        "resetsAt": {
+          "description": "When the window resets. A limit no longer applies afterwards.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "The provider's status, such as `allowed`, `allowed_warning` or `rejected`.",
+          "type": "string"
+        },
+        "window": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "window",
+        "blocked",
+        "resetsAt"
       ],
       "type": "object"
     },

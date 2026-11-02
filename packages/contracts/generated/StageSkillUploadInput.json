@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "content": {
+      "maxLength": 6990508,
+      "type": "string"
+    }
+  },
+  "required": [
+    "content"
+  ],
+  "title": "StageSkillUploadInput",
+  "type": "object"
+}

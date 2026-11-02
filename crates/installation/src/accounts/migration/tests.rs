@@ -69,7 +69,7 @@ async fn real_version13_database_preserves_accounts_usage_secrets_and_references
         &db,
         "SELECT json_array(id,updated_at) FROM records WHERE kind='agentAccounts' ORDER BY id",
     );
-    let runs = rows(&db, "SELECT json_array(id,data) FROM runs ORDER BY id");
+    let runs = crate::placement_migration_fixture::run_views(&db);
     let checkpoints = rows(
         &db,
         "SELECT json_array(run_id,state) FROM run_checkpoints ORDER BY run_id",
@@ -77,10 +77,7 @@ async fn real_version13_database_preserves_accounts_usage_secrets_and_references
     let direct = direct_metadata(&db);
     let store = Store::open(root.path()).unwrap();
     assert_eq!(direct_metadata(&db), direct);
-    assert_eq!(
-        rows(&db, "SELECT json_array(id,data) FROM runs ORDER BY id"),
-        runs
-    );
+    assert_eq!(crate::placement_migration_fixture::run_views(&db), runs);
     assert_eq!(
         rows(
             &db,
@@ -143,7 +140,7 @@ async fn real_version13_database_preserves_accounts_usage_secrets_and_references
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        19
+        crate::store::DATABASE_VERSION
     );
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
@@ -282,7 +279,7 @@ async fn empty_version13_pool_upgrades_and_unrelated_foreign_key_failure_rolls_b
 }
 
 #[tokio::test]
-async fn real_version12_database_completes_both_atomic_upgrades() {
+async fn real_version12_database_completes_all_atomic_upgrades() {
     let root = tempfile::tempdir().unwrap();
     let db = Connection::open(root.path().join("manager.db")).unwrap();
     db.execute_batch(include_str!("../../../tests/fixtures/account-pool-v12.sql"))
@@ -292,7 +289,7 @@ async fn real_version12_database_completes_both_atomic_upgrades() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        19
+        crate::store::DATABASE_VERSION
     );
     assert_eq!(direct_metadata(&db), vec![Vec::<String>::new(); 7]);
 }

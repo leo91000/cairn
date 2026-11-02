@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "instanceId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "page": {
+      "default": 1,
+      "format": "int64",
+      "maximum": 10000,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "pluginId": {
+      "type": "string"
+    },
+    "query": {
+      "default": "",
+      "type": "string"
+    },
+    "resourceType": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "pluginId",
+    "instanceId",
+    "resourceType"
+  ],
+  "title": "ListPluginResourcesInput",
+  "type": "object"
+}

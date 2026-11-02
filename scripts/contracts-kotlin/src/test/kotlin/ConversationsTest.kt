@@ -50,6 +50,13 @@ class ConversationsTest {
         corpus.getValue("views").jsonArray.forEach {
             val chat = json.decodeFromJsonElement<Chat>(it)
             assertEquals(chat, json.decodeFromJsonElement<Chat>(json.encodeToJsonElement(chat)))
+            it.jsonObject["suspendedByExclusive"]
+                ?.takeIf { value -> value != JsonNull }
+                ?.let { reservation ->
+                    val expected = json.decodeFromJsonElement<ExclusiveReservation>(reservation)
+                    assertEquals(expected, chat.suspendedByExclusive)
+                    assertEquals(expected.reason, chat.suspendedByExclusive?.reason)
+                }
         }
         corpus.getValue("invalidViews").jsonArray.forEach { value ->
             assertFails(value.toString()) { json.decodeFromJsonElement<Chat>(value) }

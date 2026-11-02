@@ -24,6 +24,170 @@ fn main() {
     let root = Path::new(&root);
     fs::create_dir_all(root).unwrap();
     let mut generator = SchemaSettings::draft07().for_serialize().into_generator();
+    export::<ReadSkillInput>(root, &mut generator, Contract::Deserialize);
+    export::<SkillInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListSkillsInput>(root, &mut generator, Contract::Deserialize);
+    export::<Skill>(root, &mut generator, Contract::Deserialize);
+    export::<SkillSource>(root, &mut generator, Contract::Deserialize);
+    export::<SkillFile>(root, &mut generator, Contract::Deserialize);
+    export::<SkillLimits>(root, &mut generator, Contract::Deserialize);
+    export::<SkillBundle>(root, &mut generator, Contract::Deserialize);
+    export::<SkillFileContent>(root, &mut generator, Contract::Deserialize);
+    export::<SkillUpload>(root, &mut generator, Contract::Deserialize);
+    export::<SkillImport>(root, &mut generator, Contract::Deserialize);
+    export::<SkillArchiveChunk>(root, &mut generator, Contract::Deserialize);
+    export::<SkillDiffLine>(root, &mut generator, Contract::Deserialize);
+    export::<SkillSourceChange>(root, &mut generator, Contract::Deserialize);
+    export::<SkillSourceVersion>(root, &mut generator, Contract::Deserialize);
+    export::<SkillSourceStatus>(root, &mut generator, Contract::Deserialize);
+    export::<SkillChange>(root, &mut generator, Contract::Deserialize);
+    export::<EditSkillFilesInput>(root, &mut generator, Contract::Deserialize);
+    export::<SaveSkillInput>(root, &mut generator, Contract::Deserialize);
+    export::<ReadSkillFileInput>(root, &mut generator, Contract::Deserialize);
+    export::<ExportSkillArchiveInput>(root, &mut generator, Contract::Deserialize);
+    export::<StageSkillUploadInput>(root, &mut generator, Contract::Deserialize);
+    export::<UpdateSkillSourceInput>(root, &mut generator, Contract::Deserialize);
+    export::<DeleteSkillOutput>(root, &mut generator, Contract::Deserialize);
+    export::<ForgetSkillSourceOutput>(root, &mut generator, Contract::Deserialize);
+    export::<SkillMetadata>(root, &mut generator, Contract::Deserialize);
+    export::<ImportSkillInput>(root, &mut generator, Contract::Deserialize);
+    export::<ImportProjectInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListSourceProjectsInput>(root, &mut generator, Contract::Deserialize);
+    export::<PluginProject>(root, &mut generator, Contract::Deserialize);
+    export::<PluginProjectPage>(root, &mut generator, Contract::Deserialize);
+    let skill_clients = serde_json::json!([
+        {
+            "name": "listSkills",
+            "input": "ListSkillsInput",
+            "output": "Skill",
+            "method": "GET",
+            "path": "/skills",
+            "query": [
+                "scope"
+            ],
+            "optionalQuery": [
+                "scope"
+            ],
+            "array": true
+        },
+        {
+            "name": "readSkillBundle",
+            "input": "SkillInput",
+            "output": "SkillBundle",
+            "method": "GET",
+            "path": "/skills/{scope}/{name}/bundle"
+        },
+        {
+            "name": "readSkillFile",
+            "input": "ReadSkillFileInput",
+            "output": "SkillFileContent",
+            "method": "GET",
+            "path": "/skills/{scope}/{name}/file",
+            "query": [
+                "path"
+            ]
+        },
+        {
+            "name": "editSkillFiles",
+            "input": "EditSkillFilesInput",
+            "output": "SkillBundle",
+            "method": "POST",
+            "path": "/skills/{scope}/{name}/bundle"
+        },
+        {
+            "name": "saveSkill",
+            "input": "SaveSkillInput",
+            "output": "SkillMetadata",
+            "method": "PUT",
+            "path": "/skills/{scope}/{name}"
+        },
+        {
+            "name": "importSkill",
+            "deferred": true,
+            "input": "ImportSkillInput",
+            "output": "SkillImport",
+            "method": "POST",
+            "path": "/skills/import"
+        },
+        {
+            "name": "deleteSkill",
+            "input": "SkillInput",
+            "output": "DeleteSkillOutput",
+            "method": "DELETE",
+            "path": "/skills/{scope}/{name}"
+        },
+        {
+            "name": "exportSkillArchive",
+            "input": "ExportSkillArchiveInput",
+            "output": "SkillArchiveChunk",
+            "method": "GET",
+            "path": "/skills/{scope}/{name}/archive",
+            "query": [
+                "offset",
+                "revision"
+            ],
+            "optionalQuery": [
+                "revision"
+            ]
+        },
+        {
+            "name": "getSkillSourceStatus",
+            "deferred": true,
+            "input": "SkillInput",
+            "output": "SkillSourceStatus",
+            "method": "GET",
+            "path": "/skills/{scope}/{name}/source"
+        },
+        {
+            "name": "updateSkillSource",
+            "deferred": true,
+            "input": "UpdateSkillSourceInput",
+            "output": "SkillBundle",
+            "method": "POST",
+            "path": "/skills/{scope}/{name}/source/update"
+        },
+        {
+            "name": "forgetSkillSource",
+            "input": "SkillInput",
+            "output": "ForgetSkillSourceOutput",
+            "method": "DELETE",
+            "path": "/skills/{scope}/{name}/source"
+        },
+        {
+            "name": "stageSkillUpload",
+            "input": "StageSkillUploadInput",
+            "output": "SkillUpload",
+            "method": "POST",
+            "path": "/skills/stage"
+        },
+        {
+            "name": "importProject",
+            "deferred": true,
+            "input": "ImportProjectInput",
+            "output": "Project",
+            "method": "POST",
+            "path": "/projects/import"
+        },
+        {
+            "name": "listSourceProjects",
+            "deferred": true,
+            "input": "ListSourceProjectsInput",
+            "output": "PluginProjectPage",
+            "method": "GET",
+            "path": "/plugins/{pluginId}/projects",
+            "query": [
+                "source",
+                "instance",
+                "page",
+                "query"
+            ]
+        }
+    ]);
+    fs::write(
+        root.join("skill-clients.json"),
+        serde_json::to_string_pretty(&skill_clients).unwrap() + "\n",
+    )
+    .unwrap();
     export::<CodingAgentAccount>(root, &mut generator, Contract::Deserialize);
     export::<CodingAgentAccounts>(root, &mut generator, Contract::Deserialize);
     export::<AccountUsage>(root, &mut generator, Contract::Deserialize);
@@ -125,6 +289,7 @@ fn main() {
     export::<ConversationId>(root, &mut generator, Contract::Deserialize);
     export::<CreateChatInput>(root, &mut generator, Contract::Deserialize);
     export::<ChatInput>(root, &mut generator, Contract::Deserialize);
+    export::<ResumeChatInput>(root, &mut generator, Contract::Deserialize);
     export::<ChatMessageInput>(root, &mut generator, Contract::Deserialize);
     export::<SendChatMessageInput>(root, &mut generator, Contract::Deserialize);
     export::<RenameChatInput>(root, &mut generator, Contract::Deserialize);
@@ -143,6 +308,7 @@ fn main() {
     export::<NodeConfiguration>(root, &mut generator, Contract::Deserialize);
     export::<NodeCapabilities>(root, &mut generator, Contract::Deserialize);
     export::<NodeResources>(root, &mut generator, Contract::Deserialize);
+    export::<ExecutionResources>(root, &mut generator, Contract::Serialize);
     export::<NativeModeRequest>(root, &mut generator, Contract::Deserialize);
     export::<NativeModeObserved>(root, &mut generator, Contract::Deserialize);
     export::<NativeModeProposal>(root, &mut generator, Contract::Deserialize);
@@ -256,6 +422,13 @@ fn main() {
                 "path": "/chats/{chatId}/restore"
             },
             {
+                "name": "resumeChat",
+                "input": "ResumeChatInput",
+                "output": "Run",
+                "method": "POST",
+                "path": "/chats/{chatId}/resume"
+            },
+            {
                 "name": "deleteChat",
                 "input": "ConfirmChatInput",
                 "output": "Chat",
@@ -276,7 +449,25 @@ fn main() {
         serde_json::to_string_pretty(&chat_clients).unwrap() + "\n",
     )
     .unwrap();
+
+    export::<GetPlacementInput>(root, &mut generator, Contract::Deserialize);
+    export::<ConfigurePlacementInput>(root, &mut generator, Contract::Deserialize);
+    export::<ConversationPlacement>(root, &mut generator, Contract::Serialize);
+    export::<MoveToNodeInput>(root, &mut generator, Contract::Deserialize);
+    export::<MoveToNodeOutput>(root, &mut generator, Contract::Serialize);
+    export::<NodeMoveStarted>(root, &mut generator, Contract::Serialize);
+    export::<NodeMoveOperationInput>(root, &mut generator, Contract::Deserialize);
+    export::<NodeMoveOperation>(root, &mut generator, Contract::Serialize);
+    export::<ReleaseExclusiveInput>(root, &mut generator, Contract::Deserialize);
+    export::<AcquireExclusiveInput>(root, &mut generator, Contract::Deserialize);
+    export::<ExclusiveReservation>(root, &mut generator, Contract::Serialize);
+    export::<ExclusiveStatusOutput>(root, &mut generator, Contract::Serialize);
     let node_clients = serde_json::json!([
+        {"name":"getConversationPlacement", "input":"GetPlacementInput", "output":"ConversationPlacement", "method":"GET", "path":"/nodes/placement/{runId}"},
+        {"name":"configureConversationPlacement", "input":"ConfigurePlacementInput", "output":"ConversationPlacement", "method":"PUT", "path":"/nodes/placement/{runId}"},
+        {"name":"moveConversationToNode", "input":"MoveToNodeInput", "output":"MoveToNodeOutput", "method":"POST", "path":"/nodes/placement/{runId}/move"},
+        {"name":"releaseNodeReservation", "input":"ReleaseExclusiveInput", "output":"ExclusiveReservation", "method":"POST", "path":"/nodes/reservations/exclusive/{reservationId}/release"},
+
         {"name":"createNodeEnrollment", "input":"CreateNodeEnrollmentInput", "output":"NodeEnrollment", "method":"POST", "path":"/nodes/enrollments"},
         {"name":"updateNodeStorage", "input":"UpdateNodeStorageInput", "output":"ExecutionNode", "method":"PUT", "path":"/nodes/{nodeId}/storage"},
         {"name":"revokeNode", "input":"RevokeNodeInput", "output":"NodeRevocation", "method":"POST", "path":"/nodes/{nodeId}/revoke"}
@@ -335,6 +526,12 @@ fn main() {
     export::<RunHistoryWindowOutput>(root, &mut generator, Contract::Serialize);
     export::<ReadRunHistoryInput>(root, &mut generator, Contract::Deserialize);
     export::<HistoryPage>(root, &mut generator, Contract::Deserialize);
+    export::<TimelineEntry>(root, &mut generator, Contract::Serialize);
+    export::<LargeTimelineReference>(root, &mut generator, Contract::Serialize);
+    export::<ReadLargeTimelineInput>(root, &mut generator, Contract::Deserialize);
+    export::<TimelineChange>(root, &mut generator, Contract::Serialize);
+    export::<ReadRunTimelineInput>(root, &mut generator, Contract::Deserialize);
+    export::<RunTimelineOutput>(root, &mut generator, Contract::Serialize);
     export::<RunHistoryOutput>(root, &mut generator, Contract::Serialize);
     export::<Run>(root, &mut generator, Contract::Serialize);
     export::<RunState>(root, &mut generator, Contract::Serialize);
@@ -343,6 +540,7 @@ fn main() {
     export::<RunMissionInput>(root, &mut generator, Contract::Deserialize);
     export::<CancelRunOutput>(root, &mut generator, Contract::Serialize);
     export::<CleanupRunOutput>(root, &mut generator, Contract::Serialize);
+    export::<ResumeExecutionSelection>(root, &mut generator, Contract::Deserialize);
     export::<ResumeRunInput>(root, &mut generator, Contract::Deserialize);
     export::<ResumeRunOutput>(root, &mut generator, Contract::Serialize);
     export::<QualificationFixture>(root, &mut generator, Contract::Serialize);
@@ -354,6 +552,8 @@ fn main() {
     export::<Project>(root, &mut generator, Contract::Serialize);
     export::<DeleteProjectOutput>(root, &mut generator, Contract::Serialize);
     export::<CreateAgentInput>(root, &mut generator, Contract::Deserialize);
+    export::<AgentPluginGrants>(root, &mut generator, Contract::Serialize);
+    export::<ReplaceAgentPluginGrantsInput>(root, &mut generator, Contract::Deserialize);
     export::<ReplaceAgentInput>(root, &mut generator, Contract::Deserialize);
     export::<SetAgentAvatarInput>(root, &mut generator, Contract::Deserialize);
     export::<AgentInput>(root, &mut generator, Contract::Deserialize);
@@ -602,6 +802,10 @@ fn main() {
     export::<ProgramRelease>(root, &mut generator, Contract::Serialize);
     export::<InstalledProgram>(root, &mut generator, Contract::Serialize);
     export::<ProgramState>(root, &mut generator, Contract::Serialize);
+    export::<ListPluginResourcesInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListPluginResourcesOutput>(root, &mut generator, Contract::Serialize);
+    export::<ResolvePluginResourceInput>(root, &mut generator, Contract::Deserialize);
+    export::<ResolvePluginResourceOutput>(root, &mut generator, Contract::Serialize);
     export::<ListPluginProgramsInput>(root, &mut generator, Contract::Deserialize);
     export::<ListPluginProgramsOutput>(root, &mut generator, Contract::Serialize);
     export::<InstallPluginPackageInput>(root, &mut generator, Contract::Deserialize);
@@ -708,6 +912,9 @@ fn main() {
         {"name": "installPluginPackage", "input": "InstallPluginPackageInput", "output": "PackageVersion", "method": "POST", "path": "/plugins/packages"},
         {"deferred": true, "name": "approvePluginPackage", "input": "ApprovePluginPackageInput", "output": "PackageVersion", "method": "POST", "path": "/plugins/packages/{pluginId}/approve"},
         {"deferred": true, "name": "activatePluginPackage", "input": "ActivatePluginPackageInput", "output": "PackageVersion", "method": "POST", "path": "/plugins/packages/{pluginId}/activate"},
+        {"name": "getPluginResourceOperation", "input": "PluginOperationInput", "output": "PluginOperation", "method": "GET", "path": "/plugins/resources/operations/{operationId}"},
+        {"name": "listPluginResources", "input": "ListPluginResourcesInput", "output": "ListPluginResourcesOutput", "method": "GET", "deferred": true, "path": "/plugins/{pluginId}/connections/{instanceId}/resources", "query": ["resourceType", "page", "query"]},
+        {"name": "resolvePluginResource", "input": "ResolvePluginResourceInput", "output": "ResolvePluginResourceOutput", "method": "GET", "deferred": true, "path": "/plugins/{pluginId}/connections/{instanceId}/resources/ancestors", "query": ["resourceType", "id"]},
         {"name": "listPluginPrograms", "input": "ListPluginProgramsInput", "output": "ListPluginProgramsOutput", "method": "GET", "path": "/plugins/{pluginId}/programs"},
         {"name": "getPluginOperation", "input": "PluginOperationInput", "output": "PluginOperation", "method": "GET", "path": "/plugins/packages/operations/{operationId}"},
         { "name": "preparePluginProgram", "input": "PluginProgramInput", "output": "ProgramState", "method": "POST", "path": "/plugins/programs/prepare", "deferred": true },
@@ -716,6 +923,8 @@ fn main() {
         { "name": "managePlugin", "input": "ManagePluginInput", "output": "ManagePluginOutput", "method": "POST", "path": "/plugins/manage", "deferred": true }
     ])).unwrap() + "\n").unwrap();
     let clients = serde_json::json!([
+        { "name": "getAgentPluginGrants", "input": "AgentInput", "output": "AgentPluginGrants", "method": "GET", "path": "/agents/{agentId}/plugin-grants" },
+        { "name": "replaceAgentPluginGrants", "input": "ReplaceAgentPluginGrantsInput", "output": "AgentPluginGrants", "method": "PUT", "path": "/agents/{agentId}/plugin-grants" },
         {
             "name": "setAgentAvatar",
             "input": "SetAgentAvatarInput",
@@ -1014,6 +1223,7 @@ fn main() {
     }
     let mut node_decoder = SchemaSettings::draft07().for_deserialize().into_generator();
     node_decoder.subschema_for::<ExecutionNode>();
+    node_decoder.subschema_for::<ConversationPlacement>();
     for (name, schema) in node_decoder.take_definitions(true) {
         definitions.insert(name, schema);
     }

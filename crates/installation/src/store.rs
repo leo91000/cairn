@@ -11,6 +11,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -35,7 +36,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-const DATABASE_VERSION: i64 = 19;
+pub(crate) const DATABASE_VERSION: i64 = 25;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -63,6 +64,41 @@ fn actors(connections: Vec<Connection>, lane: &'static str) -> mpsc::Sender<Job>
     tx
 }
 
+fn enable_wal(connection: &Connection, timeout: Duration) -> rusqlite::Result<()> {
+    let started = Instant::now();
+    let mut retries = 0;
+    let result = loop {
+        connection.busy_timeout(timeout.saturating_sub(started.elapsed()))?;
+        match connection.execute_batch("PRAGMA journal_mode=WAL;") {
+            Err(error)
+                if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+                    && started.elapsed() < timeout =>
+            {
+                // Changing from a rollback journal to WAL can return BUSY
+                // without invoking SQLite's busy handler. Retry the statement
+                // after it releases its read lock, within the original budget.
+                retries += 1;
+                let remaining = timeout.saturating_sub(started.elapsed());
+                std::thread::sleep(Duration::from_millis(10).min(remaining));
+            }
+            result => break result,
+        }
+    };
+    if retries > 0 {
+        tracing::info!(
+            target: "cairn_performance",
+            operation = "store_startup",
+            phase = "wal",
+            retries,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            outcome = if result.is_ok() { "success" } else { "failed" },
+            "database startup contention"
+        );
+    }
+    result?;
+    connection.busy_timeout(timeout)
+}
+
 impl Store {
     pub fn open(directory: &Path) -> Result<Self> {
         std::fs::create_dir_all(directory)?;
@@ -70,20 +106,22 @@ impl Store {
         let fresh = !file.exists();
         let mut writer = Connection::open(&file)?;
         let mut version: i64 = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !fresh && !matches!(version, 11..=DATABASE_VERSION) {
+        if !fresh && !(11..=DATABASE_VERSION).contains(&version) {
             return Err(Error::bad(
                 "Unsupported installation database version; use a compatible release or an explicit migration.",
             ));
         }
-        writer.busy_timeout(std::time::Duration::from_secs(5))?;
         writer.set_prepared_statement_cache_capacity(128);
-        writer.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        enable_wal(&writer, Duration::from_secs(5))?;
+        // Allow durable writes on a slow disk to finish under contention.
+        writer.busy_timeout(Duration::from_secs(30))?;
+        writer.execute_batch("PRAGMA foreign_keys=ON;")?;
         if !fresh && version == 11 {
             let upgraded = crate::nodes::inventory::migration::upgrade(&mut writer);
             version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
             // Another startup can finish later atomic steps while this one
             // waits for the inventory migration's immediate transaction.
-            if !matches!(version, 12..=DATABASE_VERSION) {
+            if !(12..=DATABASE_VERSION).contains(&version) {
                 upgraded?;
             }
         }
@@ -97,7 +135,7 @@ impl Store {
                 tx.execute_batch("CREATE TABLE direct_read_authorizations(grant_id TEXT NOT NULL,object TEXT NOT NULL,hash TEXT NOT NULL,run_id TEXT NOT NULL,PRIMARY KEY(grant_id,object));CREATE INDEX direct_read_authorizations_object ON direct_read_authorizations(object);")?;
                 tx.execute_batch(crate::nodes::journal_acknowledgements::SCHEMA)?;
                 tx.pragma_update(None, "user_version", 13)?;
-            } else if !matches!(current, 13..=DATABASE_VERSION) {
+            } else if !(13..=DATABASE_VERSION).contains(&current) {
                 return Err(Error::bad(
                     "Unexpected installation database version during direct storage upgrade.",
                 ));
@@ -126,12 +164,51 @@ impl Store {
             version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
         }
         if !fresh && version == 18 {
+            crate::runs::projections::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 19 {
+            let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let current: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+            if current == 19 {
+                tx.execute_batch(crate::plugins::hooks::SCHEMA)?;
+                tx.pragma_update(None, "user_version", 20)?;
+            } else if !(20..=DATABASE_VERSION).contains(&current) {
+                return Err(Error::bad(
+                    "Unexpected database version during plugin hooks upgrade.",
+                ));
+            }
+            tx.commit()?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 20 {
+            crate::worker::progress::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 21 {
+            crate::timeline::migration::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 22 {
+            crate::nodes::attempts_migration::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 23 {
+            let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if tx.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))? == 23 {
+                crate::plugins::grants::migrate(&Db(&tx), directory)?;
+                tx.pragma_update(None, "user_version", 24)?;
+            }
+            tx.commit()?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 24 {
             crate::agent_access::upgrade(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;
             tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('agentAccounts','chats','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+            "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('node-attempts','node-exclusive-requests','agentAccounts','chats','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS records_kind ON records(kind,updated_at DESC);
 CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),type TEXT NOT NULL CHECK(length(type)>0),text TEXT NOT NULL,payload TEXT CHECK(payload IS NULL OR json_valid(payload)));
@@ -147,18 +224,24 @@ CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at
 CREATE INDEX IF NOT EXISTS events_user_input ON events(run_id,id) WHERE type='chat.user';
 CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload,'$.item.id'),id) WHERE json_extract(payload,'$.item.type')='agent_message';")?;
             tx.execute_batch(crate::runs::SCHEMA)?;
+            tx.execute_batch(crate::worker::progress::SCHEMA)?;
             tx.execute_batch(crate::accounts::sql::SCHEMA)?;
             tx.execute_batch(crate::nodes::shared_blocks::SCHEMA)?;
             tx.execute_batch(crate::nodes::journal_acknowledgements::SCHEMA)?;
             tx.execute_batch(crate::projects::SCHEMA)?;
             tx.execute_batch(crate::nodes::inventory::SCHEMA)?;
+            tx.execute_batch(crate::nodes::attempts::SCHEMA)?;
+            tx.execute_batch(crate::nodes::exclusive_state::SCHEMA)?;
             tx.execute_batch(crate::agents::SCHEMA)?;
+            tx.execute_batch(crate::agent_access::SCHEMA)?;
             tx.execute_batch(crate::mcps::sql::SCHEMA)?;
             tx.execute_batch(crate::plugins::instances::SCHEMA)?;
             tx.execute_batch(crate::plugins::state::SCHEMA)?;
             tx.execute_batch(crate::plugins::queues::SCHEMA)?;
+            tx.execute_batch(crate::plugins::hooks::SCHEMA)?;
             crate::plugins::registry::initialize(&Db(&tx))?;
             tx.execute_batch(crate::agent_grants::SCHEMA)?;
+            tx.execute_batch(crate::plugins::grants::SCHEMA)?;
             tx.execute_batch(crate::missions::SCHEMA)?;
             tx.execute_batch(crate::chats::storage::SCHEMA)?;
             tx.execute_batch(crate::chats::question_storage::SCHEMA)?;
@@ -166,7 +249,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::reads::sql::SCHEMA)?;
             tx.execute_batch(crate::waits::sql::SCHEMA)?;
             tx.execute_batch(crate::chats::engine_switch::SCHEMA)?;
-            tx.execute_batch(crate::agent_access::SCHEMA)?;
+            tx.execute_batch(crate::timeline::SCHEMA)?;
             tx.commit()?;
         }
         // total_changes also counts rows undone by a transition savepoint. Keep
@@ -202,19 +285,24 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
     async fn call<T: Send + 'static>(
         &self,
         tx: &mpsc::Sender<Job>,
+        caller: &'static str,
         f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let queued_at = std::time::Instant::now();
         let (reply, rx) = oneshot::channel();
         tx.send(Box::new(move |connection| {
+            let cpu = performance::CpuTime::start();
             let started = std::time::Instant::now();
             let result = f(&mut Db(connection));
             let execution = started.elapsed();
+            let cpu = cpu.elapsed();
             let failed = result.is_err();
             let abandoned_reply = reply.send(result).is_err();
             performance::Completed {
+                caller,
                 queue: started.duration_since(queued_at),
                 execution,
+                cpu,
                 failed,
                 abandoned_reply,
             }
@@ -229,7 +317,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         &self,
         f: impl FnOnce(&mut Db<'_>) -> Result<T> + Send + 'static,
     ) -> Result<T> {
-        self.call(&self.0.readers, f).await
+        self.call(&self.0.readers, performance::caller(&f), f).await
     }
 
     pub async fn write<T: Send + 'static>(
@@ -239,7 +327,8 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         let changes = self.0.changes.clone();
         let discarded = self.0.discarded_changes.clone();
         let preparation = crate::plugins::operations::publication_cancellation();
-        self.call(&self.0.writer, move |db| {
+        let caller = performance::caller(&f);
+        self.call(&self.0.writer, caller, move |db| {
             if preparation.is_some_and(|token| token.is_cancelled()) {
                 return Err(Error::conflict("Preparation was cancelled."));
             }
@@ -276,7 +365,8 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         let changes = self.0.changes.clone();
         let discarded = self.0.discarded_changes.clone();
         let preparation = crate::plugins::operations::publication_cancellation();
-        self.call(&self.0.writer, move |db| {
+        let caller = performance::caller(&f);
+        self.call(&self.0.writer, caller, move |db| {
             if preparation.is_some_and(|token| token.is_cancelled()) {
                 return Err(Error::conflict("Preparation was cancelled."));
             }
@@ -513,6 +603,8 @@ impl Db<'_> {
             kind,
             "agentAccounts"
                 | "chats"
+                | "node-attempts"
+                | "node-exclusive-requests"
                 | "nodes"
                 | "projects"
                 | "agents"
@@ -634,7 +726,7 @@ impl Db<'_> {
             return Ok(result);
         }
         let mut rows=self.json_rows(
-            "SELECT data FROM runs WHERE status IN ('queued','running','waiting') ORDER BY created_at",
+            "SELECT data FROM run_views AS runs WHERE status IN ('queued','running','waiting') ORDER BY created_at",
             [],
         )?;
         self.hydrate_run_wakeups(&mut rows)?;
@@ -726,9 +818,11 @@ impl Db<'_> {
         values.push(limit.into());
         values.push(offset.into());
         let clause = filters.join(" AND ");
+        // Pagination values are already i64. An explicit integer expression
+        // prevents SQLite from reparsing the projection for each LIMIT binding.
         (
             format!(
-                "SELECT {fields} FROM runs WHERE {clause} ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?"
+                "SELECT {fields} FROM run_views AS runs WHERE {clause} ORDER BY created_at DESC,id DESC LIMIT CAST(? AS INTEGER) OFFSET CAST(? AS INTEGER)"
             ),
             values,
         )
@@ -741,30 +835,88 @@ impl Db<'_> {
         text: &str,
         payload: Option<&Value>,
     ) -> Result<()> {
+        self.event_at(run, kind, text, payload, now())
+    }
+
+    /// Records an event and applies it to the run's timeline in one savepoint:
+    /// a caller that catches a failure never commits half of the event.
+    pub(crate) fn event_at(
+        &self,
+        run: &str,
+        kind: &EventKind,
+        text: &str,
+        payload: Option<&Value>,
+        created_at: i64,
+    ) -> Result<()> {
         let text = text.chars().take(16000).collect::<String>();
-        self.0
-            .prepare_cached(
-                "INSERT INTO events(run_id,created_at,type,text,payload) VALUES(?,?,?,?,?)",
-            )?
-            .execute(params![
-                run,
-                now(),
-                kind.as_str(),
-                text,
-                payload.map(Value::to_string)
-            ])?;
-        // Prune in batches instead of executing a delete for every streamed delta.
-        if self.0.last_insert_rowid() % 256 == 0 {
+        self.0.execute_batch("SAVEPOINT event_record")?;
+        let before = self.0.total_changes();
+        let result = (|| {
             self.0
                 .prepare_cached(
-                    "DELETE FROM events
+                    "INSERT INTO events(run_id,created_at,type,text,payload) VALUES(?,?,?,?,?)",
+                )?
+                .execute(params![
+                    run,
+                    created_at,
+                    kind.as_str(),
+                    text,
+                    payload.map(Value::to_string)
+                ])?;
+            let id = self.0.last_insert_rowid();
+            crate::timeline::record(
+                self,
+                run,
+                crate::timeline::reducer::Event {
+                    id,
+                    created_at,
+                    kind,
+                    text: &text,
+                    payload,
+                },
+            )?;
+            // Prune in batches instead of executing a delete for every streamed delta.
+            if id % 256 == 0 {
+                let pruned = self
+                    .0
+                    .prepare_cached(
+                        "DELETE FROM events
                      WHERE run_id=?1
                        AND id<(SELECT COALESCE(MAX(id),0)-10000 FROM events WHERE run_id=?1)
                        AND run_id IN (SELECT id FROM runs WHERE trigger!='chat')",
-                )?
-                .execute([run])?;
+                    )?
+                    .execute([run])?;
+                if pruned > 0 {
+                    crate::timeline::prune(self, run)?;
+                }
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.0.execute_batch("RELEASE event_record")?;
+                Ok(())
+            }
+            Err(error) => {
+                self.0
+                    .execute_batch("ROLLBACK TO event_record; RELEASE event_record")?;
+                let discarded = self.0.total_changes() - before;
+                if discarded > 0
+                    && self.0.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='cairn_discarded_changes')",
+                        [],
+                        |r| r.get::<_, bool>(0),
+                    )?
+                {
+                    self.0.query_row(
+                        "SELECT cairn_discarded_changes(?)",
+                        [i64::try_from(discarded).unwrap_or(i64::MAX)],
+                        |_| Ok(()),
+                    )?;
+                }
+                Err(error)
+            }
         }
-        Ok(())
     }
 
     /// Repair completed chats whose answer survived only in the run summary.
@@ -820,10 +972,12 @@ impl Db<'_> {
                     "recovered": true,
                 },
             });
-            self.event(&id, &EventKind::ItemCompleted, &summary, Some(&payload))?;
-            self.0.execute(
-                "UPDATE events SET created_at=? WHERE id=?",
-                params![finished, self.0.last_insert_rowid()],
+            self.event_at(
+                &id,
+                &EventKind::ItemCompleted,
+                &summary,
+                Some(&payload),
+                finished,
             )?;
         }
         Ok(())
@@ -867,7 +1021,7 @@ impl Db<'_> {
     }
 
     /// SSE is intentionally uncompressed; preserve its small initial/replay window.
-    pub(crate) fn live_events_between(
+    pub fn live_events_between(
         &self,
         run: &str,
         after: i64,
@@ -986,6 +1140,7 @@ fn within_budget(
             kind: EventKind::from_adapter(&kind),
             text,
             display_id: None,
+            timeline: false,
             payload: payload
                 .map(serde_json::value::RawValue::from_string)
                 .transpose()?,
@@ -1102,6 +1257,81 @@ mod schema_tests {
     use super::*;
     use crate::agent_fixture::StoreAgentFixture;
 
+    #[test]
+    fn wal_contention_has_one_timeout_budget_and_can_be_retried_after_release() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("manager.db");
+        let mut owner = Connection::open(&file).unwrap();
+        owner
+            .execute_batch("CREATE TABLE retained(value TEXT); INSERT INTO retained VALUES('original'); PRAGMA user_version=18;")
+            .unwrap();
+        let transaction = owner
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let waiting = Connection::open(&file).unwrap();
+        let timeout = Duration::from_millis(50);
+        let started = Instant::now();
+        let error = enable_wal(&waiting, timeout).unwrap_err();
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy)
+        );
+        assert!(started.elapsed() >= timeout);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(
+            waiting
+                .pragma_query_value::<String, _>(None, "journal_mode", |row| row.get(0))
+                .unwrap(),
+            "delete"
+        );
+        assert_eq!(
+            waiting
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            18
+        );
+        assert_eq!(
+            waiting
+                .query_row("SELECT value FROM retained", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap(),
+            "original"
+        );
+        transaction.commit().unwrap();
+        enable_wal(&waiting, timeout).unwrap();
+        assert_eq!(
+            waiting
+                .pragma_query_value::<String, _>(None, "journal_mode", |row| row.get(0))
+                .unwrap(),
+            "wal"
+        );
+        assert_eq!(
+            waiting
+                .pragma_query_value::<i64, _>(None, "busy_timeout", |row| row.get(0))
+                .unwrap(),
+            50
+        );
+    }
+
+    #[test]
+    fn wal_initialization_returns_non_busy_errors_without_waiting() {
+        let root = tempfile::tempdir().unwrap();
+        let mut connection = Connection::open(root.path().join("manager.db")).unwrap();
+        connection
+            .execute_batch("CREATE TABLE retained(value TEXT);")
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+        let started = Instant::now();
+        let error = enable_wal(&transaction, Duration::from_secs(5)).unwrap_err();
+        assert_ne!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy)
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        transaction.rollback().unwrap();
+        enable_wal(&connection, Duration::from_secs(5)).unwrap();
+    }
+
     #[tokio::test]
     async fn fresh_node_schema_reopens_without_a_records_mirror() {
         let root = tempfile::tempdir().unwrap();
@@ -1164,6 +1394,147 @@ mod schema_tests {
     }
 
     #[test]
+    fn run_pagination_reuses_its_plan_and_preserves_integer_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        drop(Store::open(root.path()).unwrap());
+        let connection = Connection::open(root.path().join("manager.db")).unwrap();
+        let db = Db(&connection);
+        for (id, created_at) in [("run-a", 1), ("run-b", 2), ("run-c", 3)] {
+            let state = serde_json::from_value(json!({
+                "id": id, "taskId": "task", "status": "succeeded", "createdAt": created_at,
+            }))
+            .unwrap();
+            db.admit_run(&state, None, &json!({}), None).unwrap();
+        }
+        for full in [false, true] {
+            for (status, task) in [
+                (None, None),
+                (Some("succeeded"), None),
+                (None, Some("task")),
+            ] {
+                for (limit, offset, expected) in [
+                    (10, 0, "run-c,run-b,run-a"),
+                    (-1, 0, "run-c,run-b,run-a"),
+                    (0, 0, ""),
+                    (1, 1, "run-b"),
+                    (i64::MAX, 2, "run-a"),
+                    (2, -1, "run-c,run-b"),
+                ] {
+                    let (query, values) = Db::run_query(status, task, limit, offset, full);
+                    let mut statement = connection.prepare_cached(&query).unwrap();
+                    let ids = statement
+                        .query_map(rusqlite::params_from_iter(values), |row| {
+                            row.get::<_, String>(0)
+                        })
+                        .unwrap()
+                        .map(|row| {
+                            let row: Value = serde_json::from_str(&row.unwrap()).unwrap();
+                            row["id"].as_str().unwrap().to_owned()
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(ids.join(","), expected);
+                    assert_eq!(
+                        statement.reset_status(rusqlite::StatementStatus::RePrepare),
+                        0,
+                        "Integer pagination must not recompile the wire projection"
+                    );
+                }
+            }
+        }
+    }
+
+    // Reconstruct the released layout from a real previous writer's database,
+    // rather than changing the version of today's placement tables.
+    fn version_nineteen_database(root: &Path) -> Connection {
+        let mut db = Connection::open(root.join("manager.db")).unwrap();
+        db.execute_batch(include_str!("../tests/fixtures/placements-v15.sql"))
+            .unwrap();
+        db.pragma_update(None, "foreign_keys", true).unwrap();
+        crate::chats::question_migration::upgrade(&mut db).unwrap();
+        crate::attachments::migration::upgrade(&mut db).unwrap();
+        crate::reads::migration::upgrade(&mut db).unwrap();
+        crate::runs::projections::upgrade(&mut db).unwrap();
+        db
+    }
+
+    #[test]
+    fn version_nineteen_upgrade_adds_hook_queues_without_touching_existing_work() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("manager.db");
+        let db = version_nineteen_database(root.path());
+        db.execute(
+            "INSERT INTO kv(key,data) VALUES('hook-upgrade-fixture','true')",
+            [],
+        )
+        .unwrap();
+        drop(db);
+        drop(Store::open(root.path()).unwrap());
+        drop(Store::open(root.path()).unwrap());
+        let db = Connection::open(file).unwrap();
+        assert_eq!(
+            db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .unwrap(),
+            DATABASE_VERSION
+        );
+        assert!(db.table_exists(None, "plugin_hook_events").unwrap());
+        assert!(db.table_exists(None, "plugin_hook_receipts").unwrap());
+        assert_eq!(
+            db.query_row(
+                "SELECT data FROM kv WHERE key='hook-upgrade-fixture'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "true"
+        );
+    }
+
+    #[test]
+    fn version_twenty_upgrade_preserves_hook_schema_and_persisted_work() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("manager.db");
+        let db = version_nineteen_database(root.path());
+        db.execute_batch(crate::plugins::hooks::SCHEMA).unwrap();
+        db.pragma_update(None, "user_version", 20).unwrap();
+        let hook_schema = |db: &Connection| -> Vec<String> {
+            db.prepare(
+                "SELECT sql FROM sqlite_schema WHERE name LIKE 'plugin_hook_%' ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+        };
+        let retained = hook_schema(&db);
+        db.execute(
+            "INSERT INTO kv(key,data) VALUES('progress-upgrade-fixture','true')",
+            [],
+        )
+        .unwrap();
+        drop(db);
+        drop(Store::open(root.path()).unwrap());
+        drop(Store::open(root.path()).unwrap());
+        let db = Connection::open(file).unwrap();
+        assert_eq!(
+            db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
+                .unwrap(),
+            DATABASE_VERSION
+        );
+        assert_eq!(hook_schema(&db), retained);
+        assert!(db.table_exists(None, "run_progress").unwrap());
+        assert_eq!(
+            db.query_row::<String, _, _>(
+                "SELECT data FROM kv WHERE key='progress-upgrade-fixture'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            "true"
+        );
+    }
+
+    #[test]
     fn version_twelve_upgrade_preserves_data_and_fences_older_binaries() {
         let root = tempfile::tempdir().unwrap();
         drop(Store::open(root.path()).unwrap());
@@ -1216,7 +1587,8 @@ mod schema_tests {
 
     #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 99] {
+        let unsupported_versions = (0..=10).chain([DATABASE_VERSION + 1, 99]);
+        for version in unsupported_versions {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();

@@ -56,7 +56,8 @@ import build.cairn.contracts.CreateChatInput
 import build.cairn.contracts.EditChatMessage
 import build.cairn.contracts.EditChatMessageInput
 import build.cairn.contracts.QuestionAnswerInput
-import build.cairn.contracts.ResumeRunInput
+import build.cairn.contracts.ResumeChatInput
+import build.cairn.contracts.ResumeExecutionSelection
 import build.cairn.contracts.SendChatMessageInput
 import build.cairn.contracts.SetChatPausedInput
 import build.cairn.contracts.answerChatQuestion
@@ -67,7 +68,7 @@ import build.cairn.contracts.deleteChatMessage
 import build.cairn.contracts.editChatMessage
 import build.cairn.contracts.restartChatSession
 import build.cairn.contracts.restoreChat
-import build.cairn.contracts.resumeRun
+import build.cairn.contracts.resumeChat
 import build.cairn.contracts.sendChatMessage
 import build.cairn.contracts.setChatPaused
 import build.cairn.contracts.stopChat
@@ -381,6 +382,25 @@ internal fun ChatPage(
                 current = { savedIsCurrent(it, conversations.state?.chats) },
             )
     val chat = live.state?.chat?.takeIf { it.id == id }
+    val savedResumeRun = chat?.run
+    val savedResumeAgent = savedResumeRun?.snapshot?.agent
+    val savedResumeTurnId = savedResumeRun?.chatExecution?.messageId
+    val resumeReasoningContext =
+        listOf(
+                id,
+                chat?.id,
+                savedResumeRun?.id,
+                savedResumeTurnId,
+                savedResumeAgent?.id,
+                savedResumeAgent?.provider,
+                savedResumeAgent?.model,
+                savedResumeAgent?.reasoning,
+                savedResumeAgent?.speed,
+            )
+            .joinToString("\u0000") { value ->
+                val normalized = value.orEmpty()
+                "${normalized.length}:$normalized"
+            }
     ReadWhileOpen(
         vm,
         chat
@@ -410,6 +430,31 @@ internal fun ChatPage(
     var model by rememberSaveable(id) { mutableStateOf(savedDraft.model) }
     var reasoning by rememberSaveable(id) { mutableStateOf(savedDraft.reasoning) }
     var speed by rememberSaveable(id) { mutableStateOf(savedDraft.speed) }
+    var reasoningIntentKind by
+        rememberSaveable(id, resumeReasoningContext) { mutableStateOf("untouched") }
+    var reasoningIntentValue by rememberSaveable(id, resumeReasoningContext) { mutableStateOf("") }
+    fun setResumeReasoningIntent(intent: ResumeReasoningIntent) {
+        when (intent) {
+            is ResumeReasoningIntent.Effort -> {
+                reasoningIntentKind = "effort"
+                reasoningIntentValue = intent.value
+            }
+            ResumeReasoningIntent.ModelDefault -> {
+                reasoningIntentKind = "model-default"
+                reasoningIntentValue = ""
+            }
+            ResumeReasoningIntent.Untouched -> {
+                reasoningIntentKind = "untouched"
+                reasoningIntentValue = ""
+            }
+        }
+    }
+    val currentResumeReasoningIntent =
+        when (reasoningIntentKind) {
+            "model-default" -> ResumeReasoningIntent.ModelDefault
+            "effort" -> ResumeReasoningIntent.Effort(reasoningIntentValue)
+            else -> ResumeReasoningIntent.Untouched
+        }
     var attachments by rememberForm(savedDraft.attachments)
     // Per-file states of the composer: refused before upload, uploading, or failed to upload.
     var rejected by rememberForm(savedDraft.rejected)
@@ -450,25 +495,26 @@ internal fun ChatPage(
     }
     SideEffect { persistDraft() }
     DisposableEffect(draftKey) { onDispose { persistDraft() } }
-    LaunchedEffect(chat?.messages, live.events) {
+    LaunchedEffect(chat?.messages, live.entries) {
         outgoing?.let { pending ->
             if (
                 chat?.messages.orEmpty().any { it.id == pending.id && it.status == "delivered" } ||
-                    live.events.any {
-                        it.type == "chat.user" &&
-                            it.payload?.get("messageId")?.jsonPrimitive?.contentOrNull == pending.id
+                    live.entries.any {
+                        (it.content as? build.cairn.contracts.TimelineContent.A)?.messageId ==
+                            pending.id
                     }
             )
                 outgoing = null
         }
     }
     val timelineKeys = remember(id) { TimelineKeys() }
-    val quota = remember(chat?.run, live.events) { chatQuota(chat?.run, live.events) }
+    val quota = remember(chat?.run, live.entries) { chatQuota(chat?.run, live.entries) }
     // A failed or interrupted turn never resumes its wakeup, even when the record lingers.
     val pendingWakeup = liveWakeup(chat)
     val history =
         remember(
             live.events,
+            live.entries,
             live.state?.artifacts,
             pendingWakeup?.id,
             pendingWakeup?.observation,
@@ -476,7 +522,12 @@ internal fun ChatPage(
             deliveryTimeline(
                 timelineKeys.stabilize(
                     live.history,
-                    timelineEntries(live.events, chat = true, pendingWakeup = pendingWakeup),
+                    timelineEntries(
+                        live.events,
+                        chat = true,
+                        pendingWakeup = pendingWakeup,
+                        cards = live.entries,
+                    ),
                 ),
                 live.state?.artifacts.orEmpty(),
             )
@@ -513,8 +564,8 @@ internal fun ChatPage(
     val active = chat?.run?.active == true
     val running = chat?.run?.status == "running" && quota == null
     val waitingTasks =
-        remember(live.events, running) {
-            if (running) backgroundWait(live.events) else null
+        remember(live.entries, running) {
+            if (running) backgroundWait(live.entries) else null
         }
     // A subagent's full activity opens in a sheet. The current request's subagents stay in sight
     // above the composer while one of them works.
@@ -553,14 +604,14 @@ internal fun ChatPage(
             else
                 waitingTasks?.let {
                     waitingStep(it)
-                        .copy(subagents = waitingForSubagents(live.events, currentSubagents))
+                        .copy(subagents = waitingForSubagents(it.taskIds, currentSubagents))
                 } ?: workingStep(live.events, chat?.agentName.orEmpty(), chat?.run?.startedAt)
         }
     val conversationError = conversationError(chat)
     val error = conversationError?.takeUnless {
         quota != null && (isQuotaMessage(it) || it == quota.message)
     }
-    val errorShown = remember(chat, live.events) { failureShown(chat, live.events) }
+    val errorShown = remember(chat, live.entries) { failureShown(chat, live.entries) }
     var errorDismissed by
         remember(error, chat?.id, chat?.run?.id, chat?.run?.finishedAt) { mutableStateOf(false) }
     val selectedAgent = state.agents.find { it.id == (chat?.agentId ?: agent) }
@@ -576,6 +627,7 @@ internal fun ChatPage(
     val defaultReasoning = inheritedAssistant?.reasoning.orEmpty()
     val defaultSpeed = inheritedAssistant?.speed.orEmpty()
     fun chooseProvider(value: String) {
+        setResumeReasoningIntent(ResumeReasoningIntent.Untouched)
         provider = value
         model = ""
         reasoning = ""
@@ -613,7 +665,7 @@ internal fun ChatPage(
             selectedAgent?.access?.projects == null ||
                 it.id in selectedAgent.access.projects.orEmpty()
         }
-    val delivery = chatDelivery(chat, live.events, outgoing)
+    val delivery = chatDelivery(chat, live.entries, outgoing)
     val pending = delivery.queued
     val questions = chat?.questions.orEmpty().filter { it.status == "pending" }
     // Files over the limits stay visible as refused cards; the others join the draft.
@@ -671,6 +723,7 @@ internal fun ChatPage(
         uploadErrors.remove(key)
     }
     fun clearDraft() {
+        setResumeReasoningIntent(ResumeReasoningIntent.Untouched)
         vm.files.discard(attachments)
         attachments = emptyList()
         rejected = emptyList()
@@ -792,6 +845,7 @@ internal fun ChatPage(
             return
         }
         editing = message.id
+        setResumeReasoningIntent(ResumeReasoningIntent.Untouched)
         composer.setTextAndPlaceCursorAtEnd(message.text)
         provider = message.provider.ifBlank { currentProvider }
         model = message.model
@@ -1401,12 +1455,126 @@ internal fun ChatPage(
                                                     resume = {
                                                         chat?.let { current ->
                                                             vm.perform {
-                                                                if (current.run?.status == "failed")
-                                                                    api.resumeRun(
-                                                                        ResumeRunInput(
-                                                                            current.run.id
+                                                                val run = current.run
+                                                                if (
+                                                                    run != null &&
+                                                                        run.status in
+                                                                            setOf(
+                                                                                "failed",
+                                                                                "interrupted",
+                                                                                "cancelled",
+                                                                            )
+                                                                ) {
+                                                                    val savedAgent =
+                                                                        run.snapshot?.agent
+                                                                    val selection =
+                                                                        if (
+                                                                            run.resumeAvailable &&
+                                                                                savedAgent !=
+                                                                                    null &&
+                                                                                chosenProvider ==
+                                                                                    savedAgent
+                                                                                        .provider &&
+                                                                                !run.chatExecution
+                                                                                    ?.messageId
+                                                                                    .isNullOrBlank()
+                                                                        ) {
+                                                                            val catalog =
+                                                                                state.modelCatalog(
+                                                                                    chosenProvider
+                                                                                )
+                                                                            val selectedRow =
+                                                                                selectedModel(
+                                                                                    catalog,
+                                                                                    model,
+                                                                                    savedAgent
+                                                                                        .model,
+                                                                                )
+                                                                            val selectedModelChanged =
+                                                                                model
+                                                                                    .isNotBlank() &&
+                                                                                    model !=
+                                                                                        savedAgent
+                                                                                            .model
+                                                                            val selectedReasoning =
+                                                                                resumeSelectionReasoning(
+                                                                                    currentResumeReasoningIntent,
+                                                                                    reasoning,
+                                                                                    savedAgent
+                                                                                        .reasoning,
+                                                                                    selectedModelChanged,
+                                                                                    selectedRow
+                                                                                        ?.defaultReasoningEffort
+                                                                                        .orEmpty(),
+                                                                                )
+                                                                            val selectedModelName =
+                                                                                resumeSelectionModelId(
+                                                                                    selectedRow,
+                                                                                    model,
+                                                                                    savedAgent
+                                                                                        .model,
+                                                                                )
+                                                                            val preserveModel =
+                                                                                savedAgent.model
+                                                                                    .isEmpty() &&
+                                                                                    model.isBlank()
+                                                                            val selectionModelName =
+                                                                                if (preserveModel)
+                                                                                    savedAgent.model
+                                                                                else
+                                                                                    selectedModelName
+                                                                            val selectedDisplayedSpeed =
+                                                                                pickerAppliedSpeed(
+                                                                                    chosenProvider,
+                                                                                    selectedRow,
+                                                                                    speed,
+                                                                                    savedAgent
+                                                                                        .speed,
+                                                                                )
+                                                                            val selectedSpeed =
+                                                                                resumeSelectionSpeed(
+                                                                                    chosenProvider,
+                                                                                    selectedRow,
+                                                                                    speed,
+                                                                                    savedAgent
+                                                                                        .speed,
+                                                                                )
+                                                                            if (
+                                                                                needsResumeSelection(
+                                                                                    selectionModelName,
+                                                                                    selectedReasoning,
+                                                                                    selectedDisplayedSpeed,
+                                                                                    savedAgent
+                                                                                        .model,
+                                                                                    savedAgent
+                                                                                        .reasoning,
+                                                                                    savedAgent
+                                                                                        .speed,
+                                                                                )
+                                                                            ) {
+                                                                                ResumeExecutionSelection(
+                                                                                    model =
+                                                                                        selectionModelName,
+                                                                                    reasoning =
+                                                                                        selectedReasoning,
+                                                                                    speed =
+                                                                                        selectedSpeed,
+                                                                                    preserveModel =
+                                                                                        preserveModel,
+                                                                                )
+                                                                            } else null
+                                                                        } else null
+                                                                    api.resumeChat(
+                                                                        ResumeChatInput(
+                                                                            chatId = current.id,
+                                                                            runId = run.id,
+                                                                            turnId =
+                                                                                run.chatExecution
+                                                                                    ?.messageId,
+                                                                            selection = selection,
                                                                         )
                                                                     )
+                                                                }
                                                                 api.request(
                                                                     "POST",
                                                                     "/chats/${segment(current.id)}/pause",
@@ -1432,31 +1600,15 @@ internal fun ChatPage(
                                     items(delivery.sending, key = { "sending:${it.message.id}" }) {
                                         sending ->
                                         Column {
-                                            EventRow(
+                                            MessageRow(
                                                 vm,
-                                                RunEvent(
-                                                    id = -1,
-                                                    createdAt = sending.message.createdAt,
-                                                    type = "chat.user",
-                                                    text = sending.message.text,
-                                                    payload =
-                                                        kotlinx.serialization.json.JsonObject(
-                                                            mapOf(
-                                                                "text" to
-                                                                    JsonPrimitive(
-                                                                        questionAnswerText(
-                                                                            sending.message.text,
-                                                                            sending.message
-                                                                                .questionId,
-                                                                        )
-                                                                    ),
-                                                                "attachments" to
-                                                                    wireJson.encodeToJsonElement(
-                                                                        sending.message.attachments
-                                                                    ),
-                                                            )
-                                                        ),
+                                                user = true,
+                                                questionAnswerText(
+                                                    sending.message.text,
+                                                    sending.message.questionId,
                                                 ),
+                                                sending.message.attachments,
+                                                sending.message.createdAt,
                                                 chat?.agentName ?: "Cairn",
                                             )
                                             Text(
@@ -1756,6 +1908,7 @@ internal fun ChatPage(
                                                 speed = speed,
                                                 defaultSpeed = defaultSpeed,
                                                 changeSpeed = { speed = it },
+                                                onReasoningIntent = ::setResumeReasoningIntent,
                                             ) { m, r ->
                                                 model = m
                                                 reasoning = r

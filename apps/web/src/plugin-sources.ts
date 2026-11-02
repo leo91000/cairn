@@ -55,15 +55,6 @@ export function pluginSources(catalog: Pick<Catalog, 'packages' | 'connections'>
   })
 }
 
-/**
- * One page of a source's projects. Packages may ignore a search, so the picker filters what it
- * loaded instead of sending one.
- */
-export function projectsPath(pluginId: string, source: string, instance: string, page: number) {
-  const params = new URLSearchParams({ source, instance, page: String(page) })
-  return `/plugins/${encodeURIComponent(pluginId)}/projects?${params}`
-}
-
 /** Whether a project matches every word typed, in its name, identifier, description or badges. */
 export function projectMatches(project: PluginProject, query: string) {
   const words = searchText(query).trim().split(/\s+/).filter(Boolean)

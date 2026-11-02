@@ -17,11 +17,11 @@ class SkillMentionLogicTest {
     fun `chat skills follow agent access and the chat project`() {
         val skills =
             listOf(
-                Skill("review"),
-                Skill("deploy", scope = project),
-                Skill("secret", scope = other),
-                Skill("broken", valid = false),
-                Skill("review", "Projet", scope = project),
+                Skill(name = "review"),
+                Skill(name = "deploy", scope = project),
+                Skill(name = "secret", scope = other),
+                Skill(name = "broken", valid = false),
+                Skill(name = "review", description = "Projet", scope = project),
             )
         assertEquals(
             listOf("$project/deploy", "$project/review"),

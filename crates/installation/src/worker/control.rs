@@ -1,4 +1,4 @@
-use super::{Worker, checkpoint::RunCheckpoint};
+use super::{ResumeSelectionContext, Worker, checkpoint::RunCheckpoint};
 use crate::{
     config::now,
     error::{Error, Result, required},
@@ -8,7 +8,7 @@ use crate::{
     store::Db,
     validation::text,
 };
-use cairn_contracts::EventKind;
+use cairn_contracts::{EventKind, ResumeExecutionSelection};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -18,25 +18,28 @@ use std::{
 
 impl Worker {
     pub async fn cancel(&self, s: &Service, id: &str) -> Result<()> {
-        self.cancel_with_grant(s, id, None).await
+        self.cancel_live(s, id, crate::authorization::Authorization::default())
+            .await
     }
 
-    pub(crate) async fn cancel_from_run(&self, s: &Service, id: &str, bearer: &str) -> Result<()> {
-        self.cancel_with_grant(s, id, Some(bearer.to_owned())).await
-    }
-
-    async fn cancel_with_grant(&self, s: &Service, id: &str, bearer: Option<String>) -> Result<()> {
+    pub(crate) async fn cancel_live(
+        &self,
+        s: &Service,
+        id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<()> {
+        authorize.recheck().await?;
         let active = self.active.lock().await;
+        authorize.recheck().await?;
         let is_active = active.contains_key(id);
         let run_id = id.to_owned();
         s.store
             .transaction(move |db| {
-                if let Some(bearer) = bearer {
-                    crate::installation_mcp::authorize_in(db, &bearer)?;
-                }
+                authorize.authorize(db)?;
                 request_cancel(db, &run_id, is_active)
             })
             .await?;
+        s.accepted_jobs.revoke_run(id);
         if let Some(cancel) = active.get(id) {
             cancel.cancel();
         }
@@ -54,13 +57,25 @@ impl Worker {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.stop_chat_live(s, id, crate::authorization::Authorization::once(authorize))
+            .await
+    }
+
+    pub(crate) async fn stop_chat_live(
+        &self,
+        s: &Service,
+        id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let active = self.active.lock().await;
+        authorize.recheck().await?;
         let executing: std::collections::HashSet<_> = active.keys().cloned().collect();
         let id = id.to_owned();
         let chat = s
             .store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 let chat = crate::chats::pause_in(db, &id, true)?;
                 if let Some(run_id) = chat["runId"].as_str() {
                     crate::chats::coding_agent::cancel_in(db, run_id)?;
@@ -73,6 +88,7 @@ impl Worker {
                 required(db.conversation_boundary(&id)?, "Chat not found")
             })
             .await?;
+        s.accepted_jobs.revoke_chat(text(&chat, "id"));
         if let Some(cancel) = chat["runId"].as_str().and_then(|id| active.get(id)) {
             cancel.cancel();
         }
@@ -94,7 +110,62 @@ impl Worker {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.resume_selected_authorized(s, id, ResumeSelectionContext::default(), authorize)
+            .await
+    }
+
+    pub(crate) async fn resume_live(
+        &self,
+        s: &Service,
+        id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        self.resume_selected_live(s, id, ResumeSelectionContext::default(), authorize)
+            .await
+    }
+
+    pub(crate) async fn resume_selected_authorized<F>(
+        &self,
+        s: &Service,
+        id: &str,
+        resume: ResumeSelectionContext,
+        authorize: F,
+    ) -> Result<Value>
+    where
+        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+    {
+        self.resume_selected_live(
+            s,
+            id,
+            resume,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    /// Resume a stopped run after checking authority, the exact turn, and selected agent.
+    pub(crate) async fn resume_selected_live(
+        &self,
+        s: &Service,
+        id: &str,
+        resume: ResumeSelectionContext,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        if resume.selection.is_some()
+            && resume
+                .expected_turn_id
+                .as_deref()
+                .is_none_or(|turn| turn.is_empty() || turn.chars().count() > 200)
+        {
+            return Err(Error::bad(
+                "A valid turn identifier is required when selecting a model for resume.",
+            ));
+        }
+        let preparation = self.run_preparation_lock(id).await;
+        let _preparation = preparation.lock_owned().await;
+        authorize.recheck().await?;
         let active = self.active.lock().await;
+        authorize.recheck().await?;
         if active.contains_key(id) {
             return Err(Error::conflict(
                 "Wait for this run to finish stopping before resuming.",
@@ -104,8 +175,15 @@ impl Worker {
         let result = s
             .store
             .transaction(move |db| {
-                authorize(db)?;
-                requeue(db, &id)
+                authorize.authorize(db)?;
+                requeue(
+                    db,
+                    &id,
+                    resume.expected_turn_id.as_deref(),
+                    resume.selection.as_ref(),
+                    resume.selected_provider,
+                    resume.saved_auto_catalog.as_ref(),
+                )
             })
             .await?;
         self.notify();
@@ -125,13 +203,25 @@ impl Worker {
     where
         F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
     {
+        self.cleanup_live(s, id, crate::authorization::Authorization::local(authorize))
+            .await
+    }
+
+    pub(crate) async fn cleanup_live(
+        &self,
+        s: &Service,
+        id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let active = self.active.lock().await;
+        authorize.recheck().await?;
         let proof = authorize.clone();
         let run_id = id.to_owned();
         let run = s
             .store
             .read(move |db| {
-                proof(db)?;
+                proof.authorize(db)?;
                 required(db.run_record(&run_id)?, "Run not found")
             })
             .await?;
@@ -168,9 +258,11 @@ impl Worker {
         for workspace in &managed {
             ensure_clean(workspace, &root, &env).await?;
         }
+        authorize.recheck().await?;
         let proof = authorize.clone();
-        s.store.read(move |db| proof(db)).await?;
+        s.store.read(move |db| proof.authorize(db)).await?;
         for workspace in &managed {
+            authorize.recheck().await?;
             remove_workspace(&run, workspace, &env).await?;
         }
         let patch = crate::runs::RunChanges {
@@ -180,9 +272,10 @@ impl Worker {
             ..Default::default()
         };
         let id = id.to_owned();
+        authorize.recheck().await?;
         s.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 db.change_run(&id, patch)?;
                 db.audit("run.workspace.cleaned", &json!({ "id": id }))
             })
@@ -235,10 +328,33 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
 }
 
 /// Queues a stopped run to continue its saved conversation.
-fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
+fn requeue(
+    db: &Db<'_>,
+    id: &str,
+    expected_turn_id: Option<&str>,
+    selection: Option<&ResumeExecutionSelection>,
+    selected_provider: Option<crate::provider::Provider>,
+    saved_auto_catalog: Option<&Value>,
+) -> Result<Value> {
     let record = required(db.run_record(id)?, "Run not found")?;
     let state = record.state.clone();
     let run = record.wire()?;
+    let turn_mismatch = if selection.is_some() {
+        expected_turn_id.is_none_or(|expected| {
+            text(&run, "trigger") != "chat"
+                || run["chatExecution"]["messageId"].as_str() != Some(expected)
+        })
+    } else {
+        expected_turn_id.is_some_and(|expected| {
+            run["chatExecution"]["messageId"].as_str() != Some(expected)
+                && run["missionTurnId"].as_str() != Some(expected)
+        })
+    };
+    if turn_mismatch {
+        return Err(Error::conflict(
+            "This turn changed before it could be resumed. Refresh the conversation.",
+        ));
+    }
     if run["backendMigration"].is_object() {
         return Err(Error::conflict(
             "Wait for the backend migration to finish before resuming.",
@@ -271,6 +387,42 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
             "This run has no saved conversation available to resume.",
         ));
     }
+    let pending_switch =
+        state.trigger == "chat" && crate::chats::coding_agent::pending_for_run(db, id)?;
+    if pending_switch && selection.is_none() {
+        return Err(Error::conflict(
+            "Wait for the provider switch to finish before resuming without a model selection.",
+        ));
+    }
+    crate::resume_selection::validate_saved_opencode_auto_catalog(&run, saved_auto_catalog)?;
+    let selected_snapshot = if let Some(selection) = selection {
+        if !resumable {
+            return Err(Error::conflict(
+                "A model can only be selected for a saved conversation resume.",
+            ));
+        }
+        let provider = crate::provider::Provider::of_run(&run)?;
+        if selected_provider != Some(provider) {
+            return Err(Error::conflict(
+                "The saved coding agent changed before it could be resumed. Refresh the conversation.",
+            ));
+        }
+        crate::resume_selection::validate_preserved_model(&run, selection)?;
+        let mut snapshot: cairn_contracts::RunSnapshot =
+            serde_json::from_value(run["snapshot"].clone())?;
+        if !selection.preserve_model {
+            snapshot.agent.settings.model.clone_from(&selection.model);
+        }
+        snapshot
+            .agent
+            .settings
+            .reasoning
+            .clone_from(&selection.reasoning);
+        snapshot.agent.settings.speed.clone_from(&selection.speed);
+        Some(snapshot)
+    } else {
+        None
+    };
     if db
         .active_run_states()?
         .iter()
@@ -285,6 +437,9 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
     // A manual resume may arrive before chat_tick observes the terminal turn.
     // Its scheduled continuation must not survive into the resumed execution.
     crate::chats::continuation::cancel_for_run(db, id)?;
+    if pending_switch && selection.is_some() {
+        crate::chats::coding_agent::cancel_in(db, id)?;
+    }
     if let Some(mut checkpoint) = checkpoint {
         checkpoint.remaining_ms = Some(crate::run_limits::budget_ms(&run["snapshot"]["agent"]));
         checkpoint.controller_recoveries = None;
@@ -319,6 +474,7 @@ fn requeue(db: &Db<'_>, id: &str) -> Result<Value> {
     }
     let wait_reason = (!before_launch).then_some("Resuming saved conversation.");
     let mut patch = crate::runs::RunChanges {
+        snapshot: selected_snapshot,
         status: Some(RunStatus::Queued),
         error: Some(None),
         recovery_pending: Some(true),
@@ -360,11 +516,41 @@ fn managed_workspaces(run: &Value) -> Vec<Value> {
 async fn ensure_clean(workspace: &Value, root: &PathBuf, env: &Environment) -> Result<()> {
     let target = Path::new(text(workspace, "path"));
     if !target.starts_with(root)
-        || crate::skills::workspace(target, std::slice::from_ref(root)).await? != target
+        || target.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
     {
         return Err(Error::conflict(
             "Workspace is outside this run’s managed directory.",
         ));
+    }
+    // A revocation can interrupt a cleanup between workspaces. A retry may
+    // acknowledge an already absent directory, but may never follow an alias.
+    let boundary = root
+        .parent()
+        .ok_or_else(|| Error::conflict("Managed directory is missing."))?;
+    let mut ancestor = target;
+    loop {
+        match tokio::fs::symlink_metadata(ancestor).await {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && ancestor != boundary => {
+                ancestor = ancestor
+                    .parent()
+                    .ok_or_else(|| Error::conflict("Managed directory is missing."))?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if crate::skills::workspace(ancestor, &[boundary.to_path_buf()]).await? != ancestor {
+        return Err(Error::conflict(
+            "Workspace is outside this run’s managed directory.",
+        ));
+    }
+    if ancestor != target {
+        return Ok(());
     }
     let target = target.to_string_lossy().into_owned();
     let output = git(&["-C", &target, "status", "--porcelain", "--ignored"], env).await?;
@@ -378,6 +564,11 @@ async fn ensure_clean(workspace: &Value, root: &PathBuf, env: &Environment) -> R
 
 async fn remove_workspace(run: &Value, workspace: &Value, env: &Environment) -> Result<()> {
     let path = text(workspace, "path");
+    match tokio::fs::symlink_metadata(path).await {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
     if workspace["kind"] == "clone" {
         tokio::fs::remove_dir_all(path).await?;
         return Ok(());
@@ -437,7 +628,24 @@ pub async fn routes(s: &Arc<Service>, input: &crate::http::Input) -> Option<Resu
         }
         ["runs", id, "resume"] => {
             async {
-                let command = crate::capabilities::RESUME_RUN.decode(json!({ "runId": id }))?;
+                let mut body = if input.body.is_null() {
+                    json!({})
+                } else {
+                    input.body.clone()
+                };
+                let Some(fields) = body.as_object_mut() else {
+                    return Err(Error::bad("Resume input must be an object."));
+                };
+                if fields
+                    .get("runId")
+                    .is_some_and(|requested| requested.as_str() != Some(id))
+                {
+                    return Err(Error::conflict(
+                        "Resume runId must match the run in the request path.",
+                    ));
+                }
+                fields.insert("runId".into(), (*id).into());
+                let command = crate::capabilities::RESUME_RUN.decode(body)?;
                 let context = crate::capabilities::ResumeContext::http(input)?;
                 let output = crate::capabilities::RESUME_RUN
                     .invoke(s, command, context)
@@ -458,6 +666,307 @@ use crate::run_fixture::DbRunFixture;
 mod tests {
     use super::*;
 
+    async fn chat_resume_store() -> (tempfile::TempDir, crate::store::Store) {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({
+                        "id": "chat-run",
+                        "taskId": "chat-task",
+                        "status": "failed",
+                        "trigger": "chat",
+                        "createdAt": 0,
+                        "resumeAvailable": true,
+                        "sessionId": "saved-session",
+                        "chatExecution": { "messageId": "chat-turn" },
+                        "snapshot": {
+                            "agent": {
+                                "id": crate::config::MAIN_AGENT_ID,
+                                "provider": "codex",
+                                "model": "",
+                                "reasoning": "low",
+                                "speed": "",
+                            },
+                        },
+                    }),
+                    None,
+                )?;
+                db.save_checkpoint_boundary(
+                    "chat-run",
+                    &json!({
+                        "launched": true,
+                        "prepared": { "cwd": "/workspace" },
+                        "generation": "saved-generation",
+                    }),
+                )?;
+                let chat = serde_json::from_value::<crate::chats::Conversation>(json!({
+                    "id": "chat",
+                    "agentId": crate::config::MAIN_AGENT_ID,
+                    "runId": "chat-run",
+                    "createdAt": 0,
+                    "updatedAt": 0,
+                }))
+                .unwrap();
+                db.save_conversation(&chat)?;
+                db.save_engine_switch(&crate::chats::engine_switch::EngineSwitch {
+                    chat_id: "chat".into(),
+                    request_id: "switch-request".into(),
+                    run_id: "chat-run".into(),
+                    turn_id: "chat-turn".into(),
+                    provider: "claude".into(),
+                    model: "claude-sonnet".into(),
+                    pending: true,
+                    error: None,
+                    retry_at: None,
+                    receipt_expires_at: crate::config::now() + 86_400_000,
+                    current_expires_at: None,
+                })?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        (root, store)
+    }
+
+    #[tokio::test]
+    async fn preserve_model_rechecks_current_snapshot_before_requeue_mutations() {
+        let (_root, store) = chat_resume_store().await;
+        let selection = ResumeExecutionSelection {
+            model: String::new(),
+            preserve_model: true,
+            reasoning: "high".into(),
+            speed: "standard".into(),
+        };
+        let preflight_run = store.read(|db| db.run("chat-run")).await.unwrap().unwrap();
+        crate::resume_selection::validate_preserved_model(&preflight_run, &selection).unwrap();
+
+        store
+            .transaction(|db| {
+                let mut snapshot = db.run("chat-run")?.unwrap()["snapshot"].clone();
+                snapshot["agent"]["model"] = "gpt-6-luna".into();
+                db.change_run(
+                    "chat-run",
+                    crate::runs::RunChanges {
+                        snapshot: Some(serde_json::from_value(snapshot)?),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let before_run = store.read(|db| db.run("chat-run")).await.unwrap().unwrap();
+        let before_checkpoint = store
+            .read(|db| db.checkpoint_boundary("chat-run"))
+            .await
+            .unwrap()
+            .unwrap();
+        let before_switch = store
+            .read(|db| db.engine_switch("chat"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before_run["snapshot"]["agent"]["model"], "gpt-6-luna");
+        assert!(before_switch.pending);
+
+        let rejected = store
+            .transaction(move |db| {
+                requeue(
+                    db,
+                    "chat-run",
+                    Some("chat-turn"),
+                    Some(&selection),
+                    Some(crate::provider::Provider::Codex),
+                    None,
+                )
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(rejected.status, 400);
+        assert!(rejected.message.contains("Preserving the saved model"));
+
+        let after_run = store.read(|db| db.run("chat-run")).await.unwrap().unwrap();
+        let after_checkpoint = store
+            .read(|db| db.checkpoint_boundary("chat-run"))
+            .await
+            .unwrap()
+            .unwrap();
+        let after_switch = store
+            .read(|db| db.engine_switch("chat"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_run, before_run);
+        assert_eq!(after_checkpoint, before_checkpoint);
+        assert_eq!(
+            serde_json::to_value(after_switch).unwrap(),
+            serde_json::to_value(before_switch).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn preserve_model_blank_and_explicit_model_requeue_controls() {
+        let (_blank_root, blank_store) = chat_resume_store().await;
+        let preserve = ResumeExecutionSelection {
+            model: String::new(),
+            preserve_model: true,
+            reasoning: "high".into(),
+            speed: "standard".into(),
+        };
+        let blank_before = blank_store
+            .read(|db| db.run("chat-run"))
+            .await
+            .unwrap()
+            .unwrap();
+        crate::resume_selection::validate_preserved_model(&blank_before, &preserve).unwrap();
+        let blank_after = blank_store
+            .transaction(move |db| {
+                requeue(
+                    db,
+                    "chat-run",
+                    Some("chat-turn"),
+                    Some(&preserve),
+                    Some(crate::provider::Provider::Codex),
+                    None,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(blank_after["status"], "queued");
+        assert_eq!(blank_after["snapshot"]["agent"]["model"], "");
+        assert_eq!(blank_after["snapshot"]["agent"]["reasoning"], "high");
+        assert_eq!(blank_after["snapshot"]["agent"]["speed"], "standard");
+        let cancelled_switch = blank_store
+            .read(|db| db.engine_switch("chat"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!cancelled_switch.pending);
+
+        let (_explicit_root, explicit_store) = chat_resume_store().await;
+        let explicit = ResumeExecutionSelection {
+            model: "gpt-6-luna".into(),
+            preserve_model: false,
+            reasoning: "xhigh".into(),
+            speed: "standard".into(),
+        };
+        let explicit_after = explicit_store
+            .transaction(move |db| {
+                requeue(
+                    db,
+                    "chat-run",
+                    Some("chat-turn"),
+                    Some(&explicit),
+                    Some(crate::provider::Provider::Codex),
+                    None,
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(explicit_after["status"], "queued");
+        assert_eq!(explicit_after["snapshot"]["agent"]["model"], "gpt-6-luna");
+        assert_eq!(explicit_after["snapshot"]["agent"]["reasoning"], "xhigh");
+        assert_eq!(explicit_after["snapshot"]["agent"]["speed"], "standard");
+    }
+
+    #[tokio::test]
+    async fn cleanup_can_retry_after_revocation_between_managed_directories() {
+        let f = crate::plugin_grant_fixture::Fixture::new().await;
+        let root =
+            f.s.config
+                .data_dir
+                .join("runs")
+                .join(&f.run)
+                .join("workspace");
+        let first = root.join("first");
+        let second = root.join("second");
+        let env = std::env::vars().collect();
+        for path in [&first, &second] {
+            tokio::fs::create_dir_all(path).await.unwrap();
+            assert!(
+                git(&["-C", path.to_str().unwrap(), "init"], &env)
+                    .await
+                    .unwrap()
+                    .success
+            );
+        }
+        let mut snapshot = f.s.store.run(&f.run).await.unwrap()["snapshot"].clone();
+        snapshot["task"]["worktree"] = true.into();
+        f.s.store
+            .change_run(
+                &f.run,
+                crate::runs::RunChanges {
+                    status: Some(RunStatus::Cancelled),
+                    snapshot: Some(serde_json::from_value(snapshot).unwrap()),
+                    workspace: Some(Some(root.to_string_lossy().into_owned())),
+                    boundary: Some(json!({
+                        "isolated": false,
+                        "workspaces": [
+                            { "path": first, "kind": "clone" },
+                            { "path": second, "kind": "clone" },
+                        ],
+                    })),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let watched = first.clone();
+        let authorize = crate::authorization::Authorization::new(&f.s, move |_| {
+            if !watched.exists() {
+                return Err(Error::forbidden("Revoked during cleanup."));
+            }
+            Ok(())
+        });
+        let error =
+            f.s.worker
+                .cleanup_live(&f.s, &f.run, authorize)
+                .await
+                .unwrap_err();
+        assert_eq!(error.status, 403);
+        assert!(!first.exists());
+        assert!(second.exists());
+        let retry = f.s.worker.cleanup(&f.s, &f.run).await.unwrap();
+        assert_eq!(retry["cleaned"], true);
+        assert!(!second.exists());
+        assert!(f.s.store.run(&f.run).await.unwrap()["workspace"].is_null());
+        f.s.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn absent_cleanup_paths_must_still_resolve_under_the_managed_root() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let link = root.path().join("alias");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+        let env = std::env::vars().collect();
+        let removed_root = root.path().join("removed-workspace-root");
+        ensure_clean(&json!({ "path": removed_root }), &removed_root, &env)
+            .await
+            .unwrap();
+        let missing = root.path().join("already-removed");
+        ensure_clean(
+            &json!({ "path": missing }),
+            &root.path().to_path_buf(),
+            &env,
+        )
+        .await
+        .unwrap();
+        assert!(
+            ensure_clean(
+                &json!({ "path": link.join("missing") }),
+                &root.path().to_path_buf(),
+                &env
+            )
+            .await
+            .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn manual_mission_resume_changes_completed_turn_identity_but_keeps_interrupted_turns() {
         for completed in [false, true] {
@@ -473,7 +982,7 @@ mod tests {
                     db.save_checkpoint_boundary("mission", &json!({
                     "completed": completed, "outputInterrupted": true, "launched": true, "prepared": { "cwd": "/workspace" },
                 }))?;
-                    let resumed = requeue(db, "mission")?;
+                    let resumed = requeue(db, "mission", None, None, None, None)?;
                     assert_eq!(resumed["status"], "queued");
                     let checkpoint = db.checkpoint_boundary("mission")?.unwrap();
                     assert!(checkpoint["outputInterrupted"].is_null());

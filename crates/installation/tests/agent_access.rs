@@ -590,9 +590,9 @@ async fn the_first_authoritative_snapshot_includes_current_and_reinvited_members
         agent(&s, "Existing").await
     };
 
-    // Reconstruct a version-18 database: the same tables without account access.
+    // Reconstruct a version-24 database without account access.
     let db = rusqlite::Connection::open(root.path().join("data/manager.db")).unwrap();
-    db.execute_batch("DROP TABLE agent_account_access; PRAGMA user_version=18;")
+    db.execute_batch("DROP TABLE agent_account_access; PRAGMA user_version=24;")
         .unwrap();
     drop(db);
 
@@ -650,7 +650,7 @@ async fn direct_write_completes_delayed_rollout_without_overriding_owner_revocat
         agent(&s, "Existing").await
     };
     let db = rusqlite::Connection::open(root.path().join("data/manager.db")).unwrap();
-    db.execute_batch("DROP TABLE agent_account_access; PRAGMA user_version=18;")
+    db.execute_batch("DROP TABLE agent_account_access; PRAGMA user_version=24;")
         .unwrap();
     drop(db);
 
@@ -734,9 +734,9 @@ async fn a_members_scheduled_task_keeps_running_after_the_rollout() {
         task["id"].as_str().unwrap().to_owned()
     };
 
-    // The same membership, on a version-18 database without account access.
+    // The same membership, on a version-24 database without account access.
     let db = rusqlite::Connection::open(root.path().join("data/manager.db")).unwrap();
-    db.execute_batch("DROP TABLE agent_account_access; PRAGMA user_version=18;")
+    db.execute_batch("DROP TABLE agent_account_access; PRAGMA user_version=24;")
         .unwrap();
     drop(db);
 

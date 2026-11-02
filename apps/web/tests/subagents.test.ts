@@ -1,8 +1,7 @@
 import type { ChatView } from '../../../packages/contracts/chats'
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
-import { activityEntries } from '../src/activity'
-import { backgroundWait, workingStep } from '../src/signal'
+import { workingStep } from '../src/signal'
 import {
   currentSubagents,
   subagentState,
@@ -10,6 +9,7 @@ import {
   subagentTeams,
   waitingForSubagents,
 } from '../src/subagents'
+import { fixtureEntries } from './timeline-fixture'
 
 let serial = 0
 
@@ -41,7 +41,7 @@ function subagent(type: string, id: string, values: Record<string, unknown> = {}
 
 describe('subagents', () => {
   it('clears the previous report and message when a subagent starts a follow-up', () => {
-    const [team] = activityEntries([
+    const [team] = fixtureEntries([
       subagent('item.started', 'worker'),
       item('item.completed', {
         id: 'reply',
@@ -56,7 +56,7 @@ describe('subagents', () => {
   })
 
   it('keeps a resumed subagent in its row with its steps and new report', () => {
-    const [team] = activityEntries([
+    const [team] = fixtureEntries([
       subagent('item.started', 'reviewer'),
       item('item.completed', {
         id: 'first',
@@ -89,7 +89,7 @@ describe('subagents', () => {
   })
 
   it('folds early lifecycle activity into its spawn without losing metadata or steps', () => {
-    const entries = activityEntries([
+    const entries = fixtureEntries([
       subagent('item.started', 'spawn'),
       item('item.started', {
         id: 'early',
@@ -116,7 +116,7 @@ describe('subagents', () => {
   })
 
   it('keeps child step identities stable across parent turns and separate between siblings', () => {
-    const entries = activityEntries([
+    const entries = fixtureEntries([
       subagent('item.started', 'First'),
       subagent('item.started', 'Second'),
       item('item.started', {
@@ -151,7 +151,7 @@ describe('subagents', () => {
   })
 
   it('keeps unfinished subagents stopped after another execution starts', () => {
-    const entries = activityEntries([
+    const entries = fixtureEntries([
       subagent('item.started', 'Previous'),
       item('item.started', {
         id: 'unfinished',
@@ -170,7 +170,7 @@ describe('subagents', () => {
   })
 
   it('groups subagents started together and keeps their steps and messages out of the reply', () => {
-    const entries = activityEntries([
+    const entries = fixtureEntries([
       user('Audit the webhooks'),
       item('item.completed', { id: 'intro', type: 'agent_message', text: 'Starting two subagents.' }),
       subagent('item.started', 'Webhooks'),
@@ -218,7 +218,7 @@ describe('subagents', () => {
   })
 
   it('keeps the agent steps around a team in their order', () => {
-    const entries = activityEntries([
+    const entries = fixtureEntries([
       item('item.completed', {
         id: 'read',
         type: 'command_execution',
@@ -241,7 +241,7 @@ describe('subagents', () => {
   })
 
   it('names Codex subagent tools and keeps orphaned messages readable', () => {
-    const [group] = activityEntries([
+    const [group] = fixtureEntries([
       item('item.completed', {
         id: 'close',
         type: 'collab_tool_call',
@@ -260,7 +260,7 @@ describe('subagents', () => {
   })
 
   it('keeps one row per subagent across turns', () => {
-    const [team] = activityEntries([
+    const [team] = fixtureEntries([
       subagent('item.completed', 'Background', { background: true }),
       event('turn.started', { type: 'turn.started' }),
       subagent('item.updated', 'Background', { background: true, status: 'completed', result: 'Done later' }),
@@ -269,7 +269,7 @@ describe('subagents', () => {
   })
 
   it('marks failed and stopped subagents', () => {
-    const [team] = activityEntries([
+    const [team] = fixtureEntries([
       subagent('item.completed', 'Broken', { status: 'failed', result: 'Permission denied' }),
       subagent('item.completed', 'Closed', { status: 'stopped' }),
     ])
@@ -285,37 +285,20 @@ describe('subagents', () => {
       subagent('item.started', 'Webhooks'),
       subagent('item.started', 'Tests'),
     ]
-    expect(workingStep(activityEntries(events, true), 'Claude', null)).toMatchObject({ title: 'Waiting for 2 subagents', detail: 'Webhooks · Tests', subagents: true })
+    expect(workingStep(fixtureEntries(events, true), 'Claude', null)).toMatchObject({ title: 'Waiting for 2 subagents', detail: 'Webhooks · Tests', subagents: true })
     const one = [...events, subagent('item.completed', 'Tests', { status: 'completed' })]
-    expect(workingStep(activityEntries(one, true), 'Claude', null)).toMatchObject({ title: 'Waiting for a subagent', detail: 'Webhooks' })
+    expect(workingStep(fixtureEntries(one, true), 'Claude', null)).toMatchObject({ title: 'Waiting for a subagent', detail: 'Webhooks' })
     const acting = [...one, item('item.started', {
       id: 'lint',
       type: 'command_execution',
       command: 'pnpm lint',
       status: 'in_progress',
     })]
-    expect(workingStep(activityEntries(acting, true), 'Claude', null).title).not.toContain('subagent')
-  })
-
-  it('keeps waiting for background work while a background subagent reports progress', () => {
-    const waiting = event('turn.waiting', { type: 'turn.waiting', tasks: [{ id: 'task', description: 'List files' }] })
-    const events = [user('List'), subagent('item.completed', 'List files', { background: true }), waiting]
-    expect(backgroundWait([
-      ...events,
-      item('item.completed', {
-        id: 'ls',
-        type: 'command_execution',
-        command: 'ls',
-        exit_code: 0,
-        parent_id: 'List files',
-      }),
-      subagent('item.updated', 'List files', { background: true, activity: 'Running ls' }),
-    ])).toMatchObject({ tasks: ['List files'] })
-    expect(backgroundWait([...events, item('item.started', { id: 'msg', type: 'agent_message', text: '' })])).toBeNull()
+    expect(workingStep(fixtureEntries(acting, true), 'Claude', null).title).not.toContain('subagent')
   })
 
   it('finds the subagents of the current request and what each one does', () => {
-    const entries = activityEntries([
+    const entries = fixtureEntries([
       user('First'),
       subagent('item.completed', 'Earlier', { status: 'completed', result: '## Findings\nAll good' }),
       user('Second'),
@@ -328,12 +311,12 @@ describe('subagents', () => {
     expect(current.map(agent => subagentSummary(agent, true))).toEqual(['Reading webhook.rs', 'Starting…'])
     // Once the run ends, a subagent that never reported shows as stopped.
     expect(subagentState(current[0]!, false)).toBe('stopped')
-    const earlier = activityEntries([subagent('item.completed', 'Earlier', { status: 'completed', result: '## Findings\nAll good' })])
+    const earlier = fixtureEntries([subagent('item.completed', 'Earlier', { status: 'completed', result: '## Findings\nAll good' })])
     expect(earlier[0]?.kind === 'team' && subagentSummary(earlier[0].agents[0]!, false)).toBe('Findings')
   })
 
   it('keeps earlier workers and nested children reachable after another user message', () => {
-    const entries = activityEntries([
+    const entries = fixtureEntries([
       user('First'),
       subagent('item.started', 'Earlier'),
       subagent('item.completed', 'Done', { status: 'completed' }),
@@ -354,16 +337,10 @@ describe('subagents', () => {
       subagent('item.completed', 'Worker', { background: true, task_id: 'worker-task' }),
       event('turn.waiting', { type: 'turn.waiting', tasks: [{ id: 'worker-task', description: 'Worker' }] }),
     ]
-    const agents = currentSubagents(activityEntries(events, true))
-    expect(waitingForSubagents(events, agents)).toBe(true)
-    const mixed = [...events, event('turn.waiting', {
-      tasks: [
-        { id: 'worker-task', description: 'Worker' },
-        { id: 'build-task', description: 'Build' },
-      ],
-    })]
-    expect(waitingForSubagents(mixed, agents)).toBe(false)
-    expect(waitingForSubagents([event('turn.waiting', { tasks: [] })], agents)).toBe(false)
+    const agents = currentSubagents(fixtureEntries(events, true))
+    expect(waitingForSubagents(['worker-task'], agents)).toBe(true)
+    expect(waitingForSubagents(['worker-task', 'build-task'], agents)).toBe(false)
+    expect(waitingForSubagents([], agents)).toBe(false)
   })
 })
 
@@ -411,7 +388,7 @@ describe('delegated tasks', () => {
   })
 
   it('shows tasks delegated together as one team instead of their tool calls', () => {
-    const entries = activityEntries([user('Review it'), toolCall, delegated('a'), delegated('b'), delegated('a')], true)
+    const entries = fixtureEntries([user('Review it'), toolCall, delegated('a'), delegated('b'), delegated('a')], true)
     const team = entries.find(entry => entry.kind === 'team')
     expect(team?.kind === 'team' && team.agents.map(agent => agent.subagent?.delegation)).toEqual([
       { chatId: 'a', agentName: 'Reviewer', provider: 'codex' },
@@ -422,7 +399,7 @@ describe('delegated tasks', () => {
   })
 
   it('follows each delegated task through its conversation', () => {
-    const [agent] = currentSubagents(activityEntries([user('Review it'), delegated('a')], true))
+    const [agent] = currentSubagents(fixtureEntries([user('Review it'), delegated('a')], true))
     const state = (chat?: ChatView) => {
       const chats = new Map(chat ? [[chat.id, chat]] : [])
       return [subagentState(agent!, false, chats), subagentSummary(agent!, false, chats)]
@@ -442,7 +419,7 @@ describe('delegated tasks', () => {
   })
 
   it('keeps earlier delegated tasks with the request that started them', () => {
-    const entries = activityEntries([user('First'), delegated('a'), user('Second')], true)
+    const entries = fixtureEntries([user('First'), delegated('a'), user('Second')], true)
     expect(currentSubagents(entries)).toEqual([])
   })
 })

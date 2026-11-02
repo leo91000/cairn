@@ -20,6 +20,8 @@ data class PluginManifest(
     val credential: PluginCredential? = null,
     val description: String = "",
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val hooks: List<PluginHook> = listOf(),
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val hosts: List<String> = listOf(),
     val id: String,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
@@ -37,6 +39,8 @@ data class PluginManifest(
     val programs: List<PluginProgram> = listOf(),
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val projectSources: List<PluginProjectSource> = listOf(),
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val resources: List<PluginResourceType> = listOf(),
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val runCredentials: PluginRunCredentials? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)

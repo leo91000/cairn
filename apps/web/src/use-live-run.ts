@@ -1,5 +1,5 @@
 import type { RunEvent } from '../../../packages/contracts/contracts'
-import type { HistoryPage, LiveState } from '../../../packages/contracts/live'
+import type { HistoryPage, LiveState, TimelineEntry } from '../../../packages/contracts/live'
 import type { CachedHistory, ReadingPosition } from './history-cache'
 import type { LiveStatus } from './live-connection'
 import {
@@ -19,8 +19,9 @@ import {
   removeHistory,
   writeHistory,
 } from './history-cache'
+import { readLargeTimeline } from './large-timeline'
 import { liveConnection } from './live-connection'
-import { LiveEvents } from './live-events'
+import { LiveTimeline } from './live-timeline'
 
 /** A revalidation that takes longer than this says so; a quick one stays silent. */
 const SLOW_UPDATE = 1000
@@ -45,6 +46,8 @@ export interface LiveRunOptions {
 export function useLiveRun(path: () => string | undefined, options: LiveRunOptions = {}) {
   const snapshot = ref<LiveState>()
   const events = ref<RunEvent[]>([])
+  /** Timeline cards, in the order they first appeared. */
+  const timeline = ref<TimelineEntry[]>([])
   const status = ref<LiveStatus>('connecting')
   const slow = ref(false)
   const catchingUp = ref(true)
@@ -103,8 +106,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
         return
     }
 
-    let accumulator = new LiveEvents()
-    let rows: RunEvent[] = cached?.events.slice() ?? []
+    let accumulator = new LiveTimeline()
     let detail = cached?.state
     let cursor = cached?.cursor ?? 0
     let history = cached?.history
@@ -116,13 +118,19 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     let replacements = 0
     let storedPosition = cached?.position
     position.value = storedPosition
-    accumulator.restore(rows, cursor)
+    accumulator.restore(cached?.events ?? [], cursor, cached?.entries ?? [])
+
+    function show() {
+      events.value = accumulator.events.slice()
+      timeline.value = accumulator.entries()
+    }
 
     function showSaved(saved: CachedHistory) {
       hasOlder.value = older
       restored.value = true
       snapshot.value = saved.state
       events.value = saved.events
+      timeline.value = saved.entries
       catchingUp.value = false
     }
 
@@ -137,11 +145,12 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
         return
       storedPosition = position.value
       const record = {
-        version: 1 as const,
+        version: 2 as const,
         cursor,
         history,
         state: detail,
-        events: rows.slice(),
+        events: accumulator.events.slice(),
+        entries: accumulator.entries(),
         oldest,
         hasOlder: older,
         savedAt: Date.now(),
@@ -164,20 +173,18 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
         const page = runId
           ? await readRunHistory(api, { runId, before, history: expected })
           : await api<HistoryPage>(`${value.replace(/\/stream$/, '')}/history?before=${before}&history=${encodeURIComponent(expected)}`)
+        const large = await readLargeTimeline(value, page.largeEntries ?? [])
         if (disposed || current !== generation || history !== expected || page.history !== expected || replacements !== baseline)
           return
         if (page.hasOlder && page.oldest >= before)
           throw new Error('Invalid history page')
-        const next: RunEvent[] = []
-        const candidate = new LiveEvents()
-        candidate.append(next, [...new Map([...page.events, ...rows].map(e => [e.id, e])).values()].sort((a, b) => a.id - b.id))
-        candidate.restore(next, cursor)
+        const candidate = accumulator.copy()
+        candidate.merge(page.events, [...page.entries, ...large])
         accumulator = candidate
-        rows = next
         oldest = page.oldest
         older = page.hasOlder
         hasOlder.value = older
-        events.value = rows.slice()
+        show()
         scheduleSave()
       }
       catch (e) {
@@ -191,66 +198,71 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     }
 
     let checking = false
-    connection = liveConnection(value, (batch, accepted) => {
-      if (batch.state?.cacheRevision) {
-        const revisionKey = state.installationId ? `conversation-cache-revision:${state.installationId}` : 'conversation-cache-revision'
-        try {
-          if (localStorage.getItem(revisionKey) !== batch.state.cacheRevision) {
-            void clearHistoryCache()
-            localStorage.setItem(revisionKey, batch.state.cacheRevision)
+    connection = liveConnection(value, (batch, accepted, signal) => {
+      const apply = (large: TimelineEntry[]) => {
+        if (signal?.aborted || disposed || current !== generation)
+          return
+        if (batch.state?.cacheRevision) {
+          const revisionKey = state.installationId ? `conversation-cache-revision:${state.installationId}` : 'conversation-cache-revision'
+          try {
+            if (localStorage.getItem(revisionKey) !== batch.state.cacheRevision) {
+              void clearHistoryCache()
+              localStorage.setItem(revisionKey, batch.state.cacheRevision)
+            }
           }
+          catch { void clearHistoryCache() }
         }
-        catch { void clearHistoryCache() }
-      }
 
-      const reset = batch.reset || (history && batch.history !== history)
-        || (batch.state && detail?.run?.id !== batch.state.run?.id)
-      if (reset) {
-        replacements++
-        rows = []
-        accumulator = new LiveEvents()
-        oldest = 0
-        older = false
-        complete = false
-        position.value = undefined
-        olderError.value = ''
-        if (scope)
-          saved().forEach(path => void removeHistory(scope, path))
-      }
+        const reset = batch.reset || (history && batch.history !== history)
+          || (batch.state && detail?.run?.id !== batch.state.run?.id)
+        if (reset) {
+          replacements++
+          accumulator = new LiveTimeline()
+          oldest = 0
+          older = false
+          complete = false
+          position.value = undefined
+          olderError.value = ''
+          if (scope)
+            saved().forEach(path => void removeHistory(scope, path))
+        }
 
-      // Persist a complete snapshot only. An interrupted catch-up cannot corrupt it.
-      const next = rows.slice()
-      const candidate = accumulator.copy()
-      candidate.append(next, batch.events)
-      accumulator = candidate
-      rows = next
-      if (batch.state)
-        detail = batch.state
-      carriesList.value = !!options.list && !!detail?.chats
-
-      cursor = accepted
-      history = batch.history
-      // Revalidation describes the server's recent window, not the pages already read.
-      // Keep the earliest loaded boundary unless the stream replaces the history.
-      if (batch.oldest !== undefined && (reset || !oldest || batch.oldest <= oldest)) {
-        oldest = batch.oldest
-        older = batch.hasOlder ?? false
-      }
-
-      complete = !batch.more
-      if (complete) {
-        waiting = false
-        hasOlder.value = older
-        synced.value = true
+        // Persist a complete snapshot only. An interrupted catch-up cannot corrupt it.
+        const candidate = accumulator.copy()
+        candidate.apply(batch.events, [...(batch.entries ?? []), ...large.map(entry => ({ kind: 'upsert' as const, entry }))], accepted)
+        accumulator = candidate
         if (batch.state)
-          restored.value = false
-        snapshot.value = detail
-        events.value = rows.slice()
-        catchingUp.value = false
-        scheduleSave()
+          detail = batch.state
+        carriesList.value = !!options.list && !!detail?.chats
+
+        cursor = accepted
+        history = batch.history
+        // Revalidation describes the server's recent window, not the pages already read.
+        // Keep the earliest loaded boundary unless the stream replaces the history.
+        if (batch.oldest !== undefined && (reset || !oldest || batch.oldest <= oldest)) {
+          oldest = batch.oldest
+          older = batch.hasOlder ?? false
+        }
+
+        complete = !batch.more
+        if (complete) {
+          waiting = false
+          hasOlder.value = older
+          synced.value = true
+          if (batch.state)
+            restored.value = false
+          snapshot.value = detail
+          show()
+          catchingUp.value = false
+          scheduleSave()
+        }
+
+        error.value = ''
       }
 
-      error.value = ''
+      if (batch.largeEntries?.length)
+        return readLargeTimeline(value, batch.largeEntries, signal).then(apply)
+      apply([])
     }, (connectionStatus, opening = false) => {
       if (options.list && opening)
         carriesList.value = true
@@ -277,6 +289,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
           connection?.close()
           snapshot.value = undefined
           events.value = []
+          timeline.value = []
           if (scope)
             saved().forEach(path => void removeHistory(scope, path))
         }
@@ -300,6 +313,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     hasOlder.value = false
     snapshot.value = undefined
     events.value = []
+    timeline.value = []
     catchingUp.value = true
     setStatus('connecting')
     error.value = ''
@@ -335,6 +349,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
     olderError,
     loadOlder,
     events,
+    timeline,
     catchingUp,
     synced,
     error,

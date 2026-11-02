@@ -237,6 +237,15 @@ pub(crate) fn verified(db: &Db<'_>, publication: &str) -> Result<()> {
     Ok(())
 }
 
+// The outer membership test guarantees a reference owned by this publication.
+// The unique (publication, object) key means another owner exists exactly when
+// the object has a second reference. Inspect that entry in the covering object
+// index instead of loading each reference's publication from its table row.
+const RETIRE_UNREFERENCED_OBJECTS: &str = "UPDATE shared_objects SET unused_at=?2
+     WHERE id IN (SELECT object FROM shared_references WHERE publication=?1)
+     AND NOT EXISTS (SELECT 1 FROM shared_references r
+                     WHERE r.object=shared_objects.id LIMIT 1 OFFSET 1)";
+
 /// Called only after the owner publication has stopped and its readers drained.
 pub(crate) fn release(db: &Db<'_>, publication: &str) -> Result<()> {
     let retained = db.0.execute(
@@ -248,13 +257,7 @@ pub(crate) fn release(db: &Db<'_>, publication: &str) -> Result<()> {
     }
     // Mark only this publication's objects. A concurrent/new reference clears the
     // timestamp in reserve, in the same SQLite serialization order as GC claims.
-    db.0.execute(
-        "UPDATE shared_objects SET unused_at=?2
-         WHERE id IN (SELECT object FROM shared_references WHERE publication=?1)
-         AND NOT EXISTS (SELECT 1 FROM shared_references r
-                         WHERE r.object=shared_objects.id AND r.publication<>?1)",
-        params![publication, now()],
-    )?;
+    db.0.execute(RETIRE_UNREFERENCED_OBJECTS, params![publication, now()])?;
     db.0.execute("DELETE FROM shared_publications WHERE id=?1", [publication])?;
     Ok(())
 }
@@ -498,6 +501,9 @@ async fn maintain_batches<F: std::future::Future<Output = Result<usize>>>(
         }
     }
 }
+
+#[cfg(test)]
+mod retirement_tests;
 
 #[cfg(test)]
 mod tests {

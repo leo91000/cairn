@@ -295,6 +295,8 @@ export class InstallationTransport {
           this.failed()
       }, 30000)
       const offer = await peer.createOffer({ iceRestart })
+      if (!current())
+        return
       const fingerprint = /^a=fingerprint:(sha-256 [A-Fa-f0-9:]+)\r?$/m.exec(offer.sdp || '')?.[1]?.toUpperCase().replace('SHA-256', 'sha-256')
       if (!fingerprint)
         throw new Error('Missing DTLS fingerprint')
@@ -398,7 +400,8 @@ export class InstallationTransport {
       catch (error) {
         const method = (options.method || 'GET').toUpperCase()
         const message = method === 'POST' && /^\/chats\/[^/]+\/messages$/.test(path) && typeof options.body === 'string' && typeof JSON.parse(options.body).id === 'string'
-        const replayable = error instanceof TransportNotSent || (error instanceof TransportLost && (method === 'GET' || method === 'HEAD' || message))
+        const snapshotRead = method === 'POST' && /^\/(?:chats|runs)\/[^/]+\/timeline-content$/.test(path)
+        const replayable = error instanceof TransportNotSent || (error instanceof TransportLost && (method === 'GET' || method === 'HEAD' || message || snapshotRead))
         if (!replayable)
           throw error
         const response = await fetch(url, options)

@@ -382,6 +382,12 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                 capture("chat-fullscreen-light")
                 InstrumentationRegistry.getInstrumentation()
                     .sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_BACK)
+                compose.waitUntil(15000) {
+                    compose
+                        .onAllNodes(hasSetTextAction() and hasText("Un brouillon sur téléphone"))
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
                 compose
                     .onNode(hasSetTextAction() and hasText("Un brouillon sur téléphone"))
                     .assertExists()

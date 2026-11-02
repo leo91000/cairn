@@ -7,6 +7,12 @@
     "encoding": {
       "type": "string"
     },
+    "entryId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "eventId": {
       "format": "int64",
       "type": [

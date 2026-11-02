@@ -136,11 +136,17 @@ async fn assert_files(owner: &Owner, node: &str, run: &str, native: bool) {
     assert_eq!(fs.read(home).unwrap(), b"engine context");
 }
 
-#[tokio::test]
+// Match the service executor: synchronous fixture disk I/O must not starve
+// its synthetic native-authority and node-heartbeat task.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires loopback S3; run scripts/tests/node_s3_test.py --case backend_migration"]
 async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_source_on_failure() {
     let (listener, address) = common::bind().await;
     let owner = Owner::at(address.to_string()).await;
+    // Migration stages disks on the manager, so configure its fixture reserve too.
+    owner
+        .put_node_fixture(json!({ "id": LOCAL_NODE_ID, "storage": small_reserve() }))
+        .await;
     let (run, agent, chat, vm_node, native_node) = (id(), id(), id(), id(), id());
     let original_agent = json!({ "id": agent, "revision": id(), "access": { "backend": "firecracker", "nodes": [vm_node] } });
     owner.put("agents", original_agent.clone()).await;
@@ -200,15 +206,6 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         cancel_during_capture: Arc::new(AtomicBool::new(false)),
     };
     let mut tasks = Vec::new();
-    // This fixture has no Beacon authority server. Model its fresh owner
-    // membership independently of slow CI filesystem/S3 timing.
-    let authority = owner.service.store.clone();
-    tasks.push(tokio::spawn(async move {
-        loop {
-            authority.set("native-authority", json!({ "observedAt": now(), "accounts": { "fixture-owner": { "email": "fixture@example.test" } } }), None).await.unwrap();
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    }));
     for node in [&vm_node, &native_node] {
         tasks.extend(connect_node(&owner, &record, node, address, &faults, &stop, false).await);
     }
@@ -224,9 +221,43 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let mut vm_record = owner.stored("nodes", &vm_node).await.unwrap();
     vm_record["capabilities"]["backend"] = "firecracker".into();
     owner.put_node_fixture(vm_record).await;
+    // This fixture has no Beacon authority server. Model its fresh owner
+    // membership independently of slow CI filesystem/S3 timing.
+    let authority = owner.service.store.clone();
+    let connected_nodes = [vm_node.clone(), native_node.clone()];
+    tasks.push(tokio::spawn(async move {
+        loop {
+            authority.set("native-authority", json!({ "observedAt": now(), "accounts": { "fixture-owner": { "email": "fixture@example.test" } } }), None).await.unwrap();
+            // The relay fixture does not run a real controller heartbeat loop.
+            // Keep its enrolled nodes fresh while conversion performs disk I/O.
+            for node in &connected_nodes {
+                let mut current = authority.node_boundary(node).await.unwrap().unwrap();
+                current["lastSeen"] = now().into();
+                authority.put_node_fixture(current).await.unwrap();
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }));
     seed_ext4(&owner, &record, &vm_node, &format!("http://{address}/")).await;
     tasks.push(owner.serve(listener));
     publication::capture(&owner.service, &owner.run(&run).await)
+        .await
+        .unwrap();
+    let last_failure_context = json!({
+        "observedAtMs": now() - 1,
+        "phase": "publication",
+        "category": "unknown",
+        "managerStatus": 503,
+        "inputRequestedRevision": 4
+    });
+    let mut backup = owner.run(&run).await["backup"].clone();
+    backup["lastFailureContext"] = last_failure_context.clone();
+    backup["requestedRevision"] = 4.into();
+    backup["acknowledgedRevision"] = 4.into();
+    owner
+        .service
+        .store
+        .update_run_boundary(&run, json!({ "backup": backup }))
         .await
         .unwrap();
     let sending = json!({
@@ -264,6 +295,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     // Compare complete stored records, including defaults and generated revisions.
     let mut expected_messages = vec![message, sending, queued];
     for (backend, destination) in [("native", &native_node), ("firecracker", &vm_node)] {
+        let previous_backup_id = owner.run(&run).await["backup"]["id"].clone();
         let source_node = if backend == "native" {
             &vm_node
         } else {
@@ -347,6 +379,14 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         let settled = wait_migration(&owner, &run).await;
         assert!(settled["backendMigrationError"].is_null(), "{settled}");
         assert_eq!(settled["nodeId"], *destination, "{settled}");
+        assert_ne!(settled["backup"]["id"], previous_backup_id);
+        assert_eq!(settled["backup"]["status"], "ready");
+        assert_eq!(
+            settled["backup"]["lastFailureContext"],
+            last_failure_context
+        );
+        assert!(settled["backup"].get("requestedRevision").is_none());
+        assert!(settled["backup"].get("acknowledgedRevision").is_none());
         assert!(settled["sessionId"].is_null());
         assert_eq!(settled["snapshot"]["agent"]["access"]["backend"], backend);
         let saved_chat = owner.stored("chats", &chat).await.unwrap();
@@ -379,10 +419,10 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         assert_files(&owner, destination, &run, backend == "native").await;
     }
     let before = owner.run(&run).await;
-    let mut profile = original_agent;
+    let mut profile = original_agent.clone();
     profile["access"]["backend"] = "native".into();
     profile["access"]["nodes"] = json!([native_node]);
-    owner.put("agents", profile).await;
+    owner.put("agents", profile.clone()).await;
     faults.failed.store(true, Ordering::SeqCst);
     let (status, response) = owner
         .send(
@@ -396,17 +436,36 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     assert!(failed["backendMigrationError"].is_string(), "{failed}");
     assert_eq!(failed["nodeId"], before["nodeId"]);
     assert_eq!(failed["backup"]["id"], before["backup"]["id"]);
+    assert_eq!(failed["backup"]["lastFailureContext"], last_failure_context);
+    let source_context = LazyDisk::context(
+        &owner
+            .root()
+            .join(&vm_node)
+            .join("disks")
+            .join(&run)
+            .join("lazy"),
+    )
+    .unwrap();
+    let source_grant = source_context["grant"].as_str().unwrap();
+    assert!(
+        disk_grants::authorize(&owner.service, source_grant)
+            .await
+            .is_err()
+    );
+    // Repairing the source requires restoring its profile authorization first.
+    owner.put("agents", original_agent).await;
     assert_files(&owner, &vm_node, &run, false).await;
     faults.failed.store(false, Ordering::SeqCst);
     assert!(
         failed["backendMigration"].is_null(),
         "a pre-conversion failure must allow repairing the source"
     );
+    owner.put("agents", profile).await;
     let marker = json!({ "id": id(), "reservationId": id(), "process": "old-manager-process", "paused": false });
     owner
         .service
         .store
-        .update_run_boundary(&run, json!({ "backendMigration": marker }))
+        .update_run_boundary_fixture(&run, json!({ "backendMigration": marker }))
         .await
         .unwrap();
     let (status, response) = owner
@@ -420,6 +479,10 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let retried = wait_migration(&owner, &run).await;
     assert!(retried["backendMigrationError"].is_null(), "{retried}");
     assert_eq!(retried["nodeId"], native_node);
+    assert_eq!(
+        retried["backup"]["lastFailureContext"],
+        last_failure_context
+    );
     assert_eq!(owner.stored("chats", &chat).await.unwrap()["paused"], false);
     let checkpoint_before = owner
         .service
@@ -444,11 +507,17 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
             &run,
             cairn_installation::runs::RunChanges {
                 snapshot: Some(serde_json::from_value(before["snapshot"].clone()).unwrap()),
-                boundary: Some(json!({
-                    "nodeId": before["nodeId"],
-                    "backup": before["backup"],
-                    "backendMigration": pending,
-                })),
+                placement: Some(Box::new(
+                    cairn_installation::nodes::run_placement::PlacementChanges {
+                        node_id: Some(
+                            serde_json::from_value(serde_json::json!(before["nodeId"])).unwrap(),
+                        ),
+                        ..Default::default()
+                    },
+                )),
+                boundary: Some(
+                    serde_json::json!({"backup": before["backup"],"backendMigration": pending}),
+                ),
                 ..Default::default()
             },
         )
@@ -483,6 +552,10 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     let recovered = wait_migration(&owner, &run).await;
     assert!(recovered["backendMigrationError"].is_null(), "{recovered}");
     assert_eq!(recovered["backup"]["id"], saved_point);
+    assert_eq!(
+        recovered["backup"]["lastFailureContext"],
+        last_failure_context
+    );
     assert_eq!(
         owner.stored("node-attempts", &reservation).await.unwrap()["released"],
         true

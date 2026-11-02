@@ -18,7 +18,7 @@ class SavedConversationTest {
     private fun saved(run: Run? = this.run, chat: Chat? = this.chat) =
         CachedHistory(
             cursor = 1,
-            history = "v1:run:1",
+            history = "v2:run:1",
             state = LiveState(run = run, chat = chat),
             events = emptyList(),
         )

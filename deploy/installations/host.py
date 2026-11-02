@@ -21,6 +21,42 @@ import urllib.request
 ROOT = Path(os.environ.get('CAIRN_INSTALLATION_ROOT', '/var/lib/cairn-installation'))
 GARAGE_IMAGE = 'dxflrs/garage@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690'
 IMAGE = re.compile(r'^ghcr\.io/leo91000/cairn@sha256:[a-f0-9]{64}$')
+COMPOSE_WAIT_TIMEOUT = 240
+COMPOSE_COMMAND_TIMEOUT = 300
+UPDATE_PHASES = frozenset(('startup', 'configuration', 'release_lookup', 'image_pull', 'image_inspection',
+                          'lease_acquire', 'lease_release', 'lease_ack_write', 'candidate_inspection',
+                          'manager_health', 'runner_health', 'configure_runner', 'stop_manager',
+                          'stop_runner', 'compose_write', 'compose_up', 'commit_candidate',
+                          'clear_owner', 'complete'))
+UPDATE_PHASE = 'startup'
+
+
+class LeaseRejected(RuntimeError):
+    """An explicit manager response must never authorize unavailable-manager recovery."""
+
+
+def update_phase(value):
+    global UPDATE_PHASE
+    if value not in UPDATE_PHASES:
+        raise ValueError('Invalid update phase')
+    UPDATE_PHASE = value
+    print(json.dumps({'event': 'installation_update_phase', 'phase': value}), file=sys.stderr, flush=True)
+
+
+def update_failure(error):
+    if isinstance(error, subprocess.TimeoutExpired):
+        category = 'TimeoutExpired'
+    elif isinstance(error, OSError):
+        category = 'OSError'
+    elif isinstance(error, ValueError):
+        category = 'ValueError'
+    elif isinstance(error, LeaseRejected):
+        category = 'LeaseRejected'
+    else:
+        category = 'RuntimeError'
+    phase = UPDATE_PHASE if UPDATE_PHASE in UPDATE_PHASES else 'startup'
+    print(json.dumps({'event': 'installation_update_failed', 'phase': phase, 'exception': category}),
+          file=sys.stderr, flush=True)
 
 
 def atomic(path, data):
@@ -311,6 +347,7 @@ def docker_output(args):
 
 
 def update(origin):
+    update_phase('configuration')
     origin = beacon_origin(origin)
     config_file = ROOT / 'installation.json'
     config = json.loads(config_file.read_text())
@@ -319,6 +356,7 @@ def update(origin):
     docker = ['docker', 'compose', '--project-directory', str(ROOT), '-f', str(ROOT / 'compose.json')]
 
     def lease(owner, release=False):
+        update_phase('lease_release' if release else 'lease_acquire')
         # Read the credential inside the manager, never in argv or diagnostics.
         method = json.dumps('DELETE' if release else 'POST')
         lease_owner = json.dumps(owner)
@@ -329,13 +367,25 @@ fetch('http://127.0.0.1:4310/internal/deployment-lease', {{
     method: {method},
     headers: {{ 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }},
     body: JSON.stringify({{ owner: {lease_owner} }}),
-}}).then(response => {{
-    if (!response.ok) process.exit(1);
+}}).then(async response => {{
+    let paused = null;
+    try {{
+        const value = await response.json();
+        if (typeof value?.paused === 'boolean') paused = value.paused;
+    }} catch {{}}
+    console.log(JSON.stringify({{ status: response.status, paused }}));
 }}).catch(() => process.exit(1));
 """
-        run(docker + ['exec', '-T', 'manager', 'node', '-e', script], timeout=10)
+        verdict = docker_output(docker[1:] + ['exec', '-T', 'manager', 'node', '-e', script])
+        status = verdict.get('status') if isinstance(verdict, dict) else None
+        if status == 200 and verdict.get('paused') is (not release):
+            return
+        if status == 409:
+            raise LeaseRejected('Another deployment owns the installation lease. Existing image and data are retained.')
+        raise LeaseRejected('The manager refused the deployment lease. Existing image and data are retained.')
 
     def inspect(image):
+        update_phase('image_inspection')
         metadata = docker_output(['image', 'inspect', image])[0]
         if image not in metadata.get('RepoDigests', []):
             raise RuntimeError('Downloaded image digest does not match the approved release.')
@@ -345,21 +395,59 @@ fetch('http://127.0.0.1:4310/internal/deployment-lease', {{
             raise RuntimeError('Approved image lacks runtime identity.')
         return runtime
 
-    def manager_health(runtime=None):
+    def manager_health(runtime=None, service='manager'):
+        update_phase('manager_health' if service == 'manager' else 'runner_health')
         expected_runtime = json.dumps(runtime)
+        port = 4310 if service == 'manager' else 4311
+        require_execution = json.dumps(service == 'manager')
         script = f"""
-fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).then(response => {{
+fetch('http://127.0.0.1:{port}/health', {{ signal: AbortSignal.timeout(5000) }}).then(response => {{
     if (!response.ok) throw Error();
     return response.json();
 }}).then(value => {{
     const expected = {expected_runtime};
-    console.log(JSON.stringify({{ healthy: value.status === 'ok' && (expected === null || value.runtimeId === expected) }}));
+    console.log(JSON.stringify({{ healthy: value.status === 'ok' && (expected === null || value.runtimeId === expected)
+        && (!{require_execution} || value.execution?.ready === true) }}));
 }}).catch(() => console.log(JSON.stringify({{ healthy: false }})));
 """
-        result = docker_output(docker[1:] + ['exec', '-T', 'manager', 'node', '-e', script])
+        result = docker_output(docker[1:] + ['exec', '-T', service, 'node', '-e', script])
         if not isinstance(result, dict) or not isinstance(result.get('healthy'), bool):
             raise RuntimeError('Manager health probe did not return a verdict.')
         return result['healthy']
+
+    def candidate_state(image):
+        update_phase('candidate_inspection')
+        deployment = json.loads((ROOT / 'compose.json').read_text())
+        if not isinstance(deployment, dict):
+            return None
+        services = deployment.get('services', {})
+        if not isinstance(services, dict):
+            return None
+        for role in ('manager', 'runner'):
+            if not isinstance(services.get(role), dict) or services[role].get('image') != image:
+                return None
+        environment = services['manager'].get('environment', {})
+        if not isinstance(environment, dict) or environment.get('CAIRN_NODE_IMAGE') != image:
+            return None
+        identities = {}
+        for role in ('manager', 'runner'):
+            rows = docker_output(docker[1:] + ['ps', '--all', '--format', 'json', role])
+            container = rows[0] if isinstance(rows, list) and len(rows) == 1 else rows
+            if not isinstance(container, dict) or not isinstance(container.get('ID'), str) or not container['ID']:
+                return None
+            if container.get('Image') != image or container.get('State') != 'running' or container.get('Health') != 'healthy':
+                return None
+            identities[role] = container['ID']
+        return identities
+
+    def healthy_candidate(image):
+        runtime = inspect(image)
+        before = candidate_state(image)
+        if not before:
+            return False
+        if not manager_health(runtime) or not manager_health(runtime, 'runner'):
+            return False
+        return candidate_state(image) == before
 
     def launch(image):
         runtime = inspect(image)
@@ -367,14 +455,21 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
         deployment['services']['manager']['image'] = image
         deployment['services']['manager']['environment']['CAIRN_NODE_IMAGE'] = image
         deployment['services']['runner']['image'] = image
+        update_phase('configure_runner')
         configure_ublk(deployment['services']['runner'])
 
         # The manager saves checkpoints before the runner is stopped. Persistent
         # volumes and Garage are never recreated or removed by this supervisor.
+        update_phase('stop_manager')
         run(docker + ['stop', '--timeout', '300', 'manager'], timeout=310)
+        update_phase('stop_runner')
         run(docker + ['stop', '--timeout', '60', 'runner'], timeout=70)
+        update_phase('compose_write')
         atomic(ROOT / 'compose.json', json.dumps(deployment, indent=2))
-        run(docker + ['up', '-d', '--wait', '--wait-timeout', '120', '--pull', 'never', '--no-deps', 'runner', 'manager'], timeout=150)
+        # Compose starts the runner before the manager. Allow up to a minute of
+        # startup overhead in addition to the bounded health-wait budget.
+        update_phase('compose_up')
+        run(docker + ['up', '-d', '--wait', '--wait-timeout', str(COMPOSE_WAIT_TIMEOUT), '--pull', 'never', '--no-deps', 'runner', 'manager'], timeout=COMPOSE_COMMAND_TIMEOUT)
 
         # A JSON verdict proves the probe ran. Docker exec failures before the
         # probe starts remain transient, rather than blacklisting an untested image.
@@ -382,14 +477,18 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
             raise RuntimeError('Installation runtime health check failed.')
 
     def finish():
+        update_phase('commit_candidate')
         config['image'] = config.pop('pendingImage')
         config.pop('leaseAcquired', None)
         # Keep the lease acknowledgement durable, including a lost DELETE reply.
         atomic(config_file, json.dumps(config))
 
     if config.get('pendingImage'):
+        lease_confirmed = False
         try:
             lease(config['leaseOwner'])
+        except LeaseRejected:
+            raise
         except RuntimeError:
             containers = docker_output(docker[1:] + ['ps', '--all', '--format', 'json', 'manager'])
             manager = containers[0] if isinstance(containers, list) and containers else containers
@@ -400,20 +499,31 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
                                      and not manager_health(inspect(config['pendingImage'])))
             if not config.get('leaseAcquired') or not (stopped or unavailable_candidate):
                 raise
-        launch(config['pendingImage'])
+        else:
+            lease_confirmed = True
+            config['leaseAcquired'] = True
+            update_phase('lease_ack_write')
+            atomic(config_file, json.dumps(config))
+        # An acknowledged, already-ready candidate only needs its durable commit
+        # and lease release. Re-launching it repeats potentially slow restoration.
+        if not (lease_confirmed and healthy_candidate(config['pendingImage'])):
+            launch(config['pendingImage'])
         finish()
 
     if config.get('leaseOwner'):
         lease(config['leaseOwner'], release=True)
         config.pop('leaseOwner')
+        update_phase('clear_owner')
         atomic(config_file, json.dumps(config))
         return
 
+    update_phase('release_lookup')
     image = release(origin)
     if image == config['image']:
         return
 
     def pull(image):
+        update_phase('image_pull')
         run(['docker', 'pull', image], timeout=1200)
         inspect(image)
 
@@ -426,6 +536,7 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
         lease(owner)
 
         config['leaseAcquired'] = True
+        update_phase('lease_ack_write')
         atomic(config_file, json.dumps(config))
         return True
 
@@ -436,6 +547,7 @@ fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).t
 
     lease(config['leaseOwner'], release=True)
     config.pop('leaseOwner')
+    update_phase('clear_owner')
     atomic(config_file, json.dumps(config))
 
 
@@ -454,11 +566,16 @@ if __name__ == '__main__':
                 raise RuntimeError('Another Cairn installer is running. Wait for it to finish and retry.') from None
             if args.update:
                 update(args.origin)
+                update_phase('complete')
             else:
                 install(args.origin, args.claim_code)
     except RuntimeError as error:
+        if args.update:
+            update_failure(error)
         print(str(error), file=sys.stderr)
         sys.exit(1)
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        if args.update:
+            update_failure(error)
         print('Cairn installation failed. Check prerequisites, outbound connectivity and Docker. Existing identity and storage are retained.', file=sys.stderr)
         sys.exit(1)

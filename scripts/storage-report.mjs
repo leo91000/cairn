@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite'
 const state = process.env.CAIRN_RUNNER_STATE || '/runner-state'
 const data = process.env.DATA_DIR || '/data'
 const db = new DatabaseSync(join(data, 'manager.db'), { readOnly: true })
-const runs = new Map(db.prepare('SELECT id, status, data FROM runs').all().map(row => [row.id, { status: row.status, ...JSON.parse(row.data) }]))
+const runs = new Map(db.prepare('SELECT id, status, data FROM run_views').all().map(row => [row.id, { status: row.status, ...JSON.parse(row.data) }]))
 const allocated = path => statSync(path).blocks * 512
 const disks = []
 

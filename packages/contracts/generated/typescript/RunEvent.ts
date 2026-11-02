@@ -17,4 +17,9 @@ export interface RunEvent {
    */
   displayId?: number
   runId: string
+  /**
+   * The timeline presents this event. Clients render it only through its
+   * card and read it as a boundary of families that are not converted yet.
+   */
+  timeline?: boolean
 }

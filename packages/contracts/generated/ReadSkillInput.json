@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "scope": {
+      "default": "global",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name"
+  ],
+  "title": "ReadSkillInput",
+  "type": "object"
+}

@@ -254,7 +254,10 @@ class AgentEditingTest {
             "1Password : 2 comptes",
             pluginSummary(agent.copy(plugins = listOf("prod", "staging")), catalog),
         )
-        assertEquals("review · Global", skillLabel(Skill("review", scope = "global"), projects))
+        assertEquals(
+            "review · Global",
+            skillLabel(Skill(name = "review", scope = "global"), projects),
+        )
         assertEquals(
             "lint · cairn",
             skillKeyLabel("2450c72e-6174-56da-b0fc-b06868e8e8e5/lint", projects),
@@ -1353,7 +1356,7 @@ class AgentEditingTest {
         val issues =
             agentIssues(
                 withGrants,
-                resources.copy(skills = listOf(Skill("review", scope = "global"))),
+                resources.copy(skills = listOf(Skill(name = "review", scope = "global"))),
             )
         assertEquals(listOf(AgentSection.Skills, AgentSection.Plugins), issues.map { it.section })
         assertEquals("2 points à vérifier", issuesLabel(issues.size))

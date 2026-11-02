@@ -547,9 +547,11 @@ may revoke other tokens for the same remote account/client; deleting an instance
 only removes local credentials and data.
 
 Public MCP and the opted-in installation tool expose `list_plugins` and
-`manage_plugin` for setup, sign-in, forms, instance lifecycle and panels. Neither
-accepts `agentIds`; instance grants remain in the owner's agent editor (ADR 0051).
-Both accept `data.sharedFrom` to reuse a granted instance's shared setup.
+`manage_plugin` for setup, sign-in, forms, instance lifecycle and panels. Public
+MCP with manage access may set full instance grants through `agentIds`.
+Installation agents refuse `agentIds` and may only reduce existing grants through
+the grant API (ADR 0075). Both accept `data.sharedFrom`; agent callers may reuse
+shared setup only from a fully granted instance.
 An installation management agent also needs the separate enabled instance grant
 before using its saved credentials in a form, panel, test or reconnect. Management
 and account grants are checked again through asynchronous handlers and refreshes.
@@ -613,9 +615,10 @@ git = [ { url = "https://example.com", username = "x-access-token", password = "
 gitIdentity = { name = "{{settings.name}}", email = "{{settings.email}}" }
 ```
 
-For each agent holding an enabled instance (one per package: Cairn refuses a second
-grant), the host renders these templates when a run is prepared and each time it
-resumes. Placeholders are `{{credential}}`, `{{secrets.KEY}}` and `{{settings.KEY}}`;
+For each agent's explicitly chosen, enabled supplying instance (at most one per
+package), the host renders these templates when a run is prepared and each time it
+resumes. Other granted instances do not supply these credentials; removing the
+supplier leaves none until another is explicitly chosen. Placeholders are `{{credential}}`, `{{secrets.KEY}}` and `{{settings.KEY}}`;
 a value with control characters, or a missing one, leaves its item out.
 
 - Files land in the run's home, private (0600 in 0700 directories), under a tool's
@@ -916,10 +919,11 @@ The bundled GitHub package (`plugins/github/`) is an ordinary package built on t
   permissions chosen on GitHub. The form checks the account, warns when an OAuth
   token lacks `workflow`, and keeps the login and commit identity (name and noreply
   address) as hidden settings. The panel and test show the account.
-- **Runs.** Agents granted an account on their page get `~/.config/gh/hosts.yml` for
-  the `gh` CLI, Git credentials for `https://github.com`, the commit identity (unless
-  the installation has its own) and the package's instructions. One account per
-  agent. Token formats are masked in run output.
+- **Runs.** The explicitly chosen credential supplier provides `~/.config/gh/hosts.yml`
+  for the `gh` CLI, Git credentials for `https://github.com` and the commit identity
+  (unless the installation has its own). Agents may hold multiple full or selected
+  instance grants; instructions require their own contribution or full access.
+  Removing the supplier leaves none. Token formats are masked in run output.
 - **Projects.** Projects → import from “GitHub repository” lists the account's
   repositories (owned, collaborations, organizations; 50 per page).
 - **Waits.** `github_workflow` (project, run ID, full commit SHA; a run GitHub does
@@ -1143,3 +1147,258 @@ controls; action secrets keep their raw bytes after the shared blank filter.
 These are client value transformations, not validation of an action. A plugin
 still validates its action input. The server's F6 manifest constraints, package
 admission/review, instance validation and completion handler remain unchanged.
+
+## Hooks and resources (ADR-0075, ticket A)
+
+These declarations are additive to API v2. Existing `inbound` and conversation
+capabilities keep their behavior until the later removal ticket. Resource-restricted
+contribution grants and the delivery authorization seam are available. Hook rules
+and their engine ship in later tickets; declaring a hook grants nobody permission
+to act on it, and nothing consumes the hook queue yet.
+
+```toml
+# Add "hooks" to capabilities and declare agentAccess for agents' future hook grants.
+[[resources]]
+name = "server"
+description = "A server"
+
+[[resources]]
+name = "channel"
+description = "A channel in a server"
+parentType = "server"
+
+[[hooks]]
+name = "message"
+description = "A message received"
+payloadSchema = { type = "object", required = [
+  "channelId",
+  "text"
+], properties = { channelId = { type = "string" }, text = { type = "string" } } }
+resourceFields = [ { path = "/channelId", resourceType = "channel" } ]
+```
+
+`resources` declares at most 32 unique types, each with a description and optional
+`parentType` naming another declared type. Hierarchies must be acyclic. `hooks`
+declares at most 32 unique hooks, each with a name, description, object
+`payloadSchema` (JSON Schema, at most 16 KiB), and optional `resourceFields`.
+Declaring hooks requires the `hooks` capability, and requesting it requires hooks.
+Tool `inputSchema` and hook `payloadSchema` are compiled during registry admission.
+Approval covers all these declarations and annotations; changing any of them
+changes the package digest. Omitted new fields preserve existing package digests.
+
+Tools also accept `resourceFields`, referring to their `inputSchema`. Each annotation
+is `{ path, resourceType }`. Paths use JSON Pointer escaping (`~0`, `~1`) through
+explicit object `properties`; `*` traverses array `items`, for example
+`/destinations/*/channelId`. The terminal schema must declare `type = "string"`.
+Paths through `$ref` or unions are not supported: expose resource IDs as explicit
+properties. At most 32 distinct paths, each at most 400 bytes and 16 segments, are
+allowed per contribution. Command arguments instead accept `resourceType = "channel"`.
+Every referenced type must be declared. Resource IDs are strings, scoped by both
+type and instance; labels carry no authority.
+
+The one-shot `resources(input)` handler uses one enabled instance's settings and
+host-injected credentials, with the usual capability and revision checks:
+
+```luau
+resources = function(input)
+    -- input.instance is { id, name, enabled, settings, secrets } (names only).
+    if input.op == "list" then
+        -- input.resourceType, input.page (1..10000), input.query (<=200 chars)
+        return { items = cairn.array({
+            { resourceType = "channel", id = "200", name = "Support",
+              parent = { resourceType = "server", id = "100" } },
+        }), nextPage = nil }
+    end
+    -- input.op == "resolve", input.resourceType, input.id
+    -- Resolve the exact ID, or fail when missing/inaccessible. Root: parent = nil.
+    if input.resourceType == "channel" and input.id == "200" then
+        return { resourceType = "channel", id = "200", name = "Support",
+                 parent = { resourceType = "server", id = "100" } }
+    elseif input.resourceType == "server" and input.id == "100" then
+        return { resourceType = "server", id = "100", name = "Team" }
+    end
+    error("Resource not found")
+end
+```
+
+Lists contain at most 200 distinct items of the requested type. IDs are nonempty,
+control-free strings of at most 200 UTF-8 bytes; names at most 300 bytes. Every
+non-root item must name its immediate parent of the declared parent type; root
+items must have no parent. Invalid items or pagination fail the whole response.
+`nextPage`, if present, must advance and stay at most 10000. To resolve ancestors,
+Cairn calls `resolve` for the target and then independently for each immediate
+parent, through the root, rejecting mismatched IDs/types and unresolved parents.
+The result is `{ resource, ancestors }`, nearest parent first.
+
+Resource reads return a short-lived operation ID immediately, so multiple ancestor
+lookups or program preparation do not hold a relay/MCP request past its deadline.
+Poll the operation in separate requests until it completes; the bounded manager
+operation has a nine-minute total budget. Completed results are tagged
+`resourcePage` with `page`, or `resourceAncestry` with `resolution`.
+The captured package, instance revision, initiating authority and instance grants
+remain checked during work and before every polling response, including through
+the existing management polling route. Changing the package/instance or revoking
+access refuses the retained result.
+
+Read surfaces share these implementations:
+
+- HTTP: `GET /api/plugins/{pluginId}/connections/{instanceId}/resources?resourceType=channel&page=1&query=`
+  and `GET .../resources/ancestors?resourceType=channel&id=200` (authenticated owner,
+  matching the existing plugin management routes).
+- HTTP polling: `GET /api/plugins/resources/operations/{operationId}`.
+  It accepts only resource-read operations, with the same owner authorization.
+- Public MCP and `cairn_installation`: `list_plugin_resources`
+  (`pluginId`, `instanceId`, `resourceType`, optional `page`/`query`) and
+  `resolve_plugin_resource` (`pluginId`, `instanceId`, `resourceType`, `id`), then
+  `get_plugin_resource_operation` (`operationId`). All require public MCP `read`.
+  The read polling tool cannot retrieve management preparations. Retrieving a
+  resource result through the existing management poller requires both `manage`
+  and `read`; it cannot bypass the read scope. Resource reads require a current
+  verifiable public authorization, not an old scope snapshot without its credential.
+  Installation agents also need a current grant on the instance, because discovery uses its service credentials; installation access
+  alone does not confer access to the service account. Authorization and instance
+  grants are checked before each host capability, after slow I/O and after the handler.
+  Installation-agent grants stay bound to the instance during OAuth refresh, including
+  credential publication and the service request. Generated web/Android clients use
+  the same typed contracts; Android clients await polling automatically, and web
+  callers pass the existing `pluginRequest` transport to the generated clients.
+  No picker UI is introduced in this ticket.
+
+Transport (`socket`) and durable `timer` handlers can emit declared hooks:
+
+```luau
+local queued = cairn.hooks.emit({
+    name = "message", id = "service-event-123",
+    payload = { channelId = "200", text = "Hello" },
+})
+```
+
+The approved `hooks` capability gates the call. Undeclared hooks, schema-invalid
+payloads, IDs over 200 bytes or with controls, and payloads over 256 KiB fail.
+One-shot handlers and ordinary script events cannot emit hooks. A transport must
+finish protocol acknowledgements before emitting; asynchronous rules cannot meet
+service protocol deadlines.
+
+Admission is atomic and durable in SQLite: event plus receipt, per instance.
+`true` means queued; `false` means duplicate ID or full queue/receipt ledger. IDs
+are deduplicated across hook names for 30 days, even after acknowledgement and
+manager restart. A full queue does not record the ID, so a producer can retry it.
+The separate hook queue holds at most 50 events per instance. The receipt ledger
+holds at most 10000 IDs per instance; at capacity, new IDs are refused until receipts
+expire rather than evicting IDs still inside their deduplication window. Events
+expire after 30 days, carry the instance revision and approved package digest, and
+are invalidated by revision/package changes. Instance deletion cascades to events
+and receipts. The existing script event pump never delivers hook events.
+
+Ticket F can use `Db::plugin_hooks(instance, revision, digest, now)` to read current
+events and `Db::remove_plugin_hook(instance, id)` to acknowledge them in its own
+transaction; receipts remain intact. Ticket C can use the manifest's
+`resourceFields`/argument `resourceType` and prepare resource resolution with
+the caller's captured authority (`plugins::resources::prepare_resolve`).
+Trusted host callers also have the synchronous `plugins::resources::resolve`
+wrapper. Resolve current ancestry before enforcing a grant; labels and retained
+picker results confer no authority.
+
+## Agent contribution grants (ADR-0075, ticket C)
+
+`GET /api/agents/{agentId}/plugin-grants` returns the agent's revision, per-instance
+`grants` and `runCredentialInstances`. `PUT` replaces this view at that revision.
+The public MCP exposes the same `get_agent_plugin_grants` (read) and
+`replace_agent_plugin_grants` (manage) operations. Installation agents can read and
+reduce only; changing to a different credential supplier counts as an expansion.
+Both generated web and Android clients expose these contracts. The grant editor
+belongs to ticket D; existing `AgentSettings.plugins` clients continue to read and
+write full access only and preserve selected grants on other instances.
+
+```json
+{
+  "agentId": "00000000-0000-4000-8000-000000000010",
+  "revision": "the-current-agent-revision",
+  "grants": [{
+    "instanceId": "00000000-0000-4000-8000-000000000011",
+    "access": {
+      "type": "selected",
+      "contributions": [{
+        "kind": "tool",
+        "name": "discord_post",
+        "resources": [{ "resourceType": "channel", "id": "support" }]
+      }]
+    }
+  }],
+  "runCredentialInstances": []
+}
+```
+
+`access: { "type": "full" }` includes current and future contributions of that
+instance. Selected contribution kinds are `tool`, `command`, `hook`,
+`runCredentials`, `instructions`, `condition`, `projectSource` and `skillSource`.
+Their names match the manifest; instructions and run credentials use an empty
+name. Only tools, commands and hooks accept resource restrictions. Restrictions
+of each type cover its descendants. All designated resources in those hierarchies
+must resolve under the allowed roots; missing, unknown or contradictory references
+fail before dispatch. Other types, such as a message's author, remain unrestricted.
+An explicit `runCredentials` contribution must also be the package's chosen
+supplier; a full grant on another instance never supplies its credentials.
+
+The SQL schema advances from 23 to 24 after the timeline projection upgrade. Existing grants remain full access per
+instance. Migration retains the old enabled, name-ordered credential supplier of
+active packages that declare run credentials. Removing the selected instance or
+its credential grant leaves a cleared supplier, including across restart and
+unrelated profile saves. An old editor's first full grant can initialize a choice;
+a cleared choice requires the owner's explicit selection. Setup's final grant is
+full access; shared setup for an installation agent still requires full access on
+the source instance. Host Git fetches for authorized projects keep their separate
+existing instance ordering; they do not publish other accounts' run credentials.
+
+Tool and command scopes expose only matching instances. Their retained authority
+checks current agent and requester revisions, instance revisions and approved
+package identity before host effects, OAuth refresh publication, and result
+return. Resource ancestry is resolved by the host, never inferred from labels.
+Delegated plugin actions verify both contributions and resources against the
+requester, including descendant resource roots; asynchronous checks are followed
+by revision checks. Deleting the requester stops its current delegated turns and
+pauses their queued follow-ups. A later authorized continuation uses the task's own
+agent access, without reviving the deleted requester's execution grants.
+
+Accepted management jobs, including portraits and backend migration, may outlive
+normal completion of the requesting turn. They retain its initiating agent and
+requester/delegation ceiling, captured at acceptance and rechecked against current
+rights before subsequent effects and publication. Cancellation, deletion and
+grant reductions still revoke the job; normal completion alone does not. This is
+private job authority, never a broader tool grant or a fallback to another agent,
+and does not extend bounded deferred resource operations.
+Deferred project/skill source results also retain their initiating authority and
+all bound source-instance/project proofs for polling; later delivery revalidates
+them. Completing the work does not turn its private results into an unguarded cache.
+
+Ticket F must call `plugins::grant_authorization::authorize_hook_delivery` with
+the execution agent, instance, declared hook name and payload before delivery; a
+refusal means no delivery. It does not consume or recreate A's durable queue.
+Ticket E/F must implement `plugins::grants::rule_uses` from their canonical rule
+store, returning the tools/hooks and resource restrictions each rule uses on its
+execution agent, regardless of rule state or budget. The reduction guard protects
+those uses. Until the full ADR-0075 conversation provenance is established, every
+current account's rule is protected; E's provenance integration may exclude only
+the eligible conversation's own account. No rule-writing, emergency-pause or
+budget authority is introduced here.
+
+Transfers returned by tools retain the producing contribution, resource inputs and
+transitive transfer dependencies. Every later read, attachment use or MIME
+composition reauthorizes those permissions for the consuming run; a retained
+instructions-only grant cannot download a revoked tool's attachment. The binding
+contains no producing run token, so a new turn can use a still-authorized handle.
+Unscoped transport/owner transfers require full instance access from an agent;
+agent uploads remain bound to their original uploader. A full-access agent may use
+another uploader's file without acquiring its identity. Appends preserve that
+boundary and all contribution origins, including when scoped data is added to a
+raw upload. Bytes and provenance change together; reads, appends, HTTP bodies and
+MIME attachments refuse a transfer version changed since authorization with a
+conflict, requiring fresh authorization before retrying.
+
+An unavailable package's previously held grants and supplier can be retained while
+reducing another grant. Migration also retains the exact legacy instance choice
+for packages whose approved files cannot currently load, rather than permanently
+losing it. A package known not to declare run credentials gets an empty supplier
+choice, including through legacy full-access saves; adding credentials in a later
+version requires an explicit owner choice. Merge preparation resolves descendant
+coverage under the caller's authority and rechecks profile revisions at publication.

@@ -11,6 +11,7 @@ import type { ConversationEnvironmentState } from './ConversationEnvironmentStat
 import type { ConversationLifecycle } from './ConversationLifecycle'
 import type { ConversationRequester } from './ConversationRequester'
 import type { ConversationStatus } from './ConversationStatus'
+import type { ExclusiveReservation } from './ExclusiveReservation'
 
 export interface Chat {
   id: string
@@ -50,7 +51,7 @@ export interface Chat {
   agentName: string
   projectName: string | null
   status: ConversationStatus
-  suspendedByExclusive?: import('../../nodes').ExclusiveReservation | null
+  suspendedByExclusive?: ExclusiveReservation | null
   wakeup?: ChatWakeup | null
   questions: Array<ChatQuestion>
   run: import('../../contracts').Run | null

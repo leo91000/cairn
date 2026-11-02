@@ -321,6 +321,12 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         connection.execute_batch(&format!("ALTER TABLE runs RENAME TO retained_runs; CREATE VIEW runs AS SELECT {columns} FROM retained_runs;")).unwrap();
+        // SQLite retargets dependent views when the physical table is renamed.
+        // Rebind the wire view so this probe also guards its snapshot access.
+        connection.execute_batch("DROP VIEW run_views").unwrap();
+        connection
+            .execute_batch(crate::runs::PROJECTION_SCHEMA)
+            .unwrap();
         connection
             .create_scalar_function(
                 "snapshot_probe",
@@ -339,6 +345,12 @@ mod tests {
             "Finished. Saved answer."
         );
         assert!(super::summary_preview(&db, "missing").unwrap().is_null());
+        assert_eq!(db.runs(None, None, 10, 0, false).unwrap().len(), 1);
+        assert_eq!(db.run_page(None, None, 10, 0).unwrap().len(), 1);
+        assert!(
+            db.runs(None, None, 10, 0, true).is_err(),
+            "the full SQL wire view must exercise the probe"
+        );
         assert!(
             db.run("run").is_err(),
             "the full run read must exercise the probe"

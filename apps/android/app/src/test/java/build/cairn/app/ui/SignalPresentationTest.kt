@@ -11,7 +11,14 @@ import org.junit.Test
 class SignalPresentationTest {
     @Test
     fun `exclusive suspension keeps active work visible without working animation and preserves attention`() {
-        val reservation = ExclusiveReservation("reservation", "node", "owner", "Build", "acquired")
+        val reservation =
+            ExclusiveReservation(
+                id = "reservation",
+                nodeId = "node",
+                ownerRunId = "owner",
+                reason = "Build",
+                state = "acquired",
+            )
         val chat =
             Chat(
                 id = "suspended",
@@ -85,11 +92,11 @@ class SignalPresentationTest {
                         id = "suspended",
                         suspendedByExclusive =
                             ExclusiveReservation(
-                                "reservation",
-                                "node",
-                                "owner",
-                                "Build",
-                                "acquired",
+                                id = "reservation",
+                                nodeId = "node",
+                                ownerRunId = "owner",
+                                reason = "Build",
+                                state = "acquired",
                             ),
                     ),
                     Chat(
@@ -824,7 +831,7 @@ class SignalPresentationTest {
                             archived = true,
                         ),
                     ),
-                skills = listOf(Skill("revue", "Guide de revue")),
+                skills = listOf(Skill(name = "revue", description = "Guide de revue")),
             )
         val chats =
             listOf(

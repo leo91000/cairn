@@ -2,6 +2,7 @@
 import type { Skill, SkillBundle } from '../../../../packages/contracts/contracts'
 import { twMerge } from 'tailwind-merge'
 import { computed, ref } from 'vue'
+import { deleteSkill } from '../../../../packages/contracts/generated/deleteSkill'
 import {
   api,
   notify,
@@ -87,9 +88,7 @@ async function imported(bundle: SkillBundle) {
 
 async function remove() {
   try {
-    await api(`/skills/${deleting.value!.scope}/${deleting.value!.name}`, {
-      method: 'DELETE',
-    })
+    await deleteSkill(api, { scope: deleting.value!.scope, name: deleting.value!.name })
     deleting.value = undefined
     await refresh()
     notify('Skill removed')

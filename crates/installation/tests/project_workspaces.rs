@@ -397,43 +397,82 @@ async fn builtin_mcp_endpoint_exposes_scoped_workspace_tools_and_checks_the_run_
     let token = &running_run_token(&s, &run).await;
     let client = reqwest::Client::new();
     let endpoint = format!("{url}/mcp-workspace");
-    for (method, params) in [
-        ("initialize", json!({ "protocolVersion": "2025-11-25" })),
-        ("tools/list", json!({})),
+    for version in [
+        cairn_installation::mcp_client::LEGACY,
+        cairn_installation::mcp_client::MODERN,
     ] {
-        let response = client
-            .post(&endpoint)
-            .bearer_auth(token)
-            .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }))
-            .send()
-            .await
-            .unwrap();
-        assert!(response.status().is_success());
-        assert_eq!(response.headers()["cache-control"], "no-store");
-        let value: Value = response.json().await.unwrap();
-        assert!(value["error"].is_null(), "{value}");
-        if method == "tools/list" {
-            // Plugin tools such as 1Password's appear only for agents granted an instance.
-            let tools = value["result"]["tools"].as_array().unwrap();
-            assert_eq!(tools.len(), 14);
-            assert!(
-                !tools
+        let negotiation = if version == cairn_installation::mcp_client::MODERN {
+            "server/discover"
+        } else {
+            "initialize"
+        };
+        let mut status_schema = Value::Null;
+        for (method, params) in [
+            (negotiation, json!({ "protocolVersion": version })),
+            ("tools/list", json!({})),
+            (
+                "tools/call",
+                json!({ "name": "exclusive_status", "arguments": {} }),
+            ),
+        ] {
+            let response = client
+                .post(&endpoint)
+                .bearer_auth(token)
+                .header("mcp-protocol-version", version)
+                .header("mcp-method", method)
+                .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }))
+                .send()
+                .await
+                .unwrap();
+            assert!(response.status().is_success());
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            let value: Value = response.json().await.unwrap();
+            assert!(value["error"].is_null(), "{value}");
+            if method == "tools/list" {
+                // Plugin tools such as 1Password's appear only for agents granted an instance.
+                let tools = value["result"]["tools"].as_array().unwrap();
+                assert_eq!(tools.len(), 14);
+                assert!(
+                    !tools
+                        .iter()
+                        .any(|tool| tool["name"] == "onepassword" || tool["name"] == "sleep")
+                );
+                for name in [
+                    "ask_questions",
+                    "wait_for",
+                    "acquire_exclusive",
+                    "release_exclusive",
+                    "exclusive_status",
+                    "renew_exclusive",
+                ] {
+                    assert!(tools.iter().any(|tool| tool["name"] == name));
+                }
+                assert_eq!(value["result"]["tools"][2]["name"], "list_nodes");
+                assert_eq!(value["result"]["tools"][1]["name"], "publish_artifact");
+                assert_eq!(value["result"]["tools"][0]["name"], "open_project");
+                for tool in tools {
+                    if let Some(schema) = tool.get("outputSchema") {
+                        // A legacy MCP Tool accepts only an object output-schema root.
+                        // Validate the complete returned catalogue, not a hand-built descriptor.
+                        assert_eq!(schema["type"], "object", "{version}: {tool}");
+                    }
+                }
+                status_schema = tools
                     .iter()
-                    .any(|tool| tool["name"] == "onepassword" || tool["name"] == "sleep")
-            );
-            for name in [
-                "ask_questions",
-                "wait_for",
-                "acquire_exclusive",
-                "release_exclusive",
-                "exclusive_status",
-                "renew_exclusive",
-            ] {
-                assert!(tools.iter().any(|tool| tool["name"] == name));
+                    .find(|tool| tool["name"] == "exclusive_status")
+                    .unwrap()["outputSchema"]
+                    .clone();
+            } else if method == "tools/call" {
+                assert_ne!(value["result"]["isError"], true, "{value}");
+                let structured = &value["result"]["structuredContent"];
+                assert_eq!(
+                    structured,
+                    &json!({ "reservations": [] }),
+                    "{version}: {value}"
+                );
+                let validator = jsonschema::validator_for(&status_schema).unwrap();
+                assert!(validator.is_valid(structured), "{version}: {value}");
             }
-            assert_eq!(value["result"]["tools"][2]["name"], "list_nodes");
-            assert_eq!(value["result"]["tools"][1]["name"], "publish_artifact");
-            assert_eq!(value["result"]["tools"][0]["name"], "open_project");
         }
     }
     s.mcps.revoke_run(&s, text(&run, "id")).await.unwrap();

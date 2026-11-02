@@ -24,6 +24,8 @@ sourceSets.test {
 
 tasks.test {
     inputs.file(rootProject.file("../../tests/fixtures/questions-waits-contracts.json"))
+
+    inputs.file(rootProject.file("../../tests/fixtures/skill-contracts.json"))
     inputs.file(rootProject.file("../../tests/fixtures/model-contracts.json"))
     val codingAgentAccounts =
         rootProject.file("../../tests/fixtures/coding-agent-account-contracts.json")
@@ -48,6 +50,7 @@ tasks.test {
     inputs.file(rootProject.file("../../tests/fixtures/mission-contracts.json"))
     inputs.file(rootProject.file("../../tests/fixtures/run-contracts.json"))
     inputs.file(rootProject.file("../../tests/fixtures/node-contracts.json"))
+    inputs.file(rootProject.file("../../tests/fixtures/placement-contracts.json"))
     inputs.file(rootProject.file("../../tests/fixtures/personal-settings-contracts.json"))
     inputs.file(rootProject.file("../../packages/contracts/generated/run-wire.json"))
     inputs.file(wire)

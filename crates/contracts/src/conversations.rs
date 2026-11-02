@@ -1,4 +1,4 @@
-//! Conversation commands and public views. Questions/waits retain their A8 boundary.
+//! Conversation commands and public views.
 use crate::*;
 use std::collections::BTreeMap;
 
@@ -410,9 +410,7 @@ pub struct Chat {
     pub status: ConversationStatus,
     #[serde(default)]
     #[ts(optional = nullable)]
-    #[schemars(with = "Option<BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "ExclusiveReservation"))]
-    #[ts(type = "import('../../nodes').ExclusiveReservation | null")]
-    pub suspended_by_exclusive: Option<serde_json::Value>,
+    pub suspended_by_exclusive: Option<crate::ExclusiveReservation>,
     #[serde(default)]
     #[ts(optional = nullable)]
     pub wakeup: Option<ChatWakeup>,
@@ -479,6 +477,22 @@ pub struct CreateChatInput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChatInput {
     pub chat_id: ConversationId,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResumeChatInput {
+    pub chat_id: ConversationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub run_id: Option<crate::RunId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 200))]
+    #[ts(optional = nullable)]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub selection: Option<crate::ResumeExecutionSelection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]

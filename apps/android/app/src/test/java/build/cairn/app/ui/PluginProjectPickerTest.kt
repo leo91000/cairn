@@ -123,16 +123,17 @@ class PluginProjectPickerTest {
         assertTrue(
             catalog.copy(connections = catalog.connections.drop(1)).projectSources().isEmpty()
         )
-        assertEquals(
-            "/plugins/forge/projects?source=repositories&instance=acct%201&page=2",
-            pluginProjectsPath("forge", "repositories", "acct 1", 2),
-        )
     }
 
     @Test
     fun searchMatchesNamesDescriptionsAndBadges() {
         val project =
-            PluginProject("team/site", "team/site", "Marketing site", badges = listOf("Private"))
+            PluginProject(
+                id = "team/site",
+                name = "team/site",
+                description = "Marketing site",
+                badges = listOf("Private"),
+            )
         assertTrue(project.matches(""))
         assertTrue(project.matches("SITE"))
         assertTrue(project.matches("marketing"))
@@ -224,9 +225,9 @@ class PluginProjectPickerTest {
             val paths = List(server.requestCount) { server.takeRequest().path.orEmpty() }
             assertEquals(
                 listOf(
-                    "/api/plugins/forge/projects?source=repositories&instance=acct-1&page=1",
-                    "/api/plugins/forge/projects?source=repositories&instance=acct-1&page=1",
-                    "/api/plugins/forge/projects?source=repositories&instance=acct-1&page=2",
+                    "/api/plugins/forge/projects?source=repositories&instance=acct-1&page=1&query=",
+                    "/api/plugins/forge/projects?source=repositories&instance=acct-1&page=1&query=",
+                    "/api/plugins/forge/projects?source=repositories&instance=acct-1&page=2&query=",
                 ),
                 paths,
             )

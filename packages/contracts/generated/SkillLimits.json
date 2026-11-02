@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "bundleBytes": {
+      "default": 16777216,
+      "format": "uint64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "fileBytes": {
+      "default": 4194304,
+      "format": "uint64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "files": {
+      "default": 500,
+      "format": "uint32",
+      "maximum": 2147483647,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "uploadBytes": {
+      "default": 5242880,
+      "format": "uint64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "title": "SkillLimits",
+  "type": "object"
+}

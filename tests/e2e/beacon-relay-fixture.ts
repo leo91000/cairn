@@ -12,7 +12,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { NativeFixture } from './native-fixture'
 
 // Shared by journeys-beacon-relay and the network bench: real processes, fake mail only.
-export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', directory = tmpdir()) {
+export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', directory = tmpdir(), originHost = 'localhost') {
   const messages: string[] = []
   const mail = createServer(async (request, response) => {
     let body = ''
@@ -26,7 +26,7 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
   const mailPort = (mail.address() as { port: number }).port
   const root = await mkdtemp(join(directory, 'cairn-beacon-relay-'))
   await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
-  const url = `http://localhost:${port}`
+  const url = `http://${originHost}:${port}`
   const children: ChildProcess[] = []
   const seed = new NativeFixture({
     dataDir: join(root, 'data'),
@@ -141,16 +141,24 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
 }
 
 export function executeBeaconSql(database: URL, sql: string) {
-  execFileSync('psql', ['-v', 'ON_ERROR_STOP=1', '-c', sql], {
-    env: {
-      ...process.env,
-      PGHOST: database.hostname,
-      PGPORT: database.port || '5432',
-      PGUSER: decodeURIComponent(database.username),
-      PGPASSWORD: decodeURIComponent(database.password),
-      PGDATABASE: decodeURIComponent(database.pathname.slice(1)),
-      PGOPTIONS: database.searchParams.get('options') || '',
-    },
+  const connection = new URL(database)
+  // The previous psql helper forwarded only the URL's PGOPTIONS query field.
+  connection.search = ''
+  const options = database.searchParams.get('options')
+  if (options)
+    connection.searchParams.set('options', options)
+
+  const env: NodeJS.ProcessEnv = {}
+  // Keep runtime/TLS settings, without forwarding credential environment fields
+  // (including the parent fixture URL) alongside the private stdin request.
+  for (const key of ['PATH', 'HOME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'PGSSLMODE', 'PGSSLROOTCERT', 'PGSSLCERT', 'PGSSLKEY', 'PGAPPNAME']) {
+    if (process.env[key] !== undefined)
+      env[key] = process.env[key]
+  }
+
+  execFileSync('target/debug/examples/beacon_sql_fixture', [], {
+    input: JSON.stringify({ database_url: connection.toString(), sql }),
+    env,
     stdio: 'pipe',
   })
 }

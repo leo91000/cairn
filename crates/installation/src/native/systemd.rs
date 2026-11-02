@@ -11,6 +11,8 @@ use std::{
 };
 use tokio::process::{Child, Command};
 
+mod diagnostics;
+
 pub struct Identity {
     pub user: String,
     pub uid: u32,
@@ -243,14 +245,20 @@ pub async fn stop_workload(attempt: &str) -> Result<()> {
     )
     .await?;
     let group = String::from_utf8_lossy(&group.stdout);
+    let mut observed_group = None;
+    let mut frozen = None;
     let populated = if group.trim().is_empty() {
         false
     } else {
         let path = Path::new("/sys/fs/cgroup")
             .join(group.trim().trim_start_matches('/'))
             .join("cgroup.events");
-        match tokio::fs::read_to_string(path).await {
-            Ok(events) => events.lines().any(|line| line == "populated 1"),
+        match tokio::fs::read_to_string(&path).await {
+            Ok(events) => {
+                frozen = diagnostics::frozen(&events);
+                observed_group = path.parent().map(Path::to_owned);
+                events.lines().any(|line| line == "populated 1")
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
             Err(error) => return Err(error.into()),
         }
@@ -261,7 +269,14 @@ pub async fn stop_workload(attempt: &str) -> Result<()> {
     {
         return Ok(());
     }
-    let _ = stopped;
+    diagnostics::record(
+        state.trim(),
+        stopped.status.success(),
+        populated,
+        frozen,
+        observed_group.as_deref(),
+    )
+    .await;
     Err(Error::unavailable(
         "Native workload termination is not confirmed.",
     ))

@@ -207,7 +207,12 @@ fn invocation_error(error: InvocationError, refused: Option<Error>) -> Error {
     }
 }
 
-async fn resolve(s: &Service, package: &Package, program: &Program) -> Result<Release> {
+async fn resolve(
+    s: &Service,
+    package: &Package,
+    program: &Program,
+    authority: &crate::capabilities::plugin_packages::Authority,
+) -> Result<Release> {
     let refused = std::sync::Mutex::new(None);
     let refused_ref = &refused;
     let value = s
@@ -223,13 +228,18 @@ async fn resolve(s: &Service, package: &Package, program: &Program) -> Result<Re
                 if method != "http.request" {
                     return Err(Denied("forbidden"));
                 }
-                metadata(s, &package.manifest, &args)
-                    .await
-                    .map_err(|error| {
-                        let code = capabilities::code(&error);
-                        *refused_ref.lock().unwrap() = Some(error);
-                        Denied(code)
-                    })
+                let result = async {
+                    authority.recheck(s).await?;
+                    let result = metadata(s, &package.manifest, &args).await?;
+                    authority.recheck(s).await?;
+                    Ok(result)
+                }
+                .await;
+                result.map_err(|error| {
+                    let code = capabilities::code(&error);
+                    *refused_ref.lock().unwrap() = Some(error);
+                    Denied(code)
+                })
             },
         )
         .await
@@ -384,6 +394,7 @@ async fn install(
     {
         installed_path(directory, installed)?;
         lock.candidate = None;
+        authority.recheck(s).await?;
         return write_lock(directory, lock);
     }
     std::fs::create_dir_all(directory)?;
@@ -408,17 +419,23 @@ async fn install(
                 let release = &release;
                 async move {
                     let mut preparation = preparation.lock().await;
-                    let result = match method.as_str() {
-                        "download" => {
-                            preparation
-                                .download(s, &package.manifest, release, &args)
-                                .await
-                        }
-                        "archive.executable" => preparation.extract(release, &args),
-                        _ => Err(Error::forbidden(
-                            "Only program preparation is allowed during install.",
-                        )),
-                    };
+                    let result = async {
+                        authority.recheck(s).await?;
+                        let result = match method.as_str() {
+                            "download" => {
+                                preparation
+                                    .download(s, &package.manifest, release, &args)
+                                    .await
+                            }
+                            "archive.executable" => preparation.extract(release, &args),
+                            _ => Err(Error::forbidden(
+                                "Only program preparation is allowed during install.",
+                            )),
+                        }?;
+                        authority.recheck(s).await?;
+                        Ok(result)
+                    }
+                    .await;
                     result.map_err(|error| {
                         let code = capabilities::code(&error);
                         *refused_ref.lock().unwrap() = Some(error);
@@ -444,6 +461,7 @@ async fn install(
         binary_sha256,
     };
     let target = directory.join(&installed.binary_sha256);
+    authority.recheck(s).await?;
     super::operations::check_publication()?;
     std::fs::rename(binary, target)?;
     lock.previous = lock.installed.take();
@@ -491,7 +509,7 @@ pub(crate) async fn executable_authorized(
     let mut lock = read_lock(&directory)?;
     if lock.installed.is_none() {
         authority.recheck(s).await?;
-        let release = resolve(s, &package, program).await?;
+        let release = resolve(s, &package, program, authority).await?;
         install(
             s, &package, program, &directory, &mut lock, release, authority,
         )
@@ -551,7 +569,7 @@ pub(crate) async fn prepare_authorized(
             installed_path(&directory, installed)?;
         } else {
             authority.recheck(s).await?;
-            let release = resolve(s, package, program).await?;
+            let release = resolve(s, package, program, authority).await?;
             install(
                 s, package, program, &directory, &mut lock, release, authority,
             )
@@ -613,7 +631,7 @@ pub(crate) async fn action_authorized(
     authority.recheck(s).await?;
     match action {
         "check" => {
-            lock.candidate = Some(resolve(s, &package, program).await?);
+            lock.candidate = Some(resolve(s, &package, program, authority).await?);
             authority.recheck(s).await?;
             write_lock(&directory, &lock)?;
         }

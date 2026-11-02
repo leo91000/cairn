@@ -4,12 +4,129 @@ use common::RelayedInstallation;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
+fn code_worker_for_target(
+    target: &std::path::Path,
+    workers: Option<&std::ffi::OsStr>,
+    legacy: Option<std::ffi::OsString>,
+    allow_remap: bool,
+) -> std::path::PathBuf {
+    if let Some(workers) = workers {
+        let workers: Vec<Value> = serde_json::from_slice(workers.as_encoded_bytes()).unwrap();
+        return workers
+            .iter()
+            .find(|worker| {
+                worker["target"]
+                    .as_str()
+                    .is_some_and(|path| std::path::Path::new(path) == target)
+            })
+            .or_else(|| {
+                if !allow_remap {
+                    return None;
+                }
+                if workers.len() == 1 {
+                    return workers.first();
+                }
+                let suffix = std::path::PathBuf::from(target.parent()?.file_name()?)
+                    .join(target.file_name()?);
+                let mut matches = workers.iter().filter(|worker| {
+                    worker["target"]
+                        .as_str()
+                        .is_some_and(|path| std::path::Path::new(path).ends_with(&suffix))
+                });
+                let matching = matches.next()?;
+                matches.next().is_none().then_some(matching)
+            })
+            .and_then(|worker| worker["binary"].as_str())
+            .map(std::path::PathBuf::from)
+            .expect("launcher supplied no code worker for this target");
+    }
+    legacy.map(std::path::PathBuf::from).expect(
+        "Use pnpm test:backend to build the isolated code worker with matching Cargo features.",
+    )
+}
+
 fn code_worker() -> std::path::PathBuf {
-    std::env::var_os("CAIRN_TEST_CODE_WORKER")
-        .map(std::path::PathBuf::from)
-        .expect(
-            "Use pnpm test:backend to build the isolated code worker with matching Cargo features.",
-        )
+    let target = std::path::Path::new(env!("CARGO_BIN_EXE_cairn-beacon"))
+        .parent()
+        .unwrap();
+    let workers = std::env::var_os("CAIRN_TEST_CODE_WORKERS");
+    code_worker_for_target(
+        target,
+        workers.as_deref(),
+        std::env::var_os("CAIRN_TEST_CODE_WORKER"),
+        std::env::var_os("CAIRN_TEST_REUSED_BUILD").is_some(),
+    )
+}
+
+#[test]
+fn code_worker_uses_the_matching_compilation_target() {
+    let root = tempfile::tempdir().unwrap();
+    let first = root.path().join("first/debug");
+    let second = root.path().join("second/debug");
+    let workers = std::ffi::OsString::from(
+        serde_json::json!([
+            { "target": first, "binary": root.path().join("first-worker") },
+            { "target": second, "binary": root.path().join("second-worker") },
+        ])
+        .to_string(),
+    );
+    assert_eq!(
+        code_worker_for_target(&first, Some(&workers), None, false),
+        root.path().join("first-worker")
+    );
+    assert_eq!(
+        code_worker_for_target(&second, Some(&workers), None, false),
+        root.path().join("second-worker")
+    );
+    assert_eq!(
+        code_worker_for_target(
+            &root.path().join("remapped/first/debug"),
+            Some(&workers),
+            None,
+            true
+        ),
+        root.path().join("first-worker")
+    );
+    let single = std::ffi::OsString::from(
+        serde_json::json!([{ "target": first, "binary": root.path().join("first-worker") }])
+            .to_string(),
+    );
+    assert_eq!(
+        code_worker_for_target(&root.path().join("remapped"), Some(&single), None, true),
+        root.path().join("first-worker")
+    );
+}
+
+#[test]
+#[should_panic(expected = "launcher supplied no code worker for this target")]
+fn code_worker_rejects_a_missing_compilation_target() {
+    code_worker_for_target(
+        std::path::Path::new("missing"),
+        Some(std::ffi::OsStr::new("[]")),
+        None,
+        false,
+    );
+}
+
+#[test]
+#[should_panic(expected = "launcher supplied no code worker for this target")]
+fn code_worker_does_not_remap_an_ordinary_build() {
+    let workers = std::ffi::OsStr::new(r#"[{"target":"first","binary":"first-worker"}]"#);
+    code_worker_for_target(std::path::Path::new("second"), Some(workers), None, false);
+}
+
+#[test]
+#[should_panic(expected = "launcher supplied no code worker for this target")]
+fn code_worker_rejects_an_ambiguous_remap() {
+    let workers = std::ffi::OsStr::new(
+        r#"[{"target":"one/triple/debug","binary":"one"},{"target":"two/triple/debug","binary":"two"}]"#,
+    );
+    code_worker_for_target(
+        std::path::Path::new("other/triple/debug"),
+        Some(workers),
+        None,
+        true,
+    );
 }
 
 #[tokio::test]
@@ -1956,4 +2073,86 @@ async fn public_plugin_upload_rechecks_its_grant_after_compilation() {
         }
         relay.close().await;
     }
+}
+
+#[tokio::test]
+async fn pending_revalidation_distinguishes_scopes_and_rejects_revoked_tokens() {
+    use sha2::{Digest, Sha256};
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    let installation_id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let identity: Value = serde_json::from_slice(
+        &std::fs::read(
+            relay
+                .installation
+                .config
+                .data_dir
+                .join("installation-relay/identity.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let check_url = format!(
+        "{}/api/relay/{installation_id}/plugin-mcp-authorization",
+        app.url
+    );
+    for granted in ["read", "run", "manage"] {
+        let response = owner_post(
+            &relay,
+            &format!("/api/installations/{installation_id}/tokens"),
+            json!({
+                "label": "Resource discovery", "scopes": [granted],
+            }),
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let grant: Value = response.json().await.unwrap();
+        let credential_digest =
+            hex::encode(Sha256::digest(grant["token"].as_str().unwrap().as_bytes()));
+        for required in [None, Some("read"), Some("run"), Some("manage")] {
+            let mut input = json!({"credentialDigest":credential_digest});
+            if let Some(scope) = required {
+                input["scope"] = scope.into();
+            }
+            let response = app
+                .client
+                .post(&check_url)
+                .bearer_auth(identity["token"].as_str().unwrap())
+                .json(&input)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.json::<bool>().await.unwrap(),
+                required.unwrap_or("manage") == granted
+            );
+        }
+        app.client
+            .delete(format!(
+                "{}/api/installations/{installation_id}/tokens/{}",
+                app.url,
+                grant["id"].as_str().unwrap()
+            ))
+            .header("cookie", &relay.cookie)
+            .header("origin", &app.url)
+            .header("x-csrf-token", relay.session["csrf"].as_str().unwrap())
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let response = app
+            .client
+            .post(&check_url)
+            .bearer_auth(identity["token"].as_str().unwrap())
+            .json(&json!({"credentialDigest":credential_digest,"scope":granted}))
+            .send()
+            .await
+            .unwrap();
+        assert!(!response.json::<bool>().await.unwrap());
+    }
+    relay.close().await;
 }

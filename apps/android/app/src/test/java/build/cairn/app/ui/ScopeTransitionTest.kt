@@ -167,9 +167,9 @@ class ScopeTransitionTest {
         action {
             vm.historyCache.save(
                 "retained",
-                CachedHistory(
+                timelineCache(
                     1,
-                    "v1:r:1",
+                    "v2:r:1",
                     LiveState(),
                     listOf(
                         RunEvent(

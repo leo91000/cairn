@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use serde_json::{Value, json};
 
 #[path = "events_reference.rs"]
-mod frozen;
+pub(super) mod frozen;
 
 const RUN: &str = "00000000-0000-4000-8000-000000000001";
 const BYTES: usize = 256 * 1024;

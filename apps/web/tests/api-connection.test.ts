@@ -246,3 +246,56 @@ it('recovers Beacon account reads independently while installation recovery is s
   await expect(settings).resolves.toEqual({})
   expect(client.state.connectionLost).toBe(false)
 })
+
+it.each(['workspace', 'page'])('keeps newer MCP connection state from a %s load when an older workspace refresh finishes later', async (source) => {
+  const agents = Promise.withResolvers<Response>()
+  let agentReads = 0
+  let mcpReads = 0
+  request.mockImplementation((url: string) => {
+    if (url.endsWith('/agents'))
+      return ++agentReads === 1 ? agents.promise : json([])
+    if (url.endsWith('/mcps'))
+      return json({ mcps: [{ id: 'fixture-mcp', state: ++mcpReads === 1 ? 'needs-auth' : 'connected' }] })
+    return successful(url)
+  })
+  const older = client.refresh()
+  await vi.advanceTimersByTimeAsync(0)
+  await (source === 'workspace' ? client.refresh() : client.refreshMcps())
+  expect(client.state.mcps[0].state).toBe('connected')
+  agents.resolve(json([]))
+  await older
+  expect(client.state.mcps[0].state).toBe('connected')
+})
+
+it('ignores an older MCP response that arrives after the page reload', async () => {
+  const olderResponse = Promise.withResolvers<Response>()
+  request.mockReturnValueOnce(olderResponse.promise)
+  request.mockResolvedValue(json({ mcps: [{ id: 'fixture-mcp', state: 'connected' }] }))
+  const older = client.refreshMcps()
+  await client.refreshMcps()
+  olderResponse.resolve(json({ mcps: [{ id: 'fixture-mcp', state: 'needs-auth' }] }))
+  await older
+  expect(client.state.mcps[0].state).toBe('connected')
+})
+
+it.each(['installation', 'account', 'sign-out'])('ignores an MCP response after changing %s', async (change) => {
+  const response = Promise.withResolvers<Response>()
+  request.mockReturnValue(response.promise)
+  const pending = client.refreshMcps()
+  if (change === 'installation')
+    client.state.installationId = 'second'
+  else if (change === 'account')
+    client.state.accountId = 'second-owner'
+  else
+    client.state.signingOut = true
+  response.resolve(json({ mcps: [{ id: 'fixture-mcp', state: 'connected' }] }))
+  await pending
+  expect(client.state.mcps).toEqual([])
+})
+
+it('does not request owner MCP connections for a member', async () => {
+  client.state.installationRole = 'member'
+  await client.refreshMcps()
+  expect(request).not.toHaveBeenCalled()
+  expect(client.state.mcps).toEqual([])
+})

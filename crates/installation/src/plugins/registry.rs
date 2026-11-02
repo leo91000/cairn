@@ -41,12 +41,7 @@ pub struct Package {
 
 /// What the owner approves: the manifest and every Luau file, by path.
 fn digest(manifest: &Manifest, source: &Sources) -> Result<String> {
-    let files = source.files().collect::<BTreeMap<_, _>>();
-    Ok(crate::auth::hex_digest(&format!(
-        "cairn-package\n{}\n{}",
-        serde_json::to_string(manifest)?,
-        serde_json::to_string(&files)?
-    )))
+    Ok(source.digest(manifest)?)
 }
 
 fn package(format: &str, manifest: &str, source: Sources, builtin: bool) -> Result<Package> {
@@ -58,14 +53,18 @@ fn package(format: &str, manifest: &str, source: Sources, builtin: bool) -> Resu
             Error::bad(message)
         }
     })?;
-    if manifest
+    for schema in manifest
         .conditions
         .iter()
-        .any(|condition| jsonschema::validator_for(&condition.input_schema).is_err())
+        .map(|c| &c.input_schema)
+        .chain(manifest.tools.iter().map(|t| &t.input_schema))
+        .chain(manifest.hooks.iter().map(|h| &h.payload_schema))
     {
-        return Err(Error::bad(
-            "A plugin condition has an invalid input schema.",
-        ));
+        if jsonschema::validator_for(schema).is_err() {
+            return Err(Error::bad(
+                "A plugin contribution has an invalid JSON schema.",
+            ));
+        }
     }
     for program in &manifest.programs {
         if !program.installer.is_empty() && !source.modules.contains_key(&program.installer) {
@@ -153,10 +152,14 @@ fn read_limited(path: &Path, limit: u64) -> Result<String> {
 
 /// Reads one installed version. Its directory names must match the manifest.
 fn read_version(s: &Service, id: &str, version: &str) -> Result<Package> {
+    read_version_at(&root(s), id, version)
+}
+
+fn read_version_at(root: &Path, id: &str, version: &str) -> Result<Package> {
     if !segment(id) || !segment(version) {
         return Err(Error::not_found("Plugin version not found."));
     }
-    let directory = root(s).join(id).join(version);
+    let directory = root.join(id).join(version);
     if !std::fs::symlink_metadata(&directory).is_ok_and(|metadata| metadata.is_dir()) {
         return Err(Error::not_found("Plugin version not found."));
     }
@@ -182,6 +185,27 @@ fn read_version(s: &Service, id: &str, version: &str) -> Result<Package> {
         return Err(Error::bad(
             "Plugin folder names must match the manifest ID and version.",
         ));
+    }
+    Ok(package)
+}
+
+/// The same active-package loader used by the one-time grant migration.
+pub(crate) fn upgrade_package(
+    db: &crate::store::Db<'_>,
+    directory: &Path,
+    id: &str,
+) -> Result<Package> {
+    if let Some(package) = builtin(id) {
+        return Ok(package);
+    }
+    let record = db.plugin_package(id)?;
+    let version = record
+        .active
+        .as_deref()
+        .ok_or_else(|| Error::forbidden("Plugin inactive."))?;
+    let package = read_version_at(&directory.join("plugins"), id, version)?;
+    if record.approvals.get(version) != Some(&package.digest) {
+        return Err(Error::forbidden("Plugin unapproved."));
     }
     Ok(package)
 }
@@ -544,6 +568,7 @@ async fn set_active(
         package.digest.clone(),
         reviewed_digest.is_some(),
     );
+    let has_run_credentials = package.manifest.run_credentials.is_some();
     s.store
         .transaction(move |db| {
             authority.authorize(db)?;
@@ -557,6 +582,10 @@ async fn set_active(
                 return Err(Error::forbidden("This version is no longer approved."));
             }
             db.activate_plugin_version(&plugin, &version, &digest, approve)?;
+            if !has_run_credentials {
+                db.clear_plugin_credential_suppliers(&plugin)?;
+            }
+            db.invalidate_plugin_hooks(&plugin, &digest)?;
             db.audit(
                 if approve {
                     "plugin.package.approved"

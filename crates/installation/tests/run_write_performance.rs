@@ -6,6 +6,35 @@ use common::run_fixture::DbRunFixture;
 use serde_json::json;
 use std::time::Instant;
 
+#[tokio::test]
+async fn lifecycle_updates_do_not_construct_wire_json() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let functions = store
+        .read(|db| {
+            let mut statement =
+                db.0.prepare("EXPLAIN UPDATE runs SET summary=? WHERE id=?")?;
+            let instructions = statement
+                .query_map(rusqlite::params!["new summary", "measured"], |row| {
+                    Ok((row.get::<_, String>(1)?, row.get::<_, Option<String>>(5)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(instructions
+                .into_iter()
+                .filter(|(opcode, _)| matches!(opcode.as_str(), "Function" | "PureFunc"))
+                .filter_map(|(_, function)| function)
+                .filter(|function| function.starts_with("json_set("))
+                .collect::<Vec<_>>())
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        functions.is_empty(),
+        "A scalar lifecycle update must not construct the full or summary wire JSON: {functions:?}"
+    );
+}
+
 fn cpu_micros() -> u128 {
     let mut time = std::mem::MaybeUninit::<libc::timespec>::uninit();
     // SAFETY: clock_gettime initializes the valid output pointer on success.
@@ -144,6 +173,80 @@ async fn metadata_writes_by_frozen_snapshot_size() {
                     "walAutocheckpoint": 0, "cache": "warm after seed and setup",
                 })
             );
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "explicit run wire read benchmark"]
+async fn wire_reads_by_frozen_snapshot_size() {
+    for kib in [0, 128, 512] {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store
+            .transaction(move |db| {
+                db.add_run_fixture(
+                    &json!({
+                        "id": "measured", "taskId": "measured", "status": "succeeded",
+                        "snapshot": {
+                            "task": { "name": "Measured task" },
+                            "agent": { "name": "Measured agent", "provider": "codex", "instructions": "x".repeat(kib * 1024) },
+                        },
+                    }),
+                    None,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        for full in [false, true] {
+            let read = |connection: &rusqlite::Connection| {
+                cairn_installation::store::Db(connection)
+                    .runs(Some("succeeded"), None, 10, 0, full)
+                    .unwrap()
+            };
+            let connection = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
+            let expected = read(&connection);
+            assert_eq!(expected.len(), 1);
+            if full {
+                assert_eq!(
+                    expected[0]["snapshot"]["agent"]["instructions"]
+                        .as_str()
+                        .unwrap()
+                        .len(),
+                    kib * 1024
+                );
+            } else {
+                assert!(expected[0].get("snapshot").is_none());
+                assert_eq!(expected[0]["taskName"], "Measured task");
+            }
+            let encoded_bytes = serde_json::to_vec(&expected).unwrap().len();
+            for cold in [false, true] {
+                let cpu = cpu_micros();
+                let mut elapsed = Vec::new();
+                for _ in 0..32 {
+                    let started = Instant::now();
+                    let result = if cold {
+                        let fresh =
+                            rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
+                        read(&fresh)
+                    } else {
+                        read(&connection)
+                    };
+                    elapsed.push(started.elapsed().as_micros());
+                    assert_eq!(result, expected);
+                }
+                println!(
+                    "{}",
+                    json!({
+                        "benchmark": "run_wire_reads", "snapshotKiB": kib,
+                        "full": full, "connectionCold": cold, "reads": 32,
+                        "encodedBytes": encoded_bytes, "cpuMicros": cpu_micros() - cpu,
+                        "elapsedMicros": elapsed, "osCache": "warm; no host cache eviction",
+                        "coldTimingIncludesConnectionOpen": cold,
+                    })
+                );
+            }
         }
     }
 }

@@ -7,10 +7,14 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class ReadRunContentInput(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val entryId: String? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val eventId: Long? = null,
     val offset: Long = 0,
     val runId: String,
     val sha256: String? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val timelineSnapshot: TimelineEntry? = null,
 ) {
     init {
         eventId?.let { require(it in 1L..9007199254740991L) }

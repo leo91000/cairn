@@ -2,7 +2,6 @@ import type { ChatView, ChatWakeup, WaitCondition } from '../../../packages/cont
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
 import sample from '../../../tests/fixtures/activity-events.json'
-import { activityEntries } from '../src/activity'
 import {
   liveWakeup,
   observedTarget,
@@ -17,6 +16,7 @@ import {
   waitTarget,
 } from '../src/chat-wait'
 import { filOf } from '../src/signal'
+import { fixtureEntries } from './timeline-fixture'
 
 const sha = '0b2ddce3a1b2c3d4e5f60718293a4b5c6d7e8f90'
 const checks: Extract<WaitCondition, { type: 'plugin' }> = {
@@ -158,7 +158,7 @@ describe('scheduled waits', () => {
   it('folds the wait tool and its events into one card that ends with the resumption', () => {
     const scheduled = wakeup({ condition: checks })
     const observation = { state: 'completed', type: 'github_pr_checks', conclusion: 'success' }
-    const entries = activityEntries([
+    const entries = fixtureEntries([
       toolCall('wait_for', 'cairn_workspace'),
       event('chat.wait', scheduled as unknown as Record<string, unknown>),
       event('chat.wait_ready', observation),
@@ -175,7 +175,7 @@ describe('scheduled waits', () => {
   it('places a scheduled wait at the end of its turn, after what the agent did once it called', () => {
     const scheduled = wakeup({ condition: checks })
     const message = (text: string) => event('item.completed', { item: { id: `message-${id}`, type: 'agent_message', text } })
-    const shape = (entries: ReturnType<typeof activityEntries>) => entries.map(entry => entry.kind === 'message' ? entry.text : entry.kind)
+    const shape = (entries: ReturnType<typeof fixtureEntries>) => entries.map(entry => entry.kind === 'message' ? entry.text : entry.kind)
     const turn = [
       event('turn.started', {}),
       message('I pushed the fix.'),
@@ -185,13 +185,13 @@ describe('scheduled waits', () => {
       message('CI is running; I will resume when it ends.'),
     ]
     // While the turn streams, the card stays last.
-    expect(shape(activityEntries(turn, true))).toEqual(['I pushed the fix.', 'group', 'CI is running; I will resume when it ends.', 'wait'])
-    const ended = activityEntries([...turn, event('turn.completed', {}), event('chat.user', { text: 'Thanks' })], true)
+    expect(shape(fixtureEntries(turn, true))).toEqual(['I pushed the fix.', 'group', 'CI is running; I will resume when it ends.', 'wait'])
+    const ended = fixtureEntries([...turn, event('turn.completed', {}), event('chat.user', { text: 'Thanks' })], true)
     expect(shape(ended)).toEqual(['I pushed the fix.', 'group', 'CI is running; I will resume when it ends.', 'wait', 'Thanks'])
     expect(ended[3]).toMatchObject({ id: 'wait:wake', wait: { ended: 'cancelled' } })
     // A wait the agent replaced stays where the later call replaced it.
     const later = wakeup({ id: 'later' })
-    const replaced = activityEntries([
+    const replaced = fixtureEntries([
       event('chat.wait', scheduled as unknown as Record<string, unknown>),
       message('Actually, a timer is enough.'),
       event('chat.sleep', later as unknown as Record<string, unknown>),
@@ -207,7 +207,7 @@ describe('scheduled waits', () => {
       status: 'succeeded',
       immediate: true,
     }
-    const immediate = activityEntries([
+    const immediate = fixtureEntries([
       event('turn.started', {}),
       event('chat.wait', scheduled as unknown as Record<string, unknown>),
       message('The run may already be done.'),
@@ -223,15 +223,15 @@ describe('scheduled waits', () => {
     const observation = { state: 'completed', type: 'github_pr_checks', conclusion: 'success' }
     const scheduled = wakeup({ condition: checks, observation })
     const ready = { ...event('chat.wait_ready', observation), text: 'Wait condition resolved' }
-    const entries = activityEntries([ready, event('chat.wakeup', scheduled as unknown as Record<string, unknown>)], true)
+    const entries = fixtureEntries([ready, event('chat.wakeup', scheduled as unknown as Record<string, unknown>)], true)
     expect(entries).toHaveLength(1)
     expect(entries[0]).toMatchObject({ id: 'wait:wake', wait: { wakeup: scheduled, observation, resumedAt: expect.any(Number) } })
-    const pending = activityEntries([ready], true, undefined, scheduled)
+    const pending = fixtureEntries([ready], true, undefined, scheduled)
     expect(pending).toHaveLength(1)
     expect(pending[0]).toMatchObject({ id: 'wait:wake', wait: { observation } })
-    expect(activityEntries([], true, undefined, scheduled)[0]).toMatchObject({ wait: { observation } })
+    expect(fixtureEntries([], true, undefined, scheduled)[0]).toMatchObject({ wait: { observation } })
     const scheduleOnly = event('chat.wait', wakeup({ condition: checks }) as unknown as Record<string, unknown>)
-    expect(activityEntries([scheduleOnly], true, undefined, scheduled)).toMatchObject([{ id: 'wait:wake', wait: { observation } }])
+    expect(fixtureEntries([scheduleOnly], true, undefined, scheduled)).toMatchObject([{ id: 'wait:wake', wait: { observation } }])
   })
 
   it('keeps an immediately completed replacement separate from the previous condition', () => {
@@ -243,7 +243,7 @@ describe('scheduled waits', () => {
       conclusion: 'success',
       immediate: true,
     }
-    const entries = activityEntries([
+    const entries = fixtureEntries([
       event('chat.wait', scheduled as unknown as Record<string, unknown>),
       { ...event('chat.wait_ready', observation), text: 'Wait condition already completed' },
     ], true)
@@ -257,7 +257,7 @@ describe('scheduled waits', () => {
     const observation = { state: 'completed', type: 'github_pr_checks', conclusion: 'success' }
     const ready = { ...event('chat.wait_ready', observation), text: 'Wait condition resolved' }
     const later = wakeup({ id: 'later', condition: checks, createdAt: ready.createdAt + 1 })
-    const entries = activityEntries([
+    const entries = fixtureEntries([
       ready,
       event('chat.user', { text: 'Another task' }),
       event('chat.wait', later as unknown as Record<string, unknown>),
@@ -269,7 +269,7 @@ describe('scheduled waits', () => {
   })
 
   it('keeps a failed wait call among the tools and recognises every provider’s name', () => {
-    const entries = activityEntries([
+    const entries = fixtureEntries([
       toolCall('mcp__cairn_workspace__sleep', 'Claude Code'),
       toolCall('cairn_workspace_sleep', 'OpenCode'),
       toolCall('sleep', 'cairn_workspace', { error: { message: 'Handle pending user input before scheduling a wakeup.' } }),
@@ -279,7 +279,7 @@ describe('scheduled waits', () => {
   })
 
   it('marks a wait a message cancelled, and an immediate result as its own card', () => {
-    const entries = activityEntries([
+    const entries = fixtureEntries([
       event('chat.sleep', wakeup() as unknown as Record<string, unknown>),
       event('chat.user', { messageId: 'next', text: 'Actually, do it now' }),
       event('chat.wait_ready', { state: 'completed', type: 'run_finished', status: 'succeeded' }, 'Wait condition already completed'),
@@ -297,7 +297,7 @@ describe('scheduled waits', () => {
       status: 'succeeded',
       immediate: true,
     }
-    const entries = activityEntries([
+    const entries = fixtureEntries([
       event('chat.wait', replaced as unknown as Record<string, unknown>),
       event('chat.wait_ready', immediate, 'Wait condition already completed'),
     ], true)
@@ -316,7 +316,7 @@ describe('scheduled waits', () => {
       },
     })
     // Recorded with the result, the reason no longer depends on when the call is reported.
-    const recorded = activityEntries([
+    const recorded = fixtureEntries([
       event('chat.wait_ready', { ...immediate, reason: 'First' }, 'Wait condition already completed'),
       call('item.started', 'c1', 'First'),
       event('chat.wait_ready', { ...immediate, reason: 'Second' }, 'Wait condition already completed'),
@@ -324,7 +324,7 @@ describe('scheduled waits', () => {
     ], true)
     expect(recorded.map(entry => entry.kind === 'wait' ? entry.wait.reason : undefined)).toEqual(['First', 'Second'])
     // A resumption whose scheduling is unloaded keeps one card, even if it repeats.
-    const resumed = activityEntries([
+    const resumed = fixtureEntries([
       event('chat.wakeup', wakeup() as unknown as Record<string, unknown>),
       event('chat.wakeup', wakeup() as unknown as Record<string, unknown>),
     ], true)
@@ -332,13 +332,13 @@ describe('scheduled waits', () => {
   })
 
   it('cancels the wait of a run that ends failed, not of a turn that is retried, and lists answered waits first', () => {
-    const retried = activityEntries([
+    const retried = fixtureEntries([
       event('chat.sleep', wakeup() as unknown as Record<string, unknown>),
       event('turn.failed', { error: { message: 'Provider unavailable' } }),
     ], true)
     expect(retried[0]).toMatchObject({ kind: 'wait', wait: { wakeup: wakeup() } })
     expect(retried[0]).not.toHaveProperty('wait.ended')
-    const failed = activityEntries([
+    const failed = fixtureEntries([
       event('chat.sleep', wakeup() as unknown as Record<string, unknown>),
       { ...event('status', {}), text: 'failed' },
     ], true)
@@ -457,7 +457,7 @@ describe('shared wait_ready corpus', () => {
         text: '',
         payload: { ...pending },
       }
-      const waits = activityEntries([scheduled, ready], true).filter(entry => entry.kind === 'wait')
+      const waits = fixtureEntries([scheduled, ready], true).filter(entry => entry.kind === 'wait')
       expect(waits).toHaveLength(immediate[index] ? 2 : 1)
       expect(waits[0]!.wait.ended).toBe(immediate[index] ? 'replaced' : undefined)
       const result = waits.at(-1)!.wait
@@ -472,7 +472,7 @@ describe('shared wait_ready corpus', () => {
 it('keeps mission wait events in one live card and resumes without a conversation pause', () => {
   const scheduled = wakeup({ messageId: null })
   const observation = { state: 'completed', type: 'time', wakeAt: scheduled.wakeAt }
-  const entries = activityEntries([
+  const entries = fixtureEntries([
     event('run.wait', scheduled as unknown as Record<string, unknown>),
     event('run.wakeup', { ...scheduled, observation }),
   ])

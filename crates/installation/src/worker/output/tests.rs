@@ -75,6 +75,27 @@ impl Fixture {
         }
     }
 
+    async fn bind_progress(&self) {
+        self.service
+            .store
+            .update_run_boundary(&self.id, json!({ "missionTurnId": "progress-turn" }))
+            .await
+            .unwrap();
+        self.checkpoint
+            .update(|saved| {
+                saved.runner_id = Some(Some("progress-attempt".into()));
+                saved.progress = Some(crate::worker::progress::Progress::launched(
+                    "progress-execution".into(),
+                    Some("progress-attempt".into()),
+                    None,
+                    Some("progress-turn".into()),
+                    1,
+                ));
+            })
+            .await
+            .unwrap();
+    }
+
     async fn output(&mut self, output: Output) {
         record(
             &self.service,
@@ -1083,6 +1104,58 @@ async fn performance_names_inside_diagnostics_are_retained_and_manager_logs_are_
     assert!(!logs.contains("invalid record"), "{logs}");
 }
 
+#[test]
+fn observed_reader_keeps_unknown_performance_on_the_current_redacted_path() {
+    crate::test_process::run_ignored("worker::output::tests::observed_reader_redaction_child");
+}
+
+#[tokio::test]
+#[ignore = "process-global diagnostic capture, invoked by its wrapper"]
+async fn observed_reader_redaction_child() {
+    use tracing::instrument::WithSubscriber;
+
+    let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let mut fixture = Fixture::new().await;
+    let log_path = fixture._root.path().join("manager.log");
+    let file = std::fs::File::create(&log_path).unwrap();
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(Arc::new(file))
+            .finish(),
+    );
+    let publisher = Publisher::new(&fixture.id, &crate::config::id());
+    let input = concat!(
+        "2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"thread/items/list\" request_id=1 event=\"started\" timeout_ms=20000\r\n",
+        "2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"sensitive-tool-credential\" request_id=1 event=\"started\" timeout_ms=20000\n",
+        "2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"thread/items/list\" request_id=1 event=\"started\" timeout_ms=20000 secret=sensitive-tool-credential\n",
+        "WARN native: cairn_performance: sensitive-tool-credential\r\n",
+        "2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"thread/items/list\" request_id=1 event=\"started\" timeout_ms=20000",
+    );
+    let (sender, mut events) = mpsc::channel(32);
+    read_agent_diagnostics(input.as_bytes(), sender, publisher).await;
+    let mut count = 0;
+    while let Some(output) = events.recv().await {
+        count += 1;
+        fixture
+            .output(output)
+            .with_subscriber(dispatch.clone())
+            .await;
+    }
+    assert_eq!(count, 4);
+    let logs = std::fs::read_to_string(&log_path).unwrap();
+    assert!(!logs.contains("sensitive-tool-credential"));
+    assert!(logs.contains("method=\\\"[redacted]\\\"") || logs.contains("method=\"[redacted]\""));
+    assert!(logs.contains("secret=[redacted]"));
+    let stored = fixture.events().await;
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0]["text"],
+        "WARN native: cairn_performance: [redacted]\r\n"
+    );
+}
+
 #[tokio::test]
 async fn terminal_styling_and_utf8_survive_long_diagnostic_fragments() {
     let prefix = "x".repeat(8190);
@@ -1297,4 +1370,317 @@ async fn display_redaction_cannot_change_engine_lifecycle_or_session_identity() 
             .iter()
             .any(|event| event["payload"]["type"] == "turn.[redacted]")
     );
+}
+
+#[tokio::test]
+async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_clock() {
+    use crate::worker::progress::{Phase, Progress};
+    let mut fixture = Fixture::new().await;
+    fixture
+        .service
+        .store
+        .update_run_boundary(&fixture.id, json!({"missionTurnId":"progress-turn"}))
+        .await
+        .unwrap();
+    fixture
+        .checkpoint
+        .update(|saved| {
+            saved.runner_id = Some(Some("progress-attempt".into()));
+            saved.progress = Some(Progress::launched(
+                "progress-execution".into(),
+                Some("progress-attempt".into()),
+                None,
+                Some("progress-turn".into()),
+                1,
+            ));
+        })
+        .await
+        .unwrap();
+    fixture
+        .output(Output::new(true, "diagnostic only".into()))
+        .await;
+    let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.progress.unwrap().advanced_at, None);
+    fixture.service.store.write(|db| {
+        db.0.execute_batch("CREATE TRIGGER reject_progress_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'fixture'); END;")?;
+        Ok(())
+    }).await.unwrap();
+    let result = record(
+        &fixture.service,
+        &Output::new(false, json!({"type":"turn.started"}).to_string()),
+        &fixture.checkpoint,
+        false,
+        &[],
+        &mut fixture.log_total,
+        &mut fixture.activity,
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(
+        fixture
+            .checkpoint
+            .snapshot()
+            .await
+            .progress
+            .unwrap()
+            .advanced_at,
+        None
+    );
+    assert_eq!(
+        RunCheckpoint::load(&fixture.service.store, &fixture.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .progress
+            .unwrap()
+            .advanced_at,
+        None
+    );
+    fixture
+        .service
+        .store
+        .write(|db| {
+            db.0.execute_batch("DROP TRIGGER reject_progress_event;")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    fixture.event(json!({"type":"turn.started"})).await;
+    let item = json!({"type":"item.updated","item":{"id":"stable","type":"mcp_tool_call","status":"completed","result":"stable-private"}});
+    fixture.event(item.clone()).await;
+    fixture
+        .checkpoint
+        .update(|saved| saved.progress.as_mut().unwrap().advanced_at = Some(2))
+        .await
+        .unwrap();
+    record(
+        &fixture.service,
+        &Output::new(false, item.to_string()),
+        &fixture.checkpoint,
+        false,
+        &["stable-private".into()],
+        &mut fixture.log_total,
+        &mut fixture.activity,
+    )
+    .await
+    .unwrap();
+    let coverage = fixture.checkpoint.snapshot().await.progress.unwrap();
+    assert!(
+        !coverage.complete,
+        "redaction-only changes cannot certify new work"
+    );
+    assert_eq!(coverage.advanced_at, Some(2));
+    fixture.event(json!({"type":"turn.completed"})).await;
+    let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let phase_at = saved.progress.as_ref().unwrap().phase_at;
+    assert_eq!(saved.progress.as_ref().unwrap().phase, Phase::Finalizing);
+    let restarted = Checkpoint::new(fixture.service.store.clone(), fixture.id.clone(), saved);
+    restarted
+        .update(|saved| saved.completed = Some(false))
+        .await
+        .unwrap();
+    record(&fixture.service, &Output::new(false, json!({"type":"item.updated","item":{"id":"late","type":"agent_message","text":"late snapshot"}}).to_string()), &restarted, false, &[], &mut fixture.log_total, &mut fixture.activity).await.unwrap();
+    restarted.persist().await.unwrap();
+    record(
+        &fixture.service,
+        &Output::new(
+            false,
+            json!({"type":"runner.finalized","attemptId":"wrong-attempt","physicalFinalized":true})
+                .to_string(),
+        ),
+        &restarted,
+        false,
+        &[],
+        &mut fixture.log_total,
+        &mut fixture.activity,
+    )
+    .await
+    .unwrap();
+    assert!(
+        restarted
+            .snapshot()
+            .await
+            .progress
+            .unwrap()
+            .finalized_at
+            .is_none()
+    );
+    record(&fixture.service, &Output::new(false, json!({"type":"runner.finalized","attemptId":"progress-attempt","physicalFinalized":true}).to_string()), &restarted, false, &[], &mut fixture.log_total, &mut fixture.activity).await.unwrap();
+    let mut saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(saved.progress.as_ref().unwrap().finalized_at.is_some());
+    assert_eq!(saved.progress.as_ref().unwrap().phase, Phase::Finalizing);
+    assert_eq!(saved.progress.as_ref().unwrap().phase_at, phase_at);
+    saved.runner_id = Some(Some("replacement".into()));
+    saved
+        .store(&fixture.service.store, &fixture.id)
+        .await
+        .unwrap();
+    let stale = record(
+        &fixture.service,
+        &Output::new(false, json!({"type":"turn.started"}).to_string()),
+        &restarted,
+        false,
+        &[],
+        &mut fixture.log_total,
+        &mut fixture.activity,
+    )
+    .await;
+    assert!(
+        stale.is_err(),
+        "old execution output must not advance replacement progress"
+    );
+}
+
+#[tokio::test]
+async fn malformed_or_truncated_stdout_retains_monitoring_gap_without_changing_control_policy() {
+    let malformed = "{malformed".to_owned();
+    let oversized = json!({
+        "type": "item.updated",
+        "item": {
+            "id": "message",
+            "type": "agent_message",
+            "text": "x".repeat(LINE_LIMIT),
+        },
+    })
+    .to_string();
+    for raw in [malformed, oversized] {
+        let mut fixture = Fixture::new().await;
+        fixture.bind_progress().await;
+        fixture.output(Output::new(false, " \t ".into())).await;
+        fixture
+            .output(Output::new(true, "diagnostic only".into()))
+            .await;
+        assert!(
+            fixture
+                .checkpoint
+                .snapshot()
+                .await
+                .progress
+                .as_ref()
+                .unwrap()
+                .complete
+        );
+        assert_ne!(
+            fixture.checkpoint.snapshot().await.output_interrupted,
+            Some(true)
+        );
+
+        fixture.output(Output::line(raw.as_bytes(), &[])).await;
+        assert!(
+            !fixture
+                .checkpoint
+                .snapshot()
+                .await
+                .progress
+                .as_ref()
+                .unwrap()
+                .complete
+        );
+        let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!saved.progress.as_ref().unwrap().complete);
+        assert_ne!(saved.output_interrupted, Some(true));
+
+        // Only an explicit trusted relay marker changes the existing control flag.
+        fixture
+            .event(json!({ "type": "runner.output_interrupted" }))
+            .await;
+        fixture
+            .event(json!({ "type": "runner.output_interrupted" }))
+            .await;
+        assert_eq!(
+            fixture.checkpoint.snapshot().await.output_interrupted,
+            Some(true)
+        );
+        let id = fixture.id.clone();
+        let gaps = fixture
+            .service
+            .store
+            .read(move |db| {
+                Ok(db
+                    .events_fixture(&id, 0, 100)?
+                    .iter()
+                    .filter(|event| {
+                        event["text"]
+                            == "Execution output was interrupted; some activity may be missing."
+                    })
+                    .count())
+            })
+            .await
+            .unwrap();
+        assert_eq!(gaps, 1);
+    }
+}
+
+#[tokio::test]
+async fn unsupported_json_degrades_coverage_even_after_log_budget_is_spent() {
+    for event in [
+        json!({}),
+        json!({ "type": "item.started" }),
+        json!({ "type": "item.updated", "item": null }),
+        json!({ "type": "item.completed", "item": [] }),
+        json!({ "type":"item.updated", "item":{"id":"stable","type":"agent_message","text":{"duration_ms":2}} }),
+        json!({ "type":"item.updated", "item":{"id":"stable","type":"agent_message","text":"stable","status":{"duration_ms":2}} }),
+        json!({ "type":"item.updated", "item":{"id":"stable","type":"agent_message","text":"stable","parent_id":{"duration_ms":2}} }),
+        json!({ "type":"item.updated", "item":{"id":"web","type":"web_search","action":{"type":"search","query":{"duration_ms":2}}} }),
+        json!({ "type":"item.updated", "item":{"id":"web","type":"web_search","action":{"type":"open_page","url":{"duration_ms":2}}} }),
+        json!({ "type":"item.updated", "item":{"id":"web","type":"web_search","action":{"type":"find_in_page","url":"https://example.test","pattern":{"duration_ms":2}}} }),
+        json!({ "type":"item.updated", "item":{"id":"web","type":"web_search","action":{"type":"search","query":"unchanged"},"results":[{"duration_ms":2}]} }),
+        json!({ "type": "future.provider_wait" }),
+        json!({ "type": "item.delta", "item": { "id": "future", "type": "agent_message" } }),
+    ] {
+        let mut fixture = Fixture::new().await;
+        fixture.bind_progress().await;
+        fixture.event(json!({ "type": "turn.started" })).await;
+        let advanced_at = fixture
+            .checkpoint
+            .snapshot()
+            .await
+            .progress
+            .as_ref()
+            .unwrap()
+            .advanced_at;
+        fixture.log_total = LOG_BUDGET;
+        fixture.event(event).await;
+        let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!saved.progress.as_ref().unwrap().complete);
+        assert_eq!(saved.progress.as_ref().unwrap().advanced_at, advanced_at);
+        assert_ne!(saved.output_interrupted, Some(true));
+    }
+}
+
+#[tokio::test]
+async fn normal_native_certificate_framing_does_not_report_lost_output() {
+    let mut fixture = Fixture::new().await;
+    fixture.bind_progress().await;
+    let stream = concat!(
+        "{\"type\":\"turn.completed\"}\n",
+        "\n{\"type\":\"runner.finalized\",\"attemptId\":\"progress-attempt\",\"physicalFinalized\":true}\n"
+    );
+    let (send, mut receive) = mpsc::channel(8);
+    read_output(stream.as_bytes(), false, send, Vec::new()).await;
+    while let Some(output) = receive.recv().await {
+        fixture.output(output).await;
+    }
+    let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(saved.output_interrupted, Some(true));
+    assert!(saved.progress.as_ref().unwrap().complete);
+    assert!(saved.progress.as_ref().unwrap().finalized_at.is_some());
 }

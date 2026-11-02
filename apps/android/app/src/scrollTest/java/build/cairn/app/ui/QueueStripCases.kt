@@ -130,7 +130,7 @@ abstract class QueueStripCases {
                             events: List<RunEvent> = emptyList(),
                         ): MockResponse {
                             val frame =
-                                "event: batch\nid: ${events.lastOrNull()?.id ?: 0}\ndata: ${wireJson.encodeToString(LiveBatch(events, state, true, false))}\n\n"
+                                "event: batch\nid: ${events.lastOrNull()?.id ?: 0}\ndata: ${wireJson.encodeToString(timelineBatch(events, state, true, false))}\n\n"
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
                                 .setBody(frame)

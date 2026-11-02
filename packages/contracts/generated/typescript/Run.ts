@@ -3,6 +3,8 @@ import type { AgentProvider } from './AgentProvider'
 import type { ChatExecution } from './ChatExecution'
 import type { ChatWakeup } from './ChatWakeup'
 import type { ContextUsage } from './ContextUsage'
+import type { ExclusiveReservation } from './ExclusiveReservation'
+import type { ExecutionResources } from './ExecutionResources'
 import type { OutcomeDismissal } from './OutcomeDismissal'
 import type { Retry } from './Retry'
 import type { RunRequester } from './RunRequester'
@@ -31,9 +33,9 @@ export interface Run {
   chatExecution?: ChatExecution | null
   outcome?: import('../../contracts').TaskOutcome | null
   dismissal?: OutcomeDismissal | null
-  resources?: import('../../nodes').NodeResources | null
+  resources?: ExecutionResources | null
   nativeMode?: import('../../nodes').NativeModeRequest | null
-  suspendedByExclusive?: import('../../nodes').ExclusiveReservation | null
+  suspendedByExclusive?: ExclusiveReservation | null
   backup?: import('../../run-boundaries').RunBackup | null
   storage?: import('../../run-boundaries').RunStorage | null
   executionBackend?: 'firecracker' | 'native' | null

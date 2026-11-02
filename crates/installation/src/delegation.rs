@@ -218,14 +218,14 @@ fn target_agent(db: &Db<'_>, run: &Value, input: &DelegateTaskInput) -> Result<V
                 crate::service::allowed(&current_access["nodes"], node.as_str().unwrap_or(""))
             })
         });
-    let plugins = crate::agent_grants::plugins(&current);
     let exclusive_nodes = crate::agent_grants::exclusive_nodes(&current);
-    let live_grants = crate::agent_grants::plugins(&agent)
+    let live_grants = crate::plugins::grants::contribution_ceiling_in(
+        db,
+        text(&current, "id"),
+        text(&agent, "id"),
+    )? && crate::agent_grants::exclusive_nodes(&agent)
         .iter()
-        .all(|instance| plugins.contains(instance))
-        && crate::agent_grants::exclusive_nodes(&agent)
-            .iter()
-            .all(|node| exclusive_nodes.contains(node));
+        .all(|node| exclusive_nodes.contains(node));
     // Wildcard node grants do not include an administrator review. A narrower
     // reviewed target must not give an unreviewed requester host privileges.
     let administrator_reviews = !crate::native::policy::supports(&agent, "native")
@@ -419,10 +419,26 @@ pub async fn delegate(s: &Service, bearer: &str, input: &Value) -> Result<Value>
             )));
         }
     }
+    let caller = crate::project_workspaces::authorize(s, bearer).await?;
+    let requester_id = text(&caller["snapshot"]["agent"], "id").to_owned();
+    let target_id = text(&engine, "id").to_owned();
+    let token = bearer.to_owned();
+    let authority = crate::capabilities::plugin_packages::Authority::for_execution(&caller)
+        .with_guard(move |db| crate::project_workspaces::authorize_in(db, &token).map(|_| ()));
+    let coverage = crate::plugins::grants::check_coverage_authorized(
+        s,
+        &requester_id,
+        &target_id,
+        Some(authority),
+    )
+    .await?;
     let (bearer, input) = (bearer.to_owned(), input.clone());
     let result = s
         .store
-        .transaction(move |db| create(db, &bearer, &input, &engine))
+        .transaction(move |db| {
+            coverage.authorize(db)?;
+            create(db, &bearer, &input, &engine)
+        })
         .await?;
     s.worker.notify();
     Ok(serde_json::to_value(result)?)
@@ -607,4 +623,119 @@ pub(crate) fn wait_result(db: &Db<'_>, chat_id: &str) -> Result<Option<WaitObser
         run.as_ref(),
         task_error(db, &chat, run.as_ref())?,
     )))
+}
+
+/// Every delegated action keeps the requester's live ceiling, including plugin
+/// contributions and resource restrictions. A deleted requester confers no authority.
+pub(crate) fn authorize_run(db: &Db<'_>, run: &Value) -> Result<()> {
+    let Some(chat) = db.conversation_for_run(text(run, "id"))? else {
+        return Ok(());
+    };
+    let Some(requester) = chat.requested_by else {
+        return Ok(());
+    };
+    let Some(parent) = db
+        .conversation(&requester.chat_id)?
+        .filter(|chat| chat.lifecycle == cairn_contracts::ConversationLifecycle::Active)
+    else {
+        return Ok(());
+    };
+    let parent_agent = required(
+        db.agent_snapshot(&parent.agent_id)?,
+        "Requesting agent not found",
+    )?;
+    let current = required(
+        db.agent_snapshot(text(&run["snapshot"]["agent"], "id"))?,
+        "Agent not found",
+    )?;
+    if policy(&parent_agent)["delegation"] != true
+        || !covers(&parent_agent, &current)
+        || !crate::plugins::grants::contribution_ceiling_in(
+            db,
+            &parent.agent_id,
+            text(&current, "id"),
+        )?
+    {
+        return Err(Error::forbidden(
+            "The requesting agent no longer covers this delegated task's contributions and resources.",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn authorize_async(s: &Service, run: &Value) -> Result<()> {
+    authorize_async_with(
+        s,
+        run,
+        crate::capabilities::plugin_packages::Authority::for_execution(run),
+    )
+    .await?;
+    Ok(())
+}
+
+pub(crate) fn authorize_async_with<'a>(
+    s: &'a Service,
+    run: &'a Value,
+    authority: crate::capabilities::plugin_packages::Authority,
+) -> futures_util::future::BoxFuture<'a, Result<crate::capabilities::plugin_packages::Authority>> {
+    Box::pin(async move {
+        let live_run = run.clone();
+        let live_authority = authority.clone();
+        let run = run.clone();
+        let pair = s
+            .store
+            .read(move |db| {
+                authorize_run(db, &run)?;
+                let Some(chat) = db.conversation_for_run(text(&run, "id"))? else {
+                    return Ok(None);
+                };
+                let Some(lineage) = chat.requested_by else {
+                    return Ok(None);
+                };
+                let parent = db.conversation(&lineage.chat_id)?.filter(|chat| {
+                    chat.lifecycle == cairn_contracts::ConversationLifecycle::Active
+                });
+                parent
+                    .map(|parent| {
+                        let target = text(&run["snapshot"]["agent"], "id").to_owned();
+                        let revisions = (
+                            required(db.agent(&parent.agent_id)?, "Requesting agent not found")?
+                                .revision,
+                            required(db.agent(&target)?, "Agent not found")?.revision,
+                        );
+                        Ok((parent.agent_id, target, revisions))
+                    })
+                    .transpose()
+            })
+            .await?;
+        let authority = if let Some((parent, target, revisions)) = pair {
+            let (left, right) = (parent.clone(), target.clone());
+            let authority = authority.with_guard(move |db| {
+                if required(db.agent(&left)?, "Requesting agent not found")?.revision != revisions.0
+                    || required(db.agent(&right)?, "Agent not found")?.revision != revisions.1
+                {
+                    return Err(Error::forbidden(
+                        "Delegated plugin grants changed. Retry the action.",
+                    ));
+                }
+                Ok(())
+            });
+            let coverage = crate::plugins::grants::check_coverage_authorized(
+                s,
+                &parent,
+                &target,
+                Some(authority.clone()),
+            )
+            .await?;
+            authority.with_guard(move |db| coverage.authorize(db))
+        } else {
+            authority
+        };
+        authority.recheck(s).await?;
+        Ok(authority.with_recheck_guard(move |s| {
+            let run = live_run.clone();
+            let authority = live_authority.clone();
+            Box::pin(async move { authorize_async_with(s, &run, authority).await.map(|_| ()) })
+        }))
+    })
 }

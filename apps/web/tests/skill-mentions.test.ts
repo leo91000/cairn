@@ -19,6 +19,10 @@ function skill(name: string, scope = 'global', extra: Partial<Skill> = {}): Skil
     content: '',
     path: '',
     valid: true,
+    usageCount: 0,
+    files: 0,
+    bytes: 0,
+    executables: 0,
     ...extra,
   }
 }

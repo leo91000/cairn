@@ -9,6 +9,8 @@ import {
   ref,
   watch,
 } from 'vue'
+import { configureConversationPlacement } from '../../../../packages/contracts/generated/configureConversationPlacement'
+import { moveConversationToNode } from '../../../../packages/contracts/generated/moveConversationToNode'
 import {
   formatBytes,
   LOCAL_NODE_ID,
@@ -219,7 +221,7 @@ async function request(operation: () => Promise<void>) {
 function savePreference() {
   const desired = { mode: mode.value, selection: selection.value }
   return request(async () => {
-    await api(`/nodes/placement/${props.run.id}`, { method: 'PUT', body: JSON.stringify({ pinnedNodeId: mode.value === 'fixed' ? selection.value : null, preferredNodeId: mode.value === 'preferred' ? selection.value : null }) })
+    await configureConversationPlacement(api, { runId: props.run.id, selection: { pinnedNodeId: mode.value === 'fixed' ? selection.value : null, preferredNodeId: mode.value === 'preferred' ? selection.value : null } })
     savedPlacement.value = desired
     saved.value = 'Preference saved. It applies the next time this conversation starts or recovers.'
   })
@@ -227,11 +229,10 @@ function savePreference() {
 
 function move() {
   return request(async () => {
-    await api(`/nodes/placement/${props.run.id}/move`, {
-      method: 'POST',
-      body: JSON.stringify({
-        nodeId: destination.value,
-      }),
+    await moveConversationToNode(api, {
+      runId: props.run.id,
+      nodeId: destination.value,
+      waitSeconds: 0,
     })
     moving.value = false
     saved.value = 'Move requested.'

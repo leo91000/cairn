@@ -33,9 +33,11 @@ data class CachedHistory(
     val history: String,
     val state: LiveState,
     val events: List<RunEvent>,
+    /** Timeline cards the server interpreted; never derived from the events. */
+    val entries: List<TimelineCard> = emptyList(),
     val savedAt: Long = System.currentTimeMillis(),
     val position: ReadingPosition? = null,
-    val version: Int = 1,
+    val version: Int = 2,
     val oldest: Long = 0,
     val hasOlder: Boolean = false,
 )
@@ -74,8 +76,8 @@ class HistoryCache(
             .joinToString("") { "%02x".format(it) }
 
     private fun valid(value: CachedHistory) =
-        value.version == 1 &&
-            value.history.startsWith("v1:") &&
+        value.version == 2 &&
+            value.history.startsWith("v2:") &&
             value.cursor >= 0 &&
             System.currentTimeMillis() - value.savedAt < ttl &&
             value.events.all { it.id > 0 && it.id <= value.cursor }
@@ -182,7 +184,7 @@ class HistoryCache(
     private fun prepareValue(key: String, value: CachedHistory): CachedHistory {
         val recent = recentHistory(value)
         val first = recent.events.firstOrNull()?.id
-        val trimmed = first != value.events.firstOrNull()?.id
+        val trimmed = recent !== value
         val position =
             (recent.position
                     ?: positions[key]?.takeIf { it.history == value.history }?.value
@@ -255,7 +257,9 @@ class HistoryCache(
         val bytes =
             value.events.sumOf {
                 (it.text.length + it.payload.toString().length).toLong() * 2
-            } + wireJson.encodeToString(value.state).length.toLong() * 2
+            } +
+                value.entries.sumOf { wireJson.encodeToString(it).length.toLong() * 2 } +
+                wireJson.encodeToString(value.state).length.toLong() * 2
         return Entry(value, bytes)
     }
 
@@ -359,19 +363,42 @@ class HistoryCache(
 
 /** Keep a contiguous recent suffix. An oversized older event stays available via pagination. */
 internal fun recentHistory(value: CachedHistory): CachedHistory {
-    val kept = ArrayDeque<RunEvent>()
-    var bytes = wireJson.encodeToString(value.state).toByteArray().size + 4096
-    for (event in value.events.sortedByDescending { it.id }) {
-        val size = wireJson.encodeToString(event).toByteArray().size + 1
+    val activeWaits =
+        value.entries
+            .filter { card ->
+                val notice = (card.content as? build.cairn.contracts.TimelineContent.C)?.notice
+                notice?.code == "backgroundTasks" && notice.waitingSince != null
+            }
+            .toSet()
+    val groups = mutableMapOf<Long, Int>()
+    for (event in value.events) {
+        groups[event.id] =
+            (groups[event.id] ?: 0) + wireJson.encodeToString(event).toByteArray().size + 1
+    }
+    for (card in value.entries) {
+        if (card !in activeWaits) {
+            groups[card.source] =
+                (groups[card.source] ?: 0) + wireJson.encodeToString(card).toByteArray().size + 1
+        }
+    }
+    var bytes =
+        wireJson.encodeToString(value.state).toByteArray().size +
+            4096 +
+            activeWaits.sumOf { wireJson.encodeToString(it).toByteArray().size + 1 }
+    val ordered = groups.keys.sortedDescending()
+    var kept = 0
+    for (id in ordered) {
+        val size = groups.getValue(id)
         if (bytes + size > 3 * 1024 * 1024) break
-        kept.addFirst(event)
+        kept++
         bytes += size
     }
-    if (kept.size == value.events.size) return value
+    if (kept == ordered.size) return value
     // A numeric list index is no longer valid after dropping a prefix.
-    val oldest = kept.minOfOrNull { it.id } ?: (value.cursor + 1)
+    val oldest = if (kept == 0) value.cursor + 1 else ordered[kept - 1]
     return value.copy(
         events = value.events.filter { it.id >= oldest },
+        entries = value.entries.filter { it.source >= oldest || it in activeWaits },
         oldest = oldest,
         hasOlder = true,
         position = null,

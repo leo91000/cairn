@@ -79,6 +79,16 @@ existing workload unit. Its per-conversation ceilings and shared node slice boun
 CPU/RAM/PIDs; it cannot delegate processes into another cgroup. The existing
 freeze monitor freezes them together. Stop, cancellation, revocation/lease expiry,
 guardian death and controller death fence the entire unit before storage unmount.
+When completion is refused, `native_workload_fence` reports a bounded systemd
+state, stop-command outcome, cgroup populated/frozen flags and remaining task
+counter. Reports are limited to one per node process per 30 seconds, with the
+number of unconfirmed observations since the previous report; other fields are
+one sampled refusal, not interval totals. Availability flags distinguish missing
+evidence from zero. These are best-effort observations after refusal, never
+permission to release ownership; the optional task-counter read uses a 100 ms
+timeout. These fields contain no
+unit names, process IDs, commands, paths or conversation identifiers. A positive
+task count does not distinguish kernel-blocked tasks from other remaining work.
 Container restart policies are refused: recreate/start development services in
 each new turn, after its current policy is checked. No daemon runs between turns.
 

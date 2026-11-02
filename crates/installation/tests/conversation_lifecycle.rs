@@ -2,6 +2,7 @@ use crate::common::run_fixture::DbRunFixture;
 use cairn_contracts::EventKind;
 use common::account_fixture::AccountFixtures;
 use common::node_fixture::*;
+use common::run_fixture::*;
 
 mod common;
 
@@ -395,7 +396,7 @@ async fn fresh_session_availability_uses_restored_runs_and_keeps_its_lifetime() 
         if historical_chat {
             app.service
                 .store
-                .update_run_boundary(&run, json!({ "restoredAt": 10 }))
+                .update_run_boundary_fixture(&run, json!({ "restoredAt": 10 }))
                 .await
                 .unwrap();
         }
@@ -417,7 +418,7 @@ async fn fresh_session_availability_uses_restored_runs_and_keeps_its_lifetime() 
             );
             app.service
                 .store
-                .update_run_boundary(&run, json!({ "restoredAt": 10 }))
+                .update_run_boundary_fixture(&run, json!({ "restoredAt": 10 }))
                 .await
                 .unwrap();
         }
@@ -1075,7 +1076,7 @@ async fn interrupted_environment_cleanup_blocks_execution_and_retries_after_poli
         .await;
     app.service
         .store
-        .update_run_boundary(&run, json!({ "workspaces": [] }))
+        .update_run_boundary_fixture(&run, json!({ "workspaces": [] }))
         .await
         .unwrap();
     let mut current = app

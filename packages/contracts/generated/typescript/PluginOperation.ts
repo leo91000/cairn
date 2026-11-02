@@ -7,4 +7,5 @@ export interface PluginOperation {
   state: PluginOperationState
   result: PluginOperationResult | null
   error: string | null
+  errorStatus?: number | null
 }
