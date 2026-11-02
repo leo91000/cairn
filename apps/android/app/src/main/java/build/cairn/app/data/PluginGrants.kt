@@ -149,6 +149,9 @@ private fun mergeContributions(
         when {
             mineValue == baseValue -> theirsItem
             theirsValue == baseValue || mineValue == theirsValue -> mineItem
+            // Removing a contribution is an explicit revocation. Do not let a
+            // concurrent edit to its roots restore it during rebase.
+            baseItem != null && (mineItem == null || theirsItem == null) -> null
             else -> {
                 val template = mineItem ?: theirsItem ?: baseItem ?: return@mapNotNull null
                 val resources =
@@ -159,8 +162,14 @@ private fun mergeContributions(
                     ) { resource ->
                         "${resource.resourceType}:${resource.id}"
                     }
-                if (resources.size > 100) mineItem ?: theirsItem
-                else template.copy(resources = resources)
+                when {
+                    resources.size > 100 -> mineItem ?: theirsItem
+                    baseItem?.resources?.isNotEmpty() == true &&
+                        mineItem?.resources?.isNotEmpty() == true &&
+                        theirsItem?.resources?.isNotEmpty() == true &&
+                        resources.isEmpty() -> mineItem
+                    else -> template.copy(resources = resources)
+                }
             }
         }
     }
@@ -177,6 +186,10 @@ private fun mergeGrant(
     val theirsValue = grantValueKey(theirs)
     if (mineValue == baseValue) return theirs
     if (theirsValue == baseValue || mineValue == theirsValue) return mine
+
+    // Preserve a revocation made on either side instead of rebuilding access from
+    // the surviving side's selected contributions.
+    if (base != null && (mine == null || theirs == null)) return null
 
     // Independent selected contributions merge; mode changes remain the local choice and
     // appear in the sensitive review against the latest server snapshot.

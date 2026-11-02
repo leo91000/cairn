@@ -160,6 +160,12 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
     await picker.getByLabel('Search resources').fill('support')
     await picker.getByRole('checkbox', { name: 'Team › #support', exact: true }).check()
     await expect(picker.getByText('Only selected roots', { exact: false })).toBeVisible()
+    if (contribution === 'tool grant_ui_read') {
+      await picker.getByLabel('Search resources').fill('general')
+      await picker.getByRole('checkbox', { name: 'Team › #general', exact: true }).check()
+      await expect(picker.getByText('Team › #general · includes descendants', { exact: true })).toBeVisible()
+    }
+
     await picker.getByLabel('Search resources').fill('general')
     await expect(picker.getByText('Team › #general', { exact: true })).toBeVisible()
     await expect(picker.getByText('Team › #support · includes descendants', { exact: true })).toBeVisible()
@@ -215,18 +221,22 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
     return testWindow.__pluginCatalogReadFailed
   })).toBe(true)
   await expect(page.getByRole('button', { name: 'Reload', exact: true })).toBeEnabled()
-  await expect(page.getByLabel('Supply run credentials from Automation', { exact: true })).toBeChecked()
+  await expect(page.getByRole('list', { name: 'Held plugin access' })).toContainText('Granted instance')
   await page.getByRole('button', { name: 'Reload', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Reload', exact: true })).toHaveCount(0)
   await expect(page.getByRole('combobox', { name: 'Access to Review' })).toHaveValue('full')
   await expect(page.getByLabel('Supply run credentials from Automation', { exact: true })).toBeChecked()
   await expect(page.getByLabel('Supply run credentials from Review', { exact: true })).not.toBeChecked()
+  await expect(page.getByRole('group', { name: 'Resource restrictions' }).first()).toContainText('Team › #general · includes descendants')
   await saveAgent(page, true)
   const saved = await workspace.api(`/api/agents/${agent.id}/plugin-grants`)
-  expect(saved.grants).toEqual(expect.arrayContaining([
-    { instanceId: first, access: { type: 'selected', contributions: expect.arrayContaining(['tool', 'command', 'hook'].map(kind => ({ kind, name: kind === 'tool' ? 'grant_ui_read' : kind === 'command' ? 'post' : 'message', resources: [{ resourceType: 'channel', id: 'support' }] }))) } },
-    { instanceId: second, access: { type: 'full' } },
+  const savedSupport = saved.grants.find((grant: any) => grant.instanceId === first)
+  expect(savedSupport.access.contributions).toEqual(expect.arrayContaining([
+    { kind: 'tool', name: 'grant_ui_read', resources: expect.arrayContaining([{ resourceType: 'channel', id: 'support' }, { resourceType: 'channel', id: 'general' }]) },
+    { kind: 'command', name: 'post', resources: [{ resourceType: 'channel', id: 'support' }] },
+    { kind: 'hook', name: 'message', resources: [{ resourceType: 'channel', id: 'support' }] },
   ]))
+  expect(saved.grants).toContainEqual({ instanceId: second, access: { type: 'full' } })
   expect(saved.runCredentialInstances).toEqual([second])
   expect(saved.grants).toContainEqual({
     instanceId: remote,
@@ -271,6 +281,13 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   await expect(page.getByRole('heading', { name: 'Local name after retry', exact: true })).toBeVisible()
   const savedAgent = await workspace.api(`/api/agents/${agent.id}`)
   expect(savedAgent).toMatchObject({ name: 'Local name after retry', description: 'Remote description survives retry' })
+
+  await page.goto(workspacePath(`/agents/${agent.id}?section=plugins`))
+  await authenticateWorkspace(page)
+  const supportSwitch = page.getByRole('switch', { name: 'Access to Grant UI Support' })
+  await supportSwitch.uncheck()
+  await expect(page.getByRole('combobox', { name: 'Access to Support' })).toHaveValue('none')
+  await expect(page.getByText('Only checked contributions are granted.', { exact: false })).toHaveCount(0)
 })
 
 test('agent overview shows plugin access as unavailable when the grant read fails', async ({ page, workspace }) => {

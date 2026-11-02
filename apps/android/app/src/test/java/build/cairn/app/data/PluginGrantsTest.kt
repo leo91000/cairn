@@ -164,6 +164,107 @@ class PluginGrantsTest {
     }
 
     @Test
+    fun rebasingPreservesLocalNoAccessWhenTheSameGrantChangedRemotely() {
+        val baseGrant =
+            PluginInstanceGrant(
+                PluginGrantAccess.B(
+                    listOf(
+                        PluginContributionGrant(
+                            "tool",
+                            "read",
+                            listOf(PluginResourceRef("support", "channel")),
+                        )
+                    )
+                ),
+                support,
+            )
+        val base = PluginGrantDraft(listOf(baseGrant))
+        val mine = PluginGrantDraft()
+        val theirs =
+            PluginGrantDraft(
+                listOf(
+                    baseGrant.copy(
+                        access =
+                            PluginGrantAccess.B(
+                                listOf(
+                                    PluginContributionGrant(
+                                        "tool",
+                                        "read",
+                                        listOf(
+                                            PluginResourceRef("support", "channel"),
+                                            PluginResourceRef("general", "channel"),
+                                        ),
+                                    )
+                                )
+                            )
+                    )
+                )
+            )
+
+        assertEquals(mine, mergePluginGrantDrafts(base, mine, theirs))
+    }
+
+    @Test
+    fun rebasingRootRemovalsCannotCreateAnUnrestrictedResourceGrant() {
+        val base =
+            PluginGrantDraft(
+                listOf(
+                    PluginInstanceGrant(
+                        PluginGrantAccess.B(
+                            listOf(
+                                PluginContributionGrant(
+                                    "tool",
+                                    "read",
+                                    listOf(
+                                        PluginResourceRef("support", "channel"),
+                                        PluginResourceRef("general", "channel"),
+                                    ),
+                                )
+                            )
+                        ),
+                        support,
+                    )
+                )
+            )
+        val mine =
+            PluginGrantDraft(
+                listOf(
+                    PluginInstanceGrant(
+                        PluginGrantAccess.B(
+                            listOf(
+                                PluginContributionGrant(
+                                    "tool",
+                                    "read",
+                                    listOf(PluginResourceRef("general", "channel")),
+                                )
+                            )
+                        ),
+                        support,
+                    )
+                )
+            )
+        val theirs =
+            PluginGrantDraft(
+                listOf(
+                    PluginInstanceGrant(
+                        PluginGrantAccess.B(
+                            listOf(
+                                PluginContributionGrant(
+                                    "tool",
+                                    "read",
+                                    listOf(PluginResourceRef("support", "channel")),
+                                )
+                            )
+                        ),
+                        support,
+                    )
+                )
+            )
+
+        assertEquals(mine, mergePluginGrantDrafts(base, mine, theirs))
+    }
+
+    @Test
     fun rebasingKeepsSuppliersForUnknownInstancesDistinct() {
         val grants =
             listOf(

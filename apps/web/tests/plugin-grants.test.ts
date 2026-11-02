@@ -85,6 +85,37 @@ it('rebases concurrent grant additions and independent resource roots', () => {
   expect(merged.runCredentialInstances).toEqual(['automation', 'review'])
 })
 
+it('keeps a local no-access choice when the same grant changed remotely', () => {
+  const base: GrantDraft = {
+    grants: [{ instanceId: 'support', access: { type: 'selected', contributions: [{ kind: 'tool', name: 'read', resources: [{ resourceType: 'channel', id: 'support' }] }] } }],
+    runCredentialInstances: [],
+  }
+  const mine: GrantDraft = { grants: [], runCredentialInstances: [] }
+  const theirs: GrantDraft = {
+    grants: [{ instanceId: 'support', access: { type: 'selected', contributions: [{ kind: 'tool', name: 'read', resources: [{ resourceType: 'channel', id: 'support' }, { resourceType: 'channel', id: 'general' }] }] } }],
+    runCredentialInstances: [],
+  }
+
+  expect(mergeGrantDrafts(base, mine, theirs)).toEqual(mine)
+})
+
+it('does not turn concurrent root removals into an unrestricted resource grant', () => {
+  const base: GrantDraft = {
+    grants: [{ instanceId: 'support', access: { type: 'selected', contributions: [{ kind: 'tool', name: 'read', resources: [{ resourceType: 'channel', id: 'support' }, { resourceType: 'channel', id: 'general' }] }] } }],
+    runCredentialInstances: [],
+  }
+  const mine: GrantDraft = {
+    grants: [{ instanceId: 'support', access: { type: 'selected', contributions: [{ kind: 'tool', name: 'read', resources: [{ resourceType: 'channel', id: 'general' }] }] } }],
+    runCredentialInstances: [],
+  }
+  const theirs: GrantDraft = {
+    grants: [{ instanceId: 'support', access: { type: 'selected', contributions: [{ kind: 'tool', name: 'read', resources: [{ resourceType: 'channel', id: 'support' }] }] } }],
+    runCredentialInstances: [],
+  }
+
+  expect(mergeGrantDrafts(base, mine, theirs)).toEqual(mine)
+})
+
 it('keeps credential suppliers for unknown instances distinct while rebasing', () => {
   const merged = mergeGrantDrafts(
     {

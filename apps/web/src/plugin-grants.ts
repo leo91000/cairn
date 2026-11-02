@@ -64,6 +64,11 @@ function mergeContributions(
     if (theirsValue === baseValue || mineValue === theirsValue)
       return mineItem ? [mineItem] : []
 
+    // Removing a contribution is an explicit revocation. Do not let a concurrent
+    // edit to its roots restore it during rebase.
+    if (baseItem && (!mineItem || !theirsItem))
+      return []
+
     const identity = (resource: PluginResourceRef) => `${resource.resourceType}:${resource.id}`
     const template = mineItem || theirsItem || baseItem
     if (!template)
@@ -71,6 +76,10 @@ function mergeContributions(
     const resources = mergeSet(baseItem?.resources ?? [], mineItem?.resources ?? [], theirsItem?.resources ?? [], identity)
     if (resources.length > MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION)
       return mineItem ? [mineItem] : theirsItem ? [theirsItem] : []
+    // An empty root list means unrestricted access. If both sides retained a
+    // restriction but removed different roots, keep the local restriction.
+    if (baseItem?.resources.length && mineItem?.resources.length && theirsItem?.resources.length && !resources.length)
+      return [mineItem]
     return [{ ...template, resources }]
   })
 }
@@ -87,6 +96,11 @@ function mergeGrant(
     return theirs
   if (theirsValue === baseValue || mineValue === theirsValue)
     return mine
+
+  // Preserve a revocation made on either side instead of rebuilding access from
+  // the surviving side's selected contributions.
+  if (base && (!mine || !theirs))
+    return undefined
 
   // Selected contributions are independent edits. Merge those by contribution and resource;
   // access-mode changes remain the local choice and are shown in the sensitive review.

@@ -22,12 +22,60 @@ import build.cairn.contracts.PluginResourceType
 import build.cairn.contracts.ResolvePluginResourceInput
 import build.cairn.contracts.listPluginResources
 import build.cairn.contracts.resolvePluginResource
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 internal const val MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION = 100
+
+private const val PLUGIN_RESOURCE_PATH_CACHE_MS = 60_000L
+
+private data class CachedPluginResourcePath(val path: String, val resolvedAt: Long)
+
+private val resolvedPluginResourcePaths = ConcurrentHashMap<String, CachedPluginResourcePath>()
+private val pluginResourcePathLocks = ConcurrentHashMap<String, Mutex>()
+
+private suspend fun resolvePluginResourcePath(
+    api: CairnApi,
+    plugin: String,
+    instance: String,
+    root: PluginResourceRef,
+): String {
+    val key = "$plugin:$instance:${root.resourceType}:${root.id}"
+    resolvedPluginResourcePaths[key]
+        ?.takeIf { System.currentTimeMillis() - it.resolvedAt < PLUGIN_RESOURCE_PATH_CACHE_MS }
+        ?.let {
+            return it.path
+        }
+
+    val lock = pluginResourcePathLocks.computeIfAbsent(key) { Mutex() }
+    return lock.withLock {
+        resolvedPluginResourcePaths[key]
+            ?.takeIf { System.currentTimeMillis() - it.resolvedAt < PLUGIN_RESOURCE_PATH_CACHE_MS }
+            ?.path
+            ?: run {
+                val resolved =
+                    api.resolvePluginResource(
+                        ResolvePluginResourceInput(
+                            root.id,
+                            instance,
+                            plugin,
+                            root.resourceType,
+                        )
+                    )
+                (resolved.ancestors.map { it.name } + resolved.resource.name)
+                    .joinToString(" › ")
+                    .also {
+                        resolvedPluginResourcePaths[key] =
+                            CachedPluginResourcePath(it, System.currentTimeMillis())
+                    }
+            }
+    }
+}
 
 internal fun canSelectPluginResourceRoot(selectedCount: Int, alreadySelected: Boolean): Boolean =
     alreadySelected || selectedCount < MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION
@@ -402,8 +450,29 @@ private fun ResourceGrantPicker(
     var nextPage by remember { mutableStateOf<Int?>(null) }
     var attempt by remember { mutableIntStateOf(0) }
     var items by remember { mutableStateOf(emptyList<Pair<PluginResource, String>>()) }
+    var selectedPaths by remember(plugin, instance) { mutableStateOf(emptyMap<String, String>()) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(plugin, instance, selected) {
+        selectedPaths = emptyMap()
+        selectedPaths = coroutineScope {
+            selected
+                .map { root ->
+                    async {
+                        val path =
+                            try {
+                                resolvePluginResourcePath(api, plugin, instance, root)
+                            } catch (e: Exception) {
+                                if (e is CancellationException) throw e
+                                "${root.resourceType} · ${root.id}"
+                            }
+                        "${root.resourceType}:${root.id}" to path
+                    }
+                }
+                .awaitAll()
+                .toMap()
+        }
+    }
     Text(
         if (selected.isEmpty())
             "Toutes les ressources. Choisissez une ressource pour restreindre cette contribution."
@@ -419,7 +488,7 @@ private fun ResourceGrantPicker(
     selected.forEach { item ->
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                "${item.resourceType} · ${item.id} et descendants",
+                "${selectedPaths["${item.resourceType}:${item.id}"] ?: "${item.resourceType} · ${item.id}"} et descendants",
                 Modifier.weight(1f),
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -445,17 +514,13 @@ private fun ResourceGrantPicker(
                 result.items
                     .map { item ->
                         async {
-                            val ancestry =
-                                api.resolvePluginResource(
-                                    ResolvePluginResourceInput(
-                                        item.id,
-                                        instance,
-                                        plugin,
-                                        item.resourceType,
-                                    )
-                                )
                             item to
-                                (ancestry.ancestors.map { it.name } + item.name).joinToString(" › ")
+                                resolvePluginResourcePath(
+                                    api,
+                                    plugin,
+                                    instance,
+                                    PluginResourceRef(item.id, item.resourceType),
+                                )
                         }
                     }
                     .awaitAll()

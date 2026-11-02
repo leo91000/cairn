@@ -28,6 +28,7 @@ const props = defineProps<{
 // Granted plugin instance ids.
 const grants = defineModel<GrantDraft>('grants', { required: true })
 const plugins = computed(() => grants.value.grants.map(item => item.instanceId))
+const editorRevisions = ref<Record<string, number>>({})
 const query = ref('')
 const grantable = computed(() => grantablePackages(props.packages))
 const instances = computed(() => props.connections.filter(connection => grantable.value.some(entry => entry.id === connection.pluginId)))
@@ -53,6 +54,22 @@ function packageName(pluginId: string) {
 
 function set(id: string, _on: boolean) {
   grants.value = removeGrant(grants.value, id)
+}
+
+function toggleAccess(id: string, on: boolean) {
+  editorRevisions.value = {
+    ...editorRevisions.value,
+    [id]: (editorRevisions.value[id] ?? 0) + 1,
+  }
+  grants.value = on
+    ? {
+        ...grants.value,
+        grants: [
+          ...grants.value.grants.filter(item => item.instanceId !== id),
+          { instanceId: id, access: { type: 'full' } },
+        ],
+      }
+    : removeGrant(grants.value, id)
 }
 
 function update(next: GrantDraft, pluginId: string, instanceId: string) {
@@ -93,7 +110,7 @@ function supplierName(pluginId: string) {
       </header>
       <ul v-if="rows.length" class="divide-y divide-line">
         <li v-for="connection in rows" :key="connection.id" class="flex min-w-0 flex-wrap items-center gap-3 px-5 py-3 phone:px-4">
-          <UiSwitch :model-value="plugins.includes(connection.id)" :label="`Access to ${packageName(connection.pluginId)} ${connection.name}`" @update:model-value="grants = $event ? { ...grants, grants: [...grants.grants, { instanceId: connection.id, access: { type: 'full' } }] } : removeGrant(grants, connection.id)" />
+          <UiSwitch :model-value="plugins.includes(connection.id)" :label="`Access to ${packageName(connection.pluginId)} ${connection.name}`" @update:model-value="toggleAccess(connection.id, $event)" />
           <div class="min-w-0 flex-1">
             <p class="flex flex-wrap items-center gap-2 text-sm">
               <span class="min-w-0 truncate font-semibold">{{ connection.name }}</span>
@@ -116,6 +133,7 @@ function supplierName(pluginId: string) {
           </RouterLink>
           <PluginGrantEditor
             v-if="entry.manifest"
+            :key="`${connection.id}:${editorRevisions[connection.id] ?? 0}`"
             :model-value="grants"
             :manifest="entry.manifest"
             :instance-id="connection.id"

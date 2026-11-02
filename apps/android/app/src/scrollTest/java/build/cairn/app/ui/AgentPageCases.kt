@@ -1081,14 +1081,14 @@ abstract class AgentPageCases {
             resourceSearch.performTextClearance()
             resourceSearch.performTextInput("general")
             waitForText("Team › #general")
-            compose.onNodeWithText("channel · support et descendants").assertExists()
+            compose.onNodeWithText("Team › #support et descendants").assertExists()
             compose
                 .onNodeWithContentDescription("Type de ressource server")
                 .performScrollTo()
                 .performClick()
             resourceSearch.performTextClearance()
             waitForText("Team")
-            compose.onNodeWithText("channel · support et descendants").assertExists()
+            compose.onNodeWithText("Team › #support et descendants").assertExists()
             compose
                 .onNodeWithContentDescription("Type de ressource channel")
                 .performScrollTo()
@@ -1098,6 +1098,7 @@ abstract class AgentPageCases {
             compose.onNodeWithContentDescription("Team › #support").assertIsOn()
             compose.onNodeWithText("Terminé").performClick()
             compose.mainClock.autoAdvance = true
+            compose.onNodeWithText("Team › #support et descendants").assertExists()
             capture("agent-plugin-grants-editor")
 
             compose
@@ -1125,6 +1126,10 @@ abstract class AgentPageCases {
             capture("agent-plugin-grants-review")
             confirmReview()
             compose.waitUntil(15000) { fixture.grantSaves.size == 1 }
+
+            back()
+            open(AgentSection.Plugins)
+            waitForText("Team › #support et descendants")
 
             val body = fixture.grantSaves.single()
             val grants = body["grants"]!!.jsonArray

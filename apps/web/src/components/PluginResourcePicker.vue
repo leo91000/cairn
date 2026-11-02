@@ -9,9 +9,9 @@ import {
   watch,
 } from 'vue'
 import { listPluginResources } from '../../../../packages/contracts/generated/listPluginResources'
-import { resolvePluginResource } from '../../../../packages/contracts/generated/resolvePluginResource'
 import { canSelectPluginResourceRoot, MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION } from '../plugin-grants'
 import { pluginRequest } from '../plugin-operations'
+import { resolvePluginResourcePath } from '../plugin-resource-paths'
 import UiButton from './UiButton.vue'
 
 const props = defineProps<{ pluginId: string, instanceId: string, types: PluginResourceType[] }>()
@@ -53,17 +53,12 @@ async function load() {
     // Resolve ancestry for presentation only; the server resolves it afresh when saving and using grants.
     const resolved = await Promise.all(result.items.map(async item => ({
       item,
-      ancestry: await resolvePluginResource(pluginRequest, {
-        pluginId: props.pluginId,
-        instanceId: props.instanceId,
-        resourceType: item.resourceType,
-        id: item.id,
-      }),
+      path: await resolvePluginResourcePath(pluginRequest, props.pluginId, props.instanceId, item),
     })))
     if (asked !== generation)
       return
-    for (const { item, ancestry } of resolved) {
-      paths.value[key(item)] = [...ancestry.ancestors.map(parent => parent.name), item.name].join(' › ')
+    for (const { item, path } of resolved) {
+      paths.value[key(item)] = path
       if (!items.value.some(held => key(held) === key(item)))
         items.value.push(item)
     }
@@ -104,6 +99,25 @@ watch(() => [props.pluginId, props.instanceId, type.value, query.value], () => {
   loading.value = false
   void load()
 }, { immediate: true })
+watch(() => [props.pluginId, props.instanceId, selected.value] as const, async ([, , roots]) => {
+  const unresolved = roots.filter(root => !paths.value[key(root)])
+  if (!unresolved.length)
+    return
+
+  const resolved = await Promise.all(unresolved.map(async (root) => {
+    try {
+      return [key(root), await resolvePluginResourcePath(pluginRequest, props.pluginId, props.instanceId, root)] as const
+    }
+    catch {
+      return null
+    }
+  }))
+
+  for (const item of resolved) {
+    if (item && selected.value.some(root => key(root) === item[0]))
+      paths.value[item[0]] = item[1]
+  }
+}, { deep: true, immediate: true })
 onBeforeUnmount(() => generation++)
 </script>
 
