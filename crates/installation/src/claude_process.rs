@@ -513,7 +513,7 @@ struct Turn<'a> {
     delivered: HashSet<String>,
     /// Receipt acknowledgements must retain delivery order when manager history was lost.
     delivery_order: Vec<String>,
-    /// Last acknowledged human request at the point an approach is completed.
+    /// Last delivered human request, copied onto each proposal when Claude authors it.
     proposal_request: Option<String>,
     /// Submitted messages whose turn has not produced a result yet.
     pending: HashSet<String>,
@@ -988,7 +988,6 @@ impl Turn<'_> {
             if item["type"] == "proposed_plan" {
                 // Cairn declines to leave plan mode; the plan itself is complete.
                 item["status"] = "completed".into();
-                item["request_id"] = json!(self.proposal_request);
                 self.proposals.push(item.clone());
                 self.emit(json!({ "type": "item.completed", "item": item }))
                     .await?;
@@ -1089,6 +1088,11 @@ impl Turn<'_> {
             let Some(mut item) = item(block, &message, index, planning) else {
                 continue;
             };
+            if item["type"] == "proposed_plan" {
+                // Bind provenance when the proposal is authored. A later steering message
+                // can be delivered before Claude returns ExitPlanMode's tool result.
+                item["request_id"] = json!(self.proposal_request.clone());
+            }
             if let Some(parent) = &parent {
                 item["parent_id"] = parent.as_str().into();
                 if item["type"] == "agent_message" {

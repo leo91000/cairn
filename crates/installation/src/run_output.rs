@@ -502,6 +502,12 @@ fn project_line(run: &Value, project: &Value) -> String {
         .map_or("", |w| text(w, "path"));
     if !path.is_empty() {
         format!("- {name} ({id}): {path}")
+    } else if run["isolated"] == true && crate::chats::planning(run) {
+        format!(
+            "- {name} ({id}): not loaded; Plan turns cannot import project files into the \
+            workspace. Include opening this project in your plan; it becomes available \
+            after the user starts implementation."
+        )
     } else if run["isolated"] == true {
         format!(
             "- {name} ({id}): not loaded; call cairn_workspace.open_project \

@@ -102,6 +102,7 @@ else {
   let planRequests
   let planCorrelation
   let planReceiptChildren = false
+  let pendingProposalSteer
   let serial = 0
   // Like Claude Code 2.1.280: the last response's prompt (cached or not) is the context,
   // and a local estimate stands in before the first response or after `/compact`.
@@ -144,6 +145,27 @@ else {
       result: text,
       session_id: session,
       ...correlation,
+    })
+  }
+  const completeProposalAfterSteer = () => {
+    if (!pendingProposalSteer?.controlAnswered || !pendingProposalSteer.steeringUuid || pendingProposalSteer.completed)
+      return
+
+    pendingProposalSteer.completed = true
+    out({
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_use_id: 'proposal-exit-tool',
+          content: 'Stay in plan mode',
+          is_error: true,
+        }],
+      },
+    })
+    complete('Plan ready for review', false, {
+      user_message_uuids: [pendingProposalSteer.initialUuid, pendingProposalSteer.steeringUuid],
     })
   }
 
@@ -231,6 +253,11 @@ else {
 
     if (value.type === 'control_response') {
       const requestId = value.response.request_id
+      if (pendingProposalSteer && requestId === 'proposal-exit') {
+        pendingProposalSteer.controlAnswered = true
+        completeProposalAfterSteer()
+        return
+      }
       if (planRequests?.has(requestId)) {
         appendFileSync(path.join(home, 'plan-responses.jsonl'), `${JSON.stringify({ id: requestId, ...value.response.response })}\n`)
         planRequests.delete(requestId)
@@ -289,6 +316,43 @@ else {
     appendFileSync(path.join(home, 'inputs.jsonl'), `${JSON.stringify(value)}\n`)
     const prompt = value.message.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
     const correlation = { user_message_uuid: value.uuid }
+    if (pendingProposalSteer && !pendingProposalSteer.steeringUuid) {
+      out(value)
+      pendingProposalSteer.steeringUuid = value.uuid
+      completeProposalAfterSteer()
+      return
+    }
+    if (prompt.includes('fixture:plan-proposal-before-steering')) {
+      out(value)
+      pendingProposalSteer = {
+        initialUuid: value.uuid,
+        controlAnswered: false,
+        steeringUuid: null,
+        completed: false,
+      }
+      out({
+        type: 'assistant',
+        message: {
+          id: 'proposal-before-steering',
+          content: [{
+            type: 'tool_use',
+            id: 'proposal-exit-tool',
+            name: 'ExitPlanMode',
+            input: { plan: 'Proposal authored for request A' },
+          }],
+        },
+      })
+      out({
+        type: 'control_request',
+        request_id: 'proposal-exit',
+        request: {
+          subtype: 'can_use_tool',
+          tool_name: 'ExitPlanMode',
+          input: { plan: 'Proposal authored for request A' },
+        },
+      })
+      return
+    }
     if (prompt.includes('fixture:plan-turn')) {
       // Permission requests Claude Code sends in plan mode, including writes the model
       // should not attempt: the adapter's callback must decide each one.

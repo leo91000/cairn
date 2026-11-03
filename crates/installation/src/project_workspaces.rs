@@ -251,10 +251,9 @@ fn open_project_tool() -> Value {
 }
 
 /// Workspace tools of a plan turn: reading Cairn's state, including delegated task
-/// reports, retiring its own obsolete questions, and opening authorized projects. Every other tool,
-/// including delegation and plugin tools, has effects beyond the turn.
-const PLAN_TOOLS: [&str; 7] = [
-    "open_project",
+/// reports, or retiring its own obsolete questions. Opening a project imports files into
+/// the runner workspace, so it is deliberately unavailable until implementation.
+const PLAN_TOOLS: [&str; 6] = [
     "list_nodes",
     "exclusive_status",
     "ask_questions",

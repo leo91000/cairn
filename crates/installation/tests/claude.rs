@@ -1171,6 +1171,71 @@ async fn only_a_cairn_plan_turn_shows_exit_plan_mode_as_a_proposed_plan() {
 }
 
 #[tokio::test]
+async fn a_clarification_delivered_before_exit_plan_result_keeps_the_authored_request() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let mut p = plan_turn(&root);
+    p["execution"]["messageId"] = "request-a".into();
+    p["execution"]["text"] = "fixture:plan-proposal-before-steering".into();
+    let (tx, mut rx) = mpsc::channel(64);
+    let task =
+        tokio::spawn(async move { claude_process::run(&c, p, tx, CancellationToken::new()).await });
+
+    let events = tokio::time::timeout(Duration::from_secs(15), async {
+        let mut events = Vec::new();
+        let mut steering_sent = false;
+        while let Some(event) = rx.recv().await {
+            if event["type"] == "item.started"
+                && event["item"]["type"] == "proposed_plan"
+                && !steering_sent
+            {
+                // Hold ExitPlanMode's result until the adapter consumes this later
+                // clarification, reproducing the delivery/result interleaving.
+                deliver(
+                    &root,
+                    &json!([{
+                        "id": "request-b",
+                        "text": "Clarify the proposed approach",
+                        "attachments": [],
+                        "plan": true,
+                    }]),
+                );
+                steering_sent = true;
+            }
+            let completed = event["type"] == "turn.completed";
+            events.push(event);
+            if completed {
+                break;
+            }
+        }
+        (events, steering_sent)
+    })
+    .await
+    .expect("Claude fixture should finish the interleaved Plan turn");
+    let (events, steering_sent) = events;
+    task.await.unwrap().unwrap();
+    assert!(steering_sent, "{events:?}");
+
+    let started = events
+        .iter()
+        .find(|event| event["type"] == "item.started" && event["item"]["type"] == "proposed_plan")
+        .unwrap();
+    assert_eq!(started["item"]["request_id"], "request-a");
+    let delivered = events
+        .iter()
+        .position(|event| event["type"] == "chat.delivered" && event["messageId"] == "request-b")
+        .unwrap();
+    let completed = events
+        .iter()
+        .position(|event| {
+            event["type"] == "item.completed" && event["item"]["type"] == "proposed_plan"
+        })
+        .unwrap();
+    assert!(delivered < completed, "{events:?}");
+    assert_eq!(events[completed]["item"]["request_id"], "request-a");
+}
+
+#[tokio::test]
 async fn plan_turns_deny_writes_effects_and_leaving_plan_mode() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);

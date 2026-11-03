@@ -115,6 +115,10 @@ async fn empty_start_does_not_touch_unselected_repositories_and_selected_start_l
         !prompt.contains(text(&projects[0], "path")),
         "host paths must not be advertised as guest workspaces"
     );
+    empty["chatExecution"] = json!({ "plan": true });
+    let plan_prompt = run_output::prompt(&empty, true);
+    assert!(plan_prompt.contains("Plan turns cannot import project files"));
+    assert!(!plan_prompt.contains("call cairn_workspace.open_project"));
     std::fs::create_dir(text(&projects[1], "path")).unwrap();
     let selected = run(&s, projects[0]["id"].clone(), MAIN_AGENT_ID).await;
     let prepared = execution::prepare(&selected, &s.config, &RunCredentials::default(), None, None)
@@ -530,12 +534,12 @@ async fn plan_turns_list_and_call_only_workspace_tools_without_effects() {
             "ask_questions",
             "exclusive_status",
             "list_nodes",
-            "open_project",
             "pending_questions",
             "withdraw_question"
         ]
     );
     for (name, arguments) in [
+        ("open_project", json!({ "projectId": id() })),
         ("publish_artifact", json!({ "path": "result.md" })),
         ("wait_for", json!({ "delay": 60 })),
         (
