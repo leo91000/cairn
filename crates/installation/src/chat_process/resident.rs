@@ -66,10 +66,10 @@ pub async fn serve_with_ready(
             Session::codex_until(config, home, &[], Some(&config.home), &stop).await?;
         tracing::info!(target: "cairn_performance", operation = "codex_resident", event = "ready", native_init_ms = started.elapsed().as_millis() as u64);
         let result = match notify() {
-            Ok(()) => serve_session(listener, &mut session, config, home, stop).await,
+            Ok(()) => serve_session(listener, &mut session, home, stop, config).await,
             Err(error) => Err(error),
         };
-        session.close().await;
+        session.shutdown().await;
         result
     }
     .await;
@@ -80,10 +80,11 @@ pub async fn serve_with_ready(
 async fn serve_session(
     listener: UnixListener,
     session: &mut Session,
-    config: &Config,
     home: &Path,
     stop: CancellationToken,
+    config: &Config,
 ) -> Result<()> {
+    let mut native_settings = json!({});
     loop {
         let (mut client, _) = tokio::select! {
             () = stop.cancelled() => return Ok(()),
@@ -98,7 +99,16 @@ async fn serve_session(
             }
         };
         require_owner(&client)?;
-        let result = handle(&mut client, &listener, session, config, home, stop.clone()).await;
+        let result = handle(
+            &mut client,
+            &listener,
+            session,
+            home,
+            stop.clone(),
+            config,
+            &mut native_settings,
+        )
+        .await;
         // An unknown client/native state cannot be offered to another attempt.
         result?;
     }
@@ -155,9 +165,10 @@ async fn handle(
     client: &mut UnixStream,
     listener: &UnixListener,
     session: &mut Session,
-    config: &Config,
     home: &Path,
     stop: CancellationToken,
+    config: &Config,
+    native_settings: &mut Value,
 ) -> Result<()> {
     let (mut read, mut write) = client.split();
     let plan = tokio::time::timeout(Duration::from_secs(10), read_value(&mut read, MAX_PLAN))
@@ -172,13 +183,25 @@ async fn handle(
             "Resident Codex requires a thread configuration.",
         ));
     }
-    // Codex keeps the sandbox of every sub-agent it has loaded, and unsubscribing does not
-    // unload them: an earlier turn's writable sub-agent could act during a plan turn. A plan
-    // turn, and the turn after one, start a new native process, where sub-agents reload under
-    // that turn's sandbox. Without one, the lease fails and the service stops.
-    if plan["planning"] == true || plan["afterPlan"] == true {
-        let fresh = Session::codex_until(config, home, &[], Some(&config.home), &stop).await?;
-        std::mem::replace(session, fresh).close().await;
+    let requested = if plan["nativeSettings"].is_object() {
+        plan["nativeSettings"].clone()
+    } else {
+        json!({})
+    };
+    // Native sub-agents retain their creation sandbox. A Plan boundary needs a fresh
+    // process even when preferences are unchanged, including the first ordinary turn after it.
+    if requested != *native_settings || plan["planning"] == true || plan["afterPlan"] == true {
+        let args = crate::coding_agent_configuration::codex_arguments(&plan)?;
+        session.shutdown().await;
+        *session = Session::codex_until(
+            config,
+            home,
+            &args,
+            Some(Path::new(crate::validation::text(&plan, "cwd"))),
+            &stop,
+        )
+        .await?;
+        *native_settings = requested;
     }
     tokio::select! {
         result = execute_lease(session, home, plan, &mut read, &mut write, stop) => result,

@@ -165,9 +165,17 @@ where
 
 /// Stops every trace of the run's previous execution before it may be relaunched.
 pub async fn fence(s: &Service, run: &Value) -> Result<()> {
+    fence_authorized(s, run, crate::authorization::Authorization::default()).await
+}
+
+pub(crate) async fn fence_authorized(
+    s: &Service,
+    run: &Value,
+    authorize: crate::authorization::Authorization,
+) -> Result<()> {
     let run_id = text(run, "id");
     let checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
-    fence_attempt(s, run, checkpoint.as_ref()).await
+    fence_attempt_authorized(s, run, checkpoint.as_ref(), authorize).await
 }
 
 /// Compare the physical owner, not the checkpoint's mutable evidence.
@@ -189,6 +197,21 @@ pub(crate) async fn fence_attempt(
     run: &Value,
     expected: Option<&RunCheckpoint>,
 ) -> Result<()> {
+    fence_attempt_authorized(
+        s,
+        run,
+        expected,
+        crate::authorization::Authorization::default(),
+    )
+    .await
+}
+
+async fn fence_attempt_authorized(
+    s: &Service,
+    run: &Value,
+    expected: Option<&RunCheckpoint>,
+    authorize: crate::authorization::Authorization,
+) -> Result<()> {
     let run_id = text(run, "id");
     let checkpoint = RunCheckpoint::load(&s.store, run_id).await?;
     if !same_execution(checkpoint.as_ref(), expected) {
@@ -205,6 +228,7 @@ pub(crate) async fn fence_attempt(
         .and_then(|saved| saved.node_id.as_ref())
         .and_then(|node| node.as_deref())
         .map(str::to_owned);
+    authorize.recheck().await?;
     if let Some(process) = &process {
         fence_process(process).await?;
     }
@@ -215,15 +239,18 @@ pub(crate) async fn fence_attempt(
             .and_then(RunCheckpoint::runner_id)
             .unwrap_or(run_id);
         let runner_url = crate::nodes::transport::url_for_node(s, node.as_deref());
-        fence_runner(s, &runner_url, attempt).await?;
+        authorize.recheck().await?;
+        fence_runner(s, &runner_url, attempt, &authorize).await?;
     }
     let id = run_id.to_owned();
     let expected = expected
         .and_then(RunCheckpoint::runner_id)
         .map(str::to_owned);
     let release = isolated.then(|| expected.clone().unwrap_or_else(|| id.clone()));
+    authorize.recheck().await?;
     s.store
         .transaction(move |db| {
+            authorize.check_local(db)?;
             let mut current = RunCheckpoint::load_in(db, &id)?;
             let current_attempt = current.as_ref().and_then(RunCheckpoint::runner_id);
             let current_node = current
@@ -251,16 +278,24 @@ pub(crate) async fn fence_attempt(
         .await
 }
 
-async fn fence_runner(s: &Service, runner_url: &str, attempt: &str) -> Result<()> {
+async fn fence_runner(
+    s: &Service,
+    runner_url: &str,
+    attempt: &str,
+    authorize: &crate::authorization::Authorization,
+) -> Result<()> {
+    authorize.recheck().await?;
     if runner_url.is_empty() {
         return Err(Error::unavailable(
             "Waiting for the isolated runner before recovering this run.",
         ));
     }
+    let credential = secret(&s.config.data_dir, "runner-secret").await?;
+    authorize.recheck().await?;
     let response = s
         .http
         .delete(format!("{runner_url}/runs/{attempt}"))
-        .bearer_auth(secret(&s.config.data_dir, "runner-secret").await?)
+        .bearer_auth(credential)
         .timeout(Duration::from_secs(10))
         .send()
         .await;

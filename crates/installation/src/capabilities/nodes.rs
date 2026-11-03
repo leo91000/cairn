@@ -192,17 +192,19 @@ impl NodeOperation {
                 (Some(bearer), None)
             }
         };
-        let authorize = crate::installation_mcp::management_authorization(bearer.as_deref());
+        let authorize =
+            crate::installation_mcp::management_authorization(s, bearer.as_deref()).await?;
         let before = authorize.clone();
-        s.store.read(move |db| before(db)).await?;
+        s.store.read(move |db| before.authorize(db)).await?;
         match self.name {
             "get_conversation_placement" => {
                 let input: GetPlacementInput = decode(input)?;
+                let placement_authorization = authorize.clone();
                 nodes::placement::configure_authorized(
                     s,
                     &input.run_id.to_string(),
                     None,
-                    authorize,
+                    move |db| placement_authorization.authorize(db),
                 )
                 .await
             }
@@ -216,7 +218,7 @@ impl NodeOperation {
                     &target,
                     Some(serde_json::to_value(input.selection)?),
                     move |db| {
-                        authorize(db)?;
+                        authorize.authorize(db)?;
                         native(db)
                     },
                 )
@@ -226,7 +228,8 @@ impl NodeOperation {
                 let input: MoveToNodeInput = decode(input)?;
                 input.validate().map_err(Error::bad)?;
                 let run = s.store.run(&input.run_id.to_string()).await?;
-                let authorization = nodes::moves::Authorization::new(authorize, public_credential);
+                let authorization = nodes::moves::Authorization::new(|_| Ok(()), public_credential)
+                    .with_management_authorization(authorize);
                 if let Some(audience) = audience {
                     return s.node_move_operations.start(
                         s.clone(),
@@ -260,31 +263,34 @@ impl NodeOperation {
             }
             "release_node_reservation" => {
                 let input: ReleaseExclusiveInput = decode(input)?;
-                nodes::exclusive::release_authorized(s, &input.reservation_id, None, authorize)
-                    .await
+                nodes::exclusive::release_authorized(s, &input.reservation_id, None, move |db| {
+                    authorize.authorize(db)
+                })
+                .await
             }
             "list_nodes" => {
                 let _: ListNodesInput = decode(input)?;
                 let _ = nodes::refresh_local(s).await;
                 let result = nodes::typed_inventory(s).await?;
+                authorize.recheck().await?;
                 s.store
                     .read(move |db| {
-                        authorize(db)?;
+                        authorize.authorize(db)?;
                         Ok(serde_json::to_value(result)?)
                     })
                     .await
             }
             "list_native_callers" => {
                 let _: ListNodesInput = decode(input)?;
-                nodes::native_callers(s, authorize).await
+                nodes::native_callers_live(s, authorize).await
             }
             "create_node_enrollment" => {
                 let input: CreateNodeEnrollmentInput = decode(input)?;
-                nodes::invite(s, serde_json::to_value(input)?, authorize).await
+                nodes::invite_live(s, serde_json::to_value(input)?, authorize).await
             }
             "update_node" => {
                 let input: UpdateNodeInput = decode(input)?;
-                nodes::configure_node(
+                nodes::configure_node_live(
                     s,
                     &input.node_id.to_string(),
                     serde_json::to_value(input.node)?,
@@ -294,7 +300,7 @@ impl NodeOperation {
             }
             "update_node_storage" => {
                 let input: UpdateNodeStorageInput = decode(input)?;
-                nodes::configure_storage(
+                nodes::configure_storage_live(
                     s,
                     &input.node_id.to_string(),
                     &serde_json::to_value(&input)?,
@@ -304,7 +310,7 @@ impl NodeOperation {
             }
             "change_native_node_mode" => {
                 let input: ChangeNativeNodeModeInput = decode(input)?;
-                let value = nodes::native_mode::change(
+                let value = nodes::native_mode::change_live(
                     s,
                     &input.node_id.to_string(),
                     serde_json::to_value(input.change)?,
@@ -333,7 +339,7 @@ impl NodeOperation {
             }
             _ => {
                 let input: RevokeNodeInput = decode(input)?;
-                nodes::revoke(
+                nodes::revoke_live(
                     s,
                     &input.node_id.to_string(),
                     json!({"releasePlacements": input.release_placements}),

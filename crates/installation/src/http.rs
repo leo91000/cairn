@@ -662,7 +662,8 @@ async fn raw_route(app: &App, path: &str, request: Request) -> Result<Route> {
             .map_err(|_| {
                 Error::too_large(format!("Uploads are limited to {} MiB.", limit >> 20))
             })?;
-            let authority = crate::skills::lifecycle::Authority::new(s, context, "manage").await?;
+            let authority =
+                crate::skills::lifecycle::Authority::new(s, context, "manage", false).await?;
             axum::Json(crate::capabilities::stage_resource_upload(s, &bytes, authority).await?)
                 .into_response()
         }

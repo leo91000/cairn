@@ -163,6 +163,7 @@ async fn publication_transfer_overhead_measurement() {
     for trial in 0..8 {
         let attempt = id();
         let publication = Publication {
+            authorize: crate::authorization::Authorization::default(),
             s: &s,
             run: &run,
             run_id: &run_id,

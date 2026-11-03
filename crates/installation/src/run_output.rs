@@ -564,6 +564,7 @@ pub fn chat_plan(
         "writableRoots": roots,
     });
     crate::store::merge(&mut plan, &provider.adapter().chat_mcp(mcp));
+    crate::coding_agent_configuration::apply(&mut plan, &run["snapshot"]["nativeConfiguration"])?;
     // The engine sandbox of a plan turn is read-only whatever the agent's access.
     // Adapters older than plan turns still enforce this field.
     if crate::chats::planning(run) {

@@ -287,19 +287,24 @@ async fn each_agent_runs_with_one_account_and_tokens_are_masked() {
     let second = github::instance(&f.s, "Second", "fixture-second", &[]).await;
     let mut edited = agent.clone();
     edited["plugins"] = json!([first, second]);
-    let error =
-        f.s.agent_fixture(edited.clone(), Some(text(&agent, "id")))
-            .await
-            .unwrap_err();
-    assert!(
-        error.message.contains("one GitHub instance per agent"),
-        "{}",
-        error.message
-    );
-    edited["plugins"] = json!([first]);
     f.s.agent_fixture(edited, Some(text(&agent, "id")))
         .await
         .unwrap();
+    let credentials = run_credentials::for_run(&f.s, text(&agent, "id"), &[])
+        .await
+        .unwrap();
+    assert!(
+        credentials
+            .files
+            .iter()
+            .any(|(_, content)| content.contains("fixture-first"))
+    );
+    assert!(
+        !credentials
+            .files
+            .iter()
+            .any(|(_, content)| content.contains("fixture-second"))
+    );
     // Existing instance editors must use a revision-guarded profile command.
     let refused = common::save_plugin(
         &f.s,
@@ -313,7 +318,7 @@ async fn each_agent_runs_with_one_account_and_tokens_are_masked() {
     assert!(refused.message.contains("current revision"));
     assert_eq!(
         f.s.agent_snapshot(text(&agent, "id")).await.unwrap()["plugins"],
-        json!([first])
+        json!([first, second])
     );
 
     // Long display names are cut on character boundaries.

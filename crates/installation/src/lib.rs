@@ -7,6 +7,7 @@ pub mod api;
 pub mod artifacts;
 pub mod attachments;
 pub mod auth;
+pub(crate) mod authorization;
 pub(crate) mod backend_migration;
 pub(crate) mod capabilities;
 mod chat_inbox;
@@ -18,6 +19,7 @@ pub mod claude_process;
 mod codex_background;
 mod codex_login;
 pub mod coding_agent;
+pub(crate) mod coding_agent_configuration;
 pub mod config;
 pub mod context_usage;
 pub mod conversation_deletion;
@@ -55,6 +57,7 @@ pub mod provider;
 pub mod reads;
 pub mod recovery;
 pub mod relay;
+mod resume_selection;
 pub mod rpc;
 mod run_limits;
 pub mod run_output;
@@ -84,28 +87,17 @@ extern crate self as cairn_installation;
 pub(crate) mod test_process;
 
 #[cfg(test)]
-#[path = "../tests/common/agent_fixture.rs"]
-pub(crate) mod agent_fixture;
+#[path = "../tests/common/mod.rs"]
+pub(crate) mod common;
 
 #[cfg(test)]
-#[path = "../tests/common/mission_fixture.rs"]
-pub(crate) mod mission_fixture;
+#[path = "../tests/fixtures/plugin_grants.rs"]
+pub(crate) mod plugin_grant_fixture;
 
 #[cfg(test)]
-#[path = "../tests/common/run_fixture.rs"]
-pub(crate) mod run_fixture;
-
-#[cfg(test)]
-#[path = "../tests/common/node_fixture.rs"]
-pub(crate) mod node_fixture;
-
-#[cfg(test)]
-#[path = "../tests/common/account_fixture.rs"]
-pub(crate) mod account_fixture;
-
-#[cfg(test)]
-#[path = "../tests/common/attempt_fixture.rs"]
-pub(crate) mod attempt_fixture;
+pub(crate) use common::{
+    account_fixture, agent_fixture, attempt_fixture, mission_fixture, node_fixture, run_fixture,
+};
 
 #[cfg(test)]
 #[path = "../tests/common/placement_migration_fixture.rs"]

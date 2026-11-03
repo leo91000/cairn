@@ -2,7 +2,6 @@ use crate::common::run_fixture::DbRunFixture;
 use cairn_contracts::EventKind;
 use common::account_fixture::AccountFixtures;
 use common::node_fixture::*;
-use common::run_fixture::*;
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
@@ -158,6 +157,195 @@ async fn call(s: &Arc<Service>, configuration: &Value, name: &str, args: Value) 
 fn result(response: &Value) -> &Value {
     assert_ne!(response["result"]["isError"], true, "{response}");
     &response["result"]["structuredContent"]["result"]
+}
+
+#[tokio::test]
+async fn native_configuration_has_http_and_both_mcp_parity_with_live_scopes() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let owner_token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
+    let read_token = common::relay_fixture::grant(&s, &["read"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let target = json!({ "provider": "codex", "agentId": null });
+    for (endpoint, token) in [
+        ("/mcp", owner_token.as_str()),
+        ("/mcp-installation", agent_token),
+    ] {
+        let (_, current) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "get_coding_agent_configuration",
+            target.clone(),
+        )
+        .await;
+        let revision = result(&current)["revision"].clone();
+        let command = json!({ "provider": "codex", "agentId": null, "revision": revision, "document": "model_context_window = 1000000\n", "changes": [], "reset": false });
+        let (_, preview) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "preview_coding_agent_configuration",
+            command.clone(),
+        )
+        .await;
+        assert!(
+            result(&preview)["document"]
+                .as_str()
+                .unwrap()
+                .contains("1000000")
+        );
+        let (_, saved) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "save_coding_agent_configuration",
+            command,
+        )
+        .await;
+        assert!(
+            result(&saved)["document"]
+                .as_str()
+                .unwrap()
+                .contains("1000000")
+        );
+        let request = common::request("POST", "/api/settings/coding-agents/read")
+            .header("x-test-relay-token", &owner_token)
+            .body(Body::from(target.to_string()))
+            .unwrap();
+        let response = common::send(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(common::read_json(response).await, *result(&saved));
+    }
+    let (_, current) = node_management_call(
+        &app,
+        "/mcp",
+        &owner_token,
+        "get_coding_agent_configuration",
+        target,
+    )
+    .await;
+    let revision = result(&current)["revision"].clone();
+    let command = json!({ "provider": "codex", "agentId": null, "revision": revision, "document": "model_context_window = 500000\n", "changes": [], "reset": false });
+    let (_, refused) = node_management_call(
+        &app,
+        "/mcp",
+        &read_token,
+        "save_coding_agent_configuration",
+        command,
+    )
+    .await;
+    assert_eq!(refused["result"]["isError"], true);
+    let (_, unchanged) = node_management_call(
+        &app,
+        "/mcp-installation",
+        agent_token,
+        "get_coding_agent_configuration",
+        json!({ "provider": "codex", "agentId": null }),
+    )
+    .await;
+    assert_eq!(result(&unchanged)["revision"], revision);
+
+    for (provider, document) in [
+        ("codex", "notify = ['blocked-callback']\n"),
+        ("codex", "default_permissions = ':read-only'\n"),
+        ("codex", "[permissions.readonly]\n"),
+        (
+            "codex",
+            "[agents.reviewer]\nconfig_file = 'private-role-file.toml'\n",
+        ),
+        (
+            "codex",
+            "[hooks.state.callback]\ntrusted_hash = 'test-only'\n",
+        ),
+        ("codex", "[features]\nhooks = true\n"),
+        ("codex", "[features]\ncodex_hooks = true\n"),
+        (
+            "codex",
+            "[features]\ndefault_mode_request_user_input = true\n",
+        ),
+        (
+            "claude",
+            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"blocked-callback"}]}]}}"#,
+        ),
+        (
+            "claude",
+            r#"{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"0"}}"#,
+        ),
+        ("opencode", r#"{"{env:RUNTIME_CONFIG_KEY}":{"rogue":{}}}"#),
+        ("opencode", r#"{"permissions":{}}"#),
+        ("opencode", r#"{"tools":{"bash":false}}"#),
+        ("opencode", r#"{"agents":{"build":{"permissions":{}}}}"#),
+        ("opencode", r#"{"agent":{"build":{"permissions":{}}}}"#),
+        ("opencode", r#"{"mode":{"build":{"permissions":{}}}}"#),
+        (
+            "opencode",
+            r#"{"lsp":{"custom":{"command":["blocked-callback"]}}}"#,
+        ),
+        (
+            "opencode",
+            r#"{"formatter":{"custom":{"environment":{"NODE_OPTIONS":"blocked"}}}}"#,
+        ),
+        (
+            "opencode",
+            r#"{"agent":{"build":{"permission":{"*":"allow"}}}}"#,
+        ),
+        ("opencode", r#"{"agent":{"build":{"tools":{"*":true}}}}"#),
+        (
+            "opencode",
+            r#"{"mode":{"build":{"permission":{"*":"allow"}}}}"#,
+        ),
+        ("opencode", r#"{"mode":{"build":{"tools":{"*":true}}}}"#),
+    ] {
+        let target = json!({ "provider": provider, "agentId": null });
+        let (_, current) = node_management_call(
+            &app,
+            "/mcp",
+            &owner_token,
+            "get_coding_agent_configuration",
+            target.clone(),
+        )
+        .await;
+        let revision = result(&current)["revision"].clone();
+        let command = json!({ "provider": provider, "agentId": null, "revision": revision, "document": document, "changes": [], "reset": false });
+        for (endpoint, token) in [
+            ("/mcp", owner_token.as_str()),
+            ("/mcp-installation", agent_token),
+        ] {
+            let (_, refused) = node_management_call(
+                &app,
+                endpoint,
+                token,
+                "save_coding_agent_configuration",
+                command.clone(),
+            )
+            .await;
+            assert_eq!(refused["result"]["isError"], true, "{provider}: {endpoint}");
+        }
+        let request = common::request("PUT", "/api/settings/coding-agents")
+            .header("x-test-relay-token", &owner_token)
+            .body(Body::from(command.to_string()))
+            .unwrap();
+        assert_eq!(
+            common::send(&app, request).await.status(),
+            StatusCode::BAD_REQUEST,
+            "{provider}"
+        );
+        let (_, unchanged) = node_management_call(
+            &app,
+            "/mcp",
+            &owner_token,
+            "get_coding_agent_configuration",
+            target,
+        )
+        .await;
+        assert_eq!(result(&unchanged)["revision"], revision);
+    }
 }
 
 async fn node_management_call(
@@ -1233,6 +1421,8 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "set_agent_avatar",
         "list_agents",
         "get_agent",
+        "get_agent_plugin_grants",
+        "replace_agent_plugin_grants",
         "save_agent",
         "replace_agent",
         "preview_agent",
@@ -1276,6 +1466,9 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "mark_read",
         "set_outcome_aside",
         "get_installation_settings",
+        "get_coding_agent_configuration",
+        "preview_coding_agent_configuration",
+        "save_coding_agent_configuration",
         "get_installation_overview",
         "list_audit",
         "get_storage_settings",
@@ -3609,6 +3802,126 @@ async fn code_mode_checks_each_operations_scopes_and_revocation_without_rolling_
 }
 
 #[tokio::test]
+async fn code_mode_truncates_one_completed_result_without_repeating_its_effect() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let before = call(&s, &configuration, "list_chats", json!({})).await;
+    let before = result(&before)["chats"].as_array().unwrap().len();
+
+    let response = call(
+        &s,
+        &configuration,
+        "execute",
+        json!({
+            "code": "await cairn.create_chat({}); return 'x'.repeat(1100000);",
+        }),
+    )
+    .await;
+    assert_eq!(response["id"], 1);
+    let after = call(&s, &configuration, "list_chats", json!({})).await;
+    assert_eq!(
+        result(&after)["chats"].as_array().unwrap().len(),
+        before + 1,
+        "The oversized-result operation must have executed exactly once",
+    );
+    if response["result"]["isError"] == true {
+        assert_eq!(
+            response["result"]["content"][0]["text"],
+            "Code result exceeds 1 MiB. Filter results or read bounded pages.",
+            "Only the known result-budget failure qualifies the reference RED",
+        );
+    }
+    assert_ne!(
+        response["result"]["isError"], true,
+        "A completed operation must not become a tool error because its result is large",
+    );
+    assert!(serde_json::to_vec(&response["result"]).unwrap().len() <= 1024 * 1024);
+    assert_eq!(response["result"]["structuredContent"]["truncated"], true);
+    assert_eq!(response["result"]["structuredContent"]["retained"], false);
+    assert!(
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("truncated")
+    );
+
+    let next = call(
+        &s,
+        &configuration,
+        "execute",
+        json!({ "code": "return 42;" }),
+    )
+    .await;
+    assert_eq!(result(&next), 42);
+}
+
+#[tokio::test]
+async fn code_mode_bounds_the_complete_encoded_response_and_preserves_null_results() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let app = cairn_installation::http::router(s.clone()).await.unwrap();
+    let (_, catalog) = request(&s, token, "tools/list", json!({})).await;
+    let schema = catalog["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "execute")
+        .unwrap()["outputSchema"]
+        .clone();
+
+    // The first two values fit the worker's single-value budget but exceed the
+    // final MCP budget after duplicated representations and JSON escaping.
+    for code in [
+        "return '\"'.repeat(400000);",
+        "return '🦀'.repeat(200000);",
+        "return '\\u0000'.repeat(200000);",
+        "return 'x'.repeat(9 * 1024 * 1024);",
+    ] {
+        let body = json!({
+            "jsonrpc": "2.0", "id": "encoded-fixture", "method": "tools/call",
+            "params": { "name": "execute", "arguments": { "code": code } },
+        });
+        let request = common::request("POST", "/mcp-installation")
+            .header("authorization", format!("Bearer {token}"))
+            .header("mcp-protocol-version", "2026-07-28")
+            .header("mcp-method", "tools/call")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = common::send(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024 + 1024)
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["id"], "encoded-fixture");
+        let result = &response["result"];
+        assert_eq!(result["resultType"], "complete");
+        assert_ne!(result["isError"], true, "{code}");
+        assert!(serde_json::to_vec(result).unwrap().len() <= 1024 * 1024);
+        assert_eq!(result["structuredContent"]["truncated"], true);
+        assert_eq!(result["structuredContent"]["retained"], false);
+        assert!(jsonschema::is_valid(&schema, &result["structuredContent"]));
+    }
+
+    for code in ["return null;", "return undefined;", "return false;"] {
+        let response = call(&s, &configuration, "execute", json!({ "code": code })).await;
+        let expected = if code == "return false;" {
+            json!(false)
+        } else {
+            Value::Null
+        };
+        assert_eq!(result(&response), &expected);
+    }
+}
+
+#[tokio::test]
 async fn code_mode_isolates_scripts_bounds_resources_and_remains_usable_after_failure() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
@@ -3640,7 +3953,6 @@ async fn code_mode_isolates_scripts_bounds_resources_and_remains_usable_after_fa
         "return (", // Syntax errors cannot reach an operation.
         "return await import('node:fs');",
         "return () => 42;",
-        "return 'x'.repeat(1100000);",          // Result budget.
         "return 'x'.repeat(80 * 1024 * 1024);", // Heap budget.
         "for (;;) {}",                          // Process CPU budget.
         "for (let i = 0; i < 65; i++) await cairn.list_chats({}); return true;",
@@ -4247,6 +4559,131 @@ async fn resume_run_is_one_capability_on_http_public_and_installation() {
         operation["outputSchema"]["properties"]["runId"]["format"],
         "uuid"
     );
+}
+
+#[tokio::test]
+async fn installation_resume_selection_authorizes_target_before_catalog_discovery() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let config = cairn_installation::config::Config {
+        codex_bin: common::fixture("codex.mjs"),
+        ..common::config(root.path())
+    };
+    let s = Service::new(config).await.unwrap();
+    common::relay_fixture::claimed(&s).await.unwrap();
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+
+    let caller_agent = enabled_main(&s).await;
+    let (_, caller_configuration) = active_run(&s, &caller_agent).await;
+    let caller_token = text(&caller_configuration["env"], "CAIRN_MCP_RUN_TOKEN");
+
+    let target_agent = s
+        .agent_fixture(
+            json!({
+                "name": "Native resume target",
+                "provider": "codex",
+                "access": {
+                    "backend": "auto",
+                    "nodes": [cairn_installation::nodes::LOCAL_NODE_ID],
+                },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let chat = s
+        .chat_create(json!({ "agentId": target_agent["id"] }))
+        .await
+        .unwrap();
+    let chat_id = text(&chat, "id").to_owned();
+    let turn_id = uuid::Uuid::new_v4().to_string();
+    s.chat_send(
+        &chat_id,
+        json!({
+            "id": turn_id,
+            "text": "Keep the existing native session",
+            "provider": "codex",
+            "model": "fixture-fast",
+            "reasoning": "high",
+            "speed": "priority",
+        }),
+    )
+    .await
+    .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let conversation = s.chat_detail(&chat_id).await.unwrap();
+    let target_id = text(&conversation, "runId").to_owned();
+    let queued = s.store.run(&target_id).await.unwrap();
+    assert_eq!(queued["trigger"], "chat");
+    assert_eq!(queued["chatExecution"]["messageId"], turn_id);
+    assert_eq!(
+        queued["snapshot"]["agent"]["access"]["nodes"],
+        json!([cairn_installation::nodes::LOCAL_NODE_ID]),
+        "the saved target must retain its authorized execution node",
+    );
+
+    let mut snapshot = queued["snapshot"].clone();
+    snapshot["agent"]["access"]["backend"] = "native".into();
+    snapshot["agent"]["access"]["nodes"] = json!([]);
+    s.store
+        .change_run(
+            &target_id,
+            cairn_installation::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(snapshot).unwrap()),
+                status: Some(RunStatus::Cancelled),
+                resume_available: Some(true),
+                session_id: Some(Some("retained-native-session".into())),
+                workspace: Some(Some("/saved/native/workspace".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    common::set_checkpoint(
+        &s.store,
+        &target_id,
+        json!({
+            "launched": true,
+            "prepared": { "cwd": "/saved/native/workspace" },
+            "generation": "retained-generation",
+        }),
+    )
+    .await;
+    let before = s.store.run(&target_id).await.unwrap();
+
+    // A cache miss must stay untouched when the valid caller token cannot direct this target.
+    s.store.delete("codex-models:").await.unwrap();
+    let discovery_log = s.config.home.join(".codex/fixture-lifecycle.jsonl");
+    std::fs::create_dir_all(discovery_log.parent().unwrap()).unwrap();
+    std::fs::write(&discovery_log, "").unwrap();
+    assert!(s.store.kv("codex-models:").await.unwrap().is_none());
+
+    let (status, denied) = node_management_call(
+        &app,
+        "/mcp-installation",
+        caller_token,
+        "resume_run",
+        json!({
+            "runId": target_id,
+            "turnId": turn_id,
+            "selection": {
+                "model": "fixture-fast",
+                "reasoning": "high",
+                "speed": "priority",
+            },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{denied}");
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    let after = s.store.run(&target_id).await.unwrap();
+    assert_eq!(after["snapshot"], before["snapshot"]);
+    assert_eq!(after["status"], before["status"]);
+    assert_eq!(after, before);
+    assert!(std::fs::read_to_string(discovery_log).unwrap().is_empty());
+    assert!(s.store.kv("codex-models:").await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -5844,6 +6281,126 @@ async fn resource_sources_require_the_calling_agents_existing_instance_grant() {
     assert!(s.store.projects().await.unwrap().is_empty());
 }
 
+#[tokio::test]
+async fn skill_source_without_instance_uses_an_instance_granted_for_that_source() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use common::github::{self, Github};
+
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let github = Github::start(root.path()).await;
+    github.attach(&s);
+    let main = enabled_main(&s).await;
+    let unused = github::instance(
+        &s,
+        "A enabled but ungranted account",
+        "synthetic-unused-secret",
+        &[],
+    )
+    .await;
+    let granted = github::instance(
+        &s,
+        "Z source account",
+        "synthetic-source-secret",
+        &[MAIN_AGENT_ID],
+    )
+    .await;
+    assert_ne!(unused, granted);
+
+    let grant_path = format!("/api/agents/{MAIN_AGENT_ID}/plugin-grants");
+    let current =
+        common::owner_api_route(&s, "GET", &grant_path, json!({ "agentId": MAIN_AGENT_ID }))
+            .await
+            .unwrap();
+    common::owner_api_route(
+        &s,
+        "PUT",
+        &grant_path,
+        json!({
+            "agentId": MAIN_AGENT_ID,
+            "revision": current["revision"],
+            "grants": [{
+                "instanceId": granted,
+                "access": {
+                    "type": "selected",
+                    "contributions": [{
+                        "kind": "skillSource",
+                        "name": "repository",
+                        "resources": [],
+                    }],
+                },
+            }],
+            "runCredentialInstances": [],
+        }),
+    )
+    .await
+    .unwrap();
+
+    let version = "1".repeat(40);
+    let tree = "2".repeat(40);
+    let blob = "a".repeat(40);
+    let manifest = b"---\nname: review\ndescription: Review source\n---\nReview.";
+    github.respond(
+        "repos/fixture/skills/commits/main",
+        &json!({
+            "sha": version,
+            "commit": {
+                "tree": { "sha": tree },
+                "message": "Release",
+                "committer": { "date": "2026-10-01" },
+            },
+        }),
+    );
+    github.respond(
+        &format!("repos/fixture/skills/commits/{version}"),
+        &json!({
+            "sha": version,
+            "commit": {
+                "tree": { "sha": tree },
+            },
+        }),
+    );
+    github.respond(
+        &format!("repos/fixture/skills/git/trees/{tree}?recursive=1"),
+        &json!({
+            "tree": [{
+                "path": "SKILL.md",
+                "type": "blob",
+                "mode": "100644",
+                "sha": blob,
+                "size": manifest.len(),
+            }],
+            "truncated": false,
+        }),
+    );
+    github.respond(
+        &format!("repos/fixture/skills/git/blobs/{blob}"),
+        &json!({
+            "content": STANDARD.encode(manifest),
+            "encoding": "base64",
+        }),
+    );
+
+    let (_, configuration) = active_run(&s, &main).await;
+    let imported = call(
+        &s,
+        &configuration,
+        "import_skill",
+        json!({
+            "source": "plugin",
+            "scope": "global",
+            "pluginId": "github",
+            "skillSource": "repository",
+            "location": { "repository": "fixture/skills", "ref": "main" },
+        }),
+    )
+    .await;
+
+    assert_ne!(imported["result"]["isError"], true, "{imported}");
+    assert_eq!(result(&imported)["imported"]["name"], "review");
+    assert!(!imported.to_string().contains("synthetic-source-secret"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn source_tools_share_status_updates_and_fence_instance_revocation_during_download() {
     use base64::{Engine, engine::general_purpose::STANDARD};
@@ -6871,13 +7428,18 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
-    for operation in ["list_plugin_resources", "resolve_plugin_resource"] {
+    for operation in [
+        "list_plugin_resources",
+        "resolve_plugin_resource",
+        "import_project",
+        "run_credentials_fetch",
+    ] {
         let root = TempDir::new().unwrap();
         let s = service(&root).await;
         s.plugins
             .use_worker(std::path::PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
         let main = enabled_main(&s).await;
-        let (_, configuration) = active_run(&s, &main).await;
+        let (run, configuration) = active_run(&s, &main).await;
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let service_calls = Arc::new(AtomicUsize::new(0));
@@ -6945,9 +7507,20 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
                             "clientIdSetting": "clientId",
                         },
                     },
+                    "instructions": "Fixture instructions",
+                    "projectSources": [{ "name": "repositories", "title": "Repositories" }],
+                    "runCredentials": {
+                        "git": [{
+                            "url": "https://api.example.test",
+                            "username": "fixture",
+                            "password": "{{credential}}",
+                        }],
+                    },
                     "resources": [{ "name": "repository", "description": "Repository" }],
                 },
-                "source": r#"return {resources = function(input)
+                "source": r#"return {
+                    projects = function(input) return {id=input.id, name="Repository", origin="https://api.example.test/repo.git", defaultBranch="main"} end,
+                    resources = function(input)
                 cairn.http.request({url = "https://api.example.test/resources", auth = true})
                 if input.op == "list" then return {items = cairn.array({})} end
                 return {resourceType = "repository", id = input.id, name = "Repository"}
@@ -6970,17 +7543,60 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
             }))
             .await
             .unwrap();
-        s.agent_fixture(json!({ "plugins": [instance] }), Some(MAIN_AGENT_ID))
-            .await
-            .unwrap();
-        assert!(
+        if operation != "run_credentials_fetch" {
+            s.agent_fixture(json!({ "plugins": [instance] }), Some(MAIN_AGENT_ID))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
             s.store
                 .plugin_instance(&instance)
                 .await
                 .unwrap()
                 .unwrap()
-                .grants(MAIN_AGENT_ID)
+                .grants(MAIN_AGENT_ID),
+            operation != "run_credentials_fetch",
         );
+        if operation == "import_project" {
+            let current = common::owner_api_route(
+                &s,
+                "GET",
+                &format!("/api/agents/{MAIN_AGENT_ID}/plugin-grants"),
+                Value::Null,
+            )
+            .await
+            .unwrap();
+            common::owner_api_route(
+                &s,
+                "PUT",
+                &format!("/api/agents/{MAIN_AGENT_ID}/plugin-grants"),
+                json!({
+                    "agentId": MAIN_AGENT_ID,
+                    "revision": current["revision"],
+                    "grants": [{
+                        "instanceId": instance,
+                        "access": {
+                            "type": "selected",
+                            "contributions": [
+                                {
+                                    "kind": "projectSource",
+                                    "name": "repositories",
+                                    "resources": [],
+                                },
+                                {
+                                    "kind": "instructions",
+                                    "name": "",
+                                    "resources": [],
+                                },
+                            ],
+                        },
+                    }],
+                    "runCredentialInstances": [],
+                }),
+            )
+            .await
+            .unwrap();
+        }
         let key = cairn_installation::plugins::connections::credential_key(&instance);
         let credential = json!({
             "token": "fixture-expired",
@@ -7001,15 +7617,45 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
         if operation == "resolve_plugin_resource" {
             args["id"] = json!("repo");
         }
+        if operation == "import_project" {
+            args = json!({
+                "pluginId": "resource-refresh",
+                "source": "repositories",
+                "instance": instance,
+                "id": "repo",
+            });
+        }
         let invoke = async {
+            if operation == "run_credentials_fetch" {
+                let empty =
+                    cairn_installation::plugins::run_credentials::for_execution(&s, &run, &[])
+                        .await
+                        .unwrap();
+                assert!(empty.git.is_empty());
+                assert_eq!(refresh_calls.load(Ordering::SeqCst), 0);
+                let result = cairn_installation::plugins::run_credentials::for_execution(
+                    &s,
+                    &run,
+                    &[json!({
+                        "id": uuid::Uuid::new_v4().to_string(),
+                        "origin": "https://api.example.test/repo.git",
+                    })],
+                )
+                .await;
+                return json!({ "result": { "isError": result.is_err() } });
+            }
             let started = call(&s, &configuration, operation, args).await;
-            let response = finish_plugin_resource_call(
-                &s,
-                "/mcp-installation",
-                text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN"),
-                started,
-            )
-            .await;
+            let response = if operation == "import_project" {
+                started
+            } else {
+                finish_plugin_resource_call(
+                    &s,
+                    "/mcp-installation",
+                    text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN"),
+                    started,
+                )
+                .await
+            };
             assert!(
                 refresh_calls.load(Ordering::SeqCst) > 0,
                 "Refresh was not reached: {response}"
@@ -7018,17 +7664,42 @@ async fn resource_handlers_do_not_send_after_grant_revocation_during_oauth_refre
         };
         let revoke = async {
             started.notified().await;
-            s.agent_fixture(json!({ "plugins": [] }), Some(MAIN_AGENT_ID))
+            if operation == "run_credentials_fetch" {
+                s.worker.cancel(&s, text(&run, "id")).await.unwrap();
+            } else if operation == "import_project" {
+                let mut current = common::owner_api_route(
+                    &s,
+                    "GET",
+                    &format!("/api/agents/{MAIN_AGENT_ID}/plugin-grants"),
+                    Value::Null,
+                )
                 .await
                 .unwrap();
+                current["grants"][0]["access"]["contributions"] =
+                    json!([{"kind":"instructions","name":"","resources":[]}]);
+                common::owner_api_route(
+                    &s,
+                    "PUT",
+                    &format!("/api/agents/{MAIN_AGENT_ID}/plugin-grants"),
+                    current,
+                )
+                .await
+                .unwrap();
+            } else {
+                s.agent_fixture(json!({ "plugins": [] }), Some(MAIN_AGENT_ID))
+                    .await
+                    .unwrap();
+            }
             let current = s.store.plugin_instance(&instance).await.unwrap().unwrap();
             assert_eq!(current.revision, saved["revision"].as_str().unwrap());
             // Plugin grants are independent of the run's installation access.
-            let still_authorized = call(&s, &configuration, "list_plugins", json!({})).await;
-            assert_ne!(
-                still_authorized["result"]["isError"], true,
-                "{still_authorized}"
-            );
+            if operation != "run_credentials_fetch" {
+                let still_authorized = call(&s, &configuration, "list_plugins", json!({})).await;
+                assert_ne!(
+                    still_authorized["result"]["isError"], true,
+                    "{still_authorized}"
+                );
+            }
             release.notify_one();
         };
         let (response, ()) = tokio::time::timeout(std::time::Duration::from_secs(15), async {

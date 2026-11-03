@@ -16,6 +16,11 @@ import { describe, expect, it } from 'vitest'
 import { acquireNetworkPackages, installNetworkPackageClosure, networkPackageManifest } from '../ci-network-package-closure.mjs'
 import { prepareNetworkTools } from '../prepare-network-tools.mjs'
 
+function archiveUrl(snapshotUrl) {
+  const url = new URL(snapshotUrl)
+  return `https://archive.ubuntu.com/ubuntu${url.pathname.replace(/^\/ubuntu\/\d{8}T\d{6}Z/, '')}`
+}
+
 function fixture(options = {}) {
   const directory = mkdtempSync(path.join(tmpdir(), 'cairn-ci-packages-'))
   const manifest = structuredClone(networkPackageManifest)
@@ -25,10 +30,12 @@ function fixture(options = {}) {
     entry.bytes = bytes.length
     entry.sha256 = createHash('sha256').update(bytes).digest('hex')
     contents.set(entry.url, bytes)
+    contents.set(archiveUrl(entry.url), bytes)
   }
 
   const installed = new Map([['libc6', '2.39'], ...(options.installed ?? [])])
   const calls = []
+  const diagnostics = []
   const run = (command, args) => {
     calls.push({ command, args })
     if (command === 'dpkg-deb') {
@@ -75,9 +82,11 @@ function fixture(options = {}) {
     run,
     readOS: () => options.os ?? 'ID=ubuntu\nVERSION_ID="24.04"\n',
     fetchPackage: async (url, init) => {
-      expect(init.redirect).toBe('error')
+      expect(init.redirect).toBe('manual')
       return new Response(contents.get(url))
     },
+    report: diagnostic => diagnostics.push(diagnostic),
+    diagnostics,
     close: () => rmSync(directory, { recursive: true, force: true }),
   }
 }
@@ -95,14 +104,26 @@ describe('pinned network package closure', () => {
     const value = fixture({ installed: [['libmnl0', '9.0'], ['libnfnetlink0', '9.0']] })
     try {
       const requests = []
+      const signals = []
+      const timeoutBudgets = []
       const result = await acquireNetworkPackages(value.directory, {
         ...value,
         fetchPackage: async (...args) => {
           requests.push(args[0])
+          signals.push(args[1].signal)
           return value.fetchPackage(...args)
         },
+        createTimeoutSignal: (timeoutMs) => {
+          timeoutBudgets.push(timeoutMs)
+          return AbortSignal.timeout(timeoutMs)
+        },
       })
-      expect(requests).toEqual(value.manifest.packages.map(entry => entry.url))
+      expect(requests).toEqual(value.manifest.packages.map(entry => archiveUrl(entry.url)))
+      expect(timeoutBudgets).toEqual([30000, 30000, 30000, 30000])
+      expect(new Set(signals).size).toBe(4)
+      expect(value.diagnostics.map(diagnostic => [diagnostic.package, diagnostic.source, diagnostic.status])).toEqual(
+        value.manifest.packages.map(entry => [entry.name, 'archive', 200]),
+      )
       expect(result.packages).toBe(4)
       expect(readFileSync(path.join(value.directory, 'manifest.json'), 'utf8')).toBe(`${JSON.stringify(value.manifest)}\n`)
       const reports = []
@@ -124,13 +145,162 @@ describe('pinned network package closure', () => {
     }
   })
 
-  it.each(['bad-hash', 'too-large', 'http-error'])('rejects acquisition %s without publishing a manifest', async (scenario) => {
+  it.each([
+    ['fast-server-error', async () => new Response('unavailable', { status: 503 }), 503, 'http'],
+    ['missing-body', async () => new Response(null, { status: 200 }), 200, 'missing-body'],
+    ['transport-error', async () => { throw new TypeError('private transport detail') }, null, 'transport'],
+  ])('falls back to the pinned snapshot on archive %s within the same package budget', async (_, archiveFailure, expectedStatus, expectedReason) => {
     const value = fixture()
     try {
-      const fetchPackage = async () => scenario === 'http-error'
-        ? new Response('denied', { status: 403 })
-        : new Response(scenario === 'too-large' ? 'x'.repeat(1000) : 'changed')
-      await expect(acquireNetworkPackages(value.directory, { ...value, fetchPackage })).rejects.toThrow(/^CI_NETWORK_PACKAGES_/)
+      const firstEntry = value.manifest.packages[0]
+      const firstArchive = archiveUrl(firstEntry.url)
+      const requests = []
+      const timeoutBudgets = []
+      const result = await acquireNetworkPackages(value.directory, {
+        ...value,
+        createTimeoutSignal: (timeoutMs) => {
+          timeoutBudgets.push(timeoutMs)
+          return AbortSignal.timeout(timeoutMs)
+        },
+        fetchPackage: async (url, init) => {
+          requests.push({ url, signal: init.signal })
+          if (url === firstArchive)
+            return archiveFailure()
+          return value.fetchPackage(url, init)
+        },
+      })
+
+      expect(result.packages).toBe(4)
+      expect(requests.map(request => request.url)).toEqual([
+        firstArchive,
+        firstEntry.url,
+        ...value.manifest.packages.slice(1).map(entry => archiveUrl(entry.url)),
+      ])
+      expect(requests[0].signal).toBe(requests[1].signal)
+      expect(timeoutBudgets).toEqual([30000, 30000, 30000, 30000])
+      expect(value.diagnostics[0]).toMatchObject({
+        event: 'source-unavailable',
+        package: firstEntry.name,
+        source: 'archive',
+        status: expectedStatus,
+        reason: expectedReason,
+      })
+      expect(JSON.stringify(value.diagnostics)).not.toContain('private transport detail')
+      expect(value.diagnostics.at(-1)).toMatchObject({
+        event: 'source-selected',
+        package: value.manifest.packages.at(-1).name,
+        source: 'archive',
+        status: 200,
+      })
+    }
+    finally {
+      value.close()
+    }
+  })
+
+  it('fails after both approved sources are unavailable', async () => {
+    const value = fixture()
+    try {
+      const firstEntry = value.manifest.packages[0]
+      const requests = []
+      await expect(acquireNetworkPackages(value.directory, {
+        ...value,
+        fetchPackage: async (url, init) => {
+          requests.push(url)
+          expect(init.redirect).toBe('manual')
+          return new Response('unavailable', { status: url === archiveUrl(firstEntry.url) ? 503 : 502 })
+        },
+      })).rejects.toThrow('CI_NETWORK_PACKAGES_DOWNLOAD_FAILED')
+
+      expect(requests).toEqual([archiveUrl(firstEntry.url), firstEntry.url])
+      expect(value.diagnostics.map(diagnostic => [diagnostic.source, diagnostic.status])).toEqual([['archive', 503], ['snapshot', 502]])
+      expect(() => readFileSync(path.join(value.directory, 'manifest.json'))).toThrow()
+    }
+    finally {
+      value.close()
+    }
+  })
+
+  it('does not start the snapshot request after the shared package deadline expires', async () => {
+    const value = fixture()
+    try {
+      const controller = new AbortController()
+      const firstArchive = archiveUrl(value.manifest.packages[0].url)
+      const requests = []
+      const timeoutBudgets = []
+      await expect(acquireNetworkPackages(value.directory, {
+        ...value,
+        createTimeoutSignal: (timeoutMs) => {
+          timeoutBudgets.push(timeoutMs)
+          return controller.signal
+        },
+        fetchPackage: async (url) => {
+          requests.push(url)
+          controller.abort()
+          return new Response('unavailable', { status: 503 })
+        },
+      })).rejects.toThrow('CI_NETWORK_PACKAGES_DOWNLOAD_FAILED')
+
+      expect(timeoutBudgets).toEqual([30000])
+      expect(requests).toEqual([firstArchive])
+    }
+    finally {
+      value.close()
+    }
+  })
+
+  it('does not follow or fall back from a redirect', async () => {
+    const value = fixture()
+    try {
+      const requests = []
+      await expect(acquireNetworkPackages(value.directory, {
+        ...value,
+        fetchPackage: async (url, init) => {
+          requests.push(url)
+          expect(init.redirect).toBe('manual')
+          return new Response(null, { status: 302, headers: { location: 'https://example.invalid/redirected-package.deb' } })
+        },
+      })).rejects.toThrow('CI_NETWORK_PACKAGES_REDIRECT_REJECTED')
+
+      expect(requests).toEqual([archiveUrl(value.manifest.packages[0].url)])
+      expect(value.diagnostics).toEqual([{
+        event: 'source-rejected',
+        package: value.manifest.packages[0].name,
+        source: 'archive',
+        status: 302,
+        reason: 'redirect',
+      }])
+    }
+    finally {
+      value.close()
+    }
+  })
+
+  it.each([
+    ['bad-hash', 'INTEGRITY_FAILED'],
+    ['too-large', 'SIZE_MISMATCH'],
+    ['too-small', 'INTEGRITY_FAILED'],
+    ['http-error', 'DOWNLOAD_FAILED'],
+  ])('rejects acquisition %s without publishing a manifest or falling back', async (scenario, code) => {
+    const value = fixture()
+    try {
+      const requests = []
+      const firstEntry = value.manifest.packages[0]
+      const fetchPackage = async (url) => {
+        requests.push(url)
+        if (scenario === 'http-error')
+          return new Response('denied', { status: 403 })
+        const bytes = scenario === 'too-large'
+          ? Buffer.alloc(firstEntry.bytes + 1, 'x')
+          : scenario === 'too-small'
+            ? Buffer.alloc(firstEntry.bytes - 1, 'x')
+            : Buffer.alloc(firstEntry.bytes, 'x')
+        return new Response(bytes)
+      }
+
+      await expect(acquireNetworkPackages(value.directory, { ...value, fetchPackage })).rejects.toThrow(`CI_NETWORK_PACKAGES_${code}`)
+
+      expect(requests).toEqual([archiveUrl(firstEntry.url)])
       expect(() => readFileSync(path.join(value.directory, 'manifest.json'))).toThrow()
     }
     finally {

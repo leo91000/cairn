@@ -11,6 +11,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 /// Constructed by authenticated transport adapters, never from command JSON.
+#[derive(Clone)]
 pub(crate) enum ResumeContext {
     Human(String),
     Public(Vec<String>, Option<String>),
@@ -50,6 +51,18 @@ impl ResumeRun {
         input: ResumeRunInput,
         context: ResumeContext,
     ) -> Result<ResumeRunOutput> {
+        if input
+            .turn_id
+            .as_ref()
+            .is_some_and(|turn| turn.is_empty() || turn.chars().count() > 200)
+        {
+            return Err(Error::bad("Invalid turn identifier."));
+        }
+        if input.selection.is_some() && input.turn_id.is_none() {
+            return Err(Error::bad(
+                "A turn identifier is required when selecting a model for resume.",
+            ));
+        }
         let id = input.run_id.to_string();
         let (origin, bearer) = match context {
             ResumeContext::Human(account) => (Origin::Human(account), None),
@@ -73,18 +86,52 @@ impl ResumeRun {
                 (Origin::Run(caller), Some(bearer))
             }
         };
-        let run = s.store.run(&id).await?;
+        let mut selection = input.selection;
+        let selected_resume = selection.is_some();
+        let authorize_id = id.clone();
+        let authorize_origin = origin.clone();
+        let run = s
+            .store
+            .read(move |db| {
+                let run = crate::error::required(db.run(&authorize_id)?, "Run not found")?;
+                if selected_resume || crate::resume_selection::has_saved_opencode_auto(&run) {
+                    policy::run_grant(db, &run, &authorize_origin)?;
+                }
+                Ok(run)
+            })
+            .await?;
+        let saved_auto_catalog = if !selected_resume {
+            crate::resume_selection::saved_opencode_auto_catalog(s, &run).await
+        } else {
+            None
+        };
+        let selected_provider = if let Some(selection) = selection.as_mut() {
+            let expected_turn_id = input.turn_id.as_deref().ok_or_else(|| {
+                Error::bad("A turn identifier is required when selecting a model for resume.")
+            })?;
+            Some(crate::resume_selection::validate(s, &run, selection, expected_turn_id).await?)
+        } else {
+            None
+        };
         if origin.known() && policy::supports(&run["snapshot"]["agent"], "native") {
             policy::refresh_for(s, &run["snapshot"]["agent"]).await?;
         }
         let commit_id = id.clone();
+        let authorize = crate::installation_mcp::management_authorization(s, bearer.as_deref())
+            .await?
+            .with_publication(move |db| policy::authorize_run_in(db, &commit_id, &origin));
         s.worker
-            .resume_authorized(s, &id, move |db: &Db<'_>| {
-                if let Some(bearer) = &bearer {
-                    crate::installation_mcp::authorize_in(db, bearer)?;
-                }
-                policy::authorize_run_in(db, &commit_id, &origin)
-            })
+            .resume_selected_live(
+                s,
+                &id,
+                crate::worker::ResumeSelectionContext {
+                    expected_turn_id: input.turn_id,
+                    selection,
+                    selected_provider,
+                    saved_auto_catalog,
+                },
+                authorize,
+            )
             .await?;
         Ok(ResumeRunOutput {
             run_id: input.run_id,
@@ -222,17 +269,19 @@ impl ProjectOperation {
                 Some(bearer)
             }
         };
-        let authorize = crate::installation_mcp::management_authorization(bearer.as_deref());
+        let authorize =
+            crate::installation_mcp::management_authorization(s, bearer.as_deref()).await?;
         match self.name {
             "save_project" => Ok(serde_json::to_value(
-                s.create_project(decode(input)?, None, authorize).await?,
+                s.create_project_live(decode(input)?, None, authorize)
+                    .await?,
             )?),
             "replace_project" => Ok(serde_json::to_value(
-                s.replace_project(decode(input)?, authorize).await?,
+                s.replace_project_live(decode(input)?, authorize).await?,
             )?),
             "delete_project" => {
                 let input: ProjectInput = decode(input)?;
-                s.delete_project(input.project_id, authorize).await?;
+                s.delete_project_live(input.project_id, authorize).await?;
                 Ok(serde_json::to_value(DeleteProjectOutput { deleted: true })?)
             }
             "list_projects" => {
@@ -244,7 +293,7 @@ impl ProjectOperation {
                             rusqlite::TransactionBehavior::Deferred,
                         )?;
                         let db = Db(&tx);
-                        authorize(&db)?;
+                        authorize.authorize(&db)?;
                         let output = ListProjectsOutput {
                             projects: db.projects()?,
                         };
@@ -262,7 +311,7 @@ impl ProjectOperation {
                             rusqlite::TransactionBehavior::Deferred,
                         )?;
                         let db = Db(&tx);
-                        authorize(&db)?;
+                        authorize.authorize(&db)?;
                         let project = crate::error::required(
                             db.project(&input.project_id.to_string())?,
                             "Project not found",
@@ -283,6 +332,16 @@ pub(crate) struct AgentOperation {
 }
 
 pub(crate) const AGENT_OPERATIONS: &[AgentOperation] = &[
+    AgentOperation {
+        name: "get_agent_plugin_grants",
+        scope: "read",
+        description: "Read full and selected per-instance plugin contributions, resource restrictions and explicit run credential suppliers.",
+    },
+    AgentOperation {
+        name: "replace_agent_plugin_grants",
+        scope: "manage",
+        description: "Replace plugin grants at the agent revision. Public MCP with manage may change grants and credential suppliers. Installation agents can only reduce existing grants and cannot reduce grants protected by another account's rule (all accounts outside an eligible conversation).",
+    },
     AgentOperation {
         name: "set_agent_avatar",
         scope: "manage",
@@ -343,6 +402,14 @@ impl AgentOperation {
     pub(crate) fn descriptor(&self) -> Value {
         use cairn_contracts::*;
         let (input, output) = match self.name {
+            "get_agent_plugin_grants" => (
+                schema_for::<AgentInput>(Contract::Deserialize),
+                schema_for::<AgentPluginGrants>(Contract::Serialize),
+            ),
+            "replace_agent_plugin_grants" => (
+                schema_for::<ReplaceAgentPluginGrantsInput>(Contract::Deserialize),
+                schema_for::<AgentPluginGrants>(Contract::Serialize),
+            ),
             "set_agent_avatar" => (
                 schema_for::<SetAgentAvatarInput>(Contract::Deserialize),
                 schema_for::<Agent>(Contract::Serialize),
@@ -400,7 +467,54 @@ impl AgentOperation {
         input: Value,
         context: ResumeContext,
     ) -> Result<Value> {
+        Box::pin(self.invoke_inner(s, input, context)).await
+    }
+
+    async fn invoke_inner(
+        &self,
+        s: &Arc<Service>,
+        input: Value,
+        context: ResumeContext,
+    ) -> Result<Value> {
         use cairn_contracts::*;
+        if matches!(
+            self.name,
+            "get_agent_plugin_grants" | "replace_agent_plugin_grants"
+        ) {
+            let reduce_only = matches!(&context, ResumeContext::Installation(_));
+            let authority =
+                crate::capabilities::plugin_packages::Authority::for_grants(s, context, self.scope)
+                    .await?;
+            if self.name == "replace_agent_plugin_grants" {
+                return Ok(serde_json::to_value(
+                    crate::plugins::grants::replace(s, decode(input)?, authority, reduce_only)
+                        .await?,
+                )?);
+            }
+            let input: AgentInput = decode(input)?;
+            authority.recheck(s).await?;
+            return s
+                .store
+                .read(move |db| {
+                    authority.authorize(db)?;
+                    Ok(serde_json::to_value(
+                        db.agent_plugin_grants(&input.agent_id.to_string())?,
+                    )?)
+                })
+                .await;
+        }
+        let merge_authority = if self.name == "merge_agents" {
+            Some(
+                crate::capabilities::plugin_packages::Authority::for_grants(
+                    s,
+                    context.clone(),
+                    "manage",
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         let (editor, bearer) = match context {
             ResumeContext::Human(_) => (crate::service::AgentEditor::Owner, None),
             ResumeContext::Public(scopes, _) => {
@@ -417,18 +531,19 @@ impl AgentOperation {
                 (crate::service::AgentEditor::Installation, Some(bearer))
             }
         };
-        let authorize = crate::installation_mcp::management_authorization(bearer.as_deref());
+        let authorize =
+            crate::installation_mcp::management_authorization(s, bearer.as_deref()).await?;
         match self.name {
             "set_agent_avatar" => {
                 let input: SetAgentAvatarInput = decode(input)?;
                 Ok(serde_json::to_value(
                     s.avatars
-                        .upload(s, &input.agent_id.to_string(), &input.data, authorize)
+                        .upload_live(s, &input.agent_id.to_string(), &input.data, authorize)
                         .await?,
                 )?)
             }
             "save_agent" => Ok(serde_json::to_value(
-                s.save_profile(
+                s.save_profile_live(
                     crate::agents::SaveProfile::Create(decode(input)?),
                     editor,
                     authorize,
@@ -436,7 +551,7 @@ impl AgentOperation {
                 .await?,
             )?),
             "replace_agent" => Ok(serde_json::to_value(
-                s.save_profile(
+                s.save_profile_live(
                     crate::agents::SaveProfile::Replace(decode(input)?),
                     editor,
                     authorize,
@@ -444,16 +559,17 @@ impl AgentOperation {
                 .await?,
             )?),
             "preview_agent" => Ok(serde_json::to_value(
-                s.agent_preview(decode(input)?, authorize).await?,
+                s.agent_preview_live(decode(input)?, authorize).await?,
             )?),
             "merge_agents" => Ok(serde_json::to_value(
-                s.merge_agents_authorized(decode(input)?, authorize).await?,
+                s.merge_agents_live(decode(input)?, authorize, merge_authority)
+                    .await?,
             )?),
             "generate_agent_avatar" => {
                 let input: AgentInput = decode(input)?;
                 Ok(serde_json::to_value(
                     s.avatars
-                        .generate_authorized(s, &input.agent_id.to_string(), authorize)
+                        .generate_live(s, &input.agent_id.to_string(), authorize)
                         .await?,
                 )?)
             }
@@ -462,7 +578,7 @@ impl AgentOperation {
                 let id = input.agent_id.to_string();
                 s.store
                     .transaction(move |db| {
-                        authorize(db)?;
+                        authorize.authorize(db)?;
                         crate::error::required(db.agent(&id)?, "Agent not found")?;
                         crate::service::ensure_removable(db, "agents", &id)?;
                         crate::service::forget_agent(db, &id)?;
@@ -491,7 +607,7 @@ impl AgentOperation {
                             rusqlite::TransactionBehavior::Deferred,
                         )?;
                         let db = Db(&tx);
-                        authorize(&db)?;
+                        authorize.authorize(&db)?;
                         let result = if let Some(id) = agent_id {
                             serde_json::to_value(crate::error::required(
                                 db.agent(&id.to_string())?,

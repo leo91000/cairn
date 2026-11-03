@@ -25,6 +25,7 @@ pub fn complete_snapshot_fixture(input: &Value) -> Value {
     }))
     .unwrap();
     let snapshot = cairn_contracts::RunSnapshot {
+        native_configuration: None,
         task,
         agent,
         project: None,

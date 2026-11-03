@@ -104,7 +104,15 @@ pub(crate) async fn list(
     let package = registry::active(s, plugin_id).await?;
     let source = input.source.as_str();
     let connection = instance(s, &package, source, &input.instance).await?;
-    let authority = authority.instance(s, &connection, &package).await?;
+    let authority = authority
+        .instance(
+            s,
+            &connection,
+            &package,
+            cairn_contracts::PluginContributionKind::ProjectSource,
+            source,
+        )
+        .await?;
     let page = input.page;
     let search = &input.query;
     if !(1..=10000).contains(&page)
@@ -116,6 +124,10 @@ pub(crate) async fn list(
         ));
     }
     let scope = Scope::Instance(Box::new(connection));
+    let scope = match authority.management() {
+        Some(management) => Scope::Managed(Box::new(scope), management),
+        None => scope,
+    };
     let payload = json!({
         "op": "list",
         "source": source,
@@ -158,7 +170,15 @@ pub(crate) async fn import(
     let instance_id = command.instance.as_str();
     uuid(instance_id)?;
     let connection = instance(s, &package, source, instance_id).await?;
-    let authority = authority.instance(s, &connection, &package).await?;
+    let authority = authority
+        .instance(
+            s,
+            &connection,
+            &package,
+            cairn_contracts::PluginContributionKind::ProjectSource,
+            source,
+        )
+        .await?;
     let item_id = plain(&Value::String(command.id.clone()), 200)
         .filter(|id| !id.is_empty())
         .ok_or_else(|| Error::bad("Choose a project to import."))?;
@@ -176,6 +196,10 @@ pub(crate) async fn import(
         }
     }
     let scope = Scope::Instance(Box::new(connection.clone()));
+    let scope = match authority.management() {
+        Some(management) => Scope::Managed(Box::new(scope), management),
+        None => scope,
+    };
     let payload = json!({
         "op": "resolve",
         "source": source,
@@ -244,8 +268,14 @@ pub(crate) async fn import(
         .tempdir_in(&root)?;
     let path = directory.path().join("repository");
     authority.recheck(s).await?;
-    let credentials = run_credentials::for_instance(s, &package, &connection).await?;
-    crate::project_git::import(&s.config, &credentials, &origin, &path, &branch).await?;
+    let management = authority.management();
+    let credentials =
+        run_credentials::for_instance_managed(s, &package, &connection, management.as_ref())
+            .await?;
+    crate::project_git::import_authorized(&s.config, &credentials, &origin, &path, &branch, || {
+        Box::pin(authority.recheck(s))
+    })
+    .await?;
     settings.path = path.to_string_lossy().into_owned();
     let source = ProjectSource {
         plugin_id: plugin_id.into(),

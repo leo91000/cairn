@@ -4,7 +4,7 @@
 use rusqlite::Connection;
 
 pub fn previous_layout(db: &Connection) {
-    // The released placement input predates Plan24, including its message/question columns.
+    // The released placement input predates Plan26, including its message/question columns.
     for table in ["chat_messages", "chat_questions"] {
         let has_plan = db
             .prepare(&format!(

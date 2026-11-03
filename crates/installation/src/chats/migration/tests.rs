@@ -827,7 +827,7 @@ async fn actual_version14_preserves_conversations_accounts_leases_and_credential
 }
 
 #[tokio::test]
-async fn version23_messages_gain_plan_requests_without_other_changes() {
+async fn version25_messages_gain_plan_requests_without_other_changes() {
     let root = tempfile::tempdir().unwrap();
     let db = database(root.path()).await;
     let chat = json!({"id": CHAT, "slug": "retained-plan", "paused": true});
@@ -858,10 +858,14 @@ async fn version23_messages_gain_plan_requests_without_other_changes() {
     crate::worker::progress::upgrade(&mut db).unwrap();
     crate::timeline::migration::upgrade(&mut db).unwrap();
     crate::nodes::attempts_migration::upgrade(&mut db).unwrap();
+    crate::plugins::grants::migrate(&Db(&db), root.path()).unwrap();
+    db.execute_batch(crate::coding_agent_configuration::SCHEMA)
+        .unwrap();
+    db.pragma_update(None, "user_version", 25).unwrap();
     assert_eq!(
         db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        23
+        25
     );
     assert!(
         !db.prepare("SELECT 1 FROM pragma_table_info('chat_messages') WHERE name='plan'")

@@ -1,4 +1,5 @@
 use cairn_contracts::EventKind;
+use common::AgentFixture;
 use common::McpFixture;
 use common::MissionFixture;
 
@@ -630,6 +631,400 @@ async fn legacy_stdio_servers_can_exit_on_the_modern_probe() {
     let tools = client.discover().await.unwrap();
     assert_eq!(tools[0]["name"], "legacy_tool");
     client.close().await;
+}
+
+const BOUNDED_RESULT_SERVER: &str = r#"
+const { createServer } = require('node:http');
+const { appendFileSync, readFileSync } = require('node:fs');
+const schema = {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    type: 'object', properties: { value: { type: 'string' } }, required: ['value'],
+    $defs: { recursive: { $anchor: 'node', $ref: '#node' }, external: { $ref: 'https://invalid.example/do-not-fetch' } },
+};
+const server = createServer(async (incoming, response) => {
+    let body = '';
+    for await (const chunk of incoming) body += chunk;
+    const request = JSON.parse(body);
+    if (request.id === undefined) {
+        response.writeHead(202).end();
+        return;
+    }
+    let result;
+    if (request.method === 'server/discover') {
+        result = { supportedVersions: ['2026-07-28'], capabilities: { tools: {} } };
+    } else if (request.method === 'tools/list') {
+        if (process.env.TEST_DISCOVERY_COUNTER) appendFileSync(process.env.TEST_DISCOVERY_COUNTER, 'list\n');
+        const mode = process.env.TEST_CATALOG_MODE ? readFileSync(process.env.TEST_CATALOG_MODE, 'utf8') : 'valid';
+        const tool = { name: 'bounded_fixture', inputSchema: { type: 'object' }, outputSchema: schema };
+        const other = { name: 'unlisted_fixture', inputSchema: { type: 'object' } };
+        const tools = mode === 'scalar' ? [42] : mode === 'array' ? [[]] : mode === 'mixed' ? [tool, 42, []] : mode === 'invalid_unlisted' ? [tool, { ...other, inputSchema: [] }] : [tool, other];
+        result = { tools };
+    } else if (request.method === 'tools/call') {
+        appendFileSync(process.env.TEST_COUNTER, 'call\n');
+        const mode = request.params.arguments.mode;
+        if (mode === 'scalar') {
+            result = 42;
+        } else if (mode === 'array') {
+            result = ['fixture'];
+        } else if (mode === 'many') {
+            result = { content: Array.from({ length: 60000 }, () => ({ type: 'text', text: '' })), structuredContent: { value: 'completed' } };
+        } else {
+            result = mode === 'error'
+                ? { content: [{ type: 'text', text: 'error: ' + 'x'.repeat(1100000) }], isError: true, _meta: { 'mcp/www_authenticate': 'Bearer scope="read"' } }
+                : { content: [{ type: 'text', text: 'completed' }], structuredContent: { value: mode === 'large' ? 'x'.repeat(1100000) : 'granted-credential-fixture' } };
+        }
+    } else {
+        result = {};
+    }
+    response.writeHead(200, { 'content-type': 'application/json' });
+    response.end(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }));
+});
+server.listen(0, '127.0.0.1', () => console.log(`http://127.0.0.1:${server.address().port}/mcp`));
+"#;
+
+/// Run a controlled HTTP producer on the transport that receives gateway grants.
+/// Direct coding-agent stdio connections intentionally receive no gateway grant.
+async fn bounded_result_server(root: &TempDir) -> (String, tokio::process::Child) {
+    std::fs::write(root.path().join("catalog-mode"), "valid").unwrap();
+    let mut child = tokio::process::Command::new("node")
+        .args(["-e", BOUNDED_RESULT_SERVER])
+        .env("TEST_COUNTER", root.path().join("counter"))
+        .env("TEST_CATALOG_MODE", root.path().join("catalog-mode"))
+        .env(
+            "TEST_DISCOVERY_COUNTER",
+            root.path().join("discovery-counter"),
+        )
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
+    let endpoint = output.next_line().await.unwrap().unwrap();
+    (endpoint, child)
+}
+
+#[tokio::test]
+async fn gateway_bounds_completed_results_without_changing_schemas_grants_or_effect_count() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let counter = root.path().join("counter");
+    let (upstream_url, mut upstream) = bounded_result_server(&root).await;
+    let (s, origin, server) = served(&root).await;
+    let connection = s
+        .mcp_fixture(
+            json!({
+                "name": "Bounded result fixture", "url": upstream_url, "allowPrivateNetwork": true,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let connection_id = connection["id"].as_str().unwrap();
+    s.mcps.test(&s, connection_id).await.unwrap();
+    let canonical = s.mcps.server(&s, connection_id).await.unwrap().tools;
+    assert!(canonical[0]["outputSchema"].is_object());
+    let run = manual_run(&s, "Bounded model results", "Fixture only").await;
+    let run_id = run["id"].as_str().unwrap();
+    s.store
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Running),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
+    let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let endpoint = format!("{origin}/mcp-gateway/{connection_id}");
+    let http = reqwest::Client::new();
+    let request = |version: &str, method: &str, params: Value| {
+        http.post(&endpoint).bearer_auth(token)
+            .header("mcp-protocol-version", version)
+            .json(&json!({ "jsonrpc": "2.0", "id": "fixture-id", "method": method, "params": params }))
+    };
+    let catalog: Value = request("2025-11-25", "tools/list", json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let advertised = &catalog["result"]["tools"][0];
+    assert!(advertised.get("outputSchema").is_none());
+    assert_eq!(advertised["inputSchema"], canonical[0]["inputSchema"]);
+    assert_eq!(advertised["name"], canonical[0]["name"]);
+    assert!(
+        advertised["description"]
+            .as_str()
+            .unwrap()
+            .contains("omits the upstream outputSchema")
+    );
+
+    for (index, mode) in ["small", "large", "many", "error", "small"]
+        .into_iter()
+        .enumerate()
+    {
+        let response = request(
+            "2025-11-25",
+            "tools/call",
+            json!({ "name": "bounded_fixture", "arguments": { "mode": mode } }),
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let bytes = response.bytes().await.unwrap();
+        assert!(bytes.len() <= 1024 * 1024 + 1024);
+        let response: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["id"], "fixture-id");
+        let result = &response["result"];
+        assert!(serde_json::to_vec(result).unwrap().len() <= 1024 * 1024);
+        assert_eq!(
+            std::fs::read_to_string(&counter).unwrap().lines().count(),
+            index + 1
+        );
+        if mode == "small" {
+            assert_eq!(
+                result["structuredContent"]["value"],
+                "granted-credential-fixture"
+            );
+            assert!(result["structuredContent"].get("truncated").is_none());
+        } else {
+            assert_eq!(result["structuredContent"]["truncated"], true);
+            assert_eq!(result["structuredContent"]["retained"], false);
+            assert!(
+                result["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("truncated")
+            );
+        }
+        if mode == "error" {
+            assert_eq!(result["isError"], true);
+            assert_eq!(
+                result["_meta"]["mcp/www_authenticate"],
+                "Bearer scope=\"read\""
+            );
+        } else {
+            assert_ne!(result["isError"], true);
+        }
+    }
+    assert_eq!(
+        s.mcps.server(&s, connection_id).await.unwrap().tools,
+        canonical
+    );
+    let mut calls = 5;
+    for version in ["2025-11-25", "2026-07-28"] {
+        for mode in ["scalar", "array"] {
+            let response = request(
+                version,
+                "tools/call",
+                json!({ "name": "bounded_fixture", "arguments": { "mode": mode } }),
+            )
+            .send()
+            .await
+            .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let response: Value = response.json().await.unwrap();
+            assert_eq!(response["id"], "fixture-id");
+            assert_eq!(response["error"]["code"], -32603);
+            assert_eq!(
+                response["error"]["message"],
+                "MCP response result must be an object. Tool outcome is unknown; do not repeat the operation automatically."
+            );
+            assert!(response.get("result").is_none());
+            calls += 1;
+            assert_eq!(
+                std::fs::read_to_string(&counter).unwrap().lines().count(),
+                calls
+            );
+        }
+    }
+    s.mcps.revoke_run(&s, run_id).await.unwrap();
+    let revoked = request(
+        "2025-11-25",
+        "tools/call",
+        json!({ "name": "bounded_fixture", "arguments": { "mode": "small" } }),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(revoked.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        std::fs::read_to_string(&counter).unwrap().lines().count(),
+        calls
+    );
+    server.abort();
+    upstream.kill().await.unwrap();
+    upstream.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn gateway_rejects_malformed_advertisements_under_both_grant_scopes() {
+    for restricted in [false, true] {
+        malformed_advertisement_scope(restricted).await;
+    }
+}
+
+async fn malformed_advertisement_scope(restricted: bool) {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let mode = root.path().join("catalog-mode");
+    let discovery = root.path().join("discovery-counter");
+    std::fs::write(&mode, "valid").unwrap();
+    let (upstream_url, mut upstream) = bounded_result_server(&root).await;
+    let (s, origin, server) = served(&root).await;
+    let connection = s
+        .mcp_fixture(
+            json!({
+                "name": "Malformed advertisement fixture",
+                "url": upstream_url,
+                "allowPrivateNetwork": true,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let connection_id = connection["id"].as_str().unwrap();
+    s.mcps.test(&s, connection_id).await.unwrap();
+    let canonical = s.mcps.server(&s, connection_id).await.unwrap().tools;
+    let agent_id = if restricted {
+        let agent = s
+            .agent_fixture(
+                json!({
+                    "name": "Restricted gateway fixture",
+                    "access": {
+                        "mcps": [connection_id],
+                        "mcpTools": { connection_id: ["bounded_fixture"] },
+                    },
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_ne!(agent["id"], MAIN_AGENT_ID);
+        agent["id"].clone()
+    } else {
+        json!(MAIN_AGENT_ID)
+    };
+    let task = s
+        .task_fixture(
+            json!({
+                "name": "Malformed discovery",
+                "agentId": agent_id,
+                "prompt": "Fixture only",
+                "worktree": false,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let run = s
+        .enqueue(task["id"].as_str().unwrap(), "manual", None)
+        .await
+        .unwrap();
+    let run_id = run["id"].as_str().unwrap();
+    s.store
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Running),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
+    let token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let (_, scope) = s.mcps.grant(&s, connection_id, token).await.unwrap();
+    let expected_tools = restricted.then(|| vec!["bounded_fixture".to_owned()]);
+    assert_eq!(scope.tools, expected_tools);
+    let original_scope = serde_json::to_value(&scope).unwrap();
+    let endpoint = format!("{origin}/mcp-gateway/{connection_id}");
+    let http = reqwest::Client::new();
+    let mut calls = std::fs::read_to_string(&discovery).unwrap().lines().count();
+    for version in ["2025-11-25", "2026-07-28"] {
+        for catalog_mode in ["scalar", "array", "mixed", "invalid_unlisted", "valid"] {
+            std::fs::write(&mode, catalog_mode).unwrap();
+            let response = http.post(&endpoint).bearer_auth(token)
+                .header("mcp-protocol-version", version)
+                .header("mcp-method", "tools/list")
+                .json(&json!({ "jsonrpc": "2.0", "id": "catalog-id", "method": "tools/list", "params": {} }))
+                .send().await.unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let bytes = response.bytes().await.unwrap();
+            assert!(bytes.len() < 4096);
+            let response: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(response["id"], "catalog-id");
+            if catalog_mode == "valid" {
+                assert_eq!(
+                    response["result"]["tools"].as_array().unwrap().len(),
+                    if restricted { 1 } else { 2 }
+                );
+                let advertised = &response["result"]["tools"][0];
+                assert_eq!(advertised["name"], canonical[0]["name"]);
+                assert_eq!(advertised["inputSchema"], canonical[0]["inputSchema"]);
+                assert!(advertised.get("outputSchema").is_none());
+                assert_eq!(
+                    advertised["description"]
+                        .as_str()
+                        .unwrap()
+                        .matches("Cairn limits each complete encoded tool result")
+                        .count(),
+                    1
+                );
+            } else {
+                assert_eq!(response["error"]["code"], -32603);
+                assert_eq!(
+                    response["error"]["message"],
+                    "MCP server returned an invalid tool catalog."
+                );
+                assert!(response.get("result").is_none());
+                assert!(
+                    !std::str::from_utf8(&bytes)
+                        .unwrap()
+                        .contains("unlisted_fixture")
+                );
+            }
+            calls += 1;
+            assert_eq!(
+                std::fs::read_to_string(&discovery).unwrap().lines().count(),
+                calls
+            );
+            assert_eq!(
+                s.mcps.server(&s, connection_id).await.unwrap().tools,
+                canonical
+            );
+            let (_, scope) = s.mcps.grant(&s, connection_id, token).await.unwrap();
+            assert_eq!(serde_json::to_value(scope).unwrap(), original_scope);
+        }
+    }
+    s.mcps.revoke_run(&s, run_id).await.unwrap();
+    let revoked = http
+        .post(&endpoint)
+        .bearer_auth(token)
+        .json(
+            &json!({ "jsonrpc": "2.0", "id": "catalog-id", "method": "tools/list", "params": {} }),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), reqwest::StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        std::fs::read_to_string(&discovery).unwrap().lines().count(),
+        calls
+    );
+    server.abort();
+    upstream.kill().await.unwrap();
+    upstream.wait().await.unwrap();
 }
 
 async fn fetch_error(endpoint: &str, allow_private: bool) -> String {

@@ -199,7 +199,7 @@ impl Server {
             "--port",
             "0",
             "--log-level",
-            "ERROR",
+            native["logLevel"].as_str().unwrap_or("ERROR"),
         ]
         .map(str::to_owned);
         let mut cmd = command(&config.opencode_bin, &args, &env, Some(cwd));

@@ -56,6 +56,7 @@ struct Entry {
     audience: Audience,
     cancellation: tokio_util::sync::CancellationToken,
     resource: Option<Arc<super::resources::Read>>,
+    result_authority: Option<crate::capabilities::plugin_packages::Authority>,
 }
 
 pub struct Operations {
@@ -79,7 +80,7 @@ impl Operations {
         audience: Audience,
         work: impl Future<Output = Result<PluginOperationResult>> + Send + 'static,
     ) -> Result<Value> {
-        self.start_with_resource(s, audience, None, work)
+        self.start_with_resource(s, audience, None, None, work)
     }
 
     pub(crate) fn start_resource_read(
@@ -89,7 +90,17 @@ impl Operations {
         resource: Arc<super::resources::Read>,
         work: impl Future<Output = Result<PluginOperationResult>> + Send + 'static,
     ) -> Result<Value> {
-        self.start_with_resource(s, audience, Some(resource), work)
+        self.start_with_resource(s, audience, Some(resource), None, work)
+    }
+
+    pub(crate) fn start_with_result_authority(
+        &self,
+        s: Arc<Service>,
+        audience: Audience,
+        authority: crate::capabilities::plugin_packages::Authority,
+        work: impl Future<Output = Result<PluginOperationResult>> + Send + 'static,
+    ) -> Result<Value> {
+        self.start_with_resource(s, audience, None, Some(authority), work)
     }
 
     fn start_with_resource(
@@ -97,6 +108,7 @@ impl Operations {
         s: Arc<Service>,
         audience: Audience,
         resource: Option<Arc<super::resources::Read>>,
+        result_authority: Option<crate::capabilities::plugin_packages::Authority>,
         work: impl Future<Output = Result<PluginOperationResult>> + Send + 'static,
     ) -> Result<Value> {
         let permit =
@@ -121,6 +133,7 @@ impl Operations {
                 Entry {
                     audience,
                     resource,
+                    result_authority,
                     cancellation: cancellation.clone(),
                     operation: Operation {
                         id: id.clone(),
@@ -190,6 +203,17 @@ impl Operations {
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn result_authority(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::capabilities::plugin_packages::Authority>> {
+        let entries = self.entries.lock().unwrap();
+        let entry = entries
+            .get(id)
+            .ok_or_else(|| Error::not_found("Operation not found."))?;
+        Ok(entry.result_authority.clone())
     }
 
     pub(crate) fn resource_read(

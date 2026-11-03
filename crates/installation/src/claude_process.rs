@@ -190,7 +190,14 @@ fn strings(value: &Value) -> impl Iterator<Item = &str> {
 }
 
 fn settings(plan: &Value) -> Value {
-    let mut settings = json!({ "attribution": { "commit": "" } });
+    let mut settings = plan["claudeSettings"].clone();
+    if !settings.is_object() {
+        settings = json!({});
+    }
+    if !settings["attribution"].is_object() {
+        settings["attribution"] = json!({});
+    }
+    settings["attribution"]["commit"] = "".into();
     let planning = plan["planning"] == true;
     if plan["sandbox"] == "yolo" && !planning {
         return settings;

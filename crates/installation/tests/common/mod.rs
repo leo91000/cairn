@@ -788,3 +788,31 @@ pub fn resource_output(value: &Value) -> Value {
 }
 
 pub mod attempt_fixture;
+
+/// Saves a native preference through the real owner HTTP boundary.
+pub async fn save_native_configuration(
+    service: &Arc<Service>,
+    provider: &str,
+    agent: Option<&str>,
+    document: &str,
+) {
+    let app = relay_fixture::router(service.clone()).await.unwrap();
+    let token = relay_fixture::grant(service, &["read", "manage"]).await;
+    let target = serde_json::json!({ "provider": provider, "agentId": agent });
+    let read = request("POST", "/api/settings/coding-agents/read")
+        .header("x-test-relay-token", &token)
+        .body(Body::from(target.to_string()))
+        .unwrap();
+    let response = send(&app, read).await;
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let current = read_json(response).await;
+    let input = serde_json::json!({ "provider": provider, "agentId": agent, "revision": current["revision"], "document": document, "changes": [], "reset": false });
+    let save = request("PUT", "/api/settings/coding-agents")
+        .header("x-test-relay-token", &token)
+        .body(Body::from(input.to_string()))
+        .unwrap();
+    let response = send(&app, save).await;
+    let status = response.status();
+    let saved = read_json(response).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{saved}");
+}

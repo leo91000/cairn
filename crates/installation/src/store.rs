@@ -36,7 +36,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 24;
+pub(crate) const DATABASE_VERSION: i64 = 26;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -194,6 +194,23 @@ impl Store {
             version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
         }
         if !fresh && version == 23 {
+            let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if tx.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))? == 23 {
+                crate::plugins::grants::migrate(&Db(&tx), directory)?;
+                tx.pragma_update(None, "user_version", 24)?;
+            }
+            tx.commit()?;
+        }
+        if !fresh {
+            let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if tx.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))? == 24 {
+                tx.execute_batch(crate::coding_agent_configuration::SCHEMA)?;
+                tx.pragma_update(None, "user_version", 25)?;
+            }
+            tx.commit()?;
+        }
+        if !fresh && writer.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))? == 25
+        {
             crate::chats::migration::plan_requests(&mut writer)?;
         }
         if fresh {
@@ -224,6 +241,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::nodes::attempts::SCHEMA)?;
             tx.execute_batch(crate::nodes::exclusive_state::SCHEMA)?;
             tx.execute_batch(crate::agents::SCHEMA)?;
+            tx.execute_batch(crate::coding_agent_configuration::SCHEMA)?;
             tx.execute_batch(crate::mcps::sql::SCHEMA)?;
             tx.execute_batch(crate::plugins::instances::SCHEMA)?;
             tx.execute_batch(crate::plugins::state::SCHEMA)?;
@@ -231,6 +249,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::plugins::hooks::SCHEMA)?;
             crate::plugins::registry::initialize(&Db(&tx))?;
             tx.execute_batch(crate::agent_grants::SCHEMA)?;
+            tx.execute_batch(crate::plugins::grants::SCHEMA)?;
             tx.execute_batch(crate::missions::SCHEMA)?;
             tx.execute_batch(crate::chats::storage::SCHEMA)?;
             tx.execute_batch(crate::chats::question_storage::SCHEMA)?;
@@ -1576,7 +1595,8 @@ mod schema_tests {
 
     #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, DATABASE_VERSION + 1, 99] {
+        let unsupported_versions = (0..=10).chain([DATABASE_VERSION + 1, 99]);
+        for version in unsupported_versions {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();

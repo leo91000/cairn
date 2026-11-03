@@ -32,6 +32,7 @@ impl App {
     async fn with_public_url(public_url: Option<String>) -> Self {
         let root = TempDir::new().unwrap();
         let mut config = common::config(root.path());
+        config.opencode_bin = common::fixture("opencode.mjs");
         if let Some(public_url) = public_url {
             config.public_url = public_url;
         }
@@ -1711,6 +1712,64 @@ async fn quota_switch_fixture(app: &App) -> (String, Value) {
         .unwrap();
     let input = json!({"requestId":uuid::Uuid::new_v4(),"runId":run["id"],"turnId":run["chatExecution"]["messageId"],"provider":"claude"});
     (path, input)
+}
+
+#[tokio::test]
+async fn quota_switch_uses_the_configured_opencode_model_before_catalog_fallback() {
+    for customize_agent in [false, true] {
+        let app = App::new().await;
+        let (path, mut input) = quota_switch_fixture(&app).await;
+        app.service
+            .accounts
+            .connect_api_key(
+                &app.service,
+                cairn_installation::provider::Provider::Opencode,
+                "Zen",
+                "opencode",
+                "synthetic-switch-zen-key",
+                None,
+            )
+            .await
+            .unwrap();
+        common::save_native_configuration(
+            &app.service,
+            "opencode",
+            customize_agent.then_some(cairn_installation::config::MAIN_AGENT_ID),
+            r#"{"model":"opencode/cat-jam-free"}"#,
+        )
+        .await;
+        input["provider"] = "opencode".into();
+        let (status, accepted) = app
+            .request("POST", &format!("{path}/coding-agent"), input.clone())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{accepted}");
+        for mut account in app.service.store.account_fixtures().await.unwrap() {
+            account["enabled"] = false.into();
+            app.service
+                .store
+                .save_account_fixture(account)
+                .await
+                .unwrap();
+        }
+        app.service.worker.tick(&app.service).await.unwrap();
+        common::eventually(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(20),
+            async || {
+                let run = app.service.store.run(text(&input, "runId")).await.unwrap();
+                (run["snapshot"]["agent"]["provider"] == "opencode").then_some(())
+            },
+        )
+        .await;
+        let run = app.service.store.run(text(&input, "runId")).await.unwrap();
+        assert_eq!(run["snapshot"]["agent"]["model"], "opencode/cat-jam-free");
+        assert!(
+            run["snapshot"]["nativeConfiguration"]["document"]
+                .as_str()
+                .unwrap()
+                .contains("opencode/cat-jam-free")
+        );
+    }
 }
 
 #[tokio::test]

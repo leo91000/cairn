@@ -17,6 +17,21 @@ pub(crate) struct SettingsOperation {
 
 pub(crate) const SETTINGS_OPERATIONS: &[SettingsOperation] = &[
     SettingsOperation {
+        name: "get_coding_agent_configuration",
+        scope: "read",
+        description: "Read effective editable native Codex, Claude Code or OpenCode configuration, installation inheritance, form fields, revision and managed restrictions. Credentials are never included.",
+    },
+    SettingsOperation {
+        name: "preview_coding_agent_configuration",
+        scope: "read",
+        description: "Validate a native document or form changes without saving. Returns the same effective document and form fields, preserving advanced options.",
+    },
+    SettingsOperation {
+        name: "save_coding_agent_configuration",
+        scope: "manage",
+        description: "Save revision-guarded native engine defaults or agent customizations. Applies at the next message without interrupting an active turn. Cannot expand Cairn resource grants or replace managed credentials, transport or tools.",
+    },
+    SettingsOperation {
         name: "get_installation_settings",
         scope: "read",
         description: "Read the installation's public and MCP URLs, workspace roots, worker home, host concurrency, version, commit and protocol.",
@@ -55,6 +70,14 @@ pub(crate) fn settings_operation(name: &str) -> Option<&'static SettingsOperatio
 impl SettingsOperation {
     pub(crate) fn descriptor(&self) -> Value {
         let (input, output) = match self.name {
+            "get_coding_agent_configuration" => (
+                schema_for::<CodingAgentConfigurationInput>(Contract::Deserialize),
+                schema_for::<CodingAgentConfiguration>(Contract::Serialize),
+            ),
+            "preview_coding_agent_configuration" | "save_coding_agent_configuration" => (
+                schema_for::<EditCodingAgentConfigurationInput>(Contract::Deserialize),
+                schema_for::<CodingAgentConfiguration>(Contract::Serialize),
+            ),
             "get_installation_settings" => (
                 schema_for::<GetInstallationSettingsInput>(Contract::Deserialize),
                 schema_for::<InstallationSettings>(Contract::Serialize),
@@ -100,6 +123,33 @@ impl SettingsOperation {
         input: Value,
         context: ResumeContext,
     ) -> Result<Value> {
+        if matches!(
+            self.name,
+            "get_coding_agent_configuration"
+                | "preview_coding_agent_configuration"
+                | "save_coding_agent_configuration"
+        ) {
+            let authority =
+                super::plugin_packages::Authority::for_grants(s, context, self.scope).await?;
+            let authorize = crate::authorization::Authorization::live(s, authority);
+            let name = self.name;
+            return s
+                .store
+                .transaction(move |db| {
+                    authorize.authorize(db)?;
+                    let result = if name == "get_coding_agent_configuration" {
+                        crate::coding_agent_configuration::view(db, decode(input)?)?
+                    } else {
+                        crate::coding_agent_configuration::edit(
+                            db,
+                            &decode(input)?,
+                            name == "save_coding_agent_configuration",
+                        )?
+                    };
+                    Ok(serde_json::to_value(result)?)
+                })
+                .await;
+        }
         // HTTP enforces the owner role for settings and audit before dispatch.
         let (human, bearer) = match context {
             ResumeContext::Human(_) => (true, None),
@@ -117,7 +167,8 @@ impl SettingsOperation {
                 (false, Some(bearer))
             }
         };
-        let authorize = crate::installation_mcp::management_authorization(bearer.as_deref());
+        let authorize =
+            crate::installation_mcp::management_authorization(s, bearer.as_deref()).await?;
         match self.name {
             "get_installation_settings" => {
                 let _: GetInstallationSettingsInput = decode(input)?;
@@ -143,7 +194,7 @@ impl SettingsOperation {
                 let _: CheckStorageInput = decode(input)?;
                 // Network I/O never runs inside a database transaction.
                 let storage = crate::object_storage::Storage::configured(s)?;
-                Box::pin(storage.probe()).await?;
+                Box::pin(storage.probe_live(authorize)).await?;
                 Ok(serde_json::to_value(StorageCheck { ok: true })?)
             }
             name => {
@@ -161,7 +212,7 @@ impl SettingsOperation {
                             rusqlite::TransactionBehavior::Deferred,
                         )?;
                         let db = Db(&tx);
-                        authorize(&db)?;
+                        authorize.authorize(&db)?;
                         let result = if audit {
                             serde_json::to_value(ListAuditOutput {
                                 entries: db.audit_entries(100)?,

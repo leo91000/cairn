@@ -152,6 +152,27 @@ async fn choices(s: &Service, agent: &Value) -> Result<Vec<Choice>> {
             else {
                 continue;
             };
+            let agent_id = text(agent, "id").to_owned();
+            let preferred = s
+                .store
+                .read(move |db| {
+                    let configuration =
+                        crate::coding_agent_configuration::snapshot(db, provider, &agent_id)?;
+                    let value = crate::coding_agent_configuration::parse(
+                        provider,
+                        &configuration.document,
+                    )?;
+                    Ok(text(&value, "model").to_owned())
+                })
+                .await?;
+            let route_available = |route: &Value| {
+                route["hidden"] != true
+                    && accounts.iter().any(|account| {
+                        account.provider == cairn_contracts::AgentProvider::Opencode
+                            && available(account)
+                            && account.model_provider.as_deref() == route["provider"].as_str()
+                    })
+            };
             let models = catalog["models"]
                 .as_array()
                 .into_iter()
@@ -161,25 +182,32 @@ async fn choices(s: &Service, agent: &Value) -> Result<Vec<Choice>> {
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .any(|route| {
-                            route["hidden"] != true
-                                && accounts.iter().any(|account| {
-                                    account.provider == cairn_contracts::AgentProvider::Opencode
-                                        && available(account)
-                                        && account.model_provider.as_deref()
-                                            == route["provider"].as_str()
-                                })
-                        })
+                        .any(&route_available)
                 })
                 .collect::<Vec<_>>();
-            let Some(model) = models
-                .iter()
-                .find(|model| model["isDefault"] == true)
-                .or_else(|| models.first())
-            else {
-                continue;
-            };
-            text(model, "model").to_owned()
+            if !preferred.is_empty() {
+                let offered = models.iter().any(|model| {
+                    model["model"] == preferred
+                        || model["routes"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .any(|route| route["model"] == preferred && route_available(route))
+                });
+                if !offered {
+                    continue;
+                }
+                preferred
+            } else {
+                let Some(model) = models
+                    .iter()
+                    .find(|model| model["isDefault"] == true)
+                    .or_else(|| models.first())
+                else {
+                    continue;
+                };
+                text(model, "model").to_owned()
+            }
         } else {
             String::new()
         };
@@ -194,15 +222,18 @@ async fn choices(s: &Service, agent: &Value) -> Result<Vec<Choice>> {
     Ok(choices)
 }
 
-pub(crate) async fn options<F>(s: &Service, id: &str, authorize: F) -> Result<Value>
-where
-    F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
-{
+pub(crate) async fn options_live(
+    s: &Service,
+    id: &str,
+    authorize: crate::authorization::Authorization,
+) -> Result<Value> {
+    authorize.recheck().await?;
     let id = id.to_owned();
+    let proof = authorize.clone();
     let (run, pending, eligible) = s
         .store
         .read(move |db| {
-            authorize(db)?;
+            authorize.authorize(db)?;
             let chat = chat(db, &id)?;
             super::require_active(&chat)?;
             let run = db.run(text(&chat, "runId"))?.unwrap_or(Value::Null);
@@ -227,6 +258,7 @@ where
             })
         })
         .collect::<Vec<_>>();
+    proof.recheck().await?;
     Ok(json!({
         "runId": run["id"],
         "turnId": run["chatExecution"]["messageId"],
@@ -237,14 +269,12 @@ where
 }
 
 impl Service {
-    pub(crate) async fn switch_chat_coding_agent<F>(
+    pub(crate) async fn switch_chat_coding_agent_live(
         &self,
         input: Value,
-        authorize: F,
-    ) -> Result<Value>
-    where
-        F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
-    {
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let input: cairn_contracts::SwitchChatCodingAgentInput =
             serde_json::from_value(input).map_err(|e| Error::bad(e.to_string()))?;
         if input.turn_id.is_empty() || input.turn_id.chars().count() > 200 {
@@ -261,7 +291,7 @@ impl Service {
         let agent = self
             .store
             .read(move |db| {
-                check(db)?;
+                check.authorize(db)?;
                 let chat = chat(db, &chat_id)?;
                 let run = required(db.run(text(&chat, "runId"))?, "Run not found")?;
                 Ok(run["snapshot"]["agent"].clone())
@@ -269,11 +299,12 @@ impl Service {
             .await?;
         let available = choices(self, &agent).await?;
         let active = self.worker.active.lock().await;
+        authorize.recheck().await?;
         let saved = input.clone();
         let result = self
             .store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 let id = text(&saved, "chatId");
                 let chat = chat(db, id)?;
                 super::require_active(&chat)?;
@@ -403,9 +434,10 @@ pub(crate) async fn tick(s: &Arc<Service>, active: &HashSet<String>) -> Result<(
                 let _ = s
                     .store
                     .transaction(move |db| {
-                        let Some(mut current) = db.engine_switch(&id)?.filter(|value| {
-                            value.request_id == pending.request_id && value.pending
-                        }) else {
+                        let Some(mut current) = db
+                            .engine_switch(&id)?
+                            .filter(|value| same_pending_request(value, &pending))
+                        else {
                             return Ok(());
                         };
                         current.error = Some(message);
@@ -426,15 +458,23 @@ async fn advance(
     id: &str,
     pending: &super::engine_switch::EngineSwitch,
 ) -> Result<()> {
-    let run = s.store.run(&pending.run_id).await?;
+    let Some(run) = pending_run(s, id, pending).await? else {
+        return Ok(());
+    };
     crate::recovery::fence(s, &run).await?;
+    if pending_run(s, id, pending).await?.is_none() {
+        return Ok(());
+    }
     s.accounts.recover_run(s, &run).await?;
+    if pending_run(s, id, pending).await?.is_none() {
+        return Ok(());
+    }
     let (id, pending) = (id.to_owned(), pending.clone());
     s.store
         .transaction(move |db| {
             let Some(mut current) = db
                 .engine_switch(&id)?
-                .filter(|p| p.pending && p.request_id == pending.request_id)
+                .filter(|p| same_pending_request(p, &pending))
             else {
                 return Ok(());
             };
@@ -453,6 +493,12 @@ async fn advance(
             let mut snapshot = run.clone();
             snapshot["snapshot"]["agent"] =
                 selection(&run["snapshot"]["agent"], target, &pending.model);
+            crate::coding_agent_configuration::freeze_message(
+                db,
+                &mut snapshot,
+                Some(&run),
+                &json!({ "model": pending.model }),
+            )?;
             target
                 .adapter()
                 .validate_agent(&snapshot["snapshot"]["agent"])?;
@@ -529,4 +575,45 @@ pub(crate) fn cancel_in(db: &Db<'_>, run: &str) -> Result<()> {
         db.save_engine_switch(&state)?;
     }
     Ok(())
+}
+
+async fn pending_run(
+    s: &Service,
+    id: &str,
+    pending: &super::engine_switch::EngineSwitch,
+) -> Result<Option<Value>> {
+    let (id, pending) = (id.to_owned(), pending.clone());
+    s.store
+        .read(move |db| {
+            let Some(current) = db
+                .engine_switch(&id)?
+                .filter(|current| same_pending_request(current, &pending))
+            else {
+                return Ok(None);
+            };
+            let chat = chat(db, &id)?;
+            super::require_active(&chat)?;
+            if chat["runId"].as_str() != Some(current.run_id.as_str())
+                || chat["cancelledByDeletion"] == true
+            {
+                return Err(Error::conflict("The conversation changed while switching."));
+            }
+            let run = required(db.run(&current.run_id)?, "Run not found")?;
+            if run["chatExecution"]["messageId"].as_str() != Some(current.turn_id.as_str()) {
+                return Err(Error::conflict("The pending turn changed."));
+            }
+            Ok(Some(run))
+        })
+        .await
+}
+
+fn same_pending_request(
+    current: &super::engine_switch::EngineSwitch,
+    expected: &super::engine_switch::EngineSwitch,
+) -> bool {
+    current.pending
+        && current.request_id == expected.request_id
+        && current.run_id == expected.run_id
+        && current.turn_id == expected.turn_id
+        && current.provider == expected.provider
 }

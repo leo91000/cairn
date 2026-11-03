@@ -52,6 +52,7 @@ fun newAgent() =
     Agent(
         id = "00000000-0000-4000-8000-000000000000",
         name = "",
+        reasoning = "",
         revision = "",
         createdAt = 0,
         access =

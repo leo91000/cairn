@@ -45,6 +45,7 @@ async fn measure_conversation_reads_by_count_and_snapshot_size() {
             let root = tempfile::tempdir().unwrap();
             let store = crate::store::Store::open(root.path()).unwrap();
             let snapshot = cairn_contracts::RunSnapshot {
+                native_configuration: None,
                 task: serde_json::from_value(json!({
                     "id": "00000000-0000-4000-8000-000000000003",
                     "name": "Measured task", "prompt": "Measured prompt",

@@ -110,6 +110,15 @@
             }
           ]
         },
+        "codingAgentDefaults": {
+          "additionalProperties": {
+            "$ref": "#/definitions/CodingAgentPreferences"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "createdAt": {
           "format": "int64",
           "maximum": 9007199254740991,
@@ -397,6 +406,17 @@
             "$ref": "#/definitions/ChatMessage"
           },
           "type": "array"
+        },
+        "nextSelection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CodingAgentPreferences"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Resolved selection for the next implicit message, including changed defaults."
         },
         "paused": {
           "default": false,
@@ -1026,6 +1046,26 @@
       ],
       "type": "object"
     },
+    "CodingAgentPreferences": {
+      "description": "Safe display defaults. These are inherited preferences, never profile overrides.",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "reasoning": {
+          "type": "string"
+        },
+        "speed": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "reasoning",
+        "speed"
+      ],
+      "type": "object"
+    },
     "CodingAgentSwitch": {
       "properties": {
         "error": {
@@ -1246,6 +1286,43 @@
         "connectionId",
         "revision",
         "authorId"
+      ],
+      "type": "object"
+    },
+    "NativeConfigurationSnapshot": {
+      "additionalProperties": false,
+      "description": "Frozen per message. Contains editable settings only, never credentials.",
+      "properties": {
+        "agentId": {
+          "description": "Profile that supplied these defaults, even if the conversation is later transferred.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "configuredPaths": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "document": {
+          "type": "string"
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "document",
+        "revision"
       ],
       "type": "object"
     },
@@ -1963,6 +2040,16 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "nativeConfiguration": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NativeConfigurationSnapshot"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "project": {

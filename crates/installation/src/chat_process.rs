@@ -1272,13 +1272,14 @@ pub async fn run(
     events: mpsc::Sender<Value>,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let args = plan["args"]
+    let mut args = plan["args"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    args.extend(crate::coding_agent_configuration::codex_arguments(&plan)?);
     let mut session =
         match Session::codex(config, home, &args, Some(Path::new(text(&plan, "cwd")))).await {
             Ok(session) => session,

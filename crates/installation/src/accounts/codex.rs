@@ -62,6 +62,13 @@ impl Tokens {
         Self::deserialize(&auth["tokens"]).unwrap_or_default()
     }
 
+    fn redactions(self) -> Vec<String> {
+        [self.access_token, self.refresh_token, self.id_token]
+            .into_iter()
+            .filter(|token| !token.is_empty())
+            .collect()
+    }
+
     /// The ID token's subject.
     fn subject(&self) -> String {
         self.id_token
@@ -274,7 +281,43 @@ struct IdentityAccount {
     plan_type: Option<String>,
 }
 
-/// Saves the credentials a Codex home holds, refusing a sign-in to a different account.
+// The sole managed-Codex credential writer. A guard is returned from the
+// Store job so it outlives actual commit even if its async caller disappears.
+async fn replace_credentials(s: &Service, id: &str, auth: Option<&Value>) -> Result<()> {
+    let old = s.vault.get(&secret(id)).await?.unwrap_or(Value::Null);
+    let mut values = Tokens::of(&old).redactions();
+    values.extend(Tokens::of(auth.unwrap_or(&Value::Null)).redactions());
+    let encrypted = auth
+        .map(|auth| s.vault.encrypt(&secret(id), auth))
+        .transpose()?;
+    let change = s.accounts.output_credentials.begin(id, values);
+    let key = format!("mcp-secret:{}", secret(id));
+    let committed = s
+        .store
+        .write(move |db| {
+            #[cfg(test)]
+            change.before_commit_fixture();
+            if let Some(value) = encrypted {
+                db.set(&key, &value, None)?;
+            } else {
+                db.delete(&key)?;
+            }
+            Ok(change)
+        })
+        .await?;
+    drop(committed);
+    Ok(())
+}
+
+pub(crate) fn delivered_redactions(response: &Value) -> Vec<String> {
+    response["accessToken"]
+        .as_str()
+        .filter(|token| !token.is_empty())
+        .map(|token| vec![token.to_owned()])
+        .unwrap_or_default()
+}
+
+/// Saves a Codex home, refusing credentials for a different identity.
 async fn capture(s: &Service, id: &str, home: &Path) -> Result<()> {
     if home.join("cairn-managed-auth").exists() {
         return Ok(());
@@ -294,7 +337,7 @@ async fn capture(s: &Service, id: &str, home: &Path) -> Result<()> {
     {
         return Err(super::different_account());
     }
-    s.vault.set(&secret(id), &auth).await?;
+    replace_credentials(s, id, Some(&auth)).await?;
     tokio::fs::set_permissions(
         home.join("auth.json"),
         std::fs::Permissions::from_mode(0o600),
@@ -303,8 +346,52 @@ async fn capture(s: &Service, id: &str, home: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) async fn replace_credentials_fixture(
+    s: &Service,
+    id: &str,
+    auth: Option<&Value>,
+) -> Result<()> {
+    let _guard = s.accounts.lock(id).await;
+    replace_credentials(s, id, auth).await
+}
+
+// Test adapter only: initialize through the real capture/identity/write path.
+#[cfg(test)]
+pub(crate) async fn capture_fixture(s: &Service, id: &str, home: &Path) -> Result<()> {
+    let _guard = s.accounts.lock(id).await;
+    capture(s, id, home).await
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct MaterializeProbe {
+    pub(crate) old_pid: std::sync::atomic::AtomicU32,
+    pub(crate) overlapped: std::sync::atomic::AtomicBool,
+    pub(crate) entries: std::sync::atomic::AtomicU64,
+}
+
 /// Writes the vault credentials into a manager-only Codex home.
 async fn materialize(s: &Service, id: &str, home: &Path) -> Result<()> {
+    #[cfg(test)]
+    let probe = {
+        s.accounts
+            .codex_materialize_probes
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+    };
+    #[cfg(test)]
+    if let Some(probe) = probe {
+        use std::sync::atomic::Ordering;
+        let old = probe.old_pid.load(Ordering::Relaxed);
+        if old != 0 && unsafe { libc::kill(old as libc::pid_t, 0) } == 0 {
+            probe.overlapped.store(true, Ordering::Relaxed);
+        }
+        probe.entries.fetch_add(1, Ordering::Relaxed);
+    }
+
     // A previous process may have refreshed just before a crash or a failed vault write.
     // Recover that authoritative copy before overwriting it.
     if home.join("auth.json").exists() {
@@ -741,8 +828,8 @@ impl Driver for Codex {
         if verified.is_err() {
             // Keep the previous working credentials when the new sign-in cannot be verified.
             match previous {
-                Some(previous) => s.vault.set(&secret(id), &previous).await?,
-                None => s.vault.delete(&secret(id)).await?,
+                Some(previous) => replace_credentials(s, id, Some(&previous)).await?,
+                None => replace_credentials(s, id, None).await?,
             }
         }
         verified
@@ -870,22 +957,26 @@ impl Driver for Codex {
 
     async fn redactions(&self, s: &Service, id: &str) -> Result<Vec<String>> {
         let auth = s.vault.get(&secret(id)).await?.unwrap_or(Value::Null);
-        let tokens = Tokens::of(&auth);
-        Ok([tokens.access_token, tokens.refresh_token, tokens.id_token]
-            .into_iter()
-            .filter(|token| !token.is_empty())
-            .collect())
+        Ok(Tokens::of(&auth).redactions())
     }
 
     async fn forget(&self, s: &Service, id: &str) -> Result<()> {
+        let values = self.redactions(s, id).await?;
+        let change = s.accounts.output_credentials.begin(id, values);
         let id = id.to_owned();
-        s.store
+        let committed = s
+            .store
             .transaction(move |db| {
+                #[cfg(test)]
+                change.before_commit_fixture();
                 db.delete(&format!("mcp-secret:{}", secret(&id)))?;
                 db.delete(&reset_key(&id))?;
-                db.delete(&format!("codex-models:{id}"))
+                db.delete(&format!("codex-models:{id}"))?;
+                Ok(change)
             })
-            .await
+            .await?;
+        drop(committed);
+        Ok(())
     }
 }
 

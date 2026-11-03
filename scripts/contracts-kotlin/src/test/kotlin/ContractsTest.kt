@@ -8,6 +8,44 @@ class ContractsTest {
     private val json = Json { encodeDefaults = true }
 
     @Test
+    fun resumeExecutionSelectionAcceptsSchemaReasoningAndSpeedValues() {
+        val fast =
+            ResumeExecutionSelection(
+                model = "gpt-6-luna",
+                reasoning = "xhigh",
+                speed = "priority",
+            )
+        assertEquals("xhigh", fast.reasoning)
+        assertEquals("priority", fast.speed)
+
+        val inherited = ResumeExecutionSelection(model = "gpt-6-sol", reasoning = "", speed = "")
+        assertEquals("", inherited.reasoning)
+        assertEquals("", inherited.speed)
+        assertFalse(inherited.preserveModel)
+        assertFalse(json.encodeToJsonElement(inherited).jsonObject.containsKey("preserveModel"))
+
+        val preserved =
+            ResumeExecutionSelection(
+                model = "",
+                preserveModel = true,
+                reasoning = "high",
+                speed = "standard",
+            )
+        assertTrue(
+            json.encodeToJsonElement(preserved).jsonObject["preserveModel"] == JsonPrimitive(true)
+        )
+
+        val standard =
+            ResumeExecutionSelection(
+                model = "gpt-6-sol",
+                reasoning = "high",
+                speed = "standard",
+            )
+        assertEquals("high", standard.reasoning)
+        assertEquals("standard", standard.speed)
+    }
+
+    @Test
     fun placementCommandsAndExclusiveLifecycleMatchRust() {
         val root = File(System.getProperty("cairn.contractWire")).parentFile
         val corpus =

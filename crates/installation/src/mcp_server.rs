@@ -1,6 +1,7 @@
 mod chat_files;
 pub(crate) mod chat_tools;
 pub mod code_mode;
+mod model_result;
 
 use crate::{
     error::{Error, Result, required},
@@ -37,7 +38,7 @@ const CACHEABLE: [&str; 5] = [
     "prompts/list",
 ];
 
-// Leave ample headroom below the gateway's 8 MiB ceiling: MCP serializes the
+// Leave headroom below the model-facing 1 MiB result budget: MCP serializes the
 // result both as structured data and as escaped text for older clients.
 const RUN_PAGE_BYTES: usize = 256 * 1024;
 
@@ -335,11 +336,16 @@ async fn respond(s: &Arc<Service>, request: Request) -> Result<Response> {
             endpoint, connection_id, method, elapsed_ms = started.elapsed().as_millis() as u64,
             success = dispatched.is_ok());
     }
+    let dispatched = dispatched.and_then(|result| {
+        finish_result(
+            result,
+            method,
+            modern,
+            matches!(endpoint, Endpoint::Gateway(_)),
+        )
+    });
     let frame = match dispatched {
-        Ok(result) => Frame::strict(Message::Result {
-            id,
-            result: finish_result(result, method, modern),
-        }),
+        Ok(result) => Frame::strict(Message::Result { id, result }),
         Err(error) => {
             let code = if error.is_not_found() {
                 crate::rpc::jsonrpc::METHOD_NOT_FOUND
@@ -361,7 +367,12 @@ async fn respond(s: &Arc<Service>, request: Request) -> Result<Response> {
 }
 
 /// Adapts a result to the negotiated protocol's result metadata.
-fn finish_result(mut result: Value, method: &str, modern: bool) -> Value {
+fn finish_result(mut result: Value, method: &str, modern: bool, gateway: bool) -> Result<Value> {
+    if !result.is_object() {
+        return Err(Error::bad_gateway(
+            "MCP response result must be an object. Tool outcome is unknown; do not repeat the operation automatically.",
+        ));
+    }
     if modern && CACHEABLE.contains(&method) {
         result["ttlMs"] = 0.into();
         result["cacheScope"] = "private".into();
@@ -372,7 +383,13 @@ fn finish_result(mut result: Value, method: &str, modern: bool) -> Value {
     if !modern && let Some(object) = result.as_object_mut() {
         object.remove("resultType");
     }
-    result
+    if method == "tools/list" {
+        return model_result::advertise(result, gateway);
+    }
+    if method == "tools/call" {
+        return model_result::finish(result);
+    }
+    Ok(result)
 }
 
 async fn dispatch(
@@ -1106,12 +1123,12 @@ pub(crate) async fn invoke(
     args: Value,
     bearer: Option<&str>,
 ) -> Result<Value> {
-    let authorize = crate::installation_mcp::management_authorization(bearer);
+    let authorize = crate::installation_mcp::management_authorization(s, bearer).await?;
     match name {
         "get_chat_backend_migration" => {
-            crate::backend_migration::preview(s, text(&args, "chatId"), authorize).await
+            crate::backend_migration::preview_live(s, text(&args, "chatId"), authorize).await
         }
-        "migrate_chat_backend" => s.migrate_chat_backend(args, authorize).await,
+        "migrate_chat_backend" => s.migrate_chat_backend_live(args, authorize).await,
 
         "list_chat_artifacts"
         | "read_chat_artifact"
@@ -1132,22 +1149,14 @@ async fn proxy(
     params: Value,
 ) -> Result<Value> {
     let _guard = s.mcps.lock(id).await;
-    let (server, scope) = s.mcps.grant(s, id, bearer).await?;
-    let authorize = {
-        let id = id.to_owned();
-        let bearer = bearer.to_owned();
-        move |db: &crate::store::Db<'_>| {
-            crate::mcps::grant_in(db, &id, &bearer)?;
-            Ok(())
-        }
-    };
+    let (server, scope, authority) = s.mcps.grant_authorized(s, id, bearer).await?;
+    let authorize = crate::authorization::Authorization::live(s, authority.clone());
     if method == "tools/call" && !scope.allows(text(&params, "name")) {
         return Err(Error::forbidden("This tool is unavailable to this agent."));
     }
     let result = async {
         let mut client =
-            crate::mcp_client::Client::connect_server_authorized(s, &server, authorize.clone())
-                .await?;
+            crate::mcp_client::Client::connect_server_live(s, &server, authority.clone()).await?;
         let unsupported = match method {
             "resources/list" | "resources/templates/list" => {
                 client.capabilities.get("resources").is_none()
@@ -1156,12 +1165,15 @@ async fn proxy(
             _ => false,
         };
         let result = match method {
-            "tools/list" => client.discover().await.map(|tools| {
+            "tools/list" => client.discover().await.and_then(|tools| {
+                for tool in &tools {
+                    model_result::validate_descriptor(tool)?;
+                }
                 let tools = tools
                     .into_iter()
                     .filter(|tool| scope.allows(text(tool, "name")))
                     .collect::<Vec<_>>();
-                json!({ "tools": tools })
+                Ok(json!({ "tools": tools }))
             }),
             _ if unsupported => Ok(empty_listing(method).unwrap_or_default()),
             "tools/call"
@@ -1176,10 +1188,17 @@ async fn proxy(
         result
     }
     .await;
+    authority.recheck(s).await?;
+    s.store
+        .read({
+            let authorize = authorize.clone();
+            move |db| authorize.authorize(db)
+        })
+        .await?;
     if let Err(error) = &result {
         // Recheck the same gateway grant before publishing a failure after network work.
         s.mcps
-            .record_discovery_authorized(s, server, &Err(error.clone()), authorize)
+            .record_discovery_live(s, server, &Err(error.clone()), authorize)
             .await?;
     }
     result

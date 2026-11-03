@@ -296,6 +296,10 @@ pub struct CodingAgentSwitch {
 #[serde(rename_all = "camelCase")]
 pub struct Chat {
     pub id: String,
+    /// Resolved selection for the next implicit message, including changed defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub next_selection: Option<crate::CodingAgentPreferences>,
     #[serde(default)]
     pub slug: String,
     #[serde(default)]
@@ -492,6 +496,22 @@ pub struct PlanApproval {
     pub source_id: String,
     #[schemars(length(max = 120))]
     pub revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResumeChatInput {
+    pub chat_id: ConversationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub run_id: Option<crate::RunId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 200))]
+    #[ts(optional = nullable)]
+    pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub selection: Option<crate::ResumeExecutionSelection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]

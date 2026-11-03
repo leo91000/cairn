@@ -290,6 +290,7 @@ fn main() {
     export::<CreateChatInput>(root, &mut generator, Contract::Deserialize);
     export::<ChatInput>(root, &mut generator, Contract::Deserialize);
     export::<PlanApproval>(root, &mut generator, Contract::Deserialize);
+    export::<ResumeChatInput>(root, &mut generator, Contract::Deserialize);
     export::<ChatMessageInput>(root, &mut generator, Contract::Deserialize);
     export::<SendChatMessageInput>(root, &mut generator, Contract::Deserialize);
     export::<RenameChatInput>(root, &mut generator, Contract::Deserialize);
@@ -422,6 +423,13 @@ fn main() {
                 "path": "/chats/{chatId}/restore"
             },
             {
+                "name": "resumeChat",
+                "input": "ResumeChatInput",
+                "output": "Run",
+                "method": "POST",
+                "path": "/chats/{chatId}/resume"
+            },
+            {
                 "name": "deleteChat",
                 "input": "ConfirmChatInput",
                 "output": "Chat",
@@ -533,6 +541,7 @@ fn main() {
     export::<RunMissionInput>(root, &mut generator, Contract::Deserialize);
     export::<CancelRunOutput>(root, &mut generator, Contract::Serialize);
     export::<CleanupRunOutput>(root, &mut generator, Contract::Serialize);
+    export::<ResumeExecutionSelection>(root, &mut generator, Contract::Deserialize);
     export::<ResumeRunInput>(root, &mut generator, Contract::Deserialize);
     export::<ResumeRunOutput>(root, &mut generator, Contract::Serialize);
     export::<QualificationFixture>(root, &mut generator, Contract::Serialize);
@@ -544,6 +553,8 @@ fn main() {
     export::<Project>(root, &mut generator, Contract::Serialize);
     export::<DeleteProjectOutput>(root, &mut generator, Contract::Serialize);
     export::<CreateAgentInput>(root, &mut generator, Contract::Deserialize);
+    export::<AgentPluginGrants>(root, &mut generator, Contract::Serialize);
+    export::<ReplaceAgentPluginGrantsInput>(root, &mut generator, Contract::Deserialize);
     export::<ReplaceAgentInput>(root, &mut generator, Contract::Deserialize);
     export::<SetAgentAvatarInput>(root, &mut generator, Contract::Deserialize);
     export::<AgentInput>(root, &mut generator, Contract::Deserialize);
@@ -910,6 +921,8 @@ fn main() {
         { "name": "managePlugin", "input": "ManagePluginInput", "output": "ManagePluginOutput", "method": "POST", "path": "/plugins/manage", "deferred": true }
     ])).unwrap() + "\n").unwrap();
     let clients = serde_json::json!([
+        { "name": "getAgentPluginGrants", "input": "AgentInput", "output": "AgentPluginGrants", "method": "GET", "path": "/agents/{agentId}/plugin-grants" },
+        { "name": "replaceAgentPluginGrants", "input": "ReplaceAgentPluginGrantsInput", "output": "AgentPluginGrants", "method": "PUT", "path": "/agents/{agentId}/plugin-grants" },
         {
             "name": "setAgentAvatar",
             "input": "SetAgentAvatarInput",
@@ -999,6 +1012,7 @@ fn main() {
         .iter()
         .enumerate()
         .map(|(index, input)| Agent {
+            coding_agent_defaults: None,
             id: AgentId(uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap()),
             settings: input.settings.clone(),
             revision: "profile-revision".into(),
@@ -1123,6 +1137,14 @@ fn main() {
     export::<OutcomeDismissal>(root, &mut generator, Contract::Serialize);
     export::<SetOutcomeAsideOutput>(root, &mut generator, Contract::Serialize);
     export::<GetInstallationSettingsInput>(root, &mut generator, Contract::Deserialize);
+    export::<CodingAgentConfigurationInput>(root, &mut generator, Contract::Deserialize);
+    export::<EditCodingAgentConfigurationInput>(root, &mut generator, Contract::Deserialize);
+    export::<CodingAgentSettingChange>(root, &mut generator, Contract::Deserialize);
+    export::<CodingAgentSetting>(root, &mut generator, Contract::Serialize);
+    export::<ManagedCodingAgentSetting>(root, &mut generator, Contract::Serialize);
+    export::<CodingAgentConfiguration>(root, &mut generator, Contract::Serialize);
+    export::<CodingAgentPreferences>(root, &mut generator, Contract::Serialize);
+    export::<NativeConfigurationSnapshot>(root, &mut generator, Contract::Serialize);
     export::<InstallationSettings>(root, &mut generator, Contract::Serialize);
     export::<GetInstallationOverviewInput>(root, &mut generator, Contract::Deserialize);
     export::<InstallationOverview>(root, &mut generator, Contract::Serialize);
@@ -1135,6 +1157,9 @@ fn main() {
     export::<CheckStorageInput>(root, &mut generator, Contract::Deserialize);
     export::<StorageCheck>(root, &mut generator, Contract::Serialize);
     let settings_clients = serde_json::json!([
+        { "name": "getCodingAgentConfiguration", "input": "CodingAgentConfigurationInput", "output": "CodingAgentConfiguration", "method": "POST", "path": "/settings/coding-agents/read" },
+        { "name": "previewCodingAgentConfiguration", "input": "EditCodingAgentConfigurationInput", "output": "CodingAgentConfiguration", "method": "POST", "path": "/settings/coding-agents/preview" },
+        { "name": "saveCodingAgentConfiguration", "input": "EditCodingAgentConfigurationInput", "output": "CodingAgentConfiguration", "method": "PUT", "path": "/settings/coding-agents" },
         { "name": "markRead", "input": "MarkReadInput", "output": "MarkReadOutput", "method": "POST", "path": "/reads" },
         { "name": "setOutcomeAside", "input": "SetOutcomeAsideInput", "output": "SetOutcomeAsideOutput", "method": "POST", "path": "/dismissals" },
         { "name": "getInstallationSettings", "input": "GetInstallationSettingsInput", "output": "InstallationSettings", "method": "GET", "path": "/settings" },

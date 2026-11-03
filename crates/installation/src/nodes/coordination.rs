@@ -13,6 +13,7 @@ pub const SYNC_CONCURRENCY: usize = 2;
 #[derive(Default)]
 struct Disk {
     operation: Arc<AsyncMutex<()>>,
+    storage_refresh: Arc<AsyncMutex<()>>,
     readers: Arc<RwLock<()>>,
 }
 
@@ -40,6 +41,11 @@ pub struct Operation {
 
 pub struct Reader {
     _read: OwnedRwLockReadGuard<()>,
+    _disk: Arc<Disk>,
+}
+
+pub struct StorageRefresh {
+    _refresh: OwnedMutexGuard<()>,
     _disk: Arc<Disk>,
 }
 
@@ -84,6 +90,15 @@ impl Coordination {
         let read = disk.readers.clone().read_owned().await;
         Reader {
             _read: read,
+            _disk: disk,
+        }
+    }
+
+    pub async fn storage_refresh(&self, run: &str) -> StorageRefresh {
+        let disk = self.disk(run);
+        let refresh = disk.storage_refresh.clone().lock_owned().await;
+        StorageRefresh {
+            _refresh: refresh,
             _disk: disk,
         }
     }
@@ -147,5 +162,29 @@ mod tests {
         );
         drop((one, two));
         let _next = locks.transfer().await;
+    }
+
+    #[tokio::test]
+    async fn storage_refreshes_serialize_per_run_and_retain_weak_map_scope() {
+        let locks = Coordination::default();
+        let first = locks.storage_refresh("same").await;
+
+        let mut same_run = Box::pin(locks.storage_refresh("same"));
+        assert!(futures_util::poll!(same_run.as_mut()).is_pending());
+
+        let mut different_run = Box::pin(locks.storage_refresh("different"));
+        let different_run = match futures_util::poll!(different_run.as_mut()) {
+            std::task::Poll::Ready(guard) => guard,
+            std::task::Poll::Pending => panic!("different runs must refresh independently"),
+        };
+        drop(different_run);
+
+        drop(first);
+        let same_run = same_run.await;
+
+        let mut next_same_run = Box::pin(locks.storage_refresh("same"));
+        assert!(futures_util::poll!(next_same_run.as_mut()).is_pending());
+        drop(same_run);
+        let _next_same_run = next_same_run.await;
     }
 }

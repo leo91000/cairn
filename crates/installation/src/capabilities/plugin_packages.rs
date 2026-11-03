@@ -8,6 +8,7 @@ use crate::{
     store::Db,
 };
 use cairn_contracts::*;
+use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -90,23 +91,202 @@ pub(crate) fn plugin_package_operation(name: &str) -> Option<&'static PluginPack
 #[derive(Clone, Default)]
 pub(crate) struct Authority {
     pub bearer: Option<String>,
+    accepted_job: Option<Arc<crate::authorization::Accepted>>,
     owner: Option<cairn_protocol::TaskAuthorGrant>,
     public_credential: Option<String>,
     public_scope: Option<&'static str>,
     additional_public_scope: Option<&'static str>,
+    guard: Option<Arc<LocalGuard>>,
+    recheck_guard: Option<Arc<RecheckGuard>>,
+}
+
+type LocalGuard = dyn Fn(&Db<'_>) -> Result<()> + Send + Sync;
+
+type RecheckGuard = dyn for<'a> Fn(&'a Service) -> BoxFuture<'a, Result<()>> + Send + Sync;
+
+struct ExecutionPlugin {
+    id: String,
+    revision: String,
+    enabled: bool,
+    plugin: String,
+    active: Option<String>,
+    digest: Option<String>,
 }
 
 impl Authority {
-    pub(crate) fn installation(bearer: String) -> Self {
-        Self {
-            bearer: Some(bearer),
+    /// Built only at a known management-job handoff, before composing any
+    /// operation-specific guards. The token remains identity, not a renewable
+    /// transport credential; admission and polling still require a live bearer.
+    pub(crate) async fn accepted_management(s: &Service, bearer: &str) -> Result<Self> {
+        let (_, live) = crate::installation_mcp::authorize_with_authority(s, bearer).await?;
+        let job = crate::authorization::Accepted::capture(s, bearer).await?;
+        live.recheck(s).await?;
+        Ok(Self {
+            bearer: Some(bearer.to_owned()),
+            accepted_job: Some(job),
             ..Default::default()
-        }
+        })
     }
 
-    pub(crate) fn public(public_credential: Option<String>) -> Self {
+    pub(crate) fn accepted_job(&self) -> Option<Arc<crate::authorization::Accepted>> {
+        self.accepted_job.clone()
+    }
+
+    /// Freeze the complete plugin authority used to prepare and launch a turn,
+    /// including disabled/inactive grants that must not become live mid-prepare.
+    pub(crate) async fn for_run(s: &Service, run: &Value) -> Result<Self> {
+        let authority = Self::for_execution(run);
+        let agent = crate::validation::text(&run["snapshot"]["agent"], "id").to_owned();
+        let captured = authority.clone();
+        let (agent, revision, plugins) = s
+            .store
+            .read(move |db| {
+                captured.authorize(db)?;
+                let grants = db.agent_plugin_grants(&agent)?;
+                let mut plugins = Vec::new();
+                for grant in grants.grants {
+                    let instance = crate::error::required(
+                        db.plugin_instance(&grant.instance_id.to_string())?,
+                        "Plugin instance removed",
+                    )?;
+                    let state = db.plugin_package(&instance.plugin_id)?;
+                    let digest = state
+                        .active
+                        .as_ref()
+                        .and_then(|version| state.approvals.get(version))
+                        .cloned();
+                    plugins.push(ExecutionPlugin {
+                        id: instance.id,
+                        revision: instance.revision,
+                        enabled: instance.enabled,
+                        plugin: instance.plugin_id,
+                        active: state.active,
+                        digest,
+                    });
+                }
+                Ok((agent, grants.revision, plugins))
+            })
+            .await?;
+        let authority = authority.with_guard(move |db| {
+            if crate::error::required(db.agent(&agent)?, "Agent not found")?.revision != revision {
+                return Err(Error::forbidden(
+                    "Agent grants changed during execution preparation.",
+                ));
+            }
+            for expected in &plugins {
+                let current = crate::error::required(
+                    db.plugin_instance(&expected.id)?,
+                    "Plugin instance removed",
+                )?;
+                let state = db.plugin_package(&expected.plugin)?;
+                let digest = state
+                    .active
+                    .as_ref()
+                    .and_then(|version| state.approvals.get(version));
+                if current.revision != expected.revision
+                    || current.enabled != expected.enabled
+                    || state.active != expected.active
+                    || digest != expected.digest.as_ref()
+                {
+                    return Err(Error::forbidden(
+                        "Plugin authority changed during execution preparation.",
+                    ));
+                }
+            }
+            Ok(())
+        });
+        crate::delegation::authorize_async_with(s, run, authority).await
+    }
+
+    pub(crate) fn for_execution(run: &Value) -> Self {
+        let id = crate::validation::text(run, "id").to_owned();
+        let execution = crate::waits::execution_id(run).clone();
+        Self::default().with_guard(move |db| {
+            let run = crate::error::required(db.run(&id)?, "Run not found")?;
+            let agent = &run["snapshot"]["agent"];
+            let current = crate::error::required(
+                db.agent_snapshot(crate::validation::text(agent, "id"))?,
+                "Agent not found",
+            )?;
+            if crate::waits::execution_id(&run) != &execution
+                || !run["cancelRequestedAt"].is_null()
+                || !crate::run_status::RunStatus::of(&run)
+                    .is_some_and(crate::run_status::RunStatus::is_active)
+                || crate::waits::Owner::for_run(db, &run)?.run_id() != id
+                || !crate::service::covers(&current, agent)
+            {
+                return Err(Error::forbidden("The calling execution ended or changed."));
+            }
+            crate::delegation::authorize_run(db, &run)
+        })
+    }
+
+    pub(crate) fn with_guard(
+        mut self,
+        guard: impl Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        let previous = self.guard.take();
+        self.guard = Some(Arc::new(move |db| {
+            if let Some(previous) = &previous {
+                previous(db)?;
+            }
+            guard(db)
+        }));
+        self
+    }
+
+    pub(crate) fn with_recheck_guard(
+        mut self,
+        guard: impl for<'a> Fn(&'a Service) -> BoxFuture<'a, Result<()>> + Send + Sync + 'static,
+    ) -> Self {
+        let previous = self.recheck_guard.take();
+        let guard: Arc<RecheckGuard> = Arc::new(guard);
+        self.recheck_guard = Some(Arc::new(move |s| {
+            let (previous, guard) = (previous.clone(), guard.clone());
+            Box::pin(async move {
+                if let Some(previous) = previous {
+                    previous(s).await?;
+                }
+                guard(s).await
+            })
+        }));
+        self
+    }
+
+    pub(crate) async fn for_grants(
+        s: &Service,
+        context: ResumeContext,
+        scope: &'static str,
+    ) -> Result<Self> {
+        let authority = match context {
+            ResumeContext::Installation(bearer) => {
+                crate::installation_mcp::authorize_with_authority(s, &bearer)
+                    .await?
+                    .1
+            }
+            ResumeContext::Human(account) => Self::human(s, &account).await?,
+            ResumeContext::Public(scopes, credential) => {
+                if !scopes.iter().any(|held| held == scope) {
+                    return Err(Error::forbidden(format!("The {scope} scope is required.")));
+                }
+                let credential = credential.ok_or_else(|| {
+                    Error::unauthorized("A current public MCP authorization is required.")
+                })?;
+                Self {
+                    public_credential: Some(credential),
+                    public_scope: Some(scope),
+                    ..Default::default()
+                }
+            }
+        };
+        authority.recheck(s).await?;
+        Ok(authority)
+    }
+
+    pub(crate) fn public_scoped(public_credential: Option<String>, scope: &'static str) -> Self {
         Self {
             public_credential,
+            public_scope: Some(scope),
             ..Default::default()
         }
     }
@@ -122,14 +302,20 @@ impl Authority {
         }
         Ok(Self {
             bearer: None,
+            accepted_job: None,
             owner: Some(policy.owner),
             public_credential: None,
             public_scope: None,
             additional_public_scope: None,
+            guard: None,
+            recheck_guard: None,
         })
     }
 
     pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        if let Some(job) = &self.accepted_job {
+            job.recheck(s).await?;
+        }
         if let Some(credential) = &self.public_credential {
             let required_scope = self.public_scope.unwrap_or("manage");
             crate::relay::authorize_plugin_mcp_scope(s, credential, required_scope).await?;
@@ -151,12 +337,22 @@ impl Authority {
                 ));
             }
         }
+        if let Some(guard) = &self.recheck_guard {
+            let authority = self.clone();
+            s.store.read(move |db| authority.authorize(db)).await?;
+            guard(s).await?;
+        }
         let authority = self.clone();
         s.store.read(move |db| authority.authorize(db)).await
     }
 
     pub(crate) fn authorize(&self, db: &Db<'_>) -> Result<()> {
-        if let Some(bearer) = &self.bearer {
+        if let Some(guard) = &self.guard {
+            guard(db)?;
+        }
+        if let Some(job) = &self.accepted_job {
+            job.authorize(db)?;
+        } else if let Some(bearer) = &self.bearer {
             crate::installation_mcp::authorize_in(db, bearer)?;
         }
         Ok(())
@@ -245,10 +441,15 @@ impl PluginPackageOperation {
             _ => None,
         };
         let mut authority = match context {
-            ResumeContext::Installation(bearer) => Authority {
-                bearer: Some(bearer),
-                ..Default::default()
-            },
+            ResumeContext::Installation(bearer) => {
+                let (_, live) =
+                    crate::installation_mcp::authorize_with_authority(s, &bearer).await?;
+                if self.name == "activate_plugin_package" {
+                    Authority::accepted_management(s, &bearer).await?
+                } else {
+                    live
+                }
+            }
             ResumeContext::Public(scopes, credential) => {
                 if !scopes.iter().any(|scope| scope == self.scope) {
                     return Err(Error::forbidden(format!(
@@ -288,6 +489,7 @@ impl PluginPackageOperation {
         let check = authority.clone();
         s.store.read(move |db| check.authorize(db)).await?;
         let mut resource_result = None;
+        let mut result_authority = None;
         let result = match self.name {
             "list_plugins" => {
                 let _: ListPluginPackagesInput = decode(input)?;
@@ -443,11 +645,13 @@ impl PluginPackageOperation {
                     authority.bearer.as_deref(),
                     owner,
                 )?;
+                result_authority = s.plugins.operations.result_authority(&input.operation_id)?;
                 resource_result = s.plugins.operations.resource_read(
                     &input.operation_id,
                     self.name == "get_plugin_resource_operation",
                 )?;
-                if resource_result.is_some()
+                let protected_result = resource_result.is_some() || result_authority.is_some();
+                if protected_result
                     && authority.owner.is_none()
                     && let Some(account) = &human_account
                 {
@@ -468,6 +672,14 @@ impl PluginPackageOperation {
                     }
                     authority.additional_public_scope = Some("read");
                 }
+                if result_authority.is_some()
+                    && public_resource_read.is_some()
+                    && authority.public_credential.is_none()
+                {
+                    return Err(Error::unauthorized(
+                        "A current public MCP authorization is required.",
+                    ));
+                }
                 if self.name == "cancel_plugin_operation" {
                     s.plugins.operations.cancel(&input.operation_id)?;
                 }
@@ -479,6 +691,11 @@ impl PluginPackageOperation {
         s.store.read(move |db| check.authorize(db)).await?;
         if let Some(read) = resource_result {
             read.authorize_result(s, &authority).await?;
+        }
+        if let Some(origin) = result_authority {
+            authority.recheck(s).await?;
+            origin.recheck(s).await?;
+            authority.recheck(s).await?;
         }
         Ok(result)
     }

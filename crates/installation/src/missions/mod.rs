@@ -25,18 +25,28 @@ pub struct Missions {
 pub(crate) enum Actor {
     Human(InstallationIdentity),
     Public,
-    Installation(String),
+    Installation(String, crate::authorization::Authorization),
 }
 
 impl Actor {
     fn bearer(&self) -> Option<&str> {
         match self {
-            Self::Installation(bearer) => Some(bearer),
+            Self::Installation(bearer, _) => Some(bearer),
             _ => None,
         }
     }
 
+    async fn recheck(&self) -> Result<()> {
+        if let Self::Installation(_, authorize) = self {
+            authorize.recheck().await?;
+        }
+        Ok(())
+    }
+
     fn authorize(&self, db: &Db<'_>) -> Result<()> {
+        if let Self::Installation(_, authorize) = self {
+            authorize.authorize(db)?;
+        }
         if let Some(bearer) = self.bearer() {
             crate::installation_mcp::authorize_in(db, bearer)?;
         }
@@ -69,7 +79,9 @@ impl Missions {
         command: SaveMission,
         actor: Actor,
     ) -> Result<Mission> {
+        actor.recheck().await?;
         let _authors = self.authors.lock().await;
+        actor.recheck().await?;
         let (mission_id, expected, mut settings, creation) = match command {
             SaveMission::Create(mut input) => {
                 input.settings.validate().map_err(Error::bad)?;
@@ -110,6 +122,7 @@ impl Missions {
         {
             actor.require_author(previous)?;
             self.observe(s).await?;
+            actor.recheck().await?;
             return s
                 .store
                 .read(move |db| {
@@ -182,6 +195,7 @@ impl Missions {
             native_provenance_unknown: true,
             native_plugin_grants: None,
         };
+        actor.recheck().await?;
         s.store
             .transaction(move |db| {
                 actor.authorize(db)?;
@@ -269,6 +283,7 @@ impl Missions {
             ));
         }
         let _authors = self.authors.lock().await;
+        actor.recheck().await?;
         s.store
             .transaction(move |db| {
                 actor.authorize(db)?;
@@ -347,15 +362,14 @@ impl Missions {
         s.queue_run(run, dedupe, None).await
     }
 
-    pub(crate) async fn merge_agents<F>(
+    pub(crate) async fn merge_agents_live(
         &self,
         s: &Service,
         input: MergeAgentsInput,
-        authorize: F,
-    ) -> Result<MergeAgentsOutput>
-    where
-        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
-    {
+        authorize: crate::authorization::Authorization,
+        resource_authority: Option<crate::capabilities::plugin_packages::Authority>,
+    ) -> Result<MergeAgentsOutput> {
+        authorize.recheck().await?;
         let _authors = self.authors.lock().await;
         if !input.confirm {
             return Err(Error::bad("Confirm the merge."));
@@ -364,11 +378,31 @@ impl Missions {
         // An active worker can still be settling a terminal run. Keep the same
         // worker/admission ordering as the profile merge while commitments are held.
         let active = s.worker.active.lock().await;
+        authorize.recheck().await?;
+        let coverage = crate::plugins::grants::check_coverage_authorized(
+            s,
+            &input.target_id.to_string(),
+            &input.source_id.to_string(),
+            resource_authority.clone(),
+        )
+        .await
+        .map_err(|error| {
+            if error.status == 403 {
+                Error::conflict(error.message)
+            } else {
+                error
+            }
+        })?;
+        authorize.recheck().await?;
         let executing = active.keys().cloned().collect::<Vec<_>>();
         let result = s
             .store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
+                coverage.authorize(db)?;
+                if let Some(authority) = &resource_authority {
+                    authority.authorize(db)?;
+                }
                 crate::agent_merge::merge(db, &input, &executing)
             })
             .await?;
@@ -511,5 +545,91 @@ impl Service {
                 Ok(())
             })
             .await
+    }
+}
+
+#[cfg(test)]
+mod management_authorization_tests {
+    use super::*;
+    use crate::validation::text;
+    use crate::{
+        agent_fixture::AgentFixture,
+        plugin_grant_fixture::{Fixture, contribution, support},
+    };
+    use std::sync::{Arc, atomic::Ordering};
+
+    #[tokio::test]
+    async fn mission_publication_rechecks_delegation_after_the_author_lock() {
+        let f = Fixture::new().await;
+        f.marker("live-parent").await;
+        f.set(json!([contribution("tool", "grant_probe_post", support())]))
+            .await;
+        let child =
+            f.s.agent_fixture(
+                json!({
+                    "name": "Child",
+                    "access": { "installation": true },
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let child_id = text(&child, "id");
+        f.set_for(
+            child_id,
+            json!([contribution(
+                "tool",
+                "grant_probe_post",
+                json!([{ "resourceType": "thread", "id": "support-thread" }])
+            )]),
+        )
+        .await;
+        let (_, bearer) = f.delegated(crate::config::MAIN_AGENT_ID, child_id).await;
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let signal = reached.clone();
+        let (_, authority) = crate::installation_mcp::authorize_with_authority(&f.s, &bearer)
+            .await
+            .unwrap();
+        let authority = authority.with_recheck_guard(move |_| {
+            let signal = signal.clone();
+            Box::pin(async move {
+                signal.notify_one();
+                Ok(())
+            })
+        });
+        let actor = Actor::Installation(
+            bearer,
+            crate::authorization::Authorization::live(&f.s, authority),
+        );
+        let command = SaveMission::Create(
+            serde_json::from_value(json!({
+                "settings": {
+                    "name": "Forbidden mission",
+                    "agentId": crate::config::MAIN_AGENT_ID,
+                    "prompt": "Must not be queued",
+                },
+            }))
+            .unwrap(),
+        );
+        let lock = f.s.missions.authors.lock().await;
+        let service = f.s.clone();
+        let save =
+            tokio::spawn(async move { service.missions.save(&service, command, actor).await });
+        tokio::time::timeout(std::time::Duration::from_secs(10), reached.notified())
+            .await
+            .unwrap();
+        f.moved_parent.store(true, Ordering::SeqCst);
+        drop(lock);
+        let error = save.await.unwrap().unwrap_err();
+        assert_eq!(error.status, 403);
+        assert!(
+            f.s.store
+                .missions()
+                .await
+                .unwrap()
+                .iter()
+                .all(|mission| mission.settings.name != "Forbidden mission")
+        );
+        f.s.shutdown.cancel();
     }
 }
