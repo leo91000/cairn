@@ -36,7 +36,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 24;
+pub(crate) const DATABASE_VERSION: i64 = 25;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -200,6 +200,10 @@ impl Store {
                 tx.pragma_update(None, "user_version", 24)?;
             }
             tx.commit()?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 24 {
+            crate::agent_access::upgrade(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;
@@ -229,6 +233,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::nodes::attempts::SCHEMA)?;
             tx.execute_batch(crate::nodes::exclusive_state::SCHEMA)?;
             tx.execute_batch(crate::agents::SCHEMA)?;
+            tx.execute_batch(crate::agent_access::SCHEMA)?;
             tx.execute_batch(crate::mcps::sql::SCHEMA)?;
             tx.execute_batch(crate::plugins::instances::SCHEMA)?;
             tx.execute_batch(crate::plugins::state::SCHEMA)?;

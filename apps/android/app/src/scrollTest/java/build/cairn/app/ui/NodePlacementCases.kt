@@ -643,6 +643,153 @@ abstract class NodePlacementCases {
 
     @Test fun suspendedRunTimelineAndResultDescribeThePause() = suspendedTimeline(false)
 
+    @Test
+    fun aDelegatedRunCanBeReadThroughItsRequesterButItsWorktreeCannotBeCleanedWithoutAgentAccess() {
+        val requesterAgentId = MAIN_AGENT_ID
+        val privateAgentId = "00000000-0000-4000-8000-000000000096"
+        val requestingChat =
+            Chat(
+                id = "00000000-0000-4000-8000-000000000097",
+                title = "Conversation demandeuse",
+                agentId = requesterAgentId,
+            )
+        val delegatedChatId = "00000000-0000-4000-8000-000000000098"
+        val delegatedChat =
+            Chat(
+                id = delegatedChatId,
+                title = "Conversation déléguée",
+                agentId = privateAgentId,
+                requester = ChatRequester(requestingChat.id),
+            )
+        assertTrue(
+            canDirectChat(
+                listOf(requesterAgentId),
+                delegatedChat,
+                listOf(requestingChat, delegatedChat),
+            )
+        )
+        val privateAgent =
+            Agent(
+                access =
+                    AccessPolicy(
+                        mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                        projects = null,
+                        skills = null,
+                        mcps = null,
+                    ),
+                createdAt = 0,
+                exclusiveNodes = emptyList(),
+                id = privateAgentId,
+                name = "Agent privé",
+                plugins = emptyList(),
+                revision = "fixture",
+            )
+        val run =
+            Run(
+                id = "00000000-0000-4000-8000-000000000099",
+                taskId = delegatedChatId,
+                status = "failed",
+                trigger = "chat",
+                createdAt = 1,
+                startedAt = 1,
+                finishedAt = 2,
+                workspace = "/workspace/private",
+                snapshot =
+                    Snapshot(
+                        task =
+                            build.cairn.contracts.RunTaskSnapshot(
+                                id = delegatedChatId,
+                                name = "Travail délégué privé",
+                                prompt = "Inspecter l’espace de travail privé.",
+                                agentId = privateAgentId,
+                                worktree = true,
+                            ),
+                        agent = privateAgent,
+                    ),
+            )
+        MockWebServer().use { server ->
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        val path = request.path!!.substringBefore('?')
+                        val live =
+                            if (path == "/api/installations/fixture/api/runs/${run.id}/stream")
+                                LiveState(run = run)
+                            else null
+                        if (live != null) {
+                            val frame =
+                                "event: batch\nid: 0\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), live, true, false))}\n\n"
+                            return MockResponse()
+                                .setHeader("Content-Type", "text/event-stream")
+                                .setBody(nodeWireFixture(request.path, frame))
+                        }
+                        val body =
+                            when {
+                                path == "/api/installations" ->
+                                    beaconInstallationsFixture()
+                                        .replace("\"role\":\"owner\"", "\"role\":\"member\"")
+                                path == "/api/account/session" ->
+                                    beaconAccountFixture("fixture")
+                                        .replace("\"role\":\"owner\"", "\"role\":\"member\"")
+                                path == "/api/installations/fixture/api/usable-agents" ->
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.UsableAgentsOutput(
+                                            listOf(requesterAgentId)
+                                        )
+                                    )
+                                path == "/api/installations/fixture/api/overview" -> "{}"
+                                path.endsWith("/models") -> "{}"
+                                path.endsWith("/agents") ->
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(emptyList())
+                                    )
+                                else ->
+                                    if (path.endsWith("/projects")) "{\"projects\":[]}"
+                                    else if (path.endsWith("/tasks")) "{\"tasks\":[]}"
+                                    else if (path.endsWith("/mcps")) "{\"mcps\":[]}" else "[]"
+                            }
+                        return MockResponse().setBody(nodeWireFixture(request.path, body))
+                    }
+                }
+            server.start()
+            val vm = connectedViewModel()
+            val conversations =
+                LiveSnapshot(
+                    state = LiveState(chats = listOf(requestingChat, delegatedChat)),
+                    synced = true,
+                    catchingUp = false,
+                )
+            compose.setContent {
+                val state by vm.state.collectAsStateWithLifecycle()
+                LaunchedEffect(Unit) {
+                    vm.state.first { it.ready }
+                    vm.connect(server.url("/").toString())
+                }
+                CairnTheme {
+                    androidx.compose.runtime.CompositionLocalProvider(
+                        LocalFilSnapshot provides FilSnapshot(conversations, null)
+                    ) {
+                        if (state.session.authenticated) RunScreen(vm, state, run.id, openRun = {})
+                    }
+                }
+            }
+            try {
+                compose.waitUntil(20000) {
+                    compose
+                        .onAllNodesWithText("Travail délégué privé", substring = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithContentDescription("Options de l’exécution").performClick()
+                compose.onNodeWithText("Mission et détails").performClick()
+                compose.onNodeWithText("Espace de travail").assertExists()
+                compose.onNodeWithText("Nettoyer le worktree").assertDoesNotExist()
+            } finally {
+                vm.api.closeStreams()
+            }
+        }
+    }
+
     private fun suspendedTimeline(chatPage: Boolean) {
         MockWebServer().use { server ->
             val reservation =

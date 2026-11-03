@@ -21,6 +21,7 @@ import { importProject } from '../../../../packages/contracts/generated/importPr
 import { listPluginPackages } from '../../../../packages/contracts/generated/listPluginPackages'
 import { replaceProject } from '../../../../packages/contracts/generated/replaceProject'
 import { accessSummary } from '../agent-access'
+import { canUseAgent } from '../agent-use'
 import {
   api,
   notify,
@@ -337,7 +338,7 @@ async function remove() {
         </div>
       </div>
       <div class="flex items-center justify-between gap-4" :class="isAgent ? 'col-span-2 border-t border-line/60 pt-3' : 'col-start-3 row-start-1 phone:col-start-2 phone:row-start-2'">
-        <RouterLink :to="{ path: '/chats', query: { [isAgent ? 'agent' : 'project']: item.id } }" class="inline-flex min-h-8 items-center gap-2 rounded-lg text-xs font-medium text-accent hover:underline focus-visible:outline-2 focus-visible:outline-accent phone:min-h-11">
+        <RouterLink v-if="!isAgent || canUseAgent(state.usableAgents, item.id)" :to="{ path: '/chats', query: { [isAgent ? 'agent' : 'project']: item.id } }" class="inline-flex min-h-8 items-center gap-2 rounded-lg text-xs font-medium text-accent hover:underline focus-visible:outline-2 focus-visible:outline-accent phone:min-h-11">
           <Icon :name="MessageCircle" :size="15" />Start chat
         </RouterLink>
         <div v-if="state.installationRole === 'owner'" class="flex items-center gap-1">

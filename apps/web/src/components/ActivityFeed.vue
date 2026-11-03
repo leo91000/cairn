@@ -80,6 +80,8 @@ const props = defineProps<{
   codingAgentSwitch?: { provider: Provider, error: string | null } | null
   canManageAccounts?: boolean
   busy?: boolean
+  // Without access to the agent, recovery choices that resume it are not offered.
+  readOnly?: boolean
 }>()
 const emit = defineEmits<{
   load: []
@@ -510,6 +512,7 @@ defineExpose({
                 :quota="quota"
                 :progress="codingAgentSwitch"
                 :can-manage="!!canManageAccounts"
+                :read-only="readOnly"
                 :busy="busy"
                 @resume="emit('resumeQuota')"
                 @switched="emit('codingAgentSwitched', $event)"

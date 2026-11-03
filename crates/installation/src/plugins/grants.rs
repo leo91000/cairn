@@ -1334,7 +1334,7 @@ mod migration_tests {
             .unwrap();
         drop(store);
         let db = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
-        db.execute_batch("DROP TABLE plugin_grant_resources; DROP TABLE plugin_contribution_grants; DROP TABLE plugin_credential_suppliers; PRAGMA user_version=23;").unwrap();
+        db.execute_batch("DROP TABLE plugin_grant_resources; DROP TABLE plugin_contribution_grants; DROP TABLE plugin_credential_suppliers; DROP TABLE agent_account_access; DELETE FROM kv WHERE key='agent-access-rollout'; PRAGMA user_version=23;").unwrap();
         let timeline = db
             .query_row::<String, _, _>(
                 "SELECT sql FROM sqlite_master WHERE name='timeline_entries'",

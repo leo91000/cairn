@@ -35,6 +35,16 @@ impl ResumeContext {
     }
 }
 
+pub(crate) fn member_account(
+    identity: Option<&crate::auth::InstallationIdentity>,
+) -> Option<String> {
+    identity
+        .filter(|identity| {
+            identity.role == crate::auth::InstallationRole::Member && identity.mcp_scopes.is_none()
+        })
+        .map(|identity| identity.account_id.clone())
+}
+
 pub(crate) struct ResumeRun;
 
 pub(crate) const RESUME_RUN: ResumeRun = ResumeRun;
@@ -50,6 +60,7 @@ impl ResumeRun {
         s: &Arc<Service>,
         input: ResumeRunInput,
         context: ResumeContext,
+        member_account: Option<String>,
     ) -> Result<ResumeRunOutput> {
         if input
             .turn_id
@@ -120,6 +131,14 @@ impl ResumeRun {
         let authorize = crate::installation_mcp::management_authorization(s, bearer.as_deref())
             .await?
             .with_publication(move |db| policy::authorize_run_in(db, &commit_id, &origin));
+        let authorize = if let Some(account) = member_account {
+            let run_id = id.clone();
+            authorize.with_guard(move |db| {
+                crate::agent_access::authorize_member_run_in(db, &account, &run_id)
+            })
+        } else {
+            authorize
+        };
         s.worker
             .resume_selected_live(
                 s,
@@ -388,6 +407,11 @@ pub(crate) const AGENT_OPERATIONS: &[AgentOperation] = &[
         description: "Whether avatar generation is configured; no account details are returned.",
     },
     AgentOperation {
+        name: "list_agent_accounts",
+        scope: "read",
+        description: "List the member accounts the owner allowed to use an agent; the owner uses every agent. Only the owner gives or removes this access, from the apps.",
+    },
+    AgentOperation {
         name: "generate_agent_avatar",
         scope: "manage",
         description: "Schedule an agent portrait. Read get_agent for generation status.",
@@ -441,6 +465,10 @@ impl AgentOperation {
             "get_agent_avatar_configuration" => (
                 schema_for::<ListAgentsInput>(Contract::Deserialize),
                 schema_for::<AvatarConfiguration>(Contract::Serialize),
+            ),
+            "list_agent_accounts" => (
+                schema_for::<AgentInput>(Contract::Deserialize),
+                schema_for::<ListAgentAccountsOutput>(Contract::Serialize),
             ),
             _ => (
                 schema_for::<AgentInput>(Contract::Deserialize),
@@ -531,14 +559,14 @@ impl AgentOperation {
                 (crate::service::AgentEditor::Installation, Some(bearer))
             }
         };
-        let authorize =
+        let authorization =
             crate::installation_mcp::management_authorization(s, bearer.as_deref()).await?;
         match self.name {
             "set_agent_avatar" => {
                 let input: SetAgentAvatarInput = decode(input)?;
                 Ok(serde_json::to_value(
                     s.avatars
-                        .upload_live(s, &input.agent_id.to_string(), &input.data, authorize)
+                        .upload_live(s, &input.agent_id.to_string(), &input.data, authorization)
                         .await?,
                 )?)
             }
@@ -546,7 +574,7 @@ impl AgentOperation {
                 s.save_profile_live(
                     crate::agents::SaveProfile::Create(decode(input)?),
                     editor,
-                    authorize,
+                    authorization,
                 )
                 .await?,
             )?),
@@ -554,22 +582,22 @@ impl AgentOperation {
                 s.save_profile_live(
                     crate::agents::SaveProfile::Replace(decode(input)?),
                     editor,
-                    authorize,
+                    authorization,
                 )
                 .await?,
             )?),
             "preview_agent" => Ok(serde_json::to_value(
-                s.agent_preview_live(decode(input)?, authorize).await?,
+                s.agent_preview_live(decode(input)?, authorization).await?,
             )?),
             "merge_agents" => Ok(serde_json::to_value(
-                s.merge_agents_live(decode(input)?, authorize, merge_authority)
+                s.merge_agents_live(decode(input)?, authorization, merge_authority)
                     .await?,
             )?),
             "generate_agent_avatar" => {
                 let input: AgentInput = decode(input)?;
                 Ok(serde_json::to_value(
                     s.avatars
-                        .generate_live(s, &input.agent_id.to_string(), authorize)
+                        .generate_live(s, &input.agent_id.to_string(), authorization)
                         .await?,
                 )?)
             }
@@ -578,7 +606,7 @@ impl AgentOperation {
                 let id = input.agent_id.to_string();
                 s.store
                     .transaction(move |db| {
-                        authorize.authorize(db)?;
+                        authorization.authorize(db)?;
                         crate::error::required(db.agent(&id)?, "Agent not found")?;
                         crate::service::ensure_removable(db, "agents", &id)?;
                         crate::service::forget_agent(db, &id)?;
@@ -586,6 +614,24 @@ impl AgentOperation {
                     })
                     .await?;
                 Ok(serde_json::to_value(DeleteAgentOutput { deleted: true })?)
+            }
+            "list_agent_accounts" => {
+                let input: AgentInput = decode(input)?;
+                // The owner sees who may use the agent now, not an ended membership's entry.
+                crate::agent_access::confirm_memberships(s).await;
+                s.store
+                    .read(move |db| {
+                        let tx = rusqlite::Transaction::new_unchecked(
+                            db.0,
+                            rusqlite::TransactionBehavior::Deferred,
+                        )?;
+                        let db = Db(&tx);
+                        authorization.authorize(&db)?;
+                        let output = crate::agent_access::list(&db, input.agent_id)?;
+                        tx.commit()?;
+                        Ok(serde_json::to_value(output)?)
+                    })
+                    .await
             }
             name => {
                 let agent_id = if name == "get_agent" {
@@ -607,7 +653,7 @@ impl AgentOperation {
                             rusqlite::TransactionBehavior::Deferred,
                         )?;
                         let db = Db(&tx);
-                        authorize.authorize(&db)?;
+                        authorization.authorize(&db)?;
                         let result = if let Some(id) = agent_id {
                             serde_json::to_value(crate::error::required(
                                 db.agent(&id.to_string())?,

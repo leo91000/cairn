@@ -102,6 +102,7 @@ internal fun ConversationList(
 ) {
     var view by rememberSaveable { mutableStateOf("active") }
     var menu by remember { mutableStateOf(false) }
+    val usableAgents = vm.state.collectAsState().value.usableAgents
     var other by remember { mutableStateOf<List<Chat>>(emptyList()) }
     var revision by remember { mutableIntStateOf(0) }
     var listError by remember { mutableStateOf<String?>(null) }
@@ -210,7 +211,10 @@ internal fun ConversationList(
                             Box(Modifier.animateItem()) {
                                 key(view) {
                                     SwipeToTrashRow(
-                                        enabled = view != "trash",
+                                        // Deleting needs access to the conversation's agent.
+                                        enabled =
+                                            view != "trash" &&
+                                                canUseAgent(usableAgents, chat.agentId),
                                         onTrash = { trash.trash(chat.id) },
                                     ) { swipe ->
                                         Surface(
@@ -407,6 +411,11 @@ internal fun ChatPage(
     )
     var createdId by rememberSaveable(id) { mutableStateOf<String?>(null) }
     var agent by rememberSaveable(id) { mutableStateOf(initialAgent) }
+    // The member's agents may load after the new conversation opened.
+    LaunchedEffect(state.usableAgents, id) {
+        if (id == null && !canUseAgent(state.usableAgents, agent))
+            agent = defaultAgent(state.usableAgents, state.agents)
+    }
     var project by rememberSaveable(id) { mutableStateOf(initialProject) }
     val draftKey = id ?: "new:$initialAgent:$initialProject"
     val savedDraft = remember(draftKey) { vm.chatDrafts[draftKey] ?: ChatDraft() }
@@ -524,6 +533,10 @@ internal fun ChatPage(
             )
         }
     val chats = conversations.state?.chats
+    // A member without access to the conversation's agent follows it without directing it.
+    val readOnly = chat != null && !canDirectChat(state.usableAgents, chat, chats.orEmpty())
+    // A member the owner has not yet given any agent cannot start a conversation.
+    val noAgent = id == null && state.usableAgents?.isEmpty() == true
     val timeline = remember(history, chats) { history.followingDelegations(chats) }
     var asking by remember { mutableStateOf<ChatQuestion?>(null) }
     var stopping by remember { mutableStateOf(false) }
@@ -1013,26 +1026,28 @@ internal fun ChatPage(
                                     },
                                 )
                                 chat?.let { current ->
-                                    DropdownMenuItem(
-                                        text = {
-                                            Text(
-                                                if (current.paused) "Reprendre"
-                                                else "Mettre en pause"
-                                            )
-                                        },
-                                        leadingIcon = {
-                                            Icon(
-                                                if (current.paused) Icons.Default.PlayArrow
-                                                else CairnIcons.Pause,
-                                                null,
-                                            )
-                                        },
-                                        enabled = !state.busy,
-                                        onClick = {
-                                            menu = false
-                                            togglePause(current)
-                                        },
-                                    )
+                                    // Resuming needs access; reading and stopping do not.
+                                    if (!(readOnly && current.paused))
+                                        DropdownMenuItem(
+                                            text = {
+                                                Text(
+                                                    if (current.paused) "Reprendre"
+                                                    else "Mettre en pause"
+                                                )
+                                            },
+                                            leadingIcon = {
+                                                Icon(
+                                                    if (current.paused) Icons.Default.PlayArrow
+                                                    else CairnIcons.Pause,
+                                                    null,
+                                                )
+                                            },
+                                            enabled = !state.busy,
+                                            onClick = {
+                                                menu = false
+                                                togglePause(current)
+                                            },
+                                        )
                                     current.runId?.let { runId ->
                                         DropdownMenuItem(
                                             text = { Text("Voir l’exécution") },
@@ -1163,7 +1178,7 @@ internal fun ChatPage(
                         }
                         chat
                             ?.compaction
-                            ?.takeIf { it.supported && chat.lifecycle == "active" }
+                            ?.takeIf { it.supported && chat.lifecycle == "active" && !readOnly }
                             ?.let { compaction ->
                                 TextButton(
                                     {
@@ -1197,8 +1212,9 @@ internal fun ChatPage(
                 if (error != null && !errorDismissed && isOpenCodePrivacyError(error))
                     OpenCodePrivacyNotice(
                         enabled = !state.busy,
-                        retry = { chat?.let { setPaused(it, false) } },
-                        create = create,
+                        retry =
+                            if (readOnly) null else ({ if (chat != null) setPaused(chat, false) }),
+                        create = if (readOnly) null else create,
                         dismiss = { errorDismissed = true },
                     )
                 else if (error != null && !errorDismissed && !errorShown)
@@ -1273,7 +1289,9 @@ internal fun ChatPage(
                         chat.lifecycleError?.let {
                             Text(it, color = MaterialTheme.colorScheme.error)
                         }
-                        if (recoverable)
+                        // Restoring, like deleting, needs access to the conversation's own
+                        // agent.
+                        if (recoverable && canUseAgent(state.usableAgents, chat.agentId))
                             Button(
                                 onClick = {
                                     vm.perform {
@@ -1284,6 +1302,12 @@ internal fun ChatPage(
                             ) {
                                 Text("Restaurer la conversation")
                             }
+                        else if (recoverable)
+                            Text(
+                                "Seules les personnes ayant accès à ${chat.agentName.ifBlank { "son agent" }} peuvent la restaurer.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                     }
                 } else
                     Column(
@@ -1296,14 +1320,14 @@ internal fun ChatPage(
                         chat?.environmentState?.let { state ->
                             EnvironmentExpirationNotice(state, chat.environmentError)
                         }
-                        if (chat?.canRequestNewSession == true)
+                        if (chat?.canRequestNewSession == true && !readOnly)
                             TextButton(
                                 { newSession = true },
                                 Modifier.padding(horizontal = 8.dp),
                             ) {
                                 Text("Repartir avec une nouvelle session agent")
                             }
-                        if (chat?.sessionRestartRequested == true)
+                        if (chat?.sessionRestartRequested == true && !readOnly)
                             Text(
                                 "Écrivez un nouveau message, puis reprenez la file pour continuer.",
                                 Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
@@ -1322,14 +1346,15 @@ internal fun ChatPage(
                                 ) {
                                     cancelled.forEach { message ->
                                         Text(message.text)
-                                        TextButton({
-                                            composer.setTextAndPlaceCursorAtEnd(message.text)
-                                            attachments =
-                                                message.attachments.map { DraftAttachment(it) }
-                                            cancelledExpanded = false
-                                        }) {
-                                            Text("Copier dans le message")
-                                        }
+                                        if (!readOnly)
+                                            TextButton({
+                                                composer.setTextAndPlaceCursorAtEnd(message.text)
+                                                attachments =
+                                                    message.attachments.map { DraftAttachment(it) }
+                                                cancelledExpanded = false
+                                            }) {
+                                                Text("Copier dans le message")
+                                            }
                                     }
                                 }
                         }
@@ -1368,7 +1393,11 @@ internal fun ChatPage(
                                     if (id == null)
                                         item(key = "new-conversation") {
                                             NewConversationIntro(
-                                                state.agents,
+                                                // Members start conversations only with the
+                                                // agents the owner lets them use.
+                                                state.agents.filter {
+                                                    canUseAgent(state.usableAgents, it.id)
+                                                },
                                                 agent,
                                                 projects,
                                                 project,
@@ -1417,6 +1446,7 @@ internal fun ChatPage(
                                                     quota,
                                                     followConversation = { chooseProvider("") },
                                                     canManage = state.isOwner,
+                                                    readOnly = readOnly,
                                                     busy = state.busy,
                                                     openConnections = openConnections,
                                                     resume = {
@@ -1626,7 +1656,13 @@ internal fun ChatPage(
                                 openedSubagent = null
                             }
                         }
-                        if (questions.isNotEmpty())
+                        if (questions.isNotEmpty() && readOnly)
+                            Notice(
+                                "${questions.size} ${if (questions.size == 1) "question attend" else "questions attendent"} une personne ayant accès à cet agent.",
+                                Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                                icon = CairnIcons.Hourglass,
+                            )
+                        else if (questions.isNotEmpty())
                             Surface(
                                 onClick = { asking = questions.first() },
                                 modifier =
@@ -1652,6 +1688,24 @@ internal fun ChatPage(
                                     )
                                 }
                             }
+                        if (!fullscreen && noAgent)
+                            Notice(
+                                "Vous pouvez lire toutes les conversations de l’installation. Pour en démarrer une, demandez l’accès à un agent au propriétaire de l’installation.",
+                                Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                                    .testTag("conversation-no-agent"),
+                                title = "Aucun agent accessible pour l’instant",
+                                icon = CairnIcons.Shield,
+                                maxLines = 4,
+                            )
+                        if (!fullscreen && readOnly)
+                            Notice(
+                                chat?.let { readOnlyNotice(it, chats.orEmpty()) }.orEmpty(),
+                                Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                                    .testTag("conversation-read-only"),
+                                title = "Vous pouvez suivre cette conversation",
+                                icon = CairnIcons.Shield,
+                                maxLines = 4,
+                            )
                         if (!fullscreen)
                             Surface(
                                 Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
@@ -1690,6 +1744,7 @@ internal fun ChatPage(
                                             steer = ::steerQueued,
                                             remove = { removing = it },
                                             togglePause = { chat?.let(::togglePause) },
+                                            readOnly = readOnly,
                                             models = state.modelCatalog("codex").models,
                                             attachments = {
                                                 MessageAttachments(
@@ -1779,14 +1834,16 @@ internal fun ChatPage(
                                             SkillMentionHighlight(skillNames, skillMentionStyle()),
                                         lineLimits =
                                             TextFieldLineLimits.MultiLine(maxHeightInLines = 4),
-                                        enabled = !state.busy,
+                                        enabled = !state.busy && !readOnly && !noAgent,
                                         decorator = { inner ->
                                             Box {
                                                 if (draft.isEmpty())
                                                     Text(
                                                         // Any message cancels a pending wait,
                                                         // paused or not.
-                                                        if (chat?.paused == true)
+                                                        if (readOnly || noAgent)
+                                                            "Réservé aux personnes ayant accès à cet agent"
+                                                        else if (chat?.paused == true)
                                                             if (liveWakeup(chat) != null)
                                                                 "Ajouter à la file — annule l’attente"
                                                             else "Ajouter à la file…"
@@ -1810,10 +1867,15 @@ internal fun ChatPage(
                                         Modifier.fillMaxWidth(),
                                         verticalAlignment = Alignment.CenterVertically,
                                     ) {
+                                        // Files and the assistant only go with a message, which
+                                        // needs access to the agent.
                                         ActionIcon(
                                             "Joindre",
                                             CairnIcons.Plus,
-                                            !state.busy && attachments.size < 8,
+                                            !state.busy &&
+                                                !readOnly &&
+                                                !noAgent &&
+                                                attachments.size < 8,
                                         ) {
                                             attaching = true
                                         }
@@ -1835,7 +1897,7 @@ internal fun ChatPage(
                                                 defaultReasoning,
                                                 inherit = inheritedAssistant != null,
                                                 conversationDefault = inheritConversation,
-                                                enabled = !state.busy,
+                                                enabled = !state.busy && !readOnly && !noAgent,
                                                 refresh = { vm.refreshModels(chosenProvider) },
                                                 provider = chosenProvider,
                                                 changeProvider = ::chooseProvider,
@@ -1851,16 +1913,18 @@ internal fun ChatPage(
                                         }
                                         val canSend =
                                             !state.busy &&
+                                                !readOnly &&
+                                                !noAgent &&
                                                 rejected.isEmpty() &&
                                                 uploadProgress.isEmpty() &&
                                                 (draft.isNotBlank() || attachments.isNotEmpty()) &&
                                                 (id == null || chat != null) &&
                                                 live.error == null
-                                        if (
-                                            active &&
-                                                editing == null &&
-                                                (draft.isNotBlank() || attachments.isNotEmpty())
-                                        )
+                                        // Without access a leftover draft cannot be sent, so
+                                        // stopping stays offered.
+                                        val hasDraft =
+                                            draft.isNotBlank() || attachments.isNotEmpty()
+                                        if (active && editing == null && hasDraft && !readOnly)
                                             RoundAction(
                                                 "Intervenir maintenant",
                                                 CairnIcons.Steer,
@@ -1876,8 +1940,7 @@ internal fun ChatPage(
                                             }
                                         if (
                                             (active || chat?.wakeup != null) &&
-                                                draft.isBlank() &&
-                                                attachments.isEmpty()
+                                                (!hasDraft || readOnly)
                                         )
                                             RoundAction(
                                                 "Arrêter",
@@ -1944,7 +2007,8 @@ internal fun ChatPage(
             }
             asking?.let { selected ->
                 val current = questions.find { it.id == selected.id }
-                if (current == null) LaunchedEffect(selected.id) { asking = null }
+                if (current == null || readOnly)
+                    LaunchedEffect(selected.id, readOnly) { asking = null }
                 else
                     QuestionDialog(vm, state, current, questions, { asking = it }) { asking = null }
             }

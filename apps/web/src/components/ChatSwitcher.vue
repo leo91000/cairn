@@ -8,7 +8,8 @@ import {
   useId,
   watch,
 } from 'vue'
-import { api } from '../api'
+import { canUseAgent } from '../agent-use'
+import { api, state } from '../api'
 import { waitTarget } from '../chat-wait'
 import {
   Clock,
@@ -191,7 +192,7 @@ function time(timestamp: number) {
                 <time :datetime="new Date(chat.updatedAt).toISOString()" class="shrink-0 pt-1 text-[10px] text-muted">{{ time(chat.updatedAt) }}</time>
               </RouterLink>
               <button
-                v-if="view !== 'trash'"
+                v-if="view !== 'trash' && canUseAgent(state.usableAgents, chat.agentId)"
                 :aria-label="`Delete ${chat.title}`"
                 class="mt-2 flex min-h-11 shrink-0 items-center gap-1.5 rounded-lg px-2 text-[11px] text-muted hover:bg-danger-surface hover:text-danger focus-visible:outline-2 focus-visible:outline-accent"
                 @click="confirmation = chat"

@@ -39,7 +39,7 @@ fn previous(root: &std::path::Path) -> Connection {
 /// converted attempt/reservation rows and counters.
 fn tables(db: &Connection) -> BTreeMap<String, Vec<String>> {
     let names = db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'timeline_%' AND name NOT IN ('runs','placements','attempts','exclusive_reservations','exclusive_members','exclusive_paused_runs','exclusive_sequence') ORDER BY name")
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'timeline_%' AND name NOT IN ('runs','placements','attempts','exclusive_reservations','exclusive_members','exclusive_paused_runs','exclusive_sequence','sqlite_sequence') ORDER BY name")
         .unwrap()
         .query_map([], |row| row.get::<_, String>(0))
         .unwrap()
@@ -54,6 +54,8 @@ fn tables(db: &Connection) -> BTreeMap<String, Vec<String>> {
                     .collect::<rusqlite::Result<_>>().unwrap();
                 let fields = columns.iter().map(|column| format!("\"{column}\"")).collect::<Vec<_>>().join(",");
                 format!("SELECT {fields} FROM nodes")
+            } else if name == "kv" {
+                format!("SELECT * FROM \"{name}\" WHERE key!='agent-access-rollout'")
             } else {
                 format!("SELECT * FROM \"{name}\"")
             };
@@ -304,6 +306,7 @@ async fn long_engine_item_ids_survive_migration_and_live_updates() {
         "plugin_contribution_grants",
         "plugin_grant_resources",
         "plugin_credential_suppliers",
+        "agent_account_access",
     ] {
         assert!(
             after.remove(table).is_some(),
@@ -451,6 +454,7 @@ async fn upgrade_builds_the_timeline_from_retained_events_and_changes_nothing_el
         "plugin_contribution_grants",
         "plugin_grant_resources",
         "plugin_credential_suppliers",
+        "agent_account_access",
     ] {
         assert!(
             after.remove(table).is_some(),

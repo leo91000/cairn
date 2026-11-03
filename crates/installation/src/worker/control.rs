@@ -621,6 +621,7 @@ pub async fn routes(s: &Arc<Service>, input: &crate::http::Input) -> Option<Resu
                         s,
                         json!({ "runId": id }),
                         crate::capabilities::ResumeContext::http(input)?,
+                        crate::capabilities::member_account(input.identity.as_ref()),
                     )
                     .await
             }
@@ -648,7 +649,12 @@ pub async fn routes(s: &Arc<Service>, input: &crate::http::Input) -> Option<Resu
                 let command = crate::capabilities::RESUME_RUN.decode(body)?;
                 let context = crate::capabilities::ResumeContext::http(input)?;
                 let output = crate::capabilities::RESUME_RUN
-                    .invoke(s, command, context)
+                    .invoke(
+                        s,
+                        command,
+                        context,
+                        crate::capabilities::member_account(input.identity.as_ref()),
+                    )
                     .await?;
                 Ok(serde_json::to_value(output)?)
             }

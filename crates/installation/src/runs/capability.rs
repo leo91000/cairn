@@ -110,6 +110,7 @@ impl RunOperation {
         s: &Arc<Service>,
         input: Value,
         context: ResumeContext,
+        member_account: Option<String>,
     ) -> Result<Value> {
         let human = matches!(&context, ResumeContext::Human(_));
         let bearer = match context {
@@ -138,6 +139,7 @@ impl RunOperation {
                     &input.task_id.to_string(),
                     if human { "manual" } else { "mcp" },
                     bearer,
+                    member_account,
                     authorize,
                 )
                 .await
@@ -145,7 +147,7 @@ impl RunOperation {
             "retry_run" => {
                 let input: RunInput = decode(input)?;
                 let run = s.store.run_state(&input.run_id.to_string()).await?;
-                self.enqueue(s, &run.task_id, "retry", bearer, authorize)
+                self.enqueue(s, &run.task_id, "retry", bearer, member_account, authorize)
                     .await
             }
             "cancel_run" => {
@@ -156,9 +158,23 @@ impl RunOperation {
             }
             "cleanup_run" => {
                 let input: RunInput = decode(input)?;
-                s.worker
-                    .cleanup_live(s, &input.run_id.to_string(), authorize)
-                    .await
+                let id = input.run_id.to_string();
+                // Cleanup removes private files before its final database commit. Hold the
+                // same lock as grant revocation across that effect so a revoke cannot race it.
+                let _membership = if member_account.is_some() {
+                    Some(s.missions.authors.lock().await)
+                } else {
+                    None
+                };
+                let authorize = if let Some(account) = member_account {
+                    let run_id = id.clone();
+                    authorize.with_guard(move |db| {
+                        crate::agent_access::authorize_member_run_cleanup_in(db, &account, &run_id)
+                    })
+                } else {
+                    authorize
+                };
+                s.worker.cleanup_live(s, &id, authorize).await
             }
             "list_runs" => {
                 let input: ListRunsInput = decode(input)?;
@@ -292,9 +308,18 @@ impl RunOperation {
         task: &str,
         trigger: &str,
         bearer: Option<String>,
+        member_account: Option<String>,
         authorize: crate::authorization::Authorization,
     ) -> Result<Value> {
         let run = s.prepare_run(task, trigger).await?;
+        let authorize = if let Some(account) = member_account {
+            let agent = crate::validation::text(&run["snapshot"]["agent"], "id").to_owned();
+            authorize.with_guard(move |db| {
+                crate::agent_access::authorize_member_agent_in(db, &account, &agent)
+            })
+        } else {
+            authorize
+        };
         authorize.recheck().await?;
         let run: Run =
             serde_json::from_value(s.queue_run_live(run, None, bearer, authorize).await?)?;

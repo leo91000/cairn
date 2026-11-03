@@ -16,9 +16,11 @@ import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import build.cairn.contracts.ServiceTier
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -31,7 +33,8 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun rejectedQuotaSwitchRemainsVisibleAfterOptionsRefresh() =
-        conversation("running", quota = true, codingAgentChoices = true, rejectSwitch = true) {
+        conversation("running", quota = true, codingAgentChoices = true, rejectSwitch = true) { _, _
+            ->
             compose.waitUntil(5000) {
                 compose
                     .onAllNodesWithText("Continuer avec Codex")
@@ -56,7 +59,7 @@ abstract class BackgroundWaitCases {
             quota = true,
             codingAgentChoices = true,
             initialAlternatives = "unavailable",
-        ) {
+        ) { _, _ ->
             compose.waitUntil(15000) {
                 compose
                     .onAllNodesWithText("Continuer avec Codex")
@@ -73,7 +76,7 @@ abstract class BackgroundWaitCases {
             quota = true,
             codingAgentChoices = true,
             initialAlternatives = "error",
-        ) {
+        ) { _, _ ->
             compose.waitUntil(15000) {
                 compose
                     .onAllNodesWithText("Continuer avec Codex")
@@ -86,7 +89,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun quotaOffersOneClickCodingAgentSwitchForTheCurrentTurn() =
-        conversation("running", quota = true, codingAgentChoices = true) { server ->
+        conversation("running", quota = true, codingAgentChoices = true) { server, _ ->
             compose.waitUntil(5000) {
                 compose
                     .onAllNodesWithText("Continuer avec Codex")
@@ -125,7 +128,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun recoveredQuotaDoesNotRestoreDuplicateErrors() =
-        conversation("succeeded", quota = true) {
+        conversation("succeeded", quota = true) { _, _ ->
             compose.onNodeWithTag("chat-quota").assertDoesNotExist()
             compose.onNodeWithText(SPEND_LIMIT).assertDoesNotExist()
             compose.onNodeWithText("L’agent a rencontré une erreur").assertDoesNotExist()
@@ -134,7 +137,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun quotaWaitFoldsDuplicateErrorsAndExpandsOneTechnicalMessage() =
-        conversation("running", quota = true) {
+        conversation("running", quota = true) { _, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose
                 .onAllNodesWithText("Limite de dépense Claude Code atteinte")
@@ -185,7 +188,7 @@ abstract class BackgroundWaitCases {
                         ),
                     )
             },
-        ) {
+        ) { _, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.onNodeWithText("Quota Claude Code atteint").assertIsDisplayed()
             compose
@@ -200,7 +203,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun quotaWaitRemainsAutomaticWhileFollowupQueueIsPaused() =
-        conversation("running", quota = true, paused = true) {
+        conversation("running", quota = true, paused = true) { _, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.onNodeWithText("En pause").assertExists()
             compose
@@ -211,8 +214,89 @@ abstract class BackgroundWaitCases {
         }
 
     @Test
+    fun aMemberWithoutAccessSeesWhyTheConversationStoppedWithoutItsActions() =
+        conversation("failed", quota = true, readOnly = true) { _, _ ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.onNodeWithText("Limite de dépense Claude Code atteinte").assertExists()
+            compose.onNodeWithText("Reprendre la conversation").assertDoesNotExist()
+            compose
+                .onNodeWithText(
+                    "Demandez au propriétaire de l’installation de vérifier les comptes."
+                )
+                .assertDoesNotExist()
+            compose.onNodeWithText("L’agent a rencontré une erreur").assertDoesNotExist()
+        }
+
+    @Test
+    fun losingAgentAccessClosesAnOpenQuestionWithoutAnsweringOrWithdrawingIt() {
+        val usableAgents = AtomicReference(listOf(MAIN_AGENT_ID))
+        val question =
+            questionFixture(
+                "pending-question",
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                fields =
+                    listOf(
+                        fieldFixture(
+                            "scope",
+                            "Quelle portée ?",
+                            options = listOf(optionFixture("Un seul module", id = "module")),
+                        )
+                    ),
+            )
+
+        conversation(
+            "running",
+            questions = listOf(question),
+            usableAgents = { usableAgents.get() },
+        ) { server, vm ->
+            compose.onNodeWithText("1 question · Répondre").performClick()
+            compose.onNodeWithText("Un seul module").performClick()
+            compose.onNodeWithText("Envoyer la réponse").assertIsEnabled()
+            compose.onNodeWithText("Ce n’est plus utile").assertExists()
+
+            usableAgents.set(emptyList())
+            compose.runOnIdle { vm.perform { refreshUsableAgents() } }
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithTag("conversation-read-only")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Votre réponse").assertDoesNotExist()
+            compose.onNodeWithText("Envoyer la réponse").assertDoesNotExist()
+            compose.onNodeWithText("Ce n’est plus utile").assertDoesNotExist()
+            compose.onNodeWithText("1 question · Répondre").assertDoesNotExist()
+            compose
+                .onNodeWithText("1 question attend une personne ayant accès à cet agent.")
+                .assertExists()
+
+            usableAgents.set(listOf(MAIN_AGENT_ID))
+            compose.runOnIdle { vm.perform { refreshUsableAgents() } }
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithText("1 question · Répondre")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Votre réponse").assertDoesNotExist()
+            compose.onNodeWithText("Envoyer la réponse").assertDoesNotExist()
+            compose.onNodeWithText("Ce n’est plus utile").assertDoesNotExist()
+
+            val requests = List(server.requestCount) { server.takeRequest(5, TimeUnit.SECONDS)!! }
+            assertEquals(
+                0,
+                requests.count {
+                    it.method == "POST" &&
+                        (it.path?.endsWith("/answer") == true ||
+                            it.path?.endsWith("/cancel") == true)
+                },
+            )
+        }
+    }
+
+    @Test
     fun savedQuotaFailureOffersManualResumeInsteadOfPromisingAutomaticRecovery() =
-        conversation("failed", quota = true, resumableTurn = true) { server ->
+        conversation("failed", quota = true, resumableTurn = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.onNodeWithText("Reprendre la conversation").assertExists()
             compose
@@ -279,7 +363,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedCodexQuotaResumeSubmitsChangedModelDefaultEffort() =
-        conversation("failed", quota = true, resumeChangedModel = true) { server ->
+        conversation("failed", quota = true, resumeChangedModel = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("GPT-6 Sol").fetchSemanticsNodes().isNotEmpty()
@@ -325,7 +409,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedOpenCodeGroupedRouteResumeSubmitsTheExplicitRouteId() =
-        conversation("failed", quota = true, resumeRouteSelection = true) { server ->
+        conversation("failed", quota = true, resumeRouteSelection = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("Sonnet").fetchSemanticsNodes().isNotEmpty()
@@ -363,7 +447,7 @@ abstract class BackgroundWaitCases {
             quota = true,
             resumeRouteSelection = true,
             resumePinnedRouteSelection = true,
-        ) { server ->
+        ) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
                 compose
@@ -406,7 +490,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedCodexQuotaResumeKeepsEmptyInheritedEffortWithoutPickerChanges() =
-        conversation("failed", quota = true, resumeInheritedEffort = true) { server ->
+        conversation("failed", quota = true, resumeInheritedEffort = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
                 compose
@@ -444,7 +528,7 @@ abstract class BackgroundWaitCases {
             quota = true,
             resumeInheritedEffort = true,
             resumeInheritedSpeed = true,
-        ) { server ->
+        ) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
                 compose
@@ -492,7 +576,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedCodexQuotaResumeUsesExplicitSameModelDefaultEffort() =
-        conversation("failed", quota = true, resumeSameModelDefault = true) { server ->
+        conversation("failed", quota = true, resumeSameModelDefault = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
                 compose
@@ -545,7 +629,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedCodexQuotaResumeKeepsExplicitEffortOverModelDefault() =
-        conversation("failed", quota = true, resumeExplicitEffort = true) { server ->
+        conversation("failed", quota = true, resumeExplicitEffort = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
                 compose
@@ -601,7 +685,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedCodexQuotaResumeClearsDefaultIntentWhenReturningToConversationModel() =
-        conversation("failed", quota = true, resumeResetIntent = true) { server ->
+        conversation("failed", quota = true, resumeResetIntent = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.waitUntil(10000) {
                 compose
@@ -649,7 +733,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun prelaunchQuotaFailureUsesOrdinaryResumeWithoutSavedSelection() =
-        conversation("failed", quota = true, resumePrelaunch = true) { server ->
+        conversation("failed", quota = true, resumePrelaunch = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
 
@@ -673,7 +757,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedCodexResumeKeepsUntouchedBlankModelWhenNothingChanges() =
-        conversation("failed", quota = true, resumeBlankModelNoChange = true) { server ->
+        conversation("failed", quota = true, resumeBlankModelNoChange = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
 
@@ -693,7 +777,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedCodexResumePreservesBlankModelForSpeedOnlyChange() =
-        conversation("failed", quota = true, resumeBlankModelSpeedOnly = true) { server ->
+        conversation("failed", quota = true, resumeBlankModelSpeedOnly = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.onNodeWithTag("model-picker").performClick()
             compose
@@ -723,7 +807,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedCodexResumePreservesBlankModelForReasoningOnlyChange() =
-        conversation("failed", quota = true, resumeBlankModelReasoning = true) { server ->
+        conversation("failed", quota = true, resumeBlankModelReasoning = true) { server, _ ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.onNodeWithTag("model-picker").performClick()
             compose
@@ -756,7 +840,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun relayedBackgroundWaitReplacesWorking() =
-        conversation("running") {
+        conversation("running") { _, _ ->
             compose.onNodeWithTag("agent-waiting").assertExists()
             compose.onAllNodesWithTag("agent-working").assertCountEquals(0)
             compose
@@ -801,7 +885,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun failedResponseBannerCanBeDismissed() =
-        conversation("failed") {
+        conversation("failed") { _, _ ->
             val message =
                 "La réponse s’est arrêtée avant la fin. Reprenez la conversation pour continuer."
             compose.onNodeWithText(message).assertIsDisplayed()
@@ -813,7 +897,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun scheduledSleepDisplaysAutomaticResumeWithoutWorkingIndicator() =
-        conversation("succeeded", sleeping = true) {
+        conversation("succeeded", sleeping = true) { _, _ ->
             compose
                 .onNodeWithText("Reprise dans 7 min", substring = true, useUnmergedTree = true)
                 .assertExists()
@@ -830,7 +914,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun conditionWaitShowsResultAndDeadlineWithoutWorkingIndicator() =
-        conversation("succeeded", conditional = true) {
+        conversation("succeeded", conditional = true) { _, _ ->
             compose
                 .onNodeWithText(
                     "Résultat attendu · 7 min max",
@@ -905,7 +989,7 @@ abstract class BackgroundWaitCases {
                     ),
                 )
             },
-        ) {
+        ) { _, _ ->
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("Agent principal").fetchSemanticsNodes().size == 2
             }
@@ -1109,9 +1193,13 @@ abstract class BackgroundWaitCases {
         initialAlternatives: String? = null,
         rejectSwitch: Boolean = false,
         paused: Boolean = false,
+        // A member who cannot use the conversation's agent.
+        readOnly: Boolean = false,
+        questions: List<ChatQuestion> = emptyList(),
+        usableAgents: (() -> List<String>)? = null,
         reason: String = "Attendre la CI",
         history: ((ChatWakeup?, Long) -> List<RunEvent>)? = null,
-        check: (MockWebServer) -> Unit,
+        check: (MockWebServer, CairnViewModel) -> Unit,
     ) {
         MockWebServer().use { server ->
             val now = System.currentTimeMillis()
@@ -1134,6 +1222,7 @@ abstract class BackgroundWaitCases {
                     agentId = MAIN_AGENT_ID,
                     agentName = "Agent principal",
                     paused = paused,
+                    questions = questions,
                     runId = SAVED_RUN_ID,
                     run =
                         Run(
@@ -1359,8 +1448,22 @@ abstract class BackgroundWaitCases {
 
                         val body =
                             when (path) {
-                                "/api/account/session" -> beaconAccountFixture()
-                                "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/session" ->
+                                    beaconAccountFixture().let {
+                                        if (usableAgents == null) it
+                                        else it.replace("\"role\":\"owner\"", "\"role\":\"member\"")
+                                    }
+                                "/api/installations" ->
+                                    beaconInstallationsFixture().let {
+                                        if (usableAgents == null) it
+                                        else it.replace("\"role\":\"owner\"", "\"role\":\"member\"")
+                                    }
+                                "/api/installations/fixture/api/usable-agents" ->
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.UsableAgentsOutput(
+                                            usableAgents?.invoke().orEmpty()
+                                        )
+                                    )
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
                                         build.cairn.contracts.ListAgentsOutput(
@@ -1569,7 +1672,7 @@ abstract class BackgroundWaitCases {
                             Box(Modifier.safeDrawingPadding()) {
                                 ChatScreen(
                                     vm,
-                                    state,
+                                    if (readOnly) state.copy(usableAgents = emptyList()) else state,
                                     "6cc6efab-10af-54c7-a91b-dcff664166a1",
                                     openChat = {},
                                     openRun = {},
@@ -1592,7 +1695,7 @@ abstract class BackgroundWaitCases {
                             .isNotEmpty())
             }
             try {
-                check(server)
+                check(server, vm)
             } finally {
                 vm.api.closeStreams()
             }

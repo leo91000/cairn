@@ -21,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.*
@@ -28,6 +29,8 @@ import build.cairn.app.data.*
 import build.cairn.app.diagnostics.PerfConnection
 import build.cairn.app.diagnostics.PerfScreen
 import build.cairn.app.diagnostics.Performance
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /** Top-level destinations reached from the dock; everything else is a pushed screen. */
 private val topLevel = setOf("fil", "missions", "atelier")
@@ -109,6 +112,18 @@ private fun CairnAppContent(
     }
     val pushReenrollmentRequired by
         vm.notifications.nativeReenrollmentRequired.collectAsStateWithLifecycle(false)
+    // The owner may give or remove access to agents at any time: a member's app follows within a
+    // short delay while it is shown, and at once when it comes back.
+    val lifecycleScope = rememberCoroutineScope()
+    LifecycleStartEffect(state.installation?.id) {
+        val refreshing = lifecycleScope.launch {
+            while (true) {
+                vm.refreshUsableAgents()
+                delay(30_000)
+            }
+        }
+        onStopOrDispose { refreshing.cancel() }
+    }
     val snackbar = remember { SnackbarHostState() }
     LaunchedEffect(state.notice) {
         state.notice?.let {
@@ -314,6 +329,7 @@ private fun WorkspaceApp(
             activity.orEmpty(),
             state.tasks,
             vm.localReads,
+            usable = state.usableAgents,
         )
     val attention = filAttention(feed)
     fun navigate(target: String) {
@@ -475,8 +491,9 @@ private fun WorkspaceApp(
                                     state,
                                     null,
                                     initialAgent =
-                                        entry.arguments?.getString("agent")?.ifBlank { null }
-                                            ?: MAIN_AGENT_ID,
+                                        entry.arguments?.getString("agent")?.takeIf {
+                                            canUseAgent(state.usableAgents, it)
+                                        } ?: defaultAgent(state.usableAgents, state.agents),
                                     initialProject =
                                         entry.arguments?.getString("project").orEmpty(),
                                     openChat = { nav.navigate("chat/$it") { popUpTo("fil") } },

@@ -146,11 +146,17 @@ pub(super) async fn list(
 ) -> Result<Json<Value>, ApiError> {
     let account = installations::account(&service, &headers, &Method::GET).await?;
     let mut transaction = owner_transaction(&service, &installation, &account).await?;
-    let rows: Vec<(String, String)> = query_as("SELECT a.id, a.email FROM installation_members m JOIN cairn_accounts a ON a.id = m.account_id WHERE m.installation_id = $1 ORDER BY m.joined_at, a.id")
+    let rows: Vec<(String, String, String)> = query_as("SELECT a.id, a.email, m.access_id FROM installation_members m JOIN cairn_accounts a ON a.id = m.account_id WHERE m.installation_id = $1 ORDER BY m.joined_at, a.id")
         .bind(&installation).fetch_all(&mut *transaction).await?;
     let members: Vec<Value> = rows
         .into_iter()
-        .map(|(id, email)| json!({ "id": id, "email": email }))
+        .map(|(id, email, access_id)| {
+            json!({
+                "id": id,
+                "email": email,
+                "accessId": access_id,
+            })
+        })
         .collect();
     let invitations = invitation_list(&mut transaction, &installation).await?;
     Ok(Json(
@@ -341,7 +347,9 @@ pub(super) async fn accept(
             "Invitation not found or expired",
         ));
     }
-    query("INSERT INTO installation_members (installation_id, account_id) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+    // A lock wait must not backdate a new membership to the transaction's start:
+    // installations use this evidence to retain only pre-upgrade memberships.
+    query("INSERT INTO installation_members (installation_id, account_id, joined_at) VALUES ($1, $2, clock_timestamp()) ON CONFLICT DO NOTHING")
         .bind(&installation).bind(&account).execute(&mut *transaction).await?;
     super::audit::record(
         &mut transaction,
@@ -354,6 +362,9 @@ pub(super) async fn accept(
     )
     .await?;
     transaction.commit().await?;
+    // A new membership never inherits account access to agents from an earlier one,
+    // even when the installation missed the removal's reconciliation.
+    super::relay::refresh_task_authors(&service, &installation).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -73,13 +73,13 @@ fn validate_answer(field: &QuestionField, answer: &FieldAnswer) -> Result<()> {
 }
 
 fn receive(db: &Db<'_>, mut question: Question) -> Result<()> {
-    let Some(chat) = chat_for_run(db, &question.run_id)? else {
+    let Some(chat) = db.conversation_for_run(&question.run_id)? else {
         return Ok(());
     };
-    if !crate::conversation_lifecycle::is_active(&chat) {
+    if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active {
         return Ok(());
     }
-    question.chat_id = text(&chat, "id").to_owned();
+    question.chat_id.clone_from(&chat.id);
     if let Some(mut existing) = find_question(db, &question.chat_id, &question.id)? {
         existing.blocking = existing.status == QuestionStatus::Pending && question.blocking;
         return save_question(db, &existing);

@@ -158,6 +158,7 @@ internal fun buildFeed(
     tasks: List<Task>,
     read: Map<String, Long> = emptyMap(),
     now: Long = System.currentTimeMillis(),
+    usable: List<String>? = null,
 ): Feed {
     fun unreadNow(key: String, finishedAt: Long?) =
         (read[key] ?: Long.MIN_VALUE) < (finishedAt ?: 0)
@@ -195,6 +196,13 @@ internal fun buildFeed(
                 )
             val wait = chatWaitNotice(chat.run)
             when {
+                // A question only those with access to its agent may answer waits for them.
+                chat.pendingQuestions > 0 && !canDirectChat(usable, chat, chats) ->
+                    waiting +=
+                        item(
+                            FeedKind.WAITING_CHAT,
+                            "En attente d’une personne ayant accès à l’agent",
+                        )
                 chat.pendingQuestions > 0 ->
                     forYou +=
                         item(
@@ -470,7 +478,19 @@ fun FilScreen(
     }
     val trash = rememberConversationTrash(vm)
     val chats = live.state?.chats?.filter { it.id !in trash.hidden }
-    val feed = buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads, now)
+    val feed =
+        buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads, now, state.usableAgents)
+    // A delegated task may also be directed through its requesting conversation's agent.
+    fun directable(item: FeedItem): Boolean =
+        item.chatId
+            ?.let { id -> chats?.find { it.id == id } }
+            ?.let { canDirectChat(state.usableAgents, it, chats.orEmpty()) }
+            ?: canUseAgent(state.usableAgents, item.agentKey)
+    // Deleting a conversation needs access to its agent (ADR-0075).
+    fun deletion(item: FeedItem): (() -> Unit)? =
+        item.chatId
+            ?.takeIf { canUseAgent(state.usableAgents, item.agentKey) }
+            ?.let { id -> { trash.trash(id) } }
     fun retry(item: FeedItem) {
         val task = item.taskId ?: return
         vm.perform { openRun(api.runMission(RunMissionInput(task)).id) }
@@ -560,18 +580,25 @@ fun FilScreen(
             FeedRow(
                 item,
                 { open(item) },
-                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
+                onDelete = deletion(item),
             ) {
                 ForYouAction(
                     item,
                     now,
                     !state.busy,
                     { open(item) },
-                    { retry(item) },
+                    // Relaunching needs access to the mission's current agent.
+                    { retry(item) }.takeIf {
+                        canUseAgent(
+                            state.usableAgents,
+                            state.tasks.find { it.id == item.taskId }?.agentId ?: item.agentKey,
+                        )
+                    },
                     { vm.markRead(listOf(item.read)) },
                     dismiss = { setAside(item) },
                     snooze = { setAside(item, tomorrowMorning(now)) },
                     archive = { archive(item) },
+                    usable = directable(item),
                 )
             }
         }
@@ -579,7 +606,7 @@ fun FilScreen(
             FeedRow(
                 item,
                 { open(item) },
-                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
+                onDelete = deletion(item),
             ) {
                 Text(
                     elapsed(item.startedAt, now),
@@ -592,7 +619,7 @@ fun FilScreen(
             FeedRow(
                 item,
                 { open(item) },
-                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
+                onDelete = deletion(item),
             ) {
                 Text(
                     item.wakeAt?.let { waitLeft(it, item.condition, item.resolved, now) }
@@ -607,7 +634,7 @@ fun FilScreen(
             FeedRow(
                 item,
                 { open(item) },
-                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
+                onDelete = deletion(item),
             ) {
                 Stamp(item.stamp, now)
             }
@@ -647,11 +674,13 @@ private fun ForYouAction(
     now: Long,
     enabled: Boolean,
     open: () -> Unit,
-    retry: () -> Unit,
+    retry: (() -> Unit)?,
     markRead: () -> Unit,
     dismiss: () -> Unit = {},
     snooze: () -> Unit = {},
     archive: () -> Unit = {},
+    /** Whether the account may use the item's agent, to answer rather than only read. */
+    usable: Boolean = true,
 ) {
     if (item.kind == FeedKind.REVIEW_TASK)
         Row(
@@ -683,15 +712,19 @@ private fun ForYouAction(
                             snooze()
                         },
                     )
-                    DropdownMenuItem(
-                        text = { Text("Relancer") },
-                        leadingIcon = { androidx.compose.material3.Icon(CairnIcons.Retry, null) },
-                        enabled = enabled,
-                        onClick = {
-                            menu = false
-                            retry()
-                        },
-                    )
+                    retry?.let { relaunch ->
+                        DropdownMenuItem(
+                            text = { Text("Relancer") },
+                            leadingIcon = {
+                                androidx.compose.material3.Icon(CairnIcons.Retry, null)
+                            },
+                            enabled = enabled,
+                            onClick = {
+                                menu = false
+                                relaunch()
+                            },
+                        )
+                    }
                     DropdownMenuItem(
                         text = { Text("Archiver la mission") },
                         leadingIcon = { androidx.compose.material3.Icon(CairnIcons.Trash, null) },
@@ -712,10 +745,10 @@ private fun ForYouAction(
             onClick = markRead,
         )
     else if (item.kind == FeedKind.QUESTION)
-        SignalButton("Répondre", height = 36.dp, onClick = open)
+        SignalButton(if (usable) "Répondre" else "Ouvrir", height = 36.dp, onClick = open)
     else if (item.kind == FeedKind.RECONNECT)
         SignalButton("Connexions", height = 36.dp, onClick = open)
-    else if (item.kind == FeedKind.FAILED_TASK)
+    else if (item.kind == FeedKind.FAILED_TASK && retry != null)
         RoundAction(
             "Relancer ${item.title}",
             CairnIcons.Retry,

@@ -258,6 +258,7 @@ impl ChatOperation {
         s: &Arc<Service>,
         input: Value,
         context: ResumeContext,
+        member_account: Option<String>,
     ) -> Result<Value> {
         let reader = super::personal::listing_reader(&context);
         let (bearer, origin) = match context {
@@ -299,13 +300,23 @@ impl ChatOperation {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&input.data)
                 .map_err(|_| Error::bad("Expected base64 file data."))?;
+            let authorization =
+                crate::installation_mcp::management_authorization(s, bearer.as_deref()).await?;
+            let authorization = if let Some(account) = member_account.clone() {
+                let chat_id = input.chat_id.clone();
+                authorization.with_guard(move |db| {
+                    crate::agent_access::authorize_member_chat_in(db, &account, &chat_id)
+                })
+            } else {
+                authorization
+            };
             let attachment = s
                 .store_attachment_live(
                     &input.chat_id,
                     &input.attachment_id,
                     &input.name,
                     &bytes,
-                    crate::installation_mcp::management_authorization(s, bearer.as_deref()).await?,
+                    authorization,
                 )
                 .await?;
             return Ok(serde_json::to_value(attachment)?);
@@ -463,12 +474,30 @@ impl ChatOperation {
                     let authorize =
                         crate::installation_mcp::management_authorization(s, bearer.as_deref())
                             .await?;
-                    return s
-                        .chat_from_run_live(crate::validation::text(&args, "runId"), authorize)
-                        .await;
+                    let run_id = crate::validation::text(&args, "runId").to_owned();
+                    let authorize = if let Some(account) = member_account.clone() {
+                        let guarded_run_id = run_id.clone();
+                        authorize.with_guard(move |db| {
+                            crate::agent_access::authorize_member_run_in(
+                                db,
+                                &account,
+                                &guarded_run_id,
+                            )
+                        })
+                    } else {
+                        authorize
+                    };
+                    return s.chat_from_run_live(&run_id, authorize).await;
                 }
-                crate::mcp_server::chat_tools::invoke(s, self.name, args, bearer.as_deref(), reader)
-                    .await
+                crate::mcp_server::chat_tools::invoke(
+                    s,
+                    self.name,
+                    args,
+                    bearer.as_deref(),
+                    reader,
+                    member_account,
+                )
+                .await
             })
             .await?;
         if matches!(
