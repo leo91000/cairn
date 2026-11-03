@@ -2,8 +2,6 @@ package build.cairn.app.ui
 
 import build.cairn.app.data.Chat
 import build.cairn.app.data.RunEvent
-import build.cairn.contracts.TimelineContent
-import build.cairn.contracts.TimelineEntry
 import kotlinx.serialization.json.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -173,10 +171,11 @@ class SubagentsTest {
         val steering = user("Clarify the approach")
         val completed =
             item("item.completed") {
-                put("id", "plan")
-                put("type", "proposed_plan")
-                put("text", "Clarified approach")
-            }.copy(legacyPlanApproval = true)
+                    put("id", "plan")
+                    put("type", "proposed_plan")
+                    put("text", "Clarified approach")
+                }
+                .copy(legacyPlanApproval = true)
         assertEquals("run:${completed.id}", proposedPlanApproval(listOf(steering, completed)))
         assertEquals(
             "run:${completed.id}",

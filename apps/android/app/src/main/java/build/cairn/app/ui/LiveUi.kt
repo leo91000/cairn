@@ -662,11 +662,7 @@ internal fun proposedPlanApproval(
         return null
     val item = proposal.item()
     val authoredRequest = item.string("request_id")
-    if (
-        item?.containsKey("request_id") != true &&
-            proposal.legacyPlanApproval != true
-    )
-        return null
+    if (item?.containsKey("request_id") != true && proposal.legacyPlanApproval != true) return null
 
     if (
         item?.containsKey("request_id") == true &&
@@ -731,8 +727,8 @@ internal fun timelineEntries(
                 }
                 continue
             }
-            if (event.type == "turn.started") {
-                positions.clear()
+            when (event.type) {
+                "turn.started", "turn.completed", "turn.failed" -> positions.clear()
             }
             val item = event.item()
             val id = item.string("id")

@@ -749,6 +749,7 @@ async fn live_batches_full_replay_and_checkpoint_restart_build_the_same_timeline
                         .get::<_, Option<String>>(5)?
                         .map(|p| serde_json::value::RawValue::from_string(p).unwrap()),
                     display_id: None,
+                    legacy_plan_approval: None,
                     timeline: false,
                 })
             })
@@ -862,6 +863,7 @@ fn replay(events: &[(EventKind, &str, Value)]) -> Vec<TimelineEntry> {
             payload: (!payload.is_null())
                 .then(|| serde_json::value::RawValue::from_string(payload.to_string()).unwrap()),
             display_id: None,
+            legacy_plan_approval: None,
             timeline: false,
         })
         .collect::<Vec<_>>();
@@ -1339,20 +1341,24 @@ async fn legacy_plan_approval_uses_run_wide_request_state_in_live_and_history_pa
     let run = "00000000-0000-4000-8000-0000000000a5";
     store
         .transaction(move |db| {
-            let state = serde_json::json!({
-                "id": run,
-                "taskId": "legacy-plan-approval",
-                "status": "succeeded",
-            });
+            let state: cairn_contracts::RunState =
+                serde_json::from_value(serde_json::json!({
+                    "id": run,
+                    "taskId": "legacy-plan-approval",
+                    "status": "succeeded",
+                }))?;
             db.admit_run(&state, None, &serde_json::json!({}), None)?;
             Ok(())
         })
         .await
         .unwrap();
-    let request = serde_json::json!({"messageId":"request-a","text":"Plan this"});
+    let request = serde_json::json!({
+        "messageId": "request-a",
+        "text": "Plan this",
+    });
     for _ in 0..2 {
         store
-            .event(run, &EventKind::ChatUser, "Plan this", Some(&request))
+            .event(run, &EventKind::ChatUser, "Plan this", Some(request.clone()))
             .await
             .unwrap();
     }
@@ -1361,7 +1367,13 @@ async fn legacy_plan_approval_uses_run_wide_request_state_in_live_and_history_pa
             run,
             &EventKind::ItemCompleted,
             "Approach",
-            Some(&serde_json::json!({"item":{"id":"plan-a","type":"proposed_plan","text":"Approach"}})),
+            Some(serde_json::json!({
+                "item": {
+                    "id": "plan-a",
+                    "type": "proposed_plan",
+                    "text": "Approach",
+                },
+            })),
         )
         .await
         .unwrap();
@@ -1379,7 +1391,10 @@ async fn legacy_plan_approval_uses_run_wide_request_state_in_live_and_history_pa
             run,
             &EventKind::ChatUser,
             "Another request",
-            Some(&serde_json::json!({"messageId":"request-b","text":"Another request"})),
+            Some(serde_json::json!({
+                "messageId": "request-b",
+                "text": "Another request",
+            })),
         )
         .await
         .unwrap();
@@ -1388,7 +1403,13 @@ async fn legacy_plan_approval_uses_run_wide_request_state_in_live_and_history_pa
             run,
             &EventKind::ItemCompleted,
             "Revised approach",
-            Some(&serde_json::json!({"item":{"id":"plan-b","type":"proposed_plan","text":"Revised approach"}})),
+            Some(serde_json::json!({
+                "item": {
+                    "id": "plan-b",
+                    "type": "proposed_plan",
+                    "text": "Revised approach",
+                },
+            })),
         )
         .await
         .unwrap();

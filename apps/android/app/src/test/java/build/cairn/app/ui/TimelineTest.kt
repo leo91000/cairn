@@ -300,6 +300,26 @@ class TimelineTest {
     }
 
     @Test
+    fun `reused proposal ids after completion and failure stay in separate turns`() {
+        val rows =
+            fixtureEntries(
+                listOf(
+                    event(1, "item.completed", "proposal", "proposed_plan"),
+                    event(2, "turn.completed"),
+                    event(3, "item.completed", "proposal", "proposed_plan"),
+                    event(4, "turn.failed"),
+                    event(5, "item.completed", "proposal", "proposed_plan"),
+                )
+            )
+
+        val proposals =
+            rows.flatMap { row ->
+                row.events.filter { it.item().string("type") == "proposed_plan" }
+            }
+        assertEquals(listOf(1L, 3L, 5L), proposals.map { it.id })
+    }
+
+    @Test
     fun `user messages separate action groups without losing errors`() {
         val rows =
             fixtureEntries(
