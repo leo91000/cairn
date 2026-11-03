@@ -990,30 +990,24 @@ impl Chat<'_> {
             .iter()
             .find(|preset| preset["mode"] == kind)?
             .clone();
-        // A preset names its model: without a chosen one, keep the model Codex runs the
-        // thread with, which its configuration may set, rather than the catalog's default.
-        let model = match model(plan) {
-            Some(model) => model.clone(),
-            None if !self.thread_model.is_empty() => self.thread_model.clone().into(),
-            None => {
-                let models = crate::models::discover(self.session).await.ok()?;
-                let default = models.as_array()?.iter().find(|m| m["isDefault"] == true)?;
-                default["model"].clone()
-            }
-        };
+        // Preserve a selected or thread-reported model. If Codex does not report the
+        // configured thread model, omit the preset model so it cannot replace that config.
+        let model = model(plan)
+            .cloned()
+            .or_else(|| (!self.thread_model.is_empty()).then(|| self.thread_model.clone().into()));
         let effort = if effort.is_empty() {
             preset["reasoning_effort"].clone()
         } else {
             effort.into()
         };
-        Some(json!({
-            "mode": kind,
-            "settings": {
-                "model": model,
-                "reasoning_effort": effort,
-                "developer_instructions": null,
-            },
-        }))
+        let mut settings = json!({
+            "reasoning_effort": effort,
+            "developer_instructions": null,
+        });
+        if let Some(model) = model {
+            settings["model"] = model;
+        }
+        Some(json!({ "mode": kind, "settings": settings }))
     }
 
     async fn start_turn(&mut self, plan: &Value, effort: &str, continuing: bool) -> Result<()> {

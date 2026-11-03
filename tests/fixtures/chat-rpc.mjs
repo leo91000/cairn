@@ -15,7 +15,14 @@ export function chatFixture() {
   const file = path.join(process.env.CODEX_HOME, 'fixture-conversation.json')
   // The thread's model: the requested one, else one the fixture's configuration sets.
   const configModel = path.join(process.env.CODEX_HOME, 'fixture-config-model')
+  const unknownThreadModel = path.join(process.env.CODEX_HOME, 'fixture-unknown-thread-model')
   const threadModel = params => params.model || (existsSync(configModel) ? readFileSync(configModel, 'utf8').trim() : 'fixture-fast')
+  const threadModelResult = params => {
+    const result = { thread }
+    if (!existsSync(unknownThreadModel))
+      result.model = threadModel(params)
+    return result
+  }
   const emit = value => process.stdout.write(`${JSON.stringify(value)}\n`)
   const notify = (method, params) => emit({ method, params })
   let thread
@@ -169,7 +176,7 @@ export function chatFixture() {
         fixtureInstructions: params.developerInstructions || '',
       }
       save()
-      emit({ id: request.id, result: { thread, model: threadModel(params) } })
+      emit({ id: request.id, result: threadModelResult(params) })
     }
 
     if (method === 'thread/resume') {
@@ -180,7 +187,7 @@ export function chatFixture() {
       thread.fixtureConfig = params.config
       thread.fixtureInstructions = params.developerInstructions || ''
       counter = thread.turns.length
-      emit({ id: request.id, result: { thread: { ...thread, turns: [] }, model: threadModel(params) } })
+      emit({ id: request.id, result: { ...threadModelResult(params), thread: { ...thread, turns: [] } } })
     }
 
     if (method === 'thread/turns/list' || method === 'thread/items/list') {

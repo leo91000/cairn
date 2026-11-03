@@ -1388,6 +1388,38 @@ async fn plan_presets_keep_the_model_codex_runs_the_thread_with() {
 }
 
 #[tokio::test]
+async fn plan_presets_omit_a_model_when_codex_does_not_report_its_configured_model() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    std::fs::write(home.join("fixture-config-model"), "fixture-deep").unwrap();
+    std::fs::write(home.join("fixture-unknown-thread-model"), "").unwrap();
+
+    let mut initial = plan(&root, "Start the work");
+    initial["execution"]["messageId"] = "message-0".into();
+    run_quietly(&config, &home, initial).await;
+
+    for (index, mark) in [(1, "planning"), (2, "afterPlan")] {
+        let mut turn = plan(&root, "Continue");
+        turn[mark] = true.into();
+        turn["sessionId"] = "fixture-chat".into();
+        turn["execution"]["messageId"] = format!("message-{index}").into();
+        run_quietly(&config, &home, turn).await;
+    }
+
+    let turns = conversation(&home)["turns"].clone();
+    for (index, mode) in [(1, "plan"), (2, "default")] {
+        assert_eq!(turns[index]["collaborationMode"]["mode"], mode);
+        assert!(
+            turns[index]["collaborationMode"]["settings"]
+                .get("model")
+                .is_none(),
+            "turn {index} must let Codex keep its configured model"
+        );
+    }
+}
+
+#[tokio::test]
 async fn recovery_replays_a_completed_plan_only_turn_without_starting_another() {
     for steering in [false, true] {
         let root = TempDir::new().unwrap();

@@ -204,7 +204,7 @@ jobs:
     needs: resolve
     if: always() && !cancelled() && (inputs.backend-only == true || (needs.resolve.result == 'success' && (inputs.backend-qualification == 'backend-migration' || needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')))
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 30
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
@@ -227,7 +227,6 @@ jobs:
         if: inputs.backend-only == true
         run: pnpm validate:pr rust
       - name: Run backend tests across binaries with isolated credentials
-        # Leave time within the unchanged 40-minute job for interrupted traces.
         timeout-minutes: 30
         run: |
           set -o pipefail
@@ -329,7 +328,7 @@ jobs:
           # Each engine's own sandbox enforces a plan turn's boundary. The releases this build
           # ships run one through Cairn's adapters against a local model that asks for writes,
           # network access, escalation and subagents; none may take effect, and the turn after
-          # the plan must write again. See docs/adr/0079-plan-turns.md#qualification.
+          # the plan must write again. See docs/adr/0080-plan-turns.md#qualification.
           sudo apt-get install -y --no-install-recommends bubblewrap socat
           # Ubuntu restricts the unprivileged user namespaces both sandboxes create.
           if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
