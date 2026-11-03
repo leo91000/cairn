@@ -86,6 +86,10 @@ fn managed_settings_are_refused_before_launch_and_errors_do_not_echo_values() {
         (Provider::Codex, json!({ "marketplaces": {} })),
         (
             Provider::Codex,
+            json!({ "agents": { "reviewer": { "config_file": "private-test-value" } } }),
+        ),
+        (
+            Provider::Codex,
             json!({ "default_permissions": ":read-only" }),
         ),
         (
@@ -129,7 +133,7 @@ fn managed_settings_are_refused_before_launch_and_errors_do_not_echo_values() {
     assert!(
         validate(
             Provider::Codex,
-            &json!({ "model_context_window": 1000000, "model_auto_compact_token_limit": 900000, "features": { "default_mode_request_user_input": false, "hooks": false, "codex_hooks": false } })
+            &json!({ "model_context_window": 1000000, "model_auto_compact_token_limit": 900000, "features": { "default_mode_request_user_input": false, "hooks": false, "codex_hooks": false }, "agents": { "max_threads": 2, "reviewer": { "description": "Review code" } } })
         )
         .is_ok()
     );

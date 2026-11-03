@@ -659,6 +659,20 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
             )));
         }
     }
+    if provider == Provider::Codex
+        && value
+            .get("agents")
+            .and_then(Value::as_object)
+            .is_some_and(|agents| {
+                agents
+                    .values()
+                    .any(|role| role.get("config_file").is_some())
+            })
+    {
+        return Err(Error::bad(
+            "Codex role config_file references are not supported: external configuration files cannot be frozen or transported with the message. Use Cairn agent profiles for model, reasoning and instructions.",
+        ));
+    }
     for path in paths(value) {
         let lower = path.to_ascii_lowercase();
         if lower.contains("api_key")

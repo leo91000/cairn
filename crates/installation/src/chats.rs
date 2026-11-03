@@ -1061,9 +1061,8 @@ fn continue_run(
         };
         db.event(run_id, &EventKind::Status, &status, None)?;
     } else if provider == Provider::Codex && resumes_mission_thread(run) {
-        // Codex keeps the developer instructions a thread started with, so the
-        // mission's thread would stay unattended. Every turn repeats the rule
-        // because compaction can drop earlier user messages.
+        // Keep the interactive rule explicit across native versions; compaction
+        // can drop earlier user messages.
         execution.text = format!(
             "{CONTINUED_MISSION} {}\n\n{}",
             crate::run_output::INTERACTIVE,

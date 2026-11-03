@@ -84,6 +84,10 @@ These boundaries preserve [ADR-0013](adr/0013-managed-tools-without-native-plugi
 [configuration decision](adr/0079-native-coding-agent-configuration.md).
 Codex native `permissions` profiles and `default_permissions` selections are
 managed alongside its legacy sandbox settings; use Cairn agent access settings.
+Codex `agents.<role>.config_file` references are unsupported: external role
+preferences cannot be frozen or transported with a message. Use Cairn agent
+profiles for model, reasoning and instructions. See the native
+[role configuration loader](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/core/src/agent/role.rs#L120-L150).
 
 Codex `notify` and `hooks` (including trust state), Claude hooks, native command callbacks and authentication helpers
 are refused. They can execute outside the tool permission checks; use Cairn skills,

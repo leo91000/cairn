@@ -257,6 +257,10 @@ async fn native_configuration_has_http_and_both_mcp_parity_with_live_scopes() {
         ("codex", "[permissions.readonly]\n"),
         (
             "codex",
+            "[agents.reviewer]\nconfig_file = 'private-role-file.toml'\n",
+        ),
+        (
+            "codex",
             "[hooks.state.callback]\ntrusted_hash = 'test-only'\n",
         ),
         ("codex", "[features]\nhooks = true\n"),
