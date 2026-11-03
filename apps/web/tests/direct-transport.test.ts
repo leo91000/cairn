@@ -431,7 +431,12 @@ it('replays an interrupted immutable timeline snapshot read on relay', async () 
 
 it('replays an interrupted immutable event-content read on relay', async () => {
   const { api, channel } = await direct()
-  const body = JSON.stringify({ runId: 'r', eventId: 'event-1', offset: 0, sha256: null })
+  const body = JSON.stringify({
+    runId: 'r',
+    eventId: 'event-1',
+    offset: 0,
+    sha256: null,
+  })
   const read = api('/runs/r/event-content', { method: 'POST', body })
   await vi.waitFor(() => expect(channel.packets.length).toBe(1))
   channel.dispatchEvent(new Event('close'))

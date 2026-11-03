@@ -1065,13 +1065,12 @@ class DirectTransportTest {
             api.transport.attach(
                 DirectChannel({ _, _, _ -> throw IOException("acknowledgement lost") }, {})
             )
-            val payload =
-                buildJsonObject {
-                    put("runId", "run")
-                    put("eventId", "event-1")
-                    put("offset", 0)
-                    put("sha256", JsonNull)
-                }
+            val payload = buildJsonObject {
+                put("runId", "run")
+                put("eventId", "event-1")
+                put("offset", 0)
+                put("sha256", JsonNull)
+            }
             assertEquals("{}", api.request("POST", "/runs/run/event-content", payload))
             assertEquals(payload.toString(), server.takeRequest().body.readUtf8())
             assertEquals("relay", api.transport.route.value)
