@@ -127,7 +127,7 @@ async fn controller_reason_preserves_provider_finalization_completion_and_cancel
                 db.add_run_fixture(
                     &json!({
                         "id": name,
-                        "taskId": "task",
+                        "taskId": name,
                         "status": "running",
                         "cancelRequestedAt": cancelled.then_some(1),
                     }),
