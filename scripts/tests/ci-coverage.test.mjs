@@ -142,6 +142,7 @@ describe('parallel CI coverage', () => {
 
     const expression = publish.if
       .replaceAll('inputs.backend-qualification', 'selection')
+      .replaceAll('inputs.validation-only', 'validationOnly')
       .replace(/\bneeds\.([a-z0-9-]+)\b/g, (_match, name) => `needs[${JSON.stringify(name)}]`)
     const baseNeeds = {
       'resolve': { outputs: { reuse: 'false' } },
@@ -158,8 +159,9 @@ describe('parallel CI coverage', () => {
       'image': { result: 'success', outputs: { published: 'true' } },
       'beacon-image': { result: 'success', outputs: { published: 'true' } },
     }
-    const canPublish = (selection, migrationResult, backendResult = 'success', reuse = 'false') => runInNewContext(expression, {
+    const canPublish = (selection, migrationResult, backendResult = 'success', reuse = 'false', validationOnly = false) => runInNewContext(expression, {
       selection,
+      validationOnly,
       needs: {
         ...baseNeeds,
         'resolve': { outputs: { reuse } },
@@ -176,6 +178,7 @@ describe('parallel CI coverage', () => {
     expect(canPublish('none', 'skipped')).toBe(true)
     expect(canPublish(undefined, 'skipped')).toBe(true)
     expect(canPublish(undefined, 'skipped', 'success', 'true')).toBe(false)
+    expect(canPublish(undefined, 'skipped', 'success', 'false', true)).toBe(false)
   })
 
   it('requires the selected physical qualification before re-promoting a reused image', () => {
@@ -187,9 +190,11 @@ describe('parallel CI coverage', () => {
 
     const expression = promote.if
       .replaceAll('inputs.backend-qualification', 'selection')
+      .replaceAll('inputs.validation-only', 'validationOnly')
       .replace(/\bneeds\.([a-z0-9-]+)\b/g, (_match, name) => `needs[${JSON.stringify(name)}]`)
-    const canPromote = (selection, migrationResult, reuse) => runInNewContext(expression, {
+    const canPromote = (selection, migrationResult, reuse, validationOnly = false) => runInNewContext(expression, {
       selection,
+      validationOnly,
       needs: {
         'resolve': { outputs: { reuse } },
         'backend-migration-qualification': { result: migrationResult },
@@ -204,6 +209,7 @@ describe('parallel CI coverage', () => {
     expect(canPromote('none', 'skipped', 'true')).toBe(true)
     expect(canPromote(undefined, 'skipped', 'true')).toBe(true)
     expect(canPromote('backend-migration', 'success', 'false')).toBe(false)
+    expect(canPromote(undefined, 'skipped', 'true', true)).toBe(false)
   })
 
   it('keeps the PR browser lane conditional, read-only and limited to the saved-chat journey', () => {

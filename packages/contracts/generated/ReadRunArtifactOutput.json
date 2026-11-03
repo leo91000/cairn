@@ -113,6 +113,7 @@
           "type": "integer"
         },
         "visibility": {
+          "pattern": "^(private|public)$",
           "type": [
             "string",
             "null"

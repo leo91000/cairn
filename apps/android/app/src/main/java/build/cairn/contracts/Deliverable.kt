@@ -55,6 +55,7 @@ data class Deliverable(
         require(Regex("^(pending|ready|unavailable|none)\$").containsMatchIn(previewStatus))
         require(size in 0L..9007199254740991L)
         require(version in 1L..9007199254740991L)
+        visibility?.let { require(Regex("^(private|public)\$").containsMatchIn(it)) }
         width?.let { require(it >= 0L) }
     }
 }
