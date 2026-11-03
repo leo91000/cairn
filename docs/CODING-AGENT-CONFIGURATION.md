@@ -81,7 +81,7 @@ These boundaries preserve [ADR-0013](adr/0013-managed-tools-without-native-plugi
 [ADR-0042](adr/0042-opencode-api-key-integration.md) and the
 [configuration decision](adr/0079-native-coding-agent-configuration.md).
 
-Codex `notify`, Claude hooks, native command callbacks and authentication helpers
+Codex `notify` and `hooks` (including trust state), Claude hooks, native command callbacks and authentication helpers
 are refused. They can execute outside the tool permission checks; use Cairn skills,
 plugins and Connections instead. Claude's editable `env` preferences are limited
 to `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS` and
@@ -89,6 +89,8 @@ to `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS` and
 overrides remain managed by Cairn.
 Codex `features.default_mode_request_user_input` likewise remains disabled;
 Cairn provides the supported questionnaire tools.
+The Codex `features.hooks` flag and its deprecated `features.codex_hooks` alias
+cannot be enabled through native configuration.
 
 OpenCode `{file:...}` and `{env:...}` substitutions are refused in both property
 names and values. OpenCode expands these before parsing its configuration, which

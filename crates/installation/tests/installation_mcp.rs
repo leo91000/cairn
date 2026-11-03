@@ -255,6 +255,12 @@ async fn native_configuration_has_http_and_both_mcp_parity_with_live_scopes() {
         ("codex", "notify = ['blocked-callback']\n"),
         (
             "codex",
+            "[hooks.state.callback]\ntrusted_hash = 'test-only'\n",
+        ),
+        ("codex", "[features]\nhooks = true\n"),
+        ("codex", "[features]\ncodex_hooks = true\n"),
+        (
+            "codex",
             "[features]\ndefault_mode_request_user_input = true\n",
         ),
         (

@@ -76,6 +76,8 @@ internal fun nativeManagedReason(path: String): String =
         "mcp" -> "Cairn fournit les outils MCP autorisés et les jetons privés de l’exécution."
         "notify" ->
             "Les commandes de notification natives ne peuvent pas s’exécuter hors des contrôles de droits Cairn. Utilisez les skills et les plugins Cairn."
+        "hooks" ->
+            "Les commandes natives de cycle de vie et leur état de confiance ne sont pas pris en charge. Utilisez les skills et les plugins Cairn."
         "features.default_mode_request_user_input" ->
             "Cairn fournit les questionnaires. L’outil de question natif de Codex en mode par défaut reste désactivé."
         "hooks / command helpers" ->

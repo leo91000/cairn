@@ -85,6 +85,11 @@ fn managed_settings_are_refused_before_launch_and_errors_do_not_echo_values() {
             Provider::Codex,
             json!({ "features": { "default_mode_request_user_input": true } }),
         ),
+        (Provider::Codex, json!({ "features": { "hooks": true } })),
+        (
+            Provider::Codex,
+            json!({ "features": { "codex_hooks": true } }),
+        ),
         (
             Provider::Claude,
             json!({ "env": { "ANTHROPIC_BASE_URL": "https://untrusted.invalid" } }),
@@ -111,7 +116,7 @@ fn managed_settings_are_refused_before_launch_and_errors_do_not_echo_values() {
     assert!(
         validate(
             Provider::Codex,
-            &json!({ "model_context_window": 1000000, "model_auto_compact_token_limit": 900000, "features": { "default_mode_request_user_input": false } })
+            &json!({ "model_context_window": 1000000, "model_auto_compact_token_limit": 900000, "features": { "default_mode_request_user_input": false, "hooks": false, "codex_hooks": false } })
         )
         .is_ok()
     );
@@ -231,6 +236,27 @@ async fn preview_and_save_agree_when_replacing_nested_native_values() {
 fn native_configuration_cannot_launch_callbacks_or_replace_managed_claude_environment() {
     let mut cases = vec![
         (Provider::Codex, json!({ "notify": ["blocked-callback"] })),
+        (
+            Provider::Codex,
+            json!({
+                "hooks": {
+                    "SessionStart": [{
+                        "matcher": "startup|resume",
+                        "hooks": [{
+                            "type": "command",
+                            "command": "printf hook-proof",
+                            "timeout": 600,
+                            "async": false
+                        }]
+                    }],
+                    "state": {
+                        "/<session-flags>/config.toml:session_start:0:0": {
+                            "trusted_hash": "sha256:b4e875f9a217a9060e320cedf9f75751478f4e4a69c7e23f6309cff4796cc1b1"
+                        }
+                    }
+                }
+            }),
+        ),
         (
             Provider::Claude,
             json!({

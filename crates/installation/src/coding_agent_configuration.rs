@@ -406,6 +406,10 @@ fn managed(provider: Provider) -> Vec<ManagedCodingAgentSetting> {
                 "Native command callbacks cannot run outside Cairn's permission checks. Use Cairn skills and plugins.",
             ));
             entries.push((
+                "hooks",
+                "Native lifecycle commands and their trust state are not supported. Use Cairn skills and plugins.",
+            ));
+            entries.push((
                 "features.default_mode_request_user_input",
                 "Cairn supplies questionnaire tools; Codex's native default-mode question tool remains disabled.",
             ));
@@ -535,6 +539,7 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
             "/profile",
             "/profiles",
             "/notify",
+            "/hooks",
         ],
         Provider::Claude => &[
             "/permissions",
@@ -619,6 +624,18 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
         return Err(Error::bad(
             "features.default_mode_request_user_input is managed by Cairn and cannot be enabled. Use Cairn's questionnaire tools.",
         ));
+    }
+    if provider == Provider::Codex {
+        for feature in ["hooks", "codex_hooks"] {
+            if value
+                .pointer(&format!("/features/{feature}"))
+                .is_some_and(|value| value != false)
+            {
+                return Err(Error::bad(
+                    "Native Codex hooks are not supported and cannot be enabled. Use Cairn skills and plugins.",
+                ));
+            }
+        }
     }
     if provider == Provider::Opencode {
         if value
