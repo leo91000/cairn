@@ -1341,12 +1341,11 @@ async fn legacy_plan_approval_uses_run_wide_request_state_in_live_and_history_pa
     let run = "00000000-0000-4000-8000-0000000000a5";
     store
         .transaction(move |db| {
-            let state: cairn_contracts::RunState =
-                serde_json::from_value(serde_json::json!({
-                    "id": run,
-                    "taskId": "legacy-plan-approval",
-                    "status": "succeeded",
-                }))?;
+            let state: cairn_contracts::RunState = serde_json::from_value(serde_json::json!({
+                "id": run,
+                "taskId": "legacy-plan-approval",
+                "status": "succeeded",
+            }))?;
             db.admit_run(&state, None, &serde_json::json!({}), None)?;
             Ok(())
         })
@@ -1358,7 +1357,12 @@ async fn legacy_plan_approval_uses_run_wide_request_state_in_live_and_history_pa
     });
     for _ in 0..2 {
         store
-            .event(run, &EventKind::ChatUser, "Plan this", Some(request.clone()))
+            .event(
+                run,
+                &EventKind::ChatUser,
+                "Plan this",
+                Some(request.clone()),
+            )
             .await
             .unwrap();
     }
