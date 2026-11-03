@@ -6,12 +6,15 @@ import kotlinx.serialization.Serializable
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class NativeConfigurationSnapshot(
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val agentId: String? = null,
     val configuredPaths: List<String> = listOf(),
     val document: String,
     val provider: String,
     val revision: String,
 ) {
     init {
+        agentId?.let { java.util.UUID.fromString(it) }
         require(Regex("^(codex|claude|opencode)\$").containsMatchIn(provider))
     }
 }

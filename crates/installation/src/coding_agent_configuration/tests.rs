@@ -737,3 +737,40 @@ async fn native_configuration_storage_measurement() {
         std::fs::read_to_string("/proc/self/stat").unwrap_or_default()
     );
 }
+
+#[tokio::test]
+async fn transferred_conversations_keep_their_selection_until_target_preferences_change() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    store.transaction(|db| {
+        let source = agent(db, "codex")?;
+        let mut profile = db.agent(&source.to_string())?.unwrap();
+        profile.settings.model = "source-model".into();
+        profile.settings.reasoning = "high".into();
+        db.save_agent(&profile)?;
+        change(db, target(Some(source)), "model = 'source-model'\nmodel_reasoning_effort = 'high'\nmodel_context_window = 1000000\n", vec![])?;
+        let mut previous = json!({ "snapshot": { "agent": profile } });
+        freeze_message(db, &mut previous, None, &json!({}))?;
+        let destination = agent(db, "codex")?;
+        let mut profile = db.agent(&destination.to_string())?.unwrap();
+        profile.settings.model = "target-model".into();
+        profile.settings.reasoning = "low".into();
+        db.save_agent(&profile)?;
+        previous["snapshot"]["agent"]["id"] = destination.to_string().into();
+        let mut next = json!({ "snapshot": { "agent": profile } });
+        crate::chats::select_agent(&mut next, Some(&previous), &json!({}))?;
+        freeze_message(db, &mut next, Some(&previous), &json!({}))?;
+        assert_eq!(next["snapshot"]["agent"]["model"], "source-model");
+        assert_eq!(next["snapshot"]["agent"]["reasoning"], "high");
+        assert_eq!(next["snapshot"]["nativeConfiguration"]["agentId"], destination.to_string());
+        let current = view(db, target(Some(destination)))?;
+        change(db, target(Some(destination)), &current.document, vec![CodingAgentSettingChange { path: "/model".into(), value: "\"updated-target-model\"".into() }])?;
+        let previous = next.clone();
+        crate::chats::select_agent(&mut next, Some(&previous), &json!({}))?;
+        freeze_message(db, &mut next, Some(&previous), &json!({}))?;
+        assert_eq!(next["snapshot"]["agent"]["model"], "updated-target-model");
+        assert_eq!(next["snapshot"]["agent"]["reasoning"], "low");
+        assert!(next_selection(db, &destination.to_string(), Some(&json!({ "snapshot": null })))?.is_none());
+        Ok(())
+    }).await.unwrap();
+}

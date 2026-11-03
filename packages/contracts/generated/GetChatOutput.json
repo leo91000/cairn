@@ -1281,6 +1281,14 @@
       "additionalProperties": false,
       "description": "Frozen per message. Contains editable settings only, never credentials.",
       "properties": {
+        "agentId": {
+          "description": "Profile that supplied these defaults, even if the conversation is later transferred.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "configuredPaths": {
           "default": [],
           "items": {

@@ -95,6 +95,10 @@ pub struct CodingAgentConfiguration {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NativeConfigurationSnapshot {
+    /// Profile that supplied these defaults, even if the conversation is later transferred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub agent_id: Option<AgentId>,
     #[schemars(with = "String", pattern("^(codex|claude|opencode)$"))]
     pub provider: AgentProvider,
     pub document: String,

@@ -316,6 +316,11 @@ pub(crate) fn next_selection(
     agent_id: &str,
     run: Option<&Value>,
 ) -> Result<Option<CodingAgentPreferences>> {
+    // Restored historical runs may have no recoverable execution assignment.
+    // Display preferences must not prevent reading their history or recovery controls.
+    if run.is_some_and(|run| Provider::of_run(run).is_err()) {
+        return Ok(None);
+    }
     let Some(agent) = db.agent_snapshot(agent_id)? else {
         return Ok(None);
     };
@@ -976,6 +981,22 @@ pub(crate) fn edit(
     view(db, target)
 }
 
+fn native_paths(db: &Db<'_>, provider: Provider, agent_id: AgentId) -> Result<BTreeSet<String>> {
+    let defaults = record(db, provider, None)?;
+    let own = record(db, provider, Some(agent_id))?;
+    let mut configured = paths(&defaults.value);
+    configured.extend(paths(&own.value));
+    configured.extend(own.removed);
+    if own.revision != "initial" {
+        configured.extend(
+            mappings(provider)
+                .iter()
+                .map(|(path, _)| (*path).to_owned()),
+        );
+    }
+    Ok(configured)
+}
+
 pub(crate) fn snapshot(
     db: &Db<'_>,
     provider: Provider,
@@ -990,20 +1011,10 @@ pub(crate) fn snapshot(
             agent_id: Some(agent_id),
         },
     )?;
-    let defaults = record(db, provider, None)?;
-    let own = record(db, provider, Some(agent_id))?;
-    let mut configured_paths = paths(&defaults.value);
+    let mut configured_paths = native_paths(db, provider, agent_id)?;
     configured_paths.extend(result.customized_paths);
-    configured_paths.extend(paths(&own.value));
-    configured_paths.extend(own.removed);
-    if own.revision != "initial" {
-        configured_paths.extend(
-            mappings(provider)
-                .iter()
-                .map(|(path, _)| (*path).to_owned()),
-        );
-    }
     Ok(NativeConfigurationSnapshot {
+        agent_id: Some(agent_id),
         provider: result.provider,
         document: result.document,
         revision: result.revision,
@@ -1021,6 +1032,19 @@ pub(crate) fn freeze_message(
     let agent_id = text(&snapshot["snapshot"]["agent"], "id");
     let frozen = self::snapshot(db, provider, agent_id)?;
     let native = parse(provider, &frozen.document)?;
+    let previous_frozen = previous
+        .map(|run| &run["snapshot"]["nativeConfiguration"])
+        .filter(|configuration| configuration["provider"] == provider.as_str());
+    let transferred = previous_frozen
+        .and_then(|configuration| configuration["agentId"].as_str())
+        .is_some_and(|owner| owner != agent_id);
+    // Before native snapshots existed, a conversation's explicit model remains its
+    // selection. Only an actual native default can replace that legacy selection.
+    let legacy_paths = if previous.is_some() && previous_frozen.is_none() {
+        Some(native_paths(db, provider, frozen.agent_id.unwrap())?)
+    } else {
+        None
+    };
     let old = previous
         .filter(|run| run["snapshot"]["nativeConfiguration"]["provider"] == provider.as_str())
         .and_then(|run| run["snapshot"]["nativeConfiguration"]["document"].as_str())
@@ -1030,24 +1054,29 @@ pub(crate) fn freeze_message(
     let previous_paths = previous
         .filter(|run| run["snapshot"]["nativeConfiguration"]["provider"] == provider.as_str())
         .and_then(|run| run["snapshot"]["nativeConfiguration"]["configuredPaths"].as_array());
-    let model_changed = text(message, "model").is_empty()
-        && native.get("model") != old.get("model")
-        && (frozen.configured_paths.iter().any(|path| path == "/model")
-            || previous_paths.is_some_and(|paths| paths.iter().any(|path| path == "/model")));
-    for (path, field) in mappings(provider) {
-        if !text(message, field).is_empty()
-            || *field == "reasoning" && !text(message, "model").is_empty()
-        {
-            continue;
+    let configured = |path: &str| {
+        if let Some(paths) = &legacy_paths {
+            return paths.contains(path);
         }
-        let configured = frozen
+        frozen
             .configured_paths
             .iter()
             .any(|configured| configured == path)
-            || previous_paths
-                .is_some_and(|paths| paths.iter().any(|configured| configured == path));
+            || previous_paths.is_some_and(|paths| paths.iter().any(|configured| configured == path))
+    };
+    let model_changed = !transferred
+        && text(message, "model").is_empty()
+        && native.get("model") != old.get("model")
+        && configured("/model");
+    for (path, field) in mappings(provider) {
+        if !text(message, field).is_empty()
+            || *field == "reasoning" && !text(message, "model").is_empty()
+            || transferred && matches!(*field, "model" | "reasoning" | "speed")
+        {
+            continue;
+        }
         let reset_reasoning = *field == "reasoning" && model_changed;
-        if (configured || reset_reasoning)
+        if (configured(path) || reset_reasoning)
             && (reset_reasoning
                 || *field == "instructions"
                 || previous.is_none()
