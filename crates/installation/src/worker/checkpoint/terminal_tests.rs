@@ -195,3 +195,74 @@ async fn controller_reason_rejects_a_different_attempt_without_committing_eviden
         .await;
     assert!(result.unwrap_err().is_conflict());
 }
+
+#[tokio::test]
+async fn native_output_limit_survives_guard_authenticated_wait_and_checkpoint_reopen() {
+    use crate::runner::{CONTROLLER_FAILED, TerminalReason::NativeOutputLimit};
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let run_id = "native-output-limit";
+    let attempt = crate::config::id();
+    let result = crate::native::output_limit_completion(&attempt).await;
+
+    assert_eq!(result.code, CONTROLLER_FAILED);
+    assert!(result.physical_finalized);
+    assert!(!result.finalization_failed);
+    assert_eq!(result.terminal_reason, Some(NativeOutputLimit));
+
+    let saved = RunCheckpoint::from_value(json!({
+        "prepared": { "backend": "native", "isolated": true },
+        "runnerId": attempt,
+        "remainingMs": null,
+    }))
+    .unwrap();
+    store
+        .transaction(|db| {
+            db.add_run_fixture(
+                &json!({ "id": run_id, "taskId": "task", "status": "running" }),
+                None,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    saved.store(&store, run_id).await.unwrap();
+
+    let checkpoint = Checkpoint::new(store.clone(), run_id.into(), saved);
+    let decision_attempt = attempt.clone();
+    checkpoint
+        .decide(move |saved, db| {
+            saved.record_controller_result(db, run_id, &decision_attempt, Some(result))?;
+            saved.record_controller_result(db, run_id, &decision_attempt, Some(result))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let reopened = RunCheckpoint::load(&store, run_id).await.unwrap().unwrap();
+    assert_eq!(reopened.prepared().unwrap()["backend"], "native");
+    assert_eq!(reopened.terminal_code(), Some(CONTROLLER_FAILED));
+    assert_eq!(
+        reopened.last_error(),
+        "Native output exceeded its bounded log budget."
+    );
+    let failure = reopened.controller_failure.as_ref().unwrap();
+    assert_eq!(failure.attempt, attempt);
+    assert_eq!(failure.reason, NativeOutputLimit);
+
+    let events = store
+        .read(|db| db.events_fixture(run_id, 0, 100))
+        .await
+        .unwrap();
+    let failures = events
+        .iter()
+        .filter(|event| event["payload"]["error"]["code"] == "native_output_limit")
+        .collect::<Vec<_>>();
+    assert_eq!(failures.len(), 1, "{events:#?}");
+    assert_eq!(failures[0]["payload"]["attemptId"], attempt);
+    assert_eq!(
+        failures[0]["payload"]["error"]["message"],
+        "Native output exceeded its bounded log budget."
+    );
+}

@@ -31,7 +31,7 @@ use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     future::Future,
-    os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
