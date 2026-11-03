@@ -1,4 +1,5 @@
 import type { Ref } from 'vue'
+import type { AgentAccount } from '../../../packages/contracts/generated/typescript/AgentAccount'
 import type { Member } from './agent-use'
 import { computed, ref } from 'vue'
 import { grantAgentAccount } from '../../../packages/contracts/generated/grantAgentAccount'
@@ -24,7 +25,7 @@ export function useAgentPeople(agentId: Ref<string | null>) {
   const people = ref<Member[]>([])
   // Invited people get a switch once they join.
   const invited = ref<Member[]>([])
-  const allowed = ref<string[]>([])
+  const allowed = ref<AgentAccount[]>([])
   const loading = ref(false)
   const loaded = ref(false)
   const error = ref('')
@@ -62,7 +63,7 @@ export function useAgentPeople(agentId: Ref<string | null>) {
         return
       people.value = listed.members
       invited.value = listed.invitations
-      allowed.value = accounts.accounts.map(account => account.accountId)
+      allowed.value = accounts.accounts
       outdated.value = false
       loaded.value = true
     }
@@ -90,7 +91,7 @@ export function useAgentPeople(agentId: Ref<string | null>) {
       const input = { agentId: agent, accountId }
       const output = allow ? await grantAgentAccount(api, input) : await revokeAgentAccount(api, input)
       if (agentId.value === agent)
-        allowed.value = withAccess(allowed.value, accountId, output.accounts.map(account => account.accountId))
+        allowed.value = withAccess(allowed.value, accountId, output.accounts)
     }
     catch (cause) {
       if (agentId.value === agent)

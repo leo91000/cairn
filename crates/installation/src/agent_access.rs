@@ -77,12 +77,13 @@ impl Db<'_> {
         Ok(self
             .0
             .prepare_cached(
-                "SELECT account_id,granted_at FROM agent_account_access WHERE agent_id=? ORDER BY granted_at,account_id",
+                "SELECT account_id,access_id,granted_at FROM agent_account_access WHERE agent_id=? ORDER BY granted_at,account_id",
             )?
             .query_map([agent], |row| {
                 Ok(AgentAccount {
                     account_id: row.get(0)?,
-                    granted_at: row.get(1)?,
+                    access_id: row.get(1)?,
+                    granted_at: row.get(2)?,
                 })
             })?
             .collect::<rusqlite::Result<_>>()?)

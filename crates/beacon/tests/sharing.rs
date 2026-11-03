@@ -132,6 +132,12 @@ async fn invited_new_account_accepts_and_uses_the_shared_installation() {
         .await
         .unwrap();
     assert_eq!(sharing["members"][0]["email"], "member@example.test");
+    assert!(
+        !sharing["members"][0]["accessId"]
+            .as_str()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(sharing["invitations"], json!([]));
     relay.close().await;
 }

@@ -6,6 +6,7 @@ import kotlinx.serialization.Serializable
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class AgentAccount(
+    val accessId: String,
     val accountId: String,
     val grantedAt: Long,
 ) {

@@ -37,7 +37,13 @@ it('starts new conversations on Main only when it is usable', () => {
 })
 
 it('lists every member once and keeps entries of former members removable', () => {
-  const rows = accessRows([{ id: 'a', email: 'ada@example.com' }, { id: 'b', email: 'bo@example.com' }], ['b', 'gone'])
+  const rows = accessRows([
+    { id: 'a', email: 'ada@example.com', accessId: 'membership-a' },
+    { id: 'b', email: 'bo@example.com', accessId: 'membership-b' },
+  ], [
+    { accountId: 'b', accessId: 'membership-b', grantedAt: 0n },
+    { accountId: 'gone', accessId: 'former-membership', grantedAt: 1n },
+  ])
   expect(rows).toEqual([
     {
       accountId: 'a',
@@ -63,12 +69,27 @@ it('lists every member once and keeps entries of former members removable', () =
   expect(accessSummary(2)).toEqual({ short: 'You + 2', long: 'You and 2 members' })
 })
 
+it('does not show an old membership grant as access for a re-invited account', () => {
+  const rows = accessRows(
+    [{ id: 'ada', email: 'ada@example.com', accessId: 'new-membership' }],
+    [{ accountId: 'ada', accessId: 'old-membership', grantedAt: 0n }],
+  )
+  expect(rows).toEqual([{
+    accountId: 'ada',
+    email: 'ada@example.com',
+    known: true,
+    allowed: false,
+  }])
+})
+
 it('applies only the changed member when responses arrive out of order', () => {
   // Two quick grants: the first response, listing only its own member, arrives last.
-  const afterSecond = withAccess([], 'b', ['a', 'b'])
-  expect(withAccess(afterSecond, 'a', ['a'])).toEqual(['b', 'a'])
-  expect(withAccess(['a', 'b'], 'a', ['b'])).toEqual(['b'])
-  expect(withAccess(['a'], 'a', ['a'])).toEqual(['a'])
+  const first = { accountId: 'a', accessId: 'membership-a', grantedAt: 0n }
+  const second = { accountId: 'b', accessId: 'membership-b', grantedAt: 0n }
+  const afterSecond = withAccess([], 'b', [first, second])
+  expect(withAccess(afterSecond, 'a', [first])).toEqual([second, first])
+  expect(withAccess([first, second], 'a', [second])).toEqual([second])
+  expect(withAccess([first], 'a', [first])).toEqual([first])
 })
 
 it('names the requesting conversation\'s agent in a delegated task\'s read-only notice while it exists', () => {

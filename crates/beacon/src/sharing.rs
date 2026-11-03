@@ -146,11 +146,11 @@ pub(super) async fn list(
 ) -> Result<Json<Value>, ApiError> {
     let account = installations::account(&service, &headers, &Method::GET).await?;
     let mut transaction = owner_transaction(&service, &installation, &account).await?;
-    let rows: Vec<(String, String)> = query_as("SELECT a.id, a.email FROM installation_members m JOIN cairn_accounts a ON a.id = m.account_id WHERE m.installation_id = $1 ORDER BY m.joined_at, a.id")
+    let rows: Vec<(String, String, String)> = query_as("SELECT a.id, a.email, m.access_id FROM installation_members m JOIN cairn_accounts a ON a.id = m.account_id WHERE m.installation_id = $1 ORDER BY m.joined_at, a.id")
         .bind(&installation).fetch_all(&mut *transaction).await?;
     let members: Vec<Value> = rows
         .into_iter()
-        .map(|(id, email)| json!({ "id": id, "email": email }))
+        .map(|(id, email, access_id)| json!({ "id": id, "email": email, "accessId": access_id }))
         .collect();
     let invitations = invitation_list(&mut transaction, &installation).await?;
     Ok(Json(

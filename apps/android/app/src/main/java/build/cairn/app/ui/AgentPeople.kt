@@ -19,6 +19,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.AgentAccount
 import build.cairn.contracts.AgentAccountInput
 import build.cairn.contracts.AgentInput
 import build.cairn.contracts.grantAgentAccount
@@ -39,7 +40,7 @@ private const val MEMBERS_NOT_LOADED = "Les membres n’ont pas pu être chargé
 internal class AgentPeople {
     var members by mutableStateOf<List<InstallationMember>>(emptyList())
     var invited by mutableStateOf<List<InstallationMember>>(emptyList())
-    var allowed by mutableStateOf<List<String>>(emptyList())
+    var allowed by mutableStateOf<List<AgentAccount>>(emptyList())
     var loading by mutableStateOf(false)
     var loaded by mutableStateOf(false)
     var error by mutableStateOf<String?>(null)
@@ -70,7 +71,7 @@ internal class AgentPeople {
                 invited = sharing.invitations
                 val listedAccounts = accounts.await()
                 outdated = listedAccounts == null
-                allowed = listedAccounts?.accounts.orEmpty().map { it.accountId }
+                allowed = listedAccounts?.accounts.orEmpty()
             }
             loaded = !outdated
         } catch (e: Exception) {
@@ -90,7 +91,7 @@ internal class AgentPeople {
             val input = AgentAccountInput(accountId = accountId, agentId = agentId)
             val output =
                 if (allow) vm.api.grantAgentAccount(input) else vm.api.revokeAgentAccount(input)
-            allowed = withAccess(allowed, accountId, output.accounts.map { it.accountId })
+            allowed = withAccess(allowed, accountId, output.accounts)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             failure = accountId to (e.message ?: "L’accès n’a pas pu être modifié.")

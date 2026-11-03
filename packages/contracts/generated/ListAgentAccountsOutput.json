@@ -6,6 +6,9 @@
       "additionalProperties": false,
       "description": "A member account the owner allowed to use an agent (ADR-0075). The owner can use\nevery agent and is never listed. Entries belong to one membership.",
       "properties": {
+        "accessId": {
+          "type": "string"
+        },
         "accountId": {
           "type": "string"
         },
@@ -16,6 +19,7 @@
       },
       "required": [
         "accountId",
+        "accessId",
         "grantedAt"
       ],
       "type": "object"

@@ -1,12 +1,14 @@
 package build.cairn.app.data
 
+import build.cairn.contracts.AgentAccount
 import kotlinx.serialization.Serializable
 
 // Which agents an account may use (ADR-0075). The server enforces it; the app only avoids offering
 // what would be refused. A null list means every agent: the owner, or not loaded yet.
 
 /** A member of the installation, as the Beacon lists them to its owner. */
-@Serializable data class InstallationMember(val id: String, val email: String = "")
+@Serializable
+data class InstallationMember(val id: String, val email: String = "", val accessId: String = "")
 
 @Serializable
 data class InstallationSharing(
@@ -59,23 +61,32 @@ data class AgentAccessRow(
 /** Every member once, then entries a former member still holds until the next check. */
 fun agentAccessRows(
     members: List<InstallationMember>,
-    allowed: List<String>,
+    allowed: List<AgentAccount>,
 ): List<AgentAccessRow> =
-    members.map { AgentAccessRow(it.id, it.email, known = true, allowed = it.id in allowed) } +
+    members.map { member ->
+        AgentAccessRow(
+            member.id,
+            member.email,
+            known = true,
+            allowed = allowed.any { it.accountId == member.id && it.accessId == member.accessId },
+        )
+    } +
         allowed
-            .filter { account -> members.none { it.id == account } }
-            .map { AgentAccessRow(it, "Ancien membre", known = false, allowed = true) }
+            .filter { account -> members.none { it.id == account.accountId } }
+            .map { AgentAccessRow(it.accountId, "Ancien membre", known = false, allowed = true) }
 
 /**
  * Applies one member's change from a response and keeps the other rows as shown, so responses to
  * several quick changes cannot undo each other when they arrive out of order.
  */
-fun withAccess(allowed: List<String>, accountId: String, accounts: List<String>): List<String> =
-    when {
-        accountId !in accounts -> allowed - accountId
-        accountId in allowed -> allowed
-        else -> allowed + accountId
-    }
+fun withAccess(
+    allowed: List<AgentAccount>,
+    accountId: String,
+    accounts: List<AgentAccount>,
+): List<AgentAccount> {
+    val updated = accounts.find { it.accountId == accountId }
+    return allowed.filterNot { it.accountId == accountId } + listOfNotNull(updated)
+}
 
 fun agentAccessSummary(allowed: Int): String =
     when (allowed) {

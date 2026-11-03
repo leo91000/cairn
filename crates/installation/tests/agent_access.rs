@@ -300,7 +300,9 @@ async fn access_belongs_to_one_membership_and_a_new_invitation_does_not_restore_
     let reviewer = agent(&s, "Reviewer").await;
     relay_fixture::add_member(&s, MEMBER, "membership-1").await;
     let path = format!("/api/agents/{reviewer}/accounts/{MEMBER}");
-    assert_eq!(owner(&s, "PUT", &path, json!({})).await.0, StatusCode::OK);
+    let (status, granted) = owner(&s, "PUT", &path, json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(granted["accounts"][0]["accessId"], "membership-1");
     assert_eq!(usable(&s).await, json!([reviewer]));
 
     relay_fixture::remove_member(&s, MEMBER).await;

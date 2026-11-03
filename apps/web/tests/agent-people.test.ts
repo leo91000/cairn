@@ -18,7 +18,7 @@ afterEach(() => {
 })
 
 it('keeps a pending change and its refusal on the agent it was made for', async () => {
-  vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ members: [{ id: 'ada', email: 'ada@example.test' }] })))
+  vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ members: [{ id: 'ada', email: 'ada@example.test', accessId: 'membership-ada' }] })))
   let refuse!: (cause: Error) => void
   request.mockImplementation((path: string, options?: RequestInit) => options?.method === 'PUT'
     ? new Promise((_, reject) => refuse = reject)
@@ -42,7 +42,7 @@ it('keeps a pending change and its refusal on the agent it was made for', async 
 })
 
 it('says every member uses the agent when the installation predates account access', async () => {
-  vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ members: [{ id: 'ada', email: 'ada@example.test' }] })))
+  vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ members: [{ id: 'ada', email: 'ada@example.test', accessId: 'membership-ada' }] })))
   request.mockRejectedValue(new ApiError('Not found', 404))
   const { useAgentPeople } = await import('../src/agent-people')
   const people = useAgentPeople(ref<string | null>('reviewer'))
@@ -64,10 +64,10 @@ it('says every member uses the agent when the installation predates account acce
 
 it('lists pending invitations apart from the members who may get access', async () => {
   vi.stubGlobal('fetch', async () => new Response(JSON.stringify({
-    members: [{ id: 'ada', email: 'ada@example.test' }],
+    members: [{ id: 'ada', email: 'ada@example.test', accessId: 'membership-ada' }],
     invitations: [{ id: 'invite-bo', email: 'bo@example.test' }],
   })))
-  request.mockResolvedValue({ accounts: [{ accountId: 'ada', grantedAt: 0 }] })
+  request.mockResolvedValue({ accounts: [{ accountId: 'ada', accessId: 'membership-ada', grantedAt: 0n }] })
   const { useAgentPeople } = await import('../src/agent-people')
   const people = useAgentPeople(ref<string | null>('reviewer'))
   await people.load()

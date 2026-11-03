@@ -1,4 +1,5 @@
 import type { ChatView } from '../../../packages/contracts/chats'
+import type { AgentAccount } from '../../../packages/contracts/generated/typescript/AgentAccount'
 import { MAIN_AGENT_ID } from '../../../packages/contracts/constants'
 
 // Which agents an account may use (ADR-0075). The server enforces it; the apps only avoid
@@ -42,7 +43,7 @@ export function defaultAgent(usable: UsableAgents, agents: readonly { id: string
   return agents.find(agent => canUseAgent(usable, agent.id))?.id ?? ''
 }
 
-export interface Member { id: string, email: string }
+export interface Member { id: string, email: string, accessId?: string }
 
 export interface AccessRow {
   accountId: string
@@ -53,16 +54,16 @@ export interface AccessRow {
 }
 
 /** Every member, with whether they may use the agent; leftover entries come last. */
-export function accessRows(members: readonly Member[], allowed: readonly string[]): AccessRow[] {
+export function accessRows(members: readonly Member[], allowed: readonly AgentAccount[]): AccessRow[] {
   const rows = members.map(member => ({
     accountId: member.id,
     email: member.email,
     known: true,
-    allowed: allowed.includes(member.id),
+    allowed: allowed.some(account => account.accountId === member.id && account.accessId === member.accessId),
   }))
-  const leftovers = allowed.filter(account => !members.some(member => member.id === account))
-  return [...rows, ...leftovers.map(accountId => ({
-    accountId,
+  const leftovers = allowed.filter(account => !members.some(member => member.id === account.accountId))
+  return [...rows, ...leftovers.map(account => ({
+    accountId: account.accountId,
     email: 'Former member',
     known: false,
     allowed: true,
@@ -73,10 +74,10 @@ export function accessRows(members: readonly Member[], allowed: readonly string[
  * Applies one member's change from a response and keeps the other rows as shown, so responses to
  * several quick changes cannot undo each other when they arrive out of order.
  */
-export function withAccess(allowed: readonly string[], accountId: string, accounts: readonly string[]) {
-  if (!accounts.includes(accountId))
-    return allowed.filter(account => account !== accountId)
-  return allowed.includes(accountId) ? [...allowed] : [...allowed, accountId]
+export function withAccess(allowed: readonly AgentAccount[], accountId: string, accounts: readonly AgentAccount[]) {
+  const updated = accounts.find(account => account.accountId === accountId)
+  const otherAccounts = allowed.filter(account => account.accountId !== accountId)
+  return updated ? [...otherAccounts, updated] : otherAccounts
 }
 
 export function accessSummary(allowed: number) {

@@ -402,6 +402,7 @@ pub struct MergeAgentsOutput {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentAccount {
     pub account_id: String,
+    pub access_id: String,
     pub granted_at: i64,
 }
 

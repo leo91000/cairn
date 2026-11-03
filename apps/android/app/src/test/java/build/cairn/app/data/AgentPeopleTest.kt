@@ -85,10 +85,21 @@ class AgentPeopleTest {
         val rows =
             agentAccessRows(
                 listOf(
-                    InstallationMember("a", "ada@example.test"),
-                    InstallationMember("b", "bo@example.test"),
+                    InstallationMember("a", "ada@example.test", "membership-a"),
+                    InstallationMember("b", "bo@example.test", "membership-b"),
                 ),
-                listOf("b", "gone"),
+                listOf(
+                    build.cairn.contracts.AgentAccount(
+                        accessId = "membership-b",
+                        accountId = "b",
+                        grantedAt = 0,
+                    ),
+                    build.cairn.contracts.AgentAccount(
+                        accessId = "former-membership",
+                        accountId = "gone",
+                        grantedAt = 1,
+                    ),
+                ),
             )
         assertEquals(
             listOf(
@@ -101,6 +112,23 @@ class AgentPeopleTest {
         assertEquals("Vous seul", agentAccessSummary(0))
         assertEquals("Vous et 1 membre", agentAccessSummary(1))
         assertEquals("Vous et 3 membres", agentAccessSummary(3))
+    }
+
+    @Test
+    fun anOldMembershipGrantDoesNotAllowAReinvitedAccount() {
+        assertEquals(
+            listOf(AgentAccessRow("ada", "ada@example.test", known = true, allowed = false)),
+            agentAccessRows(
+                listOf(InstallationMember("ada", "ada@example.test", "new-membership")),
+                listOf(
+                    build.cairn.contracts.AgentAccount(
+                        accessId = "old-membership",
+                        accountId = "ada",
+                        grantedAt = 0,
+                    )
+                ),
+            ),
+        )
     }
 
     @Test
@@ -130,9 +158,21 @@ class AgentPeopleTest {
     @Test
     fun aResponseChangesOnlyItsOwnMember() {
         // Two quick grants: the first response, listing only its own member, arrives last.
-        val afterSecond = withAccess(emptyList(), "b", listOf("a", "b"))
-        assertEquals(listOf("b", "a"), withAccess(afterSecond, "a", listOf("a")))
-        assertEquals(listOf("b"), withAccess(listOf("a", "b"), "a", listOf("b")))
-        assertEquals(listOf("a"), withAccess(listOf("a"), "a", listOf("a")))
+        val first =
+            build.cairn.contracts.AgentAccount(
+                accessId = "membership-a",
+                accountId = "a",
+                grantedAt = 0,
+            )
+        val second =
+            build.cairn.contracts.AgentAccount(
+                accessId = "membership-b",
+                accountId = "b",
+                grantedAt = 0,
+            )
+        val afterSecond = withAccess(emptyList(), "b", listOf(first, second))
+        assertEquals(listOf(second, first), withAccess(afterSecond, "a", listOf(first)))
+        assertEquals(listOf(second), withAccess(listOf(first, second), "a", listOf(second)))
+        assertEquals(listOf(first), withAccess(listOf(first), "a", listOf(first)))
     }
 }

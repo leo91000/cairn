@@ -4,4 +4,4 @@
  * A member account the owner allowed to use an agent (ADR-0075). The owner can use
  * every agent and is never listed. Entries belong to one membership.
  */
-export interface AgentAccount { accountId: string, grantedAt: bigint }
+export interface AgentAccount { accountId: string, accessId: string, grantedAt: bigint }
