@@ -206,6 +206,7 @@ for (const pending of ['authorization', 'offer'] as const) {
         if (cancellationErrorIndex !== -1)
           unexpectedErrors.splice(cancellationErrorIndex, 1)
       }
+
       expect(unexpectedErrors).toEqual([])
     }
     finally {
