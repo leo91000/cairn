@@ -219,7 +219,6 @@ impl Store {
         }
         if !fresh && version == 25 {
             crate::artifacts::migration::upgrade(&mut writer)?;
-            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
         }
         if fresh {
             let tx = writer.transaction()?;
