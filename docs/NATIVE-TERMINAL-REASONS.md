@@ -50,10 +50,11 @@ the private directory/file modes, malformed and oversized records, symlinks,
 forged child output, metadata-write failure, and idempotent reading after opening
 another controller handle.
 
-These tests have not run on the current base yet. Hosted exact-head validation,
-native physical-finalization qualification, and the measurement below remain
-pending. Do not treat formatting or static inspection as a substitute for those
-checks.
+The regular backend job runs the ignored metadata measurement below as a separate
+step, after the bootstrap observer. The source tests, hosted exact-head validation,
+native physical-finalization qualification and current-head measurement remain
+pending until their respective checks complete. Do not treat formatting or static
+inspection as a substitute for those checks.
 
 ### Historical regression evidence
 
@@ -74,8 +75,8 @@ not a measured zero. The implementation encodes the fixed metadata record as 32
 bytes. A healthy finalized status-70 result grows from 42 to 81 encoded bytes
 when it carries the reason. The ordinary journal bytes remain unchanged.
 
-Run the ignored measurement alone in the exact candidate's hosted backend job,
-using the credential-isolating launcher:
+The backend job runs this measurement alone with the credential-isolating
+launcher. The same command can be used to reproduce it on an exact candidate:
 
 ```sh
 node scripts/test-backend.mjs -p cairn-installation --lib \
