@@ -431,7 +431,7 @@ impl RunCheckpoint {
             });
             db.event(
                 id,
-                &cairn_contracts::EventKind::Error,
+                &cairn_contracts::EventKind::RunnerFailed,
                 message,
                 Some(&payload),
             )?;

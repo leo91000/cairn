@@ -218,7 +218,7 @@ async fn native_output_limit_survives_guard_authenticated_wait_and_checkpoint_re
     }))
     .unwrap();
     store
-        .transaction(|db| {
+        .transaction(move |db| {
             db.add_run_fixture(
                 &json!({ "id": run_id, "taskId": "task", "status": "running" }),
                 None,
@@ -252,7 +252,7 @@ async fn native_output_limit_survives_guard_authenticated_wait_and_checkpoint_re
     assert_eq!(failure.reason, NativeOutputLimit);
 
     let events = store
-        .read(|db| db.events_fixture(run_id, 0, 100))
+        .read(move |db| db.events_fixture(run_id, 0, 100))
         .await
         .unwrap();
     let failures = events
@@ -260,9 +260,31 @@ async fn native_output_limit_survives_guard_authenticated_wait_and_checkpoint_re
         .filter(|event| event["payload"]["error"]["code"] == "native_output_limit")
         .collect::<Vec<_>>();
     assert_eq!(failures.len(), 1, "{events:#?}");
+    assert_eq!(failures[0]["type"], "runner.failed");
     assert_eq!(failures[0]["payload"]["attemptId"], attempt);
     assert_eq!(
         failures[0]["payload"]["error"]["message"],
         "Native output exceeded its bounded log budget."
+    );
+
+    let (timeline, more) = store
+        .read(move |db| crate::timeline::page(db, run_id, i64::MAX, 100))
+        .await
+        .unwrap();
+    assert!(!more);
+    let failure_notice = timeline
+        .iter()
+        .find_map(|entry| match &entry.content {
+            cairn_contracts::TimelineContent::Notice { notice }
+                if notice.code == cairn_contracts::NoticeCode::Failure =>
+            {
+                Some(notice)
+            }
+            _ => None,
+        })
+        .expect("A native controller failure should become a failure notice.");
+    assert_eq!(
+        failure_notice.origin,
+        Some(cairn_contracts::FailureOrigin::Runner)
     );
 }

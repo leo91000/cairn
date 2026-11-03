@@ -26,13 +26,14 @@ bytes, and rejects unknown fields and reason values. The output log and its
 After existing physical cleanup, the native controller attaches the reason only
 to status 70 with `PhysicalFinalized: true` and no `FinalizationFailed` marker.
 The authenticated runner client accepts it only with that status and physical
-finalization evidence. The worker persists one fixed error event and typed
+finalization evidence. The worker persists one fixed `runner.failed` event and typed
 checkpoint cause only for the matching native attempt. Child output cannot set
-that checkpoint evidence. A prior provider or controller error remains the
-displayed error; cancellation, provider completion and controller retry policy
-retain their existing precedence. The failure event and checkpoint record are
-committed together. Attempt cleanup removes the metadata alongside the log and
-lease files.
+that checkpoint evidence. An earlier provider or controller `last_error` remains
+authoritative; the fixed message fills it only when it is empty and no provider
+failure is recorded. Cancellation, provider completion and controller retry
+policy retain their existing precedence. The failure event and checkpoint record
+are committed together. Attempt cleanup removes the metadata alongside the log
+and lease files.
 
 This change adds no output rotation, acknowledgement, sliding window, quota
 increase, timeout change or retry-policy change. A finalization failure keeps
