@@ -76,8 +76,26 @@ describe('parallel CI coverage', () => {
     expect(backend.steps.some(step => step.name === 'Check Rust documentation examples')).toBe(true)
     expect(backend.steps.some(step => step.name === 'Qualify the resolved OpenCode release against its native adapter')).toBe(true)
     expect(backend.steps.some(step => step.name === 'Qualify the resolved Claude Code release against its native adapter')).toBe(true)
+    expect(backend.steps.some(step => step.name === 'Check all Rust targets for a backend-only qualification')).toBe(false)
     expect(backend.steps.some(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'before-build')).toBe(true)
     expect(backend.steps.some(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'after-build')).toBe(true)
+
+    const rustCheck = quality.jobs['rust-check']
+    expect(rustCheck.needs).toBe('resolve')
+    expect(rustCheck.if).toContain('inputs.backend-only == true')
+    const rustCondition = rustCheck.if
+      .replaceAll('inputs.backend-only', 'backendOnly')
+      .replace(/\bneeds\.([a-z0-9-]+)\b/g, (_match, name) => `needs[${JSON.stringify(name)}]`)
+    const runsRustCheck = (backendOnly, resolveResult, reuse) => runInNewContext(rustCondition, {
+      backendOnly,
+      needs: { resolve: { result: resolveResult, outputs: { reuse } } },
+      github: { ref: 'refs/heads/feature' },
+      always: () => true,
+      cancelled: () => false,
+    }, { timeout: 1000 })
+    expect(runsRustCheck(true, 'skipped', '')).toBe(true)
+    expect(runsRustCheck(false, 'success', 'false')).toBe(true)
+    expect(runsRustCheck(false, 'success', 'true')).toBe(false)
 
     const selected = quality.jobs['backend-migration-qualification']
     expect(selected.needs).toBe('backend')
