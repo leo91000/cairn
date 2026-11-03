@@ -630,12 +630,15 @@ through the conversation's agent or its active requesting conversation's agent
 ([ADR-0075](adr/0075-plugin-hooks-rules-and-scoped-grants.md)). Immediately before
 each member device's provider attempt, Beacon asks the installation for the pending
 question's current eligible account and membership identifiers through its internal
-maintenance relay. This lookup reads local grants only. Beacon matches the returned
-membership identifier against its current membership under the sharing lock. A
-queued event therefore cannot preserve a revoked agent grant or an ended membership,
-including while delivery waits on another device or database lock. A provider
-attempt already admitted may finish. Owner notifications bypass the lookup, and
-alerts retain their existing owner-and-members audience.
+maintenance relay. This lookup reads local grants only. The event also carries the
+account and membership identifiers eligible when the question first entered the
+outbox. Beacon requires the same membership in both that snapshot and the current
+lookup, then matches it against current installation membership under the sharing
+lock. A queued event therefore cannot preserve a revoked agent grant or ended
+membership, or gain a recipient from a later grant, including while delivery waits on
+another device or database lock. A provider attempt already admitted may finish.
+Owner notifications bypass the member checks, and alerts retain their existing
+owner-and-members audience.
 
 Transient recipient lookup failures keep member deliveries retryable. A missing,
 unsupported or incomplete lookup supplies no member eligibility: the question goes

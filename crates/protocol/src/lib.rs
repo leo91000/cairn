@@ -87,11 +87,15 @@ pub struct NotificationEvent {
     pub chat_id: String,
     #[serde(flatten)]
     pub kind: NotificationKind,
-    /// Legacy recipient restriction. Questions from current installations use an empty
-    /// list: member delivery requires a current, membership-bound recipient lookup.
-    /// Alerts retain their existing audience when this is absent.
+    /// Legacy recipient restriction used by alerts. Alerts retain their existing
+    /// audience when this is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub members: Option<Vec<String>>,
+    /// Membership-bound question audience captured when the question enters the
+    /// outbox. Beacon intersects this snapshot with current membership before delivery.
+    /// Missing evidence (including events persisted by older installations) fails closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_recipients: Option<Vec<NotificationMember>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

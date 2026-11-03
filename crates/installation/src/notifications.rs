@@ -24,6 +24,10 @@ fn enqueue_event(db: &Db<'_>, event: &NotificationEvent) -> Result<()> {
 
 /// A question reaches only the people who may answer it (ADR-0075).
 pub fn enqueue(db: &Db<'_>, question: &Question) -> Result<()> {
+    let question_recipients = match db.conversation(&question.chat_id)? {
+        Some(chat) => Some(crate::agent_access::chat_members(db, &chat)?),
+        None => Some(Vec::new()),
+    };
     enqueue_event(
         db,
         &NotificationEvent {
@@ -32,8 +36,9 @@ pub fn enqueue(db: &Db<'_>, question: &Question) -> Result<()> {
             kind: NotificationKind::Question {
                 question_id: question.id.clone(),
             },
-            // A field-aware older Beacon must not trust an account-only snapshot.
+            // Older Beacon versions fail closed because this restriction is empty.
             members: Some(Vec::new()),
+            question_recipients,
         },
     )
 }
@@ -50,6 +55,7 @@ pub fn enqueue_alert(db: &Db<'_>, alert: &Value) -> Result<()> {
                 body: text(alert, "body").chars().take(300).collect(),
             },
             members: None,
+            question_recipients: None,
         },
     )
 }
@@ -95,7 +101,8 @@ pub async fn pending(
                         db.delete(&key)?;
                         continue;
                     }
-                    // Also restrict persisted events from before the recipient lookup.
+                    // Older Beacons can use this account-only field as a delivery
+                    // restriction, but it cannot authorize the membership snapshot.
                     event.members = Some(Vec::new());
                 }
                 events.push(event);

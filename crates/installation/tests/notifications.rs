@@ -6,6 +6,7 @@ use cairn_installation::{
     config::{MAIN_AGENT_ID, id, now},
     service::Service,
 };
+use cairn_protocol::{NotificationEvent, NotificationMember};
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc};
 
@@ -91,6 +92,21 @@ async fn question_recipients_require_maintenance_authority_and_current_membershi
         current,
         json!({ "members": [{ "account_id": "member", "access_id": "membership-member" }] })
     );
+    let queued: NotificationEvent = serde_json::from_value(
+        s.store
+            .kv(&format!("push-outbox:{question}"))
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        queued.question_recipients,
+        Some(vec![NotificationMember {
+            account_id: "member".into(),
+            access_id: "membership-member".into(),
+        }])
+    );
 
     // An event already in the outbox must not preserve the owner's revoked grant.
     s.store
@@ -114,6 +130,7 @@ async fn old_outbox_snapshots_cannot_authorize_legacy_member_pushes() {
     let (chat, question) = pending_question(&s).await;
     let key = format!("push-outbox:{question}");
     let mut old = s.store.kv(&key).await.unwrap().unwrap();
+    old.as_object_mut().unwrap().remove("questionRecipients");
     old["members"] = json!(["member"]);
     s.store.set(&key, old, None).await.unwrap();
     let pending = cairn_installation::notifications::pending(&s, HashSet::new(), String::new(), 4)
@@ -121,5 +138,6 @@ async fn old_outbox_snapshots_cannot_authorize_legacy_member_pushes() {
         .unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].members, Some(Vec::new()));
+    assert!(pending[0].question_recipients.is_none());
     assert_eq!(pending[0].chat_id, chat);
 }

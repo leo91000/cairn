@@ -528,7 +528,8 @@ async fn wait_pushes(mail: &PushMailbox, count: usize) {
     })
     .await
     .expect("Beacon must deliver the installation event through the push provider");
-    assert_eq!(mail.messages.lock().unwrap().len(), count);
+    let messages = mail.messages.lock().unwrap();
+    assert_eq!(messages.len(), count);
 }
 
 #[tokio::test]
@@ -559,10 +560,17 @@ async fn relayed_questions_and_alerts_target_only_current_installation_accounts(
 
     question(&relay, &run, &"a".repeat(64)).await;
     wait_pushes(&mail, 3).await;
-    let sent = mail.messages.lock().unwrap()[1..].to_vec();
+    let sent = {
+        let messages = mail.messages.lock().unwrap();
+        messages[1..].to_vec()
+    };
     let mut endpoints: Vec<_> = sent.iter().map(|entry| entry.0.as_str()).collect();
     endpoints.sort();
     assert_eq!(endpoints, vec![member, owner]);
+    assert!(
+        sent.iter()
+            .all(|(_, payload)| payload["questionId"] == "a".repeat(64))
+    );
     let installation = relay.session["installations"][0]["id"].as_str().unwrap();
     for (_, payload) in sent {
         assert_eq!(payload["installationId"], installation);
@@ -2189,6 +2197,7 @@ async fn one_android_device_receives_both_installations_without_installation_sub
                 question_id: "e".repeat(64),
             },
             members: None,
+            question_recipients: None,
         });
         socket
             .send(Message::Text(serde_json::to_string(&event).unwrap().into()))

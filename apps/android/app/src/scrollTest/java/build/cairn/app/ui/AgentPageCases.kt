@@ -269,7 +269,7 @@ abstract class AgentPageCases {
                         if (request.method != "GET") accessChanges += "${request.method} $path"
                         val accounts =
                             allowed.get().joinToString(",") {
-                                """{"accountId":"$it","grantedAt":0}"""
+                                """{"accountId":"$it","accessId":"access-$it","grantedAt":0}"""
                             }
                         return response.setBody("""{"agentId":"$agent","accounts":[$accounts]}""")
                     }
@@ -280,7 +280,7 @@ abstract class AgentPageCases {
                                 .setBody("""{"error":"Beacon indisponible"}""")
                         else
                             response.setBody(
-                                """{"members":[{"id":"member-ada","email":"ada@example.test"},{"id":"member-bo","email":"bo@example.test"}],"invitations":[{"id":"invite-cy","email":"cy@example.test"}]}"""
+                                """{"members":[{"id":"member-ada","email":"ada@example.test","accessId":"access-member-ada"},{"id":"member-bo","email":"bo@example.test","accessId":"access-member-bo"}],"invitations":[{"id":"invite-cy","email":"cy@example.test"}]}"""
                             )
                     if (request.method == "POST" && path == "/agents") {
                         val body = wireJson.parseToJsonElement(text).jsonObject

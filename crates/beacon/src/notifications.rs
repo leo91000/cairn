@@ -520,12 +520,20 @@ pub(super) async fn deliver(
                     let membership: Option<(String,)> = query_as(
                         "SELECT access_id FROM installation_members WHERE installation_id=$1 AND account_id=$2",
                     ).bind(installation).bind(&account).fetch_optional(&mut *transaction).await?;
-                    let allowed = membership.is_some_and(|(access,)| {
-                        recipients.members.iter().any(|member| {
-                            member.account_id == account && member.access_id == access
-                        })
-                    });
-                    if !allowed {
+                    let Some((access,)) = membership else {
+                        continue;
+                    };
+                    let allowed_at_enqueue =
+                        event.question_recipients.as_ref().is_some_and(|snapshot| {
+                            snapshot.iter().any(|member| {
+                                member.account_id == account && member.access_id == access
+                            })
+                        });
+                    let allowed_now = recipients
+                        .members
+                        .iter()
+                        .any(|member| member.account_id == account && member.access_id == access);
+                    if !allowed_at_enqueue || !allowed_now {
                         continue;
                     }
                 }
