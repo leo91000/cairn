@@ -307,7 +307,8 @@ pub(crate) fn attach_defaults(db: &Db<'_>, agents: &mut [Agent]) -> Result<()> {
 pub(crate) fn validate_profile(db: &Db<'_>, agent: &Agent) -> Result<()> {
     let provider = Provider::from(agent.settings.provider);
     let mut value = record(db, provider, None)?.value;
-    let own = record(db, provider, Some(agent.id))?;
+    let mut own = record(db, provider, Some(agent.id))?;
+    clear_changed_profile_settings(&mut own, db.agent(&agent.id.to_string())?.as_ref(), agent)?;
     merge(&mut value, &own.value);
     for path in own.removed {
         set(&mut value, &path, None)?;
@@ -321,6 +322,54 @@ pub(crate) fn validate_profile(db: &Db<'_>, agent: &Agent) -> Result<()> {
         }
     }
     provider.adapter().validate_agent(&resolved)
+}
+
+/// Ordinary profile edits own the same mapped properties as the native editor.
+fn clear_changed_profile_settings(
+    own: &mut Record,
+    previous: Option<&Agent>,
+    agent: &Agent,
+) -> Result<bool> {
+    let provider = Provider::from(agent.settings.provider);
+    let previous_settings = previous
+        .map(|agent| serde_json::to_value(&agent.settings))
+        .transpose()?;
+    let settings = serde_json::to_value(&agent.settings)?;
+    let same_provider =
+        previous.is_some_and(|previous| previous.settings.provider == agent.settings.provider);
+    let mut changed = false;
+    for (path, field) in mappings(provider) {
+        let edited = if same_provider {
+            previous_settings.as_ref().unwrap()[*field] != settings[*field]
+        } else {
+            !text(&settings, field).is_empty()
+        };
+        if !edited {
+            continue;
+        }
+        changed |=
+            own.value.pointer(path).is_some() || own.removed.iter().any(|removed| removed == path);
+        set(&mut own.value, path, None)?;
+        own.removed.retain(|removed| removed != path);
+    }
+    Ok(changed)
+}
+
+pub(crate) fn synchronize_profile(db: &Db<'_>, agent: &Agent) -> Result<()> {
+    let Some(previous) = db.agent(&agent.id.to_string())? else {
+        return Ok(());
+    };
+    let provider = Provider::from(agent.settings.provider);
+    capture_legacy_defaults(db, provider, Some(agent.id))?;
+    let mut own = record(db, provider, Some(agent.id))?;
+    if !clear_changed_profile_settings(&mut own, Some(&previous), agent)? {
+        return Ok(());
+    }
+    db.0.execute(
+        "UPDATE coding_agent_configurations SET document=?,removed=?,revision=? WHERE scope=? AND provider=?",
+        params![render(provider, &own.value)?, serde_json::to_string(&own.removed)?, id(), agent.id.to_string(), provider.as_str()],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn next_selection(

@@ -500,6 +500,119 @@ async fn historical_chat_choices_change_only_when_the_resolved_selection_default
 }
 
 #[tokio::test]
+async fn ordinary_profile_edits_update_historical_conversation_defaults() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            for field in ["model", "reasoning", "speed"] {
+                let id = agent(db, "codex")?;
+                let mut profile = db.agent(&id.to_string())?.unwrap();
+                profile.settings.model = "profile-model".into();
+                profile.settings.reasoning = "low".into();
+                profile.settings.speed = "priority".into();
+                db.save_agent(&profile)?;
+                let mut legacy = json!({ "snapshot": { "agent": profile } });
+                legacy["snapshot"]["agent"]["model"] = "conversation-model".into();
+                legacy["snapshot"]["agent"]["reasoning"] = "high".into();
+                legacy["snapshot"]["agent"]["speed"] = "standard".into();
+                match field {
+                    "model" => profile.settings.model = "changed-model".into(),
+                    "reasoning" => profile.settings.reasoning = "medium".into(),
+                    "speed" => profile.settings.speed = "".into(),
+                    _ => unreachable!(),
+                }
+                validate_profile(db, &profile)?;
+                crate::agent_grants::save_profile(db, profile.clone(), false, &[])?;
+                let next = followup(db, id, &legacy)?;
+                let settings = serde_json::to_value(&profile.settings)?;
+                assert_eq!(
+                    text(&next["snapshot"]["agent"], field),
+                    text(&settings, field)
+                );
+                let continued = followup(db, id, &next)?;
+                assert_eq!(
+                    text(&continued["snapshot"]["agent"], field),
+                    text(&settings, field)
+                );
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn ordinary_profile_resets_clear_secondary_native_overrides_and_removals() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            for removed in [false, true] {
+                let id = agent(db, "codex")?;
+                let native_target = CodingAgentConfigurationInput {
+                    provider: AgentProvider::Claude,
+                    agent_id: Some(id),
+                };
+                change(
+                    db,
+                    CodingAgentConfigurationInput {
+                        provider: AgentProvider::Claude,
+                        agent_id: None,
+                    },
+                    "{\"model\":\"installation-model\"}",
+                    vec![],
+                )?;
+                change(
+                    db,
+                    native_target,
+                    if removed {
+                        "{\"language\":\"French\"}"
+                    } else {
+                        "{\"model\":\"opus\",\"language\":\"French\"}"
+                    },
+                    vec![],
+                )?;
+                let mut profile = db.agent(&id.to_string())?.unwrap();
+                profile.settings.provider = AgentProvider::Claude;
+                crate::agent_grants::save_profile(db, profile, false, &[])?;
+                let mut profile = db.agent(&id.to_string())?.unwrap();
+                profile.settings.model = "sonnet".into();
+                let saved = crate::agent_grants::save_profile(db, profile, false, &[])?;
+                assert_eq!(
+                    saved.coding_agent_defaults.as_ref().unwrap()["claude"].model,
+                    "installation-model"
+                );
+                let mut profile = db.agent(&id.to_string())?.unwrap();
+                profile.settings.model.clear();
+                validate_profile(db, &profile)?;
+                crate::agent_grants::save_profile(db, profile, false, &[])?;
+                let current = view(db, native_target)?;
+                let effective = parse(Provider::Claude, &current.document)?;
+                assert_eq!(effective["model"], "installation-model");
+                assert_eq!(effective["language"], "French");
+                assert!(!current.customized_paths.contains(&"/model".into()));
+                change(
+                    db,
+                    CodingAgentConfigurationInput {
+                        provider: AgentProvider::Claude,
+                        agent_id: None,
+                    },
+                    "{\"model\":\"changed-installation\"}",
+                    vec![],
+                )?;
+                assert_eq!(
+                    parse(Provider::Claude, &view(db, native_target)?.document)?["model"],
+                    "changed-installation"
+                );
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn historical_transfer_keeps_its_selection_before_adopting_destination_preferences() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(root.path()).unwrap();

@@ -113,3 +113,7 @@ Changing only a context or output preference keeps the conversation's model,
 reasoning and speed. Agent merges retain the original execution identity for this
 comparison, so the destination's existing defaults do not replace the transferred
 conversation selection.
+Edits from the ordinary agent model picker use the same comparison baseline.
+Choosing a mapped profile value replaces an older native customization for that
+property; clearing it restores installation inheritance without reviving a stale
+secondary-engine override or deletion.

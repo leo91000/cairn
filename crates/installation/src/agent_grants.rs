@@ -217,10 +217,11 @@ pub(crate) fn save_profile(
         owner_review,
         native_reviews,
     )?;
+    crate::coding_agent_configuration::synchronize_profile(db, &agent)?;
     agent.revision = crate::config::id();
     db.save_agent(&agent)?;
     db.audit("agent.saved", &json!({ "id": agent.id }))?;
-    Ok(agent)
+    required(db.agent(&agent.id.to_string())?, "Agent not found")
 }
 
 /// Whether a current typed permission set still covers the saved run policy.
