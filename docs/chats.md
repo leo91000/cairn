@@ -69,12 +69,14 @@ A selected or saved Plan choice is never silently converted to an ordinary reque
 
 Cairn enforces the boundary rather than asking the model to respect it. During a plan
 turn the engine's sandbox is read-only with no shell network access, whatever the
-agent's access; MCP connections only offer tools they declare read-only
-(`readOnlyHint`); `cairn_installation` only offers `read` operations; and
-`cairn_workspace` only offers `open_project`, `list_nodes`, `exclusive_status`,
-`ask_questions`, `pending_questions`, `withdraw_question` and, for an agent that delegates, `task_status`. Delegating or
-cancelling a task, plugin tools and plugin commands are unavailable. Builds and tests that
-write files fail. Claude Code runs in its plan permission mode; Codex receives the
+agent's access. Connected third-party MCP servers are omitted during Plan because
+their `readOnlyHint` is not trusted; Cairn-owned tools retain their policy checks.
+`cairn_installation` only offers `read` operations. `cairn_workspace` only offers
+`list_nodes`, `exclusive_status`, `ask_questions`, `pending_questions`,
+`withdraw_question` and, for an agent that delegates, `task_status`; `open_project`
+is unavailable because it imports project files into the runner workspace.
+Delegating or cancelling a task, plugin tools and plugin commands are unavailable.
+Builds and tests that write files fail. Claude Code runs in its plan permission mode; Codex receives the
 `plan` collaboration preset it lists. Subagents of either engine stay inside the
 same boundary, including Codex subagents an earlier turn started: the resident Codex
 process is replaced for a plan turn and the turn after it. Claude Code's auto-mode

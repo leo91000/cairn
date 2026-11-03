@@ -887,6 +887,7 @@ internal fun ChatPage(
         if (
             draft.isNotBlank() ||
                 attachments.isNotEmpty() ||
+                rejected.isNotEmpty() ||
                 editing != null ||
                 active ||
                 pending.isNotEmpty() ||
@@ -1481,7 +1482,8 @@ internal fun ChatPage(
                                                         delivery.sending.isEmpty() &&
                                                         editing == null &&
                                                         draft.isBlank() &&
-                                                        attachments.isEmpty(),
+                                                        attachments.isEmpty() &&
+                                                        rejected.isEmpty(),
                                             )
                                         }
                                     }

@@ -99,6 +99,72 @@ abstract class PlanTurnCases {
     }
 
     @Test
+    fun refusedComposerAttachmentKeepsImplementDisabledAndReasonVisible() {
+        withPlanServer { server ->
+            val calls = CopyOnWriteArrayList<String>()
+            val refused =
+                RejectedAttachment(
+                    "refused-video",
+                    "demo.mov",
+                    "video/quicktime",
+                    "Trop lourd (14,2 Mo > 10 Mo)",
+                )
+            val chat =
+                Chat(
+                    id = CHAT,
+                    title = "Plan avec pièce refusée",
+                    agentId = MAIN_AGENT_ID,
+                    run = Run(id = "run", taskId = CHAT, status = "succeeded", trigger = "chat"),
+                )
+            val proposal =
+                RunEvent(
+                    id = 1,
+                    runId = "run",
+                    createdAt = 1789315189000,
+                    type = "item.completed",
+                    text = "",
+                    payload =
+                        buildJsonObject {
+                            put(
+                                "item",
+                                buildJsonObject {
+                                    put("id", "reviewed-plan")
+                                    put("type", "proposed_plan")
+                                    put("text", "Proposition à examiner")
+                                },
+                            )
+                        },
+                )
+            val vm =
+                mountPlanChat(
+                    server,
+                    chat,
+                    listOf(proposal),
+                    calls,
+                    savedDraft = ChatDraft(rejected = listOf(refused)),
+                )
+            try {
+                compose.waitUntil(20000) {
+                    compose
+                        .onAllNodesWithTag("implement-plan")
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithTag("implement-plan").assertIsNotEnabled()
+                compose
+                    .onNodeWithContentDescription(
+                        "${refused.name} refusé : ${refused.reason}",
+                        substring = true,
+                    )
+                    .assertExists()
+                assertTrue(calls.isEmpty())
+            } finally {
+                vm.api.closeStreams()
+            }
+        }
+    }
+
+    @Test
     fun planRequestsShowTheirBadgeAndImplementingTheProposedPlanSendsAnOrdinaryMessage() =
         approvalJourney(false)
 
