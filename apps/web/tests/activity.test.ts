@@ -327,6 +327,37 @@ describe('conversation activity', () => {
     expect(proposedPlanApproval([clarification, proposal(5, 'request-b')])).toBe('run:5')
     expect(proposedPlanApproval([proposal(5, 'request-b')])).toBe('run:5')
   })
+  it('requires a fresh proposal when a legacy request boundary is ambiguous', () => {
+    const user = (id: number, messageId: string): RunEvent => ({
+      id,
+      runId: 'run',
+      createdAt: id,
+      type: 'chat.user',
+      text: '',
+      payload: { messageId },
+    })
+    const legacyProposal: RunEvent = {
+      id: 3,
+      runId: 'run',
+      createdAt: 3,
+      type: 'item.completed',
+      text: '',
+      payload: { item: { id: 'plan', type: 'proposed_plan', text: 'Reviewed approach' } },
+    }
+    const template = codex.entries.find(card => card.content.kind === 'userMessage')!
+    if (template.content.kind !== 'userMessage')
+      throw new Error('Missing fixture user card')
+    const latestCard: TimelineEntry = {
+      ...template,
+      runId: 'run',
+      content: { ...template.content, messageId: 'request-b' },
+    }
+    expect(
+      proposedPlanApproval([user(1, 'request-a'), user(2, 'request-b'), legacyProposal], [latestCard]),
+    ).toBeUndefined()
+    // A single historical request is unambiguous; its event and timeline card are one request.
+    expect(proposedPlanApproval([user(2, 'request-b'), legacyProposal], [latestCard])).toBe('run:3')
+  })
   it('approves completion after steering independently of display anchoring and page loading', () => {
     const started: RunEvent = {
       id: 10,

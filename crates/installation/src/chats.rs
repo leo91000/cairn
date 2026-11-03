@@ -786,17 +786,29 @@ fn require_current_proposal(
     {
         return Err(stale());
     }
+    let (request_count, latest_request): (i64, Option<String>) = db.0.query_row(
+        "SELECT COUNT(DISTINCT CASE
+             WHEN json_type(payload,'$.messageId')='text'
+               AND json_extract(payload,'$.messageId')!=''
+             THEN 'message:' || json_extract(payload,'$.messageId')
+             ELSE 'source:' || id
+         END), (SELECT json_extract(payload,'$.messageId') FROM events
+         WHERE run_id=? AND type='chat.user' ORDER BY id DESC LIMIT 1)
+         FROM events WHERE run_id=? AND type='chat.user'",
+        rusqlite::params![run_id, run_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
     if let Some(request_kind) = request_kind {
-        let latest_request: Option<String> = db.0.query_row(
-            "SELECT json_extract(payload,'$.messageId') FROM events WHERE run_id=? AND type='chat.user' ORDER BY id DESC LIMIT 1",
-            [run_id], |row| row.get(0),
-        ).optional()?.flatten();
         if request_kind != "text"
             || request_id.as_deref().unwrap_or("").is_empty()
             || request_id != latest_request
         {
             return Err(stale());
         }
+    } else if request_count != 1 {
+        // Older receipts had no request_id. Their proposal is still attributable only
+        // when the run contains exactly one human request.
+        return Err(stale());
     }
     let later_request: bool = db.0.query_row(
         "SELECT EXISTS(SELECT 1 FROM events WHERE run_id=? AND id>? AND type='chat.user')",

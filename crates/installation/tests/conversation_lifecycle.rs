@@ -2398,6 +2398,92 @@ async fn proposal_replay_cannot_renew_an_invalidated_request_boundary() {
 }
 
 #[tokio::test]
+async fn legacy_proposals_without_request_ids_require_one_unambiguous_request() {
+    let app = App::new().await;
+    for (request_ids, should_accept) in [
+        (vec!["request-a"], true),
+        (vec!["request-a", "request-a"], true),
+        (vec!["request-a", "request-b"], false),
+    ] {
+        let chat = app.create_chat().await;
+        let chat_id = text(&chat, "id").to_owned();
+        let run = id();
+        app.add_finished_run(
+            &run,
+            RunStatus::Succeeded,
+            json!({ "snapshot": { "agent": { "provider": "codex" } } }),
+            "Plan request",
+        )
+        .await;
+        let (c, r) = (chat_id.clone(), run.clone());
+        let proposal_id = app
+            .service
+            .store
+            .transaction(move |db| {
+                let mut chat = db.conversation_boundary(&c)?.unwrap();
+                chat["runId"] = r.clone().into();
+                db.save_conversation_boundary(&chat)?;
+                for request_id in request_ids {
+                    db.event(
+                        &r,
+                        &EventKind::ChatUser,
+                        "Plan request",
+                        Some(&json!({ "messageId": request_id })),
+                    )?;
+                }
+                db.event(
+                    &r,
+                    &EventKind::ItemCompleted,
+                    "Reviewed legacy plan",
+                    Some(&json!({
+                        "item": {
+                            "id": "legacy-plan",
+                            "type": "proposed_plan",
+                            "text": "Reviewed legacy plan"
+                        }
+                    })),
+                )?;
+                Ok(db
+                    .0
+                    .query_row("SELECT MAX(id) FROM events WHERE run_id=?", [r], |row| {
+                        row.get::<_, i64>(0)
+                    })?)
+            })
+            .await
+            .unwrap();
+        let path = chat_path(&chat);
+        let (_, current) = app.get(&path).await;
+        let request = json!({
+            "id": id(),
+            "text": "Implement the plan you proposed.",
+            "planApproval": {
+                "sourceId": format!("{run}:{proposal_id}"),
+                "revision": current["revision"]
+            }
+        });
+        let (status, body) = app
+            .request("POST", &format!("{path}/messages"), request.clone())
+            .await;
+        if should_accept {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let (retry_status, retry) = app
+                .request("POST", &format!("{path}/messages"), request)
+                .await;
+            assert_eq!(retry_status, StatusCode::OK, "{retry}");
+            assert_eq!(body["id"], retry["id"]);
+        } else {
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert!(
+                app.get(&path).await.1["messages"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn implementation_rejects_newer_unfinished_root_lifecycles() {
     let app = App::new().await;
     for status in [RunStatus::Failed, RunStatus::Cancelled] {

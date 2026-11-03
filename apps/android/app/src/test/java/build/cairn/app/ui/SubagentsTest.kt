@@ -2,6 +2,8 @@ package build.cairn.app.ui
 
 import build.cairn.app.data.Chat
 import build.cairn.app.data.RunEvent
+import build.cairn.contracts.TimelineContent
+import build.cairn.contracts.TimelineEntry
 import kotlinx.serialization.json.*
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -139,6 +141,45 @@ class SubagentsTest {
         val revised = proposal("request-b")
         assertEquals("run:${revised.id}", proposedPlanApproval(listOf(clarification, revised)))
         assertEquals("run:${revised.id}", proposedPlanApproval(listOf(revised)))
+    }
+
+    @Test
+    fun `legacy proposal approval requires one unambiguous request`() {
+        fun legacyProposal() =
+            item("item.completed") {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", "Reviewed approach")
+            }
+        val first = user("request-a")
+        val second = user("request-b")
+        val ambiguous = legacyProposal()
+        assertNull(proposedPlanApproval(listOf(first, second, ambiguous)))
+
+        val requestCard =
+            TimelineEntry(
+                attempt = 0,
+                content =
+                    TimelineContent.A(
+                        attachments = emptyList(),
+                        messageId = "request-b",
+                        sentAt = 2,
+                        text = "Second request",
+                    ),
+                createdAt = 2,
+                id = "request-b",
+                position = 2,
+                revision = 2,
+                runId = "run",
+                source = 2,
+                turn = 0,
+                updatedAt = 2,
+            )
+        val unambiguous = legacyProposal()
+        assertEquals(
+            "run:${unambiguous.id}",
+            proposedPlanApproval(listOf(second, unambiguous), listOf(requestCard)),
+        )
     }
 
     @Test

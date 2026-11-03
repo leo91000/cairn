@@ -213,6 +213,29 @@ export function proposedPlanApproval(events: RunEvent[], cards: TimelineEntry[] 
   const item = record(record(latest.payload).item)
   if (!text(item.text).trim())
     return undefined
+  if (!('request_id' in item)) {
+    const requests = new Set<string>()
+    for (const event of events) {
+      if (event.runId !== latest.runId || event.type !== 'chat.user')
+        continue
+      const messageId = text(record(event.payload).messageId)
+      if (messageId)
+        requests.add(`message:${messageId}`)
+      else
+        requests.add(`source:${event.id}`)
+    }
+    for (const card of cards) {
+      if (card.runId !== latest.runId || card.content.kind !== 'userMessage')
+        continue
+      const messageId = text(card.content.messageId)
+      if (messageId)
+        requests.add(`message:${messageId}`)
+      else
+        requests.add(`source:${card.source}`)
+    }
+    if (requests.size !== 1)
+      return undefined
+  }
   if ('request_id' in item && (!text(item.request_id) || (requestSource >= 0 && text(item.request_id) !== requestId)))
     return undefined
   return `${latest.runId}:${latest.id}`

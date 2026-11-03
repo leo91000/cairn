@@ -662,6 +662,20 @@ internal fun proposedPlanApproval(
         return null
     val item = proposal.item()
     val authoredRequest = item.string("request_id")
+    if (item?.containsKey("request_id") != true) {
+        val requests = mutableSetOf<String>()
+        for (event in events) {
+            if (event.runId != proposal.runId || event.type != "chat.user") continue
+            val messageId = event.payload?.string("messageId").orEmpty()
+            requests.add(if (messageId.isNotBlank()) "message:$messageId" else "source:${event.id}")
+        }
+        for (card in cards) {
+            if (card.runId != proposal.runId || card.content !is TimelineContent.A) continue
+            val messageId = (card.content as TimelineContent.A).messageId.orEmpty()
+            requests.add(if (messageId.isNotBlank()) "message:$messageId" else "source:${card.source}")
+        }
+        if (requests.size != 1) return null
+    }
     if (
         item?.containsKey("request_id") == true &&
             (authoredRequest.isBlank() ||
