@@ -119,6 +119,25 @@ async function waitForFile(directory, name, timeoutMs = 3000) {
   throw new Error('observer snapshot did not appear')
 }
 
+async function waitForObserverStatus(directory, expectedStatus, expectedSampleIndex, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      const status = JSON.parse(readFileSync(path.join(directory, 'observer-status.json'), 'utf8'))
+      if (status.status === expectedStatus && status.sampleIndex === expectedSampleIndex)
+        return status
+    }
+    catch (error) {
+      if (error.code !== 'ENOENT')
+        throw error
+    }
+
+    await delay(10)
+  }
+
+  throw new Error('observer status did not update')
+}
+
 describe('android action closure observer', () => {
   it('projects only whitelisted process metadata and aggregate descriptor kinds', () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'cairn-observer-proc-'))
@@ -381,7 +400,7 @@ describe('android action closure observer', () => {
 
       const firstSnapshotPath = await waitForFile(outputDirectory, 'sample-000.json')
       const snapshot = JSON.parse(readFileSync(firstSnapshotPath, 'utf8'))
-      const status = JSON.parse(readFileSync(path.join(outputDirectory, 'observer-status.json'), 'utf8'))
+      const status = await waitForObserverStatus(outputDirectory, 'first-sample-written', 0)
       expect(snapshot.actionNode).toEqual({
         pid: target.pid,
         startTicks: targetStartTicks,
