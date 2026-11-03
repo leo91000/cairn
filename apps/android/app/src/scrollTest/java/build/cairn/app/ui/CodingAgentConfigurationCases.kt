@@ -148,7 +148,7 @@ abstract class CodingAgentConfigurationCases {
     fun resetAllClearsInvalidFieldsAndSavesTheReplacementDocument() {
         val configured =
             initial.copy(
-                agentId = "fixture-agent",
+                agentId = "00000000-0000-4000-8000-000000000001",
                 inheritedDocument = initial.document,
                 customizedPaths = listOf("/model_context_window"),
             )
