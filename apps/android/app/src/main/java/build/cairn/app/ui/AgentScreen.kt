@@ -424,19 +424,13 @@ private fun AgentPage(
                         preview,
                     ) + pluginGrantReview(savedGrants, grants, catalog)
                 val reviewRequired = needsReview(lines, preview)
-                if (reviewRequired && !creating && preview?.accounts == null) {
-                    throw IllegalStateException(
-                        "Impossible de vérifier les comptes qui ont accès à cet agent. Reconnectez l’installation puis réessayez."
-                    )
-                }
                 if (reviewRequired) {
                     val suspended = preview?.suspendedDelegations().orEmpty()
                     reapprove = preview?.preselectedReapprovals().orEmpty()
                     review =
                         PendingReview(
                             edited,
-                            if (creating) lines + newAgentAccountReviewLine()
-                            else lines + agentAccountReviewLine(preview!!.accounts!!),
+                            lines,
                             suspended,
                             edited.nativeReviewNodes(resources),
                         )

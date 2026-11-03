@@ -17,7 +17,6 @@ import {
   mergeList,
   nativeReviewNodes,
   needsReview,
-  newAgentAccountReviewLine,
   newAgentDraft,
   nodesFor,
   rebaseDraft,
@@ -556,14 +555,6 @@ it('opens the review only for what this edit does', () => {
   expect(needsReview(reduction, { ...preview, runs: { queued: 1, running: 0 } })).toBe(true)
   expect(needsReview([{ ...reduction[0]!, requiresReview: true }], null)).toBe(true)
   expect(needsReview([{ ...reduction[0]!, kind: 'secret' }], null)).toBe(true)
-})
-
-it('states that new agents are owner-only by default', () => {
-  const line = newAgentAccountReviewLine()
-  expect(line.kind).toBe('secret')
-  expect(line.text).toContain('Only the installation owner can access a newly created agent')
-  expect(line.text).toContain('members have no access by default')
-  expect(line.text).toContain('the no-code hook rule editor is not part of this change')
 })
 
 it('raises no node issue while the nodes are not loaded', () => {

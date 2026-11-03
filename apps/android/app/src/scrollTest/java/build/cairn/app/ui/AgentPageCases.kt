@@ -938,18 +938,7 @@ abstract class AgentPageCases {
                 fixture.saved.isNotEmpty() ||
                     compose.onAllNodesWithTag("agent-review").fetchSemanticsNodes().isNotEmpty()
             }
-            if (fixture.saved.isEmpty()) {
-                compose
-                    .onNodeWithText("Comptes ayant accès à cet agent", substring = true)
-                    .assertExists()
-                compose
-                    .onNodeWithText(
-                        "l’éditeur de règles de hooks sans code n’est pas inclus",
-                        substring = true,
-                    )
-                    .assertExists()
-                confirmReview()
-            }
+            if (fixture.saved.isEmpty()) confirmReview()
             compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
             val settings = fixture.saved.single().second["settings"]!!.jsonObject
             assertEquals(
@@ -1002,7 +991,7 @@ abstract class AgentPageCases {
             }
             compose
                 .onNodeWithText(
-                    "Production : Accès complet, y compris les contributions futures. Effectif immédiatement, y compris dans les conversations en cours."
+                    "1Password “Production” : Accès complet, y compris les contributions futures. Les contrôles d’accès du plugin s’appliquent immédiatement, y compris aux runs en cours. Les identifiants déjà chargés restent utilisables jusqu’à la fin de chaque run."
                 )
                 .assertExists()
             // Declining the reapproval is possible: the bot then stops until it is reapproved.
@@ -1175,7 +1164,10 @@ abstract class AgentPageCases {
                 .onNodeWithText("channel support et descendants", substring = true)
                 .assertExists()
             compose
-                .onNodeWithText("Fournisseurs d’identifiants de run : Automation", substring = true)
+                .onNodeWithText(
+                    "Fournisseurs d’identifiants de run : 1Password “Automation”",
+                    substring = true,
+                )
                 .assertExists()
             capture("agent-plugin-grants-review")
             confirmReview()
@@ -2124,28 +2116,25 @@ abstract class AgentPageCases {
     }
 
     @Test
-    fun creatingAnAgentReviewsItsOwnerOnlyAccess() {
+    fun creatingAnAgentReviewsItsPluginGrant() {
         journey("") { fixture ->
-            open(AgentSection.Identity)
-            compose.onNodeWithText("Nom").performTextReplacement("Agent privé")
-            back()
-            open(AgentSection.Powers)
-            val installationAccess =
-                compose.onNodeWithContentDescription("Gérer l’installation Cairn")
-            installationAccess.performScrollTo().assertIsOff().performClick().assertIsOn()
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Production")
+            compose
+                .onNodeWithContentDescription("Accès à Production")
+                .performScrollTo()
+                .performClick()
             back()
             compose.onNodeWithText("Créer l’agent").performClick()
             waitForText("Vérifier avant d’enregistrer")
             waitForText(
-                "Seul le propriétaire de l’installation a accès à un nouvel agent",
+                "1Password “Production” : Accès complet, y compris les contributions futures",
                 substring = true,
             )
-            compose
-                .onNodeWithText("les membres n’y ont pas accès par défaut", substring = true)
-                .assertExists()
             confirmReview()
             compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
-            assertTrue(needsReview(listOf(newAgentAccountReviewLine()), preview = null))
+            compose.waitUntil(15000) { fixture.grantSaves.isNotEmpty() }
+            assertEquals(1, fixture.grantSaves.single()["grants"]!!.jsonArray.size)
         }
     }
 

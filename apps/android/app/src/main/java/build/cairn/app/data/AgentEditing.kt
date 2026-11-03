@@ -12,8 +12,6 @@ import kotlinx.serialization.json.jsonObject
 
 typealias AgentPreviewRuns = build.cairn.contracts.AgentPreviewRuns
 
-typealias AgentPreviewAccount = build.cairn.contracts.AgentPreviewAccount
-
 typealias AgentDelegationEffect = build.cairn.contracts.AgentDelegationEffect
 
 typealias AgentPreview = build.cairn.contracts.AgentPreview
@@ -627,20 +625,6 @@ data class ReviewLine(
     val text: String,
     val requiresReview: Boolean = false,
 )
-
-fun agentAccountReviewLine(accounts: List<AgentPreviewAccount>): ReviewLine {
-    val emails = accounts.map { it.email }.joinToString().ifBlank { "Aucun compte retourné" }
-    return ReviewLine(
-        ReviewKind.Access,
-        "Comptes ayant accès à cet agent : $emails. Cette revue couvre les droits des plugins ; l’éditeur de règles de hooks sans code n’est pas inclus dans ce changement.",
-    )
-}
-
-fun newAgentAccountReviewLine(): ReviewLine =
-    ReviewLine(
-        ReviewKind.Access,
-        "Seul le propriétaire de l’installation peut accéder à un agent nouvellement créé ; les membres n’y ont pas accès par défaut. Cette revue couvre les droits des plugins ; l’éditeur de règles de hooks sans code n’est pas inclus dans ce changement.",
-    )
 
 private val sandboxStrictness = mapOf("yolo" to 0, "workspace-write" to 1, "read-only" to 2)
 

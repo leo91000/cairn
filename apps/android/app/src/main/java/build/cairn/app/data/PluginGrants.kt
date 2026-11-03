@@ -416,13 +416,17 @@ fun pluginGrantReview(
                     ReviewLine(
                         if (after.grants.none { it.instanceId == id }) ReviewKind.Reduction
                         else ReviewKind.Access,
-                        "$name : ${after.description(id)}. Les contrôles d’accès du plugin s’appliquent immédiatement, y compris aux runs en cours. Les identifiants déjà chargés restent utilisables jusqu’à la fin de chaque run.",
+                        "$name : ${before.description(id)} → ${after.description(id)}. Les contrôles d’accès du plugin s’appliquent immédiatement, y compris aux runs en cours. Les identifiants déjà chargés restent utilisables jusqu’à la fin de chaque run.",
                         requiresReview = after.grants.none { it.instanceId == id },
                     )
                 )
             }
         }
     if (before.runCredentialInstances.toSet() != after.runCredentialInstances.toSet()) {
+        val previousNames =
+            before.runCredentialInstances.map { id ->
+                catalog?.connectionLabel(id) ?: id
+            }
         val names =
             after.runCredentialInstances.map { id ->
                 catalog?.connectionLabel(id) ?: id
@@ -436,7 +440,7 @@ fun pluginGrantReview(
         add(
             ReviewLine(
                 ReviewKind.Access,
-                "Fournisseurs d’identifiants de run : ${names.joinToString().ifBlank { "Aucun" }}. Les identifiants rendent vaines les restrictions de ressource des outils.$activeRunNotice",
+                "Fournisseurs d’identifiants de run : ${previousNames.joinToString().ifBlank { "Aucun" }} → ${names.joinToString().ifBlank { "Aucun" }}. Les identifiants rendent vaines les restrictions de ressource des outils.$activeRunNotice",
             )
         )
     }

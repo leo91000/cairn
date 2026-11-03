@@ -6,8 +6,6 @@ import kotlinx.serialization.Serializable
 @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class AgentPreview(
-    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
-    val accounts: List<AgentPreviewAccount>? = null,
     val delegations: List<AgentDelegationEffect>,
     val runs: AgentPreviewRuns,
 ) {

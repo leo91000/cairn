@@ -48,7 +48,6 @@ import {
   mainLockedSections,
   nativeReviewNodes,
   needsReview,
-  newAgentAccountReviewLine,
   newAgentDraft,
   nodeName,
   nodesFor,
@@ -507,6 +506,7 @@ function grantReviewLines(): ReviewLine[] {
     ...[...ids].filter(instance => grantDescription(savedGrants.value, instance) !== grantDescription(grants.value, instance)).map((instance) => {
       const previous = savedGrants.value.grants.find(item => item.instanceId === instance)
       const current = grants.value.grants.find(item => item.instanceId === instance)
+      const previousDescription = grantDescription(savedGrants.value, instance)
       const description = grantDescription(grants.value, instance)
 
       if (!previous && current) {
@@ -529,26 +529,17 @@ function grantReviewLines(): ReviewLine[] {
       return {
         kind: 'secret' as const,
         section: 'plugins' as const,
-        text: `${connectionName(instance)}: ${description}. Plugin permission checks update immediately, including for running conversations. Credentials already loaded into active runs remain available until those runs finish.`,
+        text: `${connectionName(instance)}: ${previousDescription} → ${description}. Plugin permission checks update immediately, including for running conversations. Credentials already loaded into active runs remain available until those runs finish.`,
       }
     }),
     ...(JSON.stringify(savedGrants.value.runCredentialInstances) !== JSON.stringify(grants.value.runCredentialInstances)
       ? [{
           kind: 'secret' as const,
           section: 'plugins' as const,
-          text: `Run credential suppliers: ${grants.value.runCredentialInstances.map(connectionName).join(', ') || 'None'}. Credentials void tool resource restrictions.${savedGrants.value.runCredentialInstances.some(instance => !grants.value.runCredentialInstances.includes(instance)) ? ' Active runs keep credentials already loaded until they finish.' : ''}`,
+          text: `Run credential suppliers: ${savedGrants.value.runCredentialInstances.map(connectionName).join(', ') || 'None'} → ${grants.value.runCredentialInstances.map(connectionName).join(', ') || 'None'}. Credentials void tool resource restrictions.${savedGrants.value.runCredentialInstances.some(instance => !grants.value.runCredentialInstances.includes(instance)) ? ' Active runs keep credentials already loaded until they finish.' : ''}`,
         }]
       : []),
   ]
-}
-
-function agentAccountReviewLine(preview: Preview): ReviewLine {
-  const names = preview.accounts?.map(account => account.email).join(', ') || 'No accounts'
-  return {
-    kind: 'secret',
-    section: 'plugins',
-    text: `Accounts with access to this agent: ${names}. Plugin grant review only; the no-code hook rule editor is not included in this change.`,
-  }
 }
 
 async function load() {
@@ -657,15 +648,6 @@ async function requestSave() {
   // Powers, secrets, interrupted work and delegations this edit suspends deserve a look; anything
   // else saves directly.
   if (needsReview(lines, current)) {
-    if (!isNew.value && current && !current.accounts) {
-      failed(new Error('Could not verify which accounts can use this agent. Reconnect the installation and try again.'))
-      return
-    }
-
-    if (!isNew.value && current)
-      lines = [...lines, agentAccountReviewLine(current)]
-    else if (isNew.value)
-      lines = [...lines, newAgentAccountReviewLine()]
     reviewError.value = ''
     review.value = { lines, delegations: effects, nativeNodes: nativeReviewNodes(draft.value, context.value) }
     return

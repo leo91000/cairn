@@ -370,18 +370,9 @@ pub struct AgentDelegationEffect {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AgentPreviewAccount {
-    pub email: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentPreview {
     pub runs: AgentPreviewRuns,
     pub delegations: Vec<AgentDelegationEffect>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub accounts: Option<Vec<AgentPreviewAccount>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]

@@ -648,14 +648,6 @@ export function needsReview(lines: ReviewLine[], preview: Preview | null) {
   return lines.some(line => line.kind !== 'reduction' || line.requiresReview) || runs > 0 || delegations
 }
 
-export function newAgentAccountReviewLine(): ReviewLine {
-  return {
-    kind: 'secret',
-    section: 'plugins',
-    text: 'Only the installation owner can access a newly created agent; members have no access by default. This review covers plugin grants; the no-code hook rule editor is not part of this change.',
-  }
-}
-
 export interface Issue {
   section: SectionId
   text: string
