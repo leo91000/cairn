@@ -130,6 +130,9 @@ for (const pending of ['authorization', 'offer'] as const) {
       },
     })
     const errors: string[] = []
+    let directCancelled = false
+    let directCancellationUrl: string | undefined
+    let directCancellationReason: string | undefined
     page.on('pageerror', error => errors.push(error.message))
     try {
       await workspace.api('/api/mcps', 'POST', {
@@ -142,10 +145,12 @@ for (const pending of ['authorization', 'offer'] as const) {
 
       const direct = Promise.withResolvers<void>()
       const directCompleted = Promise.withResolvers<void>()
-      let directCancelled = false
       page.on('requestfailed', (request) => {
-        if (request.url().endsWith('/direct/authorize'))
+        if (request.url().endsWith('/direct/authorize')) {
           directCancelled = true
+          directCancellationUrl = request.url()
+          directCancellationReason = request.failure()?.errorText
+        }
       })
       if (pending === 'authorization') {
         await page.route('**/direct/authorize', async (route) => {
@@ -189,13 +194,20 @@ for (const pending of ['authorization', 'offer'] as const) {
         expect(closedOffers).toEqual([true])
       else
         expect(directCancelled).toBe(true)
-      // WebKit reports this expected navigation-aborted request as a CORS page error.
-      const cancelledAuthorization = `/api/installations/${workspace.installationId}/direct/authorize due to access control checks.`
-      const expectedNavigationAbort = pending === 'authorization' && directCancelled
-        ? errors.filter(error => error.endsWith(cancelledAuthorization))
-        : []
-      expect(expectedNavigationAbort.length).toBeLessThanOrEqual(1)
-      expect(errors).toEqual(expectedNavigationAbort)
+      // WebKit reports this held, cancelled fetch as an access-control page error.
+      const expectedWebKitCancellation = browserName === 'webkit'
+        && pending === 'authorization'
+        && directCancellationReason === 'Load request cancelled'
+      const unexpectedErrors = [...errors]
+      if (expectedWebKitCancellation && directCancellationUrl) {
+        const cancelledUrl = new URL(directCancellationUrl)
+        const cancellationError = `/${cancelledUrl.host}${cancelledUrl.pathname} due to access control checks.`
+        const cancellationErrorIndex = unexpectedErrors.findIndex(error => error === cancellationError)
+        if (cancellationErrorIndex !== -1)
+          unexpectedErrors.splice(cancellationErrorIndex, 1)
+      }
+
+      expect(unexpectedErrors).toEqual([])
     }
     finally {
       authorizing.resolve()
