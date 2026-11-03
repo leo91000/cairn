@@ -895,11 +895,11 @@ async fn plan_omits_third_party_mcp_even_when_effectful_tool_claims_read_only() 
     assert_eq!(discovered.tools[0]["annotations"]["readOnlyHint"], true);
 
     let mut run = manual_run(&s, "Plan without external MCP", "Explore safely").await;
-    let run_id = run["id"].as_str().unwrap();
+    let run_id = run["id"].as_str().unwrap().to_owned();
     run["chatExecution"] = json!({ "messageId": "plan-request", "plan": true });
     s.store
         .change_run(
-            run_id,
+            &run_id,
             cairn_installation::runs::RunChanges {
                 status: Some(RunStatus::Running),
                 boundary: Some(json!({ "chatExecution": run["chatExecution"] })),
