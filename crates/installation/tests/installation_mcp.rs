@@ -253,6 +253,8 @@ async fn native_configuration_has_http_and_both_mcp_parity_with_live_scopes() {
 
     for (provider, document) in [
         ("codex", "notify = ['blocked-callback']\n"),
+        ("codex", "default_permissions = ':read-only'\n"),
+        ("codex", "[permissions.readonly]\n"),
         (
             "codex",
             "[hooks.state.callback]\ntrusted_hash = 'test-only'\n",

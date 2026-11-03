@@ -23,6 +23,29 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('coding-agent model catalogs', () => {
+  it('refreshes saved preferences after an already pending catalog request finishes', async () => {
+    let resolvePrevious!: (value: unknown) => void
+    request.mockReturnValueOnce(new Promise(resolve => resolvePrevious = resolve))
+    const defaults = { model: 'opencode/inherited-model', reasoning: '', speed: '' }
+    const response = {
+      models: [],
+      checkedAt: 1,
+      stale: false,
+      error: '',
+    }
+    request.mockResolvedValueOnce({ ...response, checkedAt: 2, nativeDefaults: defaults })
+    const { modelCatalogs } = await import('../src/models')
+    const previous = modelCatalogs.opencode.load()
+    const refreshed = modelCatalogs.opencode.refresh()
+    expect(modelCatalogs.opencode.catalog.loaded).toBe(false)
+    expect(request).toHaveBeenCalledTimes(1)
+    resolvePrevious(response)
+    await previous
+    await refreshed
+    expect(request).toHaveBeenCalledTimes(2)
+    expect(modelCatalogs.opencode.catalog.nativeDefaults).toEqual(defaults)
+  })
+
   it('clears inherited preferences when a refresh omits the reset installation defaults', async () => {
     const defaults = { model: 'opencode/inherited-model', reasoning: '', speed: '' }
     const response = {

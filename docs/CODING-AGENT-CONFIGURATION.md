@@ -80,6 +80,8 @@ before saving with an explanation; they are not accepted and silently replaced.
 These boundaries preserve [ADR-0013](adr/0013-managed-tools-without-native-plugin-catalog.md),
 [ADR-0042](adr/0042-opencode-api-key-integration.md) and the
 [configuration decision](adr/0079-native-coding-agent-configuration.md).
+Codex native `permissions` profiles and `default_permissions` selections are
+managed alongside its legacy sandbox settings; use Cairn agent access settings.
 
 Codex `notify` and `hooks` (including trust state), Claude hooks, native command callbacks and authentication helpers
 are refused. They can execute outside the tool permission checks; use Cairn skills,

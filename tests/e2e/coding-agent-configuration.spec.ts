@@ -1,8 +1,11 @@
 import type { Workspace } from './fixtures'
 import {
+  createAgent,
   expect,
   expectSingleScroll,
   expectUncovered,
+  grantFullAccess,
+  openAgentSection,
   signIn,
   test,
   workspacePath,
@@ -12,6 +15,49 @@ const read = (workspace: Workspace, provider = 'codex', agentId: string | null =
 test.beforeEach(async ({ page, workspace }) => {
   await page.goto(workspace.url)
   await signIn(page)
+})
+
+test('new agents inherit installation preferences saved after the catalog was loaded', async ({ page, workspace }) => {
+  test.setTimeout(60000)
+  await save(workspace, '{}', 'opencode')
+  await workspace.api('/api/accounts', 'POST', {
+    provider: 'opencode',
+    name: 'Configuration catalog',
+    modelProvider: 'opencode',
+    apiKey: 'synthetic-browser-zen-key',
+  })
+  const existing = await workspace.api('/api/agents', 'POST', {
+    name: 'Catalog primer',
+    provider: 'opencode',
+    model: 'opencode/ling-3.1-flash-free',
+    reasoning: '',
+  })
+  await page.goto(workspacePath(`/agents/${existing.id}?section=model`))
+  const picker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
+  await picker.click()
+  await expect(page.getByRole('dialog', { name: 'Agent & model' }).getByRole('radio', { name: 'Ling 3.1 Flash Free', exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await page.getByRole('link', { name: 'Back to agents', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Atelier sections' }).getByRole('link', { name: 'Settings', exact: true }).click()
+  await page.getByRole('link', { name: 'Installation', exact: true }).click()
+  await page.getByRole('link', { name: 'OpenCode opencode.jsonc', exact: true }).click()
+  await page.getByLabel('Model', { exact: true }).fill('opencode/configured-selection')
+  await page.getByRole('button', { name: 'Save configuration', exact: true }).click()
+  await expect(page.getByText('All changes saved', { exact: true })).toBeVisible()
+  await page.getByRole('link', { name: 'Back to installation settings', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Atelier sections' }).getByRole('link', { name: 'Agents', exact: true }).click()
+  await page.getByRole('link', { name: 'New agent', exact: true }).click()
+  await page.getByLabel('Name', { exact: true }).fill('Inherited catalog selection')
+  await grantFullAccess(page)
+  await openAgentSection(page, 'Coding agent & model')
+  await picker.click()
+  await page.getByRole('dialog', { name: 'Agent & model' }).getByRole('radio', { name: 'OpenCode', exact: true }).click()
+  await page.keyboard.press('Escape')
+  await expect(picker).toHaveAccessibleName(/opencode\/configured-selection/)
+  await createAgent(page)
+  const created = (await workspace.api('/api/agents')).find((agent: { name: string }) => agent.name === 'Inherited catalog selection')
+  expect(created.model).toBe('')
+  expect(created.codingAgentDefaults.opencode.model).toBe('opencode/configured-selection')
 })
 
 async function save(workspace: Workspace, document: string, provider = 'codex', agentId: string | null = null) {

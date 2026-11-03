@@ -32,6 +32,7 @@ import {
   Code,
   RotateCcw,
 } from '../icons'
+import { modelCatalogs } from '../models'
 
 const route = useRoute()
 const provider = computed(() => route.params.provider as Provider)
@@ -234,7 +235,7 @@ async function save() {
     conflict.value = false
     inheritedResets.value.clear()
     notify('Coding agent configuration saved')
-    await refresh()
+    await Promise.all([refresh(), modelCatalogs[result.provider].refresh()])
   }
   catch (e) {
     error.value = (e as Error).message

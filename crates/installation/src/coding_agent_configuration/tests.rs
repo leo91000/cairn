@@ -86,6 +86,14 @@ fn managed_settings_are_refused_before_launch_and_errors_do_not_echo_values() {
         (Provider::Codex, json!({ "marketplaces": {} })),
         (
             Provider::Codex,
+            json!({ "default_permissions": ":read-only" }),
+        ),
+        (
+            Provider::Codex,
+            json!({ "permissions": { "readonly": {} } }),
+        ),
+        (
+            Provider::Codex,
             json!({ "features": { "default_mode_request_user_input": true } }),
         ),
         (Provider::Codex, json!({ "features": { "hooks": true } })),

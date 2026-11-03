@@ -546,6 +546,8 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
             "/mcp_servers",
             "/sandbox_mode",
             "/sandbox_workspace_write",
+            "/default_permissions",
+            "/permissions",
             "/approval_policy",
             "/shell_environment_policy",
             "/model_instructions_file",
