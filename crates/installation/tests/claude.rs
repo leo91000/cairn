@@ -1235,6 +1235,29 @@ async fn plan_turns_deny_writes_effects_and_leaving_plan_mode() {
     assert!(proposed[1]["item"].get("result").is_none());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn plan_turn_rejects_a_symlinked_plan_directory() {
+    use std::os::unix::fs::symlink;
+
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let plans = c.home.join(".claude/plans");
+    symlink(root.path(), &plans).unwrap();
+
+    let (result, events) = run_to_end(&c, plan_turn(&root)).await;
+    result.unwrap();
+    assert!(completes(&events));
+
+    let responses = std::fs::read_to_string(c.home.join(".claude/plan-responses.jsonl")).unwrap();
+    let plan_write = responses
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|response| response["id"] == "plan-file")
+        .unwrap();
+    assert_eq!(plan_write["behavior"], "deny");
+}
+
 #[tokio::test]
 async fn completed_plan_receipt_replays_the_proposal_without_starting_another_turn() {
     let root = TempDir::new().unwrap();

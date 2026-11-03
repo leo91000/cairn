@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::Duration,
 };
 use tokio::{
@@ -1831,7 +1831,9 @@ fn plan_tool(plan: &Value, plans: &Path, name: &str, input: &Value) -> bool {
             } else {
                 "file_path"
             };
-            let plans = std::fs::canonicalize(plans).unwrap_or_else(|_| plans.to_owned());
+            let Some(plans) = plan_directory(plans) else {
+                return false;
+            };
             resolved(Path::new(text(input, key))).is_some_and(|path| path.starts_with(plans))
         }
         _ if name.starts_with("mcp__") => strings(&plan["claudePlanTools"]).any(|allowed| {
@@ -1841,6 +1843,30 @@ fn plan_tool(plan: &Value, plans: &Path, name: &str, input: &Value) -> bool {
         }),
         _ => false,
     }
+}
+
+/// Canonical plan storage is trusted only when every path component is a real directory,
+/// not a symlink that can redirect the native plan-file write into the workspace.
+fn plan_directory(plans: &Path) -> Option<PathBuf> {
+    let absolute = if plans.is_absolute() {
+        plans.to_owned()
+    } else {
+        std::env::current_dir().ok()?.join(plans)
+    };
+    let mut current = PathBuf::new();
+    for component in absolute.components() {
+        current.push(component.as_os_str());
+        if !matches!(component, Component::Normal(_)) {
+            continue;
+        }
+
+        let metadata = std::fs::symlink_metadata(&current).ok()?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return None;
+        }
+    }
+
+    std::fs::canonicalize(absolute).ok()
 }
 
 /// `path` with its symlinks resolved, or its parent's when the file does not exist yet.
