@@ -130,6 +130,8 @@ for (const pending of ['authorization', 'offer'] as const) {
       },
     })
     const errors: string[] = []
+    let directCancelled = false
+    let directCancellationReason: string | undefined
     page.on('pageerror', error => errors.push(error.message))
     try {
       await workspace.api('/api/mcps', 'POST', {
@@ -142,10 +144,11 @@ for (const pending of ['authorization', 'offer'] as const) {
 
       const direct = Promise.withResolvers<void>()
       const directCompleted = Promise.withResolvers<void>()
-      let directCancelled = false
       page.on('requestfailed', (request) => {
-        if (request.url().endsWith('/direct/authorize'))
+        if (request.url().endsWith('/direct/authorize')) {
           directCancelled = true
+          directCancellationReason = request.failure()?.errorText
+        }
       })
       if (pending === 'authorization') {
         await page.route('**/direct/authorize', async (route) => {
@@ -189,7 +192,18 @@ for (const pending of ['authorization', 'offer'] as const) {
         expect(closedOffers).toEqual([true])
       else
         expect(directCancelled).toBe(true)
-      expect(errors).toEqual([])
+      // WebKit reports this held, cancelled fetch as an access-control page error.
+      const expectedWebKitCancellation = browserName === 'webkit'
+        && pending === 'authorization'
+        && directCancellationReason === 'Load request cancelled'
+      const unexpectedErrors = [...errors]
+      if (expectedWebKitCancellation) {
+        const cancellationError = /^\/localhost:\d+\/api\/installations\/[^/]+\/direct\/authorize due to access control checks\.$/
+        const cancellationErrorIndex = unexpectedErrors.findIndex(error => cancellationError.test(error))
+        if (cancellationErrorIndex !== -1)
+          unexpectedErrors.splice(cancellationErrorIndex, 1)
+      }
+      expect(unexpectedErrors).toEqual([])
     }
     finally {
       authorizing.resolve()
