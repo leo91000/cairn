@@ -9,6 +9,7 @@ use crate::{
 use cairn_contracts::Deliverable;
 use rusqlite::{Connection, TransactionBehavior};
 use serde::Deserialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 
 #[derive(Deserialize)]
@@ -20,6 +21,36 @@ struct ShareV25 {
 
 fn invalid() -> Error {
     Error::bad("Invalid previous artifact or skill source metadata; original database retained.")
+}
+
+fn deliverable_v25(data: &str) -> Result<Deliverable> {
+    let value: Value = serde_json::from_str(data).map_err(|_| invalid())?;
+    let fields = value.as_object().ok_or_else(invalid)?;
+    for field in [
+        "id",
+        "runId",
+        "messageId",
+        "key",
+        "version",
+        "title",
+        "name",
+        "group",
+        "kind",
+        "mediaType",
+        "size",
+        "digest",
+        "createdAt",
+        "url",
+        "previewStatus",
+    ] {
+        if !fields.contains_key(field) {
+            return Err(invalid());
+        }
+    }
+    if !fields.get("digest").is_some_and(Value::is_string) {
+        return Err(invalid());
+    }
+    serde_json::from_value(value).map_err(|_| invalid())
 }
 
 pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
@@ -51,7 +82,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     let mut used = 0;
     for (key, data, _) in &rows {
         if let Some(identity) = key.strip_prefix("artifact:") {
-            let item: Deliverable = serde_json::from_str(data)?;
+            let item = deliverable_v25(data)?;
             uuid(&item.run_id)?;
             uuid(&item.id)?;
             if identity != format!("{}:{}", item.run_id, item.id) {
