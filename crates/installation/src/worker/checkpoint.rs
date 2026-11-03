@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod terminal_tests;
+
 use crate::{
     config::now,
     error::Result,
@@ -78,6 +81,10 @@ pub struct RunCheckpoint {
     /// Neither absent nor null proves success.
     #[serde(default, with = "nullable", skip_serializing_if = "Option::is_none")]
     pub terminal_code: Nullable<i32>,
+    /// Fixed authenticated controller cause, bound to its attempt independently
+    /// of child stdout and the ordinary output budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub controller_failure: Option<ControllerFailure>,
     /// Durable reservations for reads of one controller attempt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub controller_observation: Option<ControllerObservation>,
@@ -139,6 +146,13 @@ pub struct ControllerObservation {
     pub requests: u8,
     #[serde(default)]
     pub in_flight: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ControllerFailure {
+    pub attempt: String,
+    pub reason: crate::runner::TerminalReason,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -396,6 +410,40 @@ impl RunCheckpoint {
         {
             self.finalization_failure_attempt = Some(attempt.to_owned());
             db.event(id, &cairn_contracts::EventKind::Error, "The filesystem could not be flushed. Working files were preserved; automatic replay was stopped.", None)?;
+        }
+        if let Some(result) = result
+            && result.code == crate::runner::CONTROLLER_FAILED
+            && result.physical_finalized
+            && !result.finalization_failed
+            && self
+                .prepared()
+                .is_some_and(|prepared| prepared["backend"] == "native")
+            && let Some(reason) = result.terminal_reason
+            && !self
+                .controller_failure
+                .as_ref()
+                .is_some_and(|failure| failure.attempt == attempt && failure.reason == reason)
+        {
+            let message = reason.message();
+            let payload = serde_json::json!({
+                "attemptId": attempt,
+                "error": { "code": reason, "message": message },
+            });
+            db.event(
+                id,
+                &cairn_contracts::EventKind::Error,
+                message,
+                Some(&payload),
+            )?;
+            self.controller_failure = Some(ControllerFailure {
+                attempt: attempt.to_owned(),
+                reason,
+            });
+            // The provider's earlier error remains authoritative. This adds
+            // diagnostics without changing cancellation or controller retries.
+            if !self.provider_failed() && self.last_error().is_empty() {
+                self.last_error = Some(Some(message.to_owned()));
+            }
         }
         Ok(())
     }
@@ -1241,6 +1289,7 @@ mod tests {
                         code: 70,
                         finalization_failed: true,
                         physical_finalized: false,
+                        terminal_reason: None,
                     }),
                 )?;
                 Ok(())
