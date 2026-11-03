@@ -145,10 +145,7 @@ abstract class PlanTurnCases {
                 )
             try {
                 compose.waitUntil(20000) {
-                    compose
-                        .onAllNodesWithTag("implement-plan")
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
+                    compose.onAllNodesWithTag("implement-plan").fetchSemanticsNodes().isNotEmpty()
                 }
                 compose.onNodeWithTag("implement-plan").assertIsNotEnabled()
                 compose

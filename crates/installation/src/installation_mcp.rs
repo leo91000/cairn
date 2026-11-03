@@ -143,10 +143,23 @@ pub(crate) async fn rpc(
     }
 }
 
-/// A plan turn only reads the installation: operations that change it wait for
-/// the user to start implementation.
+/// A plan turn exposes only operations whose delegated MCP scope is `read`.
+fn has_read_scope(operation: &Value) -> bool {
+    operation["_meta"]["securitySchemes"]
+        .as_array()
+        .is_some_and(|schemes| {
+            schemes.iter().any(|scheme| {
+                let scopes = scheme["scopes"].as_array();
+                scheme["type"] == "oauth2"
+                    && scopes.is_some_and(|scopes| {
+                        scopes.len() == 1 && scopes[0].as_str() == Some("read")
+                    })
+            })
+        })
+}
+
 fn allowed_in_turn(run: &Value, operation: &Value) -> bool {
-    !crate::chats::planning(run) || operation["annotations"]["readOnlyHint"] == true
+    !crate::chats::planning(run) || has_read_scope(operation)
 }
 
 pub(crate) async fn operations(s: &Service, bearer: &str) -> Result<Vec<Value>> {
@@ -190,7 +203,7 @@ pub(crate) async fn operation(
     };
     if !allowed_in_turn(&run, operation) {
         return Err(Error::forbidden(
-            "This operation changes the installation, which a plan turn cannot do. Include it in your plan; the user starts implementation explicitly.",
+            "Only read-scoped installation operations are available during a plan turn.",
         ));
     }
     if let Some(operation) = crate::capabilities::plugin_package_operation(name) {

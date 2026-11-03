@@ -3696,6 +3696,35 @@ async fn plan_turns_only_read_the_installation() {
     let s = service(&root).await;
     let main = enabled_main(&s).await;
     let (run, _) = active_run(&s, &main).await;
+    let ordinary_configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
+    let ordinary = call(
+        &s,
+        &ordinary_configuration,
+        "search",
+        json!({
+            "names": [
+                "list_source_projects",
+                "get_skill_source_status",
+                "preview_agent",
+                "get_plugin_operation",
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(
+        result(&ordinary)["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|operation| operation["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "list_source_projects",
+            "get_skill_source_status",
+            "preview_agent",
+            "get_plugin_operation",
+        ]
+    );
     let planning = json!({ "messageId": "plan-message", "text": "Plan", "plan": true });
     let run = s
         .store
@@ -3706,7 +3735,6 @@ async fn plan_turns_only_read_the_installation() {
         .await
         .unwrap();
     let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
-
     let names = [
         "list_agents",
         "get_chat",
@@ -3714,6 +3742,12 @@ async fn plan_turns_only_read_the_installation() {
         "send_chat_message",
         "create_task",
         "update_agent",
+        // These operations are read-only in effect, but require the `manage`
+        // scope and must not enter the installation surface during Plan.
+        "list_source_projects",
+        "get_skill_source_status",
+        "preview_agent",
+        "get_plugin_operation",
     ];
     let summary = call(&s, &configuration, "search", json!({ "names": names })).await;
     let operations = result(&summary)["operations"].as_array().unwrap();
@@ -3724,6 +3758,10 @@ async fn plan_turns_only_read_the_installation() {
         "send_chat_message",
         "create_task",
         "update_agent",
+        "list_source_projects",
+        "get_skill_source_status",
+        "preview_agent",
+        "get_plugin_operation",
     ] {
         assert!(
             !operations.iter().any(|op| op["name"] == changing),
@@ -3739,6 +3777,34 @@ async fn plan_turns_only_read_the_installation() {
     let denied = call(&s, &configuration, "create_chat", json!({})).await;
     assert_eq!(denied["result"]["isError"], true, "{denied}");
     assert!(denied.to_string().contains("plan turn"), "{denied}");
+
+    for manage_scoped in [
+        "list_source_projects",
+        "get_skill_source_status",
+        "preview_agent",
+        "get_plugin_operation",
+    ] {
+        let denied = call(
+            &s,
+            &configuration,
+            "execute",
+            json!({
+                // `call` remains available even when an operation was removed
+                // from the discovered names, so this exercises dispatch too.
+                "code": format!("await cairn.call({manage_scoped:?}, {{}});"),
+            }),
+        )
+        .await;
+        assert_eq!(
+            denied["result"]["isError"], true,
+            "{manage_scoped}: {denied}"
+        );
+        assert!(
+            denied.to_string().contains("read-scoped"),
+            "{manage_scoped}: {denied}"
+        );
+    }
+
     assert!(s.chat_list().await.unwrap().is_empty());
 }
 
