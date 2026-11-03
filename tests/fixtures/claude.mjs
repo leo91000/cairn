@@ -147,6 +147,7 @@ else {
       ...correlation,
     })
   }
+
   const completeProposalAfterSteer = () => {
     if (!pendingProposalSteer?.controlAnswered || !pendingProposalSteer.steeringUuid || pendingProposalSteer.completed)
       return
@@ -258,6 +259,7 @@ else {
         completeProposalAfterSteer()
         return
       }
+
       if (planRequests?.has(requestId)) {
         appendFileSync(path.join(home, 'plan-responses.jsonl'), `${JSON.stringify({ id: requestId, ...value.response.response })}\n`)
         planRequests.delete(requestId)
@@ -322,6 +324,7 @@ else {
       completeProposalAfterSteer()
       return
     }
+
     if (prompt.includes('fixture:plan-proposal-before-steering')) {
       out(value)
       pendingProposalSteer = {
@@ -353,6 +356,7 @@ else {
       })
       return
     }
+
     if (prompt.includes('fixture:plan-turn')) {
       // Permission requests Claude Code sends in plan mode, including writes the model
       // should not attempt: the adapter's callback must decide each one.

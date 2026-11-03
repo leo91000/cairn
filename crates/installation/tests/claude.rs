@@ -1171,7 +1171,7 @@ async fn only_a_cairn_plan_turn_shows_exit_plan_mode_as_a_proposed_plan() {
 }
 
 #[tokio::test]
-async fn a_clarification_delivered_before_exit_plan_result_keeps_the_authored_request() {
+async fn a_clarification_delivered_before_exit_plan_result_belongs_to_the_completed_proposal() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);
     let mut p = plan_turn(&root);
@@ -1232,7 +1232,7 @@ async fn a_clarification_delivered_before_exit_plan_result_keeps_the_authored_re
         })
         .unwrap();
     assert!(delivered < completed, "{events:?}");
-    assert_eq!(events[completed]["item"]["request_id"], "request-a");
+    assert_eq!(events[completed]["item"]["request_id"], "request-b");
 }
 
 #[tokio::test]

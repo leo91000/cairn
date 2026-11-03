@@ -73,11 +73,12 @@ Pendant un tour de plan, Cairn applique lui-même la frontière :
   de la configuration du moteur, pour les transports HTTP et commande. Une annotation
   `readOnlyHint` appartient au serveur tiers et ne prouve pas qu’un outil est sans effet.
   Les outils Cairn internes gardent leurs restrictions propres : pour `cairn_installation`, les
-  opérations de portée `read` ; pour `cairn_workspace`, `open_project`, `list_nodes`,
+  opérations de portée `read` ; pour `cairn_workspace`, `list_nodes`,
   `exclusive_status`, `ask_questions`, `pending_questions`, `withdraw_question` et la lecture des tâches déléguées
   (`task_status`). Les outils et commandes des plugins sont refusés, comme
   `delegate_task`, `task_cancel`, `wait_for`, `publish_artifact` ou `report_outcome`. Ces restrictions
   suivent l’autorisation du tour (`chatExecution.plan`), que le tour suivant remplace.
+  `open_project` est omis car il prépare et importe un projet dans l’espace de travail du runner.
 
 Les préréglages du moteur ne servent qu’à guider le modèle. Cairn découvre ceux de
 Codex à chaque tour et envoie `plan`, puis `default` au tour qui suit un tour de plan,

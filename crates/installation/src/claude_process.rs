@@ -986,7 +986,8 @@ impl Turn<'_> {
                 continue;
             }
             if item["type"] == "proposed_plan" {
-                // Cairn declines to leave plan mode; the plan itself is complete.
+                // Clarifications delivered before the proposal completes belong to it.
+                item["request_id"] = json!(self.proposal_request.clone());
                 item["status"] = "completed".into();
                 self.proposals.push(item.clone());
                 self.emit(json!({ "type": "item.completed", "item": item }))
@@ -1089,8 +1090,8 @@ impl Turn<'_> {
                 continue;
             };
             if item["type"] == "proposed_plan" {
-                // Bind provenance when the proposal is authored. A later steering message
-                // can be delivered before Claude returns ExitPlanMode's tool result.
+                // Record the request known when Claude authors the proposal; completion
+                // refreshes this if a clarification arrives before ExitPlanMode returns.
                 item["request_id"] = json!(self.proposal_request.clone());
             }
             if let Some(parent) = &parent {
