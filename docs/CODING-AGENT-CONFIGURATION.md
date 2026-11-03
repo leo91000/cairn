@@ -59,6 +59,8 @@ local draft. Changes apply to the next admitted message of existing conversation
 and to new scheduled work. Each message freezes its settings for retries and
 account switches. Choosing another coding agent for a quota-blocked request freezes
 the selected engine's settings for that resumed request.
+Manual and scheduled missions resolve these settings when they enter the queue;
+later saves leave that run's retries unchanged.
 
 An active turn is never interrupted by a configuration save. A retained Codex
 process restarts between messages when its native startup settings change, using

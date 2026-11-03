@@ -519,7 +519,7 @@ impl Service {
             skills,
             delegation: None,
         };
-        let mut run = json!({
+        let run = json!({
             "id": id(),
             "taskId": task_id,
             "projectId": project_id,
@@ -534,20 +534,6 @@ impl Service {
             "usage": null,
             "snapshot": snapshot,
         });
-        if trigger != "chat" {
-            return self
-                .store
-                .read(move |db| {
-                    crate::coding_agent_configuration::freeze_message(
-                        db,
-                        &mut run,
-                        None,
-                        &Value::Null,
-                    )?;
-                    Ok(run)
-                })
-                .await;
-        }
         Ok(run)
     }
 
@@ -627,6 +613,14 @@ impl Service {
                         None,
                     )?;
                     run["requestedBy"] = requester(&caller);
+                }
+                if run["trigger"] != "chat" {
+                    crate::coding_agent_configuration::freeze_message(
+                        db,
+                        &mut run,
+                        None,
+                        &Value::Null,
+                    )?;
                 }
                 let run = crate::runs::admit_prepared(db, &run, dedupe.as_deref())?;
                 db.event(text(&run, "id"), &EventKind::Status, "Queued", None)?;

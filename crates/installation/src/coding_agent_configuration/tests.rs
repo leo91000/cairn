@@ -874,6 +874,87 @@ async fn mapped_values_have_one_owner_and_native_standard_speed_roundtrips() {
 }
 
 #[tokio::test]
+async fn non_chat_configuration_freezes_at_admission_after_preparation() {
+    use crate::common::{AgentFixture, MissionFixture};
+    let root = tempfile::tempdir().unwrap();
+    crate::common::managed_codex_home(&root.path().join("home"));
+    let service = crate::service::Service::new(crate::common::config(root.path()))
+        .await
+        .unwrap();
+    crate::common::relay_fixture::claimed(&service)
+        .await
+        .unwrap();
+    let profile = service
+        .agent_fixture(
+            json!({
+                "name": "Admission preferences",
+                "model": "",
+                "reasoning": "",
+                "access": { "backend": "firecracker" },
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let before_preparation = "model = 'before-preparation'\nmodel_context_window = 200000\nmodel_reasoning_effort = 'low'\n";
+    let before_admission = "model = 'before-admission'\nmodel_context_window = 1000000\nmodel_reasoning_effort = 'medium'\n";
+    let after_admission = "model = 'after-admission'\nmodel_context_window = 2000000\n";
+    for (trigger, document, expected_model, expected_reasoning) in [
+        ("manual", before_admission, "before-admission", "medium"),
+        ("schedule", before_admission, "before-admission", "medium"),
+        ("manual", "model_context_window = 1000000\n", "", ""),
+        ("schedule", "model_context_window = 1000000\n", "", ""),
+    ] {
+        let mission = service
+            .task_fixture(
+                json!({
+                    "name": format!("Freeze {trigger} {expected_model}"),
+                    "prompt": "Use current preferences",
+                    "agentId": profile["id"],
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        crate::common::save_native_configuration(&service, "codex", None, before_preparation).await;
+        let prepared = service
+            .prepare_run(text(&mission, "id"), trigger)
+            .await
+            .unwrap();
+        crate::common::save_native_configuration(&service, "codex", None, document).await;
+        let admitted = service.queue_run(prepared, None, None).await.unwrap();
+        assert_eq!(
+            text(&admitted["snapshot"]["agent"], "model"),
+            expected_model
+        );
+        assert_eq!(
+            text(&admitted["snapshot"]["agent"], "reasoning"),
+            expected_reasoning
+        );
+        let frozen = parse(
+            Provider::Codex,
+            admitted["snapshot"]["nativeConfiguration"]["document"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(frozen["model_context_window"], 1000000);
+        crate::common::save_native_configuration(&service, "codex", None, after_admission).await;
+        let retained = service.store.run(text(&admitted, "id")).await.unwrap();
+        assert_eq!(
+            retained["snapshot"]["nativeConfiguration"],
+            admitted["snapshot"]["nativeConfiguration"]
+        );
+        assert_eq!(
+            text(&retained["snapshot"]["agent"], "model"),
+            expected_model
+        );
+    }
+    service.shutdown.cancel();
+    service.worker.close().await;
+}
+
+#[tokio::test]
 async fn default_changes_invalidate_drafts_and_frozen_turns_keep_their_configuration() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(root.path()).unwrap();
