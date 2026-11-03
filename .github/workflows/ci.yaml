@@ -15,6 +15,10 @@ on:
         type: choice
         options: [none, backend-migration]
         default: none
+      validation-only:
+        description: Run qualifications without building or publishing container images
+        type: boolean
+        default: false
       browser-workers:
         description: Workers per browser group for performance comparisons
         type: choice
@@ -162,7 +166,7 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -p test_native_docker_workload.py -v
   rust-check:
     needs: resolve
-    if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
+    if: always() && !cancelled() && (inputs.backend-only == true || needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -219,9 +223,6 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-nextest@0.9.149
-      - name: Check all Rust targets for a backend-only qualification
-        if: inputs.backend-only == true
-        run: pnpm validate:pr rust
       - name: Run backend tests across binaries with isolated credentials
         run: |
           set -o pipefail
@@ -838,7 +839,7 @@ jobs:
   image:
     # Compile the release image immediately; wait for fixtures only before smoke tests.
     needs: resolve
-    if: needs.resolve.outputs.reuse != 'true'
+    if: inputs.validation-only != true && needs.resolve.outputs.reuse != 'true'
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       published: ${{ env.PUBLISH }}
@@ -1068,7 +1069,7 @@ jobs:
         run: df -h /
   beacon-image:
     needs: resolve
-    if: needs.resolve.outputs.reuse != 'true'
+    if: inputs.validation-only != true && needs.resolve.outputs.reuse != 'true'
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       published: ${{ env.PUBLISH }}
@@ -1180,7 +1181,7 @@ jobs:
     # The Intel nested Android test needs hardware GitHub does not provide; it runs locally
     # before releases when Android or runner changes need it (docs/DEPLOYMENT.md) and does not gate CI.
     needs: [resolve, build, quality, rust-check, backend, backend-migration-qualification, node-checks, browser, network-bench, native-runtime, android-direct-build, android-direct, image, beacon-image]
-    if: always() && !cancelled() && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.rust-check.result == 'success' && needs.backend.result == 'success' && (inputs.backend-qualification != 'backend-migration' || needs.backend-migration-qualification.result == 'success') && needs.node-checks.result == 'success' && needs.build.result == 'success' && needs.browser.result == 'success' && needs.network-bench.result == 'success' && needs.native-runtime.result == 'success' && needs.android-direct-build.result == 'success' && needs.android-direct.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true' && needs.beacon-image.result == 'success' && needs.beacon-image.outputs.published == 'true'
+    if: always() && !cancelled() && inputs.validation-only != true && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.rust-check.result == 'success' && needs.backend.result == 'success' && (inputs.backend-qualification != 'backend-migration' || needs.backend-migration-qualification.result == 'success') && needs.node-checks.result == 'success' && needs.build.result == 'success' && needs.browser.result == 'success' && needs.network-bench.result == 'success' && needs.native-runtime.result == 'success' && needs.android-direct-build.result == 'success' && needs.android-direct.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true' && needs.beacon-image.result == 'success' && needs.beacon-image.outputs.published == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -1229,7 +1230,7 @@ jobs:
           overwrite: true
   promote:
     needs: [resolve, backend-migration-qualification]
-    if: always() && !cancelled() && needs.resolve.outputs.reuse == 'true' && (inputs.backend-qualification != 'backend-migration' || needs.backend-migration-qualification.result == 'success')
+    if: always() && !cancelled() && inputs.validation-only != true && needs.resolve.outputs.reuse == 'true' && (inputs.backend-qualification != 'backend-migration' || needs.backend-migration-qualification.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -1247,7 +1248,7 @@ jobs:
           digest: ${{ needs.resolve.outputs.beacon-digest }}
           token: ${{ secrets.GITHUB_TOKEN }}
   deploy:
-    if: always() && !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && (needs.publish.result == 'success' || needs.promote.result == 'success')
+    if: always() && !cancelled() && inputs.validation-only != true && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && (needs.publish.result == 'success' || needs.promote.result == 'success')
     needs: [resolve, image, beacon-image, publish, promote]
     permissions:
       contents: read

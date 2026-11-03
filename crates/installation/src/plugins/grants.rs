@@ -1334,7 +1334,10 @@ mod migration_tests {
             .unwrap();
         drop(store);
         let db = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
-        db.execute_batch("DROP TABLE plugin_grant_resources; DROP TABLE plugin_contribution_grants; DROP TABLE plugin_credential_suppliers; PRAGMA user_version=23;").unwrap();
+        // Startup will replay A16 after this fixture's grant conversion.
+        db.execute_batch("DROP TABLE skill_source_refs; DROP TABLE skill_sources;
+DROP TABLE artifact_visibility; DROP TABLE artifact_versions; DROP TABLE artifacts;
+DROP TABLE plugin_grant_resources; DROP TABLE plugin_contribution_grants; DROP TABLE plugin_credential_suppliers; PRAGMA user_version=23;").unwrap();
         let timeline = db
             .query_row::<String, _, _>(
                 "SELECT sql FROM sqlite_master WHERE name='timeline_entries'",

@@ -323,10 +323,10 @@ class TimelineTest {
                     event(5, "item.completed", "answer-2", "agent_message"),
                 )
             )
-        fun file(id: String, message: String, version: Int, time: Long) =
+        fun file(id: String, message: String, version: Long, time: Long) =
             build.cairn.app.data.Deliverable(
-                id,
-                "run",
+                id = id,
+                runId = "run",
                 messageId = message,
                 key = "report",
                 version = version,
@@ -356,7 +356,13 @@ class TimelineTest {
 
     @Test
     fun `publication before a new user message remains before that message`() {
-        val file = build.cairn.app.data.Deliverable("file", "run", key = "report", createdAt = 500)
+        val file =
+            build.cairn.app.data.Deliverable(
+                id = "file",
+                runId = "run",
+                key = "report",
+                createdAt = 500,
+            )
         val result = deliveryTimeline(fixtureEntries(listOf(event(1, "chat.user"))), listOf(file))
         assertEquals("file", result.first().files.single().id)
         assertTrue(result.last().message)

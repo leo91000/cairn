@@ -1,25 +1,6 @@
-export interface Deliverable {
-  id: string
-  runId: string
-  messageId: string | null
-  key: string
-  version: number
-  title: string
-  name: string
-  group: string
-  kind: 'image' | 'video' | 'audio' | 'pdf' | 'markdown' | 'code' | 'file'
-  mediaType: string
-  size: number
-  createdAt: number
-  url: string
-  visibility?: 'private' | 'public'
-  publicUrl?: string | null
-  previewStatus: 'pending' | 'ready' | 'unavailable' | 'none'
-  width?: number
-  height?: number
-  duration?: number
-  excerpt?: string
-}
+import type { Deliverable } from './generated/typescript/Deliverable'
+
+export type { Deliverable } from './generated/typescript/Deliverable'
 
 export function artifactUrl(item: Deliverable, action?: 'preview' | 'download') {
   // Construct from scoped identifiers, never trust URLs returned by a tool event.
