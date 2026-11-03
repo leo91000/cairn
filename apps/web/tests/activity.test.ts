@@ -182,6 +182,38 @@ describe('conversation activity', () => {
     // Older events and ordinary requests carry no plan marker.
     expect(entries[3]).not.toHaveProperty('plan')
   })
+  it('keeps repeated proposal IDs distinct across timeline-presented turn boundaries', () => {
+    let id = 0
+    const event = (type: string, payload: Record<string, unknown>, timeline = false): RunEvent => ({
+      id: ++id,
+      runId: 'chat',
+      createdAt: id,
+      type,
+      text: '',
+      payload,
+      ...(timeline ? { timeline: true } : {}),
+    })
+    const request = (messageId: string) => event('chat.user', { messageId, plan: true })
+    const turn = () => event('turn.started', {}, true)
+    const proposal = (text: string, requestId: string) => event('item.completed', {
+      item: { id: 'exit-plan-tool', type: 'proposed_plan', text, request_id: requestId },
+    })
+    const events = [
+      request('plan-a'),
+      turn(),
+      proposal('First approach', 'plan-a'),
+      request('plan-b'),
+      turn(),
+      proposal('Revised approach', 'plan-b'),
+    ]
+
+    const proposals = activityEntries(events, true).filter(entry => entry.kind === 'proposal')
+    expect(proposals).toMatchObject([
+      { id: '1:exit-plan-tool', text: 'First approach', sourceId: 'chat:3' },
+      { id: '2:exit-plan-tool', text: 'Revised approach', sourceId: 'chat:6' },
+    ])
+    expect(proposedPlanApproval(events)).toBe('chat:6')
+  })
   it('keeps proposal approval identity exclusive to its completed lifecycle event', () => {
     const event = (id: number, type: string, text: string): RunEvent => ({
       id,

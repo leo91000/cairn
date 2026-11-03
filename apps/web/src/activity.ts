@@ -302,6 +302,9 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
   for (const [eventIndex, stored] of events.entries()) {
     const event = stored
     placeCards(event.id)
+    // Timeline cards replace rendering, not the turn boundary used to identify items.
+    if (event.type === 'turn.started')
+      turn++
     // A compaction still running when its turn or run ends did not complete.
     const end = compactionEnd(event)
     if (end) {
@@ -525,9 +528,6 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
       }
     }
 
-    // Item IDs may repeat in a later turn: a new turn's calls start afresh.
-    if (event.type === 'turn.started')
-      turn++
     // The timeline presents this event: its card takes its place here.
     if (event.timeline) {
       placeCards(event.id + 1)
