@@ -1379,7 +1379,7 @@ async fn legacy_plan_approval_uses_run_wide_request_state_in_live_and_history_pa
         .unwrap();
 
     let first = store
-        .read(move |db| Ok(db.event_page(run, 0, 10)?))
+        .read(move |db| db.event_page(run, 0, 10))
         .await
         .unwrap();
     let request_boundary = first[1].id;
@@ -1423,7 +1423,7 @@ async fn legacy_plan_approval_uses_run_wide_request_state_in_live_and_history_pa
     assert_eq!(paged_plan.legacy_plan_approval, Some(false));
 
     let event_page = store
-        .read(move |db| Ok(db.event_page(run, request_boundary, 10)?))
+        .read(move |db| db.event_page(run, request_boundary, 10))
         .await
         .unwrap();
     assert_eq!(event_page.last().unwrap().legacy_plan_approval, Some(false));

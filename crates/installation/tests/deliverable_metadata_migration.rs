@@ -39,7 +39,7 @@ fn snapshot(db: &Connection) -> Snapshot {
     tables
         .into_iter()
         .map(|(name, sql)| {
-            let columns = db
+            let mut columns = db
                 .prepare(&format!(
                     "PRAGMA table_info(\"{}\")",
                     name.replace('"', "\"\"")

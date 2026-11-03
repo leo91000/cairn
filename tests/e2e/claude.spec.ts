@@ -934,13 +934,13 @@ test('a replayed proposal retains its authored request boundary after clarificat
   workspace.service.store.event(run.id, 'chat.user', 'Include the tests', { messageId: clarification, text: 'Include the tests' })
   // The recovery event has a new manager ID, but no newly authored approach.
   workspace.service.store.event(run.id, 'item.completed', '', { item: original })
-  await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
+  await page.goto(workspacePath(`/chats/${chat.id}`))
   const replayedText = String(original.text)
   const originalProposals = page.getByTestId('proposed-plan').filter({ hasText: replayedText })
-  await expect(originalProposals).toHaveCount(2)
-  await expect(originalProposals.nth(0)).toBeVisible()
-  await expect(originalProposals.nth(1)).toBeVisible()
+  // Recovery replays the same authored item, so the timeline folds it to one card.
+  await expect(originalProposals).toHaveCount(1)
+  await expect(originalProposals.first()).toBeVisible()
   await expect(page.getByRole('button', { name: 'Implement', exact: true })).toHaveCount(0)
   workspace.service.store.event(run.id, 'item.completed', '', {
     item: {

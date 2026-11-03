@@ -312,10 +312,9 @@ class TimelineTest {
                 )
             )
 
-        val proposals =
-            rows.flatMap { row ->
-                row.events.filter { it.item().string("type") == "proposed_plan" }
-            }
+        val proposals = rows.flatMap { row ->
+            row.events.filter { it.item().string("type") == "proposed_plan" }
+        }
         assertEquals(listOf(1L, 3L, 5L), proposals.map { it.id })
     }
 
