@@ -40,6 +40,7 @@ pub struct Deliverable {
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable, type = "'private' | 'public'")]
+    #[schemars(regex(pattern = "^(private|public)$"))]
     pub visibility: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional = nullable)]

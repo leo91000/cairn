@@ -80,6 +80,11 @@ For a full dispatch that resolves to a reusable image, explicitly selecting
 the selected qualification succeeds. Leaving the choice at `none` preserves
 the existing reuse and tag paths.
 
+For a full branch qualification without writing container images or release
+tags, dispatch `ci.yaml` with `validation-only=true`. This still runs the
+applicable backend, node, native-runtime, browser and device jobs; image build,
+publish, promotion and deployment jobs are skipped.
+
 ## GitHub responsibilities
 
 `PR validation` runs on every PR and push to main: the `quality` suite always,

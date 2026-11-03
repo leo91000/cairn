@@ -240,7 +240,13 @@ mod tests {
         let (f, bearer) = Fixture::delegated_manager().await;
         let id = uuid::Uuid::new_v4().to_string();
         let bytes = b"private delegated artifact";
-        let artifact = crate::common::deliverable(&f.run, &id, &json!({ "size": bytes.len() }));
+        let artifact = crate::common::deliverable(
+            &f.run,
+            &id,
+            &json!({
+                "size": bytes.len(),
+            }),
+        );
         f.s.store
             .transaction(move |db| db.insert_artifact(&artifact))
             .await
@@ -254,9 +260,14 @@ mod tests {
             f.moved_parent.store(false, Ordering::SeqCst);
             let operation = artifact_operation(name).unwrap();
             let input = if name == "list_run_artifacts" {
-                json!({ "runId": f.run })
+                json!({
+                    "runId": f.run,
+                })
             } else {
-                json!({ "runId": f.run, "artifactId": id })
+                json!({
+                    "runId": f.run,
+                    "artifactId": id,
+                })
             };
             let context = || ResumeContext::Installation(bearer.clone());
             let valid = operation

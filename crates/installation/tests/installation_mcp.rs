@@ -8090,12 +8090,23 @@ async fn mission_deliverables_work_without_a_conversation_on_both_management_too
             use sha2::Digest;
             hex::encode(sha2::Sha256::digest(&bytes))
         };
-        let item = common::deliverable(run, &id, &json!({"size":bytes.len(),"digest":digest}));
+        let item = common::deliverable(
+            run,
+            &id,
+            &json!({
+                "size": bytes.len(),
+                "digest": digest,
+            }),
+        );
         let second_id = uuid::Uuid::new_v4().to_string();
         let second = common::deliverable(
             run,
             &second_id,
-            &json!({"version":2,"size":bytes.len(),"digest":digest}),
+            &json!({
+                "version": 2,
+                "size": bytes.len(),
+                "digest": digest,
+            }),
         );
         s.store
             .transaction(move |db| {
@@ -8117,12 +8128,23 @@ async fn mission_deliverables_work_without_a_conversation_on_both_management_too
                 public_call(&s, &["read", "manage"], name, args).await
             }
         };
-        let first = invoke("list_run_artifacts", json!({"runId":run,"limit":1})).await;
+        let first = invoke(
+            "list_run_artifacts",
+            json!({
+                "runId": run,
+                "limit": 1,
+            }),
+        )
+        .await;
         assert_eq!(result(&first)["artifacts"].as_array().unwrap().len(), 1);
         assert_eq!(result(&first)["hasMore"], true);
         let second = invoke(
             "list_run_artifacts",
-            json!({"runId":run,"limit":1,"offset":result(&first)["nextOffset"]}),
+            json!({
+                "runId": run,
+                "limit": 1,
+                "offset": result(&first)["nextOffset"],
+            }),
         )
         .await;
         assert_eq!(result(&second)["hasMore"], false);
@@ -8131,15 +8153,24 @@ async fn mission_deliverables_work_without_a_conversation_on_both_management_too
             result(&second)["artifacts"][0]["id"]
         );
         for invalid in [
-            json!({"runId":run,"limit":0}),
-            json!({"runId":run,"offset":9007199254740992_u64}),
+            json!({
+                "runId": run,
+                "limit": 0,
+            }),
+            json!({
+                "runId": run,
+                "offset": 9007199254740992_u64,
+            }),
         ] {
             let denied = invoke("list_run_artifacts", invalid).await;
             assert_eq!(denied["result"]["isError"], true);
         }
         let wrong = invoke(
             "read_run_artifact",
-            json!({"runId":caller["id"],"artifactId":id}),
+            json!({
+                "runId": caller["id"],
+                "artifactId": id,
+            }),
         )
         .await;
         assert_eq!(wrong["result"]["isError"], true);
@@ -8148,7 +8179,11 @@ async fn mission_deliverables_work_without_a_conversation_on_both_management_too
         loop {
             let response = invoke(
                 "read_run_artifact",
-                json!({"runId":run,"artifactId":id,"offset":offset}),
+                json!({
+                    "runId": run,
+                    "artifactId": id,
+                    "offset": offset,
+                }),
             )
             .await;
             let chunk = result(&response);
@@ -8170,13 +8205,21 @@ async fn mission_deliverables_work_without_a_conversation_on_both_management_too
             &s,
             &["read"],
             "set_run_artifact_visibility",
-            json!({"runId":run,"artifactId":id,"visibility":"public"}),
+            json!({
+                "runId": run,
+                "artifactId": id,
+                "visibility": "public",
+            }),
         )
         .await;
         assert_eq!(denied["result"]["isError"], true);
         let shared = invoke(
             "set_run_artifact_visibility",
-            json!({"runId":run,"artifactId":id,"visibility":"public"}),
+            json!({
+                "runId": run,
+                "artifactId": id,
+                "visibility": "public",
+            }),
         )
         .await;
         let token = result(&shared)["publicToken"].as_str().unwrap().to_owned();
@@ -8188,7 +8231,11 @@ async fn mission_deliverables_work_without_a_conversation_on_both_management_too
         );
         let private = invoke(
             "set_run_artifact_visibility",
-            json!({"runId":run,"artifactId":id,"visibility":"private"}),
+            json!({
+                "runId": run,
+                "artifactId": id,
+                "visibility": "private",
+            }),
         )
         .await;
         assert!(result(&private)["publicUrl"].is_null());
@@ -8219,7 +8266,12 @@ async fn mission_deliverables_work_without_a_conversation_on_both_management_too
                 &s,
                 token,
                 "tools/call",
-                common::mcp_arguments("list_run_artifacts", &json!({"runId":run})),
+                common::mcp_arguments(
+                    "list_run_artifacts",
+                    &json!({
+                        "runId": run,
+                    }),
+                ),
             )
             .await;
             assert_eq!(status, StatusCode::UNAUTHORIZED);

@@ -80,7 +80,10 @@ async fn reader_grant(relay: &RelayedInstallation) -> Value {
         .header("cookie", &relay.cookie)
         .header("origin", &relay.app.url)
         .header("x-csrf-token", relay.session["csrf"].as_str().unwrap())
-        .json(&json!({"label": "Artifact reader", "scopes": ["read"]}))
+        .json(&json!({
+            "label": "Artifact reader",
+            "scopes": ["read"],
+        }))
         .send()
         .await
         .unwrap();
@@ -366,9 +369,14 @@ async fn admitted_artifact_reads_recheck_public_authorization() {
             std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
             relay.installation.code_mode.use_worker(wrapper);
             let input = if operation == "list_run_artifacts" {
-                json!({"runId": run})
+                json!({
+                    "runId": run,
+                })
             } else {
-                json!({"runId": run, "artifactId": artifact})
+                json!({
+                    "runId": run,
+                    "artifactId": artifact,
+                })
             };
             let request = artifact_call(&relay, token, operation, input);
             let pending = tokio::spawn(async move { request.send().await.unwrap() });
@@ -518,9 +526,14 @@ async fn artifact_reads_recheck_public_authorization_after_preparation() {
                 .await
                 .unwrap();
             let input = if operation == "list_run_artifacts" {
-                json!({"runId": run})
+                json!({
+                    "runId": run,
+                })
             } else {
-                json!({"runId": run, "artifactId": artifact})
+                json!({
+                    "runId": run,
+                    "artifactId": artifact,
+                })
             };
             let request = artifact_call(&relay, grant["token"].as_str().unwrap(), operation, input);
             let mut pending = tokio::spawn(async move { request.send().await.unwrap() });

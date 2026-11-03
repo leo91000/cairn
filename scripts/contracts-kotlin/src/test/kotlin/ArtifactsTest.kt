@@ -27,5 +27,11 @@ class ArtifactsTest {
             metadata,
             json.decodeFromJsonElement<Deliverable>(json.encodeToJsonElement(metadata)),
         )
+        val invalidMetadata =
+            JsonObject(
+                json.encodeToJsonElement(metadata).jsonObject +
+                    ("visibility" to JsonPrimitive("owner"))
+            )
+        assertFails { json.decodeFromJsonElement<Deliverable>(invalidMetadata) }
     }
 }
