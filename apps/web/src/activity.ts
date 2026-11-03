@@ -239,6 +239,8 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
   const entries: ActivityEntry[] = []
   const artifacts = new Map<string, ActivityArtifact>()
   const proposals = new Map<string, Extract<ActivityEntry, { kind: 'proposal' }>>()
+  const proposalsByTurnItem = new Map<string, Extract<ActivityEntry, { kind: 'proposal' }>>()
+  const proposalRequests = new Map<Extract<ActivityEntry, { kind: 'proposal' }>, string>()
   // By the agent's own item ID: a subagent's steps can arrive after the turn that started it.
   const subagents = new Map<string, ActivityArtifact>()
   const aliases = new Map<string, string>()
@@ -619,7 +621,17 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
     if (type === 'proposed_plan' && !text(item.parent_id)) {
       const content = text(item.text)
       const sourceId = event.type === 'item.completed' ? `${event.runId}:${event.id}` : undefined
-      const existing = proposals.get(id)
+      const requestId = text(item.request_id)
+      const turnItemKey = JSON.stringify([event.runId, turn, itemId])
+      const requestKey = requestId ? JSON.stringify([event.runId, 'request', itemId, requestId]) : undefined
+      let existing = requestKey ? proposals.get(requestKey) : undefined
+      const sameTurn = proposalsByTurnItem.get(turnItemKey)
+      const sameTurnRequestId = sameTurn ? proposalRequests.get(sameTurn) : undefined
+      const sameTurnIsCompatible = !sameTurnRequestId || !requestId || sameTurnRequestId === requestId
+      if (!existing && sameTurn && sameTurnIsCompatible) {
+        existing = sameTurn
+      }
+
       if (existing) {
         existing.text = content || existing.text
         existing.sourceId = sourceId
@@ -633,7 +645,15 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
           sourceId,
         }
         entries.push(proposal)
-        proposals.set(id, proposal)
+        existing = proposal
+      }
+
+      if (existing) {
+        proposalsByTurnItem.set(turnItemKey, existing)
+        if (requestKey) {
+          proposals.set(requestKey, existing)
+          proposalRequests.set(existing, requestId)
+        }
       }
 
       continue

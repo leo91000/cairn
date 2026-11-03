@@ -937,8 +937,7 @@ test('a replayed proposal retains its authored request boundary after clarificat
   await page.goto(workspacePath('/'))
   await authenticateWorkspace(page)
   await page.goto(workspacePath(`/chats/${chat.id}`))
-  const replayedText = String(original.text)
-  const originalProposals = page.getByTestId('proposed-plan').filter({ hasText: replayedText })
+  const originalProposals = page.getByTestId('proposed-plan').filter({ hasText: 'Change main.rs' })
   // Recovery replays the same authored item, so the timeline folds it to one card.
   await expect(originalProposals).toHaveCount(1)
   await expect(originalProposals.first()).toBeVisible()

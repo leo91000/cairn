@@ -219,6 +219,42 @@ describe('conversation activity', () => {
     ])
     expect(proposedPlanApproval(events)).toBe('chat:6')
   })
+  it('folds a replayed proposal into its authored request without restoring stale approval', () => {
+    let id = 0
+    const event = (type: string, payload: Record<string, unknown>, timeline = false): RunEvent => ({
+      id: ++id,
+      runId: 'chat',
+      createdAt: id,
+      type,
+      text: '',
+      payload,
+      ...(timeline ? { timeline: true } : {}),
+    })
+    const request = (messageId: string) => event('chat.user', { messageId, plan: true }, true)
+    const turn = () => event('turn.started', {}, true)
+    const proposal = (text: string, requestId: string) => event('item.completed', {
+      item: {
+        id: 'exit-plan-tool',
+        type: 'proposed_plan',
+        text,
+        request_id: requestId,
+      },
+    })
+    const events = [
+      request('plan-a'),
+      turn(),
+      proposal('1. Change main.rs\n2. Run the tests', 'plan-a'),
+      request('clarification'),
+      turn(),
+      proposal('1. Change main.rs\n2. Run the tests', 'plan-a'),
+    ]
+
+    const proposals = activityEntries(events, true).filter(entry => entry.kind === 'proposal')
+    expect(proposals).toMatchObject([
+      { id: '1:exit-plan-tool', text: '1. Change main.rs\n2. Run the tests', sourceId: 'chat:6' },
+    ])
+    expect(proposedPlanApproval(events)).toBeUndefined()
+  })
   it('separates Claude proposal IDs at turn completion without a start event', () => {
     let id = 0
     const event = (type: string, payload: Record<string, unknown>, timeline = false): RunEvent => ({
