@@ -445,6 +445,10 @@ fn managed(provider: Provider) -> Vec<ManagedCodingAgentSetting> {
                 "configuration substitutions",
                 "File and environment substitutions are not supported in keys or values. Use literal values that Cairn can validate and freeze.",
             ));
+            entries.push((
+                "agent / mode permissions",
+                "Native agent permissions and legacy tool overrides cannot replace Cairn's granted tool selection. Change access on the Cairn agent page.",
+            ));
         }
     }
     entries
@@ -638,6 +642,17 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
         }
     }
     if provider == Provider::Opencode {
+        for group in ["agent", "mode"] {
+            if let Some(agents) = value.get(group).and_then(Value::as_object) {
+                for agent in agents.values() {
+                    if agent.get("permission").is_some() || agent.get("tools").is_some() {
+                        return Err(Error::bad(
+                            "OpenCode native agent tools and permissions are managed by Cairn. Use the Cairn agent's access settings instead.",
+                        ));
+                    }
+                }
+            }
+        }
         if value
             .get("compaction")
             .is_some_and(|value| !value.is_object())

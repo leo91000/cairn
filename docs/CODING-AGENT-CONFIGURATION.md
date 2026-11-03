@@ -98,3 +98,6 @@ could introduce a managed key after validation or load values that were not froz
 with the message. Use literal values in the native editor. See the native
 [Claude hook security reference](https://code.claude.com/docs/en/hooks#security-considerations)
 and [OpenCode variable reference](https://opencode.ai/docs/config/#variables).
+OpenCode `agent.*.permission` and `agent.*.tools`, including their deprecated
+`mode.*` equivalents, are managed alongside the global permission rules. They
+cannot override the MCP tool subset granted by Cairn.

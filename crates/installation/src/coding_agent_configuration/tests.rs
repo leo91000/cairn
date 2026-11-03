@@ -338,6 +338,42 @@ fn opencode_interpolation_is_refused_in_property_names_and_nested_values_before_
 }
 
 #[test]
+fn opencode_native_roles_cannot_override_a_granted_mcp_tool_subset() {
+    for group in ["agent", "mode"] {
+        for (setting, override_value) in [
+            ("permission", json!({ "*": "allow" })),
+            ("tools", json!({ "*": true })),
+        ] {
+            let native = json!({ group: { "build": { setting: override_value } } });
+            let document = render(Provider::Opencode, &native).unwrap();
+            let mut plan = json!({
+                "provider": "opencode",
+                "opencodeConfig": {
+                    "permission": { "fixture_allowed": "allow", "fixture_omitted": "deny" },
+                    "mcp": { "fixture": { "type": "local", "command": ["fixture-server"] } }
+                }
+            });
+            let original = plan.clone();
+            assert!(
+                apply(
+                    &mut plan,
+                    &json!({ "provider": "opencode", "document": document })
+                )
+                .is_err()
+            );
+            assert_eq!(plan, original);
+        }
+    }
+    assert!(
+        validate(
+            Provider::Opencode,
+            &json!({ "agent": { "build": { "description": "Native preference" } } })
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn native_codex_arguments_are_real_toml_and_keep_generated_auth_separate() {
     let native = json!({ "model_context_window": 1000000, "features": { "multi_agent": true }, "model_verbosity": "high" });
     let args = codex_arguments(&json!({ "nativeSettings": native })).unwrap();

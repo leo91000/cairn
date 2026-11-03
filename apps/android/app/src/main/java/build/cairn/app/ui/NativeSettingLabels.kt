@@ -86,6 +86,8 @@ internal fun nativeManagedReason(path: String): String =
             "Seuls CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, CLAUDE_CODE_MAX_OUTPUT_TOKENS et MAX_THINKING_TOKENS sont modifiables. Cairn gère l’environnement d’exécution."
         "configuration substitutions" ->
             "Les substitutions de fichiers et de variables sont refusées dans les clés et les valeurs. Utilisez des valeurs littérales vérifiables avant l’exécution."
+        "agent / mode permissions" ->
+            "Les droits et outils des agents natifs, y compris les anciens modes, ne peuvent pas remplacer la sélection d’outils accordée dans Cairn. Modifiez les accès sur la page de l’agent Cairn."
         "features.plugins",
         "enabledPlugins",
         "plugin" ->

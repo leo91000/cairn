@@ -272,6 +272,16 @@ async fn native_configuration_has_http_and_both_mcp_parity_with_live_scopes() {
             r#"{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"0"}}"#,
         ),
         ("opencode", r#"{"{env:RUNTIME_CONFIG_KEY}":{"rogue":{}}}"#),
+        (
+            "opencode",
+            r#"{"agent":{"build":{"permission":{"*":"allow"}}}}"#,
+        ),
+        ("opencode", r#"{"agent":{"build":{"tools":{"*":true}}}}"#),
+        (
+            "opencode",
+            r#"{"mode":{"build":{"permission":{"*":"allow"}}}}"#,
+        ),
+        ("opencode", r#"{"mode":{"build":{"tools":{"*":true}}}}"#),
     ] {
         let target = json!({ "provider": provider, "agentId": null });
         let (_, current) = node_management_call(
