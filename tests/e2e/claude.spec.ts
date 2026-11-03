@@ -934,6 +934,7 @@ test('a replayed proposal retains its authored request boundary after clarificat
   workspace.service.store.event(run.id, 'chat.user', 'Include the tests', { messageId: clarification, text: 'Include the tests' })
   // The recovery event has a new manager ID, but no newly authored approach.
   workspace.service.store.event(run.id, 'item.completed', '', { item: original })
+  await page.goto(workspacePath('/'))
   await authenticateWorkspace(page)
   await page.goto(workspacePath(`/chats/${chat.id}`))
   const replayedText = String(original.text)
