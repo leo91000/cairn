@@ -206,6 +206,15 @@ pub(crate) async fn operation(
             "Only read-scoped installation operations are available during a plan turn.",
         ));
     }
+    if let Some(op) = crate::capabilities::artifact_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
     if let Some(operation) = crate::capabilities::plugin_package_operation(name) {
         return operation
             .invoke(

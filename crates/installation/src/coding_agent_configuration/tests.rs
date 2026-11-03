@@ -1274,7 +1274,15 @@ async fn version_twenty_four_upgrade_preserves_profiles_and_reopens_with_native_
     drop(store);
     let connection = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
     connection
-        .execute_batch("DROP TABLE coding_agent_configurations; PRAGMA user_version=24;")
+        .execute_batch(
+            "DROP TABLE skill_source_refs;
+             DROP TABLE skill_sources;
+             DROP TABLE artifact_visibility;
+             DROP TABLE artifact_versions;
+             DROP TABLE artifacts;
+             DROP TABLE coding_agent_configurations;
+             PRAGMA user_version=24;",
+        )
         .unwrap();
     drop(connection);
     let store = Store::open(root.path()).unwrap();

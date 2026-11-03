@@ -13,6 +13,12 @@ const RESERVATION: &str = "00000000-0000-4000-8000-000000000094";
 async fn previous(root: &std::path::Path) -> Connection {
     drop(Store::open(root).unwrap());
     let mut db = Connection::open(root.join("manager.db")).unwrap();
+    // Discard A16 tables before simulating a pre-A16 database.
+    db.execute_batch(
+        "DROP TABLE skill_source_refs; DROP TABLE skill_sources;
+         DROP TABLE artifact_visibility; DROP TABLE artifact_versions; DROP TABLE artifacts;",
+    )
+    .unwrap();
     crate::placement_migration_fixture::previous_layout(&db);
     db.execute_batch("DROP TABLE records;
 CREATE TABLE records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('agentAccounts','chats','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);

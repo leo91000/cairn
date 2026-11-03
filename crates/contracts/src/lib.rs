@@ -322,3 +322,7 @@ pub use installation_settings::*;
 mod placement;
 
 pub use placement::*;
+
+mod artifacts;
+
+pub use artifacts::*;

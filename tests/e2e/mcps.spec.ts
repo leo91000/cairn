@@ -189,7 +189,13 @@ for (const pending of ['authorization', 'offer'] as const) {
         expect(closedOffers).toEqual([true])
       else
         expect(directCancelled).toBe(true)
-      expect(errors).toEqual([])
+      // WebKit reports this expected navigation-aborted request as a CORS page error.
+      const cancelledAuthorization = `/api/installations/${workspace.installationId}/direct/authorize due to access control checks.`
+      const expectedNavigationAbort = pending === 'authorization' && directCancelled
+        ? errors.filter(error => error.endsWith(cancelledAuthorization))
+        : []
+      expect(expectedNavigationAbort.length).toBeLessThanOrEqual(1)
+      expect(errors).toEqual(expectedNavigationAbort)
     }
     finally {
       authorizing.resolve()

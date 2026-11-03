@@ -75,10 +75,20 @@ compiled artifacts with the backend job. The default is `none`; this selected
 case does not replace native-runtime or other affected specialist
 qualifications.
 
+The backend-only dispatch also runs `rust-check` in its own disposable job
+because release resolution is skipped in that mode. Keep the all-target Clippy
+build separate from the backend test build so their Cargo artifacts do not
+compete for one runner's disk budget.
+
 For a full dispatch that resolves to a reusable image, explicitly selecting
 `backend-migration` also runs the backend job and holds reuse promotion until
 the selected qualification succeeds. Leaving the choice at `none` preserves
 the existing reuse and tag paths.
+
+For a full branch qualification without writing container images or release
+tags, dispatch `ci.yaml` with `validation-only=true`. This still runs the
+applicable backend, node, native-runtime, browser and device jobs; image build,
+publish, promotion and deployment jobs are skipped.
 
 ## GitHub responsibilities
 
