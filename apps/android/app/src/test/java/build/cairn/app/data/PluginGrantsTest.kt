@@ -28,6 +28,14 @@ class PluginGrantsTest {
     private val otherPackage = "33333333-3333-4333-8333-333333333333"
 
     @Test
+    fun nestedResourceAncestryIsShownFromItsRootToTheSelectedResource() {
+        assertEquals(
+            "Team server › Channels › Support thread",
+            pluginResourcePathLabel(listOf("Channels", "Team server"), "Support thread"),
+        )
+    }
+
+    @Test
     fun whitespaceOnlyInstructionsAreNotGrantable() {
         val manifest =
             PluginManifest(

@@ -67,8 +67,10 @@ private suspend fun resolvePluginResourcePath(
                             root.resourceType,
                         )
                     )
-                (resolved.ancestors.map { it.name } + resolved.resource.name)
-                    .joinToString(" › ")
+                pluginResourcePathLabel(
+                        resolved.ancestors.map { it.name },
+                        resolved.resource.name,
+                    )
                     .also {
                         resolvedPluginResourcePaths[key] =
                             CachedPluginResourcePath(it, System.currentTimeMillis())

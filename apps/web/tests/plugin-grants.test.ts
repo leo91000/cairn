@@ -14,6 +14,7 @@ import {
   selectableResourceTypes,
   staleResourceRestrictions,
 } from '../src/plugin-grants'
+import { pluginResourcePathLabel } from '../src/plugin-resource-paths'
 
 it('caps resource roots per contribution at the backend limit while allowing removal', () => {
   expect(MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION).toBe(100)
@@ -334,6 +335,11 @@ it('offers only resource types that can restrict a declared tool, command or hoo
   ])
   expect(selectableResourceTypes(types, ['thread']).map(type => type.name)).toEqual(['server', 'channel', 'thread'])
   expect(selectableResourceTypes(types, []).map(type => type.name)).toEqual([])
+})
+
+it('formats nested resource ancestry from its root to the selected resource', () => {
+  expect(pluginResourcePathLabel([{ name: 'Channels' }, { name: 'Team server' }], 'Support thread'))
+    .toBe('Team server › Channels › Support thread')
 })
 
 it('identifies saved resource roots no longer supported by a contribution', () => {

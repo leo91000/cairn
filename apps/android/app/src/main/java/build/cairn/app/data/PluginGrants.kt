@@ -9,6 +9,9 @@ import build.cairn.contracts.PluginResourceRef
 import build.cairn.contracts.PluginResourceType
 import kotlinx.serialization.Serializable
 
+fun pluginResourcePathLabel(ancestors: List<String>, resourceName: String): String =
+    (ancestors.asReversed() + resourceName).joinToString(" › ")
+
 @Serializable
 data class PluginGrantDraft(
     val grants: List<PluginInstanceGrant> = emptyList(),
