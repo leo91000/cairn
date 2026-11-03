@@ -141,7 +141,10 @@ async fn only_the_owner_gives_access_and_members_use_only_their_agents() {
         &s,
         "POST",
         &messages,
-        json!({ "id": cairn_installation::config::id(), "text": "Review it" }),
+        json!({
+            "id": cairn_installation::config::id(),
+            "text": "Review it",
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{sent}");
@@ -160,7 +163,10 @@ async fn only_the_owner_gives_access_and_members_use_only_their_agents() {
         &s,
         "POST",
         &messages,
-        json!({ "id": cairn_installation::config::id(), "text": "Again" }),
+        json!({
+            "id": cairn_installation::config::id(),
+            "text": "Again",
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -188,8 +194,9 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
     relay_fixture::add_member(&s, MEMBER, "membership-1").await;
     let grant = format!("/api/agents/{reviewer}/accounts/{MEMBER}");
 
-    let (_, chat) = owner(&s, "POST", "/api/chats", json!({ "agentId": reviewer })).await;
-    let chat = chat["id"].as_str().unwrap().to_owned();
+    let (_, created_chat) = owner(&s, "POST", "/api/chats", json!({ "agentId": reviewer })).await;
+    let chat_revision = created_chat["revision"].as_str().unwrap().to_owned();
+    let chat = created_chat["id"].as_str().unwrap().to_owned();
     // A conversation's finished runs, which a retry would start again: its current one
     // and an earlier one, which still follows the conversation.
     let chat_run = cairn_installation::config::id();
@@ -212,7 +219,11 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
     let mut record = s.conversation_boundary(&chat).await.unwrap();
     record["runId"] = chat_run.clone().into();
     s.store.save_conversation_boundary(record).await.unwrap();
-    let settings = json!({ "name": "Review", "prompt": "Review the changes", "agentId": reviewer });
+    let settings = json!({
+        "name": "Review",
+        "prompt": "Review the changes",
+        "agentId": reviewer,
+    });
     let (_, task) = owner(&s, "POST", "/api/tasks", json!({ "settings": settings })).await;
     let run = s
         .enqueue(task["id"].as_str().unwrap(), "manual", None)
@@ -224,7 +235,17 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
         (
             "PUT",
             format!("/api/chats/{chat}/messages/{unknown}"),
-            json!({ "text": "Steer" }),
+            json!({
+                "text": "Steer",
+            }),
+        ),
+        (
+            "PUT",
+            format!("/api/chats/{chat}"),
+            json!({
+                "revision": chat_revision,
+                "title": "Renamed",
+            }),
         ),
         (
             "POST",
@@ -279,7 +300,12 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
         (
             "POST",
             format!("/api/tasks/{task_id}/state"),
-            json!({ "taskId": task_id, "revision": task["revision"], "enabled": false, "archived": true }),
+            json!({
+                "taskId": task_id,
+                "revision": task["revision"],
+                "enabled": false,
+                "archived": true,
+            }),
         ),
     ];
     for (method, path, body) in &reductions {
@@ -354,7 +380,11 @@ async fn members_manage_tasks_only_on_agents_they_can_use_and_lost_access_suspen
     // A member moves a task only between agents they can use.
     let mut moved = settings.clone();
     moved["agentId"] = MAIN_AGENT_ID.into();
-    let replace = json!({ "taskId": id, "revision": task["revision"], "settings": moved });
+    let replace = json!({
+        "taskId": id,
+        "revision": task["revision"],
+        "settings": moved,
+    });
     let (status, _) = member(&s, "PUT", &format!("/api/tasks/{id}"), replace).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
@@ -384,13 +414,21 @@ async fn members_manage_tasks_only_on_agents_they_can_use_and_lost_access_suspen
 
     // Pausing stays open to everyone; resuming, launching and editing need access.
     let state = format!("/api/tasks/{id}/state");
-    let paused =
-        json!({ "taskId": id, "revision": task.revision, "enabled": false, "archived": false });
+    let paused = json!({
+        "taskId": id,
+        "revision": task.revision,
+        "enabled": false,
+        "archived": false,
+    });
     let (status, paused) = member(&s, "POST", &state, paused).await;
     assert_eq!(status, StatusCode::OK, "{paused}");
     assert_eq!(paused["scheduleWaitReason"], SUSPENDED);
-    let resumed =
-        json!({ "taskId": id, "revision": paused["revision"], "enabled": true, "archived": false });
+    let resumed = json!({
+        "taskId": id,
+        "revision": paused["revision"],
+        "enabled": true,
+        "archived": false,
+    });
     assert_eq!(
         member(&s, "POST", &state, resumed.clone()).await.0,
         StatusCode::FORBIDDEN
@@ -442,7 +480,11 @@ async fn retries_follow_the_tasks_current_agent_and_authors_can_move_a_suspended
     let mut moved = settings.clone();
     moved["agentId"] = MAIN_AGENT_ID.into();
     let path = format!("/api/tasks/{id}");
-    let replace = json!({ "taskId": id, "revision": task["revision"], "settings": moved });
+    let replace = json!({
+        "taskId": id,
+        "revision": task["revision"],
+        "settings": moved,
+    });
     let (status, owned) = owner(&s, "PUT", &path, replace).await;
     assert_eq!(status, StatusCode::OK, "{owned}");
     assert_eq!(owned["scheduleWaitReason"], SUSPENDED);
@@ -454,12 +496,20 @@ async fn retries_follow_the_tasks_current_agent_and_authors_can_move_a_suspended
     // Pausing it with the full settings stays open, like the state command.
     let mut paused = moved.clone();
     paused["enabled"] = false.into();
-    let replace = json!({ "taskId": id, "revision": owned["revision"], "settings": paused });
+    let replace = json!({
+        "taskId": id,
+        "revision": owned["revision"],
+        "settings": paused,
+    });
     let (status, owned) = member(&s, "PUT", &path, replace).await;
     assert_eq!(status, StatusCode::OK, "{owned}");
     let mut edited = moved.clone();
     edited["prompt"] = "Something else".into();
-    let replace = json!({ "taskId": id, "revision": owned["revision"], "settings": edited });
+    let replace = json!({
+        "taskId": id,
+        "revision": owned["revision"],
+        "settings": edited,
+    });
     assert_eq!(
         member(&s, "PUT", &path, replace).await.0,
         StatusCode::FORBIDDEN
@@ -469,7 +519,11 @@ async fn retries_follow_the_tasks_current_agent_and_authors_can_move_a_suspended
     relay_fixture::allow_member(&s, MEMBER, &writer).await;
     let mut usable = settings.clone();
     usable["agentId"] = writer.clone().into();
-    let replace = json!({ "taskId": id, "revision": owned["revision"], "settings": usable });
+    let replace = json!({
+        "taskId": id,
+        "revision": owned["revision"],
+        "settings": usable,
+    });
     let (status, moved) = member(&s, "PUT", &path, replace).await;
     assert_eq!(status, StatusCode::OK, "{moved}");
     assert!(moved["scheduleWaitReason"].is_null());
@@ -511,9 +565,13 @@ async fn merging_an_agent_never_passes_its_account_access_to_the_receiving_agent
     let (status, task) = member(&s, "POST", "/api/tasks", json!({ "settings": settings })).await;
     assert_eq!(status, StatusCode::OK, "{task}");
 
-    s.merge_agents_fixture(json!({ "sourceId": source, "targetId": destination, "confirm": true }))
-        .await
-        .unwrap();
+    s.merge_agents_fixture(json!({
+        "sourceId": source,
+        "targetId": destination,
+        "confirm": true,
+    }))
+    .await
+    .unwrap();
     assert_eq!(usable(&s).await, json!([]));
     let moved = s
         .store
@@ -557,8 +615,10 @@ async fn a_delegated_task_follows_its_requesting_conversation_until_it_is_delete
         .await
         .unwrap();
     record["runId"] = delegated_run.clone().into();
-    record["requestedBy"] =
-        json!({ "runId": cairn_installation::config::id(), "chatId": requesting["id"] });
+    record["requestedBy"] = json!({
+        "runId": cairn_installation::config::id(),
+        "chatId": requesting["id"],
+    });
     s.store.save_conversation_boundary(record).await.unwrap();
 
     let messages = format!("/api/chats/{}/messages", delegated["id"].as_str().unwrap());
@@ -566,7 +626,10 @@ async fn a_delegated_task_follows_its_requesting_conversation_until_it_is_delete
         &s,
         "POST",
         &messages,
-        json!({ "id": cairn_installation::config::id(), "text": "Continue" }),
+        json!({
+            "id": cairn_installation::config::id(),
+            "text": "Continue",
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{sent}");
@@ -594,7 +657,10 @@ async fn a_delegated_task_follows_its_requesting_conversation_until_it_is_delete
         &s,
         "POST",
         &messages,
-        json!({ "id": cairn_installation::config::id(), "text": "Again" }),
+        json!({
+            "id": cairn_installation::config::id(),
+            "text": "Again",
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -723,7 +789,10 @@ async fn a_pending_rollout_ignores_legacy_timestamp_cutoffs() {
     s.store
         .set(
             "agent-access-rollout",
-            json!({ "agentIds": [MAIN_AGENT_ID], "upgradedAt": 0 }),
+            json!({
+                "agentIds": [MAIN_AGENT_ID],
+                "upgradedAt": 0,
+            }),
             None,
         )
         .await
@@ -806,7 +875,11 @@ async fn installation_token(s: &Arc<Service>) -> String {
         .unwrap();
     let task = s
         .task_fixture(
-            json!({ "name": "Caller", "prompt": "Manage", "agentId": manager["id"] }),
+            json!({
+                "name": "Caller",
+                "prompt": "Manage",
+                "agentId": manager["id"],
+            }),
             None,
         )
         .await
@@ -856,7 +929,10 @@ async fn the_public_mcp_and_agent_tools_read_but_never_give_account_access() {
         assert_eq!(accounts(output), [MEMBER], "{listed}");
 
         for name in ["grant_agent_account", "revoke_agent_account"] {
-            let input = json!({ "agentId": reviewer, "accountId": "another-member" });
+            let input = json!({
+                "agentId": reviewer,
+                "accountId": "another-member",
+            });
             let refused = tool(&app, endpoint, token, name, input).await;
             assert!(
                 refused["result"]["isError"] == true || !refused["error"].is_null(),

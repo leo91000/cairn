@@ -440,6 +440,53 @@ class AgentEditingTest {
     }
 
     @Test
+    fun reviewListsAccountsAndHookRulesThatReceiveNewRights() {
+        val original = agent.copy(plugins = emptyList())
+        val edited = original.copy(plugins = listOf("prod"))
+        val audience =
+            AgentReviewAudience(
+                accounts = listOf("owner@example.com", "member@example.com"),
+                hookRules = emptyList(),
+            )
+
+        val line = agentReview(original, edited, resources, null, audience).last()
+
+        assertEquals(ReviewKind.Audience, line.kind)
+        assertEquals(
+            "Ces nouveaux droits s’appliquent à : owner@example.com, member@example.com. Règles de hook pouvant utiliser cet agent : aucune configurée.",
+            line.text,
+        )
+    }
+
+    @Test
+    fun reviewAudienceIncludesTheOwnerAllowedMembersAndPendingFormerMembers() {
+        val rows =
+            listOf(
+                AgentAccessRow("member", "member@example.com", known = true, allowed = true),
+                AgentAccessRow("private", "private@example.com", known = true, allowed = false),
+                AgentAccessRow("former", "Ancien membre", known = false, allowed = true),
+            )
+
+        assertEquals(
+            listOf(
+                "owner@example.com",
+                "member@example.com",
+                "Ancien membre (accès jusqu’à vérification)",
+            ),
+            agentReviewAudience("owner@example.com", rows).accounts,
+        )
+        assertEquals(
+            listOf("owner@example.com", "member@example.com", "private@example.com"),
+            agentReviewAudience(
+                    "owner@example.com",
+                    rows.filter { it.known },
+                    everyMemberHasAccess = true,
+                )
+                .accounts,
+        )
+    }
+
+    @Test
     fun reviewListsEveryRemovedGrantAndPower() {
         val granted =
             agent.copy(

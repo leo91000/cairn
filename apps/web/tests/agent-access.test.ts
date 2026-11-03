@@ -463,6 +463,21 @@ it('reviews task delegation as a power and lists its removal', () => {
   expect(reviewLines(granted, revoked, context).map(line => line.text)).toEqual(['Removed: task delegation.'])
 })
 
+it('lists the accounts and hook rules affected by widened agent rights', () => {
+  const saved = newAgentDraft()
+  const granted = structuredClone(saved)
+  granted.plugins = ['prod']
+  const lines = reviewLines(saved, granted, context, undefined, {
+    accounts: ['Installation owner', 'member@example.com'],
+    hookRules: [],
+  })
+  expect(lines.at(-1)).toEqual({
+    kind: 'audience',
+    section: 'people',
+    text: 'These new rights apply to: Installation owner, member@example.com. Hook rules that can use this agent: none configured.',
+  })
+})
+
 it('treats an exclusive reservation on a runtime without support as inactive', () => {
   const old = {
     ...gpu,

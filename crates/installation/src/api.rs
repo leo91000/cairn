@@ -313,9 +313,21 @@ async fn chat_detail(s: &Service, id: &str) -> Result<Value> {
 }
 
 async fn chat_command(s: &Arc<Service>, input: &Input, name: &str, args: Value) -> Result<Value> {
+    let member_account = input
+        .identity
+        .as_ref()
+        .filter(|identity| {
+            identity.role == crate::auth::InstallationRole::Member && identity.mcp_scopes.is_none()
+        })
+        .map(|identity| identity.account_id.clone());
     crate::capabilities::chat_operation(name)
         .expect("registered conversation command")
-        .invoke(s, args, crate::capabilities::ResumeContext::http(input)?)
+        .invoke(
+            s,
+            args,
+            crate::capabilities::ResumeContext::http(input)?,
+            member_account,
+        )
         .await
 }
 

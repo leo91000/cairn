@@ -345,13 +345,37 @@ private fun AgentPage(
                                 agentSaveBody(edited, mcpIds = mcpIds)
                             )
                         )
-                val lines =
+                var lines =
                     agentReview(
                         baseline,
                         edited,
                         resources,
                         preview,
                     )
+                if (lines.any { it.kind == ReviewKind.Power || it.kind == ReviewKind.Access }) {
+                    if (!creating) {
+                        people.load(vm, agentId)
+                        if (people.error != null || (!people.loaded && !people.outdated))
+                            error(
+                                people.error
+                                    ?: "Impossible de charger les personnes ayant accès à cet agent."
+                            )
+                    }
+                    val audience =
+                        agentReviewAudience(
+                            state.session.account?.email.orEmpty(),
+                            people.rows,
+                            everyMemberHasAccess = people.outdated,
+                        )
+                    lines =
+                        agentReview(
+                            baseline,
+                            edited,
+                            resources,
+                            preview,
+                            audience,
+                        )
+                }
                 if (needsReview(lines, preview)) {
                     val suspended = preview?.suspendedDelegations().orEmpty()
                     reapprove = preview?.preselectedReapprovals().orEmpty()
@@ -1113,6 +1137,8 @@ private fun ReviewDialog(
                                 ToneChip(PluginBadge(line.kind.label, PluginTone.OK))
                             ReviewKind.Reduction ->
                                 ToneChip(PluginBadge(line.kind.label, PluginTone.WARNING))
+                            ReviewKind.Audience ->
+                                ToneChip(PluginBadge(line.kind.label, PluginTone.ATTENTION))
                         }
                         Text(line.text, style = MaterialTheme.typography.bodyMedium)
                     }

@@ -609,6 +609,34 @@ async function requestSave() {
     }
   }
 
+  if (lines.some(line => line.kind === 'power' || line.kind === 'secret')) {
+    busy.value = true
+    try {
+      if (!isNew.value) {
+        await people.load()
+        if (people.error.value || (!people.loaded.value && !people.outdated.value))
+          throw new Error(people.error.value || 'Who can use this agent could not be loaded.')
+      }
+
+      const memberRows = people.rows.value
+        .filter(row => row.allowed || (people.outdated.value && row.known))
+        .map(row => row.known ? row.email || 'Member' : 'Former member (access ends at membership check)')
+      const audience = {
+        accounts: ['Installation owner', ...new Set(memberRows)],
+        // Hook-rule records are introduced by the later rule-engine work; this branch has none.
+        hookRules: [],
+      }
+      lines = reviewLines(saved.value, draft.value, context.value, current?.runs, audience)
+    }
+    catch (e) {
+      failed(e)
+      return
+    }
+    finally {
+      busy.value = false
+    }
+  }
+
   // Powers, secrets, interrupted work and delegations this edit suspends deserve a look; anything
   // else saves directly.
   if (needsReview(lines, current)) {

@@ -258,6 +258,7 @@ impl ChatOperation {
         s: &Arc<Service>,
         input: Value,
         context: ResumeContext,
+        member_account: Option<String>,
     ) -> Result<Value> {
         let reader = super::personal::listing_reader(&context);
         let (bearer, origin) = match context {
@@ -467,8 +468,15 @@ impl ChatOperation {
                         .chat_from_run_live(crate::validation::text(&args, "runId"), authorize)
                         .await;
                 }
-                crate::mcp_server::chat_tools::invoke(s, self.name, args, bearer.as_deref(), reader)
-                    .await
+                crate::mcp_server::chat_tools::invoke(
+                    s,
+                    self.name,
+                    args,
+                    bearer.as_deref(),
+                    reader,
+                    member_account,
+                )
+                .await
             })
             .await?;
         if matches!(

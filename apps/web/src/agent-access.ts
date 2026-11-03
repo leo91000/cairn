@@ -540,9 +540,14 @@ export function changes(saved: AgentDraft, draft: AgentDraft) {
 }
 
 export interface ReviewLine {
-  kind: 'power' | 'secret' | 'reduction'
+  kind: 'power' | 'secret' | 'reduction' | 'audience'
   text: string
   section: SectionId
+}
+
+export interface ReviewAudience {
+  accounts: string[]
+  hookRules: string[]
 }
 
 function connectionLabel(id: string, context: Context) {
@@ -576,7 +581,7 @@ export function nativeReviewNodes(draft: AgentDraft, context: Context) {
     && draft.access.nodes!.includes(node.id) && !node.nativeReviewedAgents?.includes(context.agentId ?? '')).map(node => node.id)
 }
 
-export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Context, runs = { queued: 0, running: 0 }) {
+export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Context, runs = { queued: 0, running: 0 }, audience?: ReviewAudience) {
   const lines: ReviewLine[] = []
   const node = (id: string) => nodeName(context.nodes.find(item => item.id === id), id)
   for (const id of nativeReviewNodes(draft, context))
@@ -635,6 +640,16 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     lines.push({ kind: 'reduction', section: 'projects', text: `Removed: ${removed.join(', ')}.${consequence}` })
   else if (affected)
     lines.push({ kind: 'reduction', section: 'projects', text: `Changed access.${consequence}` })
+  if (audience && lines.some(line => line.kind === 'power' || line.kind === 'secret')) {
+    const accounts = audience.accounts.join(', ')
+    const rules = audience.hookRules.length ? audience.hookRules.join(', ') : 'none configured'
+    lines.push({
+      kind: 'audience',
+      section: 'people',
+      text: `These new rights apply to: ${accounts}. Hook rules that can use this agent: ${rules}.`,
+    })
+  }
+
   return lines
 }
 

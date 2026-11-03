@@ -95,6 +95,23 @@ fun agentAccessSummary(allowed: Int): String =
         else -> "Vous et $allowed membres"
     }
 
+/** Accounts that receive a newly widened agent right, including the owner's implicit access. */
+fun agentReviewAudience(
+    owner: String,
+    rows: List<AgentAccessRow>,
+    everyMemberHasAccess: Boolean = false,
+): AgentReviewAudience {
+    val accounts = buildList {
+        add(owner.ifBlank { "Propriétaire de l’installation" })
+        rows
+            .filter { it.known && (everyMemberHasAccess || it.allowed) }
+            .forEach { add(it.email.ifBlank { "Membre" }) }
+        if (rows.any { !it.known && it.allowed }) add("Ancien membre (accès jusqu’à vérification)")
+    }
+        .distinct()
+    return AgentReviewAudience(accounts)
+}
+
 /** The overview's line: how many may use the agent, then the first members who may, by email. */
 fun agentAccessOverview(rows: List<AgentAccessRow>, limit: Int = 3): String {
     val emails = rows.filter { it.known && it.allowed }.map { it.email }

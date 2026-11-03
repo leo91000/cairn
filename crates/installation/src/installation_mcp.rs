@@ -280,6 +280,7 @@ pub(crate) async fn operation(
                 s,
                 args,
                 crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+                None,
             )
             .await;
     }

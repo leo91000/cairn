@@ -219,6 +219,17 @@ fn require_chat(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Resul
     Ok(require(uses_chat(db, identity, &chat)?, member(identity)))
 }
 
+/// Recheck a member's access in the same write transaction that accepts a message. The
+/// request preflight confirms current Beacon membership; this final local check serializes
+/// message acceptance with an owner revoking the agent grant.
+pub(crate) fn authorize_member_chat_in(db: &Db<'_>, account: &str, id: &str) -> Result<()> {
+    let identity = InstallationIdentity::trusted(InstallationRole::Member, account);
+    match require_chat(db, &identity, id)? {
+        Admission::Denied => Err(Error::forbidden(DENIED)),
+        Admission::Granted | Admission::Unrestricted => Ok(()),
+    }
+}
+
 /// A conversation's run follows its conversation; a task run follows its agent.
 fn require_run(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Result<Admission> {
     if let Some(chat) = db.conversation_for_run(id)? {
@@ -249,9 +260,8 @@ fn require_task(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Resul
 /// Read-only admission preflight for people, before dispatch, like native authority.
 /// Reductions (pause, archive, stop, cancel) and reads stay open to every member.
 /// Access allowed by a member's entry relies on a membership check started during this
-/// request, so a cached entry from an ended membership cannot serve a re-invitation. As with
-/// native authority, a change committed between this check and the command can still let
-/// that one request through.
+/// request, so a cached entry from an ended membership cannot serve a re-invitation. A chat
+/// message checks the grant again in the transaction that accepts it.
 pub(crate) async fn authorize_request(s: &Service, input: &crate::http::Input) -> Result<()> {
     let Some(identity) = input.identity.clone() else {
         return Ok(());
@@ -377,6 +387,7 @@ fn gate(
         }
         ("POST", ["chats", id, "messages"])
         | ("PUT", ["chats", id, "messages", _])
+        | ("PUT", ["chats", id])
         | ("POST", ["chats", id, "questions", _, "answer" | "cancel"])
         | (
             "POST",
@@ -869,6 +880,64 @@ mod tests {
         relay_fixture::remove_member(&s, MEMBER).await;
         relay_fixture::add_member(&s, MEMBER, "membership-2").await;
         assert_eq!(direct(&s, start).await.unwrap_err().0, 403);
+    }
+
+    #[tokio::test]
+    async fn message_acceptance_rechecks_access_after_a_revocation_race() {
+        let root = tempfile::tempdir().unwrap();
+        let s = service(&root).await;
+        relay_fixture::claimed(&s).await.unwrap();
+        let reviewer = s
+            .agent_fixture(json!({ "name": "Reviewer" }), None)
+            .await
+            .unwrap();
+        let reviewer = text(&reviewer, "id").to_owned();
+        relay_fixture::allow_member(&s, MEMBER, &reviewer).await;
+        let chat = crate::config::id();
+        let (chat_id, member_identity) = (
+            chat.clone(),
+            InstallationIdentity::trusted(InstallationRole::Member, MEMBER),
+        );
+        s.store
+            .transaction(move |db| {
+                db.save_conversation(&serde_json::from_value(json!({
+                    "id": chat_id.clone(),
+                    "agentId": reviewer,
+                    "lifecycle": "active",
+                }))?)?;
+                assert!(matches!(
+                    gate(
+                        db,
+                        &member_identity,
+                        "POST",
+                        &format!("/api/chats/{chat_id}/messages"),
+                        &json!({})
+                    )?,
+                    Admission::Granted
+                ));
+                authorize_member_chat_in(db, MEMBER, &chat_id)
+            })
+            .await
+            .unwrap();
+
+        // The preflight has succeeded. A separately committed revocation wins the order
+        // before the message transaction, so the final transaction check must refuse it.
+        let (account, chat_id) = (MEMBER.to_owned(), chat.clone());
+        s.store
+            .transaction(move |db| {
+                db.0.execute(
+                    "DELETE FROM agent_account_access WHERE account_id=?1",
+                    [account],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let result = s
+            .store
+            .transaction(move |db| authorize_member_chat_in(db, MEMBER, &chat_id))
+            .await;
+        assert_eq!(result.unwrap_err().status, 403);
     }
 
     #[tokio::test]

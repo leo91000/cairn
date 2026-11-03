@@ -245,6 +245,7 @@ pub(crate) async fn invoke(
     args: Value,
     bearer: Option<&str>,
     reader: Option<String>,
+    member_account: Option<String>,
 ) -> Result<Value> {
     let origin = crate::native::policy::origin();
     let control = matches!(
@@ -276,6 +277,18 @@ pub(crate) async fn invoke(
         }
         Ok(())
     });
+    let authorize = if name == "send_chat_message" {
+        if let Some(account) = member_account {
+            let chat_id = text(&args, "chatId").to_owned();
+            authorize.with_guard(move |db: &Db<'_>| {
+                crate::agent_access::authorize_member_chat_in(db, &account, &chat_id)
+            })
+        } else {
+            authorize
+        }
+    } else {
+        authorize
+    };
     let commit_authority = {
         let source = origin.clone();
         authorize
