@@ -1334,3 +1334,96 @@ async fn plan_delivery_flag_is_hydrated_without_changing_the_stored_card_or_priv
     let reopened = Store::open(root.path()).unwrap();
     assert!(cards(&reopened, CODEX).await.iter().any(|entry| matches!(&entry.content, TimelineContent::UserMessage { plan: true, message_id, .. } if message_id.as_deref() == Some("protected-attachment"))));
 }
+
+#[tokio::test]
+async fn legacy_plan_approval_uses_run_wide_request_state_in_live_and_history_pages() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let run = "00000000-0000-4000-8000-0000000000a5";
+    store
+        .transaction(move |db| {
+            let state = serde_json::json!({
+                "id": run,
+                "taskId": "legacy-plan-approval",
+                "status": "succeeded",
+            });
+            db.admit_run(&state, None, &serde_json::json!({}), None)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let request = serde_json::json!({"messageId":"request-a","text":"Plan this"});
+    for _ in 0..2 {
+        store
+            .event(run, &EventKind::ChatUser, "Plan this", Some(&request))
+            .await
+            .unwrap();
+    }
+    store
+        .event(
+            run,
+            &EventKind::ItemCompleted,
+            "Approach",
+            Some(&serde_json::json!({"item":{"id":"plan-a","type":"proposed_plan","text":"Approach"}})),
+        )
+        .await
+        .unwrap();
+
+    let first = store
+        .read(move |db| Ok(db.event_page(run, 0, 10)?))
+        .await
+        .unwrap();
+    let request_boundary = first[1].id;
+    let single_request_plan = first.last().unwrap();
+    assert_eq!(single_request_plan.legacy_plan_approval, Some(true));
+
+    store
+        .event(
+            run,
+            &EventKind::ChatUser,
+            "Another request",
+            Some(&serde_json::json!({"messageId":"request-b","text":"Another request"})),
+        )
+        .await
+        .unwrap();
+    store
+        .event(
+            run,
+            &EventKind::ItemCompleted,
+            "Revised approach",
+            Some(&serde_json::json!({"item":{"id":"plan-b","type":"proposed_plan","text":"Revised approach"}})),
+        )
+        .await
+        .unwrap();
+
+    let live = store
+        .read(move |db| Ok(db.live_events_between(run, request_boundary, i64::MAX)?.0))
+        .await
+        .unwrap();
+    let paged_plan = live.last().unwrap();
+    assert_eq!(paged_plan.kind, EventKind::ItemCompleted);
+    assert_eq!(paged_plan.legacy_plan_approval, Some(false));
+
+    let event_page = store
+        .read(move |db| Ok(db.event_page(run, request_boundary, 10)?))
+        .await
+        .unwrap();
+    assert_eq!(event_page.last().unwrap().legacy_plan_approval, Some(false));
+
+    let history = store
+        .read(move |db| Ok(db.events_before(run, i64::MAX)?.0))
+        .await
+        .unwrap();
+    let historical_plan = history
+        .iter()
+        .find(|event| {
+            event.payload.as_ref().is_some_and(|payload| {
+                serde_json::from_str::<serde_json::Value>(payload.get())
+                    .ok()
+                    .and_then(|payload| payload.pointer("/item/id").cloned())
+                    == Some(serde_json::json!("plan-b"))
+            })
+        })
+        .unwrap();
+    assert_eq!(historical_plan.legacy_plan_approval, Some(false));
+}

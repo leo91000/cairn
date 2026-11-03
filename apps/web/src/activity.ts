@@ -194,13 +194,18 @@ export function proposedPlanApproval(events: RunEvent[], cards: TimelineEntry[] 
   let latest: RunEvent | undefined
   let lastRequest: RunEvent | undefined
   for (const event of events) {
-    if (event.type === 'chat.user' && (!lastRequest || event.id > lastRequest.id))
+    if (event.type === 'chat.user' && (!lastRequest || event.id > lastRequest.id)) {
       lastRequest = event
-    if (!['item.started', 'item.updated', 'item.completed'].includes(event.type))
+    }
+
+    if (!['item.started', 'item.updated', 'item.completed'].includes(event.type)) {
       continue
+    }
+
     const item = record(record(event.payload).item)
-    if (item.type === 'proposed_plan' && !text(item.parent_id) && (!latest || event.id > latest.id))
+    if (item.type === 'proposed_plan' && !text(item.parent_id) && (!latest || event.id > latest.id)) {
       latest = event
+    }
   }
 
   const requestCard = cards.filter(card => card.content.kind === 'userMessage').sort((a, b) => b.source - a.source)[0]
@@ -208,36 +213,20 @@ export function proposedPlanApproval(events: RunEvent[], cards: TimelineEntry[] 
   const requestId = requestCard?.source === requestSource && requestCard.content.kind === 'userMessage'
     ? requestCard.content.messageId
     : record(lastRequest?.payload).messageId
+
   if (!latest || latest.type !== 'item.completed' || latest.id <= requestSource)
     return undefined
+
   const item = record(record(latest.payload).item)
   if (!text(item.text).trim())
     return undefined
-  if (!('request_id' in item)) {
-    const requests = new Set<string>()
-    for (const event of events) {
-      if (event.runId !== latest.runId || event.type !== 'chat.user')
-        continue
-      const messageId = text(record(event.payload).messageId)
-      if (messageId)
-        requests.add(`message:${messageId}`)
-      else
-        requests.add(`source:${event.id}`)
-    }
-    for (const card of cards) {
-      if (card.runId !== latest.runId || card.content.kind !== 'userMessage')
-        continue
-      const messageId = text(card.content.messageId)
-      if (messageId)
-        requests.add(`message:${messageId}`)
-      else
-        requests.add(`source:${card.source}`)
-    }
-    if (requests.size !== 1)
-      return undefined
-  }
+
+  if (!('request_id' in item) && latest.legacyPlanApproval !== true)
+    return undefined
+
   if ('request_id' in item && (!text(item.request_id) || (requestSource >= 0 && text(item.request_id) !== requestId)))
     return undefined
+
   return `${latest.runId}:${latest.id}`
 }
 

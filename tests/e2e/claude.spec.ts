@@ -936,7 +936,11 @@ test('a replayed proposal retains its authored request boundary after clarificat
   workspace.service.store.event(run.id, 'item.completed', '', { item: original })
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
-  await expect(page.getByTestId('proposed-plan')).toBeVisible()
+  const replayedText = String(original.text)
+  const originalProposals = page.getByTestId('proposed-plan').filter({ hasText: replayedText })
+  await expect(originalProposals).toHaveCount(2)
+  await expect(originalProposals.nth(0)).toBeVisible()
+  await expect(originalProposals.nth(1)).toBeVisible()
   await expect(page.getByRole('button', { name: 'Implement', exact: true })).toHaveCount(0)
   workspace.service.store.event(run.id, 'item.completed', '', {
     item: {
@@ -968,16 +972,22 @@ test('a proposal completed after steering remains implementable across history f
   })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
   const run = (await workspace.api(`/api/chats/${chat.id}`)).run
+  const clarification = crypto.randomUUID()
   workspace.service.store.event(run.id, 'item.started', '', {
     item: { id: 'clarified-plan', type: 'proposed_plan', text: 'Initial revision' },
   })
   workspace.service.store.event(run.id, 'chat.user', 'Include the tests', {
-    messageId: crypto.randomUUID(),
+    messageId: clarification,
     text: 'Include the tests',
     plan: true,
   })
   workspace.service.store.event(run.id, 'item.completed', '', {
-    item: { id: 'clarified-plan', type: 'proposed_plan', text: 'Clarified plan including tests' },
+    item: {
+      id: 'clarified-plan',
+      type: 'proposed_plan',
+      text: 'Clarified plan including tests',
+      request_id: clarification,
+    },
   })
   const completion = Math.max(...workspace.service.store.events(run.id).filter(event => event.type === 'item.completed').map(event => event.id))
   await page.goto(workspacePath(`/chats/${chat.id}`))

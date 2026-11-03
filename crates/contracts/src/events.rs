@@ -31,6 +31,11 @@ pub struct RunEvent {
     pub display_id: Option<i64>,
     #[serde(default)]
     pub run_id: String,
+    /// Run-wide legacy approval eligibility, derived when an old root plan is read.
+    /// This is absent for authored request boundaries and non-plan events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "boolean", optional)]
+    pub legacy_plan_approval: Option<bool>,
     /// The timeline presents this event. Clients render it only through its
     /// card and read it as a boundary of families that are not converted yet.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -279,5 +284,18 @@ mod tests {
         for value in corpus["invalidEvents"].as_array().unwrap() {
             assert!(serde_json::from_value::<RunEvent>(value.clone()).is_err());
         }
+
+        let legacy_plan = serde_json::json!({
+            "id": 5,
+            "createdAt": 5,
+            "type": "item.completed",
+            "text": "Approach",
+            "runId": "00000000-0000-4000-8000-000000000001",
+            "legacyPlanApproval": true,
+            "payload": {"item": {"id": "plan", "type": "proposed_plan", "text": "Approach"}}
+        });
+        let event: RunEvent = serde_json::from_value(legacy_plan.clone()).unwrap();
+        assert_eq!(event.legacy_plan_approval, Some(true));
+        assert_eq!(serde_json::to_value(event).unwrap(), legacy_plan);
     }
 }

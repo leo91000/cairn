@@ -96,7 +96,8 @@ class SubagentsTest {
                 if (parent != null) put("parent_id", parent)
             }
         val started = proposed("item.started", "Draft approach")
-        val completed = proposed("item.completed", "Reviewed approach")
+        val completed =
+            proposed("item.completed", "Reviewed approach").copy(legacyPlanApproval = true)
         val replay = completed.copy(id = ++serial)
         val child = proposed("item.completed", "Child approach", "Research")
         val initial = timelineEntries(listOf(started), chat = true).single { it.proposal }
@@ -151,34 +152,13 @@ class SubagentsTest {
                 put("type", "proposed_plan")
                 put("text", "Reviewed approach")
             }
-        val first = user("request-a")
         val second = user("request-b")
-        val ambiguous = legacyProposal()
-        assertNull(proposedPlanApproval(listOf(first, second, ambiguous)))
-
-        val requestCard =
-            TimelineEntry(
-                attempt = 0,
-                content =
-                    TimelineContent.A(
-                        attachments = emptyList(),
-                        messageId = "request-b",
-                        sentAt = 2,
-                        text = "Second request",
-                    ),
-                createdAt = 2,
-                id = "request-b",
-                position = 2,
-                revision = 2,
-                runId = "run",
-                source = 2,
-                turn = 0,
-                updatedAt = 2,
-            )
-        val unambiguous = legacyProposal()
+        val ambiguous = legacyProposal().copy(legacyPlanApproval = false)
+        assertNull(proposedPlanApproval(listOf(second, ambiguous)))
+        val unambiguous = legacyProposal().copy(legacyPlanApproval = true)
         assertEquals(
             "run:${unambiguous.id}",
-            proposedPlanApproval(listOf(second, unambiguous), listOf(requestCard)),
+            proposedPlanApproval(listOf(unambiguous)),
         )
     }
 
@@ -196,7 +176,7 @@ class SubagentsTest {
                 put("id", "plan")
                 put("type", "proposed_plan")
                 put("text", "Clarified approach")
-            }
+            }.copy(legacyPlanApproval = true)
         assertEquals("run:${completed.id}", proposedPlanApproval(listOf(steering, completed)))
         assertEquals(
             "run:${completed.id}",

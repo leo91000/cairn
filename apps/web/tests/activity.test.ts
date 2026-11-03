@@ -283,6 +283,7 @@ describe('conversation activity', () => {
       createdAt: id,
       type,
       text: '',
+      legacyPlanApproval: true,
       payload: { item: { id: name, type: 'proposed_plan', text: content } },
     })
     const completed = proposal(10, 'item.completed', 'old', 'Reviewed')
@@ -342,6 +343,7 @@ describe('conversation activity', () => {
       createdAt: 3,
       type: 'item.completed',
       text: '',
+      legacyPlanApproval: false,
       payload: { item: { id: 'plan', type: 'proposed_plan', text: 'Reviewed approach' } },
     }
     const template = codex.entries.find(card => card.content.kind === 'userMessage')!
@@ -355,8 +357,10 @@ describe('conversation activity', () => {
     expect(
       proposedPlanApproval([user(1, 'request-a'), user(2, 'request-b'), legacyProposal], [latestCard]),
     ).toBeUndefined()
-    // A single historical request is unambiguous; its event and timeline card are one request.
-    expect(proposedPlanApproval([user(2, 'request-b'), legacyProposal], [latestCard])).toBe('run:3')
+    // The loaded slice looks unambiguous, but only the server's run-wide decision may approve it.
+    expect(proposedPlanApproval([user(2, 'request-b'), legacyProposal], [latestCard])).toBeUndefined()
+    const serverApproved = { ...legacyProposal, id: 4, legacyPlanApproval: true }
+    expect(proposedPlanApproval([serverApproved])).toBe('run:4')
   })
   it('approves completion after steering independently of display anchoring and page loading', () => {
     const started: RunEvent = {
@@ -379,6 +383,7 @@ describe('conversation activity', () => {
       id: 12,
       createdAt: 12,
       type: 'item.completed',
+      legacyPlanApproval: true,
       payload: { item: { id: 'plan', type: 'proposed_plan', text: 'Clarified plan' } },
     }
     expect(proposedPlanApproval([steering, completed])).toBe('run:12')

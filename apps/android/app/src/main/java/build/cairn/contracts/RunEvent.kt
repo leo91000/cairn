@@ -16,6 +16,8 @@ data class RunEvent(
     val runId: String = "",
     val text: String,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val legacyPlanApproval: Boolean? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val timeline: Boolean? = null,
     val type: String,
 ) {

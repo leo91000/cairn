@@ -123,6 +123,7 @@ abstract class PlanTurnCases {
                     createdAt = 1789315189000,
                     type = "item.completed",
                     text = "",
+                    legacyPlanApproval = true,
                     payload =
                         buildJsonObject {
                             put(
@@ -569,6 +570,7 @@ abstract class PlanTurnCases {
                         createdAt = 1789315191000,
                         type = "item.completed",
                         text = "",
+                        legacyPlanApproval = true,
                         payload =
                             buildJsonObject {
                                 put(
