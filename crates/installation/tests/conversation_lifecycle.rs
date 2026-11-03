@@ -2,7 +2,6 @@ use crate::common::run_fixture::{DbRunFixture, RunFixture};
 use cairn_contracts::EventKind;
 use common::account_fixture::AccountFixtures;
 use common::node_fixture::*;
-use common::run_fixture::*;
 
 mod common;
 
