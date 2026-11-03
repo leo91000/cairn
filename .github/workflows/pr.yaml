@@ -83,7 +83,7 @@ jobs:
       - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
       - run: pnpm validate:pr android
   browser:
-    name: browser (same-provider resume)
+    name: browser (same-provider resume and deliverables)
     needs: scope
     if: needs.scope.outputs.browser == 'true'
     runs-on: ubuntu-latest
@@ -140,6 +140,9 @@ jobs:
       - name: Run the saved-chat resume journey
         timeout-minutes: 10
         run: pnpm test:e2e --project=journeys-chats tests/e2e/chats.spec.ts --grep 'same-provider quota resume' --workers=1 --fail-on-flaky-tests
+      - name: Run deliverable preview and sharing journeys
+        timeout-minutes: 10
+        run: pnpm test:e2e deliverables.spec.ts skill-bundles.spec.ts beacon-sharing.spec.ts beacon-installations.spec.ts mcps.spec.ts --workers=2 --retries=0 --fail-on-flaky-tests --trace=on
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
