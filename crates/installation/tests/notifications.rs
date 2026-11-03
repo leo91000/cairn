@@ -37,7 +37,12 @@ async fn pending_question(s: &Arc<Service>) -> (String, String) {
     s.question_receive(
         &run,
         json!({
-            "id": question, "blocking": true, "fields": [{ "id": "answer", "title": "Which?" }],
+            "id": question,
+            "blocking": true,
+            "fields": [{
+                "id": "answer",
+                "title": "Which?",
+            }],
         }),
     )
     .await

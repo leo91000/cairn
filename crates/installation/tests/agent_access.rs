@@ -206,7 +206,6 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
     let grant = format!("/api/agents/{reviewer}/accounts/{MEMBER}");
 
     let (_, created_chat) = owner(&s, "POST", "/api/chats", json!({ "agentId": reviewer })).await;
-    let chat_revision = created_chat["revision"].as_str().unwrap().to_owned();
     let chat = created_chat["id"].as_str().unwrap().to_owned();
     // A conversation's finished runs, which a retry would start again: its current one
     // and an earlier one, which still follows the conversation.
@@ -229,7 +228,8 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
     }
     let mut record = s.conversation_boundary(&chat).await.unwrap();
     record["runId"] = chat_run.clone().into();
-    s.store.save_conversation_boundary(record).await.unwrap();
+    let updated_chat = s.store.save_conversation_boundary(record).await.unwrap();
+    let chat_revision = updated_chat["revision"].as_str().unwrap().to_owned();
     let settings = json!({
         "name": "Review",
         "prompt": "Review the changes",

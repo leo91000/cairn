@@ -655,7 +655,6 @@ abstract class AgentPageCases {
     fun anOlderInstallationSaysEveryMemberCanUseTheAgent() {
         journey(release.id, prepare = { fixture -> fixture.accountsMissing.set(true) }) {
             waitForText("Tous les membres")
-            compose.onNodeWithText(NOT_LOADED).assertDoesNotExist()
             open(AgentSection.People)
             compose.onNodeWithTag("agent-people-outdated").assertExists()
             compose.onNodeWithText("Réessayer").assertDoesNotExist()

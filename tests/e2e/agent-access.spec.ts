@@ -384,6 +384,7 @@ test('agents start unlimited and retain an optional limit after saving', async (
 })
 
 test('the privilege review names every account that can use the agent', async ({ page, workspace }, testInfo) => {
+  await useRelayForHttpMocks(page)
   await signIn(page)
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Shared agent' })
   const memberId = 'a0e2e55c-d22b-4fc2-b6dc-ed917663ac16'
