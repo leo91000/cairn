@@ -3,6 +3,8 @@ mod exclusive;
 #[cfg(test)]
 mod exclusive_tests;
 mod health;
+#[cfg(test)]
+mod terminal_tests;
 
 use super::{atomic_write, block, bootstrap, disk, mode, systemd, workspace};
 use crate::runner::exclusive::{Ledger, Reservations};
@@ -24,6 +26,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bootstrap::Phase;
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -41,6 +44,20 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_PLAN: u64 = 8_000_000;
 const MAX_LOG: u64 = 64 * 1024 * 1024;
+const MAX_TERMINAL_METADATA: u64 = 128;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum LogPurpose {
+    Execution,
+    Diagnostic,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TerminalMetadata {
+    reason: crate::runner::TerminalReason,
+}
+
 const DISK_RELEASE_WAIT: Duration = Duration::from_secs(120);
 
 const DISK_WAIT_TIMEOUT: &str =
@@ -161,14 +178,23 @@ fn completion_status(previous: i32, completion: block::Completion) -> (i32, bool
     )
 }
 
-fn exit_record(code: i32, finalization_failed: bool) -> String {
+fn exit_record(
+    code: i32,
+    finalization_failed: bool,
+    terminal_reason: Option<crate::runner::TerminalReason>,
+) -> String {
     if finalization_failed {
-        json!({ "StatusCode": code, "FinalizationFailed": true }).to_string()
-    } else {
-        // This function is called for a healthy final write only after the
-        // workload, mount ownership and suspension accounting have drained.
-        json!({ "StatusCode": code, "PhysicalFinalized": true }).to_string()
+        return json!({ "StatusCode": code, "FinalizationFailed": true }).to_string();
     }
+    // This function is called for a healthy final write only after the
+    // workload, mount ownership and suspension accounting have drained.
+    let mut record = json!({ "StatusCode": code, "PhysicalFinalized": true });
+    if code == crate::runner::CONTROLLER_FAILED
+        && let Some(reason) = terminal_reason
+    {
+        record["TerminalReason"] = json!(reason);
+    }
+    record.to_string()
 }
 
 async fn preserve_interrupted_exit(marker: &std::path::Path) -> Result<()> {
@@ -522,14 +548,7 @@ impl Controller {
                 // volume can be released to a following attempt.
                 let _ = protection.await;
             }
-            let mut code = match result {
-                Ok(code) => code,
-                Err(error) => {
-                    let message = format!("Native execution failed: {}\n", error.message);
-                    let _ = controller.append(&id, true, message.as_bytes()).await;
-                    crate::runner::CONTROLLER_FAILED
-                }
-            };
+            let mut code = controller.execution_status(&id, result).await;
             let mut finalization_failed = false;
             // Deliver the result path consumed by the node connector.
             let result = root.join("data/output/result.md");
@@ -574,7 +593,7 @@ impl Controller {
                                         attempt = id,
                                         "Native filesystem could not be flushed; the durable crash prefix was retained"
                                     );
-                                    let exit = exit_record(code, true);
+                                    let exit = exit_record(code, true, None);
                                     if !matches!(
                                         tokio::time::timeout(
                                             Duration::from_secs(1),
@@ -626,7 +645,8 @@ impl Controller {
             }
             // The active marker must survive until suspension accounting is
             // finalized, so recovery can close it after any controller crash.
-            let exit = exit_record(code, finalization_failed);
+            let terminal_reason = controller.terminal_reason(&id).await;
+            let exit = exit_record(code, finalization_failed, terminal_reason);
             let mut retry_delay = Duration::from_secs(1);
             loop {
                 match crate::runner::write_final_result(
@@ -679,14 +699,83 @@ impl Controller {
         }
     }
 
-    async fn append(&self, id: &str, stderr: bool, bytes: &[u8]) -> Result<()> {
+    async fn execution_status(&self, id: &str, result: Result<i32>) -> i32 {
+        match result {
+            Ok(code) => code,
+            Err(error) => {
+                let message = format!("Native execution failed: {}\n", error.message);
+                let _ = self
+                    .append(id, true, message.as_bytes(), LogPurpose::Diagnostic)
+                    .await;
+                crate::runner::CONTROLLER_FAILED
+            }
+        }
+    }
+
+    /// This file belongs to the root-private controller state, outside the
+    /// child's log and filesystem. Never decode an arbitrary error or payload.
+    async fn terminal_reason(&self, id: &str) -> Option<crate::runner::TerminalReason> {
+        let file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(self.file(id, "terminal"))
+            .await
+            .ok()?;
+        let metadata = file.metadata().await.ok()?;
+        if !metadata.is_file() || metadata.len() > MAX_TERMINAL_METADATA {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_TERMINAL_METADATA + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .ok()?;
+        if bytes.len() as u64 > MAX_TERMINAL_METADATA {
+            return None;
+        }
+        serde_json::from_slice::<TerminalMetadata>(&bytes)
+            .ok()
+            .map(|value| value.reason)
+    }
+
+    async fn record_terminal_reason(
+        &self,
+        id: &str,
+        reason: crate::runner::TerminalReason,
+    ) -> Result<()> {
+        if self.terminal_reason(id).await == Some(reason) {
+            return Ok(());
+        }
+        let metadata = serde_json::to_vec(&TerminalMetadata { reason })?;
+        atomic_write(&self.file(id, "terminal"), &metadata).await
+    }
+
+    async fn append(
+        &self,
+        id: &str,
+        stderr: bool,
+        bytes: &[u8],
+        purpose: LogPurpose,
+    ) -> Result<()> {
         let _log = self.log_lock.lock().await;
         let mut file = tokio::fs::OpenOptions::new()
             .append(true)
             .open(self.file(id, "log"))
             .await?;
         if file.metadata().await?.len() > MAX_LOG {
-            return Err(Error::bad("Native output exceeded its bounded log budget."));
+            let reason = crate::runner::TerminalReason::NativeOutputLimit;
+            // A failed best-effort diagnostic cannot become the initiating cause.
+            // One fixed metadata write at an execution guard, never per frame.
+            if purpose == LogPurpose::Execution
+                && let Err(error) = self.record_terminal_reason(id, reason).await
+            {
+                tracing::warn!(
+                    status = error.status,
+                    "Native terminal reason could not be saved"
+                );
+            }
+            // A metadata I/O failure must not replace the original budget error.
+            return Err(Error::bad(reason.message()));
         }
         wire::write(
             &mut file,
@@ -713,7 +802,8 @@ impl Controller {
             if count == 0 {
                 return Ok(());
             }
-            self.append(id, stderr, &buffer[..count]).await?;
+            self.append(id, stderr, &buffer[..count], LogPurpose::Execution)
+                .await?;
         }
     }
 
@@ -812,6 +902,7 @@ impl Controller {
                                 id,
                                 true,
                                 b"Waiting for previous native disk ownership to be released.\n",
+                                LogPurpose::Diagnostic,
                             )
                             .await;
                         reported = true;
@@ -901,7 +992,9 @@ impl Controller {
             tracing::warn!(attempt = id, %error, "Could not persist native stop reason");
         }
         let message = format!("Native controller stopping workload: {details}\n");
-        let _ = self.append(id, true, message.as_bytes()).await;
+        let _ = self
+            .append(id, true, message.as_bytes(), LogPurpose::Diagnostic)
+            .await;
     }
 
     async fn execute(
@@ -1283,8 +1376,13 @@ impl Controller {
                 "capacity": { "capturedAt": crate::config::now(), "workspaceBytes": workspace, "temporaryBytes": temporary,
                     "allowanceBytes": allowance, "filesystemBytes": filesystem },
             });
-            self.append(id, false, format!("{event}\n").as_bytes())
-                .await?;
+            self.append(
+                id,
+                false,
+                format!("{event}\n").as_bytes(),
+                LogPurpose::Execution,
+            )
+            .await?;
         }
         if negotiated
             && allowance > filesystem
@@ -2177,7 +2275,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                             .to_string_lossy()
                             .into_owned();
                         uuid(&id)?;
-                        for extension in ["log", "lease"] {
+                        for extension in ["log", "lease", "terminal"] {
                             let _ = tokio::fs::remove_file(controller.file(&id, extension)).await;
                         }
                         let _ = tokio::fs::remove_file(
@@ -2514,8 +2612,55 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Real output guard, completion-error branch and authenticated wait/client.
+    /// Sparse bytes model an exhausted journal without storing child payloads.
+    pub(crate) async fn output_limit_completion(attempt: &str) -> crate::runner::ControllerResult {
+        let (_root, controller) = fixture().await;
+        let log = controller.file(attempt, "log");
+        let file = tokio::fs::File::create(&log).await.unwrap();
+        file.set_len(MAX_LOG + 1).await.unwrap();
+        drop(file);
+        let output = b"{\"type\":\"turn.started\"}\n";
+        let result = controller.output(attempt, false, output.as_slice()).await;
+        let error = result.as_ref().unwrap_err();
+        assert_eq!(error.status, 400);
+        assert_eq!(
+            error.message,
+            "Native output exceeded its bounded log budget."
+        );
+        let code = controller
+            .execution_status(attempt, result.map(|()| 0))
+            .await;
+        let terminal = tokio::fs::read(controller.file(attempt, "terminal"))
+            .await
+            .unwrap();
+        assert_eq!(terminal, br#"{"reason":"native_output_limit"}"#);
+        assert!(terminal.len() as u64 <= MAX_TERMINAL_METADATA);
+        assert_eq!(code, crate::runner::CONTROLLER_FAILED);
+        assert_eq!(tokio::fs::metadata(log).await.unwrap().len(), MAX_LOG + 1);
+        atomic_write(
+            &controller.file(attempt, "exit"),
+            exit_record(code, false, controller.terminal_reason(attempt).await).as_bytes(),
+        )
+        .await
+        .unwrap();
+        let router = Router::new().fallback(any(handler)).with_state(controller);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let url = format!("http://{address}/runs/{attempt}");
+        let http = reqwest::Client::new();
+        let unauthorized = http.post(format!("{url}/wait")).send().await.unwrap();
+        assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+        let result =
+            crate::runner::wait_for_exit(&http, &url, "synthetic-private-controller-token").await;
+        server.abort();
+        let _ = server.await;
+        result.unwrap()
+    }
 
     #[tokio::test]
     async fn stopped_snapshot_tags_a_missing_native_journal() {
@@ -3888,7 +4033,7 @@ mod tests {
         let (_fixture, controller) = fixture().await;
         let attempt = crate::config::id();
         let (code, failed) = completion_status(1, block::Completion::FailedFlush);
-        let record = exit_record(code, failed);
+        let record = exit_record(code, failed, None);
         controller.active.lock().await.insert(
             attempt.clone(),
             Attempt {
@@ -3986,7 +4131,7 @@ mod tests {
         }
         let (code, failed) = completion_status(1, block::Completion::Flushed);
         assert_eq!(
-            serde_json::from_str::<Value>(&exit_record(code, failed)).unwrap(),
+            serde_json::from_str::<Value>(&exit_record(code, failed, None)).unwrap(),
             json!({ "StatusCode": 1, "PhysicalFinalized": true })
         );
     }

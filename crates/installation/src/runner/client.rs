@@ -263,6 +263,21 @@ async fn collect_completion<T>(
     }
 }
 
+/// Closed, payload-free reasons issued only by an authenticated controller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalReason {
+    NativeOutputLimit,
+}
+
+impl TerminalReason {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::NativeOutputLimit => "Native output exceeded its bounded log budget.",
+        }
+    }
+}
+
 /// Read only the terminal result of this exact attempt. Both controller backends
 /// publish it after finalization and physical ownership release.
 #[derive(Clone, Copy, Debug)]
@@ -270,6 +285,7 @@ pub(crate) struct ControllerResult {
     pub code: i32,
     pub finalization_failed: bool,
     pub physical_finalized: bool,
+    pub terminal_reason: Option<TerminalReason>,
 }
 
 pub(crate) async fn wait_for_exit(
@@ -297,11 +313,18 @@ pub(crate) async fn wait_for_exit(
         .ok_or_else(|| Error::bad("Invalid execution exit status."))?;
     let finalization_failed =
         value["FinalizationFailed"] == true && code == super::CONTROLLER_FAILED;
+    let physical_finalized =
+        value["PhysicalFinalized"] == true && value["FinalizationFailed"] != true;
+    let terminal_reason = if code == super::CONTROLLER_FAILED && physical_finalized {
+        serde_json::from_value(value["TerminalReason"].clone()).ok()
+    } else {
+        None
+    };
     Ok(ControllerResult {
         code,
         finalization_failed,
-        physical_finalized: value["PhysicalFinalized"] == true
-            && value["FinalizationFailed"] != true,
+        physical_finalized,
+        terminal_reason,
     })
 }
 
@@ -644,6 +667,101 @@ mod tests {
 #[cfg(test)]
 mod physical_result_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn terminal_reason_requires_a_closed_value_and_failed_physically_finalized_status() {
+        use axum::{Router, routing::post};
+        for (value, expected) in [
+            (
+                json!({
+                    "StatusCode": 70,
+                    "PhysicalFinalized": true,
+                    "TerminalReason": "native_output_limit",
+                    "futureField": true
+                }),
+                Some(TerminalReason::NativeOutputLimit),
+            ),
+            (
+                json!({
+                    "StatusCode": 70,
+                    "PhysicalFinalized": true
+                }),
+                None,
+            ),
+            (
+                json!({
+                    "StatusCode": 70,
+                    "PhysicalFinalized": true,
+                    "TerminalReason": "future_reason"
+                }),
+                None,
+            ),
+            (
+                json!({
+                    "StatusCode": 70,
+                    "PhysicalFinalized": true,
+                    "TerminalReason": {
+                        "reason": "native_output_limit"
+                    }
+                }),
+                None,
+            ),
+            (
+                json!({
+                    "StatusCode": 70,
+                    "TerminalReason": "native_output_limit"
+                }),
+                None,
+            ),
+            (
+                json!({
+                    "StatusCode": 0,
+                    "PhysicalFinalized": true,
+                    "TerminalReason": "native_output_limit"
+                }),
+                None,
+            ),
+            (
+                json!({
+                    "StatusCode": 143,
+                    "PhysicalFinalized": true,
+                    "TerminalReason": "native_output_limit"
+                }),
+                None,
+            ),
+            (
+                json!({
+                    "StatusCode": 70,
+                    "PhysicalFinalized": true,
+                    "FinalizationFailed": true,
+                    "TerminalReason": "native_output_limit"
+                }),
+                None,
+            ),
+        ] {
+            let code = value["StatusCode"].as_i64().unwrap() as i32;
+            let app = Router::new().route(
+                "/wait",
+                post(move || {
+                    let value = value.clone();
+                    async move { axum::Json(value) }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let result = wait_for_exit(
+                &reqwest::Client::new(),
+                &format!("http://{address}"),
+                "fixture",
+            )
+            .await;
+            server.abort();
+            let result = result.unwrap();
+            assert_eq!(result.code, code);
+            assert_eq!(result.terminal_reason, expected);
+        }
+    }
 
     #[tokio::test]
     async fn exit_code_and_legacy_markers_never_substitute_for_a_physical_certificate() {
