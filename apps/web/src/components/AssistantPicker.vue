@@ -95,7 +95,8 @@ const fallback = computed(() => {
   return item?.displayName || item?.model || inheritedModel.value
 })
 const modelLabel = computed(() => [selected.value?.displayName || selected.value?.model || effectiveModel.value || 'Default model', route.value?.providerName].filter(Boolean).join(' · '))
-const defaultEffort = computed(() => (inheriting.value && !model.value ? inheritedReasoning.value || selected.value?.defaultReasoningEffort : selected.value?.defaultReasoningEffort) || '')
+const followsReasoningDefault = computed(() => inheriting.value && (!model.value || (props.variant === 'field' && props.defaultSource === 'agent' && !!inheritedReasoning.value)))
+const defaultEffort = computed(() => (followsReasoningDefault.value ? inheritedReasoning.value || selected.value?.defaultReasoningEffort : selected.value?.defaultReasoningEffort) || '')
 const effectiveEffort = computed(() => reasoning.value || defaultEffort.value)
 // Speeds Codex names in this catalog, to label a saved speed the selected model lacks.
 const knownTiers = computed(() => catalog.value.models.flatMap(item => item.serviceTiers ?? []))
@@ -127,7 +128,7 @@ const models = computed(() => {
 const missing = computed(() => !!model.value && !catalog.value.models.some(item => matches(item, model.value)))
 const inheritedLabel = computed(() => !props.inherit && catalog.value.nativeDefaults ? 'Installation default' : props.defaultSource === 'conversation' ? 'Conversation model' : 'Agent default')
 const inheritedDescription = computed(() => !props.inherit && catalog.value.nativeDefaults ? 'the installation’s setting' : props.defaultSource === 'conversation' ? 'keep this conversation’s setting' : 'the agent’s setting')
-const defaultOwner = computed(() => inheriting.value && !model.value ? props.defaultSource === 'conversation' ? 'Conversation' : 'Agent' : 'Model')
+const defaultOwner = computed(() => followsReasoningDefault.value ? !props.inherit && catalog.value.nativeDefaults ? 'Installation' : props.defaultSource === 'conversation' ? 'Conversation' : 'Agent' : 'Model')
 const choices = computed(() => [
   ...(!current.value.requiresModel || (inheriting.value && inheritedModel.value)
     ? [

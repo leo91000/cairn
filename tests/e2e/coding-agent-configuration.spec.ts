@@ -72,6 +72,29 @@ async function save(workspace: Workspace, document: string, provider = 'codex', 
   })
 }
 
+test('new agent reasoning inherits the installation without an implicit personalization', async ({ page, workspace }) => {
+  test.setTimeout(60000)
+  await save(workspace, 'model = "fixture-deep"\nmodel_reasoning_effort = "ultra"\n')
+  await page.goto(workspacePath('/agents'))
+  await page.getByRole('link', { name: 'New agent', exact: true }).click()
+  await page.getByLabel('Name', { exact: true }).fill('Inherited reasoning')
+  await grantFullAccess(page)
+  await openAgentSection(page, 'Coding agent & model')
+  const picker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
+  await expect(picker).toHaveAccessibleName(/Ultra reasoning/)
+  await picker.click()
+  await page.getByRole('dialog', { name: 'Agent & model' }).getByRole('radio', { name: 'Deep thinker', exact: true }).click()
+  await page.keyboard.press('Escape')
+  await expect(picker).toHaveAccessibleName(/Ultra reasoning/)
+  const id = await createAgent(page)
+  const created = (await workspace.api('/api/agents')).find((agent: { id: string }) => agent.id === id)
+  expect(created.reasoning).toBe('')
+  expect(created.codingAgentDefaults.codex.reasoning).toBe('ultra')
+  const chat = await workspace.api('/api/chats', 'POST', { agentId: id })
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: crypto.randomUUID(), text: 'Use the inherited effort' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.snapshot.agent.reasoning).toBe('ultra')
+})
+
 test('native form and text share comments and advanced options across save and reload', async ({ page, workspace }) => {
   await save(workspace, '# Context preference\nmodel_context_window = 200000 # keep this note\nproject_doc_max_bytes = 32768\n')
   await page.goto(workspacePath('/settings/coding-agents/codex'))

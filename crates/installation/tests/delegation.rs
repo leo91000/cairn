@@ -190,6 +190,61 @@ async fn delegation_is_an_opt_in_agent_power() {
 }
 
 #[tokio::test]
+async fn delegation_resolves_inherited_and_secondary_engine_native_models() {
+    for secondary in [false, true] {
+        let f = Fixture::new(true).await;
+        let turn = f.conversation(MAIN_AGENT_ID).await;
+        f.s.accounts
+            .connect_api_key(
+                &f.s,
+                cairn_installation::provider::Provider::Opencode,
+                "Zen",
+                "opencode",
+                "synthetic-delegation-zen-key",
+                None,
+            )
+            .await
+            .unwrap();
+        common::save_native_configuration(
+            &f.s,
+            "opencode",
+            None,
+            r#"{"model":"auto/ling-3-1-flash-free"}"#,
+        )
+        .await;
+        let input = if secondary {
+            common::save_native_configuration(
+                &f.s,
+                "opencode",
+                Some(MAIN_AGENT_ID),
+                r#"{"model":"opencode/cat-jam-free"}"#,
+            )
+            .await;
+            json!({ "task": "Review through the secondary engine", "provider": "opencode" })
+        } else {
+            let agent = f.s.agent_fixture(json!({ "name": "Inheriting OpenCode", "provider": "opencode", "model": "", "reasoning": "" }), None).await.unwrap();
+            json!({ "task": "Review through the inheriting agent", "agentId": agent["id"] })
+        };
+        let delegated = f.delegate(&turn, input).await.unwrap();
+        let expected = if secondary {
+            "opencode/cat-jam-free"
+        } else {
+            "auto/ling-3-1-flash-free"
+        };
+        assert_eq!(delegated["model"], expected);
+        let child = f.running(text(&delegated, "chatId")).await;
+        let run = f.s.store.run(&child.run).await.unwrap();
+        assert_eq!(run["snapshot"]["agent"]["model"], expected);
+        assert!(
+            run["snapshot"]["nativeConfiguration"]["document"]
+                .as_str()
+                .unwrap()
+                .contains(expected)
+        );
+    }
+}
+
+#[tokio::test]
 async fn opencode_delegation_discovers_automatic_models_and_rejects_unconnected_routes() {
     let f = Fixture::new(true).await;
     let turn = f.conversation(MAIN_AGENT_ID).await;

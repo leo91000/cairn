@@ -233,8 +233,11 @@ internal fun ModelPicker(
             if (next != null) change(next.model, "")
         }
     }
+    val followsReasoningDefault =
+        inheriting &&
+            (model.isBlank() || (field && !conversationDefault && inheritedReasoning.isNotBlank()))
     val inheritedEffort =
-        if (inheriting && model.isBlank())
+        if (followsReasoningDefault)
             inheritedReasoning.ifBlank { selected?.defaultReasoningEffort.orEmpty() }
         else selected?.defaultReasoningEffort.orEmpty()
     val effectiveEffort = pickerAppliedReasoning(selected, reasoning, inheritedEffort)

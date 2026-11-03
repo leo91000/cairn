@@ -117,3 +117,8 @@ Edits from the ordinary agent model picker use the same comparison baseline.
 Choosing a mapped profile value replaces an older native customization for that
 property; clearing it restores installation inheritance without reviving a stale
 secondary-engine override or deletion.
+New agent drafts inherit reasoning instead of personalizing it automatically.
+On the agent page, choosing only a model keeps native reasoning inherited until
+an effort is chosen separately.
+Delegation resolves inherited engine preferences before validating its model, and
+quota recovery prefers the configured OpenCode model over a catalog fallback.
