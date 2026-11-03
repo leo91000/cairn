@@ -206,21 +206,6 @@ fn selected_tools(server: &McpServer, selection: &Value) -> Option<Vec<String>> 
     )
 }
 
-/// During a plan turn, only the tools the connection declares read-only
-/// (`readOnlyHint`) among those otherwise exposed. Undeclared tools are excluded.
-fn read_only_tools(server: &McpServer, exposed: Option<&[String]>) -> Option<Vec<String>> {
-    let declared = server
-        .tools
-        .iter()
-        .filter(|tool| tool["annotations"]["readOnlyHint"] == true)
-        .map(|tool| text(tool, "name").to_owned());
-    Some(
-        declared
-            .filter(|name| exposed.is_none_or(|tools| tools.contains(name)))
-            .collect(),
-    )
-}
-
 /// Removes a deleted connection from every agent's access policy. Other settings,
 /// including live grants such as 1Password, are kept as saved.
 fn revoke_agent_access(db: &Db<'_>, id: &str) -> Result<()> {
@@ -684,10 +669,13 @@ impl Mcps {
             if !server.enabled || !allowed(&access["mcps"], &server.id) {
                 continue;
             }
-            let mut tools = selected_tools(&server, &access["mcpTools"][&server.id]);
             if planning {
-                tools = read_only_tools(&server, tools.as_deref());
+                // Third-party annotations cannot enforce a no-effects boundary. Do not
+                // pass connected MCP servers to the native process during Plan, for
+                // either transport; keep Cairn-owned tools below their own policy gates.
+                continue;
             }
+            let tools = selected_tools(&server, &access["mcpTools"][&server.id]);
             let env = self
                 .server_secrets(s, &server.id)
                 .await?
@@ -871,38 +859,6 @@ pub(crate) fn grant_in(db: &Db<'_>, id: &str, bearer: &str) -> Result<(McpServer
     }
     crate::delegation::authorize_run(db, &run)?;
     Ok((server, scope.clone()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn plan_turns_expose_only_tools_declared_read_only() {
-        let server: McpServer = serde_json::from_value(json!({
-            "tools": [
-                { "name": "search", "annotations": { "readOnlyHint": true } },
-                { "name": "delete", "annotations": { "readOnlyHint": false, "destructiveHint": true } },
-                { "name": "undeclared" },
-                { "name": "lookup", "annotations": { "readOnlyHint": true } },
-            ],
-        }))
-        .unwrap();
-        assert_eq!(
-            read_only_tools(&server, None),
-            Some(vec!["search".to_owned(), "lookup".to_owned()])
-        );
-        // The agent's own selection still applies.
-        assert_eq!(
-            read_only_tools(&server, Some(&["search".to_owned(), "delete".to_owned()])),
-            Some(vec!["search".to_owned()])
-        );
-        // Nothing discovered means nothing allowed, never everything.
-        assert_eq!(
-            read_only_tools(&McpServer::default(), None),
-            Some(Vec::new())
-        );
-    }
 }
 
 #[cfg(test)]

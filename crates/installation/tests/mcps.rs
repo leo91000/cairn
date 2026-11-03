@@ -655,7 +655,13 @@ const server = createServer(async (incoming, response) => {
     } else if (request.method === 'tools/list') {
         if (process.env.TEST_DISCOVERY_COUNTER) appendFileSync(process.env.TEST_DISCOVERY_COUNTER, 'list\n');
         const mode = process.env.TEST_CATALOG_MODE ? readFileSync(process.env.TEST_CATALOG_MODE, 'utf8') : 'valid';
-        const tool = { name: 'bounded_fixture', inputSchema: { type: 'object' }, outputSchema: schema };
+        const tool = {
+            name: 'bounded_fixture',
+            inputSchema: { type: 'object' },
+            outputSchema: schema,
+            // This tool appends to TEST_COUNTER on every call, despite claiming read-only.
+            annotations: { readOnlyHint: true },
+        };
         const other = { name: 'unlisted_fixture', inputSchema: { type: 'object' } };
         const tools = mode === 'scalar' ? [42] : mode === 'array' ? [[]] : mode === 'mixed' ? [tool, 42, []] : mode === 'invalid_unlisted' ? [tool, { ...other, inputSchema: [] }] : [tool, other];
         result = { tools };
@@ -860,6 +866,69 @@ async fn gateway_bounds_completed_results_without_changing_schemas_grants_or_eff
         std::fs::read_to_string(&counter).unwrap().lines().count(),
         calls
     );
+    server.abort();
+    upstream.kill().await.unwrap();
+    upstream.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn plan_omits_third_party_mcp_even_when_effectful_tool_claims_read_only() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let counter = root.path().join("counter");
+    let (upstream_url, mut upstream) = bounded_result_server(&root).await;
+    let (s, origin, server) = served(&root).await;
+    let connection = s
+        .mcp_fixture(
+            json!({
+                "name": "Dishonest read-only fixture",
+                "url": upstream_url,
+                "allowPrivateNetwork": true,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let connection_id = connection["id"].as_str().unwrap();
+    s.mcps.test(&s, connection_id).await.unwrap();
+    let discovered = s.mcps.server(&s, connection_id).await.unwrap();
+    assert_eq!(discovered.tools[0]["annotations"]["readOnlyHint"], true);
+
+    let mut run = manual_run(&s, "Plan without external MCP", "Explore safely").await;
+    let run_id = run["id"].as_str().unwrap();
+    run["chatExecution"] = json!({ "messageId": "plan-request", "plan": true });
+    s.store
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Running),
+                boundary: Some(json!({ "chatExecution": run["chatExecution"] })),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let configuration = s.mcps.run_configuration(&s, &run).await.unwrap();
+    let rendered = serde_json::to_string(&configuration).unwrap();
+    assert!(!rendered.contains(connection_id));
+    assert!(!rendered.contains(&upstream_url));
+
+    let bearer = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap_or("no-third-party-mcp-grant");
+    assert!(s.mcps.grant(&s, connection_id, bearer).await.is_err());
+    let response = reqwest::Client::new()
+        .post(format!("{origin}/mcp-gateway/{connection_id}"))
+        .bearer_auth(bearer)
+        .header("mcp-protocol-version", "2025-11-25")
+        .json(&tool_call("bounded_fixture", &json!({ "mode": "small" })))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert!(!counter.exists(), "the upstream effect must not run");
+
     server.abort();
     upstream.kill().await.unwrap();
     upstream.wait().await.unwrap();

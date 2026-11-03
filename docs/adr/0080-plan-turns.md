@@ -69,9 +69,10 @@ Pendant un tour de plan, Cairn applique lui-même la frontière :
   dans un tour ordinaire, le mode plan propre à Claude Code peut implémenter juste
   après `ExitPlanMode`, qui s’affiche alors comme un appel d’outil, et un élément
   `plan` de Codex comme un raisonnement. Les droits du tour ordinaire ne changent pas.
-- **Outils MCP en lecture seule seulement** : pour une connexion, les outils qu’elle
-  déclare `readOnlyHint`, appliqués par la passerelle (connexions HTTP) et par la
-  liste d’outils du moteur (connexions par commande) ; pour `cairn_installation`, les
+- **Pas de MCP tiers pendant Plan** : les connexions MCP de l’utilisateur sont omises
+  de la configuration du moteur, pour les transports HTTP et commande. Une annotation
+  `readOnlyHint` appartient au serveur tiers et ne prouve pas qu’un outil est sans effet.
+  Les outils Cairn internes gardent leurs restrictions propres : pour `cairn_installation`, les
   opérations de portée `read` ; pour `cairn_workspace`, `open_project`, `list_nodes`,
   `exclusive_status`, `ask_questions`, `pending_questions`, `withdraw_question` et la lecture des tâches déléguées
   (`task_status`). Les outils et commandes des plugins sont refusés, comme
@@ -156,9 +157,9 @@ pas un tour natif achevé et ne modifie pas les messages ordinaires.
 
 ## Limites
 
-- `readOnlyHint` est déclaré par le serveur MCP. Un serveur qui le donne à tort à un
-  outil à effets peut agir pendant un tour de plan ; un outil sans annotation est
-  refusé.
+- Les connexions MCP de l’utilisateur, HTTP comme commande, ne sont pas disponibles
+  pendant Plan. Les lectures internes Cairn restent disponibles selon les contrôles
+  de `cairn_workspace` et `cairn_installation`.
 - Les commandes qui écrivent (compilation, tests) échouent pendant un tour de plan.
 - Claude Code exige bubblewrap et socat pour son bac à sable. Une node qui ne les a
   pas refuse le tour de plan avec une erreur explicite, sans rien exécuter.
