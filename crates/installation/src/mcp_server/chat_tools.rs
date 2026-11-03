@@ -277,7 +277,7 @@ pub(crate) async fn invoke(
         }
         Ok(())
     });
-    let authorize = if name == "send_chat_message" {
+    let authorize = if matches!(name, "send_chat_message" | "edit_chat_message") {
         if let Some(account) = member_account {
             let chat_id = text(&args, "chatId").to_owned();
             authorize.with_guard(move |db: &Db<'_>| {

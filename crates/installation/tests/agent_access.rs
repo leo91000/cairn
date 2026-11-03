@@ -153,6 +153,17 @@ async fn only_the_owner_gives_access_and_members_use_only_their_agents() {
     assert_eq!(status, StatusCode::OK, "{revoked}");
     assert!(accounts(&revoked).is_empty());
 
+    let message_id = sent["id"].as_str().unwrap();
+    let edit_message = format!("{messages}/{message_id}");
+    let (status, refused) = member(
+        &s,
+        "PUT",
+        &edit_message,
+        json!({ "text": "Edit after access was revoked" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+
     // Without access, a member still sees and stops the work, but cannot direct or delete it.
     let detail = format!("/api/chats/{chat}");
     assert_eq!(

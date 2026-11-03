@@ -49,6 +49,14 @@ it('says every member uses the agent when the installation predates account acce
   await people.load()
   expect(people.outdated.value).toBe(true)
   expect(people.error.value).toBe('')
+  expect(people.rows.value).toEqual([
+    {
+      accountId: 'ada',
+      email: 'ada@example.test',
+      known: true,
+      allowed: false,
+    },
+  ])
 
   // A deleted agent is an error, not an older installation.
   request.mockRejectedValue(new ApiError('Agent not found', 404))

@@ -58,13 +58,21 @@ export function useAgentPeople(agentId: Ref<string | null>) {
     loading.value = true
     error.value = ''
     try {
-      const [listed, accounts] = await Promise.all([sharing(), listAgentAccounts(api, { agentId: agent })])
+      const [listed, accounts] = await Promise.all([
+        sharing(),
+        listAgentAccounts(api, { agentId: agent }).catch((cause) => {
+          // Older installations still share agents with every current member.
+          if (cause instanceof ApiError && cause.status === 404 && cause.message === 'Not found')
+            return null
+          throw cause
+        }),
+      ])
       if (current !== generation)
         return
       people.value = listed.members
       invited.value = listed.invitations
-      allowed.value = accounts.accounts
-      outdated.value = false
+      allowed.value = accounts?.accounts ?? []
+      outdated.value = accounts === null
       loaded.value = true
     }
     catch (cause) {
