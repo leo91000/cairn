@@ -36,7 +36,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 25;
+pub(crate) const DATABASE_VERSION: i64 = 26;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -203,15 +203,23 @@ impl Store {
             version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
         }
         if !fresh && version == 24 {
-            crate::artifacts::migration::upgrade(&mut writer)?;
-        }
-        if !fresh {
             let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            if tx.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))? == 24 {
+            let current_version =
+                tx.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))?;
+            if current_version == 24 {
                 tx.execute_batch(crate::coding_agent_configuration::SCHEMA)?;
                 tx.pragma_update(None, "user_version", 25)?;
+            } else if !(25..=DATABASE_VERSION).contains(&current_version) {
+                return Err(Error::bad(
+                    "Unexpected installation database version during coding-agent configuration upgrade.",
+                ));
             }
             tx.commit()?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 25 {
+            crate::artifacts::migration::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
         }
         if fresh {
             let tx = writer.transaction()?;

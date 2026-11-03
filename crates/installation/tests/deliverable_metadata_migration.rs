@@ -1,10 +1,11 @@
-//! Real v24 Store (c2e72b39 sources) upgraded synthetic metadata; unrelated grant rows are SQL-seeded.
+//! Schema-25 data derived from the real v24 Store exercises the A16 migration.
+//! The retained configuration row is synthetic migration-survival test data.
 use cairn_installation::store::Store;
 use rusqlite::{Connection, types::Value as SqlValue};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-const PREVIOUS: &str = include_str!("fixtures/deliverable-metadata-v24.sql");
+const PREVIOUS: &str = include_str!("fixtures/deliverable-metadata-v25.sql");
 const RUN: &str = "00000000-0000-4000-8000-000000000010";
 const TOKEN: &str = "00000000-0000-4000-8000-000000000e01";
 
@@ -170,7 +171,7 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        25
+        26
     );
     assert_eq!(
         db.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
@@ -260,7 +261,7 @@ fn invalid_previous_metadata_leaves_schema_and_every_row_intact() {
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
-            24
+            25
         );
     }
 }

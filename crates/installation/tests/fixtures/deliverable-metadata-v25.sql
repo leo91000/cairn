@@ -1,5 +1,6 @@
--- Synthetic real v24 Store/database; see the migration qualification recipe.
--- Leading NUL key/title rows written by actual v24 Db::set (66fc690b).
+-- Schema-25 fixture derived from the real v24 Store/database and its base 24->25 migration.
+-- The retained coding-agent configuration row is synthetic migration-survival test data.
+-- Leading NUL key/title rows were written by actual v24 Db::set (66fc690b).
 -- Unrelated retained project/instance/grant/supplier rows are SQL-seeded test data.
 PRAGMA foreign_keys=OFF;
 BEGIN TRANSACTION;
@@ -1191,5 +1192,18 @@ CREATE INDEX plugin_contribution_instances ON plugin_contribution_grants(instanc
 DELETE FROM "sqlite_sequence";
 INSERT INTO "sqlite_sequence" VALUES('audit',780);
 INSERT INTO "sqlite_sequence" VALUES('events',1);
+CREATE TABLE coding_agent_configurations(
+ scope TEXT NOT NULL,
+ provider TEXT NOT NULL CHECK(provider IN ('codex','claude','opencode')),
+ agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
+ document TEXT NOT NULL,
+ presentation TEXT NOT NULL,
+ removed TEXT NOT NULL CHECK(json_valid(removed) AND json_type(removed)='array'),
+ revision TEXT NOT NULL,
+ legacy_baseline TEXT CHECK(legacy_baseline IS NULL OR (json_valid(legacy_baseline) AND json_type(legacy_baseline)='object')),
+ PRIMARY KEY(scope,provider),
+ CHECK(scope=coalesce(agent_id,''))
+);
+INSERT INTO "coding_agent_configurations" VALUES('','codex',NULL,'{}','{}','[]','retained-schema25-configuration',NULL);
 COMMIT;
-PRAGMA user_version=24;
+PRAGMA user_version=25;

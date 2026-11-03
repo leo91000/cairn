@@ -1,8 +1,10 @@
-# Typed deliverables and skill sources (24 → 25)
+# Typed deliverables and skill sources (25 → 26)
 
-The manager upgrades the installation database automatically at startup in one
-immediate SQLite transaction. `artifacts` identifies a run/key; `artifact_versions`
-keeps each immutable file version and preview metadata; `artifact_visibility`
+Schema-24 databases first run the existing coding-agent configuration upgrade
+to schema 25. This A16 migration then upgrades schema 25 to 26 automatically at
+startup in one immediate SQLite transaction. `artifacts` identifies a run/key;
+`artifact_versions` keeps each immutable file version and preview metadata;
+`artifact_visibility`
 keeps its revocable public token and URL. Runs own artifact metadata through
 foreign keys. File bytes and previews stay in `data/artifacts`.
 
@@ -26,26 +28,28 @@ validator. SQLite's text length stops at U+0000; the constraints therefore count
 the value cast to BLOB, preserving legal leading NULs and multibyte strings.
 
 Stop the previous manager and retain a consistent database/WAL backup before an
-upgrade. An older binary cannot open schema 25: recovery requires the retained
+upgrade. An older binary cannot open schema 26: recovery requires the retained
 backup or a compatible forward fix. This PR authorizes no production action.
 Follow the private upgrade rehearsal in `docs/PRODUCTION-CAIRN.md` before a future
 release; synthetic qualification does not replace it.
 
 ## Qualification
 
-`deliverable_metadata_migration` restores the committed synthetic SQL snapshot
-produced by the real v24 Store from main `c2e72b39` (the test-only #661
-commit uses identical native sources). It upgrades the retained synthetic v22
-database offline through the released placement and contribution-grant steps,
-then reopens it with all rows and schema objects unchanged. Artifact versions,
-a public link and skill sources originate in the real `b3ebdc4b` writer; the
-retained timeline card originates in the actual v22 event writer. Additional
-synthetic project, plugin instance, contribution/resource grant and credential
-supplier rows are explicitly seeded with SQL into that actual previous schema
-and survive reopening through the previous Store. No production data is used.
+`deliverable_metadata_migration` restores a schema-25 fixture derived from the
+committed real v24 Store snapshot from main `c2e72b39` (the test-only #661
+commit uses identical native sources). The fixture applies base `f599b77c`'s
+24→25 coding-agent-configuration schema step and adds one explicitly synthetic
+configuration row. Opening this schema-25 fixture through the current Store
+runs A16's 25→26 migration. The configuration row and all prior rows/schema
+objects must remain unchanged. Artifact versions, a public link and skill
+sources originate in the real `b3ebdc4b` writer; the retained timeline card
+originates in the actual v22 event writer. Additional synthetic project,
+plugin instance, contribution/resource grant and credential supplier rows are
+explicitly seeded with SQL into that previous schema and survive migration.
+No production data is used.
 Two additional artifact records, with a leading NUL in the key or title, are
 persisted through that previous binary's real `Db::set` writer and reopened at
-version24. This is the writer used by its publisher; the publication validator's
+version26. This is the writer used by its publisher; the publication validator's
 bounded-string function is unchanged. Qualification retains those exact values.
 The run projection view, progress, timeline, placement and contribution tables,
 and every unrelated row/schema object must also survive. It checks metadata and
