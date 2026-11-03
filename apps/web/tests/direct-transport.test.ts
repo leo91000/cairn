@@ -429,6 +429,16 @@ it('replays an interrupted immutable timeline snapshot read on relay', async () 
   expect(fetch).toHaveBeenLastCalledWith('/api/installations/install/api/runs/r/timeline-content', expect.objectContaining({ method: 'POST', body }))
 })
 
+it('replays an interrupted immutable event-content read on relay', async () => {
+  const { api, channel } = await direct()
+  const body = JSON.stringify({ runId: 'r', eventId: 'event-1', offset: 0, sha256: null })
+  const read = api('/runs/r/event-content', { method: 'POST', body })
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  channel.dispatchEvent(new Event('close'))
+  expect(await read).toEqual({ marker: 'relay' })
+  expect(fetch).toHaveBeenLastCalledWith('/api/installations/install/api/runs/r/event-content', expect.objectContaining({ method: 'POST', body }))
+})
+
 it('sends an unsent mutation through relay when the channel is closing', async () => {
   const { api, channel, state } = await direct()
   channel.readyState = 'closing'
