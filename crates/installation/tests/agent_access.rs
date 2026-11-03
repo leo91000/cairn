@@ -240,14 +240,6 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
             }),
         ),
         (
-            "PUT",
-            format!("/api/chats/{chat}"),
-            json!({
-                "revision": chat_revision,
-                "title": "Renamed",
-            }),
-        ),
-        (
             "POST",
             format!("/api/chats/{chat}/questions/{unknown}/answer"),
             json!({}),
@@ -287,6 +279,21 @@ async fn every_route_that_directs_an_agent_needs_access_to_it() {
         let (status, refused) = member(&s, method, path, body.clone()).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{method} {path}: {refused}");
     }
+
+    // Renaming conversation metadata does not direct the agent, so every member can do it.
+    let rename_path = format!("/api/chats/{chat}");
+    let (status, renamed) = member(
+        &s,
+        "PUT",
+        &rename_path,
+        json!({
+            "revision": chat_revision,
+            "title": "Renamed",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    assert_eq!(renamed["title"], "Renamed");
 
     // Stopping, pausing and archiving stay open to everyone.
     let task_id = task["id"].as_str().unwrap();

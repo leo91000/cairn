@@ -387,7 +387,6 @@ fn gate(
         }
         ("POST", ["chats", id, "messages"])
         | ("PUT", ["chats", id, "messages", _])
-        | ("PUT", ["chats", id])
         | ("POST", ["chats", id, "questions", _, "answer" | "cancel"])
         | (
             "POST",
