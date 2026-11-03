@@ -335,6 +335,76 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    #[derive(Clone, Copy)]
+    enum AcceptedSourceCase {
+        Complete,
+        Ancestry,
+        Grant,
+        Delete,
+        Delivery,
+    }
+
+    impl AcceptedSourceCase {
+        fn label(self) -> &'static str {
+            match self {
+                Self::Complete => "complete",
+                Self::Ancestry => "ancestry",
+                Self::Grant => "grant",
+                Self::Delete => "delete",
+                Self::Delivery => "delivery",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum OperationState {
+        Running,
+        Completed,
+        Failed,
+        Cancelled,
+        Missing,
+        Other,
+    }
+
+    impl OperationState {
+        fn from_value(value: &Value) -> Self {
+            match value["state"].as_str() {
+                Some("running") => Self::Running,
+                Some("completed") => Self::Completed,
+                Some("failed") => Self::Failed,
+                Some("cancelled") => Self::Cancelled,
+                None => Self::Missing,
+                Some(_) => Self::Other,
+            }
+        }
+
+        fn label(self) -> &'static str {
+            match self {
+                Self::Running => "running",
+                Self::Completed => "completed",
+                Self::Failed => "failed",
+                Self::Cancelled => "cancelled",
+                Self::Missing => "missing",
+                Self::Other => "other",
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum WaitPhase {
+        HandlerEntry,
+        TerminalState,
+    }
+
+    impl WaitPhase {
+        fn label(self) -> &'static str {
+            match self {
+                Self::HandlerEntry => "handler_entry",
+                Self::TerminalState => "terminal_state",
+            }
+        }
+    }
+
     async fn accepted() -> (Fixture, String, Value, Authorization) {
         let (f, bearer) = Fixture::delegated_manager().await;
         let run = crate::installation_mcp::authorize(&f.s, &bearer)
@@ -513,7 +583,13 @@ mod tests {
 
     #[tokio::test]
     async fn accepted_source_jobs_keep_the_original_invocation_after_normal_completion() {
-        for change in ["complete", "ancestry", "grant", "delete", "delivery"] {
+        for (change, case) in [
+            ("complete", AcceptedSourceCase::Complete),
+            ("ancestry", AcceptedSourceCase::Ancestry),
+            ("grant", AcceptedSourceCase::Grant),
+            ("delete", AcceptedSourceCase::Delete),
+            ("delivery", AcceptedSourceCase::Delivery),
+        ] {
             let (f, bearer) = Fixture::delegated_manager().await;
             let installed = crate::common::package_install(&f.s, &json!({
                 "manifest": {
@@ -599,9 +675,28 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(10), f.entered.notified())
+            let operation = text(&pending, "operation");
+            let phase_started = tokio::time::Instant::now();
+            if tokio::time::timeout(std::time::Duration::from_secs(10), f.entered.notified())
                 .await
-                .unwrap();
+                .is_err()
+            {
+                let elapsed_ms = phase_started.elapsed().as_millis();
+                let operation_state =
+                    f.s.plugins
+                        .operations
+                        .get(operation)
+                        .map_or(OperationState::Missing, |state| {
+                            OperationState::from_value(&state)
+                        });
+                panic!(
+                    "case={} phase={} elapsed_ms={} timeout_ms=10000 operation_state={}",
+                    case.label(),
+                    WaitPhase::HandlerEntry.label(),
+                    elapsed_ms,
+                    operation_state.label(),
+                );
+            }
             if change != "delivery" {
                 complete(&f, &caller).await;
             }
@@ -629,10 +724,12 @@ mod tests {
                 _ => {}
             }
             f.release.notify_one();
-            let operation = text(&pending, "operation");
+            let mut operation_state = OperationState::Other;
+            let phase_started = tokio::time::Instant::now();
             let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                 loop {
                     let result = f.s.plugins.operations.get(operation).unwrap();
+                    operation_state = OperationState::from_value(&result);
                     if result["state"] != "running" {
                         break result;
                     }
@@ -640,7 +737,16 @@ mod tests {
                 }
             })
             .await
-            .unwrap();
+            .unwrap_or_else(|_| {
+                let elapsed_ms = phase_started.elapsed().as_millis();
+                panic!(
+                    "case={} phase={} elapsed_ms={} timeout_ms=10000 operation_state={}",
+                    case.label(),
+                    WaitPhase::TerminalState.label(),
+                    elapsed_ms,
+                    operation_state.label(),
+                );
+            });
             assert_eq!(
                 result["state"],
                 if matches!(change, "complete" | "delivery") {
@@ -648,7 +754,8 @@ mod tests {
                 } else {
                     "failed"
                 },
-                "{change}: {result}"
+                "case={} phase=terminal_state_assertion",
+                case.label(),
             );
             assert_eq!(
                 f.uploads.load(Ordering::SeqCst),

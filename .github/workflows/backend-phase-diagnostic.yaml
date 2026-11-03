@@ -1,0 +1,81 @@
+name: Backend phase diagnostic
+on:
+  push:
+    branches:
+      - chore/backend-phase-diagnostic-415567
+permissions:
+  contents: read
+concurrency:
+  group: backend-phase-diagnostic-415567
+  cancel-in-progress: false
+jobs:
+  diagnose:
+    # This one-off workflow runs only when the dedicated branch is first created.
+    if: github.event.created == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_USER: cairn
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: cairn_beacon_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@localhost:5432/cairn_beacon_test
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install the pinned Rust toolchain and backend test dependencies
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
+          rustup default 1.97.1
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
+        with:
+          tool: cargo-nextest@0.9.149
+      - id: accepted-source
+        name: Diagnose accepted-source operation phases
+        continue-on-error: true
+        run: |
+          node scripts/test-backend.mjs --nextest --test-threads 1 \
+            -E 'package(=cairn-installation) and binary(=cairn_installation) and kind(lib) and test(=authorization::jobs::tests::accepted_source_jobs_keep_the_original_invocation_after_normal_completion)' \
+            --no-tests fail --status-level pass --color never
+      - id: resource-ceiling
+        name: Diagnose delegated resource operation phases
+        continue-on-error: true
+        run: |
+          node scripts/test-backend.mjs --nextest --test-threads 1 \
+            -E 'package(=cairn-installation) and binary(=plugin_grants) and kind(test) and test(=deferred_resource_effects_retain_the_delegation_resource_ceiling)' \
+            --no-tests fail --status-level pass --color never
+      - name: Summarize exact test outcomes
+        if: always()
+        env:
+          ACCEPTED_SOURCE_OUTCOME: ${{ steps.accepted-source.outcome }}
+          RESOURCE_CEILING_OUTCOME: ${{ steps.resource-ceiling.outcome }}
+        run: |
+          {
+            echo '## Backend phase diagnostic'
+            echo '- `authorization::jobs::tests::accepted_source_jobs_keep_the_original_invocation_after_normal_completion`: exact package, library binary, and test filter; Nextest requires a nonzero selection.'
+            echo '  Expected selected test count: 1; observed counts are in the Nextest run summary.'
+            echo "  Outcome: ${ACCEPTED_SOURCE_OUTCOME}"
+            echo '- `deferred_resource_effects_retain_the_delegation_resource_ceiling`: exact package, integration-test binary, and test filter; Nextest requires a nonzero selection.'
+            echo '  Expected selected test count: 1; observed counts are in the Nextest run summary.'
+            echo "  Outcome: ${RESOURCE_CEILING_OUTCOME}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$ACCEPTED_SOURCE_OUTCOME" != success || "$RESOURCE_CEILING_OUTCOME" != success ]]; then
+            exit 1
+          fi
