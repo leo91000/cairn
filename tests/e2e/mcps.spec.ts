@@ -131,6 +131,7 @@ for (const pending of ['authorization', 'offer'] as const) {
     })
     const errors: string[] = []
     let directCancelled = false
+    let directCancellationUrl: string | undefined
     let directCancellationReason: string | undefined
     page.on('pageerror', error => errors.push(error.message))
     try {
@@ -147,6 +148,7 @@ for (const pending of ['authorization', 'offer'] as const) {
       page.on('requestfailed', (request) => {
         if (request.url().endsWith('/direct/authorize')) {
           directCancelled = true
+          directCancellationUrl = request.url()
           directCancellationReason = request.failure()?.errorText
         }
       })
@@ -197,9 +199,10 @@ for (const pending of ['authorization', 'offer'] as const) {
         && pending === 'authorization'
         && directCancellationReason === 'Load request cancelled'
       const unexpectedErrors = [...errors]
-      if (expectedWebKitCancellation) {
-        const cancellationError = /^\/localhost:\d+\/api\/installations\/[^/]+\/direct\/authorize due to access control checks\.$/
-        const cancellationErrorIndex = unexpectedErrors.findIndex(error => cancellationError.test(error))
+      if (expectedWebKitCancellation && directCancellationUrl) {
+        const cancelledUrl = new URL(directCancellationUrl)
+        const cancellationError = `/${cancelledUrl.host}${cancelledUrl.pathname} due to access control checks.`
+        const cancellationErrorIndex = unexpectedErrors.findIndex(error => error === cancellationError)
         if (cancellationErrorIndex !== -1)
           unexpectedErrors.splice(cancellationErrorIndex, 1)
       }
