@@ -307,8 +307,8 @@ function openShortcuts() {
         'flex overflow-hidden': filWorkspace,
         'page-chat': route.path.startsWith('/chats'),
         'page-default': !filPage && !route.path.startsWith('/chats'),
-        // The agent page ends with its sticky save bar.
-        'page-flush': route.path.startsWith('/agents/'),
+        // These editors own the spacing around their sticky save bar.
+        'page-flush': route.path.startsWith('/agents/') || route.path.startsWith('/settings/coding-agents/'),
       }"
     >
       <!-- Keep the Fil's filter, scroll and selection while its reading pane changes. -->
