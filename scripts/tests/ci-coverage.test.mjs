@@ -2,6 +2,12 @@ import { existsSync, readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
+import {
+  AVD_HOST_HEADROOM_BYTES,
+  AVD_USERDATA_BYTES_REQUIRED,
+  capacityPlan,
+  sdkPackagesToRemove,
+} from '../android-emulator-sdk.mjs'
 
 const quality = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
 const android = parse(readFileSync(new URL('../../.github/workflows/android.yaml', import.meta.url), 'utf8'))
@@ -347,6 +353,65 @@ describe('parallel CI coverage', () => {
     expect(network.run).toContain('python3 tests/network_bench_test.py')
     expect(network.run).toContain('python3 tests/network_probe_test.py')
     expect(network.run).toContain('python3 tests/stun_docker_test.py')
+  })
+
+  it('reclaims only unused Android SDK packages and checks userdata headroom before emulator boot', () => {
+    const job = quality.jobs['android-direct']
+    const steps = job.steps
+    const prune = steps.findIndex(step => step.run === 'node scripts/android-emulator-sdk.mjs prune')
+    const install = steps.findIndex(step => step.uses === './.github/actions/setup-android-emulator')
+    const preflight = steps.findIndex(step => step.run === 'node scripts/android-emulator-sdk.mjs preflight')
+    const emulatorIndex = steps.findIndex(step => step.uses?.startsWith('reactivecircus/android-emulator-runner@'))
+
+    expect(prune).toBeGreaterThan(-1)
+    expect(prune).toBeLessThan(install)
+    expect(install).toBeLessThan(emulatorIndex)
+    expect(install).toBeLessThan(preflight)
+    expect(preflight).toBeLessThan(emulatorIndex)
+    expect(job['timeout-minutes']).toBe(20)
+
+    expect(steps[install].with['build-packages']).toBe('build-tools;37.0.0 platforms;android-36')
+
+    const emulator = steps[emulatorIndex]
+    expect(emulator.with).toMatchObject({
+      'api-level': 36,
+      'arch': 'x86_64',
+      'target': 'google_apis',
+      'profile': 'pixel_6',
+    })
+    expect(emulator.with['disk-size']).toBeUndefined()
+    expect(emulator.with['pre-emulator-launch-script']).toBe('node scripts/android-emulator-sdk.mjs preflight')
+    expect(emulator.with['working-directory']).toBeUndefined()
+    expect(emulator.with['emulator-boot-timeout']).toBeUndefined()
+    expect(emulator.with.script).toContain('python3 tests/network-bench.py')
+    expect(steps[preflight].name).toBe('Check emulator userdata disk headroom')
+
+    const packages = [
+      'build-tools;34.0.0 | 34.0.0 | Android SDK Build-Tools 34',
+      'build-tools;37.0.0 | 37.0.0 | Android SDK Build-Tools 37',
+      'cmake;3.31.5 | 3.31.5 | CMake 3.31.5',
+      'ndk;27.3.13750724 | 27.3.13750724 | NDK',
+      'platforms;android-35 | 3 | Android SDK Platform 35',
+      'platforms;android-36 | 2 | Android SDK Platform 36',
+      'system-images;android-35;google_apis;x86_64 | 1 | Android image 35',
+      'system-images;android-36;google_apis;x86_64 | 7 | Android image 36',
+    ].join('\n')
+
+    expect(sdkPackagesToRemove(packages)).toEqual([
+      'build-tools;34.0.0',
+      'cmake;3.31.5',
+      'ndk;27.3.13750724',
+      'platforms;android-35',
+      'system-images;android-35;google_apis;x86_64',
+    ])
+
+    expect(capacityPlan(AVD_USERDATA_BYTES_REQUIRED + AVD_HOST_HEADROOM_BYTES).sufficient).toBe(true)
+    expect(capacityPlan(AVD_USERDATA_BYTES_REQUIRED + AVD_HOST_HEADROOM_BYTES - 1).sufficient).toBe(false)
+    expect(AVD_USERDATA_BYTES_REQUIRED).toBe(7_730_941_133)
+    expect(AVD_USERDATA_BYTES_REQUIRED + AVD_HOST_HEADROOM_BYTES).toBe(8_267_812_045)
+    expect(capacityPlan(7_909_670_912).sufficient).toBe(false)
+    expect(capacityPlan(8_267_812_044).sufficient).toBe(false)
+    expect(capacityPlan(8_267_812_045).sufficient).toBe(true)
   })
 
   it('delivers the pinned local package closure from this build before network preparation', () => {

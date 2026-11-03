@@ -1032,8 +1032,71 @@ async fn merges_accept_semantically_covered_descendant_grants() {
     );
 }
 
+#[derive(Clone, Copy)]
+enum DiagnosticCase {
+    ResourceCeiling,
+}
+
+impl DiagnosticCase {
+    fn label(self) -> &'static str {
+        match self {
+            Self::ResourceCeiling => "resource_ceiling",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OperationState {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    Missing,
+    Other,
+}
+
+impl OperationState {
+    fn from_value(value: &Value) -> Self {
+        match value["state"].as_str() {
+            Some("running") => Self::Running,
+            Some("completed") => Self::Completed,
+            Some("failed") => Self::Failed,
+            Some("cancelled") => Self::Cancelled,
+            None => Self::Missing,
+            Some(_) => Self::Other,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Missing => "missing",
+            Self::Other => "other",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WaitPhase {
+    EffectEntry,
+    TerminalState,
+}
+
+impl WaitPhase {
+    fn label(self) -> &'static str {
+        match self {
+            Self::EffectEntry => "effect_entry",
+            Self::TerminalState => "terminal_state",
+        }
+    }
+}
+
 #[tokio::test]
 async fn deferred_resource_effects_retain_the_delegation_resource_ceiling() {
+    let case = DiagnosticCase::ResourceCeiling;
     let f = Fixture::new().await;
     f.s.agent_fixture(
         json!({ "access": { "delegation": true } }),
@@ -1101,15 +1164,33 @@ async fn deferred_resource_effects_retain_the_delegation_resource_ceiling() {
             }),
         )
         .await;
-    assert_ne!(started["result"]["isError"], true, "{started}");
+    assert_ne!(
+        started["result"]["isError"], true,
+        "phase=operation_start_assertion"
+    );
     let operation = text(
         &started["result"]["structuredContent"]["result"],
         "operation",
     );
-    assert!(!operation.is_empty(), "{started}");
-    tokio::time::timeout(std::time::Duration::from_secs(5), f.entered.notified())
+    assert!(!operation.is_empty(), "phase=operation_id_assertion");
+    let phase_started = tokio::time::Instant::now();
+    if tokio::time::timeout(std::time::Duration::from_secs(5), f.entered.notified())
         .await
-        .unwrap();
+        .is_err()
+    {
+        let elapsed_ms = phase_started.elapsed().as_millis();
+        let operation_state = match f.s.plugins.operations.get(operation) {
+            Ok(state) => OperationState::from_value(&state),
+            Err(_) => OperationState::Missing,
+        };
+        panic!(
+            "case={} phase={} elapsed_ms={} timeout_ms=5000 operation_state={}",
+            case.label(),
+            WaitPhase::EffectEntry.label(),
+            elapsed_ms,
+            operation_state.label(),
+        );
+    }
     f.set(json!([contribution(
         "tool",
         "grant_probe_post",
@@ -1117,18 +1198,33 @@ async fn deferred_resource_effects_retain_the_delegation_resource_ceiling() {
     )]))
     .await;
     f.release.notify_one();
+    let mut operation_state = OperationState::Other;
+    let phase_started = tokio::time::Instant::now();
     let state = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let state = f.s.plugins.operations.get(operation).unwrap();
-            if matches!(text(&state, "state"), "completed" | "failed" | "cancelled") {
+            operation_state = OperationState::from_value(&state);
+            if matches!(
+                operation_state,
+                OperationState::Completed | OperationState::Failed | OperationState::Cancelled
+            ) {
                 break state;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
     })
     .await
-    .unwrap();
-    assert_eq!(state["state"], "failed", "{state}");
+    .unwrap_or_else(|_| {
+        let elapsed_ms = phase_started.elapsed().as_millis();
+        panic!(
+            "case={} phase={} elapsed_ms={} timeout_ms=5000 operation_state={}",
+            case.label(),
+            WaitPhase::TerminalState.label(),
+            elapsed_ms,
+            operation_state.label(),
+        );
+    });
+    assert_eq!(state["state"], "failed", "phase=terminal_state_assertion");
     assert_eq!(f.posts.load(Ordering::SeqCst), 1);
 }
 
