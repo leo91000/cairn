@@ -950,6 +950,55 @@ async fn non_chat_configuration_freezes_at_admission_after_preparation() {
             expected_model
         );
     }
+    for trigger in ["manual", "schedule"] {
+        crate::common::save_native_configuration(&service, "codex", None, "").await;
+        crate::common::save_native_configuration(
+            &service,
+            "codex",
+            profile["id"].as_str(),
+            "model = 'custom-model'\nmodel_reasoning_effort = 'high'\nservice_tier = 'priority'\ndeveloper_instructions = 'Old instructions'\n",
+        ).await;
+        let mission = service
+            .task_fixture(
+                json!({
+                    "name": format!("Reset customizations {trigger}"),
+                    "prompt": "Use the reset preferences",
+                    "agentId": profile["id"],
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let prepared = service
+            .prepare_run(text(&mission, "id"), trigger)
+            .await
+            .unwrap();
+        assert_eq!(prepared["snapshot"]["agent"]["model"], "custom-model");
+        crate::common::save_native_configuration(
+            &service,
+            "codex",
+            profile["id"].as_str(),
+            "model_context_window = 1000000\n",
+        )
+        .await;
+        let admitted = service.queue_run(prepared, None, None).await.unwrap();
+        for field in ["model", "reasoning", "speed", "instructions"] {
+            assert_eq!(
+                text(&admitted["snapshot"]["agent"], field),
+                "",
+                "{trigger}: {field}"
+            );
+        }
+        let native = parse(
+            Provider::Codex,
+            admitted["snapshot"]["nativeConfiguration"]["document"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(native["model_context_window"], 1000000);
+        assert!(native.get("model").is_none());
+    }
     service.shutdown.cancel();
     service.worker.close().await;
 }

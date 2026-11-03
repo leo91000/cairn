@@ -1338,7 +1338,7 @@ pub(crate) fn freeze_message(
             continue;
         }
         let reset_reasoning = *field == "reasoning" && model_changed;
-        if (configured(path) || reset_reasoning)
+        if (previous.is_none() || configured(path) || reset_reasoning)
             && (reset_reasoning
                 || *field == "instructions"
                 || previous.is_none()
