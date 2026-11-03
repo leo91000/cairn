@@ -150,7 +150,13 @@ pub(super) async fn list(
         .bind(&installation).fetch_all(&mut *transaction).await?;
     let members: Vec<Value> = rows
         .into_iter()
-        .map(|(id, email, access_id)| json!({ "id": id, "email": email, "accessId": access_id }))
+        .map(|(id, email, access_id)| {
+            json!({
+                "id": id,
+                "email": email,
+                "accessId": access_id,
+            })
+        })
         .collect();
     let invitations = invitation_list(&mut transaction, &installation).await?;
     Ok(Json(
