@@ -145,6 +145,61 @@ abstract class CodingAgentConfigurationCases {
     }
 
     @Test
+    fun resetAllClearsInvalidFieldsAndSavesTheReplacementDocument() {
+        val configured =
+            initial.copy(
+                agentId = "fixture-agent",
+                inheritedDocument = initial.document,
+                customizedPaths = listOf("/model_context_window"),
+            )
+        val reset = configured.copy(customizedPaths = emptyList())
+        val previews = CopyOnWriteArrayList<EditCodingAgentConfigurationInput>()
+        val saves = CopyOnWriteArrayList<EditCodingAgentConfigurationInput>()
+        val hold = CompletableDeferred<Unit>()
+        compose.setContent {
+            MaterialTheme {
+                CodingAgentConfigurationEditor(
+                    "codex",
+                    {},
+                    { configured },
+                    { input ->
+                        previews.add(input)
+                        if (input.reset) reset
+                        else {
+                            hold.await()
+                            preview(input)
+                        }
+                    },
+                    { input ->
+                        saves.add(input)
+                        reset
+                    },
+                )
+            }
+        }
+        compose.onNodeWithText("Seuil de compaction automatique").performTextReplacement("800000")
+        compose.waitUntil { previews.isNotEmpty() }
+        compose.onNodeWithText("Fenêtre de contexte").performTextReplacement("0")
+        compose.onNodeWithText("Fenêtre de contexte : saisissez un entier positif.").assertExists()
+        compose
+            .onNodeWithText("Réinitialiser les personnalisations")
+            .performScrollTo()
+            .performClick()
+        compose.waitForIdle()
+        compose
+            .onNodeWithText("Fenêtre de contexte : saisissez un entier positif.")
+            .assertDoesNotExist()
+        compose.onNodeWithText("Fenêtre de contexte").assertTextContains("200000")
+        compose.onNodeWithText("Seuil de compaction automatique").assertTextContains("180000")
+        compose.onNodeWithText("Enregistrer", substring = false).assertIsEnabled().performClick()
+        compose.waitUntil { saves.isNotEmpty() }
+        assertEquals(initial.document, saves.single().document)
+        assertTrue(previews.last().reset)
+        assertTrue(previews.last().changes.isEmpty())
+        assertTrue(saves.single().inheritPaths.contains("/model_context_window"))
+    }
+
+    @Test
     fun invalidNumberCanBeCorrectedWithoutLeavingTheForm() {
         compose.setContent {
             MaterialTheme {

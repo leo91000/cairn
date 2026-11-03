@@ -390,14 +390,30 @@ fn managed(provider: Provider) -> Vec<ManagedCodingAgentSetting> {
         ),
     ];
     match provider {
-        Provider::Codex => entries.push((
-            "features.plugins",
-            "Native Codex plugins are disabled; use Cairn skills and plugins.",
-        )),
-        Provider::Claude => entries.push((
-            "enabledPlugins",
-            "Native plugin loading is not supported by the managed execution adapter.",
-        )),
+        Provider::Codex => {
+            entries.push((
+                "features.plugins",
+                "Native Codex plugins are disabled; use Cairn skills and plugins.",
+            ));
+            entries.push((
+                "notify",
+                "Native command callbacks cannot run outside Cairn's permission checks. Use Cairn skills and plugins.",
+            ));
+        }
+        Provider::Claude => {
+            entries.push((
+                "enabledPlugins",
+                "Native plugin loading is not supported by the managed execution adapter.",
+            ));
+            entries.push((
+                "hooks / command helpers",
+                "Native command callbacks and authentication helpers are not supported. Use Cairn skills, plugins and Connections.",
+            ));
+            entries.push((
+                "env",
+                "Only CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, CLAUDE_CODE_MAX_OUTPUT_TOKENS and MAX_THINKING_TOKENS are editable native environment preferences. Cairn controls the runtime environment.",
+            ));
+        }
         Provider::Opencode => {
             entries.push((
                 "plugin",
@@ -411,6 +427,10 @@ fn managed(provider: Provider) -> Vec<ManagedCodingAgentSetting> {
                 "autoupdate / share",
                 "Cairn runs validated engine versions with native sharing disabled.",
             ));
+            entries.push((
+                "configuration substitutions",
+                "File and environment substitutions are not supported in keys or values. Use literal values that Cairn can validate and freeze.",
+            ));
         }
     }
     entries
@@ -423,6 +443,11 @@ fn managed(provider: Provider) -> Vec<ManagedCodingAgentSetting> {
 }
 
 pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
+    if provider == Provider::Opencode && contains_interpolation(value) {
+        return Err(Error::bad(
+            "OpenCode file and environment substitutions are not supported. Use literal configuration values so Cairn can validate and freeze them before execution.",
+        ));
+    }
     if provider == Provider::Codex
         && value.as_object().is_some_and(|object| {
             object
@@ -467,6 +492,18 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
             if env.values().any(|value| !value.is_string()) {
                 return Err(Error::bad("Claude environment values must be text."));
             }
+            if env.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
+                        | "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
+                        | "MAX_THINKING_TOKENS"
+                )
+            }) {
+                return Err(Error::bad(
+                    "Claude environment settings are managed by Cairn. Supported native preferences are CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, CLAUDE_CODE_MAX_OUTPUT_TOKENS and MAX_THINKING_TOKENS.",
+                ));
+            }
         }
     }
     if provider == Provider::Opencode && !profile.model.is_empty() {
@@ -487,6 +524,7 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
             "/experimental_instructions_file",
             "/profile",
             "/profiles",
+            "/notify",
         ],
         Provider::Claude => &[
             "/permissions",
@@ -499,6 +537,13 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
             "/enableAllProjectMcpServers",
             "/enabledPlugins",
             "/extraKnownMarketplaces",
+            "/appendPlugins",
+            "/hooks",
+            "/statusLine",
+            "/fileSuggestion",
+            "/awsAuthRefresh",
+            "/awsCredentialExport",
+            "/otelHeadersHelper",
             "/disableAllHooks",
             "/attribution/commit",
             "/env/HOME",
@@ -601,6 +646,22 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// OpenCode expands substitutions before parsing JSON, including property names.
+/// Reject them before they can introduce a managed option after our validation.
+fn contains_interpolation(value: &Value) -> bool {
+    fn interpolated(text: &str) -> bool {
+        text.contains("{env:") || text.contains("{file:")
+    }
+    match value {
+        Value::String(text) => interpolated(text),
+        Value::Array(values) => values.iter().any(contains_interpolation),
+        Value::Object(values) => values
+            .iter()
+            .any(|(key, value)| interpolated(key) || contains_interpolation(value)),
+        _ => false,
+    }
 }
 
 fn settings(

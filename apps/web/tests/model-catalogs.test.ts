@@ -23,6 +23,23 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('coding-agent model catalogs', () => {
+  it('clears inherited preferences when a refresh omits the reset installation defaults', async () => {
+    const defaults = { model: 'opencode/inherited-model', reasoning: '', speed: '' }
+    const response = {
+      models: [{ model: 'opencode/inherited-model' }],
+      checkedAt: 1,
+      stale: false,
+      error: '',
+    }
+    request.mockResolvedValueOnce({ ...response, nativeDefaults: defaults })
+    const { modelCatalogs } = await import('../src/models')
+    await modelCatalogs.opencode.load()
+    expect(modelCatalogs.opencode.catalog.nativeDefaults).toEqual(defaults)
+    request.mockResolvedValueOnce({ ...response, checkedAt: 2 })
+    await modelCatalogs.opencode.load()
+    expect(modelCatalogs.opencode.catalog.nativeDefaults).toBeUndefined()
+  })
+
   it('deduplicates requests per engine while refreshing different engines independently', async () => {
     let resolveCodex!: (value: unknown) => void
     const codex = new Promise(resolve => resolveCodex = resolve)

@@ -95,6 +95,7 @@ internal fun CodingAgentConfigurationEditor(
     var discard by remember { mutableStateOf(false) }
     var search by rememberSaveable { mutableStateOf("") }
     var generation by remember { mutableIntStateOf(0) }
+    var fieldRevision by rememberSaveable { mutableIntStateOf(0) }
     var checkJob by remember { mutableStateOf<Job?>(null) }
     val pending =
         rememberSaveable(saver = nativeSettingDraftSaver()) { mutableStateMapOf<String, String>() }
@@ -138,6 +139,7 @@ internal fun CodingAgentConfigurationEditor(
                 validation = null
                 pending.clear()
                 fieldErrors.clear()
+                fieldRevision++
                 inheritedResets = emptyList()
             } catch (e: CancellationException) {
                 throw e
@@ -167,7 +169,11 @@ internal fun CodingAgentConfigurationEditor(
                 else inheritedResets - change.path
         }
         val body =
-            input(pending.map { CodingAgentSettingChange(it.key, it.value) }).copy(reset = reset)
+            input(
+                    if (reset) emptyList()
+                    else pending.map { CodingAgentSettingChange(it.key, it.value) }
+                )
+                .copy(reset = reset)
         checking = true
         checkJob = scope.launch {
             try {
@@ -178,6 +184,10 @@ internal fun CodingAgentConfigurationEditor(
                     document = result.document
                     validation = null
                     pending.clear()
+                    if (reset) {
+                        fieldErrors.clear()
+                        fieldRevision++
+                    }
                     inheritedResets = inheritedResets.filterNot {
                         result.customizedPaths.contains(it)
                     }
@@ -339,7 +349,7 @@ internal fun CodingAgentConfigurationEditor(
                             Panel {
                                 Text(group, style = MaterialTheme.typography.titleMedium)
                                 for (field in fields) {
-                                    key(field.path) {
+                                    key(field.path, fieldRevision) {
                                         NativeConfigurationField(
                                             field,
                                             !saving,

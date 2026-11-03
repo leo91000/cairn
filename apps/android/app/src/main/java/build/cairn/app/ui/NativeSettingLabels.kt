@@ -74,6 +74,14 @@ internal fun nativeManagedReason(path: String): String =
         "permissions" ->
             "Les droits accordés dans Cairn restent le plafond. Modifiez le mode d’exécution sur la page de l’agent."
         "mcp" -> "Cairn fournit les outils MCP autorisés et les jetons privés de l’exécution."
+        "notify" ->
+            "Les commandes de notification natives ne peuvent pas s’exécuter hors des contrôles de droits Cairn. Utilisez les skills et les plugins Cairn."
+        "hooks / command helpers" ->
+            "Les hooks et commandes d’authentification natifs ne sont pas pris en charge. Utilisez les skills, plugins et Connexions Cairn."
+        "env" ->
+            "Seuls CLAUDE_AUTOCOMPACT_PCT_OVERRIDE, CLAUDE_CODE_MAX_OUTPUT_TOKENS et MAX_THINKING_TOKENS sont modifiables. Cairn gère l’environnement d’exécution."
+        "configuration substitutions" ->
+            "Les substitutions de fichiers et de variables sont refusées dans les clés et les valeurs. Utilisez des valeurs littérales vérifiables avant l’exécution."
         "features.plugins",
         "enabledPlugins",
         "plugin" ->

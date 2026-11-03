@@ -101,8 +101,25 @@ test('invalid fields remain editable and unsaved text survives a cancelled navig
   await expect(page.getByText('All changes saved', { exact: true })).toBeVisible()
 })
 
+test('reset all replaces invalid form drafts and can save the engine defaults', async ({ page, workspace }) => {
+  await save(workspace, 'model_context_window = 200000\n')
+  await page.goto(workspacePath('/settings/coding-agents/codex'))
+  const context = page.getByLabel('Context window', { exact: true })
+  const compaction = page.getByLabel('Automatic compaction threshold', { exact: true })
+  await compaction.fill('800000')
+  await context.fill('0')
+  await expect(page.getByRole('alert')).toContainText('positive whole number')
+  await page.getByRole('button', { name: 'Restore engine defaults', exact: true }).click()
+  await expect(context).toHaveValue('')
+  await expect(compaction).toHaveValue('')
+  await expect(page.getByRole('button', { name: 'Save configuration', exact: true })).toBeEnabled()
+  await page.getByRole('button', { name: 'Save configuration', exact: true }).click()
+  await expect(page.getByText('All changes saved', { exact: true })).toBeVisible()
+  await expect.poll(async () => (await read(workspace)).document.trim()).toBe('')
+})
+
 test('Claude and OpenCode use their native JSON editors and reject unsupported options', async ({ page, workspace }) => {
-  await save(workspace, '{"language":"French","hooks":{}}\n', 'claude')
+  await save(workspace, '{"language":"French","spinnerTipsEnabled":false}\n', 'claude')
   await page.goto(workspacePath('/settings/coding-agents/claude'))
   await expect(page.getByLabel('Response language', { exact: true })).toHaveValue('French')
   await page.getByLabel('Response language', { exact: true }).fill('English')

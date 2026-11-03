@@ -133,10 +133,10 @@ async function preview(changes: { path: string, value: string }[] = [], reset = 
 
   const request = ++generation
   checking.value = true
-  const fromForm = pending.size > 0
-  const submitted = new Map(pending)
+  const fromForm = !reset && pending.size > 0
+  const submitted = reset ? new Map<string, string>() : new Map(pending)
   try {
-    const result = await previewCodingAgentConfiguration(api, input([...pending].map(([path, value]) => ({ path, value })), reset))
+    const result = await previewCodingAgentConfiguration(api, input([...submitted].map(([path, value]) => ({ path, value })), reset))
     if (request !== generation)
       return
     current.value = result
@@ -144,6 +144,12 @@ async function preview(changes: { path: string, value: string }[] = [], reset = 
     document.value = result.document
     replacing = false
     validation.value = ''
+    if (reset) {
+      fieldDrafts.value = {}
+      fieldErrors.value = {}
+      pending.clear()
+    }
+
     for (const path of submitted.keys()) {
       delete fieldDrafts.value[path]
       pending.delete(path)

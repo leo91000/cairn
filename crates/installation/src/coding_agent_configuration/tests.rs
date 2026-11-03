@@ -114,7 +114,91 @@ fn managed_settings_are_refused_before_launch_and_errors_do_not_echo_values() {
     assert!(
         validate(
             Provider::Claude,
-            &json!({ "hooks": {}, "env": { "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000" } })
+            &json!({ "env": { "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000", "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80", "MAX_THINKING_TOKENS": "32000" } })
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn native_configuration_cannot_launch_callbacks_or_replace_managed_claude_environment() {
+    let mut cases = vec![
+        (Provider::Codex, json!({ "notify": ["blocked-callback"] })),
+        (
+            Provider::Claude,
+            json!({
+                "hooks": {
+                    "SessionStart": [{
+                        "hooks": [{
+                            "type": "command",
+                            "command": "blocked-callback"
+                        }]
+                    }]
+                }
+            }),
+        ),
+    ];
+    for key in [
+        "statusLine",
+        "fileSuggestion",
+        "awsAuthRefresh",
+        "awsCredentialExport",
+        "otelHeadersHelper",
+        "appendPlugins",
+    ] {
+        cases.push((Provider::Claude, json!({ key: "blocked-callback" })));
+    }
+    for key in [
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+        "CLAUDE_CODE_EFFORT_LEVEL",
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "NODE_OPTIONS",
+        "LD_PRELOAD",
+        "HTTPS_PROXY",
+        "NODE_TLS_REJECT_UNAUTHORIZED",
+    ] {
+        cases.push((
+            Provider::Claude,
+            json!({ "env": { key: "private-test-value" } }),
+        ));
+    }
+    for (provider, value) in cases {
+        let document = render(provider, &value).unwrap();
+        let mut plan = json!({ "provider": provider });
+        let error = apply(
+            &mut plan,
+            &json!({ "provider": provider, "document": document }),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains("private-test-value"));
+        assert!(plan.get("nativeSettings").is_none());
+    }
+}
+
+#[test]
+fn opencode_interpolation_is_refused_in_property_names_and_nested_values_before_loading() {
+    for value in [
+        json!({ "{file:/workspace/option-name}": { "rogue": {} } }),
+        json!({ "{env:RUNTIME_CONFIG_KEY}": {} }),
+        json!({ "instructions": ["{file:/workspace/private-preference}"] }),
+        json!({ "experimental": { "preference": "prefix {env:RUNTIME_CONFIG_VALUE} suffix" } }),
+    ] {
+        let mut plan = json!({ "provider": "opencode" });
+        let document = render(Provider::Opencode, &value).unwrap();
+        assert!(
+            apply(
+                &mut plan,
+                &json!({ "provider": "opencode", "document": document })
+            )
+            .is_err()
+        );
+        assert!(plan.get("nativeSettings").is_none());
+    }
+    assert!(
+        validate(
+            Provider::Opencode,
+            &json!({ "snapshot": false, "compaction": { "reserved": 10000 } })
         )
         .is_ok()
     );

@@ -80,3 +80,17 @@ before saving with an explanation; they are not accepted and silently replaced.
 These boundaries preserve [ADR-0013](adr/0013-managed-tools-without-native-plugin-catalog.md),
 [ADR-0042](adr/0042-opencode-api-key-integration.md) and the
 [configuration decision](adr/0079-native-coding-agent-configuration.md).
+
+Codex `notify`, Claude hooks, native command callbacks and authentication helpers
+are refused. They can execute outside the tool permission checks; use Cairn skills,
+plugins and Connections instead. Claude's editable `env` preferences are limited
+to `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS` and
+`MAX_THINKING_TOKENS`. Runtime, account, transport and reasoning environment
+overrides remain managed by Cairn.
+
+OpenCode `{file:...}` and `{env:...}` substitutions are refused in both property
+names and values. OpenCode expands these before parsing its configuration, which
+could introduce a managed key after validation or load values that were not frozen
+with the message. Use literal values in the native editor. See the native
+[Claude hook security reference](https://code.claude.com/docs/en/hooks#security-considerations)
+and [OpenCode variable reference](https://opencode.ai/docs/config/#variables).

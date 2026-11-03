@@ -44,7 +44,7 @@ function createCatalog(provider: Provider) {
     catalog.loading = true
     pending = listModels(api, { provider })
       .then((value) => {
-        Object.assign(catalog, value)
+        Object.assign(catalog, value, { nativeDefaults: value.nativeDefaults })
         store(key, value)
       })
       .catch((error: Error) => { catalog.error = error.message })

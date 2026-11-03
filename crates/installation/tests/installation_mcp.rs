@@ -250,6 +250,63 @@ async fn native_configuration_has_http_and_both_mcp_parity_with_live_scopes() {
     )
     .await;
     assert_eq!(result(&unchanged)["revision"], revision);
+
+    for (provider, document) in [
+        ("codex", "notify = ['blocked-callback']\n"),
+        (
+            "claude",
+            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"blocked-callback"}]}]}}"#,
+        ),
+        (
+            "claude",
+            r#"{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"0"}}"#,
+        ),
+        ("opencode", r#"{"{env:RUNTIME_CONFIG_KEY}":{"rogue":{}}}"#),
+    ] {
+        let target = json!({ "provider": provider, "agentId": null });
+        let (_, current) = node_management_call(
+            &app,
+            "/mcp",
+            &owner_token,
+            "get_coding_agent_configuration",
+            target.clone(),
+        )
+        .await;
+        let revision = result(&current)["revision"].clone();
+        let command = json!({ "provider": provider, "agentId": null, "revision": revision, "document": document, "changes": [], "reset": false });
+        for (endpoint, token) in [
+            ("/mcp", owner_token.as_str()),
+            ("/mcp-installation", agent_token),
+        ] {
+            let (_, refused) = node_management_call(
+                &app,
+                endpoint,
+                token,
+                "save_coding_agent_configuration",
+                command.clone(),
+            )
+            .await;
+            assert_eq!(refused["result"]["isError"], true, "{provider}: {endpoint}");
+        }
+        let request = common::request("PUT", "/api/settings/coding-agents")
+            .header("x-test-relay-token", &owner_token)
+            .body(Body::from(command.to_string()))
+            .unwrap();
+        assert_eq!(
+            common::send(&app, request).await.status(),
+            StatusCode::BAD_REQUEST,
+            "{provider}"
+        );
+        let (_, unchanged) = node_management_call(
+            &app,
+            "/mcp",
+            &owner_token,
+            "get_coding_agent_configuration",
+            target,
+        )
+        .await;
+        assert_eq!(result(&unchanged)["revision"], revision);
+    }
 }
 
 async fn node_management_call(
