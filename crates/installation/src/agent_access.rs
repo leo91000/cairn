@@ -224,7 +224,35 @@ fn require_chat(db: &Db<'_>, identity: &InstallationIdentity, id: &str) -> Resul
 /// message acceptance with an owner revoking the agent grant.
 pub(crate) fn authorize_member_chat_in(db: &Db<'_>, account: &str, id: &str) -> Result<()> {
     let identity = InstallationIdentity::trusted(InstallationRole::Member, account);
-    match require_chat(db, &identity, id)? {
+    authorize_admission(require_chat(db, &identity, id)?)
+}
+
+/// Recheck a member's access to a chat's own agent for delete and restore.
+pub(crate) fn authorize_member_chat_agent_in(db: &Db<'_>, account: &str, id: &str) -> Result<()> {
+    let chat = required(db.conversation(id)?, "Chat not found")?;
+    authorize_member_agent_in(db, account, &chat.agent_id)
+}
+
+/// Recheck a member's access to an agent in the mutation transaction.
+pub(crate) fn authorize_member_agent_in(db: &Db<'_>, account: &str, agent: &str) -> Result<()> {
+    let identity = InstallationIdentity::trusted(InstallationRole::Member, account);
+    authorize_admission(require_agent(db, &identity, agent)?)
+}
+
+/// Resume follows a conversation when the run belongs to one, otherwise its agent.
+pub(crate) fn authorize_member_run_in(db: &Db<'_>, account: &str, id: &str) -> Result<()> {
+    let identity = InstallationIdentity::trusted(InstallationRole::Member, account);
+    authorize_admission(require_run(db, &identity, id)?)
+}
+
+/// Cleanup always affects the workspace of the run's own agent.
+pub(crate) fn authorize_member_run_cleanup_in(db: &Db<'_>, account: &str, id: &str) -> Result<()> {
+    let identity = InstallationIdentity::trusted(InstallationRole::Member, account);
+    authorize_admission(require_run_cleanup(db, &identity, id)?)
+}
+
+fn authorize_admission(admission: Admission) -> Result<()> {
+    match admission {
         Admission::Denied => Err(Error::forbidden(DENIED)),
         Admission::Granted | Admission::Unrestricted => Ok(()),
     }
@@ -728,7 +756,7 @@ impl Service {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{agent_fixture::AgentFixture, relay_fixture};
+    use crate::{agent_fixture::AgentFixture, relay_fixture, run_fixture::DbRunFixture};
 
     const MEMBER: &str = "member-account";
 
@@ -893,17 +921,27 @@ mod tests {
         let reviewer = text(&reviewer, "id").to_owned();
         relay_fixture::allow_member(&s, MEMBER, &reviewer).await;
         let chat = crate::config::id();
-        let (chat_id, member_identity) = (
+        let (chat_id, member_identity, reviewer_id) = (
             chat.clone(),
             InstallationIdentity::trusted(InstallationRole::Member, MEMBER),
+            reviewer.clone(),
         );
         s.store
             .transaction(move |db| {
                 db.save_conversation(&serde_json::from_value(json!({
                     "id": chat_id.clone(),
-                    "agentId": reviewer,
+                    "agentId": reviewer_id,
                     "lifecycle": "active",
                 }))?)?;
+                db.add_run_fixture(
+                    &json!({
+                        "id": "run",
+                        "taskId": "task",
+                        "status": "succeeded",
+                        "snapshot": { "agent": { "id": reviewer_id } },
+                    }),
+                    None,
+                )?;
                 assert!(matches!(
                     gate(
                         db,
@@ -914,7 +952,10 @@ mod tests {
                     )?,
                     Admission::Granted
                 ));
-                authorize_member_chat_in(db, MEMBER, &chat_id)
+                authorize_member_agent_in(db, MEMBER, &reviewer_id)?;
+                authorize_member_chat_agent_in(db, MEMBER, &chat_id)?;
+                authorize_member_chat_in(db, MEMBER, &chat_id)?;
+                authorize_member_run_in(db, MEMBER, "run")
             })
             .await
             .unwrap();
@@ -935,6 +976,22 @@ mod tests {
         let result = s
             .store
             .transaction(move |db| authorize_member_chat_in(db, MEMBER, &chat_id))
+            .await;
+        assert_eq!(result.unwrap_err().status, 403);
+        let (agent_id, chat_id) = (reviewer.clone(), chat.clone());
+        let result = s
+            .store
+            .transaction(move |db| authorize_member_agent_in(db, MEMBER, &agent_id))
+            .await;
+        assert_eq!(result.unwrap_err().status, 403);
+        let result = s
+            .store
+            .transaction(move |db| authorize_member_chat_agent_in(db, MEMBER, &chat_id))
+            .await;
+        assert_eq!(result.unwrap_err().status, 403);
+        let result = s
+            .store
+            .transaction(move |db| authorize_member_run_in(db, MEMBER, "run"))
             .await;
         assert_eq!(result.unwrap_err().status, 403);
     }

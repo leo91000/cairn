@@ -63,6 +63,15 @@ impl Actor {
         Ok(())
     }
 
+    fn authorize_agent(&self, db: &Db<'_>, agent: &str) -> Result<()> {
+        if let Self::Human(identity) = self
+            && identity.role == InstallationRole::Member
+        {
+            crate::agent_access::authorize_member_agent_in(db, &identity.account_id, agent)?;
+        }
+        Ok(())
+    }
+
     fn require_author(&self, m: &Mission) -> Result<()> {
         if let Self::Human(identity) = self
             && identity.role == InstallationRole::Member
@@ -254,6 +263,9 @@ impl Missions {
                     db.agent_snapshot(&mission.settings.agent_id.to_string())?,
                     "Agent no longer exists",
                 )?;
+                if !reduces {
+                    actor.authorize_agent(db, &mission.settings.agent_id.to_string())?;
+                }
                 // Native provenance is still owned by the native-node domain, not by command JSON.
                 let wire = serde_json::to_value(&mission)?;
                 task_projects(&agent, &wire, &db.projects()?)?;

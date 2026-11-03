@@ -277,14 +277,43 @@ pub(crate) async fn invoke(
         }
         Ok(())
     });
-    let authorize = if matches!(name, "send_chat_message" | "edit_chat_message") {
-        if let Some(account) = member_account {
-            let chat_id = text(&args, "chatId").to_owned();
-            authorize.with_guard(move |db: &Db<'_>| {
-                crate::agent_access::authorize_member_chat_in(db, &account, &chat_id)
-            })
-        } else {
-            authorize
+    let authorize = if let Some(account) = member_account {
+        match name {
+            "create_chat" => {
+                let agent = args["agentId"]
+                    .as_str()
+                    .unwrap_or(crate::config::MAIN_AGENT_ID)
+                    .to_owned();
+                authorize.with_guard(move |db: &Db<'_>| {
+                    crate::agent_access::authorize_member_agent_in(db, &account, &agent)
+                })
+            }
+            "delete_chat" | "restore_chat" => {
+                let chat_id = text(&args, "chatId").to_owned();
+                authorize.with_guard(move |db: &Db<'_>| {
+                    crate::agent_access::authorize_member_chat_agent_in(db, &account, &chat_id)
+                })
+            }
+            "send_chat_message"
+            | "edit_chat_message"
+            | "answer_chat_question"
+            | "cancel_chat_question"
+            | "restart_chat_session"
+            | "switch_chat_coding_agent"
+            | "resume_chat"
+            | "compact_chat" => {
+                let chat_id = text(&args, "chatId").to_owned();
+                authorize.with_guard(move |db: &Db<'_>| {
+                    crate::agent_access::authorize_member_chat_in(db, &account, &chat_id)
+                })
+            }
+            "set_chat_paused" if args["paused"] != true => {
+                let chat_id = text(&args, "chatId").to_owned();
+                authorize.with_guard(move |db: &Db<'_>| {
+                    crate::agent_access::authorize_member_chat_in(db, &account, &chat_id)
+                })
+            }
+            _ => authorize,
         }
     } else {
         authorize

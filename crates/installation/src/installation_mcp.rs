@@ -324,6 +324,7 @@ pub(crate) async fn operation(
                     s,
                     args,
                     crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+                    None,
                 ),
             )
             .await;
@@ -332,7 +333,7 @@ pub(crate) async fn operation(
         let input = crate::capabilities::RESUME_RUN.decode(args)?;
         let context = crate::capabilities::ResumeContext::Installation(bearer.to_owned());
         let output = crate::capabilities::RESUME_RUN
-            .invoke(s, input, context)
+            .invoke(s, input, context, None)
             .await?;
         return Ok(serde_json::to_value(output)?);
     }

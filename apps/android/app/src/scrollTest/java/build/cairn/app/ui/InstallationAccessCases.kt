@@ -63,6 +63,11 @@ abstract class InstallationAccessCases {
                                     saved += updated
                                     wireJson.encodeToString(updated)
                                 }
+                                path == "/api/installations/fixture/sharing" ->
+                                    """{"members":[{"id":"member-1","email":"ada@example.test","accessId":"access-1"}],"invitations":[]}"""
+                                path ==
+                                    "/api/installations/fixture/api/agents/$MAIN_AGENT_ID/accounts" ->
+                                    """{"agentId":"$MAIN_AGENT_ID","accounts":[{"accountId":"member-1","accessId":"access-1","grantedAt":1}]}"""
                                 path.endsWith("/preview") ->
                                     """{"runs":{"queued":0,"running":0},"delegations":[]}"""
                                 path == "/api/installations/fixture/api/agents" ->
@@ -154,6 +159,9 @@ abstract class InstallationAccessCases {
             compose.onAllNodesWithTag("agent-review").fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithText("Ajout : gestion de l’installation", substring = true).assertExists()
+        compose
+            .onNodeWithText("Ces nouveaux droits s’appliquent à :", substring = true)
+            .assertTextContains("ada@example.test", substring = true)
         compose
             .onNode(hasText("Enregistrer") and hasAnyAncestor(hasTestTag("agent-review")))
             .performClick()

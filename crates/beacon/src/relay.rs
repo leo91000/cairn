@@ -1021,7 +1021,31 @@ pub(super) async fn notification_recipients(
                 "Notification recipients unavailable",
             )
         })?;
-    Ok(serde_json::from_slice(&body).ok())
+    decode_notification_recipients(&body).map(Some)
+}
+
+fn decode_notification_recipients(
+    body: &[u8],
+) -> Result<cairn_protocol::NotificationRecipients, ApiError> {
+    serde_json::from_slice(body).map_err(|_| {
+        ApiError::Http(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Notification recipients unavailable",
+        )
+    })
+}
+
+#[cfg(test)]
+mod notification_recipients_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_successful_response_is_unavailable() {
+        assert!(matches!(
+            decode_notification_recipients(b"not-json"),
+            Err(ApiError::Http(StatusCode::SERVICE_UNAVAILABLE, _))
+        ));
+    }
 }
 
 pub(super) async fn mcp(

@@ -242,6 +242,7 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
                     s,
                     json!({ "taskId": id }),
                     crate::capabilities::ResumeContext::http(input)?,
+                    crate::capabilities::member_account(input.identity.as_ref()),
                 )
                 .await?
         }

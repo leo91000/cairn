@@ -1,4 +1,5 @@
 use crate::{
+    auth::{InstallationIdentity, InstallationRole},
     config::now,
     error::{Error, Result, required},
     service::Service,
@@ -205,6 +206,7 @@ impl Service {
     }
 
     async fn upload_attachment(&self, chat: &str, id: &str, request: Request) -> Result<Response> {
+        let identity = request.extensions().get::<InstallationIdentity>().cloned();
         let query: HashMap<String, String> =
             serde_urlencoded::from_str(request.uri().query().unwrap_or(""))
                 .map_err(|_| Error::bad("Invalid file name."))?;
@@ -219,7 +221,22 @@ impl Service {
         .await
         .map_err(|_| Error::timeout("Upload timed out."))?
         .map_err(|_| Error::too_large("Files must be 10 MB or smaller."))?;
-        let attachment = self.store_attachment(chat, id, name, &bytes).await?;
+        let chat_id = chat.to_owned();
+        let attachment = self
+            .store_attachment_authorized(chat, id, name, &bytes, move |db| {
+                if let Some(identity) = identity.as_ref()
+                    && identity.role == InstallationRole::Member
+                    && identity.mcp_scopes.is_none()
+                {
+                    crate::agent_access::authorize_member_chat_in(
+                        db,
+                        &identity.account_id,
+                        &chat_id,
+                    )?;
+                }
+                Ok(())
+            })
+            .await?;
         Ok(Json(attachment).into_response())
     }
 

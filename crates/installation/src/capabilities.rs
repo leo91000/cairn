@@ -35,6 +35,16 @@ impl ResumeContext {
     }
 }
 
+pub(crate) fn member_account(
+    identity: Option<&crate::auth::InstallationIdentity>,
+) -> Option<String> {
+    identity
+        .filter(|identity| {
+            identity.role == crate::auth::InstallationRole::Member && identity.mcp_scopes.is_none()
+        })
+        .map(|identity| identity.account_id.clone())
+}
+
 pub(crate) struct ResumeRun;
 
 pub(crate) const RESUME_RUN: ResumeRun = ResumeRun;
@@ -50,6 +60,7 @@ impl ResumeRun {
         s: &Arc<Service>,
         input: ResumeRunInput,
         context: ResumeContext,
+        member_account: Option<String>,
     ) -> Result<ResumeRunOutput> {
         if input
             .turn_id
@@ -120,6 +131,14 @@ impl ResumeRun {
         let authorize = crate::installation_mcp::management_authorization(s, bearer.as_deref())
             .await?
             .with_publication(move |db| policy::authorize_run_in(db, &commit_id, &origin));
+        let authorize = if let Some(account) = member_account {
+            let run_id = id.clone();
+            authorize.with_guard(move |db| {
+                crate::agent_access::authorize_member_run_in(db, &account, &run_id)
+            })
+        } else {
+            authorize
+        };
         s.worker
             .resume_selected_live(
                 s,
