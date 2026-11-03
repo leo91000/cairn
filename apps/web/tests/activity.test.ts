@@ -196,7 +196,12 @@ describe('conversation activity', () => {
     const request = (messageId: string) => event('chat.user', { messageId, plan: true })
     const turn = () => event('turn.started', {}, true)
     const proposal = (text: string, requestId: string) => event('item.completed', {
-      item: { id: 'exit-plan-tool', type: 'proposed_plan', text, request_id: requestId },
+      item: {
+        id: 'exit-plan-tool',
+        type: 'proposed_plan',
+        text,
+        request_id: requestId,
+      },
     })
     const events = [
       request('plan-a'),
@@ -213,6 +218,46 @@ describe('conversation activity', () => {
       { id: '2:exit-plan-tool', text: 'Revised approach', sourceId: 'chat:6' },
     ])
     expect(proposedPlanApproval(events)).toBe('chat:6')
+  })
+  it('separates Claude proposal IDs at turn completion without a start event', () => {
+    let id = 0
+    const event = (type: string, payload: Record<string, unknown>, timeline = false): RunEvent => ({
+      id: ++id,
+      runId: 'chat',
+      createdAt: id,
+      type,
+      text: '',
+      payload,
+      ...(timeline ? { timeline: true } : {}),
+    })
+    const request = (messageId: string) => event('chat.user', { messageId, plan: true })
+    const proposal = (text: string, requestId: string) => event('item.completed', {
+      item: {
+        id: 'exit-plan-tool',
+        type: 'proposed_plan',
+        text,
+        request_id: requestId,
+      },
+    })
+    const completed = () => event('turn.completed', {}, true)
+    const events = [
+      request('plan-a'),
+      proposal('First approach', 'plan-a'),
+      completed(),
+      request('plan-b'),
+      proposal('Second approach', 'plan-b'),
+      completed(),
+      request('plan-c'),
+      proposal('Current approach', 'plan-c'),
+    ]
+
+    const proposals = activityEntries(events, true).filter(entry => entry.kind === 'proposal')
+    expect(proposals).toMatchObject([
+      { id: '0:exit-plan-tool', text: 'First approach', sourceId: 'chat:2' },
+      { id: '1:exit-plan-tool', text: 'Second approach', sourceId: 'chat:5' },
+      { id: '2:exit-plan-tool', text: 'Current approach', sourceId: 'chat:8' },
+    ])
+    expect(proposedPlanApproval(events)).toBe('chat:8')
   })
   it('keeps proposal approval identity exclusive to its completed lifecycle event', () => {
     const event = (id: number, type: string, text: string): RunEvent => ({

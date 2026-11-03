@@ -302,8 +302,9 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
   for (const [eventIndex, stored] of events.entries()) {
     const event = stored
     placeCards(event.id)
-    // Timeline cards replace rendering, not the turn boundary used to identify items.
-    if (event.type === 'turn.started')
+    // Providers may omit turn.started, but a completed/failed turn still separates item IDs.
+    // Timeline cards replace rendering, not the boundary used to identify items.
+    if (['turn.started', 'turn.completed', 'turn.failed'].includes(event.type))
       turn++
     // A compaction still running when its turn or run ends did not complete.
     const end = compactionEnd(event)
