@@ -101,3 +101,13 @@ and [OpenCode variable reference](https://opencode.ai/docs/config/#variables).
 OpenCode `agent.*.permission` and `agent.*.tools`, including their deprecated
 `mode.*` equivalents, are managed alongside the global permission rules. They
 cannot override the MCP tool subset granted by Cairn.
+Global legacy `tools` and V2 `permissions` rules are also refused. Custom
+formatter/LSP commands and their environment overrides are unsupported executable
+callbacks; disabling a built-in formatter or server remains available.
+
+For historical conversations without a native snapshot, the first configuration
+edit retains the previous effective selection defaults as a comparison baseline.
+Changing only a context or output preference keeps the conversation's model,
+reasoning and speed. Agent merges retain the original execution identity for this
+comparison, so the destination's existing defaults do not replace the transferred
+conversation selection.

@@ -1,4 +1,5 @@
 use super::*;
+use crate::run_fixture::DbRunFixture;
 use crate::store::Store;
 
 fn target(agent_id: Option<AgentId>) -> CodingAgentConfigurationInput {
@@ -81,6 +82,8 @@ fn managed_settings_are_refused_before_launch_and_errors_do_not_echo_values() {
             json!({ "profiles": { "other": { "approval_policy": "never" } } }),
         ),
         (Provider::Codex, json!({ "features": { "plugins": true } })),
+        (Provider::Codex, json!({ "plugins": {} })),
+        (Provider::Codex, json!({ "marketplaces": {} })),
         (
             Provider::Codex,
             json!({ "features": { "default_mode_request_user_input": true } }),
@@ -107,6 +110,8 @@ fn managed_settings_are_refused_before_launch_and_errors_do_not_echo_values() {
             json!({ "compaction": { "auto": true } }),
         ),
         (Provider::Opencode, json!({ "plugin": ["untrusted"] })),
+        (Provider::Opencode, json!({ "plugins": ["untrusted"] })),
+        (Provider::Opencode, json!({ "providers": {} })),
         (Provider::Opencode, json!({ "autoupdate": true })),
     ] {
         let error = validate(provider, &value).unwrap_err().to_string();
@@ -339,9 +344,10 @@ fn opencode_interpolation_is_refused_in_property_names_and_nested_values_before_
 
 #[test]
 fn opencode_native_roles_cannot_override_a_granted_mcp_tool_subset() {
-    for group in ["agent", "mode"] {
+    for group in ["agent", "mode", "agents"] {
         for (setting, override_value) in [
             ("permission", json!({ "*": "allow" })),
+            ("permissions", json!({ "*": "allow" })),
             ("tools", json!({ "*": true })),
         ] {
             let native = json!({ group: { "build": { setting: override_value } } });
@@ -371,6 +377,148 @@ fn opencode_native_roles_cannot_override_a_granted_mcp_tool_subset() {
         )
         .is_ok()
     );
+}
+
+#[test]
+fn opencode_command_callbacks_and_global_permission_aliases_are_refused_before_loading() {
+    let mut values = vec![
+        json!({ "permissions": {} }),
+        json!({ "tools": { "bash": false } }),
+    ];
+    for group in ["formatter", "lsp"] {
+        for (key, value) in [
+            ("command", json!(["blocked-callback"])),
+            ("env", json!({ "NODE_OPTIONS": "private-test-value" })),
+            ("environment", json!({ "LD_PRELOAD": "private-test-value" })),
+        ] {
+            values.push(json!({ group: { "custom": { key: value } } }));
+        }
+    }
+    for value in values {
+        let mut plan = json!({ "provider": "opencode" });
+        let document = render(Provider::Opencode, &value).unwrap();
+        let error = apply(
+            &mut plan,
+            &json!({ "provider": "opencode", "document": document }),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains("private-test-value"));
+        assert!(plan.get("nativeSettings").is_none());
+    }
+    assert!(
+        validate(
+            Provider::Opencode,
+            &json!({ "formatter": { "prettier": { "disabled": true } }, "lsp": false })
+        )
+        .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn changing_engines_uses_native_defaults_without_a_historical_baseline() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            let id = agent(db, "codex")?;
+            let profile = db.agent_snapshot(&id.to_string())?.unwrap();
+            let historical = json!({ "snapshot": { "agent": profile } });
+            let mut current = historical.clone();
+            freeze_message(db, &mut current, None, &json!({}))?;
+            change(
+                db,
+                CodingAgentConfigurationInput {
+                    provider: AgentProvider::Claude,
+                    agent_id: None,
+                },
+                r#"{"model":"opus"}"#,
+                vec![],
+            )?;
+            for previous in [historical, current] {
+                let message = json!({ "provider": "claude" });
+                let mut next = json!({ "snapshot": { "agent": profile } });
+                crate::chats::select_agent(&mut next, Some(&previous), &message)?;
+                freeze_message(db, &mut next, Some(&previous), &message)?;
+                assert_eq!(next["snapshot"]["agent"]["model"], "opus");
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+fn followup(db: &Db<'_>, agent: AgentId, previous: &Value) -> Result<Value> {
+    let profile = db.agent_snapshot(&agent.to_string())?.unwrap();
+    let mut next = json!({ "snapshot": { "agent": profile } });
+    crate::chats::select_agent(&mut next, Some(previous), &json!({}))?;
+    freeze_message(db, &mut next, Some(previous), &json!({}))?;
+    Ok(next)
+}
+
+#[tokio::test]
+async fn historical_chat_choices_change_only_when_the_resolved_selection_defaults_change() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    store.transaction(|db| {
+        for customize_agent in [true, false] {
+            let id = agent(db, "codex")?;
+            let mut profile = db.agent(&id.to_string())?.unwrap();
+            profile.settings.model = "profile-model-a".into();
+            profile.settings.reasoning = "low".into();
+            db.save_agent(&profile)?;
+            let mut legacy = json!({ "id": crate::config::id(), "taskId": "legacy-task", "status": "failed", "snapshot": { "agent": profile } });
+            legacy["snapshot"]["agent"]["model"] = "conversation-model-b".into();
+            legacy["snapshot"]["agent"]["reasoning"] = "high".into();
+            let legacy = db.add_run_fixture(&legacy, None)?;
+            let native_target = target(customize_agent.then_some(id));
+            let current = view(db, native_target)?;
+            change(db, native_target, &current.document, vec![CodingAgentSettingChange { path: "/model_context_window".into(), value: "1000000".into() }])?;
+            let next = followup(db, id, &legacy)?;
+            assert_eq!(next["snapshot"]["agent"]["model"], "conversation-model-b");
+            assert_eq!(next["snapshot"]["agent"]["reasoning"], "high");
+            change(db, target(None), "model = 'global-model'\n", vec![])?;
+            assert_eq!(followup(db, id, &legacy)?["snapshot"]["agent"]["model"], "conversation-model-b");
+            let current = view(db, target(Some(id)))?;
+            change(db, target(Some(id)), &current.document, vec![CodingAgentSettingChange { path: "/model".into(), value: "\"agent-model-c\"".into() }])?;
+            assert_eq!(followup(db, id, &legacy)?["snapshot"]["agent"]["model"], "agent-model-c");
+            change(db, target(None), "", vec![])?;
+            let current = view(db, target(Some(id)))?;
+            change(db, target(Some(id)), &current.document, vec![CodingAgentSettingChange { path: "/model".into(), value: "null".into() }])?;
+            assert_eq!(followup(db, id, &legacy)?["snapshot"]["agent"]["model"], "");
+        }
+        Ok(())
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn historical_transfer_keeps_its_selection_before_adopting_destination_preferences() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    store.transaction(|db| {
+        let source = agent(db, "codex")?;
+        let destination = agent(db, "codex")?;
+        for id in [source, destination] {
+            let mut profile = db.agent(&id.to_string())?.unwrap();
+            profile.settings.access.backend = "firecracker".into();
+            db.save_agent(&profile)?;
+        }
+        let profile = db.agent(&source.to_string())?.unwrap();
+        let mut legacy = json!({ "id": crate::config::id(), "taskId": "legacy-transfer", "status": "failed", "snapshot": { "agent": profile } });
+        legacy["snapshot"]["agent"]["model"] = "conversation-model".into();
+        legacy["snapshot"]["agent"]["reasoning"] = "high".into();
+        let legacy = db.add_run_fixture(&legacy, None)?;
+        change(db, target(Some(destination)), "model = 'destination-model'\n", vec![])?;
+        crate::agent_merge::merge(db, &MergeAgentsInput { source_id: source, target_id: destination, confirm: true }, &[])?;
+        let transferred = db.run(text(&legacy, "id"))?.unwrap();
+        let next = followup(db, destination, &transferred)?;
+        assert_eq!(next["snapshot"]["agent"]["model"], "conversation-model");
+        assert_eq!(next["snapshot"]["agent"]["reasoning"], "high");
+        let current = view(db, target(Some(destination)))?;
+        change(db, target(Some(destination)), &current.document, vec![CodingAgentSettingChange { path: "/model".into(), value: "\"changed-destination\"".into() }])?;
+        assert_eq!(followup(db, destination, &next)?["snapshot"]["agent"]["model"], "changed-destination");
+        Ok(())
+    }).await.unwrap();
 }
 
 #[test]
@@ -965,7 +1113,7 @@ async fn native_configuration_storage_measurement() {
             .unwrap();
     }
     let write_us = writes.elapsed().as_micros() / 100;
-    let bytes = store.read(|db| Ok(db.0.query_row("SELECT sum(length(CAST(document AS BLOB))+length(CAST(presentation AS BLOB))+length(CAST(removed AS BLOB))+length(CAST(revision AS BLOB))) FROM coding_agent_configurations", [], |row| row.get::<_, i64>(0))?)).await.unwrap();
+    let bytes = store.read(|db| Ok(db.0.query_row("SELECT sum(length(CAST(document AS BLOB))+length(CAST(presentation AS BLOB))+length(CAST(removed AS BLOB))+length(CAST(revision AS BLOB))+length(CAST(coalesce(legacy_baseline,'') AS BLOB))) FROM coding_agent_configurations", [], |row| row.get::<_, i64>(0))?)).await.unwrap();
     drop(store);
     let cold = Instant::now();
     for _ in 0..25 {

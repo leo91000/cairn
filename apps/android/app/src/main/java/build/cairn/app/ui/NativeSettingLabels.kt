@@ -88,6 +88,8 @@ internal fun nativeManagedReason(path: String): String =
             "Les substitutions de fichiers et de variables sont refusées dans les clés et les valeurs. Utilisez des valeurs littérales vérifiables avant l’exécution."
         "agent / mode permissions" ->
             "Les droits et outils des agents natifs, y compris les anciens modes, ne peuvent pas remplacer la sélection d’outils accordée dans Cairn. Modifiez les accès sur la page de l’agent Cairn."
+        "formatter / lsp commands" ->
+            "Les commandes personnalisées de formatage et de serveurs de langage, ainsi que leur environnement, ne sont pas prises en charge. Utilisez les skills et plugins Cairn."
         "features.plugins",
         "enabledPlugins",
         "plugin" ->

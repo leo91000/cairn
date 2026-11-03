@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS coding_agent_configurations(
  presentation TEXT NOT NULL,
  removed TEXT NOT NULL CHECK(json_valid(removed) AND json_type(removed)='array'),
  revision TEXT NOT NULL,
+ legacy_baseline TEXT CHECK(legacy_baseline IS NULL OR (json_valid(legacy_baseline) AND json_type(legacy_baseline)='object')),
  PRIMARY KEY(scope,provider),
  CHECK(scope=coalesce(agent_id,''))
 );";
@@ -35,6 +36,7 @@ struct Record {
     revision: String,
     document: String,
     presentation: String,
+    legacy_baseline: Option<Value>,
 }
 
 pub(crate) fn parse(provider: Provider, document: &str) -> Result<Value> {
@@ -156,12 +158,12 @@ fn set_keys(current: &mut Value, keys: &[String], replacement: Option<Value>) {
 
 fn record(db: &Db<'_>, provider: Provider, agent: Option<AgentId>) -> Result<Record> {
     let scope = agent.map_or_else(String::new, |id| id.to_string());
-    let row: Option<(String, String, String, String)> = db.0.query_row(
-        "SELECT document,removed,revision,presentation FROM coding_agent_configurations WHERE scope=? AND provider=?",
+    let row: Option<(String, String, String, String, Option<String>)> = db.0.query_row(
+        "SELECT document,removed,revision,presentation,legacy_baseline FROM coding_agent_configurations WHERE scope=? AND provider=?",
         params![scope, provider.as_str()],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
     ).optional()?;
-    let (document, removed, revision, presentation) = row.unwrap_or_else(|| {
+    let (document, removed, revision, presentation, legacy_baseline) = row.unwrap_or_else(|| {
         (
             if provider == Provider::Codex {
                 ""
@@ -177,6 +179,7 @@ fn record(db: &Db<'_>, provider: Provider, agent: Option<AgentId>) -> Result<Rec
                 "{}\n"
             }
             .into(),
+            None,
         )
     });
     Ok(Record {
@@ -185,6 +188,9 @@ fn record(db: &Db<'_>, provider: Provider, agent: Option<AgentId>) -> Result<Rec
         revision,
         document,
         presentation,
+        legacy_baseline: legacy_baseline
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?,
     })
 }
 
@@ -449,6 +455,10 @@ fn managed(provider: Provider) -> Vec<ManagedCodingAgentSetting> {
                 "agent / mode permissions",
                 "Native agent permissions and legacy tool overrides cannot replace Cairn's granted tool selection. Change access on the Cairn agent page.",
             ));
+            entries.push((
+                "formatter / lsp commands",
+                "Custom executable commands and their environments are not supported. Use Cairn skills and plugins.",
+            ));
         }
     }
     entries
@@ -544,6 +554,8 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
             "/profiles",
             "/notify",
             "/hooks",
+            "/plugins",
+            "/marketplaces",
         ],
         Provider::Claude => &[
             "/permissions",
@@ -576,11 +588,15 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
         ],
         Provider::Opencode => &[
             "/provider",
+            "/providers",
+            "/plugins",
             "/enabled_providers",
             "/disabled_providers",
             "/mcp",
             "/server",
             "/permission",
+            "/permissions",
+            "/tools",
             "/small_model",
         ],
     };
@@ -642,12 +658,29 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
         }
     }
     if provider == Provider::Opencode {
-        for group in ["agent", "mode"] {
+        for group in ["agent", "mode", "agents"] {
             if let Some(agents) = value.get(group).and_then(Value::as_object) {
                 for agent in agents.values() {
-                    if agent.get("permission").is_some() || agent.get("tools").is_some() {
+                    if agent.get("permission").is_some()
+                        || agent.get("permissions").is_some()
+                        || agent.get("tools").is_some()
+                    {
                         return Err(Error::bad(
                             "OpenCode native agent tools and permissions are managed by Cairn. Use the Cairn agent's access settings instead.",
+                        ));
+                    }
+                }
+            }
+        }
+        for group in ["formatter", "lsp"] {
+            if let Some(callbacks) = value.get(group).and_then(Value::as_object) {
+                for callback in callbacks.values() {
+                    if ["command", "env", "environment"]
+                        .iter()
+                        .any(|key| callback.get(*key).is_some())
+                    {
+                        return Err(Error::bad(
+                            "OpenCode formatter and language-server commands or environments are not supported by Cairn's managed execution. Use Cairn skills and plugins.",
                         ));
                     }
                 }
@@ -1099,6 +1132,7 @@ pub(crate) fn edit(
     if !save {
         return Ok(output);
     }
+    capture_legacy_defaults(db, provider, input.agent_id)?;
     if let Some(agent) = changed_agent {
         crate::agent_grants::save_profile(db, agent, false, &[])?;
     }
@@ -1130,14 +1164,45 @@ fn native_paths(db: &Db<'_>, provider: Provider, agent_id: AgentId) -> Result<BT
     let mut configured = paths(&defaults.value);
     configured.extend(paths(&own.value));
     configured.extend(own.removed);
-    if own.revision != "initial" {
-        configured.extend(
-            mappings(provider)
-                .iter()
-                .map(|(path, _)| (*path).to_owned()),
-        );
-    }
     Ok(configured)
+}
+
+/// Preserve only selection defaults, without duplicating instructions or run data.
+/// Historical chats have no native snapshot to compare against on their first turn.
+fn capture_legacy_defaults(db: &Db<'_>, provider: Provider, agent: Option<AgentId>) -> Result<()> {
+    let agents = if let Some(agent) = agent {
+        vec![agent.to_string()]
+    } else {
+        db.0.prepare("SELECT agents.id FROM agents
+            LEFT JOIN coding_agent_configurations AS config ON config.scope=agents.id AND config.provider=?
+            WHERE config.legacy_baseline IS NULL")?
+            .query_map([provider.as_str()], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for agent in agents {
+        let agent_id =
+            AgentId(uuid::Uuid::parse_str(&agent).map_err(|_| Error::bad("Invalid agent ID."))?);
+        let (value, _, own, _, _) = effective(db, provider, Some(agent_id))?;
+        if own.legacy_baseline.is_some() {
+            continue;
+        }
+        let mut baseline = json!({});
+        for (path, field) in mappings(provider) {
+            if *field != "instructions"
+                && let Some(value) = value.pointer(path)
+            {
+                set(&mut baseline, path, Some(value.clone()))?;
+            }
+        }
+        db.0.execute(
+            "INSERT INTO coding_agent_configurations(scope,provider,agent_id,document,presentation,removed,revision,legacy_baseline)
+             VALUES(?1,?2,?1,?3,?4,?5,?6,?7)
+             ON CONFLICT(scope,provider) DO UPDATE SET legacy_baseline=excluded.legacy_baseline
+             WHERE coding_agent_configurations.legacy_baseline IS NULL",
+            params![agent, provider.as_str(), own.document, own.presentation, serde_json::to_string(&own.removed)?, own.revision, baseline.to_string()],
+        )?;
+    }
+    Ok(())
 }
 
 pub(crate) fn snapshot(
@@ -1181,10 +1246,12 @@ pub(crate) fn freeze_message(
     let transferred = previous_frozen
         .and_then(|configuration| configuration["agentId"].as_str())
         .is_some_and(|owner| owner != agent_id);
-    // Before native snapshots existed, a conversation's explicit model remains its
-    // selection. Only an actual native default can replace that legacy selection.
-    let legacy_paths = if previous.is_some() && previous_frozen.is_none() {
-        Some(native_paths(db, provider, frozen.agent_id.unwrap())?)
+    let legacy = previous.is_some_and(|run| {
+        Provider::of_run(run).ok() == Some(provider)
+            && !run["snapshot"]["nativeConfiguration"].is_object()
+    });
+    let legacy_baseline = if legacy {
+        record(db, provider, frozen.agent_id)?.legacy_baseline
     } else {
         None
     };
@@ -1193,13 +1260,14 @@ pub(crate) fn freeze_message(
         .and_then(|run| run["snapshot"]["nativeConfiguration"]["document"].as_str())
         .map(|document| parse(provider, document))
         .transpose()?
+        .or(legacy_baseline.clone())
         .unwrap_or_else(|| json!({}));
     let previous_paths = previous
         .filter(|run| run["snapshot"]["nativeConfiguration"]["provider"] == provider.as_str())
         .and_then(|run| run["snapshot"]["nativeConfiguration"]["configuredPaths"].as_array());
     let configured = |path: &str| {
-        if let Some(paths) = &legacy_paths {
-            return paths.contains(path);
+        if legacy {
+            return legacy_baseline.is_some() && native.pointer(path) != old.pointer(path);
         }
         frozen
             .configured_paths

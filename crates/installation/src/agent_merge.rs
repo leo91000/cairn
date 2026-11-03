@@ -174,6 +174,24 @@ pub(crate) fn merge(
     // profile identity changes so recovery and live authorization find the target.
     for run in &runs {
         let mut snapshot = required(db.run_snapshot(text(run, "id"))?, "Run snapshot not found")?;
+        if snapshot.native_configuration.is_none() {
+            // An empty native document preserves legacy retry behavior. Its old
+            // owner identifies this transfer before the first new-message snapshot.
+            snapshot.native_configuration = Some(cairn_contracts::NativeConfigurationSnapshot {
+                agent_id: Some(source.id),
+                provider: snapshot.agent.settings.provider,
+                document: if snapshot.agent.settings.provider
+                    == cairn_contracts::AgentProvider::Codex
+                {
+                    ""
+                } else {
+                    "{}\n"
+                }
+                .into(),
+                revision: "legacy-transfer".into(),
+                configured_paths: vec![],
+            });
+        }
         snapshot.agent.id = target.id;
         if snapshot.task.settings.agent_id == source.id {
             snapshot.task.settings.agent_id = target.id;

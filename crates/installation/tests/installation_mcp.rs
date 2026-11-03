@@ -272,6 +272,19 @@ async fn native_configuration_has_http_and_both_mcp_parity_with_live_scopes() {
             r#"{"env":{"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS":"0"}}"#,
         ),
         ("opencode", r#"{"{env:RUNTIME_CONFIG_KEY}":{"rogue":{}}}"#),
+        ("opencode", r#"{"permissions":{}}"#),
+        ("opencode", r#"{"tools":{"bash":false}}"#),
+        ("opencode", r#"{"agents":{"build":{"permissions":{}}}}"#),
+        ("opencode", r#"{"agent":{"build":{"permissions":{}}}}"#),
+        ("opencode", r#"{"mode":{"build":{"permissions":{}}}}"#),
+        (
+            "opencode",
+            r#"{"lsp":{"custom":{"command":["blocked-callback"]}}}"#,
+        ),
+        (
+            "opencode",
+            r#"{"formatter":{"custom":{"environment":{"NODE_OPTIONS":"blocked"}}}}"#,
+        ),
         (
             "opencode",
             r#"{"agent":{"build":{"permission":{"*":"allow"}}}}"#,
