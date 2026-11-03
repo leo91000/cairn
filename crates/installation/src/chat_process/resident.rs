@@ -66,10 +66,10 @@ pub async fn serve_with_ready(
             Session::codex_until(config, home, &[], Some(&config.home), &stop).await?;
         tracing::info!(target: "cairn_performance", operation = "codex_resident", event = "ready", native_init_ms = started.elapsed().as_millis() as u64);
         let result = match notify() {
-            Ok(()) => serve_session(listener, &mut session, home, stop).await,
+            Ok(()) => serve_session(listener, &mut session, home, stop, config).await,
             Err(error) => Err(error),
         };
-        session.close().await;
+        session.shutdown().await;
         result
     }
     .await;
@@ -82,7 +82,9 @@ async fn serve_session(
     session: &mut Session,
     home: &Path,
     stop: CancellationToken,
+    config: &Config,
 ) -> Result<()> {
+    let mut native_settings = json!({});
     loop {
         let (mut client, _) = tokio::select! {
             () = stop.cancelled() => return Ok(()),
@@ -97,7 +99,16 @@ async fn serve_session(
             }
         };
         require_owner(&client)?;
-        let result = handle(&mut client, &listener, session, home, stop.clone()).await;
+        let result = handle(
+            &mut client,
+            &listener,
+            session,
+            home,
+            stop.clone(),
+            config,
+            &mut native_settings,
+        )
+        .await;
         // An unknown client/native state cannot be offered to another attempt.
         result?;
     }
@@ -156,6 +167,8 @@ async fn handle(
     session: &mut Session,
     home: &Path,
     stop: CancellationToken,
+    config: &Config,
+    native_settings: &mut Value,
 ) -> Result<()> {
     let (mut read, mut write) = client.split();
     let plan = tokio::time::timeout(Duration::from_secs(10), read_value(&mut read, MAX_PLAN))
@@ -169,6 +182,24 @@ async fn handle(
         return Err(Error::bad(
             "Resident Codex requires a thread configuration.",
         ));
+    }
+    let requested = if plan["nativeSettings"].is_object() {
+        plan["nativeSettings"].clone()
+    } else {
+        json!({})
+    };
+    if requested != *native_settings {
+        let args = crate::coding_agent_configuration::codex_arguments(&plan)?;
+        session.shutdown().await;
+        *session = Session::codex_until(
+            config,
+            home,
+            &args,
+            Some(Path::new(crate::validation::text(&plan, "cwd"))),
+            &stop,
+        )
+        .await?;
+        *native_settings = requested;
     }
     tokio::select! {
         result = execute_lease(session, home, plan, &mut read, &mut write, stop) => result,

@@ -554,6 +554,7 @@ pub fn chat_plan(
         "writableRoots": roots,
     });
     crate::store::merge(&mut plan, &provider.adapter().chat_mcp(mcp));
+    crate::coding_agent_configuration::apply(&mut plan, &run["snapshot"]["nativeConfiguration"])?;
     if let Some(session) = session {
         plan["sessionId"] = session.into();
     }

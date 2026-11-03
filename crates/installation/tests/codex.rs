@@ -293,6 +293,33 @@ async fn codex_sessions_keep_managed_mcp_configuration_without_cloning_native_pl
     );
 }
 
+/// Uses no account and starts no inference; inspect the real app-server configuration.
+#[tokio::test]
+#[ignore = "requires CODEX_NATIVE_BIN"]
+async fn native_codex_loads_the_requested_context_window_and_compaction_threshold() {
+    let root = TempDir::new().unwrap();
+    let mut config = config(&root);
+    config.codex_bin = std::env::var("CODEX_NATIVE_BIN")
+        .expect("Set CODEX_NATIVE_BIN to a native Codex executable");
+    let home = codex_home(&config);
+    let args = vec![
+        "-c".into(),
+        "model_context_window=1000000".into(),
+        "-c".into(),
+        "model_auto_compact_token_limit=900000".into(),
+    ];
+    let mut session = Session::codex(&config, &home, &args, Some(root.path()))
+        .await
+        .unwrap();
+    let read = session
+        .request("config/read", json!({ "includeLayers": false }))
+        .await;
+    session.close().await;
+    let result = read.unwrap();
+    assert_eq!(result["config"]["model_context_window"], 1000000);
+    assert_eq!(result["config"]["model_auto_compact_token_limit"], 900000);
+}
+
 #[tokio::test]
 async fn failed_initialization_waits_for_the_codex_process_to_exit() {
     let root = TempDir::new().unwrap();
@@ -1589,6 +1616,8 @@ async fn resident_logs_in_and_releases_managed_account_for_each_native_turn() {
     let _broker = broker::serve(&service, &lease).await.unwrap();
     let record = lease.home.join("fixture-lifecycle.jsonl");
     std::fs::write(&record, "").unwrap();
+    let launch_record = lease.home.join("fixture-launch-args.json");
+    std::fs::write(&launch_record, "[]").unwrap();
     let socket = root.path().join("resident/codex.sock");
     let endpoint = socket.clone();
     let stop = CancellationToken::new();
@@ -1616,9 +1645,10 @@ async fn resident_logs_in_and_releases_managed_account_for_each_native_turn() {
             .contains("account/login/start"),
         "Anonymous initialization never acquires an account"
     );
-    for index in 0..2 {
+    for index in 0..4 {
         let plan = json!({
             "args": [], "codexConfig": { "mcp_servers": {} },
+            "nativeSettings": if index >= 2 { json!({ "model_context_window": 1000000 }) } else { json!({}) },
             "cwd": root.path(), "sandbox": "yolo", "reasoning": "low",
             "output": root.path().join("reply.md"), "inputDirectory": root.path(),
             "writableRoots": [],
@@ -1635,6 +1665,12 @@ async fn resident_logs_in_and_releases_managed_account_for_each_native_turn() {
             .unwrap();
         output.await.unwrap();
         assert!(!lease.home.join("auth.json").exists());
+        let args: Vec<String> =
+            serde_json::from_slice(&std::fs::read(&launch_record).unwrap()).unwrap();
+        assert_eq!(
+            args.iter().any(|arg| arg == "model_context_window=1000000"),
+            index >= 2
+        );
     }
     stop.cancel();
     native.await.unwrap().unwrap();
@@ -1645,10 +1681,10 @@ async fn resident_logs_in_and_releases_managed_account_for_each_native_turn() {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     for (method, expected) in [
-        ("initialize", 1),
-        ("account/login/start", 2),
-        ("account/logout", 2),
-        ("thread/unsubscribe", 2),
+        ("initialize", 2),
+        ("account/login/start", 4),
+        ("account/logout", 4),
+        ("thread/unsubscribe", 4),
     ] {
         assert_eq!(
             log.iter().filter(|entry| entry["method"] == method).count(),

@@ -1,5 +1,19 @@
 # Android 0.6.0 / web parity
 
+## Native coding-agent configuration
+
+Web and Android expose installation defaults and agent customizations for Codex,
+Claude Code and OpenCode. A form and the native text editor share one document,
+retain advanced options and comments, show inherited values and offer individual
+resets. Both use revision-guarded read, preview and save operations, also available
+through public MCP and `cairn_installation` under the same scopes and live authority.
+The owner edits configuration; native documents cannot replace Cairn grants,
+credentials or transport. Unsupported native plugins and OpenCode automatic
+compaction are refused before saving. Settings are frozen per message, including
+existing conversations, and retained across retries; native process restarts keep
+the saved session and workspace. Android uses native fields and French form labels;
+web offers keyboard save and a resizable native text editor.
+
 Performance diagnostics: web now matches Android's default-on, account-bound,
 foreground-only upload, opt-out, local refresh/reset/copy and native sharing where
 available, including without a selected installation. Personal account diagnostics

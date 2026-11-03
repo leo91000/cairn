@@ -312,7 +312,10 @@ mod personal;
 
 pub use personal::*;
 
+mod coding_agent_configuration;
 mod installation_settings;
+
+pub use coding_agent_configuration::*;
 
 pub use installation_settings::*;
 

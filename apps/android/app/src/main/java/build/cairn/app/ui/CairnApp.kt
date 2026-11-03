@@ -39,6 +39,7 @@ private fun focusedRoute(route: String) =
         route.startsWith("run/") ||
         route.startsWith("fil/run/") ||
         route.startsWith("agents/") ||
+        route.startsWith("coding-agent-configuration/") ||
         route == "search"
 
 internal fun dockSelection(route: String): String =
@@ -579,7 +580,29 @@ private fun WorkspaceApp(
                                         openAgents = { nav.navigate("agents") },
                                     )
                                 }
-                            composable("settings") { SettingsScreen(vm, state) }
+                            composable("settings") {
+                                SettingsScreen(vm, state) { nav.navigate(it) }
+                            }
+                            if (state.isOwner)
+                                composable("coding-agent-configuration/{provider}") { entry ->
+                                    CodingAgentConfigurationScreen(
+                                        vm,
+                                        entry.arguments?.getString("provider").orEmpty(),
+                                        null,
+                                    ) {
+                                        nav.popBackStack()
+                                    }
+                                }
+                            if (state.isOwner)
+                                composable("agents/{id}/configuration/{provider}") { entry ->
+                                    CodingAgentConfigurationScreen(
+                                        vm,
+                                        entry.arguments?.getString("provider").orEmpty(),
+                                        entry.arguments?.getString("id"),
+                                    ) {
+                                        nav.popBackStack()
+                                    }
+                                }
                             if (state.isOwner)
                                 composable("authorize") {
                                     AuthorizeScreen(vm, state, sharedUrl, consumedShare)

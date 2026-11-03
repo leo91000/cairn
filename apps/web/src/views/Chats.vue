@@ -570,8 +570,15 @@ const conversationAssistant = computed(() => detail.value?.run?.snapshot.agent)
 const inheritConversation = computed(() => chosenProvider.value === conversationAssistant.value?.provider)
 const inheritedAssistant = computed(() => {
   if (inheritConversation.value)
-    return conversationAssistant.value
-  return chosenProvider.value === selectedAgent.value?.provider ? selectedAgent.value : undefined
+    return detail.value?.nextSelection || conversationAssistant.value
+  const defaults = selectedAgent.value?.codingAgentDefaults?.[chosenProvider.value]
+  if (chosenProvider.value !== selectedAgent.value?.provider)
+    return defaults
+  return {
+    model: selectedAgent.value.model || defaults?.model || '',
+    reasoning: selectedAgent.value.reasoning || defaults?.reasoning || '',
+    speed: selectedAgent.value.speed || defaults?.speed || '',
+  }
 })
 const skills = computed(() => chatSkills(state.skills, selectedAgent.value, detail.value ? detail.value.projectId : projectId.value))
 const skillNames = computed(() => skills.value.map(skill => skill.name))
@@ -700,19 +707,14 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
       return
 
     const attachmentIds = attachments.value.map(attachment => attachment.id)
-    // A chat can use a different model from its saved agent. Keep the displayed
-    // conversation selection explicit on the wire, including after a reload.
-    const selectedModel = model.value || inheritedAssistant.value?.model || ''
-    const selectedReasoning = reasoning.value || (!model.value ? inheritedAssistant.value?.reasoning : '') || ''
-    // The speed survives a model change, so it is inherited even with a new model.
-    const selectedSpeed = speed.value || inheritedAssistant.value?.speed || ''
+    // Empty selections keep inheritance live; only user choices override the next turn.
     const content = {
       text,
       mode,
       provider: chosenProvider.value,
-      model: selectedModel,
-      reasoning: selectedReasoning,
-      speed: selectedSpeed,
+      model: model.value,
+      reasoning: reasoning.value,
+      speed: speed.value,
       attachmentIds,
     }
     const submissionKey = JSON.stringify({ chatId: chat.id, editing: editing.value, ...content })

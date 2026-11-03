@@ -81,6 +81,18 @@ export default defineConfig({
     { name: 'journeys-task-focus', testMatch: 'task-focus.spec.ts' },
     { name: 'layout-webkit-task-focus', testMatch: 'task-focus.spec.ts', use: { browserName: 'webkit' } },
     { name: 'journeys-agent-access', testMatch: 'agent-access.spec.ts' },
+    { name: 'journeys-coding-agent-configuration', testMatch: 'coding-agent-configuration.spec.ts' },
+    {
+      name: 'layout-webkit-coding-agent-configuration',
+      testMatch: 'coding-agent-configuration.spec.ts',
+      use: {
+        browserName: 'webkit',
+        isMobile: true,
+        hasTouch: true,
+        viewport: { width: 390, height: 844 },
+        colorScheme: 'dark',
+      },
+    },
     {
       name: 'layout-webkit-agent-priorities',
       testMatch: 'agent-access.spec.ts',

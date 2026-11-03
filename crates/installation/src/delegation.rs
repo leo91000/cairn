@@ -243,9 +243,10 @@ fn target_agent(db: &Db<'_>, run: &Value, input: &DelegateTaskInput) -> Result<V
 }
 
 /// Checks the coding agent and model now, so a bad choice fails the call rather than the turn.
-fn select_engine(agent: &Value, message: &Value) -> Result<Value> {
+fn select_engine(db: &Db<'_>, agent: &Value, message: &Value) -> Result<Value> {
     let mut snapshot = json!({ "snapshot": { "agent": agent } });
     chats::select_agent(&mut snapshot, None, message)?;
+    crate::coding_agent_configuration::freeze_message(db, &mut snapshot, None, message)?;
     Provider::of_run(&snapshot)?
         .adapter()
         .validate_agent(&snapshot["snapshot"]["agent"])?;
@@ -304,7 +305,7 @@ fn create(
 
     let agent = target_agent(db, &run, input)?;
     let mut message = task_message(input)?;
-    let engine = select_engine(&agent, &message)?;
+    let engine = select_engine(db, &agent, &message)?;
     if &engine != checked {
         return Err(Error::conflict(
             "Delegation settings changed. Retry the request.",
@@ -392,7 +393,7 @@ pub async fn delegate(s: &Service, bearer: &str, input: &Value) -> Result<Value>
                 return Ok((Some(existing), Value::Null));
             }
             let agent = target_agent(db, &run, &request)?;
-            Ok((None, select_engine(&agent, &task_message(&request)?)?))
+            Ok((None, select_engine(db, &agent, &task_message(&request)?)?))
         })
         .await?;
     if let Some(existing) = existing {

@@ -202,9 +202,12 @@ impl Service {
             return Err(Error::bad("creationId must be a random UUID"));
         }
         let snapshot = serde_json::to_value(&agent)?;
-        crate::provider::Provider::of_agent(&snapshot)?
-            .adapter()
-            .validate_agent(&snapshot)?;
+        let validation_agent = agent.clone();
+        self.store
+            .read(move |db| {
+                crate::coding_agent_configuration::validate_profile(db, &validation_agent)
+            })
+            .await?;
         validate_profile(&agent)?;
         // File-backed skills are prepared before the publication transaction.
         self.require_access_targets(&agent.settings.access).await?;
@@ -282,6 +285,7 @@ impl Service {
                 agent.settings.exclusive_nodes = previous_exclusive.to_vec();
                 agent.settings.validate().map_err(Error::bad)?;
             }
+            crate::coding_agent_configuration::validate_profile(db, &agent)?;
             crate::agent_grants::validate(db, &agent, &accepts_agents)?;
             let agent = crate::agent_grants::save_profile(db, agent, owner_review, &review.native_node_reviews)?;
             for connection in &review.reapprove_delegations {
@@ -347,10 +351,13 @@ impl Service {
         agent.settings = input.settings;
         validate_profile(&agent)?;
         self.require_access_targets(&agent.settings.access).await?;
+        let validation_agent = agent.clone();
+        self.store
+            .read(move |db| {
+                crate::coding_agent_configuration::validate_profile(db, &validation_agent)
+            })
+            .await?;
         let agent = serde_json::to_value(&agent)?;
-        crate::provider::Provider::of_agent(&agent)?
-            .adapter()
-            .validate_agent(&agent)?;
         let id = input.agent_id.to_string();
         let owner = crate::relay::task_author_policy(self)
             .await?
@@ -503,6 +510,7 @@ impl Service {
         let task_id = task["id"].clone();
         let project_id = project.as_ref().map(|p| p.id);
         let snapshot = cairn_contracts::RunSnapshot {
+            native_configuration: None,
             task: serde_json::from_value(task)?,
             agent: serde_json::from_value(agent)?,
             project,
@@ -511,7 +519,7 @@ impl Service {
             skills,
             delegation: None,
         };
-        Ok(json!({
+        let run = json!({
             "id": id(),
             "taskId": task_id,
             "projectId": project_id,
@@ -525,7 +533,8 @@ impl Service {
             "workspace": null,
             "usage": null,
             "snapshot": snapshot,
-        }))
+        });
+        Ok(run)
     }
 
     pub async fn enqueue(
@@ -604,6 +613,14 @@ impl Service {
                         None,
                     )?;
                     run["requestedBy"] = requester(&caller);
+                }
+                if run["trigger"] != "chat" {
+                    crate::coding_agent_configuration::freeze_message(
+                        db,
+                        &mut run,
+                        None,
+                        &Value::Null,
+                    )?;
                 }
                 let run = crate::runs::admit_prepared(db, &run, dedupe.as_deref())?;
                 db.event(text(&run, "id"), &EventKind::Status, "Queued", None)?;

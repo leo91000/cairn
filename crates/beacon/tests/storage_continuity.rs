@@ -117,6 +117,7 @@ async fn existing_disks_keep_publishing_reading_and_purging_on_their_original_st
             );
             db.save_agent(&agent)?;
             let snapshot = cairn_contracts::RunSnapshot {
+                native_configuration: None,
                 task: serde_json::from_value(json!({
                     "id": record["id"],
                     "name": "Storage continuity fixture",

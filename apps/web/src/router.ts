@@ -34,6 +34,7 @@ export function workspaceRouter(base = '/') {
         props: { kind: 'agents' },
       },
       { path: '/agents/:id', component: () => import('./views/AgentPage.vue') },
+      { path: '/agents/:id/configuration/:provider(codex|claude|opencode)', component: () => import('./views/CodingAgentConfiguration.vue') },
       {
         path: '/projects',
         component: () => import('./views/Resources.vue'),
@@ -46,6 +47,7 @@ export function workspaceRouter(base = '/') {
       },
       { path: '/nodes', component: () => import('./views/Nodes.vue') },
       { path: '/settings/:section(account|installation|sensitive)?', component: () => import('./views/Settings.vue') },
+      { path: '/settings/coding-agents/:provider(codex|claude|opencode)', component: () => import('./views/CodingAgentConfiguration.vue') },
       { path: '/authorize', component: () => import('./views/Authorize.vue') },
       { path: '/:pathMatch(.*)*', redirect: '/' },
     ],

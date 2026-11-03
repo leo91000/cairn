@@ -203,12 +203,24 @@ impl AccountOperation {
             "list_models" => {
                 let input: ListModelsInput = decode(input)?;
                 let provider: crate::provider::Provider = input.provider.into();
-                let catalog: ModelCatalog = serde_json::from_value(
+                let mut catalog: ModelCatalog = serde_json::from_value(
                     provider.adapter().model_catalog(s).await?,
                 )
                 .map_err(|_| {
                     Error::bad_gateway("The coding agent returned an invalid model catalog.")
                 })?;
+                catalog.native_defaults = Some(
+                    s.store
+                        .read(move |db| {
+                            crate::coding_agent_configuration::installation_preferences(
+                                db, provider,
+                            )
+                        })
+                        .await?,
+                );
+                catalog.native_defaults = catalog.native_defaults.filter(|defaults| {
+                    *defaults != cairn_contracts::CodingAgentPreferences::default()
+                });
                 serde_json::to_value(catalog)?
             }
             "get_coding_agent_account_sign_in" => {

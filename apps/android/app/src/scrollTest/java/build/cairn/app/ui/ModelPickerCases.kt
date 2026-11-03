@@ -198,6 +198,31 @@ abstract class ModelPickerCases {
     }
 
     @Test
+    fun newAgentReasoningFollowsNativeDefaultsWithoutPinningAnEffort() {
+        val agent = newAgent().copy(model = "large")
+        var defaults by
+            mutableStateOf(build.cairn.contracts.CodingAgentPreferences("large", "low", ""))
+        compose.setContent {
+            CairnTheme("dark") {
+                SurfaceForTest {
+                    ModelPicker(
+                        catalog.copy(nativeDefaults = defaults),
+                        agent.model,
+                        agent.reasoning,
+                        field = true,
+                    ) { _, _ ->
+                        fail("Loading native defaults must not personalize a new agent")
+                    }
+                }
+            }
+        }
+        compose.onNodeWithTag("model-picker").assertTextContains("Raisonnement faible")
+        compose.runOnIdle { defaults = defaults.copy(reasoning = "medium") }
+        compose.onNodeWithTag("model-picker").assertTextContains("Raisonnement moyen")
+        assertEquals("", agent.reasoning)
+    }
+
+    @Test
     fun codexKeepsBlankModelWhenPickerDoesNotInherit() {
         var model by mutableStateOf("")
         compose.setContent {

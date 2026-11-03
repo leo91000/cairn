@@ -113,6 +113,9 @@ pub struct RunRequester {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct RunSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub native_configuration: Option<NativeConfigurationSnapshot>,
     pub task: RunTaskSnapshot,
     pub agent: Agent,
     pub project: Option<Project>,

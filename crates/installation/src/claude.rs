@@ -527,6 +527,7 @@ pub async fn model_catalog(s: &Service) -> Result<Value> {
     };
     present(&mut catalog, &cached);
     let view = cairn_contracts::ModelCatalog {
+        native_defaults: None,
         models: catalog
             .models
             .into_iter()

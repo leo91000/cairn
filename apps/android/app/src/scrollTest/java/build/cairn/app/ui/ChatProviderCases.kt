@@ -403,7 +403,7 @@ abstract class ChatProviderCases {
     }
 
     @Test
-    fun openCodeConversationKeepsItsModelAndReasoningAcrossRecreation() {
+    fun openCodeConversationKeepsItsInheritedSelectionAcrossRecreation() {
         withOpenCodeConversation { sent, _, restoration, _ ->
             compose
                 .onNodeWithTag("model-picker")
@@ -437,8 +437,9 @@ abstract class ChatProviderCases {
             compose.onNodeWithTag("conversation-send").performClick()
             compose.waitUntil(10000) { sent.isNotEmpty() }
             assertEquals("opencode", sent[0]["provider"]?.jsonPrimitive?.content)
-            assertEquals("auto/deepseek-v4-1-flash", sent[0]["model"]?.jsonPrimitive?.content)
-            assertEquals("high", sent[0]["reasoning"]?.jsonPrimitive?.content)
+            // Resolve the displayed defaults at launch, after any configuration save.
+            assertEquals("", sent[0]["model"]?.jsonPrimitive?.content)
+            assertEquals("", sent[0]["reasoning"]?.jsonPrimitive?.content)
         }
     }
 

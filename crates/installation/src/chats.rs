@@ -243,6 +243,7 @@ fn conversation_view_with_run(
         .map(|provider| serde_json::from_value(Value::from(provider.as_str())))
         .transpose()?;
     Ok(Chat {
+        next_selection: None,
         can_request_new_session: crate::conversation_lifecycle::can_request_new_session(&chat, run),
         finished_at: serde_json::from_value(run_field("finishedAt"))?,
         context_usage: serde_json::from_value(run_field("contextUsage"))?,
@@ -447,7 +448,15 @@ pub(crate) fn detail(db: &Db<'_>, id: &str) -> Result<Value> {
 fn detail_messages(db: &Db<'_>, id: &str, undelivered: bool) -> Result<Value> {
     let chat = conversation(db, id)?;
     let run = db.run(chat.run_id.as_deref().unwrap_or(""))?;
+    let next_selection = if chat.lifecycle == cairn_contracts::ConversationLifecycle::Active {
+        crate::coding_agent_configuration::next_selection(db, &chat.agent_id, run.as_ref())?
+    } else {
+        None
+    };
     let mut result = serde_json::to_value(conversation_view_with_run(db, chat, run.as_ref())?)?;
+    if let Some(selection) = next_selection {
+        result["nextSelection"] = serde_json::to_value(selection)?;
+    }
     if !is_active(&result) {
         result["questions"] = json!([]);
         result["messages"] = json!([]);
@@ -951,34 +960,22 @@ pub(crate) fn select_agent(
     {
         agent["access"]["backend"] = backend.into();
     }
-    if implicit_provider || switched {
-        // An implicit follow-up keeps the conversation's qualified selection,
-        // even when its profile changed or now has different defaults.
-        agent["model"] = if implicit_provider {
+    if continues || switched {
+        // Naming the same engine still follows the conversation's selection.
+        // Changed native/profile defaults are resolved atomically before launch.
+        agent["model"] = if continues {
             inherited_model
         } else {
             String::new()
         }
         .into();
-        agent["reasoning"] = if implicit_provider {
+        agent["reasoning"] = if continues {
             inherited_reasoning
         } else {
             String::new()
         }
         .into();
-        set_speed(
-            agent,
-            if implicit_provider {
-                &inherited_speed
-            } else {
-                ""
-            },
-        );
-    }
-    // Naming the coding agent of the latest turn keeps that turn's speed, as both clients
-    // show it, rather than a default the agent's profile gained since.
-    if !implicit_provider && continues {
-        set_speed(agent, &inherited_speed);
+        set_speed(agent, if continues { &inherited_speed } else { "" });
     }
     if !text(message, "model").is_empty() {
         agent["model"] = message["model"].clone();
@@ -1064,9 +1061,8 @@ fn continue_run(
         };
         db.event(run_id, &EventKind::Status, &status, None)?;
     } else if provider == Provider::Codex && resumes_mission_thread(run) {
-        // Codex keeps the developer instructions a thread started with, so the
-        // mission's thread would stay unattended. Every turn repeats the rule
-        // because compaction can drop earlier user messages.
+        // Keep the interactive rule explicit across native versions; compaction
+        // can drop earlier user messages.
         execution.text = format!(
             "{CONTINUED_MISSION} {}\n\n{}",
             crate::run_output::INTERACTIVE,
@@ -1159,6 +1155,10 @@ fn launch_turn(
         return Ok(());
     }
     crate::conversation_lifecycle::require_environment_state_ready(chat.environment_state)?;
+    crate::coding_agent_configuration::freeze_message(db, &mut snapshot, run.as_ref(), &message)?;
+    Provider::of_run(&snapshot)?
+        .adapter()
+        .validate_agent(&snapshot["snapshot"]["agent"])?;
     let execution = ChatExecution {
         message_id: text(&message, "id").to_owned(),
         text: with_invoked_skills(text(&message, "text"), &snapshot["snapshot"]["skills"]),
@@ -1687,9 +1687,6 @@ impl Service {
             &snapshot["snapshot"]["agent"],
         );
         select_agent(&mut snapshot, run.as_ref(), &message)?;
-        Provider::of_run(&snapshot)?
-            .adapter()
-            .validate_agent(&snapshot["snapshot"]["agent"])?;
         let chat_id = chat.id.clone();
         self.store
             .transaction(move |db| launch_turn(db, &chat_id, run, message, snapshot))
@@ -2065,6 +2062,8 @@ provider,model,reasoning,speed,mode,status,created_at,question_id FROM retained_
                             "snapshot": { "agent": { "provider": "codex" } },
                         });
                         let run = db.add_run_fixture(&run, None)?;
+                        let profile = serde_json::from_value(run["snapshot"]["agent"].clone())?;
+                        db.save_agent(&profile)?;
                         db.event("run", &EventKind::ChatUser, "Context to preserve", None)?;
                         let chat = json!({
                             "id": "chat",
@@ -2253,8 +2252,11 @@ provider,model,reasoning,speed,mode,status,created_at,question_id FROM retained_
             &json!({ "provider": "opencode" }),
         )
         .unwrap();
-        assert_eq!(explicit["snapshot"]["agent"]["model"], "");
-        assert_eq!(explicit["snapshot"]["agent"]["reasoning"], "");
+        assert_eq!(
+            explicit["snapshot"]["agent"]["model"],
+            "opencode/ling-3.1-flash-free"
+        );
+        assert_eq!(explicit["snapshot"]["agent"]["reasoning"], "medium");
     }
 
     #[test]

@@ -152,6 +152,27 @@ async fn choices(s: &Service, agent: &Value) -> Result<Vec<Choice>> {
             else {
                 continue;
             };
+            let agent_id = text(agent, "id").to_owned();
+            let preferred = s
+                .store
+                .read(move |db| {
+                    let configuration =
+                        crate::coding_agent_configuration::snapshot(db, provider, &agent_id)?;
+                    let value = crate::coding_agent_configuration::parse(
+                        provider,
+                        &configuration.document,
+                    )?;
+                    Ok(text(&value, "model").to_owned())
+                })
+                .await?;
+            let route_available = |route: &Value| {
+                route["hidden"] != true
+                    && accounts.iter().any(|account| {
+                        account.provider == cairn_contracts::AgentProvider::Opencode
+                            && available(account)
+                            && account.model_provider.as_deref() == route["provider"].as_str()
+                    })
+            };
             let models = catalog["models"]
                 .as_array()
                 .into_iter()
@@ -161,25 +182,32 @@ async fn choices(s: &Service, agent: &Value) -> Result<Vec<Choice>> {
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .any(|route| {
-                            route["hidden"] != true
-                                && accounts.iter().any(|account| {
-                                    account.provider == cairn_contracts::AgentProvider::Opencode
-                                        && available(account)
-                                        && account.model_provider.as_deref()
-                                            == route["provider"].as_str()
-                                })
-                        })
+                        .any(&route_available)
                 })
                 .collect::<Vec<_>>();
-            let Some(model) = models
-                .iter()
-                .find(|model| model["isDefault"] == true)
-                .or_else(|| models.first())
-            else {
-                continue;
-            };
-            text(model, "model").to_owned()
+            if !preferred.is_empty() {
+                let offered = models.iter().any(|model| {
+                    model["model"] == preferred
+                        || model["routes"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .any(|route| route["model"] == preferred && route_available(route))
+                });
+                if !offered {
+                    continue;
+                }
+                preferred
+            } else {
+                let Some(model) = models
+                    .iter()
+                    .find(|model| model["isDefault"] == true)
+                    .or_else(|| models.first())
+                else {
+                    continue;
+                };
+                text(model, "model").to_owned()
+            }
         } else {
             String::new()
         };
@@ -459,6 +487,12 @@ async fn advance(
             let mut snapshot = run.clone();
             snapshot["snapshot"]["agent"] =
                 selection(&run["snapshot"]["agent"], target, &pending.model);
+            crate::coding_agent_configuration::freeze_message(
+                db,
+                &mut snapshot,
+                Some(&run),
+                &json!({ "model": pending.model }),
+            )?;
             target
                 .adapter()
                 .validate_agent(&snapshot["snapshot"]["agent"])?;

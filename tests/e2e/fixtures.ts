@@ -210,6 +210,7 @@ export const test = base.extend<object, { workspace: Workspace }>({
           revision: _revision,
           createdAt: _createdAt,
           avatar: _avatar,
+          codingAgentDefaults: _codingAgentDefaults,
           ...settings
         } = { ...defaults, ...patch }
         settings.access = { ...defaults.access, ...patch.access }

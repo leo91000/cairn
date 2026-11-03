@@ -604,9 +604,20 @@ internal fun ChatPage(
     val switchingProvider = chat?.run != null && chosenProvider != currentProvider
     val conversationAssistant = chat?.run?.snapshot?.agent
     val inheritConversation = chosenProvider == conversationAssistant?.provider
+    val nativeDefaults = selectedAgent?.codingAgentDefaults?.get(chosenProvider)
     val inheritedAssistant =
-        if (inheritConversation) conversationAssistant
-        else selectedAgent?.takeIf { it.provider == chosenProvider }
+        if (inheritConversation)
+            chat?.nextSelection
+                ?: conversationAssistant?.let {
+                    build.cairn.contracts.CodingAgentPreferences(it.model, it.reasoning, it.speed)
+                }
+        else if (selectedAgent?.provider == chosenProvider) {
+            build.cairn.contracts.CodingAgentPreferences(
+                model = selectedAgent.model.ifBlank { nativeDefaults?.model.orEmpty() },
+                reasoning = selectedAgent.reasoning.ifBlank { nativeDefaults?.reasoning.orEmpty() },
+                speed = selectedAgent.speed.ifBlank { nativeDefaults?.speed.orEmpty() },
+            )
+        } else nativeDefaults
     val defaultModel = inheritedAssistant?.model.orEmpty()
     val defaultReasoning = inheritedAssistant?.reasoning.orEmpty()
     val defaultSpeed = inheritedAssistant?.speed.orEmpty()
@@ -752,12 +763,10 @@ internal fun ChatPage(
                     if (it.attachment.id == uploaded.id) it.copy(attachment = uploaded) else it
                 }
             }
-            val selectedModel = model.ifBlank { defaultModel }
-            val selectedReasoning = reasoning.ifBlank {
-                if (model.isBlank()) defaultReasoning else ""
-            }
-            // The speed survives a model change, so it is inherited even with a new model.
-            val selectedSpeed = speed.ifBlank { defaultSpeed }
+            // Keep inheritance live; only explicit choices override the next turn.
+            val selectedModel = model
+            val selectedReasoning = reasoning
+            val selectedSpeed = speed
             val content =
                 EditChatMessage(
                     text = draft.trim(),
