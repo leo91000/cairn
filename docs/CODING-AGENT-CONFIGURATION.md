@@ -87,6 +87,8 @@ plugins and Connections instead. Claude's editable `env` preferences are limited
 to `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS` and
 `MAX_THINKING_TOKENS`. Runtime, account, transport and reasoning environment
 overrides remain managed by Cairn.
+Codex `features.default_mode_request_user_input` likewise remains disabled;
+Cairn provides the supported questionnaire tools.
 
 OpenCode `{file:...}` and `{env:...}` substitutions are refused in both property
 names and values. OpenCode expands these before parsing its configuration, which

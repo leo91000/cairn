@@ -254,6 +254,10 @@ async fn native_configuration_has_http_and_both_mcp_parity_with_live_scopes() {
     for (provider, document) in [
         ("codex", "notify = ['blocked-callback']\n"),
         (
+            "codex",
+            "[features]\ndefault_mode_request_user_input = true\n",
+        ),
+        (
             "claude",
             r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"blocked-callback"}]}]}}"#,
         ),

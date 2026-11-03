@@ -82,6 +82,10 @@ fn managed_settings_are_refused_before_launch_and_errors_do_not_echo_values() {
         ),
         (Provider::Codex, json!({ "features": { "plugins": true } })),
         (
+            Provider::Codex,
+            json!({ "features": { "default_mode_request_user_input": true } }),
+        ),
+        (
             Provider::Claude,
             json!({ "env": { "ANTHROPIC_BASE_URL": "https://untrusted.invalid" } }),
         ),
@@ -107,7 +111,7 @@ fn managed_settings_are_refused_before_launch_and_errors_do_not_echo_values() {
     assert!(
         validate(
             Provider::Codex,
-            &json!({ "model_context_window": 1000000, "model_auto_compact_token_limit": 900000 })
+            &json!({ "model_context_window": 1000000, "model_auto_compact_token_limit": 900000, "features": { "default_mode_request_user_input": false } })
         )
         .is_ok()
     );
@@ -118,6 +122,109 @@ fn managed_settings_are_refused_before_launch_and_errors_do_not_echo_values() {
         )
         .is_ok()
     );
+}
+
+#[tokio::test]
+async fn restoring_deleted_objects_clears_descendant_removals_and_keeps_inheritance_live() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    store.transaction(|db| {
+        let defaults = CodingAgentConfigurationInput { provider: AgentProvider::Claude, agent_id: None };
+        for restore_whole_object in [true, false] {
+            change(db, defaults, r#"{"env":{"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE":"80","CLAUDE_CODE_MAX_OUTPUT_TOKENS":"32000"}}"#, vec![])?;
+            let id = agent(db, "claude")?;
+            let target = CodingAgentConfigurationInput { provider: AgentProvider::Claude, agent_id: Some(id) };
+            change(db, target, r#"{"env":{"CLAUDE_CODE_MAX_OUTPUT_TOKENS":"32000"}}"#, vec![])?;
+            change(db, target, "{}", vec![])?;
+            let current = view(db, target)?;
+            let input = EditCodingAgentConfigurationInput {
+                provider: target.provider,
+                agent_id: target.agent_id,
+                revision: current.revision,
+                document: current.document,
+                changes: vec![CodingAgentSettingChange {
+                    path: if restore_whole_object { "/env" } else { "/env/CLAUDE_CODE_MAX_OUTPUT_TOKENS" }.into(),
+                    value: "null".into(),
+                }],
+                inherit_paths: vec![],
+                reset: false,
+            };
+            let preview = edit(db, &input, false)?;
+            let saved = edit(db, &input, true)?;
+            assert_eq!(parse(Provider::Claude, &saved.document)?, parse(Provider::Claude, &preview.document)?);
+            let restored = parse(Provider::Claude, &saved.document)?;
+            assert_eq!(restored["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "32000");
+            assert_eq!(restored["env"].get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE").is_some(), restore_whole_object);
+            change(db, defaults, r#"{"env":{"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE":"70","CLAUDE_CODE_MAX_OUTPUT_TOKENS":"64000"}}"#, vec![])?;
+            let inherited = parse(Provider::Claude, &view(db, target)?.document)?;
+            assert_eq!(inherited["env"]["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "64000");
+            assert_eq!(inherited["env"].get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE").is_some(), restore_whole_object);
+            if restore_whole_object {
+                assert_eq!(inherited["env"]["CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"], "70");
+            }
+        }
+        Ok(())
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn preview_and_save_agree_when_replacing_nested_native_values() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            for provider in [Provider::Codex, Provider::Claude] {
+                let defaults = CodingAgentConfigurationInput {
+                    provider: provider.into(),
+                    agent_id: None,
+                };
+                let baseline = json!({ "custom": { "a": 1, "b": { "c": 2 }, "d": {} } });
+                change(db, defaults, &render(provider, &baseline)?, vec![])?;
+                let id = agent(db, provider.as_str())?;
+                let target = CodingAgentConfigurationInput {
+                    provider: provider.into(),
+                    agent_id: Some(id),
+                };
+                for desired in [
+                    json!({ "custom": { "a": 1, "b": {}, "d": {} } }),
+                    json!({}),
+                    json!({ "custom": { "a": 1 } }),
+                    json!({ "custom": { "b": { "c": 3 } } }),
+                    json!({ "custom": {} }),
+                    json!({ "custom": { "b": { "c": 2 } } }),
+                    json!({ "custom": { "b": 5 } }),
+                    json!({ "custom": { "b": { "c": 2 } } }),
+                ] {
+                    let current = view(db, target)?;
+                    let input = EditCodingAgentConfigurationInput {
+                        provider: target.provider,
+                        agent_id: target.agent_id,
+                        revision: current.revision,
+                        document: render(provider, &desired)?,
+                        changes: vec![],
+                        inherit_paths: vec![],
+                        reset: false,
+                    };
+                    assert_eq!(
+                        parse(provider, &edit(db, &input, false)?.document)?,
+                        desired
+                    );
+                    assert_eq!(parse(provider, &edit(db, &input, true)?.document)?, desired);
+                }
+                let empty = json!({ "custom": {} });
+                change(db, defaults, &render(provider, &empty)?, vec![])?;
+                assert_eq!(parse(provider, &view(db, target)?.document)?, empty);
+                change(db, target, &render(provider, &empty)?, vec![])?;
+                change(db, defaults, &render(provider, &baseline)?, vec![])?;
+                assert_eq!(
+                    parse(provider, &view(db, target)?.document)?,
+                    json!({ "custom": { "b": { "c": 2 } } })
+                );
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
 }
 
 #[test]

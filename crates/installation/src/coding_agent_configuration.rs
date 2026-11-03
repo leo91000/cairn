@@ -106,6 +106,11 @@ fn paths(value: &Value) -> BTreeSet<String> {
     paths
 }
 
+fn has_ancestor(paths: &BTreeSet<String>, path: &str) -> bool {
+    path.match_indices('/')
+        .any(|(index, _)| paths.contains(&path[..index]))
+}
+
 fn set(value: &mut Value, path: &str, replacement: Option<Value>) -> Result<()> {
     if !path.starts_with('/') {
         return Err(Error::bad("Choose a valid setting path."));
@@ -137,8 +142,9 @@ fn set_keys(current: &mut Value, keys: &[String], replacement: Option<Value>) {
     }
     if replacement.is_none() {
         if let Some(child) = object.get_mut(key) {
+            let was_empty = child.as_object().is_some_and(serde_json::Map::is_empty);
             set_keys(child, &keys[1..], None);
-            if child.as_object().is_some_and(serde_json::Map::is_empty) {
+            if !was_empty && child.as_object().is_some_and(serde_json::Map::is_empty) {
                 object.remove(key);
             }
         }
@@ -399,6 +405,10 @@ fn managed(provider: Provider) -> Vec<ManagedCodingAgentSetting> {
                 "notify",
                 "Native command callbacks cannot run outside Cairn's permission checks. Use Cairn skills and plugins.",
             ));
+            entries.push((
+                "features.default_mode_request_user_input",
+                "Cairn supplies questionnaire tools; Codex's native default-mode question tool remains disabled.",
+            ));
         }
         Provider::Claude => {
             entries.push((
@@ -599,6 +609,15 @@ pub(crate) fn validate(provider: Provider, value: &Value) -> Result<()> {
     {
         return Err(Error::bad(
             "Native Codex plugins are not supported. Use Cairn skills and plugins.",
+        ));
+    }
+    if provider == Provider::Codex
+        && value
+            .pointer("/features/default_mode_request_user_input")
+            .is_some_and(|value| value != false)
+    {
+        return Err(Error::bad(
+            "features.default_mode_request_user_input is managed by Cairn and cannot be enabled. Use Cairn's questionnaire tools.",
         ));
     }
     if provider == Provider::Opencode {
@@ -916,33 +935,64 @@ pub(crate) fn edit(
             inherited_paths.remove(&change.path);
         }
     }
-    let mut overrides = if input.reset { json!({}) } else { own.value };
-    let mut removed: BTreeSet<_> = if input.reset {
-        BTreeSet::new()
-    } else {
-        own.removed.into_iter().collect()
-    };
+    let mut overrides = json!({});
+    let mut removed = BTreeSet::new();
     if input.agent_id.is_some() {
-        let mut all = BTreeSet::new();
-        document::changed(Some(&before), Some(&value), "", &mut all);
-        all.extend(inherited_paths.iter().cloned());
-        for path in all {
-            if before.pointer(&path) == value.pointer(&path)
-                && !input.reset
-                && !inherited_paths.contains(&path)
-            {
-                continue;
-            }
-            removed.remove(&path);
-            if value.pointer(&path) == inherited.pointer(&path) {
-                set(&mut overrides, &path, None)?;
-            } else if let Some(value) = value.pointer(&path) {
-                set(&mut overrides, &path, Some(value.clone()))?;
+        // Derive the sparse document from the desired effective value. This
+        // handles whole-object and partial restorations with the same semantics.
+        let mut differences = BTreeSet::new();
+        document::changed(Some(&inherited), Some(&value), "", &mut differences);
+        for path in differences {
+            if let Some(replacement) = value.pointer(&path) {
+                set(&mut overrides, &path, Some(replacement.clone()))?;
             } else {
-                set(&mut overrides, &path, None)?;
                 removed.insert(path);
             }
         }
+        // An explicit empty object replaces that inherited object. Deleting its
+        // final child must keep this container in the native document.
+        for path in paths(&value) {
+            let desired = value.pointer(&path).unwrap();
+            if desired.as_object().is_some_and(serde_json::Map::is_empty)
+                && Some(desired) != inherited.pointer(&path)
+            {
+                set(&mut overrides, &path, Some(desired.clone()))?;
+            }
+        }
+        let inherits = |path: &str| {
+            input.reset || inherited_paths.contains(path) || has_ancestor(&inherited_paths, path)
+        };
+        // Existing equal-valued customizations remain pinned until explicitly
+        // reset; deletions remain meaningful if an installation default vanished.
+        for path in paths(&own.value) {
+            if !inherits(&path)
+                && before.pointer(&path) == value.pointer(&path)
+                && value.pointer(&path) == own.value.pointer(&path)
+            {
+                set(&mut overrides, &path, own.value.pointer(&path).cloned())?;
+            }
+        }
+        for path in own.removed {
+            if !inherits(&path) && before.pointer(&path).is_none() && value.pointer(&path).is_none()
+            {
+                removed.insert(path);
+            }
+        }
+        let empty_objects: BTreeSet<_> = paths(&overrides)
+            .into_iter()
+            .filter(|path| {
+                overrides
+                    .pointer(path)
+                    .and_then(Value::as_object)
+                    .is_some_and(serde_json::Map::is_empty)
+            })
+            .collect();
+        let all_removed = removed.clone();
+        removed.retain(|path| {
+            !has_ancestor(&all_removed, path)
+                && !empty_objects.contains(path)
+                && !has_ancestor(&empty_objects, path)
+        });
     } else {
         overrides = value.clone();
     }
