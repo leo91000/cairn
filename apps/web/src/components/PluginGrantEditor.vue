@@ -4,6 +4,7 @@ import type { GrantDraft } from '../plugin-grants'
 import { computed, ref } from 'vue'
 import {
   contributions,
+  removeGrant,
   removeGrantContribution,
   replaceGrantAccess,
   selectableResourceTypes,
