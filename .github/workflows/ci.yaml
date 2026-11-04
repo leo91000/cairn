@@ -246,6 +246,87 @@ jobs:
         with:
           name: browser-backend
           path: target/debug/
+      - name: Establish bounded low-free-space Native proof
+        id: native-low-space
+        timeout-minutes: 2
+        env:
+          PROOF_REFERENCE_SHA: ${{ needs.resolve.outputs.reference_sha }}
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs'
+          import os from 'node:os'
+          import path from 'node:path'
+          import { randomUUID } from 'node:crypto'
+          import { execFileSync } from 'node:child_process'
+          const user = os.userInfo()
+          if (process.platform !== 'linux' || user.username !== 'runner'
+            || process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted'
+            || process.env.GITHUB_JOB !== 'native-runtime' || !/^ubuntu\d+$/.test(process.env.ImageOS || '')
+            || !/^\d{8}\.\d+\.\d+$/.test(process.env.ImageVersion || ''))
+            throw new Error('Low-space proof requires its disposable GitHub-hosted Native runner.')
+          const workspace = fs.realpathSync(process.env.GITHUB_WORKSPACE)
+          const temporary = fs.realpathSync(process.env.RUNNER_TEMP)
+          if (fs.realpathSync(process.cwd()) !== workspace || !path.isAbsolute(temporary))
+            throw new Error('Unexpected proof workspace or temporary directory.')
+          const locations = [...new Set([workspace, temporary, '/tmp', '/var/tmp', '/', os.tmpdir()])]
+          const device = fs.statSync(workspace).dev
+          const filesystems = locations.map(location => {
+            const stat = fs.statSync(location)
+            const filesystem = fs.statfsSync(location, { bigint: true })
+            if (stat.dev !== device)
+              throw new Error('Controlled low space must cover every Native allocation filesystem.')
+            return { path: location, device: stat.dev, totalBytes: `${filesystem.blocks * filesystem.bsize}` }
+          })
+          const available = () => {
+            const stat = fs.statfsSync(workspace, { bigint: true })
+            return stat.bavail * stat.bsize
+          }
+          const before = available()
+          const minimum = 14n * 1024n ** 3n
+          const retained = minimum + 64n * 1024n ** 2n
+          if (before < retained)
+            throw new Error(`Runner has only ${before} bytes before proof reservation.`)
+          const bytes = before - retained
+          if (bytes > 128n * 1024n ** 3n)
+            throw new Error('Proof reservation exceeds its fixed 128-GiB allocation ceiling.')
+          const reservation = path.join(temporary, `cairn-native-low-space-${randomUUID()}.reserve`)
+          const descriptor = fs.openSync(reservation, 'wx', 0o600)
+          let recorded = false
+          try {
+            if (bytes > 0n)
+              execFileSync('fallocate', ['--length', `${bytes}`, '/proc/self/fd/3'], { stdio: ['ignore', 'inherit', 'inherit', descriptor], timeout: 60000 })
+            const atStart = available()
+            console.log(JSON.stringify({ phase: 'low-space-start', beforeBytes: `${before}`, availableBytes: `${atStart}`, reservationBytes: `${bytes}` }))
+            if (atStart < minimum || atStart > minimum + 128n * 1024n ** 2n)
+              throw new Error('Could not establish 14–14.125 GiB for the complete Native job.')
+            const stat = fs.fstatSync(descriptor)
+            const report = {
+              sourceSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
+              referenceSha: process.env.PROOF_REFERENCE_SHA,
+              workflowSha: process.env.GITHUB_SHA,
+              runId: process.env.GITHUB_RUN_ID,
+              imageVersion: process.env.ImageVersion,
+              filesystems,
+              beforeBytes: `${before}`,
+              availableAtStartBytes: `${atStart}`,
+              reservation: { path: reservation, device: stat.dev, inode: stat.ino, uid: stat.uid, size: stat.size },
+            }
+            fs.mkdirSync('native-storage-evidence', { recursive: true })
+            fs.writeFileSync('native-storage-evidence/low-space-proof.json', JSON.stringify(report, null, 2) + '\n', { flag: 'wx', mode: 0o600 })
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'created=true\n')
+            recorded = true
+          } finally {
+            fs.closeSync(descriptor)
+            if (!recorded)
+              fs.unlinkSync(reservation)
+          }
+          JS
+      - uses: actions/upload-artifact@v7.0.1
+        with:
+          name: native-low-space-start
+          path: native-storage-evidence/low-space-proof.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Prepare disposable host block storage and synthetic S3
         run: |
           sudo apt-get update -qq
@@ -273,29 +354,7 @@ jobs:
           echo "sha=$native_reference_sha" >> "$GITHUB_OUTPUT"
           echo "key=native-reference-v2-$native_reference_sha-$ImageOS-$ImageVersion-rust1.97.1-dev0-default" >> "$GITHUB_OUTPUT"
           echo "artifact=native-reference-v2-$native_reference_sha-$ImageOS-$ImageVersion-rust1.97.1-dev0-default" >> "$GITHUB_OUTPUT"
-      - name: Find the exact reference from an earlier attempt of this run
-        id: native-reference-artifact
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          NATIVE_REFERENCE_ARTIFACT: ${{ steps.native-reference-key.outputs.artifact }}
-        run: |
-          native_reference_found="$(python3 scripts/native_reference.py artifact-available)"
-          echo "found=$native_reference_found" >> "$GITHUB_OUTPUT"
-      - uses: actions/download-artifact@v8.0.1
-        if: steps.native-reference-artifact.outputs.found == 'true'
-        with:
-          name: ${{ steps.native-reference-key.outputs.artifact }}
-          path: reference-native/
-          github-token: ${{ github.token }}
-          run-id: ${{ github.run_id }}
-      - uses: actions/cache/restore@v6.1.0
-        if: steps.native-reference-artifact.outputs.found != 'true'
-        id: native-reference-cache
-        with:
-          path: reference-native/
-          key: ${{ steps.native-reference-key.outputs.key }}
       - name: Build the exact base reference
-        if: steps.native-reference-artifact.outputs.found != 'true' && steps.native-reference-cache.outputs.cache-hit != 'true'
         env:
           REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
           CARGO_PROFILE_DEV_DEBUG: '0'
@@ -315,11 +374,6 @@ jobs:
           checksums = {name: hashlib.sha256((Path('reference-native') / name).read_bytes()).hexdigest() for name in binaries}
           Path('reference-native/revision.json').write_text(json.dumps(dict(headSha=os.environ['REFERENCE_SHA'], profile='development, debug=0, incremental=0', features='default (ublk required)', rust='1.97.1', image=os.environ['ImageVersion'], buildRun=os.environ['GITHUB_RUN_ID'], sha256=checksums), indent=2))
           PYREF
-      - uses: actions/cache/save@v6.1.0
-        if: steps.native-reference-artifact.outputs.found != 'true' && steps.native-reference-cache.outputs.cache-hit != 'true'
-        with:
-          path: reference-native/
-          key: ${{ steps.native-reference-key.outputs.key }}
       - name: Verify the exact reference binaries
         env:
           REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
@@ -339,12 +393,20 @@ jobs:
           Path('native-storage-evidence/reference/revision.json').write_text(json.dumps(metadata, indent=2))
           PYREF
       - uses: actions/upload-artifact@v7.0.1
-        if: steps.native-reference-artifact.outputs.found != 'true'
         with:
           name: ${{ steps.native-reference-key.outputs.artifact }}
           path: reference-native/
           retention-days: 14
           if-no-files-found: error
+      - name: Verify the reference was compiled cold in this proof run
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          metadata = json.loads(Path('reference-native/revision.json').read_text())
+          assert metadata['buildRun'] == os.environ['GITHUB_RUN_ID'], 'Proof reused a reference build.'
+          assert Path('reference-target/debug/cairn').is_file(), 'Cold reference build outputs are missing.'
+          PY
       - name: Qualify the exact reference on the current disposable host
         env:
           REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
@@ -367,6 +429,46 @@ jobs:
           git archive HEAD scripts/tests deploy/nodes/native-host.py | tar -x -C "$candidate_fixture"
           python3 -B scripts/tests/native_admission_overlay.py "$candidate_fixture" candidate
           sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
+      - name: Record final allocation and release only the owned proof reservation
+        if: always() && steps.native-low-space.outputs.created == 'true'
+        timeout-minutes: 1
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs'
+          import os from 'node:os'
+          import path from 'node:path'
+          const user = os.userInfo()
+          if (process.platform !== 'linux' || user.username !== 'runner'
+            || process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted'
+            || process.env.GITHUB_JOB !== 'native-runtime')
+            throw new Error('Proof release requires its disposable GitHub-hosted Native runner.')
+          const filename = 'native-storage-evidence/low-space-proof.json'
+          const report = JSON.parse(fs.readFileSync(filename, 'utf8'))
+          const reservation = report.reservation
+          if (report.runId !== process.env.GITHUB_RUN_ID || report.workflowSha !== process.env.GITHUB_SHA
+            || path.dirname(reservation.path) !== fs.realpathSync(process.env.RUNNER_TEMP)
+            || !/^cairn-native-low-space-[0-9a-f-]{36}\.reserve$/.test(path.basename(reservation.path)))
+            throw new Error('Refusing an unowned proof reservation.')
+          const descriptor = fs.openSync(reservation.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
+          try {
+            const stat = fs.fstatSync(descriptor)
+            if (!stat.isFile() || stat.nlink !== 1 || stat.dev !== reservation.device || stat.ino !== reservation.inode
+              || stat.uid !== user.uid || stat.uid !== reservation.uid || stat.size !== reservation.size)
+              throw new Error('Proof reservation identity changed.')
+            const available = () => {
+              const filesystem = fs.statfsSync(process.cwd(), { bigint: true })
+              return `${filesystem.bavail * filesystem.bsize}`
+            }
+            report.availableBeforeReleaseBytes = available()
+            fs.unlinkSync(reservation.path)
+            report.availableAfterReleaseBytes = available()
+            report.released = true
+            fs.writeFileSync(filename, JSON.stringify(report, null, 2) + '\n')
+            console.log(JSON.stringify(report))
+          } finally {
+            fs.closeSync(descriptor)
+          }
+          JS
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
