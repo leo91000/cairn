@@ -70,6 +70,7 @@ pub mod skills;
 pub mod storage;
 pub mod store;
 pub mod supervisor;
+pub(crate) mod task_storage;
 pub mod timeline;
 pub mod tls;
 pub mod toolkit;
