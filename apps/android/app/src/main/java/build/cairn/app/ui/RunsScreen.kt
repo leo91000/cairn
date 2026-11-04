@@ -152,12 +152,7 @@ fun RunScreen(
     ReadWhileOpen(
         vm,
         run?.takeIf {
-                selected &&
-                    (tab == 1 || tab == 0) &&
-                    live.synced &&
-                    !live.catchingUp &&
-                    it.trigger != "chat" &&
-                    it.status == "succeeded"
+                selected && live.synced && !live.catchingUp && it.trigger != "chat"
             }
             ?.finishedAt
             ?.let { "task:${run.taskId}" to it },

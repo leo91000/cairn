@@ -278,6 +278,8 @@ class BlockedMissionJourneyTest {
                 CairnTheme("light") { CairnApp(vm = vm) }
             }
             try {
+                waitText("Tout")
+                compose.onNodeWithText("Tout").performClick()
                 body(vm)
             } finally {
                 vm.api.closeStreams()
@@ -322,8 +324,9 @@ class BlockedMissionJourneyTest {
             // What waits on the conversation that started it, or on an outside check, never asks.
             waitText("Tâche bloquée · En attente de Orchestrer les chantiers F8")
             waitText("Tâche bloquée · En attente d’une vérification externe")
-            waitText("2 éléments pour vous", substring = true)
-            compose.onNodeWithContentDescription("Écarter Preuve appareil F8").assertExists()
+            compose
+                .onNodeWithContentDescription("Autres actions pour Preuve appareil F8")
+                .assertExists()
             // Input the agent asked for can only be snoozed.
             compose
                 .onAllNodesWithContentDescription("Écarter Notes de version 0.53")
@@ -346,7 +349,10 @@ class BlockedMissionJourneyTest {
             assertEquals("348988cc-0279-5ed4-801b-ac44d6987c6e", snooze.taskId)
             assertEquals(tomorrowMorning(), (snooze.action as OutcomeAsideAction.B).until)
 
-            compose.onNodeWithContentDescription("Écarter Preuve appareil F8").performClick()
+            compose
+                .onNodeWithContentDescription("Autres actions pour Preuve appareil F8")
+                .performClick()
+            compose.onNodeWithText("Écarter le résultat").performClick()
             waitText("Tâche bloquée · Écartée")
             assertTrue(dismissals.containsKey("2db836ee-ce2e-552d-b9fa-2fef2030546c"))
             capture("android-blocked-set-aside")
@@ -396,7 +402,10 @@ class BlockedMissionJourneyTest {
     fun `server changes from another device remain visible after local dismiss and restore`() =
         journey {
             waitText("Preuve appareil F8")
-            compose.onNodeWithContentDescription("Écarter Preuve appareil F8").performClick()
+            compose
+                .onNodeWithContentDescription("Autres actions pour Preuve appareil F8")
+                .performClick()
+            compose.onNodeWithText("Écarter le résultat").performClick()
             waitText("Tâche bloquée · Écartée")
             compose.waitUntil(15000) {
                 activityReads.any { snapshot ->
@@ -407,10 +416,7 @@ class BlockedMissionJourneyTest {
             // The same account restores the outcome from another device.
             dismissals.remove(proof.id)
             compose.waitUntil(15000) {
-                compose
-                    .onAllNodesWithContentDescription("Écarter Preuve appareil F8")
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
+                compose.onAllNodesWithText("Bloquée").fetchSemanticsNodes().isNotEmpty()
             }
 
             dismissals[proof.id] = OutcomeDismissal(tomorrowMorning())

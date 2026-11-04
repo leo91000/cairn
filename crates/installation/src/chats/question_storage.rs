@@ -149,9 +149,9 @@ impl Db<'_> {
     }
 
     /// Card metadata needs the visible pending count, without definition children.
-    pub(super) fn pending_question_count(&self, chat: &str) -> Result<u32> {
-        Ok(self.0.prepare_cached("SELECT count(*) FROM chat_questions q WHERE q.chat_id=?1 AND q.status='pending' AND NOT EXISTS(SELECT 1 FROM question_import_metadata m WHERE m.question_id=q.id AND m.expires<=?2)")?
-            .query_row(params![chat, crate::config::now()], |row| row.get(0))?)
+    pub(super) fn pending_question_summary(&self, chat: &str) -> Result<(u32, Option<i64>)> {
+        Ok(self.0.prepare_cached("SELECT count(*),max(q.created_at) FROM chat_questions q WHERE q.chat_id=?1 AND q.status='pending' AND NOT EXISTS(SELECT 1 FROM question_import_metadata m WHERE m.question_id=q.id AND m.expires<=?2)")?
+            .query_row(params![chat, crate::config::now()], |row| Ok((row.get(0)?, row.get(1)?)))?)
     }
 
     pub fn question(&self, chat: &str, id: &str) -> Result<Option<ChatQuestion>> {

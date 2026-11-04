@@ -236,6 +236,12 @@ abstract class ConversationLifecycleCases {
                     }
                 }
             }
+            if (fromFil) {
+                compose.waitUntil(20000) {
+                    compose.onAllNodesWithText("Tout").fetchSemanticsNodes().isNotEmpty()
+                }
+                compose.onNodeWithText("Tout").performClick()
+            }
             compose.waitUntil(20000) {
                 compose.onAllNodesWithText(chat.title).fetchSemanticsNodes().isNotEmpty()
             }

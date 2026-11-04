@@ -44,10 +44,12 @@ for (const change of ['start', 'stop'] as const) {
       await page.setViewportSize({ width: 1440, height: 900 })
       await page.goto(workspacePath(`/chats/${firstDetail.slug}`))
       await authenticateWorkspace(page)
+      await page.getByRole('tab', { name: 'Tout', exact: true }).click()
       await expect(page.locator('.activity-message').getByText('Saved navigation conversation', { exact: true }).first()).toBeVisible()
       await expectSavedStream(page, `/chats/${firstDetail.slug}/stream`)
 
       const fil = page.getByRole('complementary', { name: 'Fil' })
+      await fil.getByRole('tab', { name: 'Tout', exact: true }).click()
       const secondRow = fil.locator(`[data-fil-key="chat:${second.id}"]`)
       await secondRow.click()
       await expect(page).toHaveURL(workspacePath(`/chats/${secondDetail.slug}`))
@@ -56,9 +58,10 @@ for (const change of ['start', 'stop'] as const) {
         await workspace.api(`/api/chats/${second.id}/messages`, 'POST', { id: randomUUID(), text: 'Keep working. fixture:chat-hang' })
       else
         await workspace.api(`/api/chats/${second.id}/stop`, 'POST')
-      const currentSection = fil.getByRole('region', { name: change === 'start' ? 'Live' : 'Recent', exact: true })
+      const currentSection = fil.getByRole('region', { name: 'Tout', exact: true })
       await expect(currentSection.locator(`[data-fil-key="chat:${second.id}"]`)).toBeVisible()
       await expect(secondRow).toHaveCount(1)
+      await expect(secondRow).toHaveAttribute('data-fil-kind', change === 'start' ? 'running' : 'paused')
       const order = await fil.locator('[data-fil-key]').evaluateAll(rows => rows.map(row => row.getAttribute('data-fil-key')))
 
       // A slow or disconnected target still restores its messages from disk, but must
@@ -68,7 +71,7 @@ for (const change of ['start', 'stop'] as const) {
       await fil.locator(`[data-fil-key="chat:${first.id}"]`).click()
       await expect(page.locator('.activity-message').getByText('Saved navigation conversation', { exact: true }).first()).toBeVisible()
       await expect(currentSection.locator(`[data-fil-key="chat:${second.id}"]`)).toBeVisible()
-      await expect(fil.getByRole('region', { name: change === 'start' ? 'Recent' : 'Live', exact: true }).locator(`[data-fil-key="chat:${second.id}"]`)).toHaveCount(0)
+      await expect(secondRow).toHaveAttribute('data-fil-kind', change === 'start' ? 'running' : 'paused')
       await expect(secondRow).toHaveCount(1)
       expect(await fil.locator('[data-fil-key]').evaluateAll(rows => rows.map(row => row.getAttribute('data-fil-key')))).toEqual(order)
       await page.screenshot({ path: test.info().outputPath(`navigation-${change}-after.png`), animations: 'disabled' })
@@ -76,6 +79,7 @@ for (const change of ['start', 'stop'] as const) {
       await page.unrouteAll({ behavior: 'wait' })
       await useRelayForHttpMocks(page)
       await page.reload()
+      await page.getByRole('tab', { name: 'Tout', exact: true }).click()
       await expect(currentSection.locator(`[data-fil-key="chat:${second.id}"]`)).toBeVisible()
     }
     finally {
@@ -98,12 +102,14 @@ for (const view of ['conversation', 'fil'] as const) {
       await page.setViewportSize({ width: 1440, height: 900 })
       await page.goto(workspacePath(path))
       await authenticateWorkspace(page)
+      await page.getByRole('tab', { name: 'Tout', exact: true }).click()
       const row = page.locator(`.fil [data-fil-key="chat:${chat.id}"]`)
       await expect(row).toBeVisible()
       await expectSavedStream(page, stream)
 
       await page.route('**/api/chats**', route => route.abort())
       await page.reload()
+      await page.getByRole('tab', { name: 'Tout', exact: true }).click()
       await expect(row).toBeVisible()
       // Persist the restored reading position before another offline load.
       const savedAfter = await page.evaluate(() => {
@@ -113,6 +119,7 @@ for (const view of ['conversation', 'fil'] as const) {
       })
       await expectSavedStream(page, stream, savedAfter)
       await page.reload()
+      await page.getByRole('tab', { name: 'Tout', exact: true }).click()
       await expect(row).toBeVisible()
       if (view === 'conversation')
         await expect(page.locator('.activity-message').getByText('Saved offline navigation conversation', { exact: true }).first()).toBeVisible()
@@ -135,6 +142,7 @@ test('returning from the Fil restores a saved conversation before its stream res
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto(workspacePath(`/chats/${detail.slug}`))
     await authenticateWorkspace(page)
+    await page.getByRole('tab', { name: 'Tout', exact: true }).click()
     const message = page.locator('.activity-message').getByText('Saved across the Fil', { exact: true }).first()
     await expect(message).toBeVisible()
     await expectSavedStream(page, `/chats/${detail.slug}/stream`)
@@ -145,7 +153,7 @@ test('returning from the Fil restores a saved conversation before its stream res
       await pending
       await route.continue()
     })
-    await page.getByRole('complementary', { name: 'Fil' }).locator(`button[data-fil-key="chat:${chat.id}"]`).click()
+    await page.getByRole('complementary', { name: 'Fil' }).locator(`[data-fil-key="chat:${chat.id}"]`).click()
     await expect(message).toBeVisible()
     await expect(page.getByText('Loading conversation…', { exact: true })).toHaveCount(0)
   }
@@ -163,6 +171,7 @@ test('the Fil keeps receiving conversations after a missing deep link fails', as
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(workspacePath(`/chats/${missing}`))
   await authenticateWorkspace(page)
+  await page.getByRole('tab', { name: 'Tout', exact: true }).click()
   await failed
 
   const chat = await workspace.api('/api/chats', 'POST', {})
@@ -215,9 +224,10 @@ test('switching conversations never shows the previous one and reopens saved one
   // Opened by identifier: the copy is saved where the Fil's slug link finds it.
   await page.goto(workspacePath(`/chats/${first.id}`))
   await authenticateWorkspace(page)
+  await page.getByRole('tab', { name: 'Tout', exact: true }).click()
   await expect(page.locator('.activity-message').getByText('First conversation message', { exact: true }).first()).toBeVisible({ timeout: 30000 })
   const fil = page.getByRole('complementary', { name: 'Fil' })
-  await expect(fil.locator('[data-fil-key]')).toHaveCount(2)
+  await expect(fil.locator('[data-fil-key^="chat:"]')).toHaveCount(2)
   const switches = [
     ['Beta conversation', 'Second conversation message', 'First conversation message', 'first visit'],
     ['Alpha conversation', 'First conversation message', 'Second conversation message', 'saved'],
@@ -262,6 +272,7 @@ test('a slow conversation opens on a loader, then returns to the previous readin
 
   await page.goto(workspacePath(`/chats/${first.slug}`))
   await authenticateWorkspace(page)
+  await page.getByRole('tab', { name: 'Tout', exact: true }).click()
   const previous = page.locator('.activity-message').getByText('Keep this conversation saved', { exact: true }).first()
   await expect(previous).toBeAttached()
   const scroller = page.getByRole('region', { name: 'Activity output' })
@@ -314,6 +325,7 @@ test('an outdated saved conversation waits for its update instead of showing old
 
   await page.goto(workspacePath(`/chats/${first.slug}`))
   await authenticateWorkspace(page)
+  await page.getByRole('tab', { name: 'Tout', exact: true }).click()
   await expect(page.locator('.activity-message').getByText('Outdated conversation question', { exact: true }).first()).toBeVisible()
   await page.locator(`[data-fil-key="chat:${second.id}"]`).click()
   await expect(page.locator('.activity-message').getByText('Another conversation', { exact: true }).first()).toBeVisible()
@@ -361,6 +373,7 @@ test('opening a mission from a conversation keeps the Fil mounted and visible', 
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Navigation shell proof' })
   await page.goto(workspacePath(`/chats/${chat.slug}`))
   await authenticateWorkspace(page)
+  await page.getByRole('tab', { name: 'Tout', exact: true }).click()
   await expect(page.locator('.activity-message').getByText('Navigation shell proof', { exact: true }).first()).toBeVisible()
   const fil = page.locator('.fil')
   await fil.evaluate(element => element.setAttribute('data-navigation-probe', 'mounted'))

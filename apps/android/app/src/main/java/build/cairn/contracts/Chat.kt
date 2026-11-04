@@ -62,6 +62,8 @@ data class Chat(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val questions: List<ChatQuestion> = listOf(),
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val readAt: Long? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val requestedBy: ConversationRequester? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val requester: ChatRequester? = null,
@@ -103,6 +105,7 @@ data class Chat(
         require(pendingQuestions >= 0L)
         provider?.let { require(Regex("^(codex|claude|opencode)\$").containsMatchIn(it)) }
         purgeAt?.let { require(it in 0L..9007199254740991L) }
+        readAt?.let { require(it in 0L..9007199254740991L) }
         restoredAt?.let { require(it in 0L..9007199254740991L) }
         require(
             Regex("^(idle|queued|running|waiting|succeeded|failed|cancelled|interrupted)\$")

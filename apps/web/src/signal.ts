@@ -40,6 +40,10 @@ export interface FilItem {
   project: string | null
   at: number
   to: string
+  /** Read state is independent of the execution/action kind. */
+  unread?: boolean
+  /** Observed question/turn timestamp to acknowledge. */
+  readAt?: number
   /** The opening of the agent's final message, for finished work not read yet. */
   preview?: string
   chatId?: string
@@ -82,7 +86,7 @@ export function tomorrowMorning(now = Date.now()) {
 }
 
 /** Finished work waiting to be read, as opposed to what needs an answer or a decision. */
-export const isUnread = (item: FilItem) => item.kind === 'unread'
+export const isUnread = (item: FilItem) => item.unread ?? item.kind === 'unread'
 
 /**
  * What needs the user first (questions, failures, missions to review, then finished work they
@@ -113,6 +117,9 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
       at: chat.updatedAt,
       to: chatPath(chat),
       chatId: chat.id,
+      readAt: chat.readAt ?? chat.finishedAt ?? chat.updatedAt,
+      unread: !!chat.unread && unreadNow(`chat:${chat.id}`, chat.readAt ?? chat.finishedAt)
+        && (!chat.requestedBy || chat.pendingQuestions > 0),
       // A delegated conversation names the conversation that delegated it.
       requester: chat.requester ? { title: chat.requester.title || 'New conversation', to: chatPath({ id: chat.requester.chatId }) } : undefined,
     }
@@ -148,7 +155,7 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
         resolved: !!chat.wakeup.observation,
       })
     }
-    else if (chat.unread && unreadNow(base.key, chat.finishedAt)) {
+    else if (base.unread) {
       forYou.push({
         ...base,
         kind: 'unread',
@@ -158,7 +165,7 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
       })
     }
     else {
-      recent.push({ ...base, kind: 'recent', subtitle: [chat.agentName, chat.projectName].filter(Boolean).join(' · ') })
+      recent.push({ ...base, kind: 'recent', subtitle: chat.status === 'succeeded' ? 'Finished' : chat.paused ? 'Paused' : [chat.agentName, chat.projectName].filter(Boolean).join(' · ') })
     }
   }
 
@@ -199,6 +206,8 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
       to: filRunPath(run.id),
       taskId: task.id,
       runId: run.id,
+      readAt: run.finishedAt ?? undefined,
+      unread: !!run.unread && unreadNow(`task:${task.id}`, run.finishedAt),
     }
     if (isExclusivelySuspended(run)) {
       live.push({ ...base, kind: 'suspended', subtitle: exclusiveSuspensionLabel })
@@ -275,7 +284,7 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
         })
       }
     }
-    else if (run.status === 'succeeded' && run.unread && unreadNow(base.key, run.finishedAt)) {
+    else if (run.status === 'succeeded' && base.unread) {
       forYou.push({
         ...base,
         kind: 'unread',
@@ -283,11 +292,14 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
         preview: run.preview || undefined,
       })
     }
+    else {
+      recent.push({ ...base, kind: 'recent', subtitle: run.status === 'succeeded' ? 'Mission finished' : run.status })
+    }
   }
 
   const newest = (a: FilItem, b: FilItem) => b.at - a.at
   // What asks for an answer or a decision stays above what only waits to be read.
-  const urgency = (a: FilItem, b: FilItem) => Number(isUnread(a)) - Number(isUnread(b)) || newest(a, b)
+  const urgency = (a: FilItem, b: FilItem) => Number(a.kind === 'unread') - Number(b.kind === 'unread') || newest(a, b)
   // A wait whose result arrived resumes first, before any deadline.
   const soonest = (a: FilItem, b: FilItem) => Number(!!b.resolved) - Number(!!a.resolved) || (a.wakeAt ?? Infinity) - (b.wakeAt ?? Infinity)
   return {
@@ -296,6 +308,14 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
     waiting: waiting.sort(soonest),
     recent: recent.sort(newest),
   }
+}
+
+/** Compact reception views: acknowledging a notification never changes its execution status. */
+export function filViews(fil: Fil) {
+  const all = [...fil.forYou, ...fil.live, ...fil.waiting, ...fil.recent].sort((a, b) => b.at - a.at)
+  const ongoing = all.filter(item => ['question', 'running', 'queued', 'waiting', 'snoozed', 'suspended', 'review'].includes(item.kind)
+    || (item.kind === 'set-aside' && item.setAside !== 'dismissed'))
+  return { unread: all.filter(isUnread), ongoing, all }
 }
 
 /**
