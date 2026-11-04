@@ -134,6 +134,7 @@ export function prepareRustRunner(environment, dependencies = {}) {
 
   // SDK inventory variables and unused PATH entries advertise preinstalled tools;
   // other filesystem-valued inputs may select native dependencies through aliases.
+  const inaccessiblePathInputs = new Set()
   for (const [name, value] of Object.entries(environment)) {
     if (!value || name === 'PATH' || /^(?:ANDROID_|DOTNET_|SWIFT_)/.test(name))
       continue
@@ -142,7 +143,25 @@ export function prepareRustRunner(environment, dependencies = {}) {
     for (const candidate of new Set([value, ...value.split(path.delimiter)])) {
       if (!candidate)
         continue
-      const location = canonicalBuildPath(candidate, workspace, filesystem)
+      const declared = path.resolve(workspace, candidate)
+      if (UNUSED_SDK_DIRECTORIES.some(directory => contains(directory, declared)))
+        throw new Error(`A native filesystem input references an SDK scheduled for reclamation: ${name}`)
+      let location
+      try {
+        location = canonicalBuildPath(candidate, workspace, filesystem)
+      }
+      catch (error) {
+        // A stock search path can contain root-only entries. The unprivileged
+        // build cannot use those entries; do not mistake them for active SDKs.
+        // Explicit native overrides were already refused above.
+        if (error.code === 'EACCES' || error.code === 'EPERM') {
+          inaccessiblePathInputs.add(name)
+          continue
+        }
+
+        throw new Error(`Could not validate the filesystem input: ${name}`)
+      }
+
       if (UNUSED_SDK_DIRECTORIES.some(directory => contains(directory, location)))
         throw new Error(`A native filesystem input references an SDK scheduled for reclamation: ${name}`)
     }
@@ -255,6 +274,7 @@ export function prepareRustRunner(environment, dependencies = {}) {
     beforeBytes: `${before}`,
     afterBytes: `${after}`,
     requiredBytes: `${REQUIRED_FREE_BYTES}`,
+    inaccessiblePathInputs: [...inaccessiblePathInputs],
     directories,
   }
   if (after < REQUIRED_FREE_BYTES) {
