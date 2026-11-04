@@ -6,6 +6,10 @@ on:
     - cron: '17 2 * * *'
   workflow_dispatch:
     inputs:
+      disk-probe-only:
+        description: Measure disposable runner capacity without compilation or publication
+        type: boolean
+        default: false
       backend-only:
         description: Run backend tests and doctests without release resolution or image jobs
         type: boolean
@@ -166,7 +170,7 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -p test_native_docker_workload.py -v
   rust-check:
     needs: resolve
-    if: always() && !cancelled() && (inputs.backend-only == true || needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')
+    if: inputs.disk-probe-only != true && always() && !cancelled() && (inputs.backend-only == true || needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -202,7 +206,7 @@ jobs:
           --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     needs: resolve
-    if: always() && !cancelled() && (inputs.backend-only == true || (needs.resolve.result == 'success' && (inputs.backend-qualification == 'backend-migration' || needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')))
+    if: inputs.disk-probe-only != true && always() && !cancelled() && (inputs.backend-only == true || (needs.resolve.result == 'success' && (inputs.backend-qualification == 'backend-migration' || needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -1295,3 +1299,11 @@ jobs:
           CAIRN_RELEASE_SSH_KEY: ${{ secrets.CAIRN_RELEASE_SSH_KEY }}
           DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
         run: node scripts/production-release.mjs verify
+  disk-probe:
+    if: inputs.disk-probe-only == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Measure fixed preinstalled SDK paths without modifying the runner
+        run: node scripts/probe-rust-runner-disk.mjs
