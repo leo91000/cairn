@@ -74,7 +74,7 @@ describe('disposable Rust test runner disk preparation', () => {
       const preparation = job.steps.findIndex(step => step.uses === './.github/actions/prepare-rust-runner')
       const dependencies = job.steps.findIndex(step => step.name === 'Install native test dependencies')
       const observation = job.steps.findIndex(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'before-build')
-      expect(job.steps[preparation]['timeout-minutes']).toBe(2)
+      expect(job.steps[preparation]['timeout-minutes']).toBe(3)
       expect(preparation).toBeGreaterThan(dependencies)
       expect(preparation).toBeLessThan(observation)
     }
@@ -93,6 +93,27 @@ describe('disposable Rust test runner disk preparation', () => {
         { stdio: 'inherit', timeout: expect.any(Number) },
       ]),
     )
+  })
+
+  it('does not invoke cleanup on a runner that already has sufficient capacity', () => {
+    const dependencies = fixture(REQUIRED_FREE_BYTES)
+    const execute = dependencies.execute.getMockImplementation()
+    dependencies.execute.mockImplementation((command, args, options) => {
+      if (command === 'sudo')
+        throw Object.assign(new Error('unnecessary cleanup timed out'), { code: 'ETIMEDOUT' })
+      return execute(command, args, options)
+    })
+    const result = prepareRustRunner(environment, dependencies)
+    expect(result.beforeBytes).toBe(result.afterBytes)
+    expect(result.directories.every(directory => directory.status === 'not-needed')).toBe(true)
+    expect(dependencies.execute.mock.calls.some(([command]) => command === 'sudo')).toBe(false)
+  })
+
+  it('stops deleting SDKs as soon as the required capacity is available', () => {
+    const dependencies = fixture(REQUIRED_FREE_BYTES - 1n)
+    const result = prepareRustRunner(environment, dependencies)
+    expect(result.directories.map(directory => directory.status)).toEqual(['removed', 'not-needed', 'not-needed'])
+    expect(dependencies.execute.mock.calls.filter(([command]) => command === 'sudo')).toHaveLength(1)
   })
 
   it.each([
@@ -240,14 +261,14 @@ describe('disposable Rust test runner disk preparation', () => {
     dependencies.execute.mockImplementation((command, args, options) => {
       const result = execute(command, args, options)
       if (command === 'sudo')
-        time += 35000
+        time += 65000
       return result
     })
-    expect(() => prepareRustRunner(environment, dependencies)).toThrow('60-second preparation budget')
+    expect(() => prepareRustRunner(environment, dependencies)).toThrow('120-second preparation budget')
     const removals = dependencies.execute.mock.calls.filter(([command]) => command === 'sudo')
     expect(removals).toHaveLength(2)
-    expect(removals[0][2].timeout).toBe(60000)
-    expect(removals[1][2].timeout).toBe(25000)
+    expect(removals[0][2].timeout).toBe(120000)
+    expect(removals[1][2].timeout).toBe(55000)
   })
 
   it.each([
