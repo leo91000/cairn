@@ -314,6 +314,7 @@ abstract class AgentPageCases {
         val grantState: ConcurrentHashMap<String, build.cairn.contracts.AgentPluginGrants>,
         val grantReadBarrier: AtomicReference<GrantReadBarrier?> = AtomicReference(null),
         val refreshWorkspace: AtomicReference<(() -> Unit)?> = AtomicReference(null),
+        val failGrantWrites: AtomicBoolean = AtomicBoolean(false),
     )
 
     private class GrantReadBarrier {
@@ -335,6 +336,7 @@ abstract class AgentPageCases {
         val failNodes = AtomicBoolean(false)
         val failPlugins = AtomicBoolean(false)
         val failGrantReads = AtomicBoolean(false)
+        val failGrantWrites = AtomicBoolean(false)
         val grantReadBarrier = AtomicReference<GrantReadBarrier?>(null)
         val mcps = AtomicReference("[]")
         val server = MockWebServer()
@@ -397,6 +399,15 @@ abstract class AgentPageCases {
                                     text
                                 )
                             grantSaves += wireJson.parseToJsonElement(text).jsonObject
+                            if (failGrantWrites.getAndSet(false))
+                                return response
+                                    .setResponseCode(503)
+                                    .setBody(
+                                        nodeWireFixture(
+                                            request.path,
+                                            """{"error":"Grant update failed"}""",
+                                        )
+                                    )
                             if (input.revision != agent.revision)
                                 return response
                                     .setResponseCode(409)
@@ -689,6 +700,7 @@ abstract class AgentPageCases {
             grantState,
             grantReadBarrier,
             AtomicReference(null),
+            failGrantWrites,
         )
     }
 
@@ -991,7 +1003,7 @@ abstract class AgentPageCases {
             }
             compose
                 .onNodeWithText(
-                    "1Password “Production” : Accès complet, y compris les contributions futures. Les contrôles d’accès du plugin s’appliquent immédiatement, y compris aux runs en cours. Les identifiants déjà chargés restent utilisables jusqu’à la fin de chaque run."
+                    "1Password “Production” : Aucun accès → Accès complet, y compris les contributions futures. Les contrôles d’accès du plugin s’appliquent immédiatement, y compris aux runs en cours. Les identifiants déjà chargés restent utilisables jusqu’à la fin de chaque run."
                 )
                 .assertExists()
             // Declining the reapproval is possible: the bot then stops until it is reapproved.
@@ -1082,6 +1094,40 @@ abstract class AgentPageCases {
             assertEquals(2, body["grants"]!!.jsonArray.size)
             assertTrue(body["runCredentialInstances"]!!.jsonArray.isEmpty())
             assertTrue(fixture.saved.isEmpty())
+        }
+    }
+
+    @Test
+    fun profileEditDoesNotRestoreFullPluginAccessWhenGrantSaveFails() {
+        val support = "66666666-6666-4666-8666-666666666666"
+        journey(
+            release.id,
+            prepare = { fixture ->
+                fixture.agents.set(
+                    fixture.agents.get().map {
+                        if (it.id == release.id) it.copy(plugins = listOf(support)) else it
+                    }
+                )
+                fixture.failGrantWrites.set(true)
+            },
+        ) { fixture ->
+            open(AgentSection.Plugins)
+            waitForDescription("Accès à Support : full")
+            compose
+                .onNodeWithContentDescription("Accès à Support : full")
+                .performScrollTo()
+                .performClick()
+            open(AgentSection.Identity)
+            compose.onNodeWithText("Nom").performTextReplacement("Release without Support")
+            compose.onNodeWithText("Enregistrer").performClick()
+            confirmReview()
+            compose.waitUntil(15000) {
+                fixture.saved.isNotEmpty() && fixture.grantSaves.isNotEmpty()
+            }
+
+            val settings = fixture.saved.single().second["settings"]!!.jsonObject
+            assertTrue(settings["plugins"]!!.jsonArray.isEmpty())
+            assertTrue(fixture.agents.get().single { it.id == release.id }.plugins.isEmpty())
         }
     }
 
@@ -2125,16 +2171,23 @@ abstract class AgentPageCases {
                 .performScrollTo()
                 .performClick()
             back()
+            open(AgentSection.Identity)
+            compose.onNodeWithText("Nom").performTextReplacement("Agent de révision")
+            back()
             compose.onNodeWithText("Créer l’agent").performClick()
             waitForText("Vérifier avant d’enregistrer")
             waitForText(
-                "1Password “Production” : Accès complet, y compris les contributions futures",
+                "1Password “Production” : Aucun accès → Accès complet, y compris les contributions futures",
                 substring = true,
             )
             confirmReview()
             compose.waitUntil(15000) { fixture.saved.isNotEmpty() }
             compose.waitUntil(15000) { fixture.grantSaves.isNotEmpty() }
-            assertEquals(1, fixture.grantSaves.single()["grants"]!!.jsonArray.size)
+            val profileSettings = fixture.saved.single().second["settings"]!!.jsonObject
+            val savedGrants = fixture.grantSaves.single()
+            assertTrue(profileSettings["plugins"]!!.jsonArray.isEmpty())
+            assertTrue(savedGrants["runCredentialInstances"]!!.jsonArray.isEmpty())
+            assertEquals(1, savedGrants["grants"]!!.jsonArray.size)
         }
     }
 

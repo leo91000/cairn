@@ -9,6 +9,13 @@ import {
 
 test('contribution grants use resource ancestry, review, conflicts and explicit credential suppliers', async ({ page, workspace }, testInfo) => {
   test.setTimeout(120000)
+  const creationBodies: Array<{ settings?: { plugins?: string[] } }> = []
+  page.on('request', (request) => {
+    const requestUrl = new URL(request.url())
+    if (request.method() === 'POST' && requestUrl.pathname === '/api/agents') {
+      creationBodies.push(request.postDataJSON() as { settings?: { plugins?: string[] } })
+    }
+  })
   const prepare = async (path: string, body: unknown) => {
     const started = await workspace.api(path, 'POST', body)
     if (!started.operation)
@@ -102,6 +109,12 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-new-agent-review.png'), fullPage: true })
   await newAgentReview.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(page).toHaveURL(/\/agents\/[0-9a-f-]{36}$/)
+  expect(creationBodies).toHaveLength(1)
+  expect(creationBodies[0]?.settings?.plugins).toEqual([])
+  const createdId = page.url().split('/').pop()!
+  const createdGrants = await workspace.api(`/api/agents/${createdId}/plugin-grants`)
+  expect(createdGrants.grants).toEqual([{ instanceId: first, access: { type: 'full' } }])
+  expect(createdGrants.runCredentialInstances).toEqual([])
 
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Resource reviewer' })
   await workspace.api(`/api/agents/${agent.id}/plugin-grants`, 'PUT', {
@@ -204,11 +217,21 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-resource-picker.png') })
   const original = await workspace.api(`/api/agents/${agent.id}/plugin-grants`)
   expect(original.grants).toEqual([{ instanceId: first, access: { type: 'full' } }])
+  const profileSaveBodies: Array<{ settings?: { plugins?: string[] } }> = []
+  page.on('request', (request) => {
+    const requestUrl = new URL(request.url())
+    if (request.method() === 'PUT' && requestUrl.pathname.endsWith(`/api/agents/${agent.id}`)) {
+      profileSaveBodies.push(request.postDataJSON() as { settings?: { plugins?: string[] } })
+    }
+  })
+  await openAgentSection(page, 'Identity & instructions')
+  await page.getByLabel('Description', { exact: true }).fill('Only selected resources are allowed.')
+  await openAgentSection(page, 'Secrets & plugins')
   await page.setViewportSize({ width: 390, height: 844 })
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
   const review = page.getByRole('dialog', { name: 'Review before saving' })
-  await expect(review).toContainText('Grant UI “Support”: Full access, including future contributions → tool grant_ui_read: channel support and descendants; command post: channel support and descendants; hook message: channel support and descendants.')
+  await expect(review).toContainText('Grant UI “Support”: Full access, including future contributions → tool grant_ui_read: channel support and descendants, channel general and descendants; command post: channel support and descendants; hook message: channel support and descendants.')
   await expect(review).toContainText('channel support and descendants')
   await expect(review).toContainText('Run credential suppliers: Grant UI “Support” → Grant UI “Automation”')
   await page.screenshot({ path: testInfo.outputPath('agent-plugin-grants-review.png'), fullPage: true })
@@ -279,6 +302,7 @@ test('contribution grants use resource ancestry, review, conflicts and explicit 
   expect(afterRemovingSupplier.grants.map((grant: any) => grant.instanceId)).toEqual(
     expect.arrayContaining([first, remote]),
   )
+  expect(profileSaveBodies.at(-1)?.settings?.plugins).not.toContain(first)
   await page.goto(workspacePath('/agents'))
   await expect(page.getByText('Selected plugin access', { exact: false })).toBeVisible()
 

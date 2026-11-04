@@ -34,10 +34,63 @@ internal const val MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION = 100
 
 private const val PLUGIN_RESOURCE_PATH_CACHE_MS = 60_000L
 
-private data class CachedPluginResourcePath(val path: String, val resolvedAt: Long)
+private data class PluginResourcePathLock(val mutex: Mutex = Mutex(), var references: Int = 0)
 
-private val resolvedPluginResourcePaths = ConcurrentHashMap<String, CachedPluginResourcePath>()
-private val pluginResourcePathLocks = ConcurrentHashMap<String, Mutex>()
+internal class PluginResourcePathCache(
+    private val maxEntries: Int = 512,
+    private val expirationMs: Long = PLUGIN_RESOURCE_PATH_CACHE_MS,
+    private val now: () -> Long = { System.currentTimeMillis() },
+) {
+    private data class Entry(val path: String, val createdAt: Long)
+
+    private val monitor = Any()
+    private val entries = LinkedHashMap<String, Entry>()
+
+    init {
+        require(maxEntries > 0)
+        require(expirationMs > 0)
+    }
+
+    val size: Int
+        get() = synchronized(monitor) { entries.size }
+
+    fun get(key: String): String? =
+        synchronized(monitor) {
+            val cached = entries[key]
+            if (cached == null || now() - cached.createdAt >= expirationMs) {
+                entries.remove(key)
+                null
+            } else {
+                cached.path
+            }
+        }
+
+    fun put(key: String, path: String) {
+        synchronized(monitor) {
+            val currentTime = now()
+            entries.entries.removeIf { currentTime - it.value.createdAt >= expirationMs }
+            entries[key] = Entry(path, currentTime)
+            while (entries.size > maxEntries) {
+                val oldestKey = entries.keys.firstOrNull() ?: break
+                entries.remove(oldestKey)
+            }
+        }
+    }
+}
+
+private val resolvedPluginResourcePaths = PluginResourcePathCache()
+private val pluginResourcePathLocks = ConcurrentHashMap<String, PluginResourcePathLock>()
+
+private fun retainPluginResourcePathLock(key: String): PluginResourcePathLock =
+    pluginResourcePathLocks.compute(key) { _, existing ->
+        (existing ?: PluginResourcePathLock()).also { it.references++ }
+    }!!
+
+private fun releasePluginResourcePathLock(key: String, lock: PluginResourcePathLock) {
+    pluginResourcePathLocks.computeIfPresent(key) { _, current ->
+        if (current !== lock) current else if (--current.references == 0) null else current
+    }
+}
 
 private suspend fun resolvePluginResourcePath(
     api: CairnApi,
@@ -46,36 +99,33 @@ private suspend fun resolvePluginResourcePath(
     root: PluginResourceRef,
 ): String {
     val key = "$plugin:$instance:${root.resourceType}:${root.id}"
-    resolvedPluginResourcePaths[key]
-        ?.takeIf { System.currentTimeMillis() - it.resolvedAt < PLUGIN_RESOURCE_PATH_CACHE_MS }
-        ?.let {
-            return it.path
-        }
+    resolvedPluginResourcePaths.get(key)?.let {
+        return it
+    }
 
-    val lock = pluginResourcePathLocks.computeIfAbsent(key) { Mutex() }
-    return lock.withLock {
-        resolvedPluginResourcePaths[key]
-            ?.takeIf { System.currentTimeMillis() - it.resolvedAt < PLUGIN_RESOURCE_PATH_CACHE_MS }
-            ?.path
-            ?: run {
-                val resolved =
-                    api.resolvePluginResource(
-                        ResolvePluginResourceInput(
-                            root.id,
-                            instance,
-                            plugin,
-                            root.resourceType,
+    val lock = retainPluginResourcePathLock(key)
+    return try {
+        lock.mutex.withLock {
+            resolvedPluginResourcePaths.get(key)
+                ?: run {
+                    val resolved =
+                        api.resolvePluginResource(
+                            ResolvePluginResourceInput(
+                                root.id,
+                                instance,
+                                plugin,
+                                root.resourceType,
+                            )
                         )
-                    )
-                pluginResourcePathLabel(
-                        resolved.ancestors.map { it.name },
-                        resolved.resource.name,
-                    )
-                    .also {
-                        resolvedPluginResourcePaths[key] =
-                            CachedPluginResourcePath(it, System.currentTimeMillis())
-                    }
-            }
+                    pluginResourcePathLabel(
+                            resolved.ancestors.map { it.name },
+                            resolved.resource.name,
+                        )
+                        .also { resolvedPluginResourcePaths.put(key, it) }
+                }
+        }
+    } finally {
+        releasePluginResourcePathLock(key, lock)
     }
 }
 

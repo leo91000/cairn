@@ -398,7 +398,8 @@ private fun AgentPage(
     }
     fun save() {
         if (saving || conflict || errors.isNotEmpty()) return
-        val edited = draft.resolved()
+        val resolvedDraft = draft.resolved()
+        val edited = resolvedDraft
         saving = true
         saveError = null
         scope.launch {

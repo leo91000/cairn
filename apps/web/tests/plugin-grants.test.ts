@@ -14,13 +14,43 @@ import {
   selectableResourceTypes,
   staleResourceRestrictions,
 } from '../src/plugin-grants'
-import { pluginResourcePathLabel } from '../src/plugin-resource-paths'
+import { pluginResourcePathLabel, resolvePluginResourcePath } from '../src/plugin-resource-paths'
 
 it('caps resource roots per contribution at the backend limit while allowing removal', () => {
   expect(MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION).toBe(100)
   expect(canSelectPluginResourceRoot(99, false)).toBe(true)
   expect(canSelectPluginResourceRoot(100, false)).toBe(false)
   expect(canSelectPluginResourceRoot(100, true)).toBe(true)
+})
+
+it('bounds cached resource paths while resolving grant labels', async () => {
+  let requests = 0
+  const request = async <T>(path: string): Promise<T> => {
+    requests += 1
+    const id = new URL(path, 'https://cairn.test').searchParams.get('id')!
+    return {
+      resource: {
+        resourceType: 'channel',
+        id,
+        name: `#${id}`,
+        parent: null,
+      },
+      ancestors: [],
+    } as T
+  }
+
+  for (let index = 0; index <= 512; index += 1) {
+    await resolvePluginResourcePath(request, 'discord', 'instance', {
+      resourceType: 'channel',
+      id: `channel-${index}`,
+    })
+  }
+
+  await resolvePluginResourcePath(request, 'discord', 'instance', {
+    resourceType: 'channel',
+    id: 'channel-0',
+  })
+  expect(requests).toBe(514)
 })
 
 it('rebases concurrent grant additions and independent resource roots', () => {

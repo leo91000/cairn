@@ -6,6 +6,7 @@ import type { PluginResourceRef } from '../../../packages/contracts/generated/ty
 import type { PluginResourceType } from '../../../packages/contracts/generated/typescript/PluginResourceType'
 
 export type GrantDraft = Pick<AgentPluginGrants, 'grants' | 'runCredentialInstances'>
+
 export type Contribution = PluginContributionGrant & { description: string, resourceTypes: string[] }
 
 export const MAX_PLUGIN_RESOURCE_ROOTS_PER_CONTRIBUTION = 100

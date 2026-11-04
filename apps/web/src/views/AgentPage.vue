@@ -90,7 +90,11 @@ import {
   Trash2,
   TriangleAlert,
 } from '../icons'
-import { grantDescription, grantKey, mergeGrantDrafts } from '../plugin-grants'
+import {
+  grantDescription,
+  grantKey,
+  mergeGrantDrafts,
+} from '../plugin-grants'
 import { useResourceSave } from '../resourceSave'
 import { buttonBase, buttonSizes, buttonVariants } from '../ui'
 
