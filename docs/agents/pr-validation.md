@@ -78,8 +78,10 @@ selected for a full run, it waits for both jobs; a backend-only migration run
 continues to require only the backend suite.
 
 Before backend or CLI test compilation, the disposable GitHub-hosted Ubuntu
-runner removes three unused platform SDK directories (Android, .NET and Swift)
-and requires 32 GiB available on the build filesystem. The fixed preparation
+runner requires 32 GiB available on the build filesystem. When capacity is
+insufficient, it reclaims a fixed allowlist of unused platform SDK directories
+(Android, .NET and Swift), stopping as soon as capacity is sufficient. Necessary
+reclamation has a 120-second budget; already sufficient runners delete no SDKs. The fixed preparation
 refuses local/self-hosted accounts, other job roles, protected build locations,
 SDK symlinks or mounts, explicit native toolchain overrides, Cargo configuration
 files and active native tools. It changes no compiler flags or test commands. The threshold follows an observed

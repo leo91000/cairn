@@ -82,11 +82,13 @@ export function prepareRustRunner(environment, dependencies = {}) {
   const user = (dependencies.userInfo ?? os.userInfo)()
   const platform = dependencies.platform ?? process.platform
   const now = dependencies.now ?? Date.now
-  const deadline = now() + 60000
+  // Hosted removal completed in 55 seconds and another run exhausted 60 seconds.
+  // Bound necessary low-capacity reclamation to twice that observed duration.
+  const deadline = now() + 120000
   const remaining = () => {
     const milliseconds = deadline - now()
     if (milliseconds <= 0)
-      throw new Error('Rust SDK reclamation exceeded its 60-second preparation budget.')
+      throw new Error('Rust SDK reclamation exceeded its 120-second preparation budget.')
     return milliseconds
   }
 
@@ -261,6 +263,11 @@ export function prepareRustRunner(environment, dependencies = {}) {
   for (const directory of directories) {
     if (directory.status !== 'eligible')
       continue
+    if (available() >= REQUIRED_FREE_BYTES) {
+      directory.status = 'not-needed'
+      continue
+    }
+
     execute('sudo', ['-n', 'rm', '--recursive', '--force', '--one-file-system', '--', directory.path], { stdio: 'inherit', timeout: remaining() })
     directory.status = 'removed'
   }
