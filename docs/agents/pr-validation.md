@@ -126,6 +126,35 @@ values for the native fixture. It reads no process command lines or environment.
 Backend trace output remains in `backend-test-trace`; native evidence and source
 manifests remain in `native-storage-evidence`.
 
+Backend diagnostics also use a foreground Node 24 action to publish a small
+immutable startup receipt before starting the heavy command. It verifies the
+pinned source/API clock and the explicitly checked-out, immutable
+`actions/upload-artifact` v7.0.1 publisher. Artifact runtime credentials stay in
+the publication process environment; they are removed from the tested child.
+The receipt contains source/observer identities, clock, supervisor/launcher
+hashes and acquisition state, with no raw output or environment.
+
+At most five rolling checkpoints follow (first after 30 seconds, then six
+minutes after each preceding upload completes), plus a final checkpoint. Each
+projects the existing bounded sample ring onto fixed phase/process/counter
+fields. A publication needs a successful finalized artifact ID and digest;
+missing/failed/timed-out acquisition stops diagnostics with a nonzero result.
+Seven publication attempts plus the existing before-build, test-trace and
+after-build artifacts stay within a conservative ten-artifact job allowance.
+Nothing overwrites or deletes earlier checkpoints. Uploads have a 20-second
+bound clipped to the actual API clock's remaining time; startup/periodic
+publication stays before the reserve, and final publication uses the existing
+reserve. Cancellation reaches the credentialed publisher. The clock is checked
+again after startup commit before any heavy child can start. The full backend
+flags and normal route remain unchanged.
+
+Previously committed artifacts survive loss of the runner without depending on
+an after-step upload. A loss before the first commit, the last partial upload,
+and the interval since the last committed sample remain **unknown**. Checkpoint
+creation proves evidence acquisition, not successful qualification or recovery
+of an unexplained earlier failure. The existing backend tail checks still run
+after the observed backend command; its checkpoint is not a whole-job PASS.
+
 The private Linux leader enables and verifies child-subreaper ownership before
 starting the command. Orphaned descendants remain adopted by that leader even
 if they create a new session and close their standard streams. This is a

@@ -135,6 +135,11 @@ export async function observeCommand({
   graceMs = 10000,
   closeGraceMs = 1000,
   inventoryLimit = 4096,
+  commandEnv = process.env,
+  beforeCommand,
+  signal,
+  stdout = process.stdout,
+  stderr = process.stderr,
 }) {
   const started = Date.now()
   if (!Number.isFinite(jobStartedAt) || jobStartedAt > started || started - jobStartedAt > 90 * 60000
@@ -268,6 +273,23 @@ export async function observeCommand({
     return 124
   }
 
+  if (beforeCommand) {
+    persist('admitted-before-command')
+    await beforeCommand()
+  }
+
+  if (signal?.aborted) {
+    interrupted = true
+    persist('external-termination')
+    return 130
+  }
+
+  if (Date.now() >= deadline) {
+    timedOut = true
+    persist('no-time-before-evidence-reserve')
+    return 124
+  }
+
   const helper = fileURLToPath(new URL('./ci-owned-command.py', import.meta.url))
   const child = spawn('python3', [helper, command, ...args], {
     // Only this supervisor owns the public stdout/stderr descriptors. A child
@@ -275,13 +297,13 @@ export async function observeCommand({
     stdio: ['inherit', 'pipe', 'pipe', 'pipe', 'pipe'],
     detached: true,
     env: {
-      ...process.env,
+      ...commandEnv,
       CAIRN_CI_PHASE_FILE: path.resolve(output, 'phase.json'),
       CAIRN_CI_DIAGNOSTIC_OUTPUT: path.resolve(output),
     },
   })
-  child.stdout.pipe(process.stdout, { end: false })
-  child.stderr.pipe(process.stderr, { end: false })
+  child.stdout.pipe(stdout, { end: false })
+  child.stderr.pipe(stderr, { end: false })
   child.stdio[4].on('error', () => {
     if (!timedOut && !interrupted)
       ownershipUncertain = true
@@ -364,6 +386,9 @@ export async function observeCommand({
   const onTerm = () => stop('external-termination')
   process.on('SIGTERM', onTerm)
   process.on('SIGINT', onTerm)
+  signal?.addEventListener('abort', onTerm, { once: true })
+  if (signal?.aborted)
+    onTerm()
   const interval = setInterval(() => {
     persist('periodic')
     if (!inventoryComplete || ownershipUncertain)
@@ -409,6 +434,7 @@ export async function observeCommand({
 
   process.off('SIGTERM', onTerm)
   process.off('SIGINT', onTerm)
+  signal?.removeEventListener('abort', onTerm)
   persist('finished')
   if (spawnError)
     throw new Error('Diagnostic command could not start', { cause: spawnError })
