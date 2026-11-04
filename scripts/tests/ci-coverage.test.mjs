@@ -85,9 +85,11 @@ describe('parallel CI coverage', () => {
     expect(rustCheck.if).toContain('inputs.backend-only == true')
     const rustCondition = rustCheck.if
       .replaceAll('inputs.backend-only', 'backendOnly')
+      .replaceAll('inputs.ci-diagnostic', 'diagnostic')
       .replace(/\bneeds\.([a-z0-9-]+)\b/g, (_match, name) => `needs[${JSON.stringify(name)}]`)
     const runsRustCheck = (backendOnly, resolveResult, reuse) => runInNewContext(rustCondition, {
       backendOnly,
+      diagnostic: '',
       needs: { resolve: { result: resolveResult, outputs: { reuse } } },
       github: { ref: 'refs/heads/feature' },
       always: () => true,
@@ -104,10 +106,12 @@ describe('parallel CI coverage', () => {
     expect(backend.if).toContain('inputs.backend-only == true')
     const backendCondition = backend.if
       .replaceAll('inputs.backend-only', 'backendOnly')
+      .replaceAll('inputs.ci-diagnostic', 'diagnostic')
       .replaceAll('inputs.backend-qualification', 'selection')
       .replace(/\bneeds\.([a-z0-9-]+)\b/g, (_match, name) => `needs[${JSON.stringify(name)}]`)
     const runsBackend = (backendOnly, selection, resolveResult, reuse) => runInNewContext(backendCondition, {
       backendOnly,
+      diagnostic: '',
       selection,
       needs: { resolve: { result: resolveResult, outputs: { reuse } } },
       github: { ref: 'refs/heads/feature' },
@@ -339,7 +343,10 @@ describe('parallel CI coverage', () => {
     const reference = steps.find(step => step.name === 'Qualify the exact reference on the current disposable host')
     const candidate = steps.find(step => step.name === 'Qualify real ublk, S3, eviction, systemd ownership and crash recovery')
     expect(reference.run).toContain('git archive "$REFERENCE_SHA" scripts/tests deploy/nodes/native-host.py')
-    expect(candidate.run).toContain('git archive HEAD scripts/tests deploy/nodes/native-host.py')
+    // eslint-disable-next-line no-template-curly-in-string -- literal shell fallback is the provenance contract
+    expect(candidate.run).toContain('git archive "${DIAGNOSTIC_CANDIDATE:-HEAD}" scripts/tests deploy/nodes/native-host.py')
+    // eslint-disable-next-line no-template-curly-in-string -- literal GitHub expression is the provenance contract
+    expect(candidate.env.DIAGNOSTIC_CANDIDATE).toBe('${{ inputs.ci-diagnostic == \'native\' && inputs.diagnostic-candidate || \'\' }}')
     expect(reference.run).toContain('native_admission_overlay.py "$reference_fixture" reference')
     expect(candidate.run).toContain('native_admission_overlay.py "$candidate_fixture" candidate')
     expect(reference.run).toContain('--repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier')
@@ -347,6 +354,59 @@ describe('parallel CI coverage', () => {
     expect(candidate.run).toContain('CAIRN_NATIVE_DOCKER_QUALIFY=1')
     expect(reference.run).not.toContain('CAIRN_NATIVE_DOCKER_QUALIFY=1')
     expect(steps.indexOf(candidate)).toBeGreaterThan(steps.indexOf(reference))
+  })
+
+  it('isolates each diagnostic job even when legacy independent inputs are populated', () => {
+    function runsWith(inputs, event = 'workflow_dispatch') {
+      const results = {}
+
+      function run(name) {
+        if (Object.hasOwn(results, name))
+          return results[name]
+        const job = quality.jobs[name]
+        const dependencies = Array.isArray(job.needs) ? job.needs : job.needs ? [job.needs] : []
+        const needs = Object.fromEntries(dependencies.map(dependency => [dependency, {
+          result: run(dependency) ? 'success' : 'skipped',
+          outputs: { reuse: results[dependency] ? 'false' : '' },
+        }]))
+        const expression = (job.if ?? 'true')
+          .replace(/\b(inputs|needs)\.([a-z0-9-]+)\b/g, (_match, scope, property) => `${scope}[${JSON.stringify(property)}]`)
+        const failedDependency = dependencies.some(dependency => !results[dependency])
+        const enabled = !failedDependency || expression.includes('always()')
+        results[name] = enabled && Boolean(runInNewContext(expression, {
+          inputs,
+          needs,
+          github: { event_name: event, ref: 'refs/heads/feature' },
+          always: () => true,
+          cancelled: () => false,
+          startsWith: (value, prefix) => value.startsWith(prefix),
+        }, { timeout: 1000 }))
+        return results[name]
+      }
+
+      for (const name of Object.keys(quality.jobs))
+        run(name)
+      return Object.keys(results).filter(name => results[name]).sort()
+    }
+
+    const legacy = {
+      'backend-only': true,
+      'validation-only': true,
+      'backend-qualification': 'none',
+      'plan-storage-reference': '06829d1b5f3d7accb9791c09d49522e7e2d2ab25',
+      'exclusive-android': true,
+      'browser-workers': '2',
+    }
+    for (const mode of ['backend', 'native']) {
+      expect(runsWith({ ...legacy, 'ci-diagnostic': mode })).toEqual([mode === 'native' ? 'native-runtime' : 'backend'])
+    }
+
+    for (const mode of ['', 'none']) {
+      expect(runsWith({ ...legacy, 'ci-diagnostic': mode })).toEqual(['backend', 'plan-storage', 'rust-check'])
+    }
+
+    expect(quality.on.pull_request).toBeUndefined()
+    expect(quality.on.push.tags).toEqual(['v*'])
   })
 
   it('gives installer and update fixtures their own database and web assets', () => {

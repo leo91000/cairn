@@ -90,6 +90,47 @@ tags, dispatch `ci.yaml` with `validation-only=true`. This still runs the
 applicable backend, node, native-runtime, browser and device jobs; image build,
 publish, promotion and deployment jobs are skipped.
 
+### Bounded deadline diagnostics
+
+When a backend/native job reaches its deadline before preserving evidence,
+`ci.yaml` also accepts an opt-in diagnostic dispatch on the observer branch:
+`backend-only=true`, `validation-only=true`, `backend-qualification=none`,
+`ci-diagnostic=backend` or `native`, and a full `diagnostic-candidate` commit SHA.
+Native diagnostics additionally require the full `diagnostic-reference` SHA.
+Only the selected job runs; release resolution, builds for the normal matrix,
+publication and deployment are excluded. This is evidence acquisition and never
+reusable release provenance or a substitute for the complete qualification.
+
+The observer remains at the workflow commit while isolated worktrees hold the
+pinned sources. Backend phases are insertion-only additions to that source's
+isolated launcher. Native diagnostics build both exact sources, checksum their
+binaries and keep each archived private fixture paired with its own binaries.
+Both fixtures receive the same insertion-only phase/stack observer; artifact
+manifests preserve the original and observed hashes. The comparison does not
+silently move to the observer commit's first parent.
+
+The existing job limits remain 30/90 minutes. A supervisor uses GitHub's actual
+job `started_at`, including setup/service time, and stops the command two minutes
+before that limit to leave room for evidence upload. A diagnostic interruption
+returns nonzero. It retains bounded phase, CPU/IO, wait-channel/kernel-stack and
+cgroup samples from its owned process/session, plus Python stacks without local
+values for the native fixture. It reads no process command lines or environment.
+Backend trace output remains in `backend-test-trace`; native evidence and source
+manifests remain in `native-storage-evidence`.
+
+The private Linux leader enables and verifies child-subreaper ownership before
+starting the command. Orphaned descendants remain adopted by that leader even
+if they create a new session and close their standard streams. This is a
+process-lifecycle mechanism on the disposable runner, not a host sandbox.
+Cleanup signals require matching PID/start-time identity. Incomplete process
+inventory, an unproven leader, inherited pipes that do not close, or an unclosed
+process produce an explicit `cleanupUnknown`/non-success result. SIGKILL cannot
+prove termination of a process blocked in kernel I/O. The supervisor closes its
+own pipe/IPC handles within a bound so that such a process cannot prevent the
+reserved artifact step. Systemd fixture units outside the owned ancestry are
+observed separately, not killed by a process-name sweep; their final cleanup is
+not proved by the generic supervisor. All of this runs on disposable CI hosts.
+
 ## GitHub responsibilities
 
 `PR validation` runs on every PR and push to main: the `quality` suite always,
