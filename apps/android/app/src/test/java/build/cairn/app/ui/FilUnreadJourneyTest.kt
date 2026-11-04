@@ -516,7 +516,7 @@ class FilUnreadJourneyTest {
     }
 
     @Test
-    fun `a mission finishing on files stays unread until its result is shown`() {
+    fun `an open mission is read on files without reading twice on result`() {
         val release = java.util.concurrent.CountDownLatch(1)
         val requests = java.util.concurrent.atomic.AtomicInteger()
         val reads = Collections.synchronizedList(mutableListOf<String>())
@@ -607,6 +607,8 @@ class FilUnreadJourneyTest {
                     compose.onAllNodesWithText("Fichiers").fetchSemanticsNodes().isNotEmpty()
                 }
                 compose.onNodeWithText("Fichiers").performClick()
+                compose.waitForIdle()
+                assertEquals(0, reads.size)
                 release.countDown()
                 compose.waitUntil(20000) {
                     compose
@@ -614,17 +616,19 @@ class FilUnreadJourneyTest {
                         .fetchSemanticsNodes()
                         .isNotEmpty()
                 }
-                compose.waitForIdle()
-                assertEquals(0, reads.size)
-                compose.onNodeWithText("Résultat").performClick()
                 compose.waitUntil(20000) {
                     compose.onAllNodes(isRoot()).fetchSemanticsNodes()
                     reads.isNotEmpty()
                 }
+                compose.onNodeWithText("Fichiers").assertIsSelected()
                 assertEquals(
                     "{\"items\":[{\"finishedAt\":${finished.finishedAt},\"target\":{\"kind\":\"mission\",\"taskId\":\"348988cc-0279-5ed4-801b-ac44d6987c6e\"}}]}",
                     reads.single(),
                 )
+                compose.onNodeWithText("Résultat").performClick()
+                compose.waitForIdle()
+                compose.onNodeWithText("Résultat").assertIsSelected()
+                assertEquals(1, reads.size)
             } finally {
                 release.countDown()
                 vm.api.closeStreams()
