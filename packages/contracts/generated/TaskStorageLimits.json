@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Installation policy for future native workspace growth. Existing grants never shrink.",
+  "properties": {
+    "maxDiskGiB": {
+      "format": "uint16",
+      "maximum": 1024,
+      "minimum": 32,
+      "type": "integer"
+    },
+    "revision": {
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "maxDiskGiB",
+    "revision"
+  ],
+  "title": "TaskStorageLimits",
+  "type": "object"
+}
