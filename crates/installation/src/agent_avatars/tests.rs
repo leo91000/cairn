@@ -192,10 +192,17 @@ impl Fixture {
     }
 
     async fn next(&mut self) -> (Value, Reply) {
-        tokio::time::timeout(Duration::from_secs(5), self.requests.recv())
-            .await
-            .unwrap()
-            .unwrap()
+        let tasks = self.s.avatars.tasks.lock().await.clone();
+        // Closing permits observation of an empty tracker; later generations may
+        // still register tasks. Production RPC deadlines continue to bound startup.
+        tasks.close();
+        tokio::select! {
+            biased;
+            request = self.requests.recv() => request.expect("Portrait provider stopped"),
+            () = tasks.wait() => {
+                panic!("Portrait generation completed without a provider request")
+            }
+        }
     }
 }
 
@@ -221,6 +228,48 @@ fn generated(bytes: Vec<u8>) -> (StatusCode, Json<Value>) {
             "result": STANDARD.encode(bytes),
         })),
     )
+}
+
+#[tokio::test]
+async fn fixture_waits_for_a_queued_portrait_without_a_separate_startup_deadline() {
+    let mut f = Fixture::new(true).await;
+    let service = f.s.clone();
+    let permits = service.avatars.slots.acquire_many(2).await.unwrap();
+    let agent = f.create().await;
+    let id = text(&agent, "id");
+
+    let (_, reply) = {
+        let request = f.next();
+        tokio::pin!(request);
+        // Only advance the queue wait: no external Codex process has started yet.
+        tokio::time::pause();
+        assert!(futures_util::poll!(request.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_secs(6)).await;
+        assert!(futures_util::poll!(request.as_mut()).is_pending());
+        tokio::time::resume();
+
+        drop(permits);
+        request.await
+    };
+    reply.send(generated(png([51, 63, 81]))).unwrap();
+    f.wait(id, "ready").await;
+    f.s.avatars.close().await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "Portrait generation completed without a provider request")]
+async fn fixture_reports_stopped_generation_without_waiting_for_a_provider_request() {
+    let mut f = Fixture::new(true).await;
+    let service = f.s.clone();
+    let permits = service.avatars.slots.acquire_many(2).await.unwrap();
+    let agent = f.create().await;
+    f.s.avatars.close().await;
+    let stopped = f.s.agent_snapshot(text(&agent, "id")).await.unwrap();
+    assert_eq!(stopped["avatar"]["status"], "failed");
+    assert_eq!(stopped["avatar"]["error"], INTERRUPTED);
+    drop(permits);
+
+    f.next().await;
 }
 
 #[tokio::test]
