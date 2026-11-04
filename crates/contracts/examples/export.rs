@@ -1142,6 +1142,8 @@ fn main() {
     export::<OutcomeDismissal>(root, &mut generator, Contract::Serialize);
     export::<SetOutcomeAsideOutput>(root, &mut generator, Contract::Serialize);
     export::<GetInstallationSettingsInput>(root, &mut generator, Contract::Deserialize);
+    export::<GetTaskStorageLimitsInput>(root, &mut generator, Contract::Deserialize);
+    export::<TaskStorageLimits>(root, &mut generator, Contract::Deserialize);
     export::<CodingAgentConfigurationInput>(root, &mut generator, Contract::Deserialize);
     export::<EditCodingAgentConfigurationInput>(root, &mut generator, Contract::Deserialize);
     export::<CodingAgentSettingChange>(root, &mut generator, Contract::Deserialize);
@@ -1162,6 +1164,8 @@ fn main() {
     export::<CheckStorageInput>(root, &mut generator, Contract::Deserialize);
     export::<StorageCheck>(root, &mut generator, Contract::Serialize);
     let settings_clients = serde_json::json!([
+        { "name": "getTaskStorageLimits", "input": "GetTaskStorageLimitsInput", "output": "TaskStorageLimits", "method": "GET", "path": "/settings/task-storage" },
+        { "name": "saveTaskStorageLimits", "input": "TaskStorageLimits", "output": "TaskStorageLimits", "method": "PUT", "path": "/settings/task-storage" },
         { "name": "getCodingAgentConfiguration", "input": "CodingAgentConfigurationInput", "output": "CodingAgentConfiguration", "method": "POST", "path": "/settings/coding-agents/read" },
         { "name": "previewCodingAgentConfiguration", "input": "EditCodingAgentConfigurationInput", "output": "CodingAgentConfiguration", "method": "POST", "path": "/settings/coding-agents/preview" },
         { "name": "saveCodingAgentConfiguration", "input": "EditCodingAgentConfigurationInput", "output": "CodingAgentConfiguration", "method": "PUT", "path": "/settings/coding-agents" },

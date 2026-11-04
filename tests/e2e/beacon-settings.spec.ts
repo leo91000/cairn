@@ -1,6 +1,7 @@
 import {
   expect,
   expectSingleScroll,
+  expectUncovered,
   signIn,
   test,
   useRelayForHttpMocks,
@@ -357,4 +358,52 @@ test('conversation retention defaults to seven days, confirms changes and persis
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await page.reload()
   await expect(days).toHaveValue('0')
+})
+
+test('task storage limit is installation-wide, revision-guarded and preserves invalid drafts', async ({ page, workspace }) => {
+  await page.goto(workspacePath('/'))
+  await signIn(page)
+  await page.goto(workspacePath('/settings/installation'))
+  const maximum = page.getByRole('spinbutton', { name: 'Maximum disk per task (GiB)', exact: true })
+  const save = page.getByRole('button', { name: 'Save task storage limit', exact: true })
+  await expect(maximum).toHaveValue('150')
+  await expect(save).toBeDisabled()
+  for (const invalid of ['31', '1025', '']) {
+    await maximum.fill(invalid)
+    await expect(save).toBeDisabled()
+  }
+
+  await maximum.fill('75')
+  await expectUncovered(maximum)
+  await save.click()
+  await expect(page.getByText('Task storage limit saved', { exact: true })).toBeVisible()
+  await page.reload()
+  await expect(maximum).toHaveValue('75')
+
+  const current = await workspace.api('/api/settings/task-storage')
+  await workspace.api('/api/settings/task-storage', 'PUT', { ...current, maxDiskGiB: 100 })
+  await maximum.fill('80')
+  await save.click()
+  await expect(page.getByRole('alert').filter({ hasText: 'Task storage limits changed.' })).toBeVisible()
+  await expect(maximum).toHaveValue('80')
+  await page.getByRole('button', { name: 'Reload saved limit', exact: true }).click()
+  await expect(maximum).toHaveValue('100')
+  await expect(save).toBeDisabled()
+  await maximum.fill('200')
+  await save.click()
+  await expect.poll(async () => (await workspace.api('/api/settings/task-storage')).maxDiskGiB).toBe(200)
+  await page.reload()
+  await expect(maximum).toHaveValue('200')
+  await expectSingleScroll(page)
+  const section = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Storage per task', exact: true }) })
+  await section.scrollIntoViewIfNeeded()
+  await test.info().attach('task-storage-limit', { body: await section.screenshot(), contentType: 'image/png' })
+  await page.setViewportSize({ width: 360, height: 640 })
+  await maximum.scrollIntoViewIfNeeded()
+  await maximum.click()
+  await maximum.fill('150')
+  await expectUncovered(maximum)
+  await expect(save).toBeEnabled()
+  await expectSingleScroll(page)
+  await test.info().attach('task-storage-limit-mobile', { body: await section.screenshot(), contentType: 'image/png' })
 })

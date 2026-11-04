@@ -6,7 +6,6 @@ use std::collections::HashMap;
 
 pub(crate) const MIB: u64 = 1_048_576;
 pub(crate) const STEP_MIB: u64 = 8192;
-const MAX_BYTES: u64 = 1 << 40;
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -198,6 +197,7 @@ pub(crate) fn report(db: &Db<'_>, node: &mut Value, body: &Value) -> Result<Valu
         return Ok(Value::Null);
     }
     let requests = std::mem::take(&mut sample.requests);
+    let task_limit_mib = crate::task_storage::limit_mib(db)?;
     node["diskGrowthProtocol"] = 1.into();
     node["diskCapacity"] = serde_json::to_value(&sample)?;
     let mut attempts = db.attempts()?;
@@ -228,14 +228,18 @@ pub(crate) fn report(db: &Db<'_>, node: &mut Value, body: &Value) -> Result<Valu
             continue;
         }
         let current = attempt.resources.disk_mi_b;
-        let next = current
-            .checked_add(STEP_MIB)
-            .filter(|next| next.saturating_mul(MIB) <= MAX_BYTES);
+        let next = (current < task_limit_mib)
+            .then(|| current.saturating_add(STEP_MIB).min(task_limit_mib));
+        let increment_mib = next.map_or(0, |next| next - current);
         let allowance = if request.current_mi_b < current {
             current
         } else if request.current_mi_b == current
             && next.is_some()
-            && fits(node, &attempts, (STEP_MIB * MIB).saturating_add(waiting))
+            && fits(
+                node,
+                &attempts,
+                (increment_mib * MIB).saturating_add(waiting),
+            )
         {
             let next = next.unwrap();
             persist_grant(db, &mut attempts[index], next)?;
@@ -243,13 +247,18 @@ pub(crate) fn report(db: &Db<'_>, node: &mut Value, body: &Value) -> Result<Valu
         } else {
             current
         };
-        if allowance == current && request.current_mi_b == current {
+        if current < task_limit_mib && allowance == current && request.current_mi_b == current {
             super::eviction::request(db, node)?;
         }
         grants.push(json!({
             "attemptId": request.attempt_id, "allowanceMiB": allowance,
+            // This authenticated pre-request value lets a controller reconcile
+            // an already committed grant even if the policy was since lowered.
+            "previousAllowanceMiB": current,
             "reason": if allowance > request.current_mi_b {
                 "granted"
+            } else if current >= task_limit_mib {
+                "task-limit"
             } else if waiting > 0 {
                 "waiting-conversation"
             } else {
@@ -257,7 +266,7 @@ pub(crate) fn report(db: &Db<'_>, node: &mut Value, body: &Value) -> Result<Valu
             },
         }));
     }
-    Ok(json!({ "protocol": 1, "grants": grants }))
+    Ok(json!({ "protocol": 1, "maxTaskDiskMiB": task_limit_mib, "grants": grants }))
 }
 
 fn persist_grant(

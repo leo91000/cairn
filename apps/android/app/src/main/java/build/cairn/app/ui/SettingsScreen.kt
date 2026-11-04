@@ -73,6 +73,7 @@ fun SettingsScreen(vm: CairnViewModel, state: Workspace, navigate: (String) -> U
                 }
             }
             StorageSettings(vm)
+            TaskStorageSettings(vm)
             ConversationRetentionSettings(vm)
             settings?.let { info ->
                 Panel {
