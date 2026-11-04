@@ -17,7 +17,34 @@ export const UNUSED_SDK_DIRECTORIES = Object.freeze([
 
 const jobs = new Set(['backend', 'cli-qualification'])
 const buildTools = ['cc', 'c++', 'clang', 'pkg-config', 'node', 'cargo', 'rustc', 'python3']
-const nativeInputs = ['CC', 'CXX', 'AR', 'RUSTC', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER', 'LIBCLANG_PATH', 'CLANG_PATH', 'LLVM_CONFIG_PATH', 'CMAKE_TOOLCHAIN_FILE', 'CMAKE_PREFIX_PATH', 'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS']
+const nativeInputs = new Set([
+  'CC',
+  'CXX',
+  'AR',
+  'CFLAGS',
+  'CXXFLAGS',
+  'CPPFLAGS',
+  'LDFLAGS',
+  'RUSTC',
+  'RUSTDOC',
+  'RUSTC_WRAPPER',
+  'RUSTC_WORKSPACE_WRAPPER',
+  'RUSTC_LINKER',
+  'LIBCLANG_PATH',
+  'CLANG_PATH',
+  'LLVM_CONFIG_PATH',
+  'LIBRARY_PATH',
+  'LD_LIBRARY_PATH',
+  'CPATH',
+  'C_INCLUDE_PATH',
+  'CPLUS_INCLUDE_PATH',
+  'CMAKE_TOOLCHAIN_FILE',
+  'CMAKE_PREFIX_PATH',
+  'RUSTFLAGS',
+  'RUSTDOCFLAGS',
+  'CARGO_ENCODED_RUSTFLAGS',
+  'CARGO_ENCODED_RUSTDOCFLAGS',
+])
 
 function contains(directory, location) {
   return location === directory || location.startsWith(`${directory}${path.sep}`)
@@ -44,6 +71,17 @@ export function prepareRustRunner(environment, dependencies = {}) {
     throw new Error('Rust disk preparation requires an approved GitHub-hosted Ubuntu test job and the runner account.')
   }
 
+  // These two jobs use the stock native toolchain. Interpreting arbitrary flag strings,
+  // wrappers and symlink aliases would make an "unused SDK" decision unsafe.
+  const nativeOverride = Object.keys(environment).find(name => environment[name] && (
+    nativeInputs.has(name)
+    || /^(?:HOST_|TARGET_)?(?:CC|CXX|AR|CFLAGS|CXXFLAGS|CPPFLAGS)_/.test(name)
+    || /^CARGO_TARGET_.+_(?:LINKER|AR|RUSTFLAGS|RUNNER)$/.test(name)
+    || /^CARGO_BUILD_(?:RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTFLAGS|RUSTDOCFLAGS|TARGET)$/.test(name)
+  ))
+  if (nativeOverride)
+    throw new Error(`Rust SDK reclamation requires stock native tools; explicit ${nativeOverride} overrides are unsupported.`)
+
   const locations = [environment.GITHUB_WORKSPACE, environment.RUNNER_TEMP, environment.HOME, environment.CARGO_HOME || (environment.HOME && path.join(environment.HOME, '.cargo'))]
   if (locations.some(location => !location || !path.isAbsolute(location)) || environment.HOME !== user.homedir)
     throw new Error('Rust disk preparation requires the runner account and absolute build locations.')
@@ -60,8 +98,6 @@ export function prepareRustRunner(environment, dependencies = {}) {
   for (const directory of UNUSED_SDK_DIRECTORIES) {
     if (protectedDirectories.some(location => contains(directory, location) || contains(location, directory)))
       throw new Error('An unused SDK directory overlaps a protected build location.')
-    if (nativeInputs.some(name => environment[name] === directory || environment[name]?.includes(`${directory}/`)))
-      throw new Error(`A configured native build input uses the SDK directory: ${directory}`)
   }
 
   const toolLocations = execute('which', buildTools, { encoding: 'utf8', timeout: Math.min(10000, remaining()), stdio: ['ignore', 'pipe', 'pipe'] })

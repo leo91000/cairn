@@ -169,13 +169,31 @@ describe('disposable Rust test runner disk preparation', () => {
     { RUSTFLAGS: '-C linker=/usr/share/swift/usr/bin/clang' },
   ])('preserves explicitly configured native toolchain inputs: %j', (change) => {
     const dependencies = fixture()
-    expect(() => prepareRustRunner({ ...environment, ...change }, dependencies)).toThrow('configured native build input')
+    expect(() => prepareRustRunner({ ...environment, ...change }, dependencies)).toThrow('stock native tools')
+    expect(dependencies.execute).not.toHaveBeenCalled()
+  })
+
+  it('fails closed for a library alias into an otherwise unused SDK', () => {
+    const dependencies = fixture()
+    dependencies.filesystem.realpathSync.mockImplementation(location => location === '/opt/active-libclang' ? '/usr/share/swift/usr/lib' : location)
+    expect(() => prepareRustRunner({ ...environment, LIBCLANG_PATH: '/opt/active-libclang' }, dependencies)).toThrow('explicit LIBCLANG_PATH')
+    expect(dependencies.execute).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: '/usr/share/swift/usr/bin/clang' },
+    { CC_x86_64_unknown_linux_gnu: '/opt/active-clang' },
+  ])('preserves target-specific native overrides without guessing their paths: %j', (change) => {
+    const dependencies = fixture()
+    expect(() => prepareRustRunner({ ...environment, ...change }, dependencies)).toThrow('stock native tools')
     expect(dependencies.execute).not.toHaveBeenCalled()
   })
 
   it('accepts absent SDKs without inventing reclaimed bytes when capacity is already sufficient', () => {
     const dependencies = fixture(REQUIRED_FREE_BYTES)
-    dependencies.filesystem.lstatSync.mockImplementation(() => { throw Object.assign(new Error('absent'), { code: 'ENOENT' }) })
+    dependencies.filesystem.lstatSync.mockImplementation(() => {
+      throw Object.assign(new Error('absent'), { code: 'ENOENT' })
+    })
     const result = prepareRustRunner(environment, dependencies)
     expect(result.beforeBytes).toBe(result.afterBytes)
     expect(result.directories.every(item => item.status === 'absent')).toBe(true)
