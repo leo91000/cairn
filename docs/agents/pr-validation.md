@@ -101,6 +101,45 @@ Only the selected job runs; release resolution, builds for the normal matrix,
 publication and deployment are excluded. This is evidence acquisition and never
 reusable release provenance or a substitute for the complete qualification.
 
+For one targeted Avatar/accepted-authority observation, keep the same diagnostic
+inputs above and additionally select `backend-diagnostic-selector=avatar-authority`
+with `ci-diagnostic=backend`. The default selector is `full`; the selector is
+ignored outside the existing backend diagnostic action. No new workflow needs
+registration. Unknown selector values fail closed inside that action.
+
+The fixed wrapper runs `cargo build --locked -p cairn-installation --bin cairn`
+from the immutable candidate, then exactly once:
+
+```sh
+node scripts/test-backend.mjs --nextest -p cairn-installation --lib --test-threads 8 --no-fail-fast --color never --status-level all -E 'test(agent_avatars::tests::) | test(authorization::tests::) | test(authorization::jobs::tests::)'
+```
+
+Both commands stay inside the existing owned-command supervisor and actual
+30-minute job clock with its two-minute evidence reserve. The existing source,
+dependency, private trace, publication and closure checks still apply. The wrapper
+forces this candidate's `target` directory, rejects cross-target builds, checks
+source identity before/after execution, and records worker bytes/SHA256 before
+launching the selected tests and checks the hash afterwards. The package-scoped
+`--lib` launcher deliberately deletes `CAIRN_TEST_CODE_WORKER` and does not build
+it; the grant fixture uses its existing candidate-local `target/debug/cairn`
+fallback. No live or downloaded worker is substituted.
+
+`backend-diagnostics/avatar-build.json`, `avatar-worker.json` and
+`avatar-result.json` retain separate build/worker/test-return evidence when each
+boundary is reached. Missing boundaries remain unknown. Rolling/final receipts
+project only the closed worker provenance; a zero guard return requires that
+provenance. Each Avatar case retains its five-second waits and all publication
+checks, with closed case/elapsed/state diagnostics. `resolverCount` measures the
+grant fixture's thread-resolver HTTP posts, not total subprocesses or worker time.
+No raw agent/run snapshots, prompts, credentials or RPC frames are projected.
+
+Start with one execution and preserve its result. There is no retry/iteration
+input or automatic rerun; at most three separate, explicit bounded observations
+may be chosen later. Preserve each failure independently. A targeted pass is not
+full backend qualification, a causal fix, or reusable release evidence. Run the
+normal full eight-thread qualification separately before release/merge; do not
+skip or weaken it because the diagnostic passed.
+
 The observer remains at the workflow commit while isolated worktrees hold the
 pinned sources. Backend phases are insertion-only additions to that source's
 isolated launcher. Native diagnostics build both exact sources, checksum their

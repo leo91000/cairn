@@ -20,6 +20,55 @@ import { observeCommand } from './ci-deadline.mjs'
 export const UPLOADER_SHA = '043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' // upload-artifact v7.0.1
 export const BACKEND_COMMAND = 'node' // Preserve setup-pnpm's PATH-selected runtime.
 export const BACKEND_ARGS = ['scripts/test-backend.mjs', '--nextest', '--test-threads', '8', '--no-fail-fast', '--color', 'never', '--status-level', 'all']
+// Selection is available only inside main's validated diagnostic startup path.
+export function backendDiagnosticCommand(selector = 'full', workspace) {
+  if (selector === 'full')
+    return { command: BACKEND_COMMAND, args: BACKEND_ARGS }
+  if (selector === 'avatar-authority' && path.isAbsolute(workspace))
+    return { command: BACKEND_COMMAND, args: [path.join(workspace, 'scripts/ci-avatar-authority-diagnostic.mjs')] }
+  throw new Error('Unknown backend diagnostic selector')
+}
+
+export function avatarWorkerProof(output, candidate) {
+  let value
+  try {
+    value = readProof(path.join(output, 'avatar-worker.json'), 4096)
+  }
+  catch (error) {
+    if (error.code === 'ENOENT')
+      return { state: 'not-built', qualificationClaim: false }
+    throw error
+  }
+
+  const sha = value => /^[a-f0-9]{64}$/.test(value ?? '')
+  if (value.diagnosticOnly !== true || value.qualificationClaim !== false || value.selector !== 'avatar-authority'
+    || !/^[a-f0-9]{40}$/.test(candidate ?? '') || value.source?.commit !== candidate || !/^[a-f0-9]{40}$/.test(value.source?.tree ?? '')
+    || value.worker?.path !== 'target/debug/cairn' || !sha(value.worker?.sha256)
+    || !Number.isSafeInteger(value.worker?.bytes) || value.worker.bytes < 1 || value.worker.bytes > 512 * 1024 * 1024
+    || !sha(value.launcherSHA256) || !sha(value.fixtureSHA256) || !sha(value.avatarTestSHA256) || !sha(value.cargoLockSHA256) || value.iteration !== 1) {
+    throw new Error('Invalid avatar worker provenance')
+  }
+
+  return {
+    state: 'built',
+    qualificationClaim: false,
+    source: { commit: value.source.commit, tree: value.source.tree },
+    worker: { path: 'target/debug/cairn', bytes: value.worker.bytes, sha256: value.worker.sha256 },
+    launcherSHA256: value.launcherSHA256,
+    fixtureSHA256: value.fixtureSHA256,
+    avatarTestSHA256: value.avatarTestSHA256,
+    cargoLockSHA256: value.cargoLockSHA256,
+    iteration: 1,
+  }
+}
+
+export function avatarDiagnosticPayload(payload, output, candidate) {
+  const avatarWorker = avatarWorkerProof(output, candidate)
+  if (payload.acquisition === 'finished' && payload.guardReturn?.code === 0 && avatarWorker.state !== 'built')
+    throw new Error('Successful avatar diagnostic requires worker provenance')
+  return { ...payload, avatarWorker }
+}
+
 export const PUBLICATION_LIMIT = 7 // Plus before-build, post-trace, after-build: <=10/job.
 const phases = ['worker-fixture-build', 'code-worker-build', 'backend-tests']
 const reasons = ['admitted-before-command', 'started', 'periodic', 'deadline', 'external-termination', 'ownership-incomplete', 'finished', 'child-exited-with-live-descendants', 'no-time-before-evidence-reserve']
@@ -452,16 +501,27 @@ export async function main() {
       launcherSHA256: sha256(readBounded(path.join(source, 'scripts/test-backend.mjs'), 65536)),
       acquisition: 'unknown',
     }
+    const selector = env.BACKEND_DIAGNOSTIC_SELECTOR || 'full'
+    const selected = backendDiagnosticCommand(selector, workspace)
+    receipt.selector = selector
+    if (selector === 'avatar-authority')
+      receipt.avatarObserverSHA256 = sha256(readBounded(path.join(workspace, 'scripts/ci-avatar-authority-diagnostic.mjs'), 65536))
     const directory = mkdtempSync(path.join(env.RUNNER_TEMP, 'cairn-backend-publication-'))
     mkdirSync(output, { recursive: true, mode: 0o700 })
-    const publish = artifactPublisher({ uploader: path.join(uploaderRoot, 'dist/upload/index.js'), directory, env })
+    const publishArtifact = artifactPublisher({ uploader: path.join(uploaderRoot, 'dist/upload/index.js'), directory, env })
+    const publish = (payload, options) => {
+      if (selector !== 'avatar-authority')
+        return publishArtifact(payload, options)
+      return publishArtifact(avatarDiagnosticPayload(payload, output, pinned.revisions.candidate), options)
+    }
+
     process.chdir(source)
     const result = await runBackendAction({
       log: path.join(workspace, 'backend-tests.log'),
       output,
-      command: BACKEND_COMMAND,
-      args: BACKEND_ARGS,
-      env,
+      command: selected.command,
+      args: selected.args,
+      env: selector === 'avatar-authority' ? { ...env, CAIRN_AVATAR_DIAGNOSTIC_CANDIDATE: pinned.revisions.candidate, CAIRN_AVATAR_DIAGNOSTIC_OUTPUT: output } : env,
       receipt,
       publish,
     })

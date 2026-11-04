@@ -423,14 +423,39 @@ test('blocked missions ask only when they wait on the user, and can be set aside
   await card(scope.task).getByRole('button', { name: `More actions for “${scope.task.name}”` }).click()
   await expect(page.getByRole('menuitem', { name: 'Dismiss outcome' })).toHaveCount(0)
   await capture(page, testInfo, 'blocked-fil-menu')
+  const snoozed = page.waitForResponse(response => response.url().endsWith('/api/dismissals') && response.request().method() === 'POST')
   await page.getByRole('menuitem', { name: 'Remind me tomorrow' }).click()
   await expect(card(scope.task)).toContainText('Snoozed')
+  expect((await snoozed).ok()).toBe(true)
   await card(proof.task).getByRole('button', { name: `Open “${proof.task.name}”` }).click()
   const actions = page.getByTestId('mission-outcome-actions')
   await expect(actions.getByRole('button', { name: 'Remind me tomorrow' })).toBeVisible()
-  await actions.getByRole('button', { name: 'Dismiss', exact: true }).click()
-  await expect(card(proof.task)).toContainText('Dismissed')
-  await expect(actions).toContainText('Dismissed: it stays out of For you until the mission reports again.')
+
+  // Text changes optimistically. Hold the write to prove that feedback, then confirm persistence
+  // before reloading: navigation can abort a request that has not reached the installation yet.
+  let release!: () => void
+  let requested!: () => void
+  const held = new Promise<void>(resolve => release = resolve)
+  const started = new Promise<void>(resolve => requested = resolve)
+  await page.route(dismissalsRoute, async (route) => {
+    requested()
+    await held
+    await route.continue()
+  })
+  try {
+    const dismissed = page.waitForResponse(response => response.url().endsWith('/api/dismissals') && response.request().method() === 'POST')
+    await actions.getByRole('button', { name: 'Dismiss', exact: true }).click()
+    await started
+    await expect(card(proof.task)).toContainText('Dismissed')
+    await expect(actions).toContainText('Dismissed: it stays out of For you until the mission reports again.')
+    release()
+    expect((await dismissed).ok()).toBe(true)
+  }
+  finally {
+    release()
+    await page.unroute(dismissalsRoute)
+  }
+
   await page.reload()
   await page.getByRole('tab', { name: 'Tout', exact: true }).click()
   await expect(card(proof.task)).toContainText('Dismissed')

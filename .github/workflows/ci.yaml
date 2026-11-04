@@ -11,6 +11,11 @@ on:
         type: choice
         options: [none, backend, native]
         default: none
+      backend-diagnostic-selector:
+        description: Fixed backend diagnostic workload; ignored outside ci-diagnostic=backend
+        type: choice
+        options: [full, avatar-authority]
+        default: full
       diagnostic-candidate:
         description: Full candidate SHA for the selected diagnostic (required in diagnostic mode)
         type: string
@@ -270,6 +275,8 @@ jobs:
       - name: Run diagnostic backend with durable startup and rolling evidence
         if: inputs.ci-diagnostic == 'backend'
         uses: ./.github/actions/backend-durable-evidence
+        env:
+          BACKEND_DIAGNOSTIC_SELECTOR: ${{ inputs.backend-diagnostic-selector || 'full' }}
       - name: Run backend tests across binaries with isolated credentials
         if: inputs.ci-diagnostic != 'backend'
         timeout-minutes: 30

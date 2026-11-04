@@ -191,6 +191,124 @@ impl Fixture {
         .unwrap()
     }
 
+    // Closed diagnostic projection only: never format the agent, run, provider
+    // request, credentials, or arbitrary errors into a failure message.
+    async fn case_snapshot(&self, id: &str, posts: &std::sync::atomic::AtomicUsize) -> Value {
+        let id = id.to_owned();
+        let state = self.s.store.read(move |db| {
+            let avatar = db.agent(&id)?.and_then(|agent| agent.avatar);
+            let status = match avatar.as_ref().map(|avatar| avatar.status.as_str()) {
+                Some("generating") => "generating",
+                Some("failed") => "failed",
+                Some("ready") => "ready",
+                None => "missing",
+                _ => "other",
+            };
+            let error = match avatar.as_ref().and_then(|avatar| avatar.error.as_deref()) {
+                None => "none",
+                Some(ACCESS_CHANGED) => "access_changed",
+                Some(INTERRUPTED) => "interrupted",
+                Some(TIMED_OUT) => "timed_out",
+                Some(codex_background::UNAVAILABLE) => "account_unavailable",
+                Some("Portrait generation yielded to a conversation or server maintenance. You can try again.") => "yielded",
+                Some("Codex could not generate a portrait. Check the account and image quota in Connections, then try again or upload an image.") => "provider_failed",
+                Some(_) => "other_public_error",
+            };
+            let queued = db.0.query_row(
+                "SELECT COUNT(*) FROM runs WHERE status='queued' AND provider='codex'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok(json!({
+                "avatarStatus": status,
+                "publicError": error,
+                "activeLeases": db.account_leases()?.len(),
+                "queuedCodex": queued,
+                "maintenance": db.kv("deployment-lease")?.is_some(),
+            }))
+        }).await;
+        let mut state = state.unwrap_or_else(|error| {
+            json!({
+                "avatarStatus": "snapshot_unavailable",
+                "snapshotErrorStatus": error.status,
+            })
+        });
+        state["resolverCount"] = json!(posts.load(std::sync::atomic::Ordering::SeqCst));
+        state["shutdown"] = json!(self.s.shutdown.is_cancelled());
+        state["portraitStop"] = json!(self.s.avatars.stop.is_cancelled());
+        state
+    }
+
+    async fn next_case(
+        &mut self,
+        id: &str,
+        case: &str,
+        posts: &std::sync::atomic::AtomicUsize,
+        started: std::time::Instant,
+    ) -> (Value, Reply) {
+        let mut last = json!({ "avatarStatus": "not_sampled" });
+        let waiting = std::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                tokio::select! {
+                    biased;
+                    request = self.requests.recv() => {
+                        return request;
+                    }
+                    () = tokio::time::sleep(Duration::from_millis(10)) => {
+                        last = self.case_snapshot(id, posts).await;
+                        assert_ne!(
+                            last["avatarStatus"],
+                            "failed",
+                            "AVATAR_CASE case={case} phase=provider_wait elapsed_ms={} wait_ms={} state={last}",
+                            started.elapsed().as_millis(),
+                            waiting.elapsed().as_millis(),
+                        );
+                    }
+                }
+            }
+        })
+        .await;
+        match result {
+            Ok(Some(request)) => request,
+            _ => panic!(
+                "AVATAR_CASE case={case} phase=provider_wait elapsed_ms={} wait_ms={} state={last}",
+                started.elapsed().as_millis(),
+                waiting.elapsed().as_millis(),
+            ),
+        }
+    }
+
+    async fn wait_case(
+        &self,
+        id: &str,
+        status: &str,
+        case: &str,
+        posts: &std::sync::atomic::AtomicUsize,
+        started: std::time::Instant,
+    ) -> Value {
+        let mut last = json!({ "avatarStatus": "not_sampled" });
+        let waiting = std::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let agent = self.s.agent_snapshot(id).await.unwrap();
+                if agent["avatar"]["status"] == status {
+                    return agent;
+                }
+                last = self.case_snapshot(id, posts).await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        result.unwrap_or_else(|_| {
+            panic!(
+                "AVATAR_CASE case={case} phase=publication_wait elapsed_ms={} wait_ms={} expected={status} state={last}",
+                started.elapsed().as_millis(),
+                waiting.elapsed().as_millis(),
+            )
+        })
+    }
+
     async fn next(&mut self) -> (Value, Reply) {
         tokio::time::timeout(Duration::from_secs(5), self.requests.recv())
             .await
@@ -738,8 +856,18 @@ async fn accepted_portraits_survive_normal_completion_but_not_revocation_before_
     use std::sync::atomic::Ordering;
 
     for change in ["complete", "ancestry", "grant", "delete", "stop"] {
+        let started = std::time::Instant::now();
+        eprintln!("AVATAR_CASE case={change} phase=grant_setup elapsed_ms=0");
         let (grants, bearer) = Grants::delegated_manager().await;
+        eprintln!(
+            "AVATAR_CASE case={change} phase=account_setup elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
         let mut f = Fixture::with_service(true, Some(grants.s.clone())).await;
+        eprintln!(
+            "AVATAR_CASE case={change} phase=authority_setup elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
         let caller = crate::installation_mcp::authorize(&f.s, &bearer)
             .await
             .unwrap();
@@ -757,11 +885,23 @@ async fn accepted_portraits_survive_normal_completion_but_not_revocation_before_
             .await
             .unwrap();
         let target = crate::config::MAIN_AGENT_ID;
+        eprintln!(
+            "AVATAR_CASE case={change} phase=generate_live elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
         f.s.avatars
             .generate_live(&f.s, target, authority)
             .await
             .unwrap();
-        let (_, reply) = f.next().await;
+        eprintln!(
+            "AVATAR_CASE case={change} phase=provider_wait elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+        let (_, reply) = f.next_case(target, change, &grants.posts, started).await;
+        eprintln!(
+            "AVATAR_CASE case={change} phase=case_mutation elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
         f.s.store
             .change_run(
                 &source,
@@ -809,7 +949,9 @@ async fn accepted_portraits_survive_normal_completion_but_not_revocation_before_
         } else {
             "failed"
         };
-        let finished = f.wait(target, expected).await;
+        let finished = f
+            .wait_case(target, expected, change, &grants.posts, started)
+            .await;
         assert_eq!(
             finished["avatar"]["url"].is_string(),
             change == "complete",
@@ -822,6 +964,10 @@ async fn accepted_portraits_survive_normal_completion_but_not_revocation_before_
                 .unwrap(),
             change == "complete",
             "{change}"
+        );
+        eprintln!(
+            "AVATAR_CASE case={change} phase=cleanup elapsed_ms={}",
+            started.elapsed().as_millis()
         );
         f.s.avatars.close().await;
     }
