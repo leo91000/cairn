@@ -77,6 +77,15 @@ Image publication requires both jobs to succeed. When physical migration is
 selected for a full run, it waits for both jobs; a backend-only migration run
 continues to require only the backend suite.
 
+Before backend or CLI test compilation, the disposable GitHub-hosted Ubuntu
+runner removes three unused platform SDK directories (Android, .NET and Swift)
+and requires 32 GiB available on the build filesystem. The fixed preparation
+refuses local/self-hosted accounts, other job roles, protected build locations,
+SDK symlinks and active native toolchains. It changes no compiler flags or test
+commands. The threshold follows an observed 22.49 GiB completed-run allocation
+plus headroom, not a measured peak bound. An insufficient runner fails before
+compilation with its capacity recorded, instead of losing logs to ENOSPC.
+
 For a focused physical backend-migration check, dispatch `ci.yaml` with
 `backend-only=true` and `backend-qualification=backend-migration`. The optional
 case runs in a separate 30-minute disposable job after the normal backend job
