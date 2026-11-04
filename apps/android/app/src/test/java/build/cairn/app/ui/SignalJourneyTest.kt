@@ -454,7 +454,9 @@ class SignalJourneyTest {
                 )
         ) {
             waitText("Reprise CI")
-            compose.onNodeWithTag("fil-wait-time").assertTextContains("min", substring = true)
+            compose
+                .onNodeWithTag("fil-wait-time", useUnmergedTree = true)
+                .assertTextContains("min", substring = true)
         }
 
     @Test
