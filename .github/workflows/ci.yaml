@@ -521,7 +521,6 @@ jobs:
           test -c /dev/ublk-control
           python3 -m venv .native-s3-test
           .native-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
-          .native-s3-test/bin/python -m unittest discover -s scripts/tests -p test_native_s3_memory.py -v
       - run: rustup toolchain install 1.97.1 --profile minimal
       - name: Identify the exact reference build
         id: native-reference-key
@@ -605,7 +604,25 @@ jobs:
               assert hashlib.sha256((Path('reference-native') / name).read_bytes()).hexdigest() == checksum
           Path('native-storage-evidence/reference').mkdir(parents=True, exist_ok=True)
           Path('native-storage-evidence/reference/revision.json').write_text(json.dumps(metadata, indent=2))
+          if os.environ.get('CI_DIAGNOSTIC_SOURCE'):
+              pinned = json.loads(Path('native-diagnostics/source.json').read_text())
+              candidate = json.loads(Path('target/debug/revision.json').read_text())
+              assert candidate['headSha'] == pinned['revisions']['candidate']
+              for field in ['image', 'rust', 'features', 'profile']:
+                  assert candidate[field] == metadata[field]
+              assert set(candidate['sha256']) == {'cairn', 'examples/native_storage_qualifier'}
+              for name, checksum in candidate['sha256'].items():
+                  assert hashlib.sha256((Path('target/debug') / name).read_bytes()).hexdigest() == checksum
           PYREF
+      - name: Check native fixture memory and garbage semantics against the candidate
+        env:
+          CAIRN_TEST_NATIVE_QUALIFIER: ${{ github.workspace }}/target/debug/examples/native_storage_qualifier
+        run: |
+          if test -n "$CI_DIAGNOSTIC_SOURCE"; then
+            node scripts/ci-deadline.mjs "$PWD/native-diagnostics/preparation" 90 -- .native-s3-test/bin/python -m unittest discover -s scripts/tests -p test_native_s3_memory.py -v
+          else
+            .native-s3-test/bin/python -m unittest discover -s scripts/tests -p test_native_s3_memory.py -v
+          fi
       - uses: actions/upload-artifact@v7.0.1
         if: inputs.ci-diagnostic != 'native' && steps.native-reference-artifact.outputs.found != 'true'
         with:

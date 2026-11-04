@@ -109,6 +109,14 @@ Both fixtures receive the same insertion-only phase/stack observer; artifact
 manifests preserve the original and observed hashes. The comparison does not
 silently move to the observer commit's first parent.
 
+The seven native memory/garbage preparation tests run after the candidate
+qualifier has been produced and verified. Their explicit
+`CAIRN_TEST_NATIVE_QUALIFIER` points to that candidate's existing binary; the
+diagnostic route reuses the pinned pair build, and the normal route reuses its
+downloaded candidate. Host/venv/ublk preparation and Rust/libclang setup still
+precede compilation. Diagnostic preparation tests share the job's existing
+clock and evidence reserve.
+
 The existing job limits remain 30/90 minutes. A supervisor uses GitHub's actual
 job `started_at`, including setup/service time, and stops the command two minutes
 before that limit to leave room for evidence upload. A diagnostic interruption

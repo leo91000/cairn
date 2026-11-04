@@ -341,3 +341,93 @@ it('keeps actual archive argv at HEAD normally and uses the exact candidate only
     assert.deepEqual(JSON.parse(readFileSync(record, 'utf8')), ['archive', selected || 'HEAD', 'scripts/tests', 'deploy/nodes/native-host.py'])
   }
 })
+
+it('provides the candidate qualifier before the real memory-test entrypoint in both routes', (t) => {
+  const workflow = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
+  const steps = workflow.jobs['native-runtime'].steps
+  const consumer = steps.findIndex(step => step.run?.includes('-p test_native_s3_memory.py'))
+  const source = new URL('./test_native_s3_memory.py', import.meta.url).pathname
+  const prefix = `
+import ast, os, unittest
+from pathlib import Path
+source=Path(${JSON.stringify(source)})
+tree=ast.parse(source.read_text())
+method=next(node for node in ast.walk(tree) if isinstance(node,ast.FunctionDef) and node.name=='test_fixture_clock_collects_deferred_garbage_and_retains_uncertain_tombstones')
+# Exercise the actual path lookup, assertion and chmod. The following Moto
+# server/Rust fixture work remains a real seven-test CI step, never local work.
+prefix=ast.Module(body=method.body[:3],type_ignores=[])
+exec(compile(ast.fix_missing_locations(prefix),str(source),'exec'),dict(Path=Path,os=os,self=unittest.TestCase(),__file__=str(Path.cwd()/'scripts/tests/test_native_s3_memory.py')))
+`
+  for (const mode of ['normal', 'native']) {
+    const directory = temporary(t)
+    const producer = mode === 'native'
+      ? steps.findIndex(step => step.name === 'Build the immutable diagnostic pair')
+      : steps.findIndex(step => step.with?.name === 'browser-backend')
+    if (producer < consumer) {
+      const binary = path.join(directory, 'target/debug/examples/native_storage_qualifier')
+      mkdirSync(path.dirname(binary), { recursive: true })
+      writeFileSync(binary, 'tiny-candidate-358-fixture')
+    }
+
+    const explicit = steps[consumer].env?.CAIRN_TEST_NATIVE_QUALIFIER
+    const environment = { ...process.env }
+    delete environment.CAIRN_TEST_NATIVE_QUALIFIER
+
+    if (explicit)
+      // eslint-disable-next-line no-template-curly-in-string -- resolve the actual workflow workspace placeholder in the fixture
+      environment.CAIRN_TEST_NATIVE_QUALIFIER = explicit.replace('${{ github.workspace }}', directory)
+    const result = spawnSync('python3', ['-B', '-c', prefix], { cwd: directory, env: environment, encoding: 'utf8' })
+    assert.equal(result.status, 0, `${mode} route: ${result.stderr}`)
+  }
+})
+
+it('verifies the pinned candidate qualifier before the seven preparation tests', (t) => {
+  const directory = temporary(t)
+  const workflow = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
+  const step = workflow.jobs['native-runtime'].steps.find(value => value.name === 'Verify the exact reference binaries')
+  const code = step.run.split('python3 - <<\'PYREF\'\n')[1].split('\nPYREF')[0]
+  const revisions = { reference: '06829d1b5f3d7accb9791c09d49522e7e2d2ab25', candidate: '358461be03f947ff168950d0a85999e5ad5f9274' }
+  for (const role of ['reference', 'candidate']) {
+    const destination = role === 'reference' ? 'reference-native' : 'target/debug'
+    const checksums = {}
+    for (const name of ['cairn', 'examples/native_storage_qualifier']) {
+      const file = path.join(directory, destination, name)
+      mkdirSync(path.dirname(file), { recursive: true })
+      const data = `${role}/${name}-tiny-fixture`
+      writeFileSync(file, data)
+      checksums[name] = createHash('sha256').update(data).digest('hex')
+    }
+
+    writeFileSync(path.join(directory, destination, 'revision.json'), JSON.stringify({
+      headSha: revisions[role],
+      image: 'fixture-image',
+      rust: '1.97.1',
+      features: 'default (ublk required)',
+      profile: 'development, debug=0, incremental=0',
+      sha256: checksums,
+    }))
+  }
+
+  mkdirSync(path.join(directory, 'native-diagnostics'))
+  writeFileSync(path.join(directory, 'native-diagnostics/source.json'), JSON.stringify({ revisions }))
+  const options = {
+    cwd: directory,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      CI_DIAGNOSTIC_SOURCE: path.join(directory, 'pinned-candidate'),
+      REFERENCE_SHA: revisions.reference,
+      ImageVersion: 'fixture-image',
+    },
+  }
+  const verify = () => spawnSync('python3', ['-B', '-c', code], options)
+  const success = verify()
+  assert.equal(success.status, 0, success.stderr)
+  const metadataFile = path.join(directory, 'target/debug/revision.json')
+  const metadata = JSON.parse(readFileSync(metadataFile, 'utf8'))
+  writeFileSync(metadataFile, JSON.stringify({ ...metadata, headSha: '41a323d0a3ff74d1486358dbef8611cc1c42fa6d' }))
+  assert.notEqual(verify().status, 0, 'observer commit must not replace pinned candidate identity')
+  writeFileSync(metadataFile, JSON.stringify(metadata))
+  writeFileSync(path.join(directory, 'target/debug/examples/native_storage_qualifier'), 'unverified-qualifier')
+  assert.notEqual(verify().status, 0, 'unverified qualifier bytes must not reach the consumer')
+})

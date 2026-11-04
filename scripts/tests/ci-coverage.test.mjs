@@ -356,6 +356,33 @@ describe('parallel CI coverage', () => {
     expect(steps.indexOf(candidate)).toBeGreaterThan(steps.indexOf(reference))
   })
 
+  it('keeps all native preparation tests after their verified candidate producer', () => {
+    const steps = quality.jobs['native-runtime'].steps
+    const host = steps.findIndex(step => step.name === 'Prepare disposable host block storage and synthetic S3')
+    const toolchain = steps.findIndex(step => step.run === 'rustup toolchain install 1.97.1 --profile minimal')
+    const pair = steps.findIndex(step => step.name === 'Build the immutable diagnostic pair')
+    const verify = steps.findIndex(step => step.name === 'Verify the exact reference binaries')
+    const consumers = steps.filter(step => step.run?.includes('-p test_native_s3_memory.py'))
+    expect(consumers).toHaveLength(1)
+    const consumer = consumers[0]
+    const index = steps.indexOf(consumer)
+    expect(host).toBeLessThan(toolchain)
+    expect(toolchain).toBeLessThan(pair)
+    expect(steps[pair].run.indexOf('apt-get install -y --no-install-recommends libclang-dev')).toBeLessThan(steps[pair].run.indexOf('scripts/ci-diagnostic-native-build.mjs'))
+    expect(pair).toBeLessThan(verify)
+    expect(verify).toBeLessThan(index)
+    expect(index).toBeLessThan(steps.findIndex(step => step.name === 'Qualify the exact reference on the current disposable host'))
+    expect(steps[host].run).not.toContain('test_native_s3_memory.py')
+    expect(consumer.if).toBeUndefined()
+    // eslint-disable-next-line no-template-curly-in-string -- exact absolute candidate fixture path in the workflow
+    expect(consumer.env.CAIRN_TEST_NATIVE_QUALIFIER).toBe('${{ github.workspace }}/target/debug/examples/native_storage_qualifier')
+    expect(consumer.run).toContain('scripts/ci-deadline.mjs "$PWD/native-diagnostics/preparation" 90 -- .native-s3-test/bin/python -m unittest discover -s scripts/tests -p test_native_s3_memory.py -v')
+    expect(consumer.run).not.toMatch(/(?:--filter|--ignore|\s-k\s)/)
+    expect(steps.filter(step => step.run?.includes('node scripts/ci-diagnostic-native-build.mjs'))).toHaveLength(1)
+    const memoryTests = readFileSync(new URL('./test_native_s3_memory.py', import.meta.url), 'utf8')
+    expect(memoryTests.match(/^\s+def test_/gm)).toHaveLength(7)
+  })
+
   it('isolates each diagnostic job even when legacy independent inputs are populated', () => {
     function runsWith(inputs, event = 'workflow_dispatch') {
       const results = {}
