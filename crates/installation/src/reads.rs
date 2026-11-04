@@ -1,5 +1,5 @@
 //! What each Cairn account has read. A conversation turn or a mission run that finished
-//! successfully stays unread in the Fil until the account opens it. Marks belong to the
+//! stays unread in the Fil until the account opens it. Marks belong to the
 //! account, so every device and the web share them, and each member reads on their own.
 //!
 //! A mission that reports it is blocked asks for attention until the account sets that outcome
@@ -102,10 +102,21 @@ impl Reads {
     pub(crate) fn chats(&self, db: &Db<'_>, chats: &mut [Value]) -> Result<()> {
         for chat in chats {
             let id = text(chat, "id");
-            let finished = chat["status"] == RunStatus::Succeeded
-                && chat["paused"] != true
-                && db.kv(&format!("plugin-conversation:{id}"))?.is_none();
-            let unread = finished && self.unread(ReadKind::Chat, id, chat["finishedAt"].as_i64());
+            let question = chat["pendingQuestions"].as_u64().unwrap_or(0) > 0;
+            let finished = matches!(
+                chat["status"].as_str(),
+                Some("succeeded" | "failed" | "interrupted")
+            ) && chat["requestedBy"].is_null()
+                && chat["paused"] != true;
+            let unread = (question || finished)
+                && db.kv(&format!("plugin-conversation:{id}"))?.is_none()
+                && self.unread(
+                    ReadKind::Chat,
+                    id,
+                    chat["readAt"]
+                        .as_i64()
+                        .or_else(|| chat["finishedAt"].as_i64()),
+                );
             chat["unread"] = unread.into();
             if unread {
                 chat["preview"] = summary_preview(db, text(chat, "runId"))?;
@@ -118,7 +129,11 @@ impl Reads {
     /// outcomes it set aside.
     pub(crate) fn runs(&self, db: &Db<'_>, runs: &mut [Value]) -> Result<()> {
         for run in runs {
-            let mission = run["trigger"] != "chat" && run["status"] == RunStatus::Succeeded;
+            let mission = run["trigger"] != "chat"
+                && matches!(
+                    run["status"].as_str(),
+                    Some("succeeded" | "failed" | "interrupted")
+                );
             let task = text(run, "taskId").to_owned();
             let unread =
                 mission && self.unread(ReadKind::Mission, &task, run["finishedAt"].as_i64());

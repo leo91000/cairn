@@ -4,7 +4,7 @@ import type { ReadTarget } from './ReadTarget'
 export interface ReadMark {
   target: ReadTarget
   /**
-   * When the work the account saw finished. Later work stays unread.
+   * Observed Chat.readAt or mission finish time, including questions and errors. Later work stays unread.
    */
   finishedAt: number
 }

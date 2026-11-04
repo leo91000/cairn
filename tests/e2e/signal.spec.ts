@@ -39,6 +39,8 @@ connection.rollback()
 
 // A failed mission needs the user; a hanging conversation keeps an agent working.
 async function seed(workspace: Workspace) {
+  await workspace.api('/api/chats')
+  await workspace.api('/api/tasks/activity')
   const agent = workspace.service.agent({ name: 'Ops' })
   const task = workspace.service.task({
     name: 'Nightly security audit',
@@ -62,6 +64,7 @@ async function signIn(page: Page) {
   await page.goto(workspacePath('/'))
   await authenticateWorkspace(page)
   await expect(page.getByRole('heading', { name: 'Fil', exact: true }).first()).toBeVisible({ timeout: 30000 })
+  await page.getByRole('tab', { name: 'Tout', exact: true }).click()
 }
 
 async function capture(page: Page, testInfo: TestInfo, name: string) {
@@ -119,8 +122,8 @@ test('delegated conversations keep their requester in attention cards and live r
     })}\n\n`,
   }))
   await signIn(page)
-  const forYou = page.getByRole('region', { name: 'For you', exact: true })
-  const live = page.getByRole('region', { name: 'Live', exact: true })
+  const forYou = page.getByRole('region', { name: 'Tout', exact: true })
+  const live = page.getByRole('region', { name: 'Tout', exact: true })
   for (const [index, task] of tasks.entries()) {
     const section = index === tasks.length - 1 ? live : forYou
     const row = section.locator(`[data-fil-key="chat:${task.id}"]`)
@@ -156,11 +159,11 @@ test('automatic quota waits appear with scheduled resumptions without a deadline
     })}\n\n`,
   }))
   await signIn(page)
-  const waiting = page.getByRole('region', { name: 'Waiting', exact: true })
+  const waiting = page.getByRole('region', { name: 'Tout', exact: true })
   const row = waiting.locator(`[data-fil-key="chat:${chat.id}"]`)
   await expect(row.getByText('Waiting for quota', { exact: true })).toBeVisible()
-  await expect(row.getByText('Awaiting availability', { exact: true })).toBeVisible()
-  await expect(page.getByRole('region', { name: 'Live', exact: true })).toHaveCount(0)
+  await expect(row).toHaveAttribute('data-fil-kind', 'waiting')
+  await expect(page.locator('[data-fil-kind=running]')).toHaveCount(0)
 })
 
 test('exclusive suspension stays live and suppresses working indicators until release', async ({ page, workspace }) => {
@@ -186,7 +189,7 @@ test('exclusive suspension stays live and suppresses working indicators until re
   })
   try {
     await signIn(page)
-    const live = page.getByRole('region', { name: 'Live', exact: true })
+    const live = page.getByRole('region', { name: 'Tout', exact: true })
     await expect(live.getByText('Suspended for exclusive work', { exact: true })).toBeVisible()
     await expect(live.getByText('Working', { exact: true })).toHaveCount(0)
     await expect(live.locator('.avatar-orbit')).toHaveCount(0)
@@ -208,28 +211,32 @@ test('the Fil, rail and shortcuts lead through the workspace', async ({ page, wo
   const { chat, run } = await seed(workspace)
   await signIn(page)
 
-  const forYou = page.getByRole('region', { name: 'For you', exact: true })
+  const forYou = page.getByRole('region', { name: 'Tout', exact: true })
   await expect(forYou.getByText('Nightly security audit', { exact: true })).toBeVisible()
   await expect(forYou.getByText('Mission failed', { exact: true })).toBeVisible()
-  await expect(forYou.getByRole('button', { name: 'Run “Nightly security audit” again' })).toBeVisible()
-  const live = page.getByRole('region', { name: 'Live', exact: true })
+  await forYou.getByRole('button', { name: 'More actions for “Nightly security audit”' }).click()
+  await expect(page.getByRole('menuitem', { name: 'Run again', exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  const live = page.getByRole('region', { name: 'Tout', exact: true })
   await expect(live.getByText('Working', { exact: true })).toBeVisible()
-  await expect(live.locator('.avatar-orbit')).toHaveCount(1)
+  await expect(live.locator('[data-fil-kind=running]')).toHaveCount(1)
   const rail = page.getByRole('navigation', { name: 'Workspace navigation' })
   const fil = rail.getByRole('link', { name: 'Fil', exact: true })
   await expect(fil).toHaveAttribute('aria-current', 'page')
-  await expect(fil).toHaveAttribute('aria-description', '1 need you')
+  await expect(fil).toHaveAttribute('aria-description', '1 to read')
   await expectSingleScroll(page)
   await capture(page, testInfo, 'signal-fil-desktop')
 
   // J selects the first item and Enter opens it, like a mail client. A mission reads beside the
   // Fil, which stays the current place, and its Mission tab holds the mission itself.
+  await page.getByRole('tab', { name: /^À lire/ }).click()
+  await page.getByRole('heading', { name: 'Fil', exact: true }).click()
   await page.keyboard.press('j')
   await page.keyboard.press('Enter')
   await expect(page).toHaveURL(workspacePath(`/fil/runs/${run.id}`))
   await expect(fil).toHaveAttribute('aria-current', 'page')
-  await expect(forYou.locator('[aria-current="page"]')).toHaveCount(0)
-  await expect(forYou.locator('article.border-accent')).toContainText('Nightly security audit')
+  await page.getByRole('tab', { name: 'Tout', exact: true }).click()
+  await expect(forYou.locator('[aria-current="page"]')).toContainText('Nightly security audit')
   const pane = page.getByRole('region', { name: 'Reading pane' })
   await expect(pane.getByRole('heading', { name: 'Nightly security audit' })).toBeVisible()
   await pane.getByRole('button', { name: 'Mission', exact: true }).click()
@@ -272,7 +279,7 @@ test('the Fil, rail and shortcuts lead through the workspace', async ({ page, wo
   // The conversation keeps the Fil beside it and names the agent's live step.
   await page.keyboard.press('g')
   await page.keyboard.press('f')
-  await live.getByRole('button', { name: /Keep watching the build/ }).click()
+  await live.getByRole('button', { name: /^Open “Keep watching the build/ }).click()
   await expect(page).toHaveURL(workspacePath(`/chats/${chat.slug}`))
   await expect(page.getByRole('complementary', { name: 'Fil' }).locator('[aria-current="page"]')).toBeVisible()
   const working = page.locator('.agent-working')
@@ -301,7 +308,7 @@ test('phones use the floating dock and read conversations full screen', async ({
   const dock = page.getByRole('navigation', { name: 'Quick navigation' })
   await expect(dock).toBeVisible()
   await expect(page.getByRole('navigation', { name: 'Workspace navigation' })).toBeHidden()
-  await expect(page.getByRole('region', { name: 'For you', exact: true }).getByText('Nightly security audit', { exact: true }).first()).toBeVisible()
+  await expect(page.getByRole('region', { name: 'Tout', exact: true }).getByText('Nightly security audit', { exact: true }).first()).toBeVisible()
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
   await expectSingleScroll(page)
   await capture(page, testInfo, 'signal-fil-mobile')
@@ -314,7 +321,7 @@ test('phones use the floating dock and read conversations full screen', async ({
   await capture(page, testInfo, 'signal-atelier-mobile')
   await dock.getByRole('link', { name: 'Fil' }).click()
 
-  await page.getByRole('region', { name: 'Live', exact: true }).getByRole('button').first().click()
+  await page.locator(`[data-fil-key="chat:${chat.id}"]`).getByRole('button', { name: /^Open “/ }).click()
   await expect(page).toHaveURL(workspacePath(`/chats/${chat.slug}`))
   await expect(dock).toHaveCount(0)
   await expect(page.locator('.agent-working')).toBeVisible()
@@ -388,94 +395,86 @@ test('blocked missions ask only when they wait on the user, and can be set aside
   await page.setViewportSize({ width: 1440, height: 900 })
   await signIn(page)
 
-  const forYou = page.getByRole('region', { name: 'For you', exact: true })
-  const recent = page.getByRole('region', { name: 'Recent', exact: true })
-  const card = (task: { id: string }) => forYou.locator(`[data-fil-key="task:${task.id}"]`)
-  await expect(card(proof.task)).toContainText('Blocked · The device proof passed')
-  await expect(card(proof.task).getByRole('button', { name: `Dismiss “${proof.task.name}”` })).toBeVisible()
-  // Input the agent asked for can only be snoozed.
-  await expect(card(scope.task)).toBeVisible()
-  await expect(card(scope.task).getByRole('button', { name: /^Dismiss/ })).toHaveCount(0)
-  // What waits on the conversation that started it, or on an outside check, never asks the user.
-  await expect(forYou.locator(`[data-fil-key="task:${handedBack.task.id}"], [data-fil-key="task:${external.task.id}"]`)).toHaveCount(0)
-  await expect(recent.locator(`[data-fil-key="task:${handedBack.task.id}"]`)).toContainText('Waiting on Orchestrate the F8 architecture work')
-  await expect(recent.locator(`[data-fil-key="task:${external.task.id}"]`)).toContainText('Waiting on an outside check')
-  await capture(page, testInfo, 'blocked-fil-for-you')
+  const all = page.getByRole('region', { name: 'Tout', exact: true })
+  const card = (task: { id: string }) => all.locator(`[data-fil-key="task:${task.id}"]`)
+  const menuAction = async (task: { id: string, name: string }, action: string) => {
+    await card(task).getByRole('button', { name: `More actions for “${task.name}”` }).click()
+    await page.getByRole('menuitem', { name: action, exact: true }).click()
+  }
 
-  // A refused write must roll back even when the following activity read is unavailable.
+  await expect(card(proof.task)).toContainText('Blocked')
+  await expect(card(scope.task)).toContainText('Answer')
+  await expect(card(handedBack.task)).toContainText('Waiting on Orchestrate the F8 architecture work')
+  await expect(card(external.task)).toContainText('Waiting on an outside check')
+  await capture(page, testInfo, 'blocked-fil-tout')
+
+  // Refused outcome changes leave the row actionable, even if the next activity read fails.
   const dismissalsRoute = '**/api/dismissals'
   const activityRoute = '**/api/tasks/activity'
   await page.route(dismissalsRoute, route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Dismissal unavailable' }) }))
   await page.route(activityRoute, route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'Activity unavailable' }) }))
-  const refusedDismissal = page.waitForResponse(response => response.url().endsWith('/api/dismissals') && response.status() === 503)
-  await card(proof.task).getByRole('button', { name: `Dismiss “${proof.task.name}”` }).click()
-  await refusedDismissal
-  await expect(card(proof.task)).toBeVisible()
+  const refused = page.waitForResponse(response => response.url().endsWith('/api/dismissals') && response.status() === 503)
+  await menuAction(proof.task, 'Dismiss outcome')
+  await refused
+  await expect(card(proof.task)).toHaveAttribute('data-fil-kind', 'review')
   await page.unroute(dismissalsRoute)
   await page.unroute(activityRoute)
 
   await card(scope.task).getByRole('button', { name: `More actions for “${scope.task.name}”` }).click()
-  const menu = page.getByRole('menu')
-  await expect(menu.getByRole('menuitem')).toHaveText(['Remind me tomorrow', 'Run again', 'Archive mission'])
+  await expect(page.getByRole('menuitem', { name: 'Dismiss outcome' })).toHaveCount(0)
   await capture(page, testInfo, 'blocked-fil-menu')
-  await menu.getByRole('menuitem', { name: 'Remind me tomorrow' }).click()
-  const waiting = page.getByRole('region', { name: 'Waiting', exact: true })
-  await expect(waiting.locator(`[data-fil-key="task:${scope.task.id}"]`)).toContainText('Snoozed')
-
-  // The run page says what the account can do, under the outcome itself.
+  const snoozed = page.waitForResponse(response => response.url().endsWith('/api/dismissals') && response.request().method() === 'POST')
+  await page.getByRole('menuitem', { name: 'Remind me tomorrow' }).click()
+  await expect(card(scope.task)).toContainText('Snoozed')
+  expect((await snoozed).ok()).toBe(true)
   await card(proof.task).getByRole('button', { name: `Open “${proof.task.name}”` }).click()
   const actions = page.getByTestId('mission-outcome-actions')
   await expect(actions.getByRole('button', { name: 'Remind me tomorrow' })).toBeVisible()
-  await capture(page, testInfo, 'blocked-run-actions')
 
-  await actions.getByRole('button', { name: 'Dismiss' }).click()
-  await expect(forYou.locator(`[data-fil-key="task:${proof.task.id}"]`)).toHaveCount(0)
-  await expect(recent.locator(`[data-fil-key="task:${proof.task.id}"]`)).toContainText('Dismissed')
-  await expect(actions).toContainText('Dismissed: it stays out of For you until the mission reports again.')
-  await capture(page, testInfo, 'blocked-run-dismissed')
+  // Text changes optimistically. Hold the write to prove that feedback, then confirm persistence
+  // before reloading: navigation can abort a request that has not reached the installation yet.
+  let release!: () => void
+  let requested!: () => void
+  const held = new Promise<void>(resolve => release = resolve)
+  const started = new Promise<void>(resolve => requested = resolve)
+  await page.route(dismissalsRoute, async (route) => {
+    requested()
+    await held
+    await route.continue()
+  })
+  try {
+    const dismissed = page.waitForResponse(response => response.url().endsWith('/api/dismissals') && response.request().method() === 'POST')
+    await actions.getByRole('button', { name: 'Dismiss', exact: true }).click()
+    await started
+    await expect(card(proof.task)).toContainText('Dismissed')
+    await expect(actions).toContainText('Dismissed: it stays out of For you until the mission reports again.')
+    release()
+    expect((await dismissed).ok()).toBe(true)
+  }
+  finally {
+    release()
+    await page.unroute(dismissalsRoute)
+  }
 
-  // Set aside for this account, on every device: it stays so after a reload.
   await page.reload()
-  await expect(recent.locator(`[data-fil-key="task:${proof.task.id}"]`)).toContainText('Dismissed')
-  await expect(waiting.locator(`[data-fil-key="task:${scope.task.id}"]`)).toContainText('Snoozed')
-
-  await recent.locator(`[data-fil-key="task:${handedBack.task.id}"]`).click()
+  await page.getByRole('tab', { name: 'Tout', exact: true }).click()
+  await expect(card(proof.task)).toContainText('Dismissed')
+  await expect(card(scope.task)).toContainText('Snoozed')
+  await card(handedBack.task).getByRole('button', { name: /^Open “/ }).click()
   await expect(actions).toContainText('Waiting on Orchestrate the F8 architecture work, which started this mission.')
-  await capture(page, testInfo, 'blocked-run-waiting-on-requester')
   await actions.getByRole('link', { name: 'Orchestrate the F8 architecture work' }).click()
   await expect(page).toHaveURL(/\/chats\//)
 
-  // The Fil once both have been set aside.
   await page.goto(workspacePath('/'))
-  await expect(waiting.locator(`[data-fil-key="task:${scope.task.id}"]`)).toBeVisible()
-  await capture(page, testInfo, 'blocked-fil-set-aside')
-
-  await waiting.locator(`[data-fil-key="task:${scope.task.id}"]`).click()
+  await page.getByRole('tab', { name: 'Tout', exact: true }).click()
+  await card(scope.task).getByRole('button', { name: /^Open “/ }).click()
   await actions.getByRole('button', { name: 'Back to For you' }).click()
-  await expect(card(scope.task)).toBeVisible()
-
-  // The keyboard dismisses a blocked mission as it reads finished work.
-  await page.goto(workspacePath(`/fil/runs/${proof.run.id}`))
-  await actions.getByRole('button', { name: 'Back to For you' }).click()
-  await expect(card(proof.task)).toBeVisible()
-  await page.goto(workspacePath('/'))
-  await expect(card(proof.task)).toBeVisible()
-  // Mission activity can arrive before the requester conversation list after a reload.
-  // Wait for its placement too, so J/K navigate the complete attention order.
-  await expect(recent.locator(`[data-fil-key="task:${handedBack.task.id}"]`)).toContainText('Waiting on Orchestrate the F8 architecture work')
-  await expect(recent.locator(`[data-fil-key="task:${external.task.id}"]`)).toContainText('Waiting on an outside check')
-  await expect(forYou.locator(`[data-fil-key="task:${handedBack.task.id}"], [data-fil-key="task:${external.task.id}"]`)).toHaveCount(0)
-  // K climbs to the top of the Fil; what needs an answer comes newest first, then the device proof.
-  for (let step = 0; step < 6; step++)
-    await page.keyboard.press('k')
-  await page.keyboard.press('j')
-  await expect(forYou.locator('article.border-accent')).toContainText(proof.task.name)
-  await page.keyboard.press('e')
-  await expect(recent.locator(`[data-fil-key="task:${proof.task.id}"]`)).toContainText('Dismissed')
-
-  // Archiving from the feed uses the revisioned state command, just like Missions.
+  await expect(card(scope.task)).toHaveAttribute('data-fil-kind', 'review')
+  // Acknowledging a notification does not dismiss an outcome or answer it.
   await card(scope.task).getByRole('button', { name: `More actions for “${scope.task.name}”` }).click()
-  await page.getByRole('menuitem', { name: 'Archive mission', exact: true }).click()
+  await expect(page.getByRole('menuitem', { name: 'Dismiss outcome' })).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await menuAction(scope.task, 'Archive mission')
   await expect.poll(() => workspace.service.store.get('tasks', scope.task.id)).toMatchObject({ archived: true, enabled: false })
 })
 
@@ -504,10 +503,10 @@ test('a waiting mission sits in Waiting, shows its wait and can be stopped', asy
   // The initial conversation stream can move unrelated requester-owned missions out of For you.
   // Keep this journey's row in place while that list arrives, including during its click.
   await page.getByRole('textbox', { name: 'Filter conversations' }).fill(task.name)
-  const waiting = page.getByRole('region', { name: 'Waiting', exact: true })
+  const waiting = page.getByRole('region', { name: 'Tout', exact: true })
   await expect(waiting.getByText(task.name, { exact: true })).toBeVisible()
   await expect(waiting.locator(`[data-fil-key="task:${task.id}"]`)).toContainText('Wait for mission CI')
-  await expect(page.getByRole('region', { name: 'Live', exact: true }).getByText(task.name, { exact: true })).toHaveCount(0)
+  await expect(waiting.locator(`[data-fil-key="task:${task.id}"]`)).toHaveAttribute('data-fil-kind', 'waiting')
   await waiting.locator(`[data-fil-key="task:${task.id}"]`).click()
   const card = page.locator('.chat-wait')
   await expect(card).toHaveCount(1)

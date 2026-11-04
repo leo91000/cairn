@@ -616,10 +616,10 @@ watch(live.snapshot, (value) => {
 // The open conversation's finished turns are read while the page is visible.
 useReadWhileOpen(() => {
   const chat = detail.value
-  const run = chat?.run
-  if (!chat || !live.synced.value || catchingUp.value || chat.id !== selectedChatId.value || run?.status !== 'succeeded' || !run.finishedAt)
+  const readAt = chat?.readAt ?? chat?.run?.finishedAt
+  if (!chat || !live.synced.value || catchingUp.value || chat.id !== selectedChatId.value || !readAt)
     return null
-  return { key: `chat:${chat.id}`, at: run.finishedAt }
+  return { key: `chat:${chat.id}`, at: readAt }
 })
 // A stream error leaves on its own once the stream recovers; the connection pill covers the outage.
 watch(live.error, (value, previous) => {

@@ -299,6 +299,10 @@ internal class ParityDeviceCases(private val compose: ComposeContentTestRule) {
                     }
                 }
                 compose.waitUntil(30000) {
+                    compose.onAllNodesWithText("Tout").fetchSemanticsNodes().isNotEmpty()
+                }
+                compose.onNodeWithText("Tout").performClick()
+                compose.waitUntil(30000) {
                     compose.onAllNodesWithText(chat.title).fetchSemanticsNodes().isNotEmpty()
                 }
                 capture("conversation-list-dark")

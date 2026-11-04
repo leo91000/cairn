@@ -348,6 +348,12 @@ pub struct Chat {
     #[serde(deserialize_with = "nullable_wire")]
     #[schemars(range(min = 0_i64, max = 9007199254740991_i64))]
     pub finished_at: Option<i64>,
+    /// Latest visible question or finished turn to acknowledge, independently of its status.
+    #[serde(default)]
+    #[ts(optional = nullable, type = "number | null")]
+    #[serde(deserialize_with = "nullable_wire")]
+    #[schemars(range(min = 0_i64, max = 9007199254740991_i64))]
+    pub read_at: Option<i64>,
     #[serde(default)]
     pub session_restart_requested: bool,
     #[serde(default)]

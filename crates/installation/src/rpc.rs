@@ -1,3 +1,4 @@
+mod diagnostics;
 pub mod jsonrpc;
 
 use crate::{
@@ -5,10 +6,16 @@ use crate::{
     error::{Error, Result},
     process::{codex_environment, command},
 };
+use diagnostics::{
+    Availability, CleanupAction, Diagnostics, Initiator, Observation, Reader, ReaderOutcome,
+    Stderr, Termination, Writer, WriterOutcome,
+};
 use jsonrpc::{ErrorObject, Frame, METHOD_NOT_FOUND, Message};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
+    convert::Infallible,
+    io,
     path::Path,
     process::Stdio,
     sync::{
@@ -18,8 +25,8 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader},
-    process::{Child, ChildStdin},
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
+    process::Child,
     sync::{Mutex, mpsc, oneshot},
 };
 use tokio_util::sync::CancellationToken;
@@ -45,6 +52,7 @@ pub struct Rpc {
     sequence: Arc<AtomicU64>,
     closed: CancellationToken,
     failure: Arc<Mutex<Option<(u16, String)>>>,
+    diagnostics: Option<Diagnostics>,
 }
 
 pub struct Session {
@@ -62,13 +70,67 @@ impl Drop for Session {
     }
 }
 
-async fn write_frames(stdin: &mut ChildStdin, output: &mut mpsc::Receiver<Frame>) -> Result<()> {
+async fn write_frames(
+    stdin: &mut (impl AsyncWrite + Unpin),
+    output: &mut mpsc::Receiver<Frame>,
+) -> Writer {
     while let Some(frame) = output.recv().await {
-        let mut bytes = serde_json::to_vec(&frame)?;
+        let Ok(mut bytes) = serde_json::to_vec(&frame) else {
+            return Writer {
+                outcome: WriterOutcome::Encode,
+                io_kind: None,
+            };
+        };
         bytes.push(b'\n');
-        stdin.write_all(&bytes).await?;
+        if let Err(error) = stdin.write_all(&bytes).await {
+            return Writer {
+                outcome: WriterOutcome::Io,
+                io_kind: Some(error.kind().into()),
+            };
+        }
     }
-    Ok(())
+    Writer {
+        outcome: WriterOutcome::Closed,
+        io_kind: None,
+    }
+}
+
+#[derive(Debug)]
+enum ReadFailure {
+    Eof,
+    Parse,
+    Io(io::Error),
+    FrameLimit,
+    IncomingClosed,
+}
+
+impl ReadFailure {
+    fn observation(&self) -> (Initiator, Reader) {
+        let (initiator, outcome, io_kind) = match self {
+            Self::Eof => (Initiator::ReaderEof, ReaderOutcome::Eof, None),
+            Self::Parse => (Initiator::ReaderParse, ReaderOutcome::Parse, None),
+            Self::Io(error) => (
+                Initiator::ReaderIo,
+                ReaderOutcome::Io,
+                Some(error.kind().into()),
+            ),
+            Self::FrameLimit => (Initiator::ReaderFrameLimit, ReaderOutcome::FrameLimit, None),
+            Self::IncomingClosed => (
+                Initiator::IncomingClosed,
+                ReaderOutcome::IncomingClosed,
+                None,
+            ),
+        };
+        (initiator, Reader { outcome, io_kind })
+    }
+
+    fn into_error(self) -> Error {
+        match self {
+            Self::Io(error) => error.into(),
+            Self::FrameLimit => Error::bad_gateway("MCP response exceeded the 2000000-byte limit."),
+            Self::Eof | Self::Parse | Self::IncomingClosed => unavailable(),
+        }
+    }
 }
 
 /// Reads one newline-terminated frame into `bytes`.
@@ -76,19 +138,17 @@ async fn read_frame(
     reader: &mut BufReader<impl AsyncRead + Unpin>,
     bytes: &mut Vec<u8>,
     jsonrpc: bool,
-) -> Result<()> {
+) -> std::result::Result<(), ReadFailure> {
     bytes.clear();
     loop {
-        let buffer = reader.fill_buf().await?;
+        let buffer = reader.fill_buf().await.map_err(ReadFailure::Io)?;
         if buffer.is_empty() {
-            return Err(unavailable());
+            return Err(ReadFailure::Eof);
         }
         let end = buffer.iter().position(|b| *b == b'\n').map(|i| i + 1);
         let length = end.unwrap_or(buffer.len());
         if jsonrpc && bytes.len() + length > MCP_FRAME_LIMIT {
-            return Err(Error::bad_gateway(
-                "MCP response exceeded the 2000000-byte limit.",
-            ));
+            return Err(ReadFailure::FrameLimit);
         }
         bytes.extend_from_slice(&buffer[..length]);
         reader.consume(length);
@@ -115,19 +175,25 @@ async fn read_frames(
     jsonrpc: bool,
     incoming: mpsc::Sender<Incoming>,
     pending: Pending,
-) -> Result<()> {
+) -> ReadFailure {
     let mut reader = BufReader::new(stdout);
     let mut bytes = Vec::new();
     loop {
-        read_frame(&mut reader, &mut bytes, jsonrpc).await?;
-        let message: Value = serde_json::from_slice(&bytes).map_err(|_| unavailable())?;
+        if let Err(failure) = read_frame(&mut reader, &mut bytes, jsonrpc).await {
+            return failure;
+        }
+        let Ok(message) = serde_json::from_slice::<Value>(&bytes) else {
+            return ReadFailure::Parse;
+        };
         if let Some(method) = message["method"].as_str() {
             let request = Incoming {
                 method: method.into(),
                 params: message["params"].clone(),
                 id: message.get("id").cloned(),
             };
-            incoming.send(request).await.map_err(|_| unavailable())?;
+            if incoming.send(request).await.is_err() {
+                return ReadFailure::IncomingClosed;
+            }
             continue;
         }
         let Some(id) = message["id"].as_u64() else {
@@ -145,19 +211,70 @@ async fn read_frames(
     }
 }
 
-/// Asks the process to exit, then kills it if it has not after two seconds.
-pub(crate) async fn terminate(child: &mut Child) {
+/// Count what was actually read; retain no stderr content and never let stderr
+/// EOF select the transport's initiating failure. Cancellation leaves Partial.
+async fn drain_stderr(
+    stderr: &mut (impl AsyncRead + Unpin),
+    observation: &mut Stderr,
+) -> Infallible {
+    let mut buffer = [0; 8192];
+    loop {
+        match stderr.read(&mut buffer).await {
+            Ok(0) => {
+                observation.availability = Availability::Eof;
+                break;
+            }
+            Ok(bytes) => observation.bytes = observation.bytes.saturating_add(bytes as u64),
+            Err(error) => {
+                observation.availability = Availability::Io;
+                observation.io_kind = Some(error.kind().into());
+                break;
+            }
+        }
+    }
+    std::future::pending().await
+}
+
+/// Keep the existing SIGTERM/two-second/kill ownership sequence. Observe status
+/// before cleanup when available, and never overwrite that first observation.
+async fn terminate(child: &mut Child, observation: &mut Termination) {
+    if observation.child.observation == Observation::Unavailable {
+        match child.try_wait() {
+            Ok(Some(status)) => observation
+                .child
+                .observe(&Ok(status), Observation::BeforeCleanup),
+            Err(error) => observation
+                .child
+                .observe(&Err(error), Observation::BeforeCleanup),
+            Ok(None) => {}
+        }
+    }
     if let Some(pid) = child.id() {
+        observation.cleanup.action = CleanupAction::Term;
         unsafe {
             libc::kill(pid as i32, libc::SIGTERM);
         }
     }
-    if tokio::time::timeout(Duration::from_secs(2), child.wait())
-        .await
-        .is_err()
-        && let Err(error) = child.kill().await
-    {
-        tracing::warn!(%error, "could not kill child process");
+    match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
+        Ok(result) => observation
+            .child
+            .observe(&result, Observation::AfterCleanup),
+        Err(_) => {
+            observation.cleanup.action = CleanupAction::Kill;
+            if let Err(error) = child.kill().await {
+                let io_kind = diagnostics::IoKind::from(error.kind());
+                tracing::warn!(?io_kind, "could not kill child process");
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => observation
+                    .child
+                    .observe(&Ok(status), Observation::AfterCleanup),
+                Err(error) => observation
+                    .child
+                    .observe(&Err(error), Observation::AfterCleanup),
+                Ok(None) => {}
+            }
+        }
     }
 }
 
@@ -287,6 +404,7 @@ impl Session {
         let closed = CancellationToken::new();
         let failure = Arc::new(Mutex::new(None));
         let (done, finished) = oneshot::channel();
+        let diagnostics = (!jsonrpc).then(Diagnostics::new);
         let rpc = Rpc {
             jsonrpc,
             outgoing,
@@ -294,33 +412,60 @@ impl Session {
             sequence: Arc::new(AtomicU64::new(0)),
             closed: closed.clone(),
             failure: failure.clone(),
+            diagnostics: diagnostics.clone(),
         };
         let stopping = stop.clone();
         tokio::spawn(async move {
-            let writer = write_frames(&mut stdin, &mut output);
-            let reader = read_frames(stdout, jsonrpc, incoming, pending.clone());
-            let drain = async {
-                // Keep stderr flowing; once it closes, leave the other branches to finish.
-                let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
-                std::future::pending::<()>().await;
-            };
-            tokio::select! {
-                () = stopping.cancelled() => {}
-                () = closed.cancelled() => {}
-                _ = child.wait() => {}
-                _ = writer => {}
-                result = reader => {
-                    if let Err(error) = result {
-                        *failure.lock().await = Some((error.status, error.message));
+            let mut stderr_observation = Stderr::default();
+            // Finish the select before probing/waiting/killing the child. Its
+            // futures must relinquish their pipe/child borrows first.
+            let (mut observation, read_error) = {
+                let writer = write_frames(&mut stdin, &mut output);
+                let reader = read_frames(stdout, jsonrpc, incoming, pending.clone());
+                let drain = drain_stderr(&mut stderr, &mut stderr_observation);
+                tokio::select! {
+                    () = stopping.cancelled() => (Termination::new(Initiator::Stop), None),
+                    () = closed.cancelled() => (Termination::new(Initiator::RpcClosed), None),
+                    result = child.wait() => {
+                        let initiator = if result.is_ok() {
+                            Initiator::ChildExit
+                        } else {
+                            Initiator::ChildWaitError
+                        };
+                        let mut observation = Termination::new(initiator);
+                        observation.child.observe(&result, Observation::BeforeCleanup);
+                        (observation, None)
                     }
+                    writer = writer => {
+                        let mut observation = Termination::new(writer.initiator());
+                        observation.writer = writer;
+                        (observation, None)
+                    }
+                    result = reader => {
+                        let (initiator, reader) = result.observation();
+                        let error = result.into_error();
+                        let mut observation = Termination::new(initiator);
+                        observation.reader = reader;
+                        (observation, Some(error))
+                    }
+                    never = drain => match never {},
                 }
-                () = drain => {}
+            };
+            observation.stderr = stderr_observation;
+            if let Some(diagnostics) = &diagnostics {
+                diagnostics.closing();
+            }
+            if let Some(error) = read_error {
+                *failure.lock().await = Some((error.status, error.message));
             }
             closed.cancel();
             for (_, reply) in pending.lock().await.drain() {
                 let _ = reply.send(Err(unavailable()));
             }
-            terminate(&mut child).await;
+            terminate(&mut child, &mut observation).await;
+            if let Some(diagnostics) = diagnostics {
+                diagnostics.closed(observation);
+            }
             let _ = done.send(());
         });
         Ok(Self {
@@ -405,6 +550,10 @@ impl Rpc {
         };
         let started = Instant::now();
         let id = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        let diagnostic_request = self
+            .diagnostics
+            .as_ref()
+            .and_then(|diagnostics| diagnostics.request(method, id, started, timeout));
         let operation = if self.jsonrpc { "mcp_rpc" } else { "codex_rpc" };
         tracing::info!(
             target: "cairn_performance",
@@ -439,6 +588,9 @@ impl Rpc {
                 )))
             });
         self.pending.lock().await.remove(&id);
+        if let Some(request) = diagnostic_request {
+            request.finish(result.is_ok());
+        }
         tracing::info!(
             target: "cairn_performance",
             operation,
@@ -486,6 +638,11 @@ fn unavailable() -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+    use tokio::io::ReadBuf;
 
     fn rpc(jsonrpc: bool) -> (Rpc, mpsc::Receiver<Frame>) {
         let (outgoing, output) = mpsc::channel(32);
@@ -497,9 +654,170 @@ mod tests {
                 sequence: Arc::new(AtomicU64::new(0)),
                 closed: CancellationToken::new(),
                 failure: Arc::default(),
+                diagnostics: (!jsonrpc).then(Diagnostics::new),
             },
             output,
         )
+    }
+
+    /// A real AsyncRead/AsyncWrite fault boundary, rather than constructing the
+    /// generic adapter Error that has already lost the IO-kind discriminator.
+    struct FaultIo;
+
+    impl AsyncRead for FaultIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "PRIVATE_IO_PATH",
+            )))
+        }
+    }
+
+    impl AsyncWrite for FaultIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "PRIVATE_IO_PATH",
+            )))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn dropped_real_initialize_future_retains_a_receipt_in_both_closure_orders() {
+        for close_first in [false, true] {
+            let (rpc, mut output) = rpc(false);
+            let diagnostics = rpc.diagnostics.as_ref().unwrap().clone();
+            {
+                let request = rpc.request("initialize", json!({ "private": "PRIVATE_PROMPT" }));
+                tokio::pin!(request);
+                tokio::select! {
+                    frame = output.recv() => assert!(matches!(frame.unwrap().message, Message::Request { id: 1, .. })),
+                    _ = &mut request => panic!("initialize must be pending before cancellation"),
+                }
+                if close_first {
+                    diagnostics.closed(Termination::new(Initiator::ReaderEof));
+                    assert_eq!(diagnostics.snapshot()["emitted"], false);
+                }
+                // Leaving this scope actually drops Rpc::request's owned future.
+            }
+            if !close_first {
+                assert_eq!(diagnostics.snapshot()["emitted"], false);
+                diagnostics.closed(Termination::new(Initiator::ReaderEof));
+            }
+            let snapshot = diagnostics.snapshot();
+            assert_eq!(snapshot["emitted"], true);
+            assert_eq!(snapshot["active"], 0);
+            assert_eq!(snapshot["startup_rpc"]["method"], "initialize");
+            assert_eq!(snapshot["startup_rpc"]["request_id"], 1);
+            assert_eq!(snapshot["startup_rpc"]["timeout_ms"], 120_000);
+            assert_eq!(snapshot["startup_rpc"]["disposition"], "cancelled");
+            assert!(!snapshot.to_string().contains("PRIVATE_PROMPT"));
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_reader_boundaries_preserve_eof_parse_io_and_incoming_closure() {
+        let (incoming, receiver) = mpsc::channel(1);
+        let pending = Pending::default();
+        let failure = read_frames(&b""[..], false, incoming.clone(), pending.clone()).await;
+        assert_eq!(failure.observation().1.outcome, ReaderOutcome::Eof);
+        let failure =
+            read_frames(&b"{invalid\n"[..], false, incoming.clone(), pending.clone()).await;
+        assert_eq!(failure.observation().1.outcome, ReaderOutcome::Parse);
+        let failure = read_frames(FaultIo, false, incoming.clone(), pending.clone()).await;
+        assert_eq!(
+            failure.observation().1.io_kind,
+            Some(diagnostics::IoKind::ConnectionReset)
+        );
+        assert!(
+            !serde_json::to_string(&failure.observation().1)
+                .unwrap()
+                .contains("PRIVATE_IO_PATH")
+        );
+        let oversized = vec![b'x'; MCP_FRAME_LIMIT + 1];
+        let failure = read_frames(
+            oversized.as_slice(),
+            true,
+            incoming.clone(),
+            pending.clone(),
+        )
+        .await;
+        assert_eq!(failure.observation().1.outcome, ReaderOutcome::FrameLimit);
+        let error = failure.into_error();
+        assert_eq!(error.status, 502);
+        assert_eq!(
+            error.message,
+            "MCP response exceeded the 2000000-byte limit."
+        );
+        drop(receiver);
+        let failure =
+            read_frames(&b"{\"method\":\"fixture\"}\n"[..], false, incoming, pending).await;
+        assert_eq!(
+            failure.observation().1.outcome,
+            ReaderOutcome::IncomingClosed
+        );
+    }
+
+    #[tokio::test]
+    async fn actual_writer_failure_records_only_its_io_kind() {
+        let (outgoing, mut output) = mpsc::channel(1);
+        outgoing
+            .send(Frame::new(
+                Message::Notification {
+                    method: "fixture".into(),
+                    params: json!({ "private": "PRIVATE_PROMPT" }),
+                },
+                false,
+            ))
+            .await
+            .unwrap();
+        let observation = write_frames(&mut FaultIo, &mut output).await;
+        assert_eq!(observation.outcome, WriterOutcome::Io);
+        assert_eq!(observation.io_kind, Some(diagnostics::IoKind::BrokenPipe));
+        let encoded = serde_json::to_string(&observation).unwrap();
+        assert!(!encoded.contains("PRIVATE_IO_PATH"));
+        assert!(!encoded.contains("PRIVATE_PROMPT"));
+    }
+
+    #[tokio::test]
+    async fn stderr_cancellation_keeps_honest_partial_counts_without_retaining_content() {
+        let (mut writing, mut reading) = tokio::io::duplex(64);
+        let private = b"PRIVATE_STDERR_CONTENT";
+        writing.write_all(private).await.unwrap();
+        let mut observation = Stderr::default();
+        {
+            let draining = drain_stderr(&mut reading, &mut observation);
+            tokio::pin!(draining);
+            tokio::select! {
+                biased;
+                never = &mut draining => match never {},
+                () = std::future::ready(()) => {}
+            }
+        }
+        assert_eq!(observation.bytes, private.len() as u64);
+        assert!(matches!(observation.availability, Availability::Partial));
+        assert!(observation.io_kind.is_none());
+        assert!(
+            !serde_json::to_string(&observation)
+                .unwrap()
+                .contains("PRIVATE_STDERR_CONTENT")
+        );
     }
 
     #[tokio::test]
