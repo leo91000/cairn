@@ -1,5 +1,19 @@
 # Android 0.6.0 / web parity
 
+## Task storage limit (2026-11-04)
+
+Installation owners configure the maximum native disk allowance per conversation
+or mission run in Settings → Installation on both platforms. The default is 150
+GiB, configurable from 32 to 1,024 GiB. Both use the same revision-guarded HTTP
+commands as public MCP and `cairn_installation`; task agents cannot increase it.
+The native controller receives the current policy through its authenticated
+heartbeat, stops growth requests at the limit and publishes the same cleanup
+notice to the agent, web, Android and the run APIs. Workspaces and managed temporary
+files count together. Existing larger allowances are preserved without additional
+growth or file deletion. Android uses native numeric fields and French labels;
+web uses its standard settings form. This does not configure S3 credentials or
+change the node's shared storage budget.
+
 ## Compact reception and acknowledgement (2026-11-04)
 
 Web and Android show À lire, En cours and Tout as understated native tabs. Rows

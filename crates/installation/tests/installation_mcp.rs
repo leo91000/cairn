@@ -160,6 +160,125 @@ fn result(response: &Value) -> &Value {
 }
 
 #[tokio::test]
+async fn task_storage_limits_have_http_and_both_mcp_parity_without_agent_increases() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let owner_token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
+    let read_token = common::relay_fixture::grant(&s, &["read"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let owner = common::RelayContext::new(&common::relay_fixture::context(&s).await);
+    let member = common::RelayContext::new(
+        &common::relay_fixture::member_context(&s, "task-limit-member").await,
+    );
+    for method in ["GET", "PUT"] {
+        let denied = member
+            .authorize(common::request(method, "/api/settings/task-storage"))
+            .body(Body::from(
+                json!({ "maxDiskGiB": 200, "revision": "default" }).to_string(),
+            ))
+            .unwrap();
+        assert_eq!(
+            common::send(&app, denied).await.status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    let read = owner
+        .authorize(common::request("GET", "/api/settings/task-storage"))
+        .body(Body::empty())
+        .unwrap();
+    let response = common::send(&app, read).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let original = common::read_json(response).await;
+    assert_eq!(original["maxDiskGiB"], 150);
+    let command = json!({ "maxDiskGiB": 200, "revision": original["revision"] });
+    let write = owner
+        .authorize(common::request("PUT", "/api/settings/task-storage"))
+        .body(Body::from(command.to_string()))
+        .unwrap();
+    let response = common::send(&app, write).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut current = common::read_json(response).await;
+    assert_eq!(current["maxDiskGiB"], 200);
+    let stale = owner
+        .authorize(common::request("PUT", "/api/settings/task-storage"))
+        .body(Body::from(command.to_string()))
+        .unwrap();
+    assert_eq!(
+        common::send(&app, stale).await.status(),
+        StatusCode::CONFLICT
+    );
+
+    for (endpoint, token, maximum) in [
+        ("/mcp", owner_token.as_str(), 240),
+        ("/mcp-installation", agent_token, 150),
+    ] {
+        let (_, view) =
+            node_management_call(&app, endpoint, token, "get_task_storage_limits", json!({})).await;
+        assert_eq!(result(&view), &current);
+        let (_, saved) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "save_task_storage_limits",
+            json!({
+                "maxDiskGiB": maximum, "revision": current["revision"],
+            }),
+        )
+        .await;
+        current = result(&saved).clone();
+        assert_eq!(current["maxDiskGiB"], maximum);
+    }
+
+    for (endpoint, token) in [
+        ("/mcp-installation", agent_token),
+        ("/mcp", read_token.as_str()),
+    ] {
+        let (_, denied) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "save_task_storage_limits",
+            json!({
+                "maxDiskGiB": 151, "revision": current["revision"],
+            }),
+        )
+        .await;
+        assert_eq!(denied["result"]["isError"], true);
+    }
+    let (_, unchanged) = node_management_call(
+        &app,
+        "/mcp",
+        &owner_token,
+        "get_task_storage_limits",
+        json!({}),
+    )
+    .await;
+    assert_eq!(result(&unchanged), &current);
+
+    s.agent_fixture(
+        json!({ "access": { "installation": false } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    let (status, _) = node_management_call(
+        &app,
+        "/mcp-installation",
+        agent_token,
+        "get_task_storage_limits",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn native_configuration_has_http_and_both_mcp_parity_with_live_scopes() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
@@ -1478,6 +1597,8 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "list_audit",
         "get_storage_settings",
         "save_storage_settings",
+        "get_task_storage_limits",
+        "save_task_storage_limits",
         "check_storage",
         "import_project",
         "list_source_projects",

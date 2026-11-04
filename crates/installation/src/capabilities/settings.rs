@@ -17,6 +17,16 @@ pub(crate) struct SettingsOperation {
 
 pub(crate) const SETTINGS_OPERATIONS: &[SettingsOperation] = &[
     SettingsOperation {
+        name: "get_task_storage_limits",
+        scope: "read",
+        description: "Read the installation's per-task disk growth limit and revision. Workspace and managed temporary files share the limit; existing larger allowances are preserved.",
+    },
+    SettingsOperation {
+        name: "save_task_storage_limits",
+        scope: "manage",
+        description: "Save the installation's per-task disk growth limit at the expected revision. Applies to future growth without shrinking existing workspaces. Task agents may reduce the limit but cannot increase it.",
+    },
+    SettingsOperation {
         name: "get_coding_agent_configuration",
         scope: "read",
         description: "Read effective editable native Codex, Claude Code or OpenCode configuration, installation inheritance, form fields, revision and managed restrictions. Credentials are never included.",
@@ -70,6 +80,14 @@ pub(crate) fn settings_operation(name: &str) -> Option<&'static SettingsOperatio
 impl SettingsOperation {
     pub(crate) fn descriptor(&self) -> Value {
         let (input, output) = match self.name {
+            "get_task_storage_limits" => (
+                schema_for::<GetTaskStorageLimitsInput>(Contract::Deserialize),
+                schema_for::<TaskStorageLimits>(Contract::Serialize),
+            ),
+            "save_task_storage_limits" => (
+                schema_for::<TaskStorageLimits>(Contract::Deserialize),
+                schema_for::<TaskStorageLimits>(Contract::Serialize),
+            ),
             "get_coding_agent_configuration" => (
                 schema_for::<CodingAgentConfigurationInput>(Contract::Deserialize),
                 schema_for::<CodingAgentConfiguration>(Contract::Serialize),
@@ -111,7 +129,7 @@ impl SettingsOperation {
             "_meta": { "securitySchemes": [{ "type": "oauth2", "scopes": [self.scope] }] },
             "annotations": {
                 "readOnlyHint": self.scope == "read",
-                "destructiveHint": self.name == "save_storage_settings",
+                "destructiveHint": matches!(self.name, "save_storage_settings" | "save_task_storage_limits"),
                 "openWorldHint": self.scope != "read",
             },
         })
@@ -123,6 +141,29 @@ impl SettingsOperation {
         input: Value,
         context: ResumeContext,
     ) -> Result<Value> {
+        if matches!(
+            self.name,
+            "get_task_storage_limits" | "save_task_storage_limits"
+        ) {
+            let may_increase = !matches!(&context, ResumeContext::Installation(_));
+            let authority =
+                super::plugin_packages::Authority::for_grants(s, context, self.scope).await?;
+            let authorize = crate::authorization::Authorization::live(s, authority);
+            let name = self.name;
+            return s
+                .store
+                .transaction(move |db| {
+                    authorize.authorize(db)?;
+                    let result = if name == "get_task_storage_limits" {
+                        let _: GetTaskStorageLimitsInput = decode(input)?;
+                        crate::task_storage::view(db)?
+                    } else {
+                        crate::task_storage::save(db, decode(input)?, may_increase)?
+                    };
+                    Ok(serde_json::to_value(result)?)
+                })
+                .await;
+        }
         if matches!(
             self.name,
             "get_coding_agent_configuration"
