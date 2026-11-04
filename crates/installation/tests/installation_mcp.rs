@@ -1597,6 +1597,8 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "list_audit",
         "get_storage_settings",
         "save_storage_settings",
+        "get_task_storage_limits",
+        "save_task_storage_limits",
         "check_storage",
         "import_project",
         "list_source_projects",
