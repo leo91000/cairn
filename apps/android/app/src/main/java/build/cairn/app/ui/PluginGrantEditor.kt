@@ -250,18 +250,12 @@ fun PluginGrantEditor(
                                             mode == value,
                                             onClick = {
                                                 selectedMode = value == "selected"
-                                                val next = draft.without(connection.id)
                                                 change(
-                                                    if (value == "full")
-                                                        next.copy(
-                                                            grants =
-                                                                next.grants +
-                                                                    PluginInstanceGrant(
-                                                                        PluginGrantAccess.A(),
-                                                                        connection.id,
-                                                                    )
-                                                        )
-                                                    else next
+                                                    draft.withAccess(
+                                                        connection.id,
+                                                        if (value == "full") PluginGrantAccess.A()
+                                                        else null,
+                                                    )
                                                 )
                                             },
                                             modifier =

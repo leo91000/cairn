@@ -23,6 +23,22 @@ data class PluginGrantDraft(
             runCredentialInstances = runCredentialInstances - instance,
         )
 
+    fun withAccess(instance: String, access: PluginGrantAccess?): PluginGrantDraft {
+        val allowsRunCredentials =
+            access is PluginGrantAccess.A ||
+                (access as? PluginGrantAccess.B)?.contributions?.any {
+                    it.kind == "runCredentials"
+                } == true
+        return copy(
+            grants =
+                grants.filterNot { it.instanceId == instance } +
+                    listOfNotNull(access?.let { PluginInstanceGrant(it, instance) }),
+            runCredentialInstances =
+                if (allowsRunCredentials) runCredentialInstances
+                else runCredentialInstances - instance,
+        )
+    }
+
     fun withoutContribution(instance: String, kind: String, name: String): PluginGrantDraft =
         copy(
             grants =

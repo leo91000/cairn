@@ -322,6 +322,25 @@ export function removeGrant(draft: GrantDraft, instance: string): GrantDraft {
   return { grants: draft.grants.filter(item => item.instanceId !== instance), runCredentialInstances: draft.runCredentialInstances.filter(id => id !== instance) }
 }
 
+/** Replace one instance's access while retaining credentials only if the new access allows them. */
+export function replaceGrantAccess(
+  draft: GrantDraft,
+  instance: string,
+  access: PluginInstanceGrant['access'] | null,
+): GrantDraft {
+  const allowsRunCredentials = access?.type === 'full'
+    || (access?.type === 'selected' && access.contributions.some(item => item.kind === 'runCredentials'))
+  return {
+    grants: [
+      ...draft.grants.filter(item => item.instanceId !== instance),
+      ...(access ? [{ instanceId: instance, access }] : []),
+    ],
+    runCredentialInstances: allowsRunCredentials
+      ? draft.runCredentialInstances
+      : draft.runCredentialInstances.filter(id => id !== instance),
+  }
+}
+
 /** Remove one selected contribution while preserving the instance's other grants. */
 export function removeGrantContribution(
   draft: GrantDraft,

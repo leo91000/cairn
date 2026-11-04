@@ -105,6 +105,37 @@ class PluginGrantsTest {
     }
 
     @Test
+    fun changingSelectedSupplierToFullAccessPreservesExplicitCredentialChoice() {
+        val tool = PluginContributionGrant("tool", "read", emptyList())
+        val credentials = PluginContributionGrant("runCredentials", "", emptyList())
+        val before =
+            PluginGrantDraft(
+                grants =
+                    listOf(
+                        PluginInstanceGrant(
+                            PluginGrantAccess.B(listOf(tool, credentials)),
+                            support,
+                        ),
+                        PluginInstanceGrant(PluginGrantAccess.A(), automation),
+                    ),
+                runCredentialInstances = listOf(support),
+            )
+
+        val after = before.withAccess(support, PluginGrantAccess.A())
+
+        assertEquals(
+            PluginInstanceGrant(PluginGrantAccess.A(), support),
+            after.grants.single { it.instanceId == support },
+        )
+        assertEquals(listOf(support), after.runCredentialInstances)
+        assertEquals(emptyList<String>(), before.withAccess(support, null).runCredentialInstances)
+        assertEquals(
+            emptyList<String>(),
+            before.withAccess(support, PluginGrantAccess.B(listOf(tool))).runCredentialInstances,
+        )
+    }
+
+    @Test
     fun removingOneStaleContributionPreservesOtherPermissionsAndSupplier() {
         val tool = PluginContributionGrant("tool", "read", emptyList())
         val credentials = PluginContributionGrant("runCredentials", "", emptyList())

@@ -11,6 +11,7 @@ import {
   mergeGrantDrafts,
   removeGrant,
   removeGrantContribution,
+  replaceGrantAccess,
   selectableResourceTypes,
   staleResourceRestrictions,
 } from '../src/plugin-grants'
@@ -293,6 +294,20 @@ it('moving credentials withdraws only the old selected credential contribution',
 it('removing a supplier never chooses another full instance', () => {
   expect(removeGrant(before, 'one')).toEqual({ grants: [before.grants[1]], runCredentialInstances: [] })
   expect(chooseCredentialSupplier(before, ['one', 'two'], null).runCredentialInstances).toEqual([])
+})
+it('preserves an explicit credential supplier when changing its selected grant to full access', () => {
+  expect(replaceGrantAccess(before, 'one', { type: 'full' })).toEqual({
+    grants: [
+      before.grants[1],
+      { instanceId: 'one', access: { type: 'full' } },
+    ],
+    runCredentialInstances: ['one'],
+  })
+  expect(replaceGrantAccess(before, 'one', null).runCredentialInstances).toEqual([])
+  expect(replaceGrantAccess(before, 'one', {
+    type: 'selected',
+    contributions: [{ kind: 'tool', name: 'post', resources: [] }],
+  }).runCredentialInstances).toEqual([])
 })
 it('removes one stale contribution and preserves other selected permissions and suppliers', () => {
   const after = removeGrantContribution(before, 'one', { kind: 'tool', name: 'read' })

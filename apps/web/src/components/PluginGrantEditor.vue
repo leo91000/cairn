@@ -4,8 +4,8 @@ import type { GrantDraft } from '../plugin-grants'
 import { computed, ref } from 'vue'
 import {
   contributions,
-  removeGrant,
   removeGrantContribution,
+  replaceGrantAccess,
   selectableResourceTypes,
   staleResourceRestrictions,
 } from '../plugin-grants'
@@ -33,10 +33,11 @@ const stale = computed(() => {
 
 function setMode(value: string) {
   selectedMode.value = value === 'selected'
-  const next = removeGrant(draft.value, props.instanceId)
-  if (value === 'full')
-    next.grants.push({ instanceId: props.instanceId, access: { type: 'full' } })
-  draft.value = next
+  draft.value = replaceGrantAccess(
+    draft.value,
+    props.instanceId,
+    value === 'full' ? { type: 'full' } : null,
+  )
 }
 
 function update(item: typeof available.value[number], on: boolean, resources = item.resources) {
