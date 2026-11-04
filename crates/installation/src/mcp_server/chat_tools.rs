@@ -36,6 +36,7 @@ fn summary(chat: &Value) -> Result<Value> {
         "createdAt",
         "updatedAt",
         "finishedAt",
+        "readAt",
         "pendingQuestions",
         "requestedBy",
         "requester",

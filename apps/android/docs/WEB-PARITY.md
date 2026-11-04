@@ -1,5 +1,22 @@
 # Android 0.6.0 / web parity
 
+## Compact reception and acknowledgement (2026-11-04)
+
+Web and Android show À lire, En cours and Tout as understated native tabs. Rows
+keep the title, status, time and context, without truncated result previews or
+large action buttons. Read and mission actions live in a row menu; Android also
+retains swipe-to-delete for conversations. Answer prompts use violet, errors coral.
+Opening synced content while foregrounded acknowledges questions and failed or
+finished work, including from a mission's other tabs. Reading changes only the
+account's notification state: questions stay unanswered, active work remains in
+En cours, and read mission results stay in Tout. Completed delegated conversations
+stay consultable with their requester but create no unread notification.
+Conversation `readAt` identifies the latest pending question or finished turn;
+mission reads retain their observed `finishedAt`, so new work can notify again.
+The shared HTTP/public MCP/installation operations expose that timestamp and the
+same acknowledgement behavior. Account binding and manage-scope checks are
+unchanged; unowned executions are refused. No stored schema or migration changes.
+
 ## Native coding-agent configuration
 
 Web and Android expose installation defaults and agent customizations for Codex,

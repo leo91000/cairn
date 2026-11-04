@@ -19,7 +19,7 @@ pub enum ReadTarget {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReadMark {
     pub target: ReadTarget,
-    /// When the work the account saw finished. Later work stays unread.
+    /// Observed Chat.readAt or mission finish time, including questions and errors. Later work stays unread.
     #[schemars(range(min = 1, max = 9007199254740991_i64))]
     #[ts(type = "number")]
     pub finished_at: i64,

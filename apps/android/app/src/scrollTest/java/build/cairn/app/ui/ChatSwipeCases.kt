@@ -340,6 +340,10 @@ abstract class ChatSwipeCases {
 
     private fun open(name: String) {
         compose.waitUntil(10000) {
+            compose.onAllNodesWithText("Tout").fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("Tout").performClick()
+        compose.waitUntil(10000) {
             compose.onAllNodesWithText(name).fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithText(name).performClick()

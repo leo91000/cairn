@@ -574,13 +574,13 @@ class SignalPresentationTest {
                 )
                 .keys()
         assertEquals(
-            listOf("chat:question", "run:failed", "run:running", "chat:live", "chat:idle"),
+            listOf("run:failed", "chat:question", "chat:live", "chat:idle", "run:running"),
             fil,
         )
         assertEquals(fil, pagerKeys(fil, listOf("run:failed"), 0))
         // A mission that finishes while read keeps its place among its neighbours.
         val finished = fil - "run:running"
-        assertEquals(fil, pagerKeys(finished, fil, 2))
+        assertEquals(fil, pagerKeys(finished, fil, fil.indexOf("run:running")))
         // A page opened from outside the Fil does not swipe into it.
         assertEquals(listOf("run:elsewhere"), pagerKeys(fil, listOf("run:elsewhere"), 0))
     }
@@ -613,26 +613,37 @@ class SignalPresentationTest {
                     emptyList(),
                 )
                 .keys()
-        assertEquals(listOf("chat:b", "chat:a", "chat:c"), after)
+        assertEquals(listOf("chat:a", "chat:b", "chat:c"), after)
         val held = pagerKeys(after, before, 0)
         assertEquals(listOf("chat:a", "chat:b", "chat:c"), held)
         assertEquals("chat:b", held[1])
     }
 
     @Test
-    fun `navigation badge distinguishes action from reading and clears optimistic reads`() {
+    fun `navigation badge counts unread questions and results independently of actions`() {
         val chats =
             listOf(
                 Chat(id = "a", title = "Result", unread = true, finishedAt = 30),
-                Chat(id = "b", title = "Question", pendingQuestions = 1),
+                Chat(
+                    id = "b",
+                    title = "Question",
+                    pendingQuestions = 1,
+                    unread = true,
+                    readAt = 40,
+                ),
             )
-        assertEquals(FilAttention(1, 1), filAttention(buildFeed(chats, emptyList(), emptyList())))
-        assertEquals(1, FilAttention(1, 4).count)
-        assertEquals(4, FilAttention(0, 4).count)
         assertEquals(
-            FilAttention(1, 0),
+            FilAttention(toRead = 2),
+            filAttention(buildFeed(chats, emptyList(), emptyList())),
+        )
+        assertEquals(
+            FilAttention(toRead = 1),
             filAttention(buildFeed(chats, emptyList(), emptyList(), mapOf("chat:a" to 30L))),
         )
+        val read =
+            buildFeed(chats, emptyList(), emptyList(), mapOf("chat:a" to 30L, "chat:b" to 40L))
+        assertEquals(FilAttention(), filAttention(read))
+        assertEquals(listOf("b"), read.ongoing.map { it.chatId })
     }
 
     @Test

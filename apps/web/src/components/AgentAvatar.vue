@@ -73,7 +73,7 @@ const mark = computed(() => Math.max(14, Math.round(props.size * 0.44)))
     <span
       v-if="badge"
       class="absolute -right-1 grid size-[15px] place-items-center rounded-full ring-2 ring-surface"
-      :class="[harness ? '-top-1' : '-bottom-1', badge === 'question' || badge === 'failed' ? 'bg-coral text-white' : badge === 'done' ? 'bg-success text-white' : badge === 'waiting' ? 'bg-accent text-surface' : 'bg-muted text-surface']"
+      :class="[harness ? '-top-1' : '-bottom-1', badge === 'question' ? 'bg-answer text-surface' : badge === 'failed' ? 'bg-coral text-white' : badge === 'done' ? 'bg-success text-white' : badge === 'waiting' ? 'bg-accent text-surface' : 'bg-muted text-surface']"
     >
       <Icon :name="badge === 'question' ? MessageCircleQuestion : badge === 'failed' ? X : badge === 'done' ? Check : badge === 'paused' ? Pause : badge === 'waiting' ? Hourglass : Clock" :size="badge === 'question' || badge === 'failed' || badge === 'done' ? 10 : 9" />
     </span>

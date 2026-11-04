@@ -35,6 +35,10 @@ export interface Chat {
   purgeAt?: number | null
   restoredAt?: number | null
   finishedAt?: number | null
+  /**
+   * Latest visible question or finished turn to acknowledge, independently of its status.
+   */
+  readAt?: number | null
   sessionRestartRequested: boolean
   canRequestNewSession: boolean
   unread: boolean

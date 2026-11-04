@@ -287,7 +287,8 @@ test('a durable scheduled wait survives restart and resumes without a user messa
   await expect(page.getByRole('button', { name: 'Cancel scheduled wait', exact: true })).toBeVisible()
   await expect(page.getByRole('textbox', { name: 'Message' })).toHaveAttribute('placeholder', 'Reply now — this cancels the wait')
   // The Fil lists it apart, until it resumes.
-  const waiting = page.getByRole('region', { name: 'Waiting', exact: true })
+  await page.getByRole('tab', { name: /^En cours/ }).click()
+  const waiting = page.getByRole('region', { name: 'En cours', exact: true })
   await expect(waiting.locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText(/Resumes at .+\d min/)
   await expect(page.locator('.agent-waiting')).toHaveCount(0)
   for (const width of [1280, 390]) {
@@ -411,7 +412,8 @@ test('a durable condition wait follows a dependency across restart and queue pau
     await authenticateWorkspace(page)
     await expect(page.locator('.chat-wait')).toContainText(/Waiting for another run to finish.*Join dependency.*up to \d+ min/)
     await expect(page.getByText(/^Awaiting result · up to \d+ min$/).first()).toBeVisible()
-    await expect(page.getByRole('region', { name: 'Waiting', exact: true }).locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('Another run')
+    await page.getByRole('tab', { name: /^En cours/ }).click()
+    await expect(page.getByRole('region', { name: 'En cours', exact: true }).locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('Another run')
     await expect(page.locator('.agent-waiting')).toHaveCount(0)
     for (const width of [1280, 390]) {
       await page.setViewportSize({ width, height: 844 })
@@ -481,7 +483,8 @@ test('a large grouped wait pages through every condition and resumes once all ar
     await expect(card.getByTestId('wait-member').first()).toContainText('The run failed')
     await expect(card.getByTestId('wait-member').last()).toContainText('Waiting for it to finish')
     await expect(card).toContainText('1/23')
-    await expect(page.getByRole('region', { name: 'Waiting', exact: true }).locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('1 of 23 results')
+    await page.getByRole('tab', { name: /^En cours/ }).click()
+    await expect(page.getByRole('region', { name: 'En cours', exact: true }).locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('1 of 23 results')
     await expect(card.getByRole('link', { name: `Open run ${first.id.slice(0, 8)}` })).toHaveAttribute('href', new RegExp(`/runs/${first.id}$`))
     await expect(card.getByRole('button', { name: 'Previous conditions' })).toBeDisabled()
     await card.getByRole('button', { name: 'Next conditions' }).click()

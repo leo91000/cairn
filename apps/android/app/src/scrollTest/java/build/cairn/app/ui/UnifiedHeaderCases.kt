@@ -215,6 +215,8 @@ abstract class UnifiedHeaderCases {
             val vm = fixture(server)
             try {
                 setApp(vm, server)
+                waitText("Tout")
+                compose.onNodeWithText("Tout").performClick()
                 waitText(chat.title)
                 capture("fil")
 
@@ -286,6 +288,8 @@ abstract class UnifiedHeaderCases {
             val vm = fixture(server)
             try {
                 setApp(vm, server, dark = false)
+                waitText("Tout")
+                compose.onNodeWithText("Tout").performClick()
                 waitText(chat.title)
                 compose.onNode(installationHeader("Maison")).performClick()
                 waitText("Réglages de l’installation")
