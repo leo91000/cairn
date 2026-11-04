@@ -28,9 +28,10 @@ fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
 const reservation = path.join(process.env.RUNNER_TEMP, `cairn-rust-disk-proof-${randomUUID()}.reserve`)
 const descriptor = fs.openSync(reservation, 'wx', 0o600)
 const before = available()
-const lowCapacityBytes = 15913492480n
+const lowCapacityBytes = 14n * 1024n ** 3n
+const lowRetained = lowCapacityBytes + 64n * 1024n ** 2n
 const retained = REQUIRED_FREE_BYTES + 64n * 1024n ** 2n
-let bytes = before > lowCapacityBytes ? before - lowCapacityBytes : 0n
+let bytes = before > lowRetained ? before - lowRetained : 0n
 const deadline = Date.now() + 25 * 60 * 1000
 
 function run(command, args) {
@@ -55,14 +56,14 @@ try {
   }
 
   const beforePreparation = available()
-  if (beforePreparation < lowCapacityBytes || beforePreparation > lowCapacityBytes + 128n * 1024n ** 2n)
-    throw new Error('Could not establish the observed low initial capacity.')
   console.log(JSON.stringify({
     phase: 'low-capacity-start',
     mode,
     availableBytes: `${beforePreparation}`,
     reservationBytes: `${bytes}`,
   }))
+  if (beforePreparation < lowCapacityBytes || beforePreparation > lowCapacityBytes + 128n * 1024n ** 2n)
+    throw new Error('Could not establish the observed low initial capacity.')
   const action = parse(fs.readFileSync('.github/actions/prepare-rust-runner/action.yaml', 'utf8'))
   if (action.runs.using !== 'composite' || action.runs.steps.length !== 1 || action.runs.steps[0].shell !== 'bash')
     throw new Error('The capacity proof requires the unchanged production preparation action.')
