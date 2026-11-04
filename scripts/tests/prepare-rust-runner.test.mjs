@@ -35,12 +35,19 @@ function fixture(initial = 15913492480n) {
   const filesystem = {
     realpathSync: vi.fn(location => location),
     statSync: vi.fn(() => stat),
-    lstatSync: vi.fn(() => stat),
+    lstatSync: vi.fn((location) => {
+      if (!UNUSED_SDK_DIRECTORIES.includes(location))
+        throw Object.assign(new Error('absent'), { code: 'ENOENT' })
+      return stat
+    }),
+    readFileSync: vi.fn(() => '1 0 8:1 / / rw - ext4 /dev/root rw\n'),
     statfsSync: vi.fn(() => ({ bavail: free, bsize: 1n })),
   }
   const execute = vi.fn((command, args) => {
     if (command === 'which')
       return args.map(tool => `/usr/bin/${tool}`).join('\n')
+    if (command === 'rustup')
+      return `/home/runner/.rustup/toolchains/1.97.1/bin/${args[1]}\n`
     const index = UNUSED_SDK_DIRECTORIES.indexOf(args.at(-1))
     if (index < 0)
       throw new Error('Cleanup escaped its fixed SDK allowlist')
@@ -51,6 +58,7 @@ function fixture(initial = 15913492480n) {
     filesystem,
     execute,
     platform: 'linux',
+    cwd: () => environment.GITHUB_WORKSPACE,
     userInfo: () => ({ username: 'runner', homedir: '/home/runner' }),
   }
 }
@@ -113,6 +121,7 @@ describe('disposable Rust test runner disk preparation', () => {
     { HOME: '/home/another-account' },
     { RUNNER_TEMP: 'relative-temp' },
     { CARGO_TARGET_DIR: '/mnt/shared-target' },
+    { CARGO_BUILD_BUILD_DIR: '/mnt/shared-build' },
     { CARGO_HOME: '/usr/share/dotnet/cargo' },
     { GITHUB_WORKSPACE: '/usr/local/lib/android/repository' },
   ])('protects user and build paths from reclamation: %j', (change) => {
@@ -134,13 +143,8 @@ describe('disposable Rust test runner disk preparation', () => {
     { uid: 1001 },
   ])('does not remove an unexpected preinstalled root: %j', (change) => {
     const dependencies = fixture()
-    dependencies.filesystem.lstatSync.mockReturnValue({
-      dev: 1,
-      uid: 0,
-      isDirectory: () => true,
-      isSymbolicLink: () => false,
-      ...change,
-    })
+    const stat = dependencies.filesystem.lstatSync.getMockImplementation()
+    dependencies.filesystem.lstatSync.mockImplementation(location => ({ ...stat(location), ...change }))
     expect(() => prepareRustRunner(environment, dependencies)).toThrow('unexpected preinstalled SDK directory')
     expect(dependencies.execute.mock.calls.some(([command]) => command === 'sudo')).toBe(false)
   })
@@ -154,10 +158,11 @@ describe('disposable Rust test runner disk preparation', () => {
 
   it('does not remove an active native compiler toolchain', () => {
     const dependencies = fixture()
+    const execute = dependencies.execute.getMockImplementation()
     dependencies.execute.mockImplementation((command, args) => {
       if (command === 'which')
         return args.map(tool => `/usr/local/lib/android/bin/${tool}`).join('\n')
-      throw new Error('Should not remove an active toolchain')
+      return execute(command, args)
     })
     expect(() => prepareRustRunner(environment, dependencies)).toThrow('active native build tool')
     expect(dependencies.execute.mock.calls.some(([command]) => command === 'sudo')).toBe(false)
@@ -183,6 +188,10 @@ describe('disposable Rust test runner disk preparation', () => {
   it.each([
     { CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: '/usr/share/swift/usr/bin/clang' },
     { CC_x86_64_unknown_linux_gnu: '/opt/active-clang' },
+    { HOST_CC: '/usr/share/swift/usr/bin/clang' },
+    { TARGET_CC: '/usr/share/swift/usr/bin/clang' },
+    { HOST_CFLAGS: '-I/usr/share/swift/usr/include' },
+    { TARGET_CFLAGS: '-I/usr/share/swift/usr/include' },
   ])('preserves target-specific native overrides without guessing their paths: %j', (change) => {
     const dependencies = fixture()
     expect(() => prepareRustRunner({ ...environment, ...change }, dependencies)).toThrow('stock native tools')
@@ -202,12 +211,8 @@ describe('disposable Rust test runner disk preparation', () => {
 
   it('fails before compilation when no eligible SDK can provide the required workspace space', () => {
     const dependencies = fixture()
-    dependencies.filesystem.lstatSync.mockReturnValue({
-      dev: 2,
-      uid: 0,
-      isDirectory: () => true,
-      isSymbolicLink: () => false,
-    })
+    const stat = dependencies.filesystem.lstatSync.getMockImplementation()
+    dependencies.filesystem.lstatSync.mockImplementation(location => ({ ...stat(location), dev: 2 }))
     expect(() => prepareRustRunner(environment, dependencies)).toThrow('available bytes')
     expect(dependencies.execute.mock.calls.some(([command]) => command === 'sudo')).toBe(false)
   })
@@ -216,7 +221,7 @@ describe('disposable Rust test runner disk preparation', () => {
     const dependencies = fixture()
     const locate = dependencies.execute.getMockImplementation()
     dependencies.execute.mockImplementation((command, args) => {
-      if (command === 'which')
+      if (command !== 'sudo')
         return locate(command, args)
       throw new Error('permission denied')
     })
@@ -239,6 +244,54 @@ describe('disposable Rust test runner disk preparation', () => {
     expect(removals).toHaveLength(2)
     expect(removals[0][2].timeout).toBe(60000)
     expect(removals[1][2].timeout).toBe(25000)
+  })
+
+  it.each([
+    '/home/runner/.cargo/config.toml',
+    '/home/runner/.cargo/config',
+    '/home/runner/work/cairn/cairn/.cargo/config.toml',
+    '/home/runner/work/.cargo/config',
+    '/.cargo/config.toml',
+  ])('refuses undisclosed Cargo configuration before SDK removal: %s', (configuration) => {
+    const dependencies = fixture()
+    const stat = dependencies.filesystem.lstatSync.getMockImplementation()
+    dependencies.filesystem.lstatSync.mockImplementation(location => location === configuration ? {} : stat(location))
+    expect(() => prepareRustRunner(environment, dependencies)).toThrow('Cargo configuration files')
+    expect(dependencies.execute).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    '/usr/share/swift',
+    '/usr/share/swift/home',
+    '/usr/share/swift/home\\040bind',
+    '/usr/local/lib/android/sdk/private',
+  ])('refuses same-filesystem mounts at or beneath an SDK root: %s', (mountpoint) => {
+    const dependencies = fixture()
+    dependencies.filesystem.readFileSync.mockReturnValue(`1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /home ${mountpoint} rw - ext4 /dev/root rw\n`)
+    expect(() => prepareRustRunner(environment, dependencies)).toThrow('mounted SDK directory or descendant')
+    expect(dependencies.execute).not.toHaveBeenCalled()
+  })
+
+  it('fails closed when mount topology is unavailable', () => {
+    const dependencies = fixture()
+    dependencies.filesystem.readFileSync.mockReturnValue('')
+    expect(() => prepareRustRunner(environment, dependencies)).toThrow('mount topology')
+    expect(dependencies.execute).not.toHaveBeenCalled()
+  })
+
+  it('checks the actual rustup-selected compiler rather than only its PATH shim', () => {
+    const dependencies = fixture()
+    const execute = dependencies.execute.getMockImplementation()
+    dependencies.execute.mockImplementation((command, args) => command === 'rustup' ? `/usr/share/swift/toolchain/bin/${args[1]}\n` : execute(command, args))
+    expect(() => prepareRustRunner(environment, dependencies)).toThrow('active native build tool')
+    expect(dependencies.execute.mock.calls.some(([command]) => command === 'sudo')).toBe(false)
+  })
+
+  it('requires Cargo execution from the checked-out root whose configurations were inspected', () => {
+    const dependencies = fixture()
+    dependencies.cwd = () => '/home/runner/work/cairn/cairn/nested'
+    expect(() => prepareRustRunner(environment, dependencies)).toThrow('workspace root')
+    expect(dependencies.execute).not.toHaveBeenCalled()
   })
 
   it('the real CLI refuses non-Actions execution, including inherited host metadata', () => {

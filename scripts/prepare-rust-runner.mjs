@@ -21,6 +21,13 @@ const nativeInputs = new Set([
   'CC',
   'CXX',
   'AR',
+  'ARFLAGS',
+  'LD',
+  'RANLIB',
+  'NM',
+  'STRIP',
+  'OBJCOPY',
+  'OBJDUMP',
   'CFLAGS',
   'CXXFLAGS',
   'CPPFLAGS',
@@ -44,6 +51,7 @@ const nativeInputs = new Set([
   'RUSTDOCFLAGS',
   'CARGO_ENCODED_RUSTFLAGS',
   'CARGO_ENCODED_RUSTDOCFLAGS',
+  'RUSTUP_TOOLCHAIN',
 ])
 
 function contains(directory, location) {
@@ -75,7 +83,10 @@ export function prepareRustRunner(environment, dependencies = {}) {
   // wrappers and symlink aliases would make an "unused SDK" decision unsafe.
   const nativeOverride = Object.keys(environment).find(name => environment[name] && (
     nativeInputs.has(name)
-    || /^(?:HOST_|TARGET_)?(?:CC|CXX|AR|CFLAGS|CXXFLAGS|CPPFLAGS)_/.test(name)
+    || /^(?:HOST|TARGET)_/.test(name)
+    || /^(?:CC|CXX|AR|ARFLAGS|LD|RANLIB|CFLAGS|CXXFLAGS|CPPFLAGS)_/.test(name)
+    || /^PKG_CONFIG(?:_|$)/.test(name)
+    || /^BINDGEN_EXTRA_CLANG_ARGS(?:_|$)/.test(name)
     || /^CARGO_TARGET_.+_(?:LINKER|AR|RUSTFLAGS|RUNNER)$/.test(name)
     || /^CARGO_BUILD_(?:RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTFLAGS|RUSTDOCFLAGS|TARGET)$/.test(name)
   ))
@@ -89,15 +100,51 @@ export function prepareRustRunner(environment, dependencies = {}) {
   const canonical = location => filesystem.realpathSync(location)
   const protectedDirectories = locations.map(canonical)
   const workspace = protectedDirectories[0]
+  if (canonical((dependencies.cwd ?? process.cwd)()) !== workspace)
+    throw new Error('Rust disk preparation must run from the checked-out workspace root.')
   const device = filesystem.statSync(workspace).dev
   if (protectedDirectories.some(location => filesystem.statSync(location).dev !== device))
     throw new Error('Rust build, temporary and Cargo directories must share the measured filesystem.')
-  if (environment.CARGO_TARGET_DIR)
-    throw new Error('Rust disk preparation does not support a custom Cargo target directory.')
+  if (['CARGO_TARGET_DIR', 'CARGO_BUILD_TARGET_DIR', 'CARGO_BUILD_BUILD_DIR'].some(name => environment[name]))
+    throw new Error('Rust disk preparation does not support custom Cargo build directories.')
 
   for (const directory of UNUSED_SDK_DIRECTORIES) {
     if (protectedDirectories.some(location => contains(directory, location) || contains(location, directory)))
       throw new Error('An unused SDK directory overlaps a protected build location.')
+  }
+
+  const cargoConfigs = new Set(['config', 'config.toml'].map(name => path.join(protectedDirectories[3], name)))
+  for (let directory = workspace; ; directory = path.dirname(directory)) {
+    for (const name of ['config', 'config.toml'])
+      cargoConfigs.add(path.join(directory, '.cargo', name))
+    if (directory === path.dirname(directory))
+      break
+  }
+
+  for (const configuration of cargoConfigs) {
+    try {
+      filesystem.lstatSync(configuration)
+    }
+    catch (error) {
+      if (error.code === 'ENOENT')
+        continue
+      throw error
+    }
+
+    throw new Error(`Rust SDK reclamation does not support Cargo configuration files: ${configuration}`)
+  }
+
+  const mountpoints = filesystem.readFileSync('/proc/self/mountinfo', 'utf8').trim().split('\n').map((line) => {
+    const fields = line.split(' ')
+    if (fields.length < 10 || fields.indexOf('-') < 6 || !fields[4]?.startsWith('/'))
+      throw new Error('Could not establish the runner mount topology before reclamation.')
+    return fields[4].replace(/\\([0-7]{3})/g, (_match, octal) => String.fromCharCode(Number.parseInt(octal, 8)))
+  })
+  if (!mountpoints.includes('/'))
+    throw new Error('Could not establish the runner root mount before reclamation.')
+  for (const directory of UNUSED_SDK_DIRECTORIES) {
+    if (mountpoints.some(mountpoint => contains(directory, mountpoint)))
+      throw new Error(`Refusing a mounted SDK directory or descendant: ${directory}`)
   }
 
   const toolLocations = execute('which', buildTools, { encoding: 'utf8', timeout: Math.min(10000, remaining()), stdio: ['ignore', 'pipe', 'pipe'] })
@@ -106,6 +153,15 @@ export function prepareRustRunner(environment, dependencies = {}) {
     .map(canonical)
   if (toolLocations.length !== buildTools.length)
     throw new Error('Could not identify the active native build tools before SDK reclamation.')
+  for (const tool of ['cargo', 'rustc']) {
+    const location = execute('rustup', ['which', tool], { encoding: 'utf8', timeout: Math.min(10000, remaining()), stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+    toolLocations.push(canonical(location))
+  }
+
+  for (const directory of UNUSED_SDK_DIRECTORIES) {
+    if (toolLocations.some(location => contains(directory, location)))
+      throw new Error(`An active native build tool uses the SDK directory: ${directory}`)
+  }
 
   const available = () => {
     const stat = filesystem.statfsSync(workspace, { bigint: true })
@@ -133,11 +189,14 @@ export function prepareRustRunner(environment, dependencies = {}) {
       continue
     }
 
-    if (toolLocations.some(location => contains(directory, location)))
-      throw new Error(`An active native build tool uses the SDK directory: ${directory}`)
+    directories.push({ path: directory, status: 'eligible' })
+  }
 
-    execute('sudo', ['-n', 'rm', '--recursive', '--force', '--one-file-system', '--', directory], { stdio: 'inherit', timeout: remaining() })
-    directories.push({ path: directory, status: 'removed' })
+  for (const directory of directories) {
+    if (directory.status !== 'eligible')
+      continue
+    execute('sudo', ['-n', 'rm', '--recursive', '--force', '--one-file-system', '--', directory.path], { stdio: 'inherit', timeout: remaining() })
+    directory.status = 'removed'
   }
 
   const after = available()

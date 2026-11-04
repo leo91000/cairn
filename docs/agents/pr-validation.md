@@ -81,8 +81,8 @@ Before backend or CLI test compilation, the disposable GitHub-hosted Ubuntu
 runner removes three unused platform SDK directories (Android, .NET and Swift)
 and requires 32 GiB available on the build filesystem. The fixed preparation
 refuses local/self-hosted accounts, other job roles, protected build locations,
-SDK symlinks, explicit native toolchain overrides and active native tools. It
-changes no compiler flags or test commands. The threshold follows an observed
+SDK symlinks or mounts, explicit native toolchain overrides, Cargo configuration
+files and active native tools. It changes no compiler flags or test commands. The threshold follows an observed
 22.49 GiB completed-run allocation
 plus headroom, not a measured peak bound. An insufficient runner fails before
 compilation with its capacity recorded, instead of losing logs to ENOSPC.
