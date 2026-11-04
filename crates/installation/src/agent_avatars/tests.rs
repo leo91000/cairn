@@ -8,6 +8,7 @@ use axum::{
     http::{Request, StatusCode},
     routing::post,
 };
+use futures_util::FutureExt;
 use tempfile::TempDir;
 use tokio::sync::{mpsc, oneshot};
 use tower::ServiceExt;
@@ -246,36 +247,26 @@ impl Fixture {
         posts: &std::sync::atomic::AtomicUsize,
         started: std::time::Instant,
     ) -> (Value, Reply) {
-        let mut last = json!({ "avatarStatus": "not_sampled" });
         let waiting = std::time::Instant::now();
-        let result = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                tokio::select! {
-                    biased;
-                    request = self.requests.recv() => {
-                        return request;
-                    }
-                    () = tokio::time::sleep(Duration::from_millis(10)) => {
-                        last = self.case_snapshot(id, posts).await;
-                        assert_ne!(
-                            last["avatarStatus"],
-                            "failed",
-                            "AVATAR_CASE case={case} phase=provider_wait elapsed_ms={} wait_ms={} state={last}",
-                            started.elapsed().as_millis(),
-                            waiting.elapsed().as_millis(),
-                        );
-                    }
-                }
-            }
-        })
-        .await;
+        // Use the upstream request-versus-generation lifecycle, including its
+        // original failure. Case observations must not add a startup deadline.
+        let result = std::panic::AssertUnwindSafe(self.next())
+            .catch_unwind()
+            .await;
         match result {
-            Ok(Some(request)) => request,
-            _ => panic!(
-                "AVATAR_CASE case={case} phase=provider_wait elapsed_ms={} wait_ms={} state={last}",
-                started.elapsed().as_millis(),
-                waiting.elapsed().as_millis(),
-            ),
+            Ok(request) => request,
+            Err(failure) => {
+                let state = std::panic::AssertUnwindSafe(self.case_snapshot(id, posts))
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| json!({ "avatarStatus": "diagnostic_unavailable" }));
+                eprintln!(
+                    "AVATAR_CASE case={case} phase=provider_wait_failed elapsed_ms={} wait_ms={} state={state}",
+                    started.elapsed().as_millis(),
+                    waiting.elapsed().as_millis(),
+                );
+                std::panic::resume_unwind(failure)
+            }
         }
     }
 
@@ -310,10 +301,17 @@ impl Fixture {
     }
 
     async fn next(&mut self) -> (Value, Reply) {
-        tokio::time::timeout(Duration::from_secs(5), self.requests.recv())
-            .await
-            .unwrap()
-            .unwrap()
+        let tasks = self.s.avatars.tasks.lock().await.clone();
+        // Closing permits observation of an empty tracker; later generations may
+        // still register tasks. Production RPC deadlines continue to bound startup.
+        tasks.close();
+        tokio::select! {
+            biased;
+            request = self.requests.recv() => request.expect("Portrait provider stopped"),
+            () = tasks.wait() => {
+                panic!("Portrait generation completed without a provider request")
+            }
+        }
     }
 }
 
@@ -339,6 +337,48 @@ fn generated(bytes: Vec<u8>) -> (StatusCode, Json<Value>) {
             "result": STANDARD.encode(bytes),
         })),
     )
+}
+
+#[tokio::test]
+async fn fixture_waits_for_a_queued_portrait_without_a_separate_startup_deadline() {
+    let mut f = Fixture::new(true).await;
+    let service = f.s.clone();
+    let permits = service.avatars.slots.acquire_many(2).await.unwrap();
+    let agent = f.create().await;
+    let id = text(&agent, "id");
+
+    let (_, reply) = {
+        let request = f.next();
+        tokio::pin!(request);
+        // Only advance the queue wait: no external Codex process has started yet.
+        tokio::time::pause();
+        assert!(futures_util::poll!(request.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_secs(6)).await;
+        assert!(futures_util::poll!(request.as_mut()).is_pending());
+        tokio::time::resume();
+
+        drop(permits);
+        request.await
+    };
+    reply.send(generated(png([51, 63, 81]))).unwrap();
+    f.wait(id, "ready").await;
+    f.s.avatars.close().await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "Portrait generation completed without a provider request")]
+async fn fixture_reports_stopped_generation_without_waiting_for_a_provider_request() {
+    let mut f = Fixture::new(true).await;
+    let service = f.s.clone();
+    let permits = service.avatars.slots.acquire_many(2).await.unwrap();
+    let agent = f.create().await;
+    f.s.avatars.close().await;
+    let stopped = f.s.agent_snapshot(text(&agent, "id")).await.unwrap();
+    assert_eq!(stopped["avatar"]["status"], "failed");
+    assert_eq!(stopped["avatar"]["error"], INTERRUPTED);
+    drop(permits);
+
+    f.next().await;
 }
 
 #[tokio::test]

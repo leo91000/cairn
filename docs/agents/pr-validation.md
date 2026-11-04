@@ -66,6 +66,18 @@ If the local host cannot execute a required qualification, run the appropriate
 GitHub workflow manually on the branch and wait for its result. A manual run can
 provide test evidence for the PR; it cannot supply reusable release provenance.
 
+Full qualifications run the resolved OpenCode and Claude Code native adapters,
+plus the Plan boundary checks for the resolved Claude Code and Codex releases,
+in one separate 30-minute `cli-qualification` job after the normal backend suite.
+It checks out the same commit, builds its test binaries on its own runner and
+preserves the native adapter, supported-release resume and rollback checks.
+The backend job retains its complete test workload, measurements, namespace
+qualification and doctests within its existing 30-minute budget. Backend-only
+and diagnostic dispatches skip this job; they do not resolve engine releases.
+Image publication requires both jobs to succeed. When physical migration is
+selected for a full run, it waits for both jobs; a backend-only migration run
+continues to require only the backend suite.
+
 For a focused physical backend-migration check, dispatch `ci.yaml` with
 `backend-only=true` and `backend-qualification=backend-migration`. The optional
 case runs in a separate 30-minute disposable job after the normal backend job
@@ -128,8 +140,12 @@ fallback. No live or downloaded worker is substituted.
 `avatar-result.json` retain separate build/worker/test-return evidence when each
 boundary is reached. Missing boundaries remain unknown. Rolling/final receipts
 project only the closed worker provenance; a zero guard return requires that
-provenance. Each Avatar case retains its five-second waits and all publication
-checks, with closed case/elapsed/state diagnostics. `resolverCount` measures the
+provenance. Avatar provider arrival follows the existing fixture's request versus
+tracked-generation completion lifecycle, with production RPC deadlines bounding
+startup. The case helper delegates that lifecycle and adds closed case/elapsed/state
+context on failure before resuming its original panic. It adds no provider-arrival
+timer or polling. Publication-state waits retain five seconds and all publication
+checks. `resolverCount` measures the
 grant fixture's thread-resolver HTTP posts, not total subprocesses or worker time.
 No raw agent/run snapshots, prompts, credentials or RPC frames are projected.
 
