@@ -111,16 +111,16 @@ describe('application image tool versions', () => {
     }
 
     for (const step of ['OpenCode', 'Claude Code']) {
-      const run = jobs.backend.steps.find(candidate => candidate.name === `Qualify the resolved ${step} release against its native adapter`).run
+      const run = jobs['cli-qualification'].steps.find(candidate => candidate.name === `Qualify the resolved ${step} release against its native adapter`).run
       expect(run).toMatch(/served=\$\(node scripts\/served-tools\.mjs rollback-target (opencode|claude) /)
     }
 
-    const opencode = jobs.backend.steps.find(step => step.name === 'Qualify the resolved OpenCode release against its native adapter')
+    const opencode = jobs['cli-qualification'].steps.find(step => step.name === 'Qualify the resolved OpenCode release against its native adapter')
     expect(opencode.env).toEqual({
       OPENCODE_VERSION: expression('needs.resolve.outputs.opencode'),
       SERVED_OPENCODE: expression('needs.resolve.outputs.served-opencode'),
     })
-    const claude = jobs.backend.steps.find(step => step.name === 'Qualify the resolved Claude Code release against its native adapter')
+    const claude = jobs['cli-qualification'].steps.find(step => step.name === 'Qualify the resolved Claude Code release against its native adapter')
     expect(claude.env).toEqual({
       CLAUDE_VERSION: expression('needs.resolve.outputs.claude'),
       SERVED_CLAUDE: expression('needs.resolve.outputs.served-claude'),
@@ -130,7 +130,8 @@ describe('application image tool versions', () => {
     for (const test of ['native_cli_lists_providers_and_models', 'pinned_native_cli_executes_and_resumes_without_global_plugins'])
       expect(opencode.run).toContain(test)
     // Images cannot be published unless both qualifications passed.
-    expect(jobs.publish.needs).toContain('backend')
+    expect(jobs.publish.needs).toContain('cli-qualification')
+    expect(jobs.publish.if).toContain('needs.cli-qualification.result == \'success\'')
   })
 
   it('holds an engine at an exact version given as its channel', async () => {
