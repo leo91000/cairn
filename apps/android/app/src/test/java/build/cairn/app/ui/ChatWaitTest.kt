@@ -824,7 +824,7 @@ class ChatWaitTest {
         assertEquals("PR #193 checks", feed.waiting[1].subtitle)
         assertTrue(feed.waiting[1].condition)
         assertEquals(listOf("chat:paused"), feed.recent.map { it.key })
-        assertEquals(feed.keys(), listOf("chat:sooner", "chat:later", "chat:paused"))
+        assertEquals(listOf("chat:later", "chat:sooner", "chat:paused"), feed.keys())
     }
 
     @Test

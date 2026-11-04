@@ -165,7 +165,7 @@ fn conversation_view_with_run(
 ) -> Result<cairn_contracts::Chat> {
     use cairn_contracts::{Chat, ChatRequester, ConversationLifecycle, ConversationStatus};
     let active = chat.lifecycle == ConversationLifecycle::Active;
-    let pending_questions = db.pending_question_count(&chat.id)?;
+    let (pending_questions, question_at) = db.pending_question_summary(&chat.id)?;
     let agent_name =
         db.0.query_row(
             "SELECT name FROM agents WHERE id=?",
@@ -246,6 +246,7 @@ fn conversation_view_with_run(
         next_selection: None,
         can_request_new_session: crate::conversation_lifecycle::can_request_new_session(&chat, run),
         finished_at: serde_json::from_value(run_field("finishedAt"))?,
+        read_at: question_at.max(run_field("finishedAt").as_i64()),
         context_usage: serde_json::from_value(run_field("contextUsage"))?,
         account_wait_reason: serde_json::from_value(run_field("accountWaitReason"))?,
         account_required: serde_json::from_value(run_field("accountRequired"))?,

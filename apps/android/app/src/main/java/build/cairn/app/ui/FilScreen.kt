@@ -11,7 +11,10 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -97,18 +100,18 @@ internal data class FeedItem(
     val requester: FeedRequester? = null,
     /** The coding agent of its latest turn. */
     val harness: String? = null,
+    val statusLabel: String = subtitle,
+    val project: String? = null,
+    val unread: Boolean = kind == FeedKind.UNREAD_CHAT || kind == FeedKind.UNREAD_TASK,
+    val readAt: Long = stamp,
 ) {
     /** Only a blocked outcome can be dismissed; input the agent asked for can only be snoozed. */
     val dismissible
         get() = kind == FeedKind.REVIEW_TASK && outcome == "blocked"
 
-    val unread
-        get() = kind == FeedKind.UNREAD_CHAT || kind == FeedKind.UNREAD_TASK
-
     /** What reading this item marks, with the end of the work it reads. */
     val read
-        get() =
-            if (kind == FeedKind.UNREAD_TASK) "task:$taskId" to stamp else "chat:$chatId" to stamp
+        get() = if (taskId != null) "task:$taskId" to readAt else "chat:$chatId" to readAt
 }
 
 internal data class Feed(
@@ -122,8 +125,26 @@ internal data class Feed(
         get() = forYou.isEmpty() && running.isEmpty() && waiting.isEmpty() && recent.isEmpty()
 
     /** Finished work waiting to be read, below what needs an answer or a decision. */
+    val all
+        get() = (forYou + running + waiting + recent).sortedByDescending { it.stamp }
+
     val unread
-        get() = forYou.filter { it.unread }
+        get() = all.filter { it.unread }
+
+    val ongoing
+        get() = all.filter {
+            it.kind in
+                setOf(
+                    FeedKind.QUESTION,
+                    FeedKind.RECONNECT,
+                    FeedKind.REVIEW_TASK,
+                    FeedKind.RUNNING_CHAT,
+                    FeedKind.RUNNING_TASK,
+                    FeedKind.WAITING_CHAT,
+                    FeedKind.WAITING_TASK,
+                    FeedKind.SNOOZED_TASK,
+                ) || (it.kind == FeedKind.SET_ASIDE_TASK && it.setAside != SetAside.DISMISSED)
+        }
 }
 
 private fun context(agent: String, project: String?) =
@@ -192,6 +213,22 @@ internal fun buildFeed(
                             )
                         },
                     harness = chat.provider,
+                    project = chat.projectName,
+                    statusLabel =
+                        when (kind) {
+                            FeedKind.QUESTION -> "Répondre"
+                            FeedKind.RECONNECT -> "Connexion requise"
+                            FeedKind.RUNNING_CHAT ->
+                                if (chat.exclusiveSuspended) "Suspendue"
+                                else if (chat.status == "queued") "En attente" else "En cours"
+                            FeedKind.WAITING_CHAT -> "Reprise prévue"
+                            else -> if (chat.paused) "En pause" else statusLabel(chat.status)
+                        },
+                    readAt = chat.readAt ?: chat.finishedAt ?: chat.updatedAt,
+                    unread =
+                        chat.unread &&
+                            unreadNow("chat:${chat.id}", chat.readAt ?: chat.finishedAt) &&
+                            (chat.requestedBy == null || chat.pendingQuestions > 0),
                 )
             val wait = chatWaitNotice(chat.run)
             when {
@@ -248,7 +285,10 @@ internal fun buildFeed(
                                 // at resumption.
                                 resolved = chat.wakeup.observation != null,
                             )
-                chat.unread && !chat.paused && unreadNow("chat:${chat.id}", chat.finishedAt) ->
+                chat.unread &&
+                    !chat.paused &&
+                    chat.requestedBy == null &&
+                    unreadNow("chat:${chat.id}", chat.readAt ?: chat.finishedAt) ->
                     toRead +=
                         item(FeedKind.UNREAD_CHAT, context(agent, chat.projectName))
                             .copy(stamp = chat.finishedAt ?: chat.updatedAt, preview = chat.preview)
@@ -257,6 +297,8 @@ internal fun buildFeed(
                         item(
                             FeedKind.CHAT,
                             if (chat.paused) "En pause · ${context(agent, chat.projectName)}"
+                            else if (chat.status == "succeeded")
+                                "Terminée · ${context(agent, chat.projectName)}"
                             else context(agent, chat.projectName),
                         )
             }
@@ -297,6 +339,18 @@ internal fun buildFeed(
                     runId = run.id,
                     taskId = run.taskId,
                     harness = run.provider,
+                    statusLabel =
+                        when (kind) {
+                            FeedKind.REVIEW_TASK ->
+                                if (run.outcome?.status == "needs_input") "Répondre" else "Bloquée"
+                            FeedKind.RUNNING_TASK ->
+                                if (run.suspendedByExclusive != null) "Suspendue"
+                                else if (run.status == "queued") "En attente" else "En cours"
+                            FeedKind.WAITING_TASK -> "Reprise prévue"
+                            else -> statusLabel(run.status)
+                        },
+                    readAt = run.finishedAt ?: run.createdAt,
+                    unread = run.unread && unreadNow("task:${run.taskId}", run.finishedAt),
                 )
             when {
                 // A mission that scheduled its continuation resumes on its own, like a chat.
@@ -373,8 +427,10 @@ internal fun buildFeed(
                 run.status == "succeeded" &&
                     run.unread &&
                     unreadNow("task:${run.taskId}", run.finishedAt) ->
-                    toRead +=
-                        item(FeedKind.UNREAD_TASK, "Mission · $agent").copy(preview = run.preview)
+                    toRead += item(FeedKind.UNREAD_TASK, "Mission terminée · $agent")
+                else ->
+                    recent +=
+                        item(FeedKind.UNREAD_TASK, "Mission terminée · $agent").copy(unread = false)
             }
         }
     return Feed(
@@ -387,7 +443,7 @@ internal fun buildFeed(
 }
 
 /** The Fil in reading order, one key per item: what a swipe between pages moves through. */
-internal fun Feed.keys() = (forYou + running + waiting + recent).map { it.key }
+internal fun Feed.keys() = all.map { it.key }
 
 /** The shell and its pages share one conversation stream and one mission poll. */
 internal data class FilSnapshot(val conversations: LiveSnapshot, val activity: List<Run>?)
@@ -429,7 +485,7 @@ internal fun feedSummary(feed: Feed): String {
         parts +=
             if (feed.running.size == 1) "1 agent au travail"
             else "${feed.running.size} agents au travail"
-    val need = feed.forYou.size - feed.unread.size
+    val need = feed.forYou.count { !it.unread }
     if (need > 0) parts += if (need == 1) "1 élément pour vous" else "$need éléments pour vous"
     if (feed.unread.isNotEmpty())
         parts +=
@@ -471,6 +527,16 @@ fun FilScreen(
     val trash = rememberConversationTrash(vm)
     val chats = live.state?.chats?.filter { it.id !in trash.hidden }
     val feed = buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads, now)
+    var selectedView by rememberSaveable { mutableIntStateOf(0) }
+    var filter by rememberSaveable { mutableStateOf("") }
+    val views = listOf(feed.unread, feed.ongoing, feed.all)
+    val visible =
+        views[selectedView].filter {
+            filter.isBlank() ||
+                listOf(it.title, it.subtitle, it.agent).any { value ->
+                    value.contains(filter, ignoreCase = true)
+                }
+        }
     fun retry(item: FeedItem) {
         val task = item.taskId ?: return
         vm.perform { openRun(api.runMission(RunMissionInput(task)).id) }
@@ -513,13 +579,40 @@ fun FilScreen(
                     account = openAccount,
                 )
                 Spacer(Modifier.height(12.dp))
-                Text(greeting(), style = MaterialTheme.typography.headlineLarge)
-                Text(
-                    if (chats == null) "Chargement…" else feedSummary(feed),
-                    Modifier.padding(top = 4.dp),
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Fil", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+                    if (feed.unread.isNotEmpty())
+                        RoundAction(
+                            "Tout marquer comme lu",
+                            CairnIcons.Check,
+                            Modifier.testTag("read-all"),
+                            size = 36.dp,
+                        ) {
+                            vm.markRead(feed.unread.map { it.read })
+                        }
+                }
+                OutlinedTextField(
+                    value = filter,
+                    onValueChange = { filter = it },
+                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                    placeholder = { Text("Filtrer le fil") },
+                    singleLine = true,
                 )
+                PrimaryTabRow(selectedTabIndex = selectedView) {
+                    listOf("À lire", "En cours", "Tout").forEachIndexed { index, label ->
+                        Tab(
+                            selected = selectedView == index,
+                            onClick = { selectedView = index },
+                            text = {
+                                Text(
+                                    if (index < 2 && views[index].isNotEmpty())
+                                        "$label ${views[index].size}"
+                                    else label
+                                )
+                            },
+                        )
+                    }
+                }
                 if (chats == null)
                     LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 12.dp))
                 live.error?.let {
@@ -536,31 +629,21 @@ fun FilScreen(
                     )
                 }
             }
-        val unread = feed.unread
-        section(
-            "Pour vous",
-            feed.forYou,
-            action =
-                if (unread.isEmpty()) null
-                else {
-                    {
-                        SignalButton(
-                            "Tout lire",
-                            Modifier.testTag("read-all"),
-                            icon = CairnIcons.Check,
-                            container = Color.Transparent,
-                            content = MaterialTheme.colorScheme.onSurfaceVariant,
-                            height = 32.dp,
-                        ) {
-                            vm.markRead(unread.map { it.read })
-                        }
-                    }
-                },
-        ) { item ->
+        if (chats != null && visible.isEmpty() && !feed.empty)
+            item(key = "view-empty") {
+                Text(
+                    if (filter.isNotBlank()) "Aucun résultat"
+                    else if (selectedView == 0) "Tout est lu." else "Aucune tâche en cours.",
+                    Modifier.padding(20.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        items(visible, key = { it.key }) { item ->
             FeedRow(
                 item,
                 { open(item) },
                 onDelete = item.chatId?.let { id -> { trash.trash(id) } },
+                now = now,
             ) {
                 ForYouAction(
                     item,
@@ -573,43 +656,6 @@ fun FilScreen(
                     snooze = { setAside(item, tomorrowMorning(now)) },
                     archive = { archive(item) },
                 )
-            }
-        }
-        section("En cours", feed.running) { item ->
-            FeedRow(
-                item,
-                { open(item) },
-                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
-            ) {
-                Text(
-                    elapsed(item.startedAt, now),
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-        }
-        section("Reprise prévue", feed.waiting) { item ->
-            FeedRow(
-                item,
-                { open(item) },
-                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
-            ) {
-                Text(
-                    item.wakeAt?.let { waitLeft(it, item.condition, item.resolved, now) }
-                        ?: "Selon disponibilité",
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-        }
-        section("Récents", feed.recent) { item ->
-            FeedRow(
-                item,
-                { open(item) },
-                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
-            ) {
-                Stamp(item.stamp, now)
             }
         }
     }
@@ -653,77 +699,63 @@ private fun ForYouAction(
     snooze: () -> Unit = {},
     archive: () -> Unit = {},
 ) {
-    if (item.kind == FeedKind.REVIEW_TASK)
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (item.dismissible)
-                RoundAction(
-                    "Écarter ${item.title}",
-                    CairnIcons.Check,
-                    size = 38.dp,
-                    onClick = dismiss,
+    var menu by remember { mutableStateOf(false) }
+    Box {
+        RoundAction("Autres actions pour ${item.title}", CairnIcons.More, size = 36.dp) {
+            menu = true
+        }
+        DropdownMenu(menu, { menu = false }) {
+            if (item.unread)
+                DropdownMenuItem(
+                    text = { Text("Marquer comme lu") },
+                    onClick = {
+                        menu = false
+                        markRead()
+                    },
                 )
-            var menu by remember { mutableStateOf(false) }
-            Box {
-                RoundAction(
-                    "Autres actions pour ${item.title}",
-                    CairnIcons.More,
-                    size = 38.dp,
-                ) {
-                    menu = true
-                }
-                DropdownMenu(menu, { menu = false }) {
-                    DropdownMenuItem(
-                        text = { Text("Me le rappeler demain") },
-                        leadingIcon = { androidx.compose.material3.Icon(CairnIcons.Clock, null) },
-                        onClick = {
-                            menu = false
-                            snooze()
-                        },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Relancer") },
-                        leadingIcon = { androidx.compose.material3.Icon(CairnIcons.Retry, null) },
-                        enabled = enabled,
-                        onClick = {
-                            menu = false
-                            retry()
-                        },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Archiver la mission") },
-                        leadingIcon = { androidx.compose.material3.Icon(CairnIcons.Trash, null) },
-                        enabled = enabled,
-                        onClick = {
-                            menu = false
-                            archive()
-                        },
-                    )
-                }
+            DropdownMenuItem(
+                text = { Text("Ouvrir") },
+                onClick = {
+                    menu = false
+                    open()
+                },
+            )
+            if (item.dismissible)
+                DropdownMenuItem(
+                    text = { Text("Écarter le résultat") },
+                    onClick = {
+                        menu = false
+                        dismiss()
+                    },
+                )
+            if (item.kind == FeedKind.REVIEW_TASK)
+                DropdownMenuItem(
+                    text = { Text("Me le rappeler demain") },
+                    onClick = {
+                        menu = false
+                        snooze()
+                    },
+                )
+            if (item.taskId != null) {
+                DropdownMenuItem(
+                    text = { Text("Relancer") },
+                    enabled = enabled,
+                    onClick = {
+                        menu = false
+                        retry()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Archiver la mission") },
+                    enabled = enabled,
+                    onClick = {
+                        menu = false
+                        archive()
+                    },
+                )
             }
         }
-    else if (item.unread)
-        RoundAction(
-            "Marquer ${item.title} comme lu",
-            CairnIcons.Check,
-            size = 38.dp,
-            onClick = markRead,
-        )
-    else if (item.kind == FeedKind.QUESTION)
-        SignalButton("Répondre", height = 36.dp, onClick = open)
-    else if (item.kind == FeedKind.RECONNECT)
-        SignalButton("Connexions", height = 36.dp, onClick = open)
-    else if (item.kind == FeedKind.FAILED_TASK)
-        RoundAction(
-            "Relancer ${item.title}",
-            CairnIcons.Retry,
-            size = 38.dp,
-            enabled = enabled,
-            onClick = retry,
-        )
-    else Stamp(item.stamp, now)
+    }
 }
 
 @Composable
@@ -775,32 +807,13 @@ private fun FeedRow(
     item: FeedItem,
     onClick: () -> Unit,
     onDelete: (() -> Unit)? = null,
+    now: Long,
     trailing: @Composable () -> Unit,
 ) {
-    val badge =
-        when (item.kind) {
-            FeedKind.RUNNING_CHAT,
-            FeedKind.RUNNING_TASK -> AvatarBadge.LIVE
-            FeedKind.QUESTION,
-            FeedKind.FAILED_CHAT,
-            FeedKind.FAILED_TASK,
-            FeedKind.REVIEW_TASK,
-            FeedKind.RECONNECT -> AvatarBadge.ATTENTION
-            FeedKind.UNREAD_CHAT,
-            FeedKind.UNREAD_TASK -> AvatarBadge.DONE
-            FeedKind.WAITING_CHAT,
-            FeedKind.WAITING_TASK,
-            FeedKind.SNOOZED_TASK -> AvatarBadge.WAITING
-            FeedKind.SET_ASIDE_TASK,
-            FeedKind.CHAT -> null
-        }
     SwipeToTrashRow(enabled = onDelete != null, onTrash = { onDelete?.invoke() }) { swipe ->
-        // Unread work keeps a faint wash of the accent until it is read.
         Surface(
             onClick = onClick,
-            color =
-                if (item.unread) MaterialTheme.colorScheme.primary.copy(alpha = 0.06f)
-                else Color.Transparent,
+            color = Color.Transparent,
             modifier =
                 swipe
                     .fillMaxWidth()
@@ -808,85 +821,111 @@ private fun FeedRow(
         ) {
             Row(
                 Modifier.widthIn(max = 760.dp)
-                    .heightIn(min = 72.dp)
-                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                    .heightIn(min = 64.dp)
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (item.working) WorkingAvatar(item.agent, item.agentKey, 44.dp)
-                else AgentAvatar(item.agent, item.agentKey, 44.dp, badge)
-                Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
-                    if (item.unread) UnreadLabel(item)
-                    val delegatedBy = item.requester?.takeIf { item.key.startsWith("chat:") }
-                    if (delegatedBy != null)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (item.unread) {
+                            Box(
+                                Modifier.size(6.dp)
+                                    .background(
+                                        MaterialTheme.colorScheme.primary,
+                                        androidx.compose.foundation.shape.CircleShape,
+                                    )
+                                    .semantics { contentDescription = "Non lu" }
+                            )
+                            Spacer(Modifier.width(7.dp))
+                        }
                         Text(
-                            "↳ Délégué par ${delegatedBy.title}",
+                            item.title,
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight =
+                                if (item.unread) FontWeight.SemiBold else FontWeight.Medium,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Stamp(item.stamp, now)
+                    }
+                    val needsAnswer =
+                        item.kind == FeedKind.QUESTION ||
+                            (item.kind == FeedKind.REVIEW_TASK && item.outcome == "needs_input")
+                    val failed =
+                        item.kind == FeedKind.FAILED_CHAT || item.kind == FeedKind.FAILED_TASK
+                    val label = item.statusLabel
+                    Row(
+                        Modifier.padding(top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        item.harness?.let {
+                            Box(
+                                Modifier.padding(end = 5.dp).testTag("harness-$it").semantics {
+                                    contentDescription = "Dernier harness : ${providerLabel(it)}"
+                                }
+                            ) {
+                                ProviderMark(it, 12.dp)
+                            }
+                        }
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.labelMedium,
+                            color =
+                                if (needsAnswer) signal.answer
+                                else if (failed) signal.attention
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            " · ${context(item.agent, item.project)}",
+                            Modifier.weight(1f),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    if (
+                        item.kind == FeedKind.SET_ASIDE_TASK ||
+                            item.kind == FeedKind.SNOOZED_TASK ||
+                            item.kind == FeedKind.WAITING_CHAT ||
+                            item.kind == FeedKind.WAITING_TASK
+                    )
+                        Text(
+                            item.subtitle,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    if (
+                        item.kind == FeedKind.WAITING_CHAT ||
+                            item.kind == FeedKind.WAITING_TASK ||
+                            item.kind == FeedKind.SNOOZED_TASK
+                    )
+                        Text(
+                            item.wakeAt?.let { waitLeft(it, item.condition, item.resolved, now) }
+                                ?: "Selon disponibilité",
+                            Modifier.testTag("fil-wait-time"),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    item.requester?.let {
+                        Text(
+                            "↳ Délégué par ${it.title}",
                             Modifier.testTag("fil-requester"),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                    Text(
-                        item.title,
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Row(
-                        Modifier.padding(top = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        if (item.working) WorkingLabel("En cours", Modifier.padding(end = 6.dp))
-                        item.harness?.let {
-                            // Beside a two-line preview, it stays on the first line.
-                            val line =
-                                if (item.preview != null)
-                                    Modifier.align(Alignment.Top).padding(top = 4.dp)
-                                else Modifier
-                            Box(
-                                line.padding(end = 5.dp).testTag("harness-$it").semantics {
-                                    contentDescription = "Dernier harness : ${providerLabel(it)}"
-                                }
-                            ) {
-                                ProviderMark(it, 13.dp)
-                            }
-                        }
-                        Text(
-                            item.preview ?: item.subtitle,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = if (item.preview != null) 2 else 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
                     }
                 }
-                Spacer(Modifier.width(10.dp))
                 trailing()
             }
         }
-    }
-}
-
-/** "Terminé" with the unread dot, above the title of finished work not read yet. */
-@Composable
-private fun UnreadLabel(item: FeedItem) {
-    Row(Modifier.padding(bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(
-            Modifier.size(8.dp)
-                .background(
-                    MaterialTheme.colorScheme.primary,
-                    androidx.compose.foundation.shape.CircleShape,
-                )
-                .semantics { contentDescription = "Non lu" }
-        )
-        Spacer(Modifier.width(6.dp))
-        Text(
-            if (item.kind == FeedKind.UNREAD_TASK) "Mission terminée · ${shortStamp(item.stamp)}"
-            else "Terminé · ${shortStamp(item.stamp)}",
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.primary,
-        )
     }
 }

@@ -316,6 +316,8 @@ class NativeParityPreviewTest {
                 }
             }
             try {
+                waitText("Tout")
+                compose.onNodeWithText("Tout").performClick()
                 waitText(chat.title)
                 if (!wide) {
                     compose.onNodeWithText(chat.title).performClick()

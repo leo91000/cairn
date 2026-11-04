@@ -246,41 +246,22 @@ class FilUnreadJourneyTest {
                 CairnTheme(theme) { CairnApp(vm = vm) }
             }
             try {
-                // Conversations stream in before the missions' activity: wait for both.
                 compose.waitUntil(20000) {
-                    compose
-                        .onAllNodesWithText("2 résultats à lire", substring = true)
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
+                    compose.onAllNodesWithText("À lire 2").fetchSemanticsNodes().isNotEmpty()
                 }
-                compose.onNodeWithText("Le changelog est prêt", substring = true).assertExists()
                 compose
-                    .onNode(
-                        hasText("Rédiger le changelog 0.53") and
-                            hasContentDescription("Dernier harness : Claude Code")
-                    )
-                    .assertExists()
+                    .onNodeWithText("Le changelog est prêt", substring = true)
+                    .assertDoesNotExist()
+                compose.onNodeWithText("Trois nouveautés", substring = true).assertDoesNotExist()
                 capture("fil-unread-dark")
                 theme = "light"
                 capture("fil-unread-light")
                 theme = "dark"
                 compose
-                    .onNodeWithTag("fil")
-                    .performScrollToNode(hasText("Mission terminée", substring = true))
-                compose.onNodeWithText("Trois nouveautés", substring = true).assertExists()
-                compose
-                    .onNode(
-                        hasText(notes.name) and hasContentDescription("Dernier harness : Codex")
-                    )
-                    .assertExists()
-                capture("fil-unread-dark-scrolled")
-                compose.onNodeWithTag("fil").performScrollToIndex(0)
-
-                compose
-                    .onNodeWithContentDescription("Marquer Rédiger le changelog 0.53 comme lu")
+                    .onNodeWithContentDescription("Autres actions pour Rédiger le changelog 0.53")
                     .performClick()
+                compose.onNodeWithText("Marquer comme lu").performClick()
                 compose.waitUntil(10000) {
-                    // Reading the tree runs the main looper, where the request resumes.
                     compose.onAllNodes(isRoot()).fetchSemanticsNodes()
                     reads.isNotEmpty()
                 }
@@ -288,19 +269,15 @@ class FilUnreadJourneyTest {
                     "{\"items\":[{\"finishedAt\":${chats.first().finishedAt},\"target\":{\"kind\":\"chat\",\"chatId\":\"${chats.first().id}\"}}]}",
                     reads.first(),
                 )
-                compose.waitUntil(10000) {
-                    compose
-                        .onAllNodesWithContentDescription(
-                            "Marquer Rédiger le changelog 0.53 comme lu"
-                        )
-                        .fetchSemanticsNodes()
-                        .isEmpty()
-                }
-                compose.onNodeWithText("1 résultat à lire", substring = true).assertExists()
-
+                compose.onNodeWithText("Rédiger le changelog 0.53").assertDoesNotExist()
+                compose.onNodeWithText("À lire 1").assertExists()
+                compose.onNodeWithText("Tout").performClick()
+                compose.onNodeWithText("Rédiger le changelog 0.53").assertExists()
+                compose.onNodeWithText("En cours 1").performClick()
+                compose.onNodeWithText("Répondre").assertExists()
+                compose.onNodeWithText("À lire 1").performClick()
                 compose.onNodeWithTag("read-all").performClick()
                 compose.waitUntil(10000) {
-                    // Reading the tree runs the main looper, where the request resumes.
                     compose.onAllNodes(isRoot()).fetchSemanticsNodes()
                     reads.size == 2
                 }
@@ -308,10 +285,8 @@ class FilUnreadJourneyTest {
                     "{\"items\":[{\"finishedAt\":${activity.first().finishedAt},\"target\":{\"kind\":\"mission\",\"taskId\":\"348988cc-0279-5ed4-801b-ac44d6987c6e\"}}]}",
                     reads[1],
                 )
-                compose.waitUntil(10000) {
-                    compose.onAllNodesWithTag("read-all").fetchSemanticsNodes().isEmpty()
-                }
                 compose.onAllNodesWithTag("unread").assertCountEquals(0)
+                compose.onNodeWithText("Tout est lu.").assertExists()
                 capture("fil-read-dark")
             } finally {
                 vm.api.closeStreams()

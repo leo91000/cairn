@@ -34,7 +34,7 @@ import {
 import { refreshMissionRuns, useMissionRuns } from '../mission-runs'
 import { localReads } from '../reads'
 import { modifier } from '../shortcuts'
-import { filOf, isUnread } from '../signal'
+import { filOf, filViews } from '../signal'
 import { setThemePreference, themePreference } from '../theme'
 import { chatPath } from '../workspace-links'
 import AgentAvatar from './AgentAvatar.vue'
@@ -174,10 +174,10 @@ const commands = computed<Command[]>(() => {
   }
 
   const fil = filOf(chatList.value, state.tasks, runs.value, localReads)
-  for (const item of fil.forYou) {
+  for (const item of filViews(fil).unread) {
     items.push({
       id: `need-${item.key}`,
-      group: isUnread(item) ? 'To read' : 'Needs you',
+      group: 'To read',
       label: item.title,
       hint: item.preview || item.subtitle,
       avatar: { name: item.agent, key: item.agentKey },
@@ -185,7 +185,7 @@ const commands = computed<Command[]>(() => {
     })
   }
 
-  const needs = new Set(fil.forYou.map(item => item.key))
+  const needs = new Set(filViews(fil).unread.map(item => item.key))
   for (const chat of [...chatList.value].sort((a, b) => b.updatedAt - a.updatedAt)) {
     if (!needs.has(`chat:${chat.id}`)) {
       items.push({

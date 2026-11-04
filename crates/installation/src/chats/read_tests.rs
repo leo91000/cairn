@@ -48,9 +48,9 @@ async fn card_question_counts_preserve_visibility_without_reading_definitions() 
         .count();
     assert_eq!(reference, 3);
     assert_eq!(expected.pending_questions as usize, reference);
-    assert_eq!(db.pending_question_count("other").unwrap(), 1);
-    assert_eq!(db.pending_question_count("empty").unwrap(), 0);
-    assert_eq!(db.pending_question_count("missing").unwrap(), 0);
+    assert_eq!(db.pending_question_summary("other").unwrap().0, 1);
+    assert_eq!(db.pending_question_summary("empty").unwrap().0, 0);
+    assert_eq!(db.pending_question_summary("missing").unwrap().0, 0);
 
     connection
         .create_scalar_function(
