@@ -235,6 +235,29 @@ jobs:
         run: node scripts/test-native-namespace.mjs --sudo
       - name: Check Rust documentation examples
         run: node scripts/test-backend.mjs --doc
+      - uses: ./.github/actions/observe-rust-build
+        if: always()
+        with:
+          phase: after-build
+  cli-qualification:
+    needs: [resolve, backend]
+    if: always() && !cancelled() && inputs.backend-only != true && needs.resolve.result == 'success' && needs.backend.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          cache: true
+      - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
+      - name: Install native test dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
+      - uses: ./.github/actions/observe-rust-build
+        with:
+          phase: before-build
       - name: Qualify the resolved OpenCode release against its native adapter
         if: inputs.backend-only != true
         env:
@@ -312,8 +335,8 @@ jobs:
         with:
           phase: after-build
   backend-migration-qualification:
-    needs: backend
-    if: always() && !cancelled() && inputs.backend-qualification == 'backend-migration' && needs.backend.result == 'success'
+    needs: [backend, cli-qualification]
+    if: always() && !cancelled() && inputs.backend-qualification == 'backend-migration' && needs.backend.result == 'success' && (inputs.backend-only == true || needs.cli-qualification.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -1180,8 +1203,8 @@ jobs:
   publish:
     # The Intel nested Android test needs hardware GitHub does not provide; it runs locally
     # before releases when Android or runner changes need it (docs/DEPLOYMENT.md) and does not gate CI.
-    needs: [resolve, build, quality, rust-check, backend, backend-migration-qualification, node-checks, browser, network-bench, native-runtime, android-direct-build, android-direct, image, beacon-image]
-    if: always() && !cancelled() && inputs.validation-only != true && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.rust-check.result == 'success' && needs.backend.result == 'success' && (inputs.backend-qualification != 'backend-migration' || needs.backend-migration-qualification.result == 'success') && needs.node-checks.result == 'success' && needs.build.result == 'success' && needs.browser.result == 'success' && needs.network-bench.result == 'success' && needs.native-runtime.result == 'success' && needs.android-direct-build.result == 'success' && needs.android-direct.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true' && needs.beacon-image.result == 'success' && needs.beacon-image.outputs.published == 'true'
+    needs: [resolve, build, quality, rust-check, backend, cli-qualification, backend-migration-qualification, node-checks, browser, network-bench, native-runtime, android-direct-build, android-direct, image, beacon-image]
+    if: always() && !cancelled() && inputs.validation-only != true && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.rust-check.result == 'success' && needs.backend.result == 'success' && needs.cli-qualification.result == 'success' && (inputs.backend-qualification != 'backend-migration' || needs.backend-migration-qualification.result == 'success') && needs.node-checks.result == 'success' && needs.build.result == 'success' && needs.browser.result == 'success' && needs.network-bench.result == 'success' && needs.native-runtime.result == 'success' && needs.android-direct-build.result == 'success' && needs.android-direct.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true' && needs.beacon-image.result == 'success' && needs.beacon-image.outputs.published == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
