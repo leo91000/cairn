@@ -54,8 +54,9 @@ runtime stage.
 Direct Docker builds must pass these build arguments too; see
 [deployment setup](DEPLOYMENT.md) and the [agent toolkit](TOOLKIT.md).
 
-The `backend` job also runs the real engine releases it resolved through their
-adapters, without credentials and without inference against a vendor. As in
+After the `backend` job succeeds, the separate `cli-qualification` job runs the
+real engine releases it resolved through their adapters, with its own 30-minute
+budget, without credentials and without inference against a vendor. As in
 production, the CLIs may still contact their vendors' public endpoints:
 
 - OpenCode lists its provider and model catalog. It executes a turn against a
