@@ -1,0 +1,14 @@
+name: Rust runner disk probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Measure fixed preinstalled SDK paths without modifying the runner
+        shell: bash
+        run: node scripts/probe-rust-runner-disk.mjs
