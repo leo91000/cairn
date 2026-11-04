@@ -148,6 +148,32 @@ reserve. Cancellation reaches the credentialed publisher. The clock is checked
 again after startup commit before any heavy child can start. The full backend
 flags and normal route remain unchanged.
 
+The backend foreground action captures all owned stdout/stderr bytes into its
+private raw trace independently of the public console. Raw workload output is
+not relayed to that console. Its asynchronous file writes, close and byte/hash
+accounting must settle within a bound taken from the existing evidence reserve;
+write/close uncertainty makes the action non-green. Public progress is advisory,
+and stopped, slow or closed public readers cannot gate private capture or the
+action's exit after mandatory closure.
+
+The final backend checkpoint includes the typed owned-command guard return and
+the private trace's state, bytes and hash scope. A local `action-lifecycle.json`
+also records the diagnostic return, publication-return boundary and exit
+decision before retiring the public streams and exiting the foreground process.
+Neither this marker nor the final artifact proves OS process or runner/job
+exit; both explicitly label foreground exit `not-observed`. The runner's actual
+exit/step result remains a separate required observation. Raw trace errors,
+unclosed owned work, failed publication or original workload failure cannot be
+turned into a successful exit. No artifact is added to the existing allowance.
+
+If local filesystem completion remains unknown, Node's own teardown may also
+wait for that I/O. A separately typed non-green retirement can signal only the
+foreground process's own PID, and only after the guard's final complete
+inventory shows zero owned processes and every publisher has returned closed.
+That decision claims neither filesystem closure nor a numeric OS exit code.
+When either process-closure proof is unknown, this forced retirement is refused;
+the non-green decision and OS-exit observation remain separate.
+
 Previously committed artifacts survive loss of the runner without depending on
 an after-step upload. A loss before the first commit, the last partial upload,
 and the interval since the last committed sample remain **unknown**. Checkpoint

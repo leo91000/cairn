@@ -2,7 +2,6 @@ import { Buffer } from 'node:buffer'
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
-  appendFileSync,
   closeSync,
   constants,
   fstatSync,
@@ -14,7 +13,7 @@ import {
 } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
-import { Writable } from 'node:stream'
+import { createPrivateTrace, exitCode, writeLifecycle } from './ci-backend-trace.mjs'
 import { observeCommand } from './ci-deadline.mjs'
 
 export const UPLOADER_SHA = '043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' // upload-artifact v7.0.1
@@ -244,6 +243,7 @@ export async function runDurableBackend({
   checkpointMs = 360000,
   observeOptions = {},
   signal,
+  onGuardReturn,
 }) {
   const controller = new AbortController()
   let interrupted = false
@@ -304,12 +304,19 @@ export async function runDurableBackend({
           schedule(firstCheckpointMs)
       },
     })
+    const guardReturn = {
+      state: 'returned',
+      code: status,
+      at: Date.now(),
+      scope: 'owned-command-guard',
+    }
+    onGuardReturn?.(guardReturn)
     clearTimeout(timer)
     await periodic
     clearTimeout(timer)
     if (failed)
       return interrupted ? 130 : 125
-    await publish(snapshot('finished'), { signal: controller.signal })
+    await publish({ ...snapshot('finished'), guardReturn }, { signal: controller.signal })
     return interrupted ? 130 : status
   }
   catch {
@@ -321,6 +328,87 @@ export async function runDurableBackend({
     process.off('SIGINT', stop)
     signal?.removeEventListener('abort', stop)
   }
+}
+
+export async function runBackendAction({ log, ...options }) {
+  const deadline = options.receipt.clock.startedAt + 30 * 60000
+  const traceFailure = new AbortController()
+  const trace = createPrivateTrace(log, { deadline, onFailure: () => traceFailure.abort() })
+  let guardReturn = { state: 'unavailable', scope: 'owned-command-guard' }
+  let status = 125
+  let finalPublicationReturned = false
+  let publicationAttempts = 0
+  let publicationReturns = 0
+  let traceResult
+  try {
+    if (await trace.ready) {
+      status = await runDurableBackend({
+        ...options,
+        signal: options.signal ? AbortSignal.any([options.signal, traceFailure.signal]) : traceFailure.signal,
+        observeOptions: { ...options.observeOptions, stdout: trace.stream, stderr: trace.stream },
+        onGuardReturn: value => guardReturn = value,
+        publish: async (payload, publicationOptions) => {
+          if (payload.acquisition === 'finished') {
+            traceResult = await trace.finish()
+            payload = { ...payload, trace: traceResult, foregroundExit: 'not-observed' }
+          }
+
+          publicationAttempts++
+          const receipt = await options.publish(payload, publicationOptions)
+          publicationReturns++
+          if (payload.acquisition === 'finished')
+            finalPublicationReturned = true
+          return receipt
+        },
+      })
+    }
+  }
+  finally {
+    traceResult = await trace.finish()
+  }
+
+  const successKnown = status !== 0 || (guardReturn.state === 'returned' && guardReturn.code === 0 && finalPublicationReturned)
+  const code = traceResult.complete && successKnown ? exitCode(status) : 125
+  let ownedClosureVerified = false
+  try {
+    const proof = readProof(path.join(options.output, 'latest.json'), 4 * 1024 * 1024)
+    ownedClosureVerified = proof.cleanupUnknown === false && proof.ownershipUncertain === false
+      && proof.inventoryComplete === true && proof.containmentReady === true
+      && proof.samples.at(-1)?.reason === 'finished' && proof.samples.at(-1)?.processCount === 0
+  }
+  catch {}
+
+  const publisherClosureVerified = publicationAttempts === publicationReturns
+  const decision = (localIOUnknown) => {
+    if (localIOUnknown && ownedClosureVerified && publisherClosureVerified) {
+      return {
+        kind: 'signal',
+        signal: 'SIGKILL',
+        reason: 'local-io-closure-unknown',
+        scope: 'before-foreground-exit',
+        ownedClosureVerified,
+        publisherClosureVerified,
+      }
+    }
+
+    return { kind: 'code', code: localIOUnknown ? 125 : code, scope: 'before-foreground-exit' }
+  }
+
+  const lifecycle = {
+    guardReturn,
+    diagnosticReturn: { state: 'returned', code: status },
+    trace: traceResult,
+    finalPublicationReturned,
+    ownedClosureVerified,
+    publisherClosureVerified,
+    publicOutput: { stdoutPendingBytes: process.stdout.writableLength, stderrPendingBytes: process.stderr.writableLength },
+    exitDecision: decision(!traceResult.fileClosed || !traceResult.streamClosed),
+    foregroundExit: 'not-observed',
+  }
+  const record = await writeLifecycle(path.join(options.output, 'action-lifecycle.json'), lifecycle, deadline)
+  if (record !== 'written')
+    return { ...lifecycle, lifecycleRecord: record, exitDecision: record === 'unknown' ? decision(true) : { kind: 'code', code: 125, scope: 'lifecycle-record-failed' } }
+  return lifecycle
 }
 
 export async function main() {
@@ -355,6 +443,7 @@ export async function main() {
       uploader: UPLOADER_SHA,
       supervisorSHA256: sha256(readBounded(path.join(workspace, 'scripts/ci-deadline.mjs'), 65536)),
       publisherSHA256: sha256(readBounded(path.join(workspace, 'scripts/ci-backend-durable.mjs'), 65536)),
+      traceObserverSHA256: sha256(readBounded(path.join(workspace, 'scripts/ci-backend-trace.mjs'), 65536)),
       sourceManifestSHA256: sha256(readBounded(path.join(output, 'source.json'), 65536)),
       launcherSHA256: sha256(readBounded(path.join(source, 'scripts/test-backend.mjs'), 65536)),
       acquisition: 'unknown',
@@ -362,26 +451,20 @@ export async function main() {
     const directory = mkdtempSync(path.join(env.RUNNER_TEMP, 'cairn-backend-publication-'))
     mkdirSync(output, { recursive: true, mode: 0o700 })
     const publish = artifactPublisher({ uploader: path.join(uploaderRoot, 'dist/upload/index.js'), directory, env })
-    const log = path.join(workspace, 'backend-tests.log')
-    const trace = new Writable({
-      write(bytes, encoding, callback) {
-        appendFileSync(log, bytes, { mode: 0o600 })
-        process.stdout.write(bytes, encoding, callback)
-      },
-    })
     process.chdir(source)
-    process.exitCode = await runDurableBackend({
+    const result = await runBackendAction({
+      log: path.join(workspace, 'backend-tests.log'),
       output,
       command: BACKEND_COMMAND,
       args: BACKEND_ARGS,
       env,
       receipt,
       publish,
-      observeOptions: { stdout: trace, stderr: trace },
     })
+    return result
   }
   catch {
     console.error('Backend diagnostic evidence acquisition failed; no qualification claimed.')
-    process.exitCode = 125
+    return 125
   }
 }
