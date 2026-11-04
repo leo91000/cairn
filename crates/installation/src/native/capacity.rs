@@ -20,10 +20,21 @@ pub(super) struct Allowance {
     workspace_bytes: u64,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(super) struct Capacity {
     pub negotiated: bool,
     pub attempts: HashMap<String, Allowance>,
+    max_task_bytes: u64,
+}
+
+impl Default for Capacity {
+    fn default() -> Self {
+        Self {
+            negotiated: false,
+            attempts: HashMap::new(),
+            max_task_bytes: u64::from(cairn_contracts::DEFAULT_TASK_DISK_GIB) * 1024 * MIB,
+        }
+    }
 }
 
 impl Capacity {
@@ -47,6 +58,13 @@ impl Capacity {
             return;
         }
         self.negotiated = true;
+        if let Some(mib) = reply["maxTaskDiskMiB"].as_u64()
+            && (u64::from(cairn_contracts::MIN_TASK_DISK_GIB) * 1024
+                ..=u64::from(cairn_contracts::MAX_TASK_DISK_GIB) * 1024)
+                .contains(&mib)
+        {
+            self.max_task_bytes = mib * MIB;
+        }
         for grant in reply["grants"].as_array().into_iter().flatten() {
             let Some(attempt) = grant["attemptId"]
                 .as_str()
@@ -60,7 +78,10 @@ impl Capacity {
             else {
                 continue;
             };
-            if bytes < attempt.bytes || bytes > limit.min(1 << 40) {
+            if bytes < attempt.bytes
+                || bytes > limit.min(1 << 40)
+                || bytes > self.max_task_bytes && bytes > attempt.bytes
+            {
                 continue;
             }
             attempt.requested = false;
@@ -81,7 +102,14 @@ impl Capacity {
         let used = workspace.saturating_add(temporary);
         let pressure = used >= attempt.bytes.saturating_mul(4) / 5
             || workspace >= filesystem.saturating_mul(4) / 5;
-        if self.negotiated && pressure && filesystem >= attempt.bytes {
+        let at_task_limit = attempt.bytes >= self.max_task_bytes;
+        if self.negotiated && !at_task_limit && attempt.reason == "task-limit" {
+            attempt.reason.clear();
+        }
+        if self.negotiated && at_task_limit {
+            attempt.requested = false;
+            attempt.reason = "task-limit".into();
+        } else if self.negotiated && pressure && filesystem >= attempt.bytes {
             attempt.requested = true;
         }
         let tier = if used >= attempt.bytes.saturating_mul(9) / 10 {
@@ -94,7 +122,10 @@ impl Capacity {
         let state = (
             attempt.bytes,
             tier,
-            format!("{}:{}", self.negotiated, attempt.reason),
+            format!(
+                "{}:{}:{}",
+                self.negotiated, attempt.reason, self.max_task_bytes
+            ),
         );
         let now = crate::config::now();
         let immediate = attempt.notice.as_ref().is_none_or(|previous| {
@@ -111,19 +142,23 @@ impl Capacity {
             attempt.last_notice_at = now;
             let gib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0 * 1024.0);
             let outcome = if !self.negotiated {
-                "Automatic growth is not negotiated with this installation; the current allowance remains in effect."
+                "Automatic growth is not negotiated with this installation; the current allowance remains in effect.".to_owned()
             } else {
                 match attempt.reason.as_str() {
+                    "task-limit" => format!(
+                        "The installation's automatic growth limit is {} GiB per task. No further growth will be requested. Free regenerable build output or obsolete temporary files. Existing larger workspaces keep their saved files and current allowance.",
+                        self.max_task_bytes / (1024 * MIB),
+                    ),
                     "waiting-conversation" => {
-                        "Additional capacity is reserved for a conversation waiting to start. Cairn reclaims synchronized inactive caches first."
+                        "Additional capacity is reserved for a conversation waiting to start. Cairn reclaims synchronized inactive caches first.".into()
                     }
                     "granted" => {
-                        "Cairn granted additional shared capacity and is expanding the filesystem."
+                        "Cairn granted additional shared capacity and is expanding the filesystem.".into()
                     }
                     "shared-capacity" => {
-                        "Additional capacity is unavailable while the node protects other conversations and its free-space reserve."
+                        "Additional capacity is unavailable while the node protects other conversations and its free-space reserve.".into()
                     }
-                    _ => "Cairn is checking shared capacity for automatic growth.",
+                    _ => "Cairn is checking shared capacity for automatic growth.".into(),
                 }
             };
             let message = format!(
@@ -415,6 +450,133 @@ mod tests {
                 .1
                 .is_some()
         );
+    }
+
+    #[test]
+    fn task_limit_counts_tmp_and_reports_cleanup_without_requesting_more_growth() {
+        let gib = 1024 * MIB;
+        for allowance in [150 * gib, 504 * gib] {
+            let mut capacity = Capacity::default();
+            capacity.register("attempt", "run", allowance);
+            capacity.negotiated = true;
+            let (_, notice) = capacity
+                .observe("attempt", allowance * 4 / 5, gib, allowance)
+                .unwrap();
+            let text = notice.unwrap()["text"].as_str().unwrap().to_owned();
+            assert!(text.contains("150 GiB"), "{text}");
+            assert!(text.contains("Free"), "{text}");
+            assert!(!text.contains("checking shared capacity"), "{text}");
+            assert!(!capacity.attempts["attempt"].requested);
+            assert!(
+                capacity
+                    .observe("attempt", allowance * 4 / 5, gib, allowance)
+                    .unwrap()
+                    .1
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn installation_limit_updates_are_applied_to_growth_and_cleanup_notices() {
+        let gib = 1024 * MIB;
+        let mut capacity = Capacity::default();
+        capacity.register("attempt", "run", 144 * gib);
+        capacity.apply(&json!({
+            "protocol": 1, "maxTaskDiskMiB": 200 * 1024,
+            "grants": [{ "attemptId": "attempt", "allowanceMiB": 152 * 1024, "reason": "granted" }],
+        }), 1024 * gib);
+        assert_eq!(capacity.attempts["attempt"].bytes, 152 * gib);
+        capacity.apply(
+            &json!({ "protocol": 1, "maxTaskDiskMiB": 100 * 1024, "grants": [] }),
+            1024 * gib,
+        );
+        let (_, notice) = capacity
+            .observe("attempt", 125 * gib, 0, 152 * gib)
+            .unwrap();
+        assert!(
+            notice.unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .contains("100 GiB")
+        );
+        assert!(!capacity.attempts["attempt"].requested);
+        assert_eq!(capacity.attempts["attempt"].bytes, 152 * gib);
+    }
+
+    #[test]
+    fn changing_a_reached_limit_refreshes_notices_and_can_allow_growth_again() {
+        let gib = 1024 * MIB;
+        let mut capacity = Capacity::default();
+        capacity.register("attempt", "run", 150 * gib);
+        capacity.negotiated = true;
+        let (_, notice) = capacity
+            .observe("attempt", 125 * gib, 0, 150 * gib)
+            .unwrap();
+        assert!(
+            notice.unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .contains("150 GiB")
+        );
+        capacity.apply(
+            &json!({ "protocol": 1, "maxTaskDiskMiB": 100 * 1024, "grants": [] }),
+            1024 * gib,
+        );
+        let (_, notice) = capacity
+            .observe("attempt", 125 * gib, 0, 150 * gib)
+            .unwrap();
+        assert!(
+            notice.unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .contains("100 GiB")
+        );
+        assert!(!capacity.attempts["attempt"].requested);
+        capacity.apply(
+            &json!({ "protocol": 1, "maxTaskDiskMiB": 200 * 1024, "grants": [] }),
+            1024 * gib,
+        );
+        let (_, notice) = capacity
+            .observe("attempt", 125 * gib, 0, 150 * gib)
+            .unwrap();
+        assert!(
+            !notice.unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .contains("No further growth")
+        );
+        assert!(capacity.attempts["attempt"].requested);
+    }
+
+    #[test]
+    fn new_grants_cannot_cross_the_task_limit_or_shrink_older_workspaces() {
+        let gib = 1024 * MIB;
+        let mut capacity = Capacity::default();
+        capacity.register("new", "new-run", 144 * gib);
+        capacity.register("old", "old-run", 504 * gib);
+        capacity.apply(
+            &json!({
+                "protocol": 1, "grants": [
+                    { "attemptId": "new", "allowanceMiB": 160 * 1024 },
+                    { "attemptId": "old", "allowanceMiB": 512 * 1024 },
+                ],
+            }),
+            1024 * gib,
+        );
+        assert_eq!(capacity.attempts["new"].bytes, 144 * gib);
+        assert_eq!(capacity.attempts["old"].bytes, 504 * gib);
+        capacity.apply(
+            &json!({
+                "protocol": 1, "grants": [
+                    { "attemptId": "new", "allowanceMiB": 150 * 1024 },
+                    { "attemptId": "old", "allowanceMiB": 150 * 1024 },
+                ],
+            }),
+            1024 * gib,
+        );
+        assert_eq!(capacity.attempts["new"].bytes, 150 * gib);
+        assert_eq!(capacity.attempts["old"].bytes, 504 * gib);
     }
 
     #[test]

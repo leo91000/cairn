@@ -2438,6 +2438,131 @@ async fn native_disk_growth_is_idempotent_and_competes_atomically_with_admission
 }
 
 #[tokio::test]
+async fn native_disk_growth_stops_at_the_task_limit_and_preserves_older_allowances() {
+    let gib = 1024 * 1024 * 1024u64;
+    for (limit_gib, initial_gib, pool_gib) in [
+        (150u64, 144u64, 158u64),
+        (150, 150, 1024),
+        (150, 504, 1024),
+        (75, 72, 80),
+        (300, 296, 1024),
+    ] {
+        let f = Fixture::new().await;
+        let owner_token = common::relay_fixture::grant(&f.service, &["read", "manage"]).await;
+        let read = common::request("GET", "/api/settings/task-storage")
+            .header("x-test-relay-token", &owner_token)
+            .body(Body::empty())
+            .unwrap();
+        let response = common::send(&f.router, read).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let current = read_json(response).await;
+        let save = common::request("PUT", "/api/settings/task-storage")
+            .header("x-test-relay-token", &owner_token)
+            .body(Body::from(
+                json!({
+                    "maxDiskGiB": limit_gib, "revision": current["revision"],
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        assert_eq!(common::send(&f.router, save).await.status(), StatusCode::OK);
+        let mut node = f.node.clone();
+        node["slots"] = 4.into();
+        // Only the final 6 GiB increment fits this pool, rather than a full 8 GiB.
+        node["limits"]["diskMiB"] = (pool_gib * 1024).into();
+        node["capabilities"]["diskTotalMiB"] = (2048 * 1024).into();
+        node["capabilities"]["diskMiB"] = (1800 * 1024).into();
+        f.service
+            .store
+            .put_node_fixture(node.clone())
+            .await
+            .unwrap();
+        let token = auth::token();
+        f.service
+            .store
+            .set(
+                &format!("node-token:{}", auth::digest(&token)),
+                node["id"].clone(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut run = f.run();
+        run["status"] = "running".into();
+        run["resources"] = json!({
+            "cpu": 2, "memoryMiB": 4096, "diskMiB": initial_gib * 1024,
+        });
+        common::add_run(&f.service.store, &run).await;
+        let attempt = id();
+        placement::reserve(&f.service, &run, &attempt)
+            .await
+            .unwrap();
+        common::set_checkpoint(
+            &f.service.store,
+            text(&run, "id"),
+            json!({
+                "nodeId": node["id"], "runnerId": attempt,
+            }),
+        )
+        .await;
+
+        let expected_mib = initial_gib.max(limit_gib) * 1024;
+        // Replaying a lost response must not grant a second increment.
+        for current_mib in [initial_gib * 1024, initial_gib * 1024, expected_mib] {
+            let body = json!({
+                "backend": "native", "nodeProtocol": 2, "executionReady": true,
+                "dataRoot": "/fixture", "runtimeId": "development",
+                "capabilities": node["capabilities"], "pool": { "capacity": 4 },
+                "sharedResources": true, "budget": { "slots": 4, "limits": node["limits"] },
+                "nativeMode": { "mode": "protected", "generation": null, "status": "applied" },
+                "usage": { "diskMiB": 0, "diskBytes": 0 },
+                "diskGrowth": {
+                    "protocol": 1, "capturedAt": now(), "usedBytes": 0,
+                    "freeBytes": 1800 * gib, "ownedBytes": {},
+                    "requests": [{ "attemptId": attempt, "currentMiB": current_mib }],
+                },
+            });
+            let request = Request::builder()
+                .method("POST")
+                .uri("/internal/nodes/heartbeat")
+                .header("host", common::HOST)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            let response = common::send(&f.router, request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let reply = read_json(response).await;
+            let grant = &reply["diskGrowth"]["grants"][0];
+            assert_eq!(reply["diskGrowth"]["maxTaskDiskMiB"], limit_gib * 1024);
+            assert_eq!(grant["allowanceMiB"], expected_mib, "{reply}");
+            assert_eq!(
+                grant["reason"],
+                if current_mib < expected_mib {
+                    "granted"
+                } else {
+                    "task-limit"
+                }
+            );
+            assert_eq!(
+                f.service.store.run(text(&run, "id")).await.unwrap()["resources"]["diskMiB"],
+                expected_mib,
+            );
+            assert_eq!(
+                f.service
+                    .store
+                    .kv(&format!("native-capacity-pressure:{}", text(&node, "id")))
+                    .await
+                    .unwrap(),
+                None,
+                "Reaching the task limit must not evict other conversations' caches",
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn storage_pressure_reserves_waiting_admission_before_another_growth_increment() {
     let f = Fixture::new().await;
     let gib = 1024 * 1024 * 1024u64;

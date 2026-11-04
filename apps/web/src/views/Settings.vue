@@ -26,6 +26,7 @@ import ConversationRetentionSettings from '../components/ConversationRetentionSe
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
 import StorageSettings from '../components/StorageSettings.vue'
+import TaskStorageSettings from '../components/TaskStorageSettings.vue'
 import ThemeControl from '../components/ThemeControl.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
@@ -286,6 +287,7 @@ async function copy(value: string) {
               No external clients have access yet.
             </p>
           </section>
+          <TaskStorageSettings />
           <ConversationRetentionSettings />
           <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 px-0 py-7 phone:py-5">
             <h2>Worker environment</h2>
