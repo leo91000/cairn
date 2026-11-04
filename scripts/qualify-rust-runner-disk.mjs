@@ -28,8 +28,9 @@ fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
 const reservation = path.join(process.env.RUNNER_TEMP, `cairn-rust-disk-proof-${randomUUID()}.reserve`)
 const descriptor = fs.openSync(reservation, 'wx', 0o600)
 const before = available()
+const lowCapacityBytes = 15913492480n
 const retained = REQUIRED_FREE_BYTES + 64n * 1024n ** 2n
-const bytes = before > retained ? before - retained : 0n
+let bytes = before > lowCapacityBytes ? before - lowCapacityBytes : 0n
 const deadline = Date.now() + 25 * 60 * 1000
 
 function run(command, args) {
@@ -53,6 +54,31 @@ try {
     })
   }
 
+  const beforePreparation = available()
+  if (beforePreparation < lowCapacityBytes || beforePreparation > lowCapacityBytes + 128n * 1024n ** 2n)
+    throw new Error('Could not establish the observed low initial capacity.')
+  console.log(JSON.stringify({
+    phase: 'low-capacity-start',
+    mode,
+    availableBytes: `${beforePreparation}`,
+    reservationBytes: `${bytes}`,
+  }))
+  const action = parse(fs.readFileSync('.github/actions/prepare-rust-runner/action.yaml', 'utf8'))
+  if (action.runs.using !== 'composite' || action.runs.steps.length !== 1 || action.runs.steps[0].shell !== 'bash')
+    throw new Error('The capacity proof requires the unchanged production preparation action.')
+  run('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', action.runs.steps[0].run])
+  const afterPreparation = available()
+  if (afterPreparation < REQUIRED_FREE_BYTES)
+    throw new Error('Production preparation did not admit this low-capacity runner.')
+  const additional = afterPreparation > retained ? afterPreparation - retained : 0n
+  if (additional > 0n) {
+    bytes += additional
+    execFileSync('fallocate', ['--length', `${bytes}`, '/proc/self/fd/3'], {
+      stdio: ['ignore', 'inherit', 'inherit', descriptor],
+      timeout: 60000,
+    })
+  }
+
   const atStart = available()
   if (atStart < REQUIRED_FREE_BYTES || atStart > REQUIRED_FREE_BYTES + 128n * 1024n ** 2n)
     throw new Error('Could not establish the controlled 32 GiB build capacity.')
@@ -64,7 +90,7 @@ try {
   }))
 
   if (mode === 'backend') {
-    run(process.execPath, ['scripts/test-backend.mjs', '--nextest', '--test-threads', '8', '--no-fail-fast', '--color', 'never', '--status-level', 'pass', '--no-run'])
+    run(process.execPath, ['scripts/test-backend.mjs', '--nextest', '--test-threads', '8', '--color', 'never', '--status-level', 'pass', '--no-run'])
     run(process.execPath, ['scripts/test-backend.mjs', '-p', 'cairn-installation', '--lib', '--no-run'])
   }
   else {
@@ -88,6 +114,8 @@ try {
     cpus: os.cpus().length,
     memoryBytes: os.totalmem(),
     availableBeforeReservation: `${before}`,
+    availableBeforePreparation: `${beforePreparation}`,
+    availableAfterPreparation: `${afterPreparation}`,
     reservationBytes: `${bytes}`,
     availableAtBuildStart: `${atStart}`,
     availableAfterBuilds: `${available()}`,

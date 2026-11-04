@@ -222,6 +222,7 @@ jobs:
       - name: Install native test dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
       - uses: ./.github/actions/prepare-rust-runner
+        if: inputs.rust-disk-proof != true
         timeout-minutes: 3
       - uses: ./.github/actions/observe-rust-build
         with:
@@ -229,7 +230,7 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-nextest@0.9.149
-      - name: Prove cold compilation with about 32 GiB initially free
+      - name: Prove low-capacity reclamation and cold compilation at about 32 GiB
         if: inputs.rust-disk-proof == true
         run: node scripts/qualify-rust-runner-disk.mjs backend
       - name: Run backend tests across binaries with isolated credentials
@@ -277,11 +278,12 @@ jobs:
       - name: Install native test dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
       - uses: ./.github/actions/prepare-rust-runner
+        if: inputs.rust-disk-proof != true
         timeout-minutes: 3
       - uses: ./.github/actions/observe-rust-build
         with:
           phase: before-build
-      - name: Prove unchanged CLI qualifications with about 32 GiB initially free
+      - name: Prove low-capacity reclamation and unchanged CLI qualifications at about 32 GiB
         if: inputs.rust-disk-proof == true
         env:
           OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
