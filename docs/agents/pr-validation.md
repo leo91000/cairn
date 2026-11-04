@@ -109,6 +109,25 @@ Both fixtures receive the same insertion-only phase/stack observer; artifact
 manifests preserve the original and observed hashes. The comparison does not
 silently move to the observer commit's first parent.
 
+Backend-only diagnostics provision the candidate's Node resolution context
+after setup-pnpm has installed the observer's dependencies. The bridge requires
+identical package/lock/workspace bytes in both pinned Git sources and working
+trees, a physical complete pnpm12.3.4 installation, its exact application lock
+document and the declared versions of every direct provider, official-client,
+stdio and tsx dependency. Root importer identities (including peer versions)
+determine the canonical virtual-store package paths. The receipt binds those
+paths, manifest bytes, and each required ESM entrypoint's canonical path and
+bytes; missing exports/files and in-store link retargets are refused. Node's ESM
+resolver probes imports without executing packages. Unsupported store identities
+requiring shortening are refused. This binds the required direct entrypoints to
+the frozen setup; it is not cryptographic attestation of all transitive code.
+Missing/mismatched/unsupported installations, escaping paths and preexisting
+candidate node_modules are refused. No package install, NODE_PATH or replacement
+fixture is used. The foreground startup revalidates the acquired bridge and
+receipt, rechecks resolution from the candidate fixture ancestry, and includes
+its hash before the heavy command. Native and ordinary
+routes do not use this bridge; its provenance file uses existing artifacts.
+
 The seven native memory/garbage preparation tests run after the candidate
 qualifier has been produced and verified. Their explicit
 `CAIRN_TEST_NATIVE_QUALIFIER` points to that candidate's existing binary; the

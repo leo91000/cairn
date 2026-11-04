@@ -13,6 +13,7 @@ import {
 } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
+import { dependencyOptions, verifyBackendDependencies } from './ci-backend-dependencies.mjs'
 import { createPrivateTrace, exitCode, writeLifecycle } from './ci-backend-trace.mjs'
 import { observeCommand } from './ci-deadline.mjs'
 
@@ -431,6 +432,8 @@ export async function main() {
     const gitHead = cwd => execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8', timeout: 10000 }).trim()
     if (gitHead(source) !== pinned.revisions.candidate || gitHead(uploaderRoot) !== UPLOADER_SHA)
       throw new Error('Diagnostic source or uploader identity mismatch')
+    const dependenciesFile = path.join(output, 'dependencies.json')
+    verifyBackendDependencies(dependencyOptions(env), readProof(dependenciesFile, 65536))
     const receipt = {
       diagnosticOnly: true,
       qualificationClaim: false,
@@ -444,6 +447,7 @@ export async function main() {
       supervisorSHA256: sha256(readBounded(path.join(workspace, 'scripts/ci-deadline.mjs'), 65536)),
       publisherSHA256: sha256(readBounded(path.join(workspace, 'scripts/ci-backend-durable.mjs'), 65536)),
       traceObserverSHA256: sha256(readBounded(path.join(workspace, 'scripts/ci-backend-trace.mjs'), 65536)),
+      dependenciesSHA256: sha256(readBounded(dependenciesFile, 65536)),
       sourceManifestSHA256: sha256(readBounded(path.join(output, 'source.json'), 65536)),
       launcherSHA256: sha256(readBounded(path.join(source, 'scripts/test-backend.mjs'), 65536)),
       acquisition: 'unknown',

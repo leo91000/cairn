@@ -264,6 +264,9 @@ jobs:
           ref: 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, bundled dist; no package install
           path: .ci-artifact-uploader
           persist-credentials: false
+      - name: Provision the exact candidate dependency context after observer installation
+        if: inputs.ci-diagnostic == 'backend'
+        run: node scripts/ci-backend-dependencies.mjs
       - name: Run diagnostic backend with durable startup and rolling evidence
         if: inputs.ci-diagnostic == 'backend'
         uses: ./.github/actions/backend-durable-evidence
