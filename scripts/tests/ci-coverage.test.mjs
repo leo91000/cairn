@@ -74,8 +74,8 @@ describe('parallel CI coverage', () => {
     expect(backend.steps.some(step => step.name === 'Measure the bounded bootstrap observer without filesystem work')).toBe(true)
     expect(backend.steps.some(step => step.name === 'Qualify native backend namespace isolation with ordinary private bind mounts')).toBe(true)
     expect(backend.steps.some(step => step.name === 'Check Rust documentation examples')).toBe(true)
-    expect(backend.steps.some(step => step.name === 'Qualify the resolved OpenCode release against its native adapter')).toBe(true)
-    expect(backend.steps.some(step => step.name === 'Qualify the resolved Claude Code release against its native adapter')).toBe(true)
+    expect(backend.steps.some(step => step.name === 'Qualify the resolved OpenCode release against its native adapter')).toBe(false)
+    expect(backend.steps.some(step => step.name === 'Qualify the resolved Claude Code release against its native adapter')).toBe(false)
     expect(backend.steps.some(step => step.name === 'Check all Rust targets for a backend-only qualification')).toBe(false)
     expect(backend.steps.some(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'before-build')).toBe(true)
     expect(backend.steps.some(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'after-build')).toBe(true)
@@ -98,7 +98,7 @@ describe('parallel CI coverage', () => {
     expect(runsRustCheck(false, 'success', 'true')).toBe(false)
 
     const selected = quality.jobs['backend-migration-qualification']
-    expect(selected.needs).toBe('backend')
+    expect(selected.needs).toEqual(['backend', 'cli-qualification'])
     expect(selected['timeout-minutes']).toBe(30)
     expect(selected.if).not.toContain('needs.resolve')
     expect(backend.if).toContain('inputs.backend-only == true')
@@ -119,7 +119,10 @@ describe('parallel CI coverage', () => {
     expect(runsBackend(false, 'none', 'success', 'false')).toBe(true)
     expect(runsBackend(true, 'none', 'skipped', '')).toBe(true)
     expect(runsBackend(false, 'backend-migration', 'failure', 'true')).toBe(false)
-    const enabled = selected.if.replaceAll('inputs.backend-qualification', 'selection')
+    const enabled = selected.if
+      .replaceAll('inputs.backend-qualification', 'selection')
+      .replaceAll('inputs.backend-only', 'backendOnly')
+      .replaceAll('needs.cli-qualification', 'needs.cliQualification')
     for (const [selection, backendResult, expected] of [
       ['backend-migration', 'success', true],
       ['backend-migration', 'failure', false],
@@ -130,7 +133,8 @@ describe('parallel CI coverage', () => {
     ]) {
       expect(runInNewContext(enabled, {
         selection,
-        needs: { backend: { result: backendResult } },
+        backendOnly: false,
+        needs: { backend: { result: backendResult }, cliQualification: { result: 'success' } },
         always: () => true,
         cancelled: () => false,
       }, { timeout: 1000 })).toBe(expected)
@@ -153,6 +157,117 @@ describe('parallel CI coverage', () => {
     expect(step.run).not.toContain('--archive-file')
   })
 
+  it('qualifies the exact resolved CLIs in their own bounded job after the normal backend', () => {
+    const job = quality.jobs['cli-qualification']
+    expect(job).toBeDefined()
+    expect(job.needs).toEqual(['resolve', 'backend'])
+    expect(job['timeout-minutes']).toBe(30)
+    expect(job.env).toEqual({ CARGO_PROFILE_DEV_DEBUG: '0', CARGO_INCREMENTAL: '0' })
+    expect(job.steps[0]).toEqual({ uses: 'actions/checkout@v7.0.1' })
+    expect(job.steps[1]).toEqual({ uses: './.github/actions/setup-pnpm', with: { cache: true } })
+    expect(job.steps[2].run).toBe('rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1')
+    expect(job.steps[3].run).toBe('sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot')
+    const qualifications = job.steps.filter(step => step.name?.startsWith('Qualify'))
+    expect(qualifications.map(step => step.name)).toEqual([
+      'Qualify the resolved OpenCode release against its native adapter',
+      'Qualify the resolved Claude Code release against its native adapter',
+    ])
+    for (const step of qualifications) {
+      expect(step.if).toBe('inputs.backend-only != true')
+      expect(step.run).toContain('node scripts/test-backend.mjs -p cairn-installation --test ')
+      expect(step.run).toContain('--ignored')
+      expect(step.run).not.toContain('CAIRN_TEST_REUSED_BUILD')
+    }
+
+    /* eslint-disable no-template-curly-in-string -- exact GitHub expressions shared with the image build */
+    expect(qualifications[0].env).toEqual({
+      OPENCODE_VERSION: '${{ needs.resolve.outputs.opencode }}',
+      SERVED_OPENCODE: '${{ needs.resolve.outputs.served-opencode }}',
+    })
+    expect(qualifications[1].env).toEqual({
+      CLAUDE_VERSION: '${{ needs.resolve.outputs.claude }}',
+      SERVED_CLAUDE: '${{ needs.resolve.outputs.served-claude }}',
+    })
+    /* eslint-enable no-template-curly-in-string */
+    expect(quality.jobs.backend.steps.find(step => step.run?.includes('--nextest --test-threads')).run).toContain('--nextest --test-threads 8 --no-fail-fast --color never --status-level pass')
+  })
+
+  it('preserves CLI selection and combined migration prerequisites across full, reuse and isolated modes', () => {
+    function runs(name, inputs, backendResult, cliResult, resolveResult = 'success', reuse = 'false', ref = 'refs/heads/feature', cancelled = false) {
+      const job = quality.jobs[name]
+      expect(job).toBeDefined()
+      const expression = job.if.replace(/\b(inputs|needs)\.([a-z0-9-]+)\b/g, (_match, scope, property) => `${scope}[${JSON.stringify(property)}]`)
+      const needs = {
+        'resolve': { result: resolveResult, outputs: { reuse } },
+        'backend': { result: backendResult },
+        'cli-qualification': { result: cliResult },
+      }
+      // Match Actions' implicit success guard for any job without a status function.
+      const dependencies = Array.isArray(job.needs) ? job.needs : [job.needs]
+      if (!expression.includes('always()') && dependencies.some(name => needs[name].result !== 'success'))
+        return false
+      return Boolean(runInNewContext(expression, {
+        inputs,
+        needs,
+        github: { ref },
+        always: () => true,
+        cancelled: () => cancelled,
+      }, { timeout: 1000 }))
+    }
+
+    for (const cliResult of ['success', 'failure', 'cancelled', 'skipped']) {
+      for (const backendResult of ['success', 'failure', 'cancelled', 'skipped']) {
+        for (const reuse of ['false', 'true']) {
+          for (const validationOnly of [false, true]) {
+            const full = {
+              'backend-only': false,
+              'validation-only': validationOnly,
+              'backend-qualification': 'backend-migration',
+            }
+            expect(runs('cli-qualification', full, backendResult, cliResult, 'success', reuse)).toBe(backendResult === 'success')
+            expect(runs('backend-migration-qualification', full, backendResult, cliResult, 'success', reuse)).toBe(backendResult === 'success' && cliResult === 'success')
+            const backendOnly = { ...full, 'backend-only': true }
+            expect(runs('cli-qualification', backendOnly, backendResult, cliResult, 'skipped', reuse)).toBe(false)
+            expect(runs('backend-migration-qualification', backendOnly, backendResult, cliResult, 'skipped', reuse)).toBe(backendResult === 'success')
+          }
+        }
+      }
+    }
+
+    for (const ref of ['refs/heads/main', 'refs/heads/feature', 'refs/tags/v0.75.0'])
+      expect(runs('cli-qualification', {}, 'success', 'skipped', 'success', 'false', ref)).toBe(true)
+
+    for (const [backendOnly, selection, reuse, ref, expected] of [
+      [false, 'none', 'false', 'refs/heads/feature', [true, true, false]],
+      [false, 'backend-migration', 'false', 'refs/heads/feature', [true, true, true]],
+      [false, 'none', 'true', 'refs/heads/main', [true, true, false]],
+      [false, 'none', 'true', 'refs/heads/feature', [false, false, false]],
+      [false, 'backend-migration', 'true', 'refs/heads/feature', [true, true, true]],
+      [true, 'backend-migration', '', 'refs/heads/feature', [true, false, true]],
+    ]) {
+      for (const validationOnly of [false, true]) {
+        const inputs = {
+          'backend-only': backendOnly,
+          'backend-qualification': selection,
+          'validation-only': validationOnly,
+        }
+        const resolveResult = backendOnly ? 'skipped' : 'success'
+        const backend = runs('backend', inputs, 'skipped', 'skipped', resolveResult, reuse, ref)
+        const backendResult = backend ? 'success' : 'skipped'
+        const cli = runs('cli-qualification', inputs, backendResult, 'skipped', resolveResult, reuse, ref)
+        const migration = runs('backend-migration-qualification', inputs, backendResult, cli ? 'success' : 'skipped', resolveResult, reuse, ref)
+        expect([backend, cli, migration]).toEqual(expected)
+      }
+    }
+
+    for (const resolveResult of ['failure', 'cancelled', 'skipped'])
+      expect(runs('cli-qualification', {}, 'success', 'success', resolveResult)).toBe(false)
+    expect(runs('cli-qualification', {}, 'success', 'success', 'success', 'false', undefined, true)).toBe(false)
+    for (const selection of ['none', undefined])
+      expect(runs('backend-migration-qualification', { 'backend-qualification': selection }, 'success', 'success')).toBe(false)
+    expect(runs('backend-migration-qualification', { 'backend-qualification': 'backend-migration' }, 'success', 'success', 'success', 'false', undefined, true)).toBe(false)
+  })
+
   it('requires the selected physical qualification for image publication and bypasses it when unselected', () => {
     const publish = quality.jobs.publish
     expect(publish.needs).toContain('backend-migration-qualification')
@@ -168,6 +283,7 @@ describe('parallel CI coverage', () => {
       'quality': { result: 'success' },
       'rust-check': { result: 'success' },
       'backend': { result: 'success' },
+      'cli-qualification': { result: 'success' },
       'node-checks': { result: 'success' },
       'browser': { result: 'success' },
       'network-bench': { result: 'success' },
@@ -177,13 +293,14 @@ describe('parallel CI coverage', () => {
       'image': { result: 'success', outputs: { published: 'true' } },
       'beacon-image': { result: 'success', outputs: { published: 'true' } },
     }
-    const canPublish = (selection, migrationResult, backendResult = 'success', reuse = 'false', validationOnly = false) => runInNewContext(expression, {
+    const canPublish = (selection, migrationResult, backendResult = 'success', reuse = 'false', validationOnly = false, cliResult = 'success') => runInNewContext(expression, {
       selection,
       validationOnly,
       needs: {
         ...baseNeeds,
         'resolve': { outputs: { reuse } },
         'backend': { result: backendResult },
+        'cli-qualification': { result: cliResult },
         'backend-migration-qualification': { result: migrationResult },
       },
       always: () => true,
@@ -193,6 +310,15 @@ describe('parallel CI coverage', () => {
     expect(canPublish('backend-migration', 'success')).toBe(true)
     expect(canPublish('backend-migration', 'failure')).toBe(false)
     expect(canPublish('backend-migration', 'skipped')).toBe(false)
+    expect(canPublish('backend-migration', 'cancelled')).toBe(false)
+    for (const cliResult of ['success', 'failure', 'cancelled', 'skipped']) {
+      for (const selection of ['none', 'backend-migration']) {
+        expect(canPublish(selection, selection === 'none' ? 'skipped' : 'success', 'success', 'false', false, cliResult)).toBe(cliResult === 'success')
+        expect(canPublish(selection, 'success', 'success', 'true', false, cliResult)).toBe(false)
+        expect(canPublish(selection, 'success', 'success', 'false', true, cliResult)).toBe(false)
+      }
+    }
+
     expect(canPublish('none', 'skipped')).toBe(true)
     expect(canPublish(undefined, 'skipped')).toBe(true)
     expect(canPublish(undefined, 'skipped', 'success', 'true')).toBe(false)
@@ -224,10 +350,27 @@ describe('parallel CI coverage', () => {
     expect(canPromote('backend-migration', 'success', 'true')).toBe(true)
     expect(canPromote('backend-migration', 'failure', 'true')).toBe(false)
     expect(canPromote('backend-migration', 'skipped', 'true')).toBe(false)
+    expect(canPromote('backend-migration', 'cancelled', 'true')).toBe(false)
     expect(canPromote('none', 'skipped', 'true')).toBe(true)
     expect(canPromote(undefined, 'skipped', 'true')).toBe(true)
     expect(canPromote('backend-migration', 'success', 'false')).toBe(false)
     expect(canPromote(undefined, 'skipped', 'true', true)).toBe(false)
+
+    const migrationExpression = quality.jobs['backend-migration-qualification'].if
+      .replace(/\b(inputs|needs)\.([a-z0-9-]+)\b/g, (_match, scope, property) => `${scope}[${JSON.stringify(property)}]`)
+    for (const cliResult of ['success', 'failure', 'cancelled', 'skipped']) {
+      const migrationRuns = runInNewContext(migrationExpression, {
+        inputs: { 'backend-qualification': 'backend-migration', 'backend-only': false },
+        needs: { 'backend': { result: 'success' }, 'cli-qualification': { result: cliResult } },
+        always: () => true,
+        cancelled: () => false,
+      }, { timeout: 1000 })
+      const migrationResult = migrationRuns ? 'success' : 'skipped'
+      expect(canPromote('backend-migration', migrationResult, 'true')).toBe(cliResult === 'success')
+      expect(canPromote('backend-migration', migrationResult, 'true', true)).toBe(false)
+      // Without selected migration, reuse retains the trusted prior exact-tree proof.
+      expect(canPromote('none', 'skipped', 'true')).toBe(true)
+    }
   })
 
   it('keeps the PR browser lane conditional, read-only and limited to the saved-chat journey', () => {
@@ -290,7 +433,7 @@ describe('parallel CI coverage', () => {
   })
 
   it('keeps every split validation in the image publication gate', () => {
-    for (const name of ['build', 'quality', 'rust-check', 'backend', 'node-checks', 'browser', 'network-bench', 'native-runtime', 'android-direct-build', 'android-direct', 'image', 'beacon-image']) {
+    for (const name of ['build', 'quality', 'rust-check', 'backend', 'cli-qualification', 'node-checks', 'browser', 'network-bench', 'native-runtime', 'android-direct-build', 'android-direct', 'image', 'beacon-image']) {
       expect(quality.jobs.publish.needs).toContain(name)
       expect(quality.jobs.publish.if).toContain(`needs.${name}.result == 'success'`)
     }
@@ -298,7 +441,7 @@ describe('parallel CI coverage', () => {
 
   it('keeps shared Rust preparation cold and preserves only exact native reference caching', () => {
     expect(existsSync(new URL('../../.github/actions/cache-rust/action.yaml', import.meta.url))).toBe(false)
-    for (const name of ['build', 'rust-check', 'backend', 'node-checks']) {
+    for (const name of ['build', 'rust-check', 'backend', 'cli-qualification', 'node-checks']) {
       const steps = quality.jobs[name].steps
       expect(steps.some(step => step.uses === './.github/actions/cache-rust')).toBe(false)
       expect(steps.some(step => step.uses?.startsWith('actions/cache'))).toBe(false)
@@ -323,7 +466,7 @@ describe('parallel CI coverage', () => {
     const upload = action.runs.steps.find(step => step.uses?.startsWith('actions/upload-artifact'))
     expect(upload['continue-on-error']).toBe(true)
     expect(upload.with.path).toContain('runner.temp')
-    for (const name of ['build', 'rust-check', 'backend', 'node-checks']) {
+    for (const name of ['build', 'rust-check', 'backend', 'cli-qualification', 'node-checks']) {
       const steps = quality.jobs[name].steps
       const before = steps.findIndex(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'before-build')
       const after = steps.findIndex(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'after-build')
