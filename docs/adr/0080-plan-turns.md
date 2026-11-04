@@ -116,10 +116,11 @@ ne sont pas transmises comme propositions de l’agent principal au nouveau mote
 vrais binaires, à travers les adaptateurs de Cairn, face à un modèle local scripté qui
 demande des effets. Aucun identifiant ni service externe n’est utilisé ; toutes les
 écritures visent un répertoire temporaire. Ignorés dans la suite ordinaire, ces tests
-sont lancés par le job `backend` du workflow complet (chaque nuit, sur dispatch manuel et
-pour chaque tag de version), pour les versions de Claude Code et de Codex que le build
-résout ; `publish` dépend de ce job : une version dont la frontière ne tient pas n’est
-pas servie. La validation courte des PR ne les lance pas, ni un dispatch `backend-only`,
+sont lancés par le job `cli-qualification` du workflow complet, après le succès du
+job `backend` (chaque nuit, sur dispatch manuel et pour chaque tag de version), pour
+les versions de Claude Code et de Codex que le build résout. Ce job possède son propre
+budget de 30 minutes ; `publish` exige son succès : une version dont la frontière
+ne tient pas n’est pas servie. La validation courte des PR ne les lance pas, ni un dispatch `backend-only`,
 qui ne résout aucune version. Résultats du 2026-10-27 :
 
 - Claude Code 2.1.308 et 2.1.280 : écritures du shell dans l’espace de travail, le
