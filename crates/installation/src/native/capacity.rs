@@ -203,6 +203,17 @@ pub(super) async fn record_retained(directory: &Path, attempt: &str, workspace: 
 fn retained_credits(state: &Path, active: &HashSet<String>) -> Result<HashMap<String, u64>> {
     use std::{io::Read, os::unix::fs::MetadataExt};
     let mut credits = HashMap::new();
+    // Diagnostic ownership follows storage -> workspace ordering without
+    // advertising foreground intent or waiting behind real storage work.
+    // A busy sample grants no retained credit and still refreshes health.
+    let _storage = match crate::file_lock::exclusive(
+        &state.join("storage.lock"),
+        "Native retained capacity observation is busy.",
+    ) {
+        Ok(storage) => storage,
+        Err(error) if error.status == 409 => return Ok(credits),
+        Err(error) => return Err(error),
+    };
     let entries = match std::fs::read_dir(state.join("native")) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(credits),
@@ -310,6 +321,21 @@ mod tests {
             .await
             .unwrap();
         assert!(sample.retained_bytes[&run] > 0);
+        let storage = crate::file_lock::exclusive(
+            &state.path().join("storage.lock"),
+            "Background preparation owns storage.",
+        )
+        .unwrap();
+        let busy_sample = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            Capacity::default().report(state.path(), 4 * MIB),
+        )
+        .await
+        .expect("busy storage must not delay fresh telemetry")
+        .unwrap();
+        assert!(busy_sample.retained_bytes.is_empty());
+        assert_eq!(busy_sample.protocol, 1);
+        drop(storage);
         drop(disk);
         let original = directory.with_file_name("previous");
         std::fs::rename(&directory, &original).unwrap();
