@@ -530,11 +530,12 @@ fun FilScreen(
     var selectedView by rememberSaveable { mutableIntStateOf(0) }
     var filter by rememberSaveable { mutableStateOf("") }
     val views = listOf(feed.unread, feed.ongoing, feed.all)
+    val query = filter.trim()
     val visible =
         views[selectedView].filter {
-            filter.isBlank() ||
-                listOf(it.title, it.subtitle, it.agent).any { value ->
-                    value.contains(filter, ignoreCase = true)
+            query.isEmpty() ||
+                listOfNotNull(it.title, it.subtitle, it.agent, it.project).any { value ->
+                    value.contains(query, ignoreCase = true)
                 }
         }
     fun retry(item: FeedItem) {

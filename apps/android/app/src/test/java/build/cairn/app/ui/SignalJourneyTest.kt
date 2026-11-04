@@ -433,6 +433,28 @@ class SignalJourneyTest {
         }
 
     @Test
+    fun `compact fil finds questions and failures by their displayed project`() =
+        journey(
+            feedChats =
+                listOf(
+                    chats.first().copy(projectName = "Atlas"),
+                    chats.last().copy(status = "failed", projectName = "Atlas"),
+                    chats[1],
+                )
+        ) {
+            waitText("Choisir la pagination")
+            waitText("Relecture de la PR")
+            compose.onNode(hasSetTextAction()).performTextInput("  aTlAs  ")
+            compose.onNodeWithText("Choisir la pagination").assertExists()
+            compose.onNodeWithText("Relecture de la PR").assertExists()
+            compose.onNodeWithText("Refonte de l’application").assertDoesNotExist()
+            compose.onNode(hasSetTextAction()).performTextReplacement("Absent")
+            compose.onNodeWithText("Choisir la pagination").assertDoesNotExist()
+            compose.onNodeWithText("Relecture de la PR").assertDoesNotExist()
+            compose.onNodeWithText("Aucun résultat").assertExists()
+        }
+
+    @Test
     fun `compact fil keeps the scheduled resume time`() =
         journey(
             feedChats =
