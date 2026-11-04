@@ -108,13 +108,173 @@ function committed(sink) {
   return readdirSync(sink).sort().map(name => JSON.parse(readFileSync(path.join(sink, name), 'utf8')))
 }
 
-function current(pid) {
+function current(pid, read = readFileSync) {
+  let text
   try {
-    const fields = readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ')[1].split(' ')
-    return { start: fields[19], state: fields[0] }
+    text = read(`/proc/${pid}/stat`, 'utf8')
   }
-  catch { return undefined }
+  catch (error) {
+    if (error.code === 'ENOENT')
+      return undefined
+    throw error
+  }
+
+  const header = `${pid} (`
+  const end = text.lastIndexOf(') ')
+  assert.ok(text.startsWith(header) && end >= header.length, 'Invalid process identity header')
+  const fields = text.slice(end + 2).trim().split(/\s+/)
+  assert.ok(fields.length >= 20, 'Incomplete process identity')
+  assert.match(fields[0], /^[RSDZTtXxKWPI]$/, 'Invalid process state')
+  assert.match(fields[19], /^\d+$/, 'Invalid process start time')
+  return { pid, start: fields[19], state: fields[0] }
 }
+
+// These helpers also drive the real fixture assertions and cleanup below.
+function isLive(item, read = current) {
+  const snapshot = read(item.pid)
+  return snapshot?.pid === item.pid && snapshot.start === item.startTicks && snapshot.state !== 'Z'
+}
+
+function signalOwned(item, read = current, kill = process.kill) {
+  if (!isLive(item, read))
+    return
+
+  try {
+    kill(item.pid, 'SIGKILL')
+  }
+  catch (error) {
+    if (error.code !== 'ESRCH')
+      throw error
+  }
+}
+
+async function withCleanup(body, cleanup) {
+  let result
+  let bodyFailure
+  let bodyFailed = false
+  try {
+    result = await body()
+  }
+  catch (error) {
+    bodyFailure = error
+    bodyFailed = true
+  }
+
+  try {
+    await cleanup()
+  }
+  catch (error) {
+    if (bodyFailed)
+      throw new AggregateError([bodyFailure, error], 'Fixture body and cleanup failed')
+    throw error
+  }
+
+  if (bodyFailed)
+    throw bodyFailure
+  return result
+}
+
+const ownedProcess = { pid: 12345, startTicks: '67890' }
+const activeProcess = { pid: ownedProcess.pid, start: ownedProcess.startTicks, state: 'S' }
+const procStat = (pid = ownedProcess.pid, start = ownedProcess.startTicks, state = 'S') => `${pid} (fixture (with) spaces) ${[state, ...Array.from({ length: 18 }).fill('0'), start].join(' ')}`
+
+it.each([1, 2])('uses one identity snapshot when a process disappears after read %s', (readsBeforeExit) => {
+  let reads = 0
+  const read = () => reads++ < readsBeforeExit ? activeProcess : undefined
+  assert.equal(isLive(ownedProcess, read), true)
+  assert.equal(reads, 1)
+})
+
+it.each([
+  ['absent', undefined, false],
+  ['reused', { ...activeProcess, start: '67891' }, false],
+  ['another PID', { ...activeProcess, pid: 12346 }, false],
+  ['zombie', { ...activeProcess, state: 'Z' }, false],
+  ['same live identity', activeProcess, true],
+])('keeps strict identity and liveness for %s', (_label, snapshot, expected) => {
+  let reads = 0
+  assert.equal(isLive(ownedProcess, () => {
+    reads++
+    return snapshot
+  }), expected)
+  assert.equal(reads, 1)
+})
+
+it('reads a complete process identity even when its command contains parentheses and spaces', () => {
+  assert.deepEqual(current(ownedProcess.pid, () => procStat()), activeProcess)
+})
+
+it('accepts only ENOENT as a missing process identity', () => {
+  assert.equal(current(ownedProcess.pid, () => {
+    throw Object.assign(new Error('gone'), { code: 'ENOENT' })
+  }), undefined)
+  for (const code of ['EACCES', 'EPERM', 'EIO']) {
+    const error = Object.assign(new Error('unreadable'), { code })
+    assert.throws(() => current(ownedProcess.pid, () => {
+      throw error
+    }), caught => caught === error)
+  }
+})
+
+it.each(['malformed', procStat(12346), procStat(12345, 'invalid'), procStat(12345, '67890', '?')])('rejects invalid or mismatched process identity %s', (text) => {
+  assert.throws(() => current(ownedProcess.pid, () => text))
+})
+
+it.each([undefined, { ...activeProcess, start: '67891' }, { ...activeProcess, pid: 12346 }, { ...activeProcess, state: 'Z' }])('never signals a missing, reused or retired identity', (snapshot) => {
+  const signals = []
+  signalOwned(ownedProcess, () => snapshot, (...args) => signals.push(args))
+  assert.deepEqual(signals, [])
+})
+
+it('ignores ESRCH when the matched process exits before its signal', () => {
+  let reads = 0
+  const signals = []
+  signalOwned(ownedProcess, () => {
+    reads++
+    return activeProcess
+  }, (...args) => {
+    signals.push(args)
+    throw Object.assign(new Error('gone'), { code: 'ESRCH' })
+  })
+  assert.equal(reads, 1)
+  assert.deepEqual(signals, [[ownedProcess.pid, 'SIGKILL']])
+})
+
+it.each(['EACCES', 'EPERM', 'EIO'])('retains unexpected signal/read error %s', (code) => {
+  const error = Object.assign(new Error('denied'), { code })
+  assert.throws(() => signalOwned(ownedProcess, () => activeProcess, () => {
+    throw error
+  }), caught => caught === error)
+  assert.throws(() => signalOwned(ownedProcess, () => {
+    throw error
+  }, () => assert.fail('signal after unreadable identity')), caught => caught === error)
+})
+
+it('preserves both a fixture body failure and an independent cleanup failure', async () => {
+  const body = new Error('receipt assertion failed')
+  const cleanup = new Error('owned process still live')
+  await assert.rejects(withCleanup(async () => {
+    throw body
+  }, async () => {
+    throw cleanup
+  }), error => error instanceof AggregateError && error.errors[0] === body && error.errors[1] === cleanup)
+})
+
+it('preserves individual fixture outcomes while always running cleanup', async () => {
+  const body = new Error('body failed')
+  const cleanup = new Error('cleanup failed')
+  let cleaned = false
+  await assert.rejects(withCleanup(async () => {
+    throw body
+  }, async () => {
+    cleaned = true
+  }), error => error === body)
+  assert.equal(cleaned, true)
+  await assert.rejects(withCleanup(async () => 7, async () => {
+    throw cleanup
+  }), error => error === cleanup)
+  assert.equal(await withCleanup(() => 7, () => {}), 7)
+})
 
 it('commits source/clock/startup before the real child, checkpoints a never-exiting child, and keeps timeout nonzero', async (t) => {
   const f = fixture(t)
@@ -137,7 +297,7 @@ it('commits source/clock/startup before the real child, checkpoints a never-exit
   assert.ok(receipts.some(item => item.acquisition === 'periodic' && item.proof.samples.some(sample => sample.processCount >= 2)))
   assert.ok(receipts.every(item => item.qualificationClaim === false))
   for (const item of receipts.flatMap(item => item.proof.samples).flatMap(sample => sample.processes))
-    assert.ok(!current(item.pid) || current(item.pid).start !== item.startTicks || current(item.pid).state === 'Z')
+    assert.ok(!isLive(item))
   for (const file of readdirSync(f.directory)) {
     const text = readFileSync(path.join(f.directory, file), 'utf8')
     assert.ok(!text.includes('private-runtime-token-fixture'))
@@ -207,7 +367,7 @@ it('bounds each uploader by the actual remaining API budget', async (t) => {
   await assert.rejects(publish({ clock: f.receipt.clock, acquisition: 'admitted-before-command' }), /failed|unknown/)
   assert.ok(Date.now() - started < 500)
   const pid = JSON.parse(readFileSync(path.join(f.root, 'hanging-uploader'), 'utf8'))
-  assert.ok(!current(pid.pid) || current(pid.pid).start !== pid.start || current(pid.pid).state === 'Z')
+  assert.ok(!isLive({ pid: pid.pid, startTicks: pid.start }))
 })
 
 for (const mode of ['hang', 'periodic-hang', 'finished-hang']) {
@@ -229,7 +389,7 @@ for (const mode of ['hang', 'periodic-hang', 'finished-hang']) {
     signal.abort()
     assert.equal(await result, 130)
     const pid = JSON.parse(readFileSync(marker, 'utf8'))
-    assert.ok(!current(pid.pid) || current(pid.pid).start !== pid.start || current(pid.pid).state === 'Z')
+    assert.ok(!isLive({ pid: pid.pid, startTicks: pid.start }))
     const proof = readProof(path.join(f.output, 'latest.json'))
     assert.equal(proof.samples.at(-1).processCount, 0)
   })
@@ -264,7 +424,7 @@ it('retains remote receipts when the foreground parent is killed, with fixture-o
   const parent = spawn(process.execPath, [worker], { stdio: 'ignore' })
   const closed = new Promise(resolve => parent.once('close', (code, signal) => resolve({ code, signal })))
   let owned = []
-  try {
+  await withCleanup(async () => {
     const until = Date.now() + 2000
     while (Date.now() < until) {
       const receipts = committed(f.sink)
@@ -281,20 +441,17 @@ it('retains remote receipts when the foreground parent is killed, with fixture-o
     assert.equal(receipts[0].candidate, f.receipt.candidate)
     assert.ok(receipts.some(item => item.acquisition === 'periodic'))
     assert.ok(!receipts.some(item => item.acquisition === 'finished'))
-  }
-  finally {
+  }, async () => {
     parent.kill('SIGKILL')
-    for (const item of owned) {
-      if (current(item.pid)?.start === item.startTicks)
-        process.kill(item.pid, 'SIGKILL')
-    }
+    for (const item of owned)
+      signalOwned(item)
 
     await closed
     const until = Date.now() + 1000
-    while (Date.now() < until && owned.some(item => current(item.pid)?.start === item.startTicks && current(item.pid)?.state !== 'Z'))
+    while (Date.now() < until && owned.some(item => isLive(item)))
       await delay(10)
-    assert.ok(owned.every(item => !current(item.pid) || current(item.pid).start !== item.startTicks || current(item.pid).state === 'Z'))
-  }
+    assert.ok(owned.every(item => !isLive(item)))
+  })
 })
 
 it.each(['failure', 'no-receipt', 'hang'])('fails closed before any heavy child on uploader %s', async (mode, t) => {
