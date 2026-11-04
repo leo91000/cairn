@@ -78,9 +78,13 @@ impl Capacity {
             else {
                 continue;
             };
+            let previously_committed = grant["previousAllowanceMiB"]
+                .as_u64()
+                .and_then(|mib| mib.checked_mul(MIB))
+                == Some(bytes);
             if bytes < attempt.bytes
                 || bytes > limit.min(1 << 40)
-                || bytes > self.max_task_bytes && bytes > attempt.bytes
+                || bytes > self.max_task_bytes && bytes > attempt.bytes && !previously_committed
             {
                 continue;
             }
@@ -550,6 +554,43 @@ mod tests {
     }
 
     #[test]
+    fn replayed_durable_grants_survive_a_lowered_cap_without_repeated_growth_requests() {
+        let gib = 1024 * MIB;
+        let mut capacity = Capacity::default();
+        capacity.register("attempt", "run", 144 * gib);
+        // The manager committed 152 GiB under a 200 GiB policy, but that reply
+        // was lost. This is its authenticated replay after the cap became 150.
+        let reply = json!({
+            "protocol": 1, "maxTaskDiskMiB": 150 * 1024,
+            "grants": [{
+                "attemptId": "attempt", "allowanceMiB": 152 * 1024,
+                "previousAllowanceMiB": 152 * 1024, "reason": "granted",
+            }],
+        });
+        capacity.apply(&reply, 1024 * gib);
+        assert_eq!(capacity.attempts["attempt"].bytes, 152 * gib);
+        let (_, notice) = capacity
+            .observe("attempt", 125 * gib, 0, 152 * gib)
+            .unwrap();
+        assert!(!capacity.attempts["attempt"].requested);
+        assert!(
+            notice.unwrap()["text"]
+                .as_str()
+                .unwrap()
+                .contains("150 GiB")
+        );
+        capacity.apply(&reply, 1024 * gib);
+        assert_eq!(capacity.attempts["attempt"].bytes, 152 * gib);
+        assert!(
+            capacity
+                .observe("attempt", 125 * gib, 0, 152 * gib)
+                .unwrap()
+                .1
+                .is_none()
+        );
+    }
+
+    #[test]
     fn new_grants_cannot_cross_the_task_limit_or_shrink_older_workspaces() {
         let gib = 1024 * MIB;
         let mut capacity = Capacity::default();
@@ -558,7 +599,7 @@ mod tests {
         capacity.apply(
             &json!({
                 "protocol": 1, "grants": [
-                    { "attemptId": "new", "allowanceMiB": 160 * 1024 },
+                    { "attemptId": "new", "allowanceMiB": 160 * 1024, "previousAllowanceMiB": 144 * 1024 },
                     { "attemptId": "old", "allowanceMiB": 512 * 1024 },
                 ],
             }),

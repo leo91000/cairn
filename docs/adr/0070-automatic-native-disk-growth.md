@@ -66,6 +66,11 @@ included in the authenticated growth reply so the native controller stops furthe
 requests and gives the agent a specific cleanup notice. Owner changes update the
 notice and the future growth ceiling without restarting an active turn.
 
+Each grant also includes `previousAllowanceMiB`, the manager's durable allowance
+before handling that request. A replay whose allowance equals that recorded value
+can reconcile a lost reply even after the owner lowers the cap. A new grant above
+the current cap is refused; node-budget and no-shrink checks still apply to replays.
+
 Already issued allowances, including workspaces larger than the new setting, keep
 their recorded size and conservative admission accounting. They receive no further
 growth while at or above the current setting. Changing the policy never shrinks an

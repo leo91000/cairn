@@ -2446,6 +2446,7 @@ async fn native_disk_growth_stops_at_the_task_limit_and_preserves_older_allowanc
         (150, 504, 1024),
         (75, 72, 80),
         (300, 296, 1024),
+        (200, 144, 1024),
     ] {
         let f = Fixture::new().await;
         let owner_token = common::relay_fixture::grant(&f.service, &["read", "manage"]).await;
@@ -2507,9 +2508,35 @@ async fn native_disk_growth_stops_at_the_task_limit_and_preserves_older_allowanc
         )
         .await;
 
-        let expected_mib = initial_gib.max(limit_gib) * 1024;
+        let expected_mib = initial_gib.max((initial_gib + 8).min(limit_gib)) * 1024;
+        let mut active_limit_gib = limit_gib;
         // Replaying a lost response must not grant a second increment.
-        for current_mib in [initial_gib * 1024, initial_gib * 1024, expected_mib] {
+        for (index, current_mib) in [initial_gib * 1024, initial_gib * 1024, expected_mib]
+            .into_iter()
+            .enumerate()
+        {
+            if limit_gib == 200 && index == 1 {
+                // The first grant was persisted, but its response was lost. The
+                // owner lowers the cap before the controller retries at 144 GiB.
+                let current = f
+                    .service
+                    .store
+                    .kv("task-storage-limits")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let save = common::request("PUT", "/api/settings/task-storage")
+                    .header("x-test-relay-token", &owner_token)
+                    .body(Body::from(
+                        json!({
+                            "maxDiskGiB": 150, "revision": current["revision"],
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+                assert_eq!(common::send(&f.router, save).await.status(), StatusCode::OK);
+                active_limit_gib = 150;
+            }
             let body = json!({
                 "backend": "native", "nodeProtocol": 2, "executionReady": true,
                 "dataRoot": "/fixture", "runtimeId": "development",
@@ -2535,8 +2562,19 @@ async fn native_disk_growth_stops_at_the_task_limit_and_preserves_older_allowanc
             assert_eq!(response.status(), StatusCode::OK);
             let reply = read_json(response).await;
             let grant = &reply["diskGrowth"]["grants"][0];
-            assert_eq!(reply["diskGrowth"]["maxTaskDiskMiB"], limit_gib * 1024);
+            assert_eq!(
+                reply["diskGrowth"]["maxTaskDiskMiB"],
+                active_limit_gib * 1024
+            );
             assert_eq!(grant["allowanceMiB"], expected_mib, "{reply}");
+            assert_eq!(
+                grant["previousAllowanceMiB"],
+                if index == 0 {
+                    initial_gib * 1024
+                } else {
+                    expected_mib
+                }
+            );
             assert_eq!(
                 grant["reason"],
                 if current_mib < expected_mib {

@@ -252,6 +252,9 @@ pub(crate) fn report(db: &Db<'_>, node: &mut Value, body: &Value) -> Result<Valu
         }
         grants.push(json!({
             "attemptId": request.attempt_id, "allowanceMiB": allowance,
+            // This authenticated pre-request value lets a controller reconcile
+            // an already committed grant even if the policy was since lowered.
+            "previousAllowanceMiB": current,
             "reason": if allowance > request.current_mi_b {
                 "granted"
             } else if current >= task_limit_mib {
