@@ -6,6 +6,10 @@ on:
     - cron: '17 2 * * *'
   workflow_dispatch:
     inputs:
+      rust-disk-proof:
+        description: Qualify the fixed disk preparation with controlled available space
+        type: boolean
+        default: false
       backend-only:
         description: Run backend tests and doctests without release resolution or image jobs
         type: boolean
@@ -84,7 +88,7 @@ jobs:
   build:
     # Browser tests need only these binaries and the frontend, not the whole quality job.
     needs: resolve
-    if: needs.resolve.outputs.reuse != 'true'
+    if: inputs.rust-disk-proof != true && (needs.resolve.outputs.reuse != 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -138,7 +142,7 @@ jobs:
           phase: after-build
   quality:
     needs: resolve
-    if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
+    if: inputs.rust-disk-proof != true && (needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -166,7 +170,7 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -p test_native_docker_workload.py -v
   rust-check:
     needs: resolve
-    if: always() && !cancelled() && (inputs.backend-only == true || needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')
+    if: inputs.rust-disk-proof != true && (always() && !cancelled() && (inputs.backend-only == true || needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -225,22 +229,37 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-nextest@0.9.149
+      - name: Prove cold compilation with about 32 GiB initially free
+        if: inputs.rust-disk-proof == true
+        run: node scripts/qualify-rust-runner-disk.mjs backend
       - name: Run backend tests across binaries with isolated credentials
+        if: inputs.rust-disk-proof != true
         run: |
           set -o pipefail
           node scripts/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level pass 2>&1 | tee backend-tests.log
       - name: Measure the bounded bootstrap observer without filesystem work
+        if: inputs.rust-disk-proof != true
         run: node scripts/test-backend.mjs -p cairn-installation --lib native::bootstrap::tests::observation_hot_path_measurement -- --exact --nocapture
       - name: Measure bounded Native terminal-reason metadata
+        if: inputs.rust-disk-proof != true
         run: node scripts/test-backend.mjs -p cairn-installation --lib native::service::terminal_tests::terminal_reason_metadata_measurement -- --exact --ignored --nocapture
       - name: Qualify native backend namespace isolation with ordinary private bind mounts
+        if: inputs.rust-disk-proof != true
         run: node scripts/test-native-namespace.mjs --sudo
       - name: Check Rust documentation examples
+        if: inputs.rust-disk-proof != true
         run: node scripts/test-backend.mjs --doc
       - uses: ./.github/actions/observe-rust-build
         if: always()
         with:
           phase: after-build
+      - uses: actions/upload-artifact@v7.0.1
+        if: always() && inputs.rust-disk-proof == true
+        with:
+          name: rust-disk-proof-backend
+          path: ${{ runner.temp }}/cairn-rust-disk-proof/
+          if-no-files-found: ignore
+          retention-days: 7
   cli-qualification:
     needs: [resolve, backend]
     if: always() && !cancelled() && inputs.backend-only != true && needs.resolve.result == 'success' && needs.backend.result == 'success'
@@ -262,8 +281,16 @@ jobs:
       - uses: ./.github/actions/observe-rust-build
         with:
           phase: before-build
+      - name: Prove unchanged CLI qualifications with about 32 GiB initially free
+        if: inputs.rust-disk-proof == true
+        env:
+          OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
+          SERVED_OPENCODE: ${{ needs.resolve.outputs.served-opencode }}
+          CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
+          SERVED_CLAUDE: ${{ needs.resolve.outputs.served-claude }}
+        run: node scripts/qualify-rust-runner-disk.mjs cli
       - name: Qualify the resolved OpenCode release against its native adapter
-        if: inputs.backend-only != true
+        if: inputs.rust-disk-proof != true && inputs.backend-only != true
         env:
           OPENCODE_VERSION: ${{ needs.resolve.outputs.opencode }}
           SERVED_OPENCODE: ${{ needs.resolve.outputs.served-opencode }}
@@ -298,7 +325,7 @@ jobs:
             qualify "$resolved" "$served"
           fi
       - name: Qualify the resolved Claude Code release against its native adapter
-        if: inputs.backend-only != true
+        if: inputs.rust-disk-proof != true && inputs.backend-only != true
         env:
           CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
           SERVED_CLAUDE: ${{ needs.resolve.outputs.served-claude }}
@@ -338,9 +365,16 @@ jobs:
         if: always()
         with:
           phase: after-build
+      - uses: actions/upload-artifact@v7.0.1
+        if: always() && inputs.rust-disk-proof == true
+        with:
+          name: rust-disk-proof-cli-qualification
+          path: ${{ runner.temp }}/cairn-rust-disk-proof/
+          if-no-files-found: ignore
+          retention-days: 7
   backend-migration-qualification:
     needs: [backend, cli-qualification]
-    if: always() && !cancelled() && inputs.backend-qualification == 'backend-migration' && needs.backend.result == 'success' && (inputs.backend-only == true || needs.cli-qualification.result == 'success')
+    if: inputs.rust-disk-proof != true && (always() && !cancelled() && inputs.backend-qualification == 'backend-migration' && needs.backend.result == 'success' && (inputs.backend-only == true || needs.cli-qualification.result == 'success'))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -378,7 +412,7 @@ jobs:
           --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     needs: resolve
-    if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
+    if: inputs.rust-disk-proof != true && (needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     # Hosted Ubuntu package downloads can consume over 20 minutes before fixtures run.
     timeout-minutes: 45
@@ -432,7 +466,7 @@ jobs:
   native-runtime:
     name: Native Linux ublk storage and process ownership (CPU workload)
     needs: [resolve, build]
-    if: needs.resolve.outputs.reuse != 'true'
+    if: inputs.rust-disk-proof != true && (needs.resolve.outputs.reuse != 'true')
     runs-on: ubuntu-latest
     # Allow slow kernel-module installation and the complete native qualification.
     timeout-minutes: 90
@@ -587,7 +621,7 @@ jobs:
       CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@postgres:5432/cairn_beacon_test
     name: browser (${{ matrix.group }})
     needs: [resolve, build]
-    if: needs.resolve.outputs.reuse != 'true'
+    if: inputs.rust-disk-proof != true && (needs.resolve.outputs.reuse != 'true')
     runs-on: ubuntu-latest
     # Preparation and evidence upload must not consume the shard's test budget.
     timeout-minutes: 25
@@ -677,7 +711,7 @@ jobs:
   network-bench:
     name: direct-relay network bench (${{ matrix.group }})
     needs: [resolve, build]
-    if: needs.resolve.outputs.reuse != 'true'
+    if: inputs.rust-disk-proof != true && (needs.resolve.outputs.reuse != 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -752,7 +786,7 @@ jobs:
           retention-days: 14
   android-direct-build:
     needs: resolve
-    if: needs.resolve.outputs.reuse != 'true'
+    if: inputs.rust-disk-proof != true && (needs.resolve.outputs.reuse != 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -783,7 +817,7 @@ jobs:
   android-direct:
     name: Android direct-relay device bench (${{ matrix.scenario }})
     needs: [resolve, build, android-direct-build]
-    if: needs.resolve.outputs.reuse != 'true'
+    if: inputs.rust-disk-proof != true && (needs.resolve.outputs.reuse != 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -866,7 +900,7 @@ jobs:
   image:
     # Compile the release image immediately; wait for fixtures only before smoke tests.
     needs: resolve
-    if: inputs.validation-only != true && needs.resolve.outputs.reuse != 'true'
+    if: inputs.rust-disk-proof != true && (inputs.validation-only != true && needs.resolve.outputs.reuse != 'true')
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       published: ${{ env.PUBLISH }}
@@ -1096,7 +1130,7 @@ jobs:
         run: df -h /
   beacon-image:
     needs: resolve
-    if: inputs.validation-only != true && needs.resolve.outputs.reuse != 'true'
+    if: inputs.rust-disk-proof != true && (inputs.validation-only != true && needs.resolve.outputs.reuse != 'true')
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       published: ${{ env.PUBLISH }}
@@ -1163,7 +1197,7 @@ jobs:
     # Main reuses a pull request image without building it; refresh the shared
     # layer cache for later pull requests. This never gates a release.
     needs: resolve
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.resolve.outputs.reuse == 'true'
+    if: inputs.rust-disk-proof != true && (github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.resolve.outputs.reuse == 'true')
     continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -1208,7 +1242,7 @@ jobs:
     # The Intel nested Android test needs hardware GitHub does not provide; it runs locally
     # before releases when Android or runner changes need it (docs/DEPLOYMENT.md) and does not gate CI.
     needs: [resolve, build, quality, rust-check, backend, cli-qualification, backend-migration-qualification, node-checks, browser, network-bench, native-runtime, android-direct-build, android-direct, image, beacon-image]
-    if: always() && !cancelled() && inputs.validation-only != true && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.rust-check.result == 'success' && needs.backend.result == 'success' && needs.cli-qualification.result == 'success' && (inputs.backend-qualification != 'backend-migration' || needs.backend-migration-qualification.result == 'success') && needs.node-checks.result == 'success' && needs.build.result == 'success' && needs.browser.result == 'success' && needs.network-bench.result == 'success' && needs.native-runtime.result == 'success' && needs.android-direct-build.result == 'success' && needs.android-direct.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true' && needs.beacon-image.result == 'success' && needs.beacon-image.outputs.published == 'true'
+    if: inputs.rust-disk-proof != true && (always() && !cancelled() && inputs.validation-only != true && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.rust-check.result == 'success' && needs.backend.result == 'success' && needs.cli-qualification.result == 'success' && (inputs.backend-qualification != 'backend-migration' || needs.backend-migration-qualification.result == 'success') && needs.node-checks.result == 'success' && needs.build.result == 'success' && needs.browser.result == 'success' && needs.network-bench.result == 'success' && needs.native-runtime.result == 'success' && needs.android-direct-build.result == 'success' && needs.android-direct.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true' && needs.beacon-image.result == 'success' && needs.beacon-image.outputs.published == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -1257,7 +1291,7 @@ jobs:
           overwrite: true
   promote:
     needs: [resolve, backend-migration-qualification]
-    if: always() && !cancelled() && inputs.validation-only != true && needs.resolve.outputs.reuse == 'true' && (inputs.backend-qualification != 'backend-migration' || needs.backend-migration-qualification.result == 'success')
+    if: inputs.rust-disk-proof != true && (always() && !cancelled() && inputs.validation-only != true && needs.resolve.outputs.reuse == 'true' && (inputs.backend-qualification != 'backend-migration' || needs.backend-migration-qualification.result == 'success'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -1275,7 +1309,7 @@ jobs:
           digest: ${{ needs.resolve.outputs.beacon-digest }}
           token: ${{ secrets.GITHUB_TOKEN }}
   deploy:
-    if: always() && !cancelled() && inputs.validation-only != true && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && (needs.publish.result == 'success' || needs.promote.result == 'success')
+    if: inputs.rust-disk-proof != true && (always() && !cancelled() && inputs.validation-only != true && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && (needs.publish.result == 'success' || needs.promote.result == 'success'))
     needs: [resolve, image, beacon-image, publish, promote]
     permissions:
       contents: read
