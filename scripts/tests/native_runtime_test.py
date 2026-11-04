@@ -125,6 +125,20 @@ def eventually(check, timeout=60):
     raise AssertionError('Timed out waiting for native runtime evidence.')
 
 
+def retained_health(api, run):
+    def sample():
+        health = api('/health', method='GET')
+        if health.get('status') != 'ok':
+            return None
+        growth = health.get('diskGrowth') or {}
+        retained = growth.get('retainedBytes', {})
+        return health if retained.get(run, 0) > 0 else None
+
+    # Health is a cached observation. Busy storage deliberately grants no
+    # retained credit; wait for an idle sample and retain that exact snapshot.
+    return eventually(sample)
+
+
 # Identical workload for the direct host reference and the actual sandbox engine.
 # Each run performs fsynced writes and reads the deterministic seeded asset.
 MEASURE = '''import json,os,time
@@ -720,7 +734,7 @@ def main():
             api('/runs/' + readonly_resume, method='DELETE')
             fenced(readonly_run, readonly_resume)
             assert not (state / 'native-block' / run / 'root/disk.blk').exists(), 'Retired device inode was retained.'
-            stopped_health = api('/health', method='GET')
+            stopped_health = retained_health(api, run)
             assert stopped_health['usage']['diskBytes'] > 0
             assert stopped_health['diskGrowth']['retainedBytes'][run] > 0, 'Stopped journal lost its measured admission credit.'
             point = manager('publish', run=run)
