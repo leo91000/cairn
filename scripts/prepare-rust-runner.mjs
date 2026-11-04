@@ -55,7 +55,25 @@ const nativeInputs = new Set([
 ])
 
 function contains(directory, location) {
-  return location === directory || location.startsWith(`${directory}${path.sep}`)
+  const prefix = directory.endsWith(path.sep) ? directory : `${directory}${path.sep}`
+  return location === directory || location.startsWith(prefix)
+}
+
+function canonicalBuildPath(location, workspace, filesystem) {
+  const suffix = []
+  let directory = path.resolve(workspace, location)
+  for (;;) {
+    try {
+      return path.join(filesystem.realpathSync(directory), ...suffix)
+    }
+    catch (error) {
+      const parent = path.dirname(directory)
+      if (error.code !== 'ENOENT' || parent === directory)
+        throw error
+      suffix.unshift(path.basename(directory))
+      directory = parent
+    }
+  }
 }
 
 export function prepareRustRunner(environment, dependencies = {}) {
@@ -87,6 +105,7 @@ export function prepareRustRunner(environment, dependencies = {}) {
     || /^(?:CC|CXX|AR|ARFLAGS|LD|RANLIB|CFLAGS|CXXFLAGS|CPPFLAGS)_/.test(name)
     || /^PKG_CONFIG(?:_|$)/.test(name)
     || /^BINDGEN_EXTRA_CLANG_ARGS(?:_|$)/.test(name)
+    || /^(?:[A-Z0-9_]+_)?OPENSSL_/.test(name)
     || /^CARGO_TARGET_.+_(?:LINKER|AR|RUSTFLAGS|RUNNER)$/.test(name)
     || /^CARGO_BUILD_(?:RUSTC|RUSTC_WRAPPER|RUSTC_WORKSPACE_WRAPPER|RUSTFLAGS|RUSTDOCFLAGS|TARGET)$/.test(name)
   ))
@@ -113,6 +132,22 @@ export function prepareRustRunner(environment, dependencies = {}) {
       throw new Error('An unused SDK directory overlaps a protected build location.')
   }
 
+  // SDK inventory variables and unused PATH entries advertise preinstalled tools;
+  // other filesystem-valued inputs may select native dependencies through aliases.
+  for (const [name, value] of Object.entries(environment)) {
+    if (!value || name === 'PATH' || /^(?:ANDROID_|DOTNET_|SWIFT_)/.test(name))
+      continue
+    if (!path.isAbsolute(value) && !/(?:DIR|ROOT|PREFIX|LIBDIR|INCLUDEDIR|PATH|HOME|FILE)$/.test(name))
+      continue
+    for (const candidate of new Set([value, ...value.split(path.delimiter)])) {
+      if (!candidate)
+        continue
+      const location = canonicalBuildPath(candidate, workspace, filesystem)
+      if (UNUSED_SDK_DIRECTORIES.some(directory => contains(directory, location)))
+        throw new Error(`A native filesystem input references an SDK scheduled for reclamation: ${name}`)
+    }
+  }
+
   const cargoConfigs = new Set(['config', 'config.toml'].map(name => path.join(protectedDirectories[3], name)))
   for (let directory = workspace; ; directory = path.dirname(directory)) {
     for (const name of ['config', 'config.toml'])
@@ -134,17 +169,29 @@ export function prepareRustRunner(environment, dependencies = {}) {
     throw new Error(`Rust SDK reclamation does not support Cargo configuration files: ${configuration}`)
   }
 
-  const mountpoints = filesystem.readFileSync('/proc/self/mountinfo', 'utf8').trim().split('\n').map((line) => {
+  const mounts = filesystem.readFileSync('/proc/self/mountinfo', 'utf8').trim().split('\n').map((line) => {
     const fields = line.split(' ')
-    if (fields.length < 10 || fields.indexOf('-') < 6 || !fields[4]?.startsWith('/'))
+    const separator = fields.indexOf('-')
+    if (fields.length < 10 || separator < 6 || !fields[4]?.startsWith('/'))
       throw new Error('Could not establish the runner mount topology before reclamation.')
-    return fields[4].replace(/\\([0-7]{3})/g, (_match, octal) => String.fromCharCode(Number.parseInt(octal, 8)))
+    const decode = value => value.replace(/\\([0-7]{3})/g, (_match, octal) => String.fromCharCode(Number.parseInt(octal, 8)))
+    return {
+      device: fields[2],
+      root: decode(fields[3]),
+      point: decode(fields[4]),
+      filesystem: fields[separator + 1],
+    }
   })
-  if (!mountpoints.includes('/'))
+  const roots = mounts.filter(mount => mount.point === '/')
+  if (roots.length !== 1 || roots[0].root !== '/' || roots[0].filesystem === 'overlay')
     throw new Error('Could not establish the runner root mount before reclamation.')
   for (const directory of UNUSED_SDK_DIRECTORIES) {
-    if (mountpoints.some(mountpoint => contains(directory, mountpoint)))
-      throw new Error(`Refusing a mounted SDK directory or descendant: ${directory}`)
+    const aliased = mounts.some(mount => mount.point !== '/' && (
+      contains(directory, mount.point) || contains(mount.point, directory)
+      || (mount.device === roots[0].device && (contains(directory, mount.root) || contains(mount.root, directory)))
+    ))
+    if (aliased)
+      throw new Error(`Refusing a mounted or aliased SDK directory: ${directory}`)
   }
 
   const toolLocations = execute('which', buildTools, { encoding: 'utf8', timeout: Math.min(10000, remaining()), stdio: ['ignore', 'pipe', 'pipe'] })

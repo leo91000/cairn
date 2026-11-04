@@ -192,6 +192,10 @@ describe('disposable Rust test runner disk preparation', () => {
     { TARGET_CC: '/usr/share/swift/usr/bin/clang' },
     { HOST_CFLAGS: '-I/usr/share/swift/usr/include' },
     { TARGET_CFLAGS: '-I/usr/share/swift/usr/include' },
+    { OPENSSL_DIR: '/usr/share/swift/usr' },
+    { OPENSSL_LIB_DIR: '/opt/active-crypto' },
+    { OPENSSL_INCLUDE_DIR: '/opt/active-crypto' },
+    { X86_64_UNKNOWN_LINUX_GNU_OPENSSL_DIR: '/opt/active-crypto' },
   ])('preserves target-specific native overrides without guessing their paths: %j', (change) => {
     const dependencies = fixture()
     expect(() => prepareRustRunner({ ...environment, ...change }, dependencies)).toThrow('stock native tools')
@@ -268,7 +272,7 @@ describe('disposable Rust test runner disk preparation', () => {
   ])('refuses same-filesystem mounts at or beneath an SDK root: %s', (mountpoint) => {
     const dependencies = fixture()
     dependencies.filesystem.readFileSync.mockReturnValue(`1 0 8:1 / / rw - ext4 /dev/root rw\n2 1 8:1 /home ${mountpoint} rw - ext4 /dev/root rw\n`)
-    expect(() => prepareRustRunner(environment, dependencies)).toThrow('mounted SDK directory or descendant')
+    expect(() => prepareRustRunner(environment, dependencies)).toThrow('mounted or aliased SDK directory')
     expect(dependencies.execute).not.toHaveBeenCalled()
   })
 
@@ -277,6 +281,34 @@ describe('disposable Rust test runner disk preparation', () => {
     dependencies.filesystem.readFileSync.mockReturnValue('')
     expect(() => prepareRustRunner(environment, dependencies)).toThrow('mount topology')
     expect(dependencies.execute).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    '2 1 8:1 /home/runner/shared /usr/share rw - ext4 /dev/root rw',
+    '2 1 8:1 /usr/share/swift /opt/native-alias rw - ext4 /dev/root rw',
+    '2 1 8:1 / /opt/root-alias rw - ext4 /dev/root rw',
+  ])('refuses SDK ancestor and source bind aliases before any deletion: %s', (mount) => {
+    const dependencies = fixture()
+    dependencies.filesystem.readFileSync.mockReturnValue(`1 0 8:1 / / rw - ext4 /dev/root rw\n${mount}\n`)
+    expect(() => prepareRustRunner(environment, dependencies)).toThrow('mounted or aliased SDK directory')
+    expect(dependencies.execute).not.toHaveBeenCalled()
+  })
+
+  it('protects unenumerated filesystem-valued dependency inputs through aliases', () => {
+    const dependencies = fixture()
+    dependencies.filesystem.realpathSync.mockImplementation(location => location === '/opt/active-crypto' ? '/usr/share/swift/usr' : location)
+    expect(() => prepareRustRunner({ ...environment, CRYPTO_BACKEND_DIR: '/opt/active-crypto' }, dependencies)).toThrow('native filesystem input')
+    expect(dependencies.execute).not.toHaveBeenCalled()
+  })
+
+  it('keeps passive preinstalled-SDK inventory metadata distinct from native tool selection', () => {
+    const dependencies = fixture()
+    expect(prepareRustRunner({
+      ...environment,
+      ANDROID_HOME: '/usr/local/lib/android/sdk',
+      DOTNET_ROOT: '/usr/share/dotnet',
+      SWIFT_PATH: '/usr/share/swift/usr/bin',
+    }, dependencies).directories.every(directory => directory.status === 'removed')).toBe(true)
   })
 
   it('checks the actual rustup-selected compiler rather than only its PATH shim', () => {
