@@ -1334,10 +1334,16 @@ mod migration_tests {
             .unwrap();
         drop(store);
         let db = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
-        // Startup will replay A16 after this fixture's grant conversion.
-        db.execute_batch("DROP TABLE skill_source_refs; DROP TABLE skill_sources;
+        // Remove post-v23 tables and Plan columns; merely rewinding the version
+        // leaves an invalid historical input for those later migrations.
+        db.execute_batch("ALTER TABLE chat_messages DROP COLUMN plan;
+ALTER TABLE chat_questions DROP COLUMN plan;
+DROP TABLE coding_agent_configurations;
+DROP TABLE skill_source_refs; DROP TABLE skill_sources;
 DROP TABLE artifact_visibility; DROP TABLE artifact_versions; DROP TABLE artifacts;
 DROP TABLE plugin_grant_resources; DROP TABLE plugin_contribution_grants; DROP TABLE plugin_credential_suppliers; PRAGMA user_version=23;").unwrap();
+        assert!(db.prepare("SELECT plan FROM chat_messages").is_err());
+        assert!(db.prepare("SELECT plan FROM chat_questions").is_err());
         let timeline = db
             .query_row::<String, _, _>(
                 "SELECT sql FROM sqlite_master WHERE name='timeline_entries'",
@@ -1355,6 +1361,16 @@ DROP TABLE plugin_grant_resources; DROP TABLE plugin_contribution_grants; DROP T
                 .unwrap(),
             crate::store::DATABASE_VERSION
         );
+        for table in ["chat_messages", "chat_questions"] {
+            let default: String = db
+                .query_row(
+                    "SELECT dflt_value FROM pragma_table_info(?) WHERE name='plan'",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(default, "0", "new Plan flag in {table}");
+        }
         assert_eq!(
             db.query_row::<String, _, _>(
                 "SELECT sql FROM sqlite_master WHERE name='timeline_entries'",

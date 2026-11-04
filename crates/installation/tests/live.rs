@@ -8,6 +8,7 @@ use common::relay_fixture::router;
 
 use axum::http::StatusCode;
 use cairn_installation::{
+    auth::hex_digest,
     config::{Config, MAIN_AGENT_ID, id},
     error::Error,
     run_status::RunStatus,
@@ -2047,8 +2048,8 @@ async fn conversation_streams_mask_queued_and_sending_private_answers() {
 #[tokio::test]
 async fn large_plan_proposals_use_bounded_stream_and_history_references() {
     let f = Fixture::new().await;
-    // This accepted native-sized proposal exceeded Android's old 16 MiB SSE
-    // limit because both envelope text and item text contain the approach.
+    // The canonical native-sized item exceeds the ordinary frame budget even
+    // though the separate generic event summary is capped at 16000 characters.
     let text = format!("{}🦊 final decision", "x".repeat(9 * 1024 * 1024));
     let payload = json!({
         "parent_tool_use_id": "child-plan", "request_id": "reviewed-request",
@@ -2100,6 +2101,7 @@ async fn large_plan_proposals_use_bounded_stream_and_history_references() {
     let mut restored = String::new();
     let mut offset = 0;
     let mut sha = Value::Null;
+    let mut total_bytes = None;
     loop {
         let response = client
             .post(&url)
@@ -2112,6 +2114,14 @@ async fn large_plan_proposals_use_bounded_stream_and_history_references() {
         let bytes = response.bytes().await.unwrap();
         assert!(bytes.len() < 256 * 1024);
         let part: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(part["runId"], f.run);
+        assert_eq!(part["encoding"], "utf-8");
+        assert_eq!(part["format"], "json");
+        let total = part["totalBytes"].as_u64().unwrap();
+        if let Some(previous) = total_bytes {
+            assert_eq!(total, previous);
+        }
+        total_bytes = Some(total);
         if !sha.is_null() {
             assert_eq!(part["sha256"], sha);
         }
@@ -2124,14 +2134,31 @@ async fn large_plan_proposals_use_bounded_stream_and_history_references() {
         }
         let next = part["nextOffset"].as_u64().unwrap();
         assert!(next > offset);
+        assert_eq!(next, restored.len() as u64);
         offset = next;
     }
+    assert_eq!(Some(restored.len() as u64), total_bytes);
+    assert_eq!(sha.as_str().unwrap(), hex_digest(&restored));
     let restored: Value = serde_json::from_str(&restored).unwrap();
     assert_eq!(restored["id"], event_id);
-    assert_eq!(restored["text"], text);
-    assert_eq!(restored["payload"]["item"]["text"], text);
+    let canonical = restored["payload"]["item"]["text"].as_str().unwrap();
+    // Compare every byte without printing a multi-megabyte diff on failure.
+    assert!(
+        canonical == text,
+        "canonical proposal differs: expected {} UTF-8 bytes, received {}",
+        text.len(),
+        canonical.len()
+    );
+    assert_eq!(restored["payload"]["item"]["id"], "proposal");
+    assert_eq!(restored["payload"]["item"]["type"], "proposed_plan");
     assert_eq!(restored["payload"]["parent_tool_use_id"], "child-plan");
     assert_eq!(restored["payload"]["request_id"], "reviewed-request");
+    let summary = restored["text"].as_str().unwrap();
+    assert_eq!(summary.chars().count(), 16000);
+    assert!(
+        text.starts_with(summary),
+        "generic event text must retain only its bounded summary"
+    );
     let wrong_run = client
         .post(&url)
         .header("x-test-relay-token", &f.token)

@@ -130,16 +130,91 @@ class SubagentsTest {
                 put("text", "Approach")
                 put("request_id", request?.let(::JsonPrimitive) ?: JsonNull)
             }
+        val start = turn("turn.started")
         val completed = proposal("request-a")
-        assertEquals("run:${completed.id}", proposedPlanApproval(listOf(initial, completed)))
+        val end = turn("turn.completed")
+        val before = listOf(initial, start, completed, end)
+        val original = timelineEntries(before, chat = true).single { it.proposal }
+        assertEquals("run:${completed.id}", proposedPlanApproval(before))
         val clarification = user("request-b")
         val replay = proposal("request-a")
-        assertNull(proposedPlanApproval(listOf(initial, completed, clarification, replay)))
+        val restored = before + listOf(clarification, replay)
+        val folded = timelineEntries(restored, chat = true).single { it.proposal }
+        assertEquals(original.key, folded.key)
+        assertEquals(completed.id, folded.events.single().id)
+        assertEquals(listOf(completed.id, replay.id), folded.sourceIds.getValue(completed.id))
+        assertEquals("run:${replay.id}", folded.proposalSourceId)
+        assertNull(proposedPlanApproval(restored))
         assertNull(proposedPlanApproval(listOf(clarification, replay)))
         assertNull(proposedPlanApproval(listOf(proposal(null))))
         val revised = proposal("request-b")
         assertEquals("run:${revised.id}", proposedPlanApproval(listOf(clarification, revised)))
         assertEquals("run:${revised.id}", proposedPlanApproval(listOf(revised)))
+    }
+
+    @Test
+    fun `proposal folding separates authored requests runs and child parents`() {
+        fun proposal(request: String, run: String = "run", parent: String? = null) =
+            item("item.completed", run) {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", request)
+                put("request_id", request)
+                if (parent != null) put("parent_id", parent)
+            }
+        val first = proposal("request-a")
+        val second = proposal("request-b")
+        val otherRun = proposal("request-a", "other-run")
+        val child = proposal("request-a", parent = "Research")
+        val otherChild = proposal("request-a", parent = "Review")
+        val replay = proposal("request-a")
+        val timeline =
+            timelineEntries(listOf(first, second, otherRun, child, otherChild, replay), chat = true)
+        val proposals = timeline.filter { it.proposal }
+        assertEquals(3, proposals.size)
+        assertEquals(
+            listOf(first.id, second.id, otherRun.id),
+            proposals.map { it.events.single().id },
+        )
+        assertEquals("run:${replay.id}", proposals.first().proposalSourceId)
+        assertEquals(
+            listOf(child, otherChild),
+            timeline.filterNot { it.proposal }.flatMap { it.events },
+        )
+    }
+
+    @Test
+    fun `legacy proposal folding stays within its turn and completed requests bind their starts`() {
+        fun proposal(type: String, request: String? = null) =
+            item(type) {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", "Approach")
+                if (request != null) put("request_id", request)
+            }
+        val started = proposal("item.started")
+        val completed = proposal("item.completed", "request-a")
+        val end = turn("turn.completed")
+        val nextLegacy = proposal("item.completed")
+        val failed = turn("turn.failed")
+        val followingLegacy = proposal("item.completed")
+        val replay = proposal("item.completed", "request-a")
+        val proposals =
+            timelineEntries(
+                    listOf(started, completed, end, nextLegacy, failed, followingLegacy, replay),
+                    chat = true,
+                )
+                .filter { it.proposal }
+        assertEquals(3, proposals.size)
+        assertEquals(
+            listOf(started.id, nextLegacy.id, followingLegacy.id),
+            proposals.map { it.events.single().id },
+        )
+        assertEquals(
+            listOf(started.id, completed.id, replay.id),
+            proposals.first().sourceIds.getValue(started.id),
+        )
+        assertEquals("run:${replay.id}", proposals.first().proposalSourceId)
     }
 
     @Test

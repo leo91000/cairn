@@ -82,7 +82,20 @@ impl App {
 
     /// Inserts a finished run, with its events, directly in the database.
     async fn add_finished_run(&self, run: &str, status: RunStatus, extra: Value, context: &str) {
+        self.add_finished_run_with_request(run, status, extra, context, None)
+            .await;
+    }
+
+    async fn add_finished_run_with_request(
+        &self,
+        run: &str,
+        status: RunStatus,
+        extra: Value,
+        context: &str,
+        request_id: Option<&str>,
+    ) {
         let (run, context) = (run.to_owned(), context.to_owned());
+        let payload = request_id.map(|request_id| json!({ "messageId": request_id }));
         let mut record = json!({
             "id": run,
             "taskId": run,
@@ -99,7 +112,7 @@ impl App {
             .store
             .transaction(move |db| {
                 db.add_run_fixture(&record, None)?;
-                db.event(&run, &EventKind::ChatUser, &context, None)?;
+                db.event(&run, &EventKind::ChatUser, &context, payload.as_ref())?;
                 Ok(())
             })
             .await
@@ -2402,11 +2415,12 @@ async fn legacy_proposals_without_request_ids_require_one_unambiguous_request() 
         let chat = app.create_chat().await;
         let chat_id = text(&chat, "id").to_owned();
         let run = id();
-        app.add_finished_run(
+        app.add_finished_run_with_request(
             &run,
             RunStatus::Succeeded,
             json!({ "snapshot": { "agent": { "provider": "codex" } } }),
             "Plan request",
+            Some(request_ids[0]),
         )
         .await;
         let (c, r) = (chat_id.clone(), run.clone());
@@ -2417,7 +2431,8 @@ async fn legacy_proposals_without_request_ids_require_one_unambiguous_request() 
                 let mut chat = db.conversation_boundary(&c)?.unwrap();
                 chat["runId"] = r.clone().into();
                 db.save_conversation_boundary(&chat)?;
-                for request_id in request_ids {
+                // The run helper already recorded the first human delivery.
+                for request_id in request_ids.into_iter().skip(1) {
                     db.event(
                         &r,
                         &EventKind::ChatUser,
@@ -2557,13 +2572,40 @@ async fn implementation_rejects_newer_unfinished_root_lifecycles() {
 
                 // Steering before the final completion belongs to the reviewed approach.
                 let r = run.clone();
-                let completed = app.service.store.transaction(move |db| {
-                    db.event(&r, &EventKind::ChatUser, "Clarify the design", None)?;
-                    db.event(&r, &EventKind::ItemCompleted, "Clarified plan", Some(&json!({
-                        "item": { "id": proposal, "type": "proposed_plan", "text": "Clarified plan" }
-                    })))?;
-                    Ok(db.0.query_row("SELECT MAX(id) FROM events WHERE run_id=?", [r], |row| row.get::<_, i64>(0))?)
-                }).await.unwrap();
+                let completed = app
+                    .service
+                    .store
+                    .transaction(move |db| {
+                        let request_id = id();
+                        db.event(
+                            &r,
+                            &EventKind::ChatUser,
+                            "Clarify the design",
+                            Some(&json!({
+                                "messageId": request_id
+                            })),
+                        )?;
+                        db.event(
+                            &r,
+                            &EventKind::ItemCompleted,
+                            "Clarified plan",
+                            Some(&json!({
+                                "item": {
+                                    "id": proposal,
+                                    "type": "proposed_plan",
+                                    "text": "Clarified plan",
+                                    "request_id": request_id
+                                }
+                            })),
+                        )?;
+                        Ok(db.0.query_row(
+                            "SELECT MAX(id) FROM events WHERE run_id=?",
+                            [r],
+                            |row| row.get::<_, i64>(0),
+                        )?)
+                    })
+                    .await
+                    .unwrap();
                 let (_, snapshot) = app.get(&path).await;
                 let message = json!({
                     "id": id(), "text": "Implement the plan you proposed.",
