@@ -715,7 +715,9 @@ internal fun timelineEntries(
     Performance.measure(PerfOperation.TIMELINE) {
         val folded = mutableListOf<RunEvent>()
         val sources = mutableListOf<MutableList<Long>>()
-        val positions = mutableMapOf<Triple<String, String, String>, Int>()
+        val positions = mutableMapOf<List<String>, Int>()
+        val proposals = mutableMapOf<List<String>, Int>()
+        val proposalRequests = mutableMapOf<Int, String>()
         val subagents = subagentTimeline(events)
         for (event in events) {
             // Context usage is a measurement the conversation header shows, not an activity.
@@ -742,15 +744,29 @@ internal fun timelineEntries(
                 // item ID must not replace the conversation's own proposed plan.
                 val proposalParent =
                     if (itemType == "proposed_plan") item.string("parent_id") else ""
-                val key = Triple(itemType, id, proposalParent)
-                val index = positions[key]
+                val key = listOf(event.runId, itemType, id, proposalParent)
+                val requestId = if (itemType == "proposed_plan") item.string("request_id") else ""
+                // Authored proposals survive receipt replay across turn boundaries. Legacy
+                // proposals without a request identity stay scoped to their current turn.
+                val requestKey = if (requestId.isNotBlank()) key + requestId else null
+                val sameTurn = positions[key]
+                val sameTurnRequest = sameTurn?.let(proposalRequests::get)
+                val sameTurnIsCompatible =
+                    sameTurnRequest == null || requestId.isBlank() || sameTurnRequest == requestId
+                val index =
+                    requestKey?.let(proposals::get) ?: sameTurn?.takeIf { sameTurnIsCompatible }
+                val position = index ?: folded.size
+                positions[key] = position
                 if (index == null) {
-                    positions[key] = folded.size
                     folded.add(event)
                     sources.add(mutableListOf(event.id))
                 } else {
                     folded[index] = event.copy(id = folded[index].id)
                     sources[index].add(event.id)
+                }
+                if (requestKey != null) {
+                    proposals[requestKey] = position
+                    proposalRequests[position] = requestId
                 }
             } else {
                 folded.add(event)

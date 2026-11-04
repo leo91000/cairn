@@ -3713,18 +3713,34 @@ async fn plan_turns_only_read_the_installation() {
         }),
     )
     .await;
+    let ordinary_names = result(&ordinary)["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|operation| operation["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
     assert_eq!(
-        result(&ordinary)["operations"]
-            .as_array()
-            .unwrap()
+        ordinary_names
             .iter()
-            .map(|operation| operation["name"].as_str().unwrap())
-            .collect::<Vec<_>>(),
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
         [
             "list_source_projects",
             "get_skill_source_status",
             "preview_agent",
             "get_plugin_operation",
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+    );
+    // Search filters membership but retains catalogue order, not input order.
+    assert_eq!(
+        ordinary_names,
+        [
+            "preview_agent",
+            "get_plugin_operation",
+            "list_source_projects",
+            "get_skill_source_status",
         ]
     );
     let planning = json!({ "messageId": "plan-message", "text": "Plan", "plan": true });

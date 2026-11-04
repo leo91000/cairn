@@ -511,9 +511,9 @@ abstract class PlanTurnCases {
                 )
             val clarification =
                 RunEvent(
-                    id = 2,
+                    id = 5,
                     runId = "run",
-                    createdAt = 2,
+                    createdAt = 5,
                     type = "chat.user",
                     text = "Clarifie le plan",
                     payload =
@@ -522,14 +522,39 @@ abstract class PlanTurnCases {
                             put("text", "Clarifie le plan")
                         },
                 )
+            val initial =
+                clarification.copy(
+                    id = 1,
+                    createdAt = 1,
+                    text = "Prépare le plan",
+                    payload =
+                        buildJsonObject {
+                            put("messageId", "request-a")
+                            put("text", "Prépare le plan")
+                        },
+                )
+            fun boundary(id: Long, type: String) =
+                RunEvent(id = id, runId = "run", createdAt = id, type = type, text = "")
             val vm =
-                mountPlanChat(server, chat, listOf(proposal(1), clarification, proposal(3)), calls)
+                mountPlanChat(
+                    server,
+                    chat,
+                    listOf(
+                        initial,
+                        boundary(2, "turn.started"),
+                        proposal(3),
+                        boundary(4, "turn.completed"),
+                        clarification,
+                        proposal(6),
+                    ),
+                    calls,
+                )
             try {
                 compose.waitUntil(20000) {
                     compose.onAllNodesWithTag("proposed-plan").fetchSemanticsNodes().isNotEmpty()
                 }
                 // Markdown renders through its native wrapper, not a Compose Text node.
-                compose.onNodeWithTag("proposed-plan").assertExists()
+                compose.onAllNodesWithTag("proposed-plan").assertCountEquals(1)
                 compose.onNodeWithText("Plan proposé").assertExists()
                 compose.onAllNodesWithTag("implement-plan").assertCountEquals(0)
                 assertTrue(calls.isEmpty())
