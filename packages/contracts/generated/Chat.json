@@ -2648,6 +2648,17 @@
       },
       "type": "array"
     },
+    "readAt": {
+      "default": null,
+      "description": "Latest visible question or finished turn to acknowledge, independently of its status.",
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
     "requestedBy": {
       "anyOf": [
         {

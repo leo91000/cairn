@@ -16,7 +16,7 @@ pub(crate) struct PersonalOperation {
 pub(crate) const PERSONAL_OPERATIONS: &[PersonalOperation] = &[
     PersonalOperation {
         name: "mark_read",
-        description: "Mark finished conversation turns or mission results as read for the Cairn account that authorized this connection, with the finish time of the work read; later work stays unread. Executions have no account delegation and are refused.",
+        description: "Acknowledge conversation questions, finished turns (including errors), or mission results for the Cairn account that authorized this connection. Pass the conversation readAt or mission finishedAt; later work stays unread. Reading does not answer a question or change execution status. Executions have no account delegation and are refused.",
     },
     PersonalOperation {
         name: "set_outcome_aside",

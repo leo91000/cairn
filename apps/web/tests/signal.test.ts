@@ -6,6 +6,7 @@ import {
   backgroundWait,
   dismissible,
   filOf,
+  filViews,
   identityColor,
   liveElapsed,
   shortAge,
@@ -498,4 +499,86 @@ describe('delegated conversations', () => {
     expect(fil.live.find(item => item.chatId === 'delegated')?.requester).toEqual({ title: 'Refactor the send queue', to: '/chats/requester' })
     expect(fil.recent.find(item => item.chatId === 'requester')?.requester).toBeUndefined()
   })
+})
+
+describe('compact reception tabs', () => {
+  it('acknowledges questions and errors without removing their status or active work', () => {
+    const chats = [
+      chat('answer', { pendingQuestions: 1, unread: true, readAt: 10 }),
+      chat('error', {
+        status: 'failed',
+        unread: true,
+        finishedAt: 20,
+        readAt: 20,
+      }),
+      chat('working', { status: 'running' }),
+    ]
+    const before = filViews(filOf(chats, [], []))
+    expect(before.unread.map(item => item.title)).toEqual(['answer', 'error'])
+    expect(before.ongoing.map(item => item.title)).toEqual(['answer', 'working'])
+    const after = filViews(filOf(chats, [], [], { 'chat:answer': 10, 'chat:error': 20 }))
+    expect(after.unread).toEqual([])
+    expect(after.ongoing.map(item => [item.title, item.kind])).toEqual([['answer', 'question'], ['working', 'running']])
+    expect(after.all.find(item => item.title === 'error')?.kind).toBe('failed')
+    expect(filViews(filOf([chat('answer', { pendingQuestions: 2, unread: true, readAt: 30 })], [], [], { 'chat:answer': 10 })).unread).toHaveLength(1)
+  })
+
+  it('keeps read mission results in Tout and pending outcomes in En cours', () => {
+    const runs = [run('done', 'mission', { unread: true, finishedAt: 20 }), run('blocked', 'input', {
+      unread: true,
+      finishedAt: 30,
+      outcome: {
+        status: 'needs_input',
+        reason: 'Pick one',
+        reportedAt: 30,
+        evidence: [],
+      },
+    })]
+    const views = filViews(filOf([], [task('mission'), task('input')], runs, { 'task:mission': 20, 'task:input': 30 }))
+    expect(views.unread).toEqual([])
+    expect(views.ongoing.map(item => item.title)).toEqual(['input'])
+    expect(views.all.map(item => item.title)).toEqual(['input', 'mission'])
+  })
+
+  it('does not notify for completed delegated conversations', () => {
+    const views = filViews(filOf([chat('delegate', {
+      status: 'succeeded',
+      unread: true,
+      finishedAt: 30,
+      requestedBy: { chatId: 'parent', runId: 'run', requestId: null },
+
+    })], [], []))
+    expect(views.unread).toEqual([])
+    expect(views.all.map(item => item.title)).toEqual(['delegate'])
+  })
+})
+
+it('shows unread notifications regardless of outcome routing or snooze state', () => {
+  for (const waitingOn of ['external', 'user'] as const) {
+    const views = filViews(filOf([], [task('mission')], [run('result', 'mission', {
+      unread: true,
+      finishedAt: 20,
+      outcome: {
+        status: 'blocked',
+        waitingOn,
+        reason: 'Waiting',
+        reportedAt: 20,
+        evidence: [],
+      },
+      ...(waitingOn === 'user' ? { dismissal: { until: 100 } } : {}),
+    })], {}, 50))
+    expect(views.unread).toHaveLength(1)
+    expect(views.all[0].unread).toBe(true)
+    expect(filViews(filOf([], [task('mission')], [run('result', 'mission', {
+      unread: true,
+      finishedAt: 20,
+      outcome: {
+        status: 'blocked',
+        waitingOn,
+        reason: 'Waiting',
+        reportedAt: 20,
+        evidence: [],
+      },
+    })], { 'task:mission': 20 })).unread).toEqual([])
+  }
 })
