@@ -301,6 +301,36 @@ describe('disposable Rust test runner disk preparation', () => {
     expect(dependencies.execute).not.toHaveBeenCalled()
   })
 
+  it('ignores unusable stock search-path entries without exposing their values', () => {
+    const dependencies = fixture()
+    dependencies.filesystem.realpathSync.mockImplementation((location) => {
+      if (location.startsWith('/root/'))
+        throw Object.assign(new Error('private path must not appear in diagnostics'), { code: 'EACCES' })
+      return location
+    })
+    const result = prepareRustRunner({ ...environment, MANPATH: '/usr/share/man:/root/.local/share/man' }, dependencies)
+    expect(result.inaccessiblePathInputs).toEqual(['MANPATH'])
+    expect(JSON.stringify(result)).not.toContain('/root/.local')
+    expect(result.directories.every(directory => directory.status === 'removed')).toBe(true)
+  })
+
+  it('still rejects an active readable dependency after an inaccessible search entry', () => {
+    const dependencies = fixture()
+    dependencies.filesystem.realpathSync.mockImplementation((location) => {
+      if (location.startsWith('/root/'))
+        throw Object.assign(new Error('unreadable'), { code: 'EACCES' })
+      return location === '/opt/active-crypto' ? '/usr/share/swift/usr' : location
+    })
+    expect(() => prepareRustRunner({ ...environment, CRYPTO_BACKEND_PATH: '/root/.local/lib:/opt/active-crypto' }, dependencies)).toThrow('native filesystem input')
+    expect(dependencies.execute).not.toHaveBeenCalled()
+  })
+
+  it('keeps explicit native overrides fail-closed even when their path is inaccessible', () => {
+    const dependencies = fixture()
+    expect(() => prepareRustRunner({ ...environment, OPENSSL_DIR: '/root/.local/crypto' }, dependencies)).toThrow('stock native tools')
+    expect(dependencies.execute).not.toHaveBeenCalled()
+  })
+
   it('keeps passive preinstalled-SDK inventory metadata distinct from native tool selection', () => {
     const dependencies = fixture()
     expect(prepareRustRunner({
