@@ -1,5 +1,19 @@
 [
   {
+    "input": "GetTaskStorageLimitsInput",
+    "method": "GET",
+    "name": "getTaskStorageLimits",
+    "output": "TaskStorageLimits",
+    "path": "/settings/task-storage"
+  },
+  {
+    "input": "TaskStorageLimits",
+    "method": "PUT",
+    "name": "saveTaskStorageLimits",
+    "output": "TaskStorageLimits",
+    "path": "/settings/task-storage"
+  },
+  {
     "input": "CodingAgentConfigurationInput",
     "method": "POST",
     "name": "getCodingAgentConfiguration",
