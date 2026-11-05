@@ -8,6 +8,7 @@ from pathlib import Path
 import resource
 import select
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -274,6 +275,94 @@ class NativeS3MemoryTests(unittest.TestCase):
             client.delete_objects(Bucket=bucket, Delete={'Objects': entries})
             self.assertFalse(client.list_object_versions(Bucket=bucket).get('Versions'))
             self.assertEqual(client.list_objects_v2(Bucket=bucket)['KeyCount'], 0)
+
+
+def allocated_spools(directory):
+    files = {}
+    for descriptor in Path('/proc/self/fd').iterdir():
+        try:
+            if not os.readlink(descriptor).startswith(directory + os.sep):
+                continue
+            metadata = descriptor.stat()
+            if stat.S_ISREG(metadata.st_mode):
+                files[metadata.st_dev, metadata.st_ino] = metadata.st_blocks * 512
+        except FileNotFoundError:
+            continue
+    return sum(files.values())
+
+
+class NativeS3DiskTests(unittest.TestCase):
+    def test_paginated_version_snapshots_release_disk_after_each_materialized_response(self):
+        fixture.configure_native_s3()
+        with tempfile.TemporaryDirectory(prefix='native-spool-bound-') as directory, \
+                patch.object(tempfile, 'tempdir', directory):
+            server = fixture.s3_server(native=True)
+            application = server._server.app.application
+            materializing = []
+
+            def measured(environment, start_response):
+                response = application(environment, start_response)
+                materializing.append(allocated_spools(directory))
+                try:
+                    for chunk in response:
+                        materializing.append(allocated_spools(directory))
+                        yield chunk
+                finally:
+                    if hasattr(response, 'close'):
+                        response.close()
+
+            server._server.app.application = measured
+            host, port = server.get_host_and_port()
+            client = boto3.client('s3', endpoint_url=f'http://{host}:{port}', region_name='us-east-1',
+                                  aws_access_key_id='fixture', aws_secret_access_key='fixture',
+                                  config=Config(retries={'max_attempts': 0}))
+            try:
+                bucket = 'native-spool-bound'
+                client.create_bucket(Bucket=bucket)
+                client.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={'Status': 'Enabled'})
+                versions = {}
+                for key in range(8):
+                    for version in range(3):
+                        name = f'blocks/{key:02}'
+                        payload = bytes([key, version]) * 65536
+                        response = client.put_object(Bucket=bucket, Key=name, Body=payload)
+                        versions[name, response['VersionId']] = payload
+                marker = client.delete_object(Bucket=bucket, Key='blocks/00')['VersionId']
+                baseline = allocated_spools(directory)
+                self.assertGreater(baseline, 0, 'The real version payloads must spill to disk.')
+                materializing.clear()
+                completed = []
+                for _ in range(4):
+                    listed, markers = [], []
+                    pages = client.get_paginator('list_object_versions').paginate(Bucket=bucket, Prefix='blocks/', MaxKeys=2)
+                    for page in pages:
+                        listed.extend((entry['Key'], entry['VersionId']) for entry in page.get('Versions', []))
+                        markers.extend(entry['VersionId'] for entry in page.get('DeleteMarkers', []))
+                        completed.append(allocated_spools(directory))
+                    self.assertEqual(set(listed), set(versions))
+                    self.assertEqual(markers, [marker])
+                peak = max(materializing)
+                retained = max(completed)
+                for (name, version), payload in versions.items():
+                    response = client.get_object(Bucket=bucket, Key=name, VersionId=version)
+                    self.assertEqual(response['Body'].read(), payload)
+                client.delete_objects(Bucket=bucket, Delete={'Objects': [
+                    dict(Key=name, VersionId=version) for name, version in versions
+                ] + [dict(Key='blocks/00', VersionId=marker)]})
+                remaining = client.list_object_versions(Bucket=bucket)
+                self.assertFalse(remaining.get('Versions'))
+                self.assertFalse(remaining.get('DeleteMarkers'))
+                self.assertEqual(client.list_objects_v2(Bucket=bucket)['KeyCount'], 0)
+                allocation = dict(liveSpoolBytes=baseline, materializingPeakBytes=peak,
+                                  completedPeakBytes=retained, afterDeleteBytes=allocated_spools(directory))
+                print('Native S3 allocation: ' + json.dumps(allocation))
+                self.assertLessEqual(peak, baseline * 3,
+                                     f'Listing materialization retained stale payload snapshots: {peak} vs {baseline} bytes.')
+                self.assertLessEqual(retained, baseline * 2,
+                                     f'Completed listings retained stale payload snapshots: {retained} vs {baseline} bytes.')
+                self.assertEqual(allocated_spools(directory), 0, 'Deleted versions retained temporary spool files.')
+            finally:
+                server.stop()
 
 
 if __name__ == '__main__':
