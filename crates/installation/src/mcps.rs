@@ -661,10 +661,18 @@ impl Mcps {
         let access = policy(agent);
         let token = token();
         let mut configuration = RunConfiguration::new(token.clone());
+        let planning = crate::chats::planning(run);
+        configuration.native.planning = planning;
         let origin = agent_origin(s, run);
         let mut servers = BTreeMap::new();
         for server in s.store.mcp_servers().await? {
             if !server.enabled || !allowed(&access["mcps"], &server.id) {
+                continue;
+            }
+            if planning {
+                // Third-party annotations cannot enforce a no-effects boundary. Do not
+                // pass connected MCP servers to the native process during Plan, for
+                // either transport; keep Cairn-owned tools below their own policy gates.
                 continue;
             }
             let tools = selected_tools(&server, &access["mcpTools"][&server.id]);

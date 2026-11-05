@@ -143,11 +143,31 @@ pub(crate) async fn rpc(
     }
 }
 
+/// A plan turn exposes only operations whose delegated MCP scope is `read`.
+fn has_read_scope(operation: &Value) -> bool {
+    operation["_meta"]["securitySchemes"]
+        .as_array()
+        .is_some_and(|schemes| {
+            schemes.iter().any(|scheme| {
+                let scopes = scheme["scopes"].as_array();
+                scheme["type"] == "oauth2"
+                    && scopes.is_some_and(|scopes| {
+                        scopes.len() == 1 && scopes[0].as_str() == Some("read")
+                    })
+            })
+        })
+}
+
+fn allowed_in_turn(run: &Value, operation: &Value) -> bool {
+    !crate::chats::planning(run) || has_read_scope(operation)
+}
+
 pub(crate) async fn operations(s: &Service, bearer: &str) -> Result<Vec<Value>> {
     let run = authorize(s, bearer).await?;
     let agent_id = &run["snapshot"]["agent"]["id"];
     let tools = crate::mcp_server::operations()
         .into_iter()
+        .filter(|tool| allowed_in_turn(&run, tool))
         .map(|mut tool| {
             tool.as_object_mut().unwrap().remove("_meta");
             if tool["name"] == "create_task" {
@@ -177,11 +197,14 @@ pub(crate) async fn operation(
     mut args: Value,
 ) -> Result<Value> {
     let run = authorize(s, bearer).await?;
-    let known = crate::mcp_server::operations()
-        .iter()
-        .any(|tool| text(tool, "name") == name);
-    if !known {
+    let operations = crate::mcp_server::operations();
+    let Some(operation) = operations.iter().find(|tool| text(tool, "name") == name) else {
         return Err(Error::not_found("Unknown operation"));
+    };
+    if !allowed_in_turn(&run, operation) {
+        return Err(Error::forbidden(
+            "Only read-scoped installation operations are available during a plan turn.",
+        ));
     }
     if let Some(op) = crate::capabilities::artifact_operation(name) {
         return op

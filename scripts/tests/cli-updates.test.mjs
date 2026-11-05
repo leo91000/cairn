@@ -110,17 +110,25 @@ describe('application image tool versions', () => {
       expect(reuse.env[`SERVED_${output.toUpperCase()}`]).toBe(expression(`steps.served.outputs.${output}`))
     }
 
+    const qualification = jobs['cli-qualification']
+    expect(qualification).toBeDefined()
+    expect(qualification.needs).toEqual(['resolve', 'backend'])
+    expect(qualification.if).toContain('inputs.backend-only != true')
+    expect(qualification.if).toContain('inputs.ci-diagnostic == \'none\' || inputs.ci-diagnostic == \'\'')
+    expect(qualification.if).toContain('needs.backend.result == \'success\'')
+    expect(qualification.if).toContain('needs.resolve.result == \'success\'')
+
     for (const step of ['OpenCode', 'Claude Code']) {
-      const run = jobs['cli-qualification'].steps.find(candidate => candidate.name === `Qualify the resolved ${step} release against its native adapter`).run
+      const run = qualification.steps.find(candidate => candidate.name === `Qualify the resolved ${step} release against its native adapter`).run
       expect(run).toMatch(/served=\$\(node scripts\/served-tools\.mjs rollback-target (opencode|claude) /)
     }
 
-    const opencode = jobs['cli-qualification'].steps.find(step => step.name === 'Qualify the resolved OpenCode release against its native adapter')
+    const opencode = qualification.steps.find(step => step.name === 'Qualify the resolved OpenCode release against its native adapter')
     expect(opencode.env).toEqual({
       OPENCODE_VERSION: expression('needs.resolve.outputs.opencode'),
       SERVED_OPENCODE: expression('needs.resolve.outputs.served-opencode'),
     })
-    const claude = jobs['cli-qualification'].steps.find(step => step.name === 'Qualify the resolved Claude Code release against its native adapter')
+    const claude = qualification.steps.find(step => step.name === 'Qualify the resolved Claude Code release against its native adapter')
     expect(claude.env).toEqual({
       CLAUDE_VERSION: expression('needs.resolve.outputs.claude'),
       SERVED_CLAUDE: expression('needs.resolve.outputs.served-claude'),
@@ -129,9 +137,15 @@ describe('application image tool versions', () => {
       expect(claude.run).toContain(test)
     for (const test of ['native_cli_lists_providers_and_models', 'pinned_native_cli_executes_and_resumes_without_global_plugins'])
       expect(opencode.run).toContain(test)
-    // Images cannot be published unless both qualifications passed.
-    expect(jobs.publish.needs).toContain('cli-qualification')
-    expect(jobs.publish.if).toContain('needs.cli-qualification.result == \'success\'')
+    // Images require both the backend workload and its separate CLI qualifications.
+    for (const name of ['backend', 'cli-qualification']) {
+      expect(jobs.publish.needs).toContain(name)
+      expect(jobs.publish.if).toContain(`needs.${name}.result == 'success'`)
+      expect(jobs['backend-migration-qualification'].needs).toContain(name)
+    }
+
+    expect(jobs['backend-migration-qualification'].if).toContain('needs.backend.result == \'success\'')
+    expect(jobs['backend-migration-qualification'].if).toContain('inputs.backend-only == true || needs.cli-qualification.result == \'success\'')
   })
 
   it('holds an engine at an exact version given as its channel', async () => {

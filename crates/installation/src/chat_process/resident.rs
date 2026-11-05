@@ -188,7 +188,9 @@ async fn handle(
     } else {
         json!({})
     };
-    if requested != *native_settings {
+    // Native sub-agents retain their creation sandbox. A Plan boundary needs a fresh
+    // process even when preferences are unchanged, including the first ordinary turn after it.
+    if requested != *native_settings || plan["planning"] == true || plan["afterPlan"] == true {
         let args = crate::coding_agent_configuration::codex_arguments(&plan)?;
         session.shutdown().await;
         *session = Session::codex_until(

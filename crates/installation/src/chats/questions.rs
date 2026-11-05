@@ -186,6 +186,10 @@ pub async fn ask(s: &Service, bearer: &str, input: Value) -> Result<Value> {
                     message_id: None,
                 },
             )?;
+            // Answering a plan turn's question continues the plan, never implementation.
+            if crate::chats::planning(&run) {
+                db.mark_plan_question(chat_id, &id)?;
+            }
             Ok(serde_json::to_value(AskQuestionsOutput {
                 question_id: id,
                 status: QuestionStatus::Pending,
@@ -348,10 +352,22 @@ fn answer(
     for field in &question.fields {
         validate_answer(field, &input.answers[&field.id])?;
     }
+    // The answer to a plan turn's question is a plan request: it joins a running plan
+    // turn, and otherwise waits for its own rather than joining a turn that can write.
+    let plan = db.plan_question(chat_id, &question.id)?;
+    let joins_plan = db
+        .run(text(&chat(db, chat_id)?, "runId"))?
+        .is_some_and(|run| super::planning(&run) && super::run_is_active(&run));
+    let mode = if plan && !joins_plan {
+        "queue"
+    } else {
+        "steer"
+    };
     let mut message = super::parse_message(json!({
         "id": input.id,
-        "mode": "steer",
+        "mode": mode,
         "text": "Questionnaire response",
+        "plan": plan,
     }))?;
     // This generated text is bounded by the questionnaire and answer contracts,
     // independently of the 50,000-character ordinary chat-composer limit.

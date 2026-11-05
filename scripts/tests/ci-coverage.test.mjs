@@ -76,6 +76,7 @@ describe('parallel CI coverage', () => {
     expect(backend.steps.some(step => step.name === 'Check Rust documentation examples')).toBe(true)
     expect(backend.steps.some(step => step.name === 'Qualify the resolved OpenCode release against its native adapter')).toBe(false)
     expect(backend.steps.some(step => step.name === 'Qualify the resolved Claude Code release against its native adapter')).toBe(false)
+    expect(backend.steps.some(step => step.run?.includes('--test native_plan_turns'))).toBe(false)
     expect(backend.steps.some(step => step.name === 'Check all Rust targets for a backend-only qualification')).toBe(false)
     expect(backend.steps.some(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'before-build')).toBe(true)
     expect(backend.steps.some(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'after-build')).toBe(true)
@@ -85,9 +86,11 @@ describe('parallel CI coverage', () => {
     expect(rustCheck.if).toContain('inputs.backend-only == true')
     const rustCondition = rustCheck.if
       .replaceAll('inputs.backend-only', 'backendOnly')
+      .replaceAll('inputs.ci-diagnostic', 'diagnostic')
       .replace(/\bneeds\.([a-z0-9-]+)\b/g, (_match, name) => `needs[${JSON.stringify(name)}]`)
     const runsRustCheck = (backendOnly, resolveResult, reuse) => runInNewContext(rustCondition, {
       backendOnly,
+      diagnostic: '',
       needs: { resolve: { result: resolveResult, outputs: { reuse } } },
       github: { ref: 'refs/heads/feature' },
       always: () => true,
@@ -104,10 +107,12 @@ describe('parallel CI coverage', () => {
     expect(backend.if).toContain('inputs.backend-only == true')
     const backendCondition = backend.if
       .replaceAll('inputs.backend-only', 'backendOnly')
+      .replaceAll('inputs.ci-diagnostic', 'diagnostic')
       .replaceAll('inputs.backend-qualification', 'selection')
       .replace(/\bneeds\.([a-z0-9-]+)\b/g, (_match, name) => `needs[${JSON.stringify(name)}]`)
     const runsBackend = (backendOnly, selection, resolveResult, reuse) => runInNewContext(backendCondition, {
       backendOnly,
+      diagnostic: '',
       selection,
       needs: { resolve: { result: resolveResult, outputs: { reuse } } },
       github: { ref: 'refs/heads/feature' },
@@ -171,6 +176,7 @@ describe('parallel CI coverage', () => {
     expect(qualifications.map(step => step.name)).toEqual([
       'Qualify the resolved OpenCode release against its native adapter',
       'Qualify the resolved Claude Code release against its native adapter',
+      'Qualify plan turns of the resolved Claude Code and Codex releases',
     ])
     for (const step of qualifications) {
       expect(step.if).toBe('inputs.backend-only != true')
@@ -188,8 +194,13 @@ describe('parallel CI coverage', () => {
       CLAUDE_VERSION: '${{ needs.resolve.outputs.claude }}',
       SERVED_CLAUDE: '${{ needs.resolve.outputs.served-claude }}',
     })
+    expect(qualifications[2].env).toEqual({
+      CLAUDE_VERSION: '${{ needs.resolve.outputs.claude }}',
+      CODEX_VERSION: '${{ needs.resolve.outputs.codex }}',
+    })
     /* eslint-enable no-template-curly-in-string */
-    expect(quality.jobs.backend.steps.find(step => step.run?.includes('--nextest --test-threads')).run).toContain('--nextest --test-threads 8 --no-fail-fast --color never --status-level pass')
+    expect(qualifications[2].run).toContain('--test native_plan_turns -- --ignored --test-threads 1')
+    expect(quality.jobs.backend.steps.find(step => step.run?.includes('--nextest --test-threads')).run).toContain('--nextest --test-threads 8 --no-fail-fast --color never --status-level all')
   })
 
   it('preserves CLI selection and combined migration prerequisites across full, reuse and isolated modes', () => {
@@ -207,7 +218,7 @@ describe('parallel CI coverage', () => {
       if (!expression.includes('always()') && dependencies.some(name => needs[name].result !== 'success'))
         return false
       return Boolean(runInNewContext(expression, {
-        inputs,
+        inputs: { 'ci-diagnostic': '', ...inputs },
         needs,
         github: { ref },
         always: () => true,
@@ -220,6 +231,7 @@ describe('parallel CI coverage', () => {
         for (const reuse of ['false', 'true']) {
           for (const validationOnly of [false, true]) {
             const full = {
+              'ci-diagnostic': 'none',
               'backend-only': false,
               'validation-only': validationOnly,
               'backend-qualification': 'backend-migration',
@@ -234,19 +246,34 @@ describe('parallel CI coverage', () => {
       }
     }
 
-    for (const ref of ['refs/heads/main', 'refs/heads/feature', 'refs/tags/v0.75.0'])
-      expect(runs('cli-qualification', {}, 'success', 'skipped', 'success', 'false', ref)).toBe(true)
+    for (const diagnostic of ['backend', 'native']) {
+      for (const backendOnly of [false, true]) {
+        for (const cliResult of ['success', 'failure', 'cancelled', 'skipped']) {
+          const inputs = { 'ci-diagnostic': diagnostic, 'backend-only': backendOnly }
+          expect(runs('cli-qualification', inputs, 'success', cliResult)).toBe(false)
+        }
+      }
+    }
 
-    for (const [backendOnly, selection, reuse, ref, expected] of [
-      [false, 'none', 'false', 'refs/heads/feature', [true, true, false]],
-      [false, 'backend-migration', 'false', 'refs/heads/feature', [true, true, true]],
-      [false, 'none', 'true', 'refs/heads/main', [true, true, false]],
-      [false, 'none', 'true', 'refs/heads/feature', [false, false, false]],
-      [false, 'backend-migration', 'true', 'refs/heads/feature', [true, true, true]],
-      [true, 'backend-migration', '', 'refs/heads/feature', [true, false, true]],
+    for (const diagnostic of ['', 'none']) {
+      for (const ref of ['refs/heads/main', 'refs/heads/feature', 'refs/tags/v0.75.0']) {
+        expect(runs('cli-qualification', { 'ci-diagnostic': diagnostic }, 'success', 'skipped', 'success', 'false', ref)).toBe(true)
+      }
+    }
+
+    for (const [diagnostic, backendOnly, selection, reuse, ref, expected] of [
+      ['none', false, 'none', 'false', 'refs/heads/feature', [true, true, false]],
+      ['none', false, 'backend-migration', 'false', 'refs/heads/feature', [true, true, true]],
+      ['', false, 'none', 'true', 'refs/heads/main', [true, true, false]],
+      ['none', false, 'none', 'true', 'refs/heads/feature', [false, false, false]],
+      ['none', false, 'backend-migration', 'true', 'refs/heads/feature', [true, true, true]],
+      ['none', true, 'backend-migration', '', 'refs/heads/feature', [true, false, true]],
+      ['backend', true, 'none', '', 'refs/heads/feature', [true, false, false]],
+      ['native', true, 'none', '', 'refs/heads/feature', [false, false, false]],
     ]) {
       for (const validationOnly of [false, true]) {
         const inputs = {
+          'ci-diagnostic': diagnostic,
           'backend-only': backendOnly,
           'backend-qualification': selection,
           'validation-only': validationOnly,
@@ -482,7 +509,10 @@ describe('parallel CI coverage', () => {
     const reference = steps.find(step => step.name === 'Qualify the exact reference on the current disposable host')
     const candidate = steps.find(step => step.name === 'Qualify real ublk, S3, eviction, systemd ownership and crash recovery')
     expect(reference.run).toContain('git archive "$REFERENCE_SHA" scripts/tests deploy/nodes/native-host.py')
-    expect(candidate.run).toContain('git archive HEAD scripts/tests deploy/nodes/native-host.py')
+    // eslint-disable-next-line no-template-curly-in-string -- literal shell fallback is the provenance contract
+    expect(candidate.run).toContain('git archive "${DIAGNOSTIC_CANDIDATE:-HEAD}" scripts/tests deploy/nodes/native-host.py')
+    // eslint-disable-next-line no-template-curly-in-string -- literal GitHub expression is the provenance contract
+    expect(candidate.env.DIAGNOSTIC_CANDIDATE).toBe('${{ inputs.ci-diagnostic == \'native\' && inputs.diagnostic-candidate || \'\' }}')
     expect(reference.run).toContain('native_admission_overlay.py "$reference_fixture" reference')
     expect(candidate.run).toContain('native_admission_overlay.py "$candidate_fixture" candidate')
     expect(reference.run).toContain('--repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier')
@@ -490,6 +520,86 @@ describe('parallel CI coverage', () => {
     expect(candidate.run).toContain('CAIRN_NATIVE_DOCKER_QUALIFY=1')
     expect(reference.run).not.toContain('CAIRN_NATIVE_DOCKER_QUALIFY=1')
     expect(steps.indexOf(candidate)).toBeGreaterThan(steps.indexOf(reference))
+  })
+
+  it('keeps all native preparation tests after their verified candidate producer', () => {
+    const steps = quality.jobs['native-runtime'].steps
+    const host = steps.findIndex(step => step.name === 'Prepare disposable host block storage and synthetic S3')
+    const toolchain = steps.findIndex(step => step.run === 'rustup toolchain install 1.97.1 --profile minimal')
+    const pair = steps.findIndex(step => step.name === 'Build the immutable diagnostic pair')
+    const verify = steps.findIndex(step => step.name === 'Verify the exact reference binaries')
+    const consumers = steps.filter(step => step.run?.includes('-p test_native_s3_memory.py'))
+    expect(consumers).toHaveLength(1)
+    const consumer = consumers[0]
+    const index = steps.indexOf(consumer)
+    expect(host).toBeLessThan(toolchain)
+    expect(toolchain).toBeLessThan(pair)
+    expect(steps[pair].run.indexOf('apt-get install -y --no-install-recommends libclang-dev')).toBeLessThan(steps[pair].run.indexOf('scripts/ci-diagnostic-native-build.mjs'))
+    expect(pair).toBeLessThan(verify)
+    expect(verify).toBeLessThan(index)
+    expect(index).toBeLessThan(steps.findIndex(step => step.name === 'Qualify the exact reference on the current disposable host'))
+    expect(steps[host].run).not.toContain('test_native_s3_memory.py')
+    expect(consumer.if).toBeUndefined()
+    // eslint-disable-next-line no-template-curly-in-string -- exact absolute candidate fixture path in the workflow
+    expect(consumer.env.CAIRN_TEST_NATIVE_QUALIFIER).toBe('${{ github.workspace }}/target/debug/examples/native_storage_qualifier')
+    expect(consumer.run).toContain('scripts/ci-deadline.mjs "$PWD/native-diagnostics/preparation" 90 -- .native-s3-test/bin/python -m unittest discover -s scripts/tests -p test_native_s3_memory.py -v')
+    expect(consumer.run).not.toMatch(/(?:--filter|--ignore|\s-k\s)/)
+    expect(steps.filter(step => step.run?.includes('node scripts/ci-diagnostic-native-build.mjs'))).toHaveLength(1)
+    const memoryTests = readFileSync(new URL('./test_native_s3_memory.py', import.meta.url), 'utf8')
+    expect(memoryTests.match(/^\s+def test_/gm)).toHaveLength(8)
+  })
+
+  it('isolates each diagnostic job even when legacy independent inputs are populated', () => {
+    function runsWith(inputs, event = 'workflow_dispatch') {
+      const results = {}
+
+      function run(name) {
+        if (Object.hasOwn(results, name))
+          return results[name]
+        const job = quality.jobs[name]
+        const dependencies = Array.isArray(job.needs) ? job.needs : job.needs ? [job.needs] : []
+        const needs = Object.fromEntries(dependencies.map(dependency => [dependency, {
+          result: run(dependency) ? 'success' : 'skipped',
+          outputs: { reuse: results[dependency] ? 'false' : '' },
+        }]))
+        const expression = (job.if ?? 'true')
+          .replace(/\b(inputs|needs)\.([a-z0-9-]+)\b/g, (_match, scope, property) => `${scope}[${JSON.stringify(property)}]`)
+        const failedDependency = dependencies.some(dependency => !results[dependency])
+        const enabled = !failedDependency || expression.includes('always()')
+        results[name] = enabled && Boolean(runInNewContext(expression, {
+          inputs,
+          needs,
+          github: { event_name: event, ref: 'refs/heads/feature' },
+          always: () => true,
+          cancelled: () => false,
+          startsWith: (value, prefix) => value.startsWith(prefix),
+        }, { timeout: 1000 }))
+        return results[name]
+      }
+
+      for (const name of Object.keys(quality.jobs))
+        run(name)
+      return Object.keys(results).filter(name => results[name]).sort()
+    }
+
+    const legacy = {
+      'backend-only': true,
+      'validation-only': true,
+      'backend-qualification': 'none',
+      'plan-storage-reference': '06829d1b5f3d7accb9791c09d49522e7e2d2ab25',
+      'exclusive-android': true,
+      'browser-workers': '2',
+    }
+    for (const mode of ['backend', 'native']) {
+      expect(runsWith({ ...legacy, 'ci-diagnostic': mode })).toEqual([mode === 'native' ? 'native-runtime' : 'backend'])
+    }
+
+    for (const mode of ['', 'none']) {
+      expect(runsWith({ ...legacy, 'ci-diagnostic': mode })).toEqual(['backend', 'plan-storage', 'rust-check'])
+    }
+
+    expect(quality.on.pull_request).toBeUndefined()
+    expect(quality.on.push.tags).toEqual(['v*'])
   })
 
   it('gives installer and update fixtures their own database and web assets', () => {

@@ -229,6 +229,39 @@ async fn lightweight_cards_match_full_execution_metadata() {
 }
 
 #[tokio::test]
+async fn lightweight_runs_keep_the_plan_boundary_of_the_turn() {
+    let root = tempfile::tempdir().unwrap();
+    let store = crate::store::Store::open(root.path()).unwrap();
+    store
+        .transaction(|db| {
+            for (id, execution) in [
+                ("planning", json!({ "messageId": "m", "plan": true })),
+                (
+                    "compacting-after-plan",
+                    json!({ "operation": "compact", "afterPlan": true }),
+                ),
+                ("ordinary", json!({ "messageId": "m" })),
+                (
+                    "explicitly-ordinary",
+                    json!({ "messageId": "m", "plan": false, "afterPlan": false }),
+                ),
+            ] {
+                let state =
+                    serde_json::from_value(json!({ "id": id, "taskId": id, "status": "running" }))?;
+                db.admit_run(&state, None, &json!({ "chatExecution": execution }), None)?;
+                let full = db.run(id)?.unwrap();
+                let light = db.conversation_run(id)?.unwrap();
+                assert_eq!(planning(&light), planning(&full), "{id}");
+                assert_eq!(follows_plan(&light), follows_plan(&full), "{id}");
+                assert_eq!(is_compaction(&light), is_compaction(&full), "{id}");
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn a_window_does_not_read_delivered_message_bodies() {
     let root = tempfile::tempdir().unwrap();
     let store = crate::store::Store::open(root.path()).unwrap();
@@ -247,7 +280,7 @@ async fn a_window_does_not_read_delivered_message_bodies() {
     let connection = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
     connection.execute_batch("ALTER TABLE chat_messages RENAME TO retained_messages;
 CREATE VIEW chat_messages AS SELECT rowid AS rowid,id,chat_id,revision,
-    body_probe(status,text) AS text,provider,model,reasoning,speed,mode,status,created_at,question_id
+    body_probe(status,text) AS text,provider,model,reasoning,speed,mode,status,created_at,question_id,plan
     FROM retained_messages;").unwrap();
     connection
         .create_scalar_function(

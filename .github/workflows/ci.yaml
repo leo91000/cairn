@@ -6,10 +6,32 @@ on:
     - cron: '17 2 * * *'
   workflow_dispatch:
     inputs:
+      ci-diagnostic:
+        description: Capture missing backend/native evidence on immutable sources; never release provenance
+        type: choice
+        options: [none, backend, native]
+        default: none
+      backend-diagnostic-selector:
+        description: Fixed backend diagnostic workload; ignored outside ci-diagnostic=backend
+        type: choice
+        options: [full, avatar-authority]
+        default: full
+      diagnostic-candidate:
+        description: Full candidate SHA for the selected diagnostic (required in diagnostic mode)
+        type: string
+        default: ''
+      diagnostic-reference:
+        description: Full paired reference SHA for a native diagnostic
+        type: string
+        default: ''
       backend-only:
         description: Run backend tests and doctests without release resolution or image jobs
         type: boolean
         default: false
+      plan-storage-reference:
+        description: Optional full base SHA for typed Plan storage measurements and the old-version fence
+        type: string
+        default: ''
       backend-qualification:
         description: Run physical backend migration in a separate job after the backend suite
         type: choice
@@ -35,7 +57,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
 jobs:
   resolve:
-    if: inputs.backend-only != true
+    if: inputs.backend-only != true && (inputs.ci-diagnostic == 'none' || inputs.ci-diagnostic == '')
     runs-on: ubuntu-latest
     timeout-minutes: 42
     permissions:
@@ -162,11 +184,13 @@ jobs:
         run: python3 -m unittest discover -s scripts/tests -p test_native_reference.py -v
       - name: Check native qualification RPC diagnostics
         run: python3 -m unittest discover -s scripts/tests -p test_native_chat_fixture.py -v
+      - name: Check native qualification phase diagnostics without real workloads
+        run: python3 -m unittest discover -s scripts/tests -p test_native_phase_diagnostics.py -v
       - name: Check native Compose service readiness
         run: python3 -m unittest discover -s scripts/tests -p test_native_docker_workload.py -v
   rust-check:
     needs: resolve
-    if: always() && !cancelled() && (inputs.backend-only == true || needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')
+    if: always() && !cancelled() && (inputs.ci-diagnostic == 'none' || inputs.ci-diagnostic == '') && (inputs.backend-only == true || needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -190,6 +214,9 @@ jobs:
         with:
           phase: after-build
   backend:
+    permissions:
+      contents: read
+      actions: read
     services:
       postgres:
         image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
@@ -202,7 +229,7 @@ jobs:
           --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
           --health-interval 5s --health-timeout 5s --health-retries 10
     needs: resolve
-    if: always() && !cancelled() && (inputs.backend-only == true || (needs.resolve.result == 'success' && (inputs.backend-qualification == 'backend-migration' || needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')))
+    if: always() && !cancelled() && inputs.ci-diagnostic != 'native' && (inputs.ci-diagnostic == 'backend' || inputs.backend-only == true || (needs.resolve.result == 'success' && (inputs.backend-qualification == 'backend-migration' || needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -211,6 +238,17 @@ jobs:
       CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@localhost:5432/cairn_beacon_test
     steps:
       - uses: actions/checkout@v7.0.1
+      - name: Pin the diagnostic source without replacing the observer
+        if: inputs.ci-diagnostic == 'backend'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DIAGNOSTIC_CANDIDATE: ${{ inputs.diagnostic-candidate }}
+          DIAGNOSTIC_REFERENCE: ${{ inputs.diagnostic-reference }}
+          BACKEND_ONLY: ${{ inputs.backend-only }}
+          VALIDATION_ONLY: ${{ inputs.validation-only }}
+          BACKEND_QUALIFICATION: ${{ inputs.backend-qualification }}
+          PLAN_STORAGE_REFERENCE: ${{ inputs.plan-storage-reference }}
+        run: node scripts/ci-diagnostic-source.mjs backend
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
@@ -225,17 +263,48 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
         with:
           tool: cargo-nextest@0.9.149
+      - name: Acquire the existing artifact publisher at its immutable version
+        if: inputs.ci-diagnostic == 'backend'
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: actions/upload-artifact
+          ref: 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, bundled dist; no package install
+          path: .ci-artifact-uploader
+          persist-credentials: false
+      - name: Provision the exact candidate dependency context after observer installation
+        if: inputs.ci-diagnostic == 'backend'
+        run: node scripts/ci-backend-dependencies.mjs
+      - name: Run diagnostic backend with durable startup and rolling evidence
+        if: inputs.ci-diagnostic == 'backend'
+        uses: ./.github/actions/backend-durable-evidence
+        env:
+          BACKEND_DIAGNOSTIC_SELECTOR: ${{ inputs.backend-diagnostic-selector || 'full' }}
       - name: Run backend tests across binaries with isolated credentials
+        if: inputs.ci-diagnostic != 'backend'
+        timeout-minutes: 30
         run: |
           set -o pipefail
-          node scripts/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level pass 2>&1 | tee backend-tests.log
+          node scripts/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level all 2>&1 | tee backend-tests.log
+      - name: Preserve the isolated backend test trace, including interrupted cases
+        if: always()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: backend-test-trace
+          path: |
+            backend-tests.log
+            backend-diagnostics/
+          if-no-files-found: ignore
       - name: Measure the bounded bootstrap observer without filesystem work
+        working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
         run: node scripts/test-backend.mjs -p cairn-installation --lib native::bootstrap::tests::observation_hot_path_measurement -- --exact --nocapture
       - name: Measure bounded Native terminal-reason metadata
+        working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
         run: node scripts/test-backend.mjs -p cairn-installation --lib native::service::terminal_tests::terminal_reason_metadata_measurement -- --exact --ignored --nocapture
       - name: Qualify native backend namespace isolation with ordinary private bind mounts
+        working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
         run: node scripts/test-native-namespace.mjs --sudo
       - name: Check Rust documentation examples
+        working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
         run: node scripts/test-backend.mjs --doc
       - uses: ./.github/actions/observe-rust-build
         if: always()
@@ -243,7 +312,7 @@ jobs:
           phase: after-build
   cli-qualification:
     needs: [resolve, backend]
-    if: always() && !cancelled() && inputs.backend-only != true && needs.resolve.result == 'success' && needs.backend.result == 'success'
+    if: always() && !cancelled() && (inputs.ci-diagnostic == 'none' || inputs.ci-diagnostic == '') && inputs.backend-only != true && needs.resolve.result == 'success' && needs.backend.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -334,6 +403,29 @@ jobs:
             qualify "$served" "$resolved"
             qualify "$resolved" "$served"
           fi
+      - name: Qualify plan turns of the resolved Claude Code and Codex releases
+        # Backend-only runs resolve no engine release; full runs qualify the ones they ship.
+        if: inputs.backend-only != true
+        env:
+          CLAUDE_VERSION: ${{ needs.resolve.outputs.claude }}
+          CODEX_VERSION: ${{ needs.resolve.outputs.codex }}
+        run: |
+          # Each engine's own sandbox enforces a plan turn's boundary. The releases this build
+          # ships run one through Cairn's adapters against a local model that asks for writes,
+          # network access, escalation and subagents; none may take effect, and the turn after
+          # the plan must write again. See docs/adr/0080-plan-turns.md#qualification.
+          sudo apt-get install -y --no-install-recommends bubblewrap socat
+          # Ubuntu restricts the unprivileged user namespaces both sandboxes create.
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          claude="$RUNNER_TEMP/claude-$CLAUDE_VERSION/bin/claude"
+          test "$("$claude" --version)" = "$CLAUDE_VERSION (Claude Code)"
+          npm install --global --prefix "$RUNNER_TEMP/codex-$CODEX_VERSION" "@openai/codex@$CODEX_VERSION"
+          codex="$RUNNER_TEMP/codex-$CODEX_VERSION/bin/codex"
+          test "$("$codex" --version)" = "codex-cli $CODEX_VERSION"
+          CLAUDE_NATIVE_BIN="$claude" CODEX_NATIVE_BIN="$codex" \
+            node scripts/test-backend.mjs -p cairn-installation --test native_plan_turns -- --ignored --test-threads 1
       - uses: ./.github/actions/observe-rust-build
         if: always()
         with:
@@ -432,7 +524,7 @@ jobs:
   native-runtime:
     name: Native Linux ublk storage and process ownership (CPU workload)
     needs: [resolve, build]
-    if: needs.resolve.outputs.reuse != 'true'
+    if: always() && !cancelled() && (inputs.ci-diagnostic == 'native' || (inputs.ci-diagnostic != 'backend' && needs.resolve.result == 'success' && needs.build.result == 'success' && needs.resolve.outputs.reuse != 'true'))
     runs-on: ubuntu-latest
     # Allow slow kernel-module installation and the complete native qualification.
     timeout-minutes: 90
@@ -441,7 +533,19 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@v7.0.1
+      - name: Pin the diagnostic source without replacing the observer
+        if: inputs.ci-diagnostic == 'native'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DIAGNOSTIC_CANDIDATE: ${{ inputs.diagnostic-candidate }}
+          DIAGNOSTIC_REFERENCE: ${{ inputs.diagnostic-reference }}
+          BACKEND_ONLY: ${{ inputs.backend-only }}
+          VALIDATION_ONLY: ${{ inputs.validation-only }}
+          BACKEND_QUALIFICATION: ${{ inputs.backend-qualification }}
+          PLAN_STORAGE_REFERENCE: ${{ inputs.plan-storage-reference }}
+        run: node scripts/ci-diagnostic-source.mjs native
       - uses: actions/download-artifact@v8.0.1
+        if: inputs.ci-diagnostic != 'native'
         with:
           name: browser-backend
           path: target/debug/
@@ -461,12 +565,11 @@ jobs:
           test -c /dev/ublk-control
           python3 -m venv .native-s3-test
           .native-s3-test/bin/pip install 'moto[server]==5.2.3' awscli
-          .native-s3-test/bin/python -m unittest discover -s scripts/tests -p test_native_s3_memory.py -v
       - run: rustup toolchain install 1.97.1 --profile minimal
       - name: Identify the exact reference build
         id: native-reference-key
         env:
-          EVENT_REFERENCE_SHA: ${{ github.event.pull_request.base.sha || (github.ref == 'refs/heads/main' && github.event.before) || '' }}
+          EVENT_REFERENCE_SHA: ${{ (inputs.ci-diagnostic == 'native' && inputs.diagnostic-reference) || github.event.pull_request.base.sha || (github.ref == 'refs/heads/main' && github.event.before) || '' }}
         run: |
           native_reference_sha="$(python3 scripts/native_reference.py)"
           echo "sha=$native_reference_sha" >> "$GITHUB_OUTPUT"
@@ -474,6 +577,7 @@ jobs:
           echo "artifact=native-reference-v2-$native_reference_sha-$ImageOS-$ImageVersion-rust1.97.1-dev0-default" >> "$GITHUB_OUTPUT"
       - name: Find the exact reference from an earlier attempt of this run
         id: native-reference-artifact
+        if: inputs.ci-diagnostic != 'native'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           NATIVE_REFERENCE_ARTIFACT: ${{ steps.native-reference-key.outputs.artifact }}
@@ -481,20 +585,20 @@ jobs:
           native_reference_found="$(python3 scripts/native_reference.py artifact-available)"
           echo "found=$native_reference_found" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v8.0.1
-        if: steps.native-reference-artifact.outputs.found == 'true'
+        if: inputs.ci-diagnostic != 'native' && steps.native-reference-artifact.outputs.found == 'true'
         with:
           name: ${{ steps.native-reference-key.outputs.artifact }}
           path: reference-native/
           github-token: ${{ github.token }}
           run-id: ${{ github.run_id }}
       - uses: actions/cache/restore@v6.1.0
-        if: steps.native-reference-artifact.outputs.found != 'true'
+        if: inputs.ci-diagnostic != 'native' && steps.native-reference-artifact.outputs.found != 'true'
         id: native-reference-cache
         with:
           path: reference-native/
           key: ${{ steps.native-reference-key.outputs.key }}
       - name: Build the exact base reference
-        if: steps.native-reference-artifact.outputs.found != 'true' && steps.native-reference-cache.outputs.cache-hit != 'true'
+        if: inputs.ci-diagnostic != 'native' && steps.native-reference-artifact.outputs.found != 'true' && steps.native-reference-cache.outputs.cache-hit != 'true'
         env:
           REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
           CARGO_PROFILE_DEV_DEBUG: '0'
@@ -515,10 +619,18 @@ jobs:
           Path('reference-native/revision.json').write_text(json.dumps(dict(headSha=os.environ['REFERENCE_SHA'], profile='development, debug=0, incremental=0', features='default (ublk required)', rust='1.97.1', image=os.environ['ImageVersion'], buildRun=os.environ['GITHUB_RUN_ID'], sha256=checksums), indent=2))
           PYREF
       - uses: actions/cache/save@v6.1.0
-        if: steps.native-reference-artifact.outputs.found != 'true' && steps.native-reference-cache.outputs.cache-hit != 'true'
+        if: inputs.ci-diagnostic != 'native' && steps.native-reference-artifact.outputs.found != 'true' && steps.native-reference-cache.outputs.cache-hit != 'true'
         with:
           path: reference-native/
           key: ${{ steps.native-reference-key.outputs.key }}
+      - name: Build the immutable diagnostic pair
+        if: inputs.ci-diagnostic == 'native'
+        env:
+          CARGO_PROFILE_DEV_DEBUG: '0'
+          CARGO_INCREMENTAL: '0'
+        run: |
+          sudo apt-get install -y --no-install-recommends libclang-dev
+          node scripts/ci-deadline.mjs "$PWD/native-diagnostics/build" 90 -- node scripts/ci-diagnostic-native-build.mjs
       - name: Verify the exact reference binaries
         env:
           REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
@@ -534,11 +646,29 @@ jobs:
           assert set(metadata['sha256']) == {'cairn', 'examples/native_storage_qualifier'}
           for name, checksum in metadata['sha256'].items():
               assert hashlib.sha256((Path('reference-native') / name).read_bytes()).hexdigest() == checksum
-          Path('native-storage-evidence/reference').mkdir(parents=True)
+          Path('native-storage-evidence/reference').mkdir(parents=True, exist_ok=True)
           Path('native-storage-evidence/reference/revision.json').write_text(json.dumps(metadata, indent=2))
+          if os.environ.get('CI_DIAGNOSTIC_SOURCE'):
+              pinned = json.loads(Path('native-diagnostics/source.json').read_text())
+              candidate = json.loads(Path('target/debug/revision.json').read_text())
+              assert candidate['headSha'] == pinned['revisions']['candidate']
+              for field in ['image', 'rust', 'features', 'profile']:
+                  assert candidate[field] == metadata[field]
+              assert set(candidate['sha256']) == {'cairn', 'examples/native_storage_qualifier'}
+              for name, checksum in candidate['sha256'].items():
+                  assert hashlib.sha256((Path('target/debug') / name).read_bytes()).hexdigest() == checksum
           PYREF
+      - name: Check native fixture memory and garbage semantics against the candidate
+        env:
+          CAIRN_TEST_NATIVE_QUALIFIER: ${{ github.workspace }}/target/debug/examples/native_storage_qualifier
+        run: |
+          if test -n "$CI_DIAGNOSTIC_SOURCE"; then
+            node scripts/ci-deadline.mjs "$PWD/native-diagnostics/preparation" 90 -- .native-s3-test/bin/python -m unittest discover -s scripts/tests -p test_native_s3_memory.py -v
+          else
+            .native-s3-test/bin/python -m unittest discover -s scripts/tests -p test_native_s3_memory.py -v
+          fi
       - uses: actions/upload-artifact@v7.0.1
-        if: steps.native-reference-artifact.outputs.found != 'true'
+        if: inputs.ci-diagnostic != 'native' && steps.native-reference-artifact.outputs.found != 'true'
         with:
           name: ${{ steps.native-reference-key.outputs.artifact }}
           path: reference-native/
@@ -554,23 +684,47 @@ jobs:
           reference_fixture="$RUNNER_TEMP/cairn-native-reference-fixture"
           mkdir -p "$reference_fixture"
           git archive "$REFERENCE_SHA" scripts/tests deploy/nodes/native-host.py | tar -x -C "$reference_fixture"
-          python3 -B scripts/tests/native_admission_overlay.py "$reference_fixture" reference
+          if test -n "$CI_DIAGNOSTIC_SOURCE"; then
+            mkdir -p "native-diagnostics/reference"
+            python3 -B scripts/tests/native_admission_overlay.py "$reference_fixture" reference | tee "native-diagnostics/reference/admission-observation.json"
+            python3 -B scripts/tests/native_phase_overlay.py "$reference_fixture" reference | tee "native-diagnostics/reference/phase-observation.json"
+          else
+            python3 -B scripts/tests/native_admission_overlay.py "$reference_fixture" reference
+          fi
           chmod +x reference-native/cairn reference-native/examples/native_storage_qualifier
-          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
+          if test -n "$CI_DIAGNOSTIC_SOURCE"; then
+            sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" CI_JOB_STARTED_AT="$CI_JOB_STARTED_AT" node scripts/ci-deadline.mjs "$PWD/native-diagnostics/reference" 90 -- .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
+          else
+            sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence/reference" .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier
+          fi
       - name: Qualify real ublk, S3, eviction, systemd ownership and crash recovery
+        env:
+          DIAGNOSTIC_CANDIDATE: ${{ inputs.ci-diagnostic == 'native' && inputs.diagnostic-candidate || '' }}
         run: |
           chmod +x target/debug/cairn target/debug/examples/native_storage_qualifier
           mkdir -p native-storage-evidence
           candidate_fixture="$RUNNER_TEMP/cairn-native-candidate-fixture"
           mkdir -p "$candidate_fixture"
-          git archive HEAD scripts/tests deploy/nodes/native-host.py | tar -x -C "$candidate_fixture"
-          python3 -B scripts/tests/native_admission_overlay.py "$candidate_fixture" candidate
-          sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
+          git archive "${DIAGNOSTIC_CANDIDATE:-HEAD}" scripts/tests deploy/nodes/native-host.py | tar -x -C "$candidate_fixture"
+          if test -n "$CI_DIAGNOSTIC_SOURCE"; then
+            mkdir -p "native-diagnostics/candidate"
+            python3 -B scripts/tests/native_admission_overlay.py "$candidate_fixture" candidate | tee "native-diagnostics/candidate/admission-observation.json"
+            python3 -B scripts/tests/native_phase_overlay.py "$candidate_fixture" candidate | tee "native-diagnostics/candidate/phase-observation.json"
+          else
+            python3 -B scripts/tests/native_admission_overlay.py "$candidate_fixture" candidate
+          fi
+          if test -n "$CI_DIAGNOSTIC_SOURCE"; then
+            sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" CI_JOB_STARTED_AT="$CI_JOB_STARTED_AT" node scripts/ci-deadline.mjs "$PWD/native-diagnostics/candidate" 90 -- .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
+          else
+            sudo env PATH="$PWD/.native-s3-test/bin:$PATH" CAIRN_NATIVE_DISPOSABLE_HOST=1 CAIRN_NATIVE_DOCKER_QUALIFY=1 NATIVE_STORAGE_EVIDENCE_DIR="$PWD/native-storage-evidence" .native-s3-test/bin/python scripts/tests/node_s3_test.py --repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier
+          fi
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
           name: native-storage-evidence
-          path: native-storage-evidence/
+          path: |
+            native-storage-evidence/
+            native-diagnostics/
           retention-days: 14
   browser:
     services:
@@ -1322,3 +1476,30 @@ jobs:
           CAIRN_RELEASE_SSH_KEY: ${{ secrets.CAIRN_RELEASE_SSH_KEY }}
           DEPLOY_INSTALLATION_IMAGE: ghcr.io/${{ github.repository_owner }}/cairn@${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
         run: node scripts/production-release.mjs verify
+
+  plan-storage:
+    name: Plan storage layout and version fence
+    if: github.event_name == 'workflow_dispatch' && (inputs.ci-diagnostic == 'none' || inputs.ci-diagnostic == '') && inputs.plan-storage-reference != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          install: false
+      - run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
+      - name: Install compilation dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
+      - name: Qualify two actual source revisions on synthetic databases
+        env:
+          PLAN_STORAGE_OUTPUT: ${{ runner.temp }}/plan-storage-evidence
+          PLAN_STORAGE_REFERENCE: ${{ inputs.plan-storage-reference }}
+        run: node scripts/qualify-plan-storage.mjs "$PLAN_STORAGE_REFERENCE"
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: plan-storage-qualification
+          path: ${{ runner.temp }}/plan-storage-evidence/
+          if-no-files-found: error

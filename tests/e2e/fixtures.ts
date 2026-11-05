@@ -55,6 +55,20 @@ export async function useRelayForHttpMocks(page: Page) {
 // Each Playwright project owns its application, database, worker, and limiter.
 // Journeys retain their deliberately ordered persistence checks within one project.
 export const test = base.extend<object, { workspace: Workspace }>({
+  context: async ({ context }, use) => {
+    await use(context)
+
+    // Drain registered HTTP routes on this fixture's context and its open pages
+    // before Playwright closes them. Explicitly closed pages, separate contexts,
+    // and handlers already removed by unroute or times remain their owners' responsibility.
+    const drains = await Promise.allSettled([
+      ...context.pages().map(page => page.unrouteAll({ behavior: 'wait' })),
+      context.unrouteAll({ behavior: 'wait' }),
+    ])
+    const failures = drains.filter(result => result.status === 'rejected')
+    if (failures.length)
+      throw new AggregateError(failures.map(result => result.reason), 'HTTP route teardown failed')
+  },
   // Playwright requires a destructuring pattern even with no fixture dependencies.
   // eslint-disable-next-line no-empty-pattern
   workspace: [async ({}, use, workerInfo) => {

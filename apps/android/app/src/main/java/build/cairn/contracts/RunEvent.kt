@@ -12,6 +12,8 @@ data class RunEvent(
     val displayId: Long? = null,
     val id: Long,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val legacyPlanApproval: Boolean? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val payload: JsonObject? = null,
     val runId: String = "",
     val text: String,

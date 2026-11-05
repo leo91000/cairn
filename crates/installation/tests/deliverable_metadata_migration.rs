@@ -39,8 +39,37 @@ fn snapshot(db: &Connection) -> Snapshot {
     tables
         .into_iter()
         .map(|(name, sql)| {
+            let mut columns = db
+                .prepare(&format!(
+                    "PRAGMA table_info(\"{}\")",
+                    name.replace('"', "\"\"")
+                ))
+                .unwrap();
+            let columns = columns
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            let plan_table = matches!(name.as_str(), "chat_messages" | "chat_questions");
+            let columns = columns
+                .into_iter()
+                .filter(|column| !plan_table || column != "plan")
+                .collect::<Vec<_>>();
+            let signature = if plan_table {
+                format!("columns:{}", columns.join(","))
+            } else {
+                sql
+            };
+            let projection = if plan_table {
+                columns.join(",")
+            } else {
+                "*".to_owned()
+            };
             let mut statement = db
-                .prepare(&format!("SELECT * FROM \"{}\"", name.replace('"', "\"\"")))
+                .prepare(&format!(
+                    "SELECT {projection} FROM \"{}\"",
+                    name.replace('"', "\"\"")
+                ))
                 .unwrap();
             let count = statement.column_count();
             let rows = statement
@@ -52,7 +81,7 @@ fn snapshot(db: &Connection) -> Snapshot {
                 .unwrap()
                 .collect::<rusqlite::Result<_>>()
                 .unwrap();
-            (name, (sql, rows))
+            (name, (signature, rows))
         })
         .collect()
 }
@@ -94,7 +123,40 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
     let before = snapshot(&db);
     let before_schema = schema(&db);
     let documents = documents(&db);
+
     let store = Store::open(root.path()).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        27
+    );
+    let after = snapshot(&db);
+    let after_schema = schema(&db);
+    for ((kind, name), definition) in before_schema {
+        if kind != "table" || !matches!(name.as_str(), "kv" | "chat_messages" | "chat_questions") {
+            assert_eq!(
+                after_schema.get(&(kind, name)),
+                Some(&definition),
+                "Unrelated schema objects must remain unchanged"
+            );
+        }
+    }
+    for (table, (signature, rows)) in before {
+        if table != "kv" {
+            assert_eq!(after[&table], (signature, rows), "{table}");
+        }
+    }
+    for table in ["chat_messages", "chat_questions"] {
+        assert!(
+            db.prepare(&format!(
+                "SELECT 1 FROM pragma_table_info('{table}') WHERE name='plan'"
+            ))
+            .unwrap()
+            .exists([])
+            .unwrap(),
+            "Plan migration should add the expected column to {table}"
+        );
+    }
     let (versions, source, public) = store
         .read(|db| {
             Ok((
@@ -169,11 +231,6 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
         2
     );
     assert_eq!(
-        db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-            .unwrap(),
-        26
-    );
-    assert_eq!(
         db.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
             .unwrap(),
         "ok"
@@ -184,22 +241,6 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
             .exists([])
             .unwrap()
     );
-    let after = snapshot(&db);
-    let after_schema = schema(&db);
-    for ((kind, name), definition) in before_schema {
-        if kind != "table" || name != "kv" {
-            assert_eq!(
-                after_schema.get(&(kind, name)),
-                Some(&definition),
-                "Unrelated schema objects must remain unchanged"
-            );
-        }
-    }
-    for (table, (sql, rows)) in before {
-        if table != "kv" {
-            assert_eq!(after[&table], (sql, rows), "{table}");
-        }
-    }
     assert_eq!(db.query_row("SELECT count(*) FROM kv WHERE key GLOB 'artifact:*' OR key GLOB 'artifact-share:*' OR key GLOB 'skill-source:*'",[],|row| row.get::<_,i64>(0)).unwrap(),0);
     for key in [
         "artifact:forbidden",

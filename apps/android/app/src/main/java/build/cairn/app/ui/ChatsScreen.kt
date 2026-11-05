@@ -55,6 +55,7 @@ import build.cairn.contracts.ConfirmChatInput
 import build.cairn.contracts.CreateChatInput
 import build.cairn.contracts.EditChatMessage
 import build.cairn.contracts.EditChatMessageInput
+import build.cairn.contracts.PlanApproval
 import build.cairn.contracts.QuestionAnswerInput
 import build.cairn.contracts.ResumeChatInput
 import build.cairn.contracts.ResumeExecutionSelection
@@ -420,6 +421,7 @@ internal fun ChatPage(
     var provider by rememberSaveable(id) { mutableStateOf(savedDraft.provider) }
     var model by rememberSaveable(id) { mutableStateOf(savedDraft.model) }
     var reasoning by rememberSaveable(id) { mutableStateOf(savedDraft.reasoning) }
+    var planning by rememberSaveable(id) { mutableStateOf(savedDraft.plan) }
     var speed by rememberSaveable(id) { mutableStateOf(savedDraft.speed) }
     var reasoningIntentKind by
         rememberSaveable(id, resumeReasoningContext) { mutableStateOf("untouched") }
@@ -481,6 +483,7 @@ internal fun ChatPage(
                     submissionKey,
                     provider,
                     rejected,
+                    planning,
                     speed,
                 )
     }
@@ -525,6 +528,12 @@ internal fun ChatPage(
         }
     val chats = conversations.state?.chats
     val timeline = remember(history, chats) { history.followingDelegations(chats) }
+    // Approval uses the latest durable source, not the row chosen for reading.
+    val implementable =
+        remember(timeline, live.events, live.entries) {
+            val sourceId = proposedPlanApproval(live.events, live.entries)
+            timeline.lastOrNull { sourceId != null && it.proposalSourceId == sourceId }?.key
+        }
     var asking by remember { mutableStateOf<ChatQuestion?>(null) }
     var stopping by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<ChatMessage?>(null) }
@@ -628,6 +637,12 @@ internal fun ChatPage(
         reasoning = ""
         speed = ""
     }
+    val planAvailable = codingAgent(chosenProvider).planTurns
+    // Availability blocks submission; it never removes the requested boundary.
+    val planRequested = planning
+    val planBlocked = planRequested && !planAvailable
+    // A plan request cannot join a turn that can already change files.
+    val steerBlocked = planRequested && chat?.run?.chatExecution?.plan != true
     val skillOptions =
         remember(state.skills, selectedAgent, chat?.projectId, project, chat == null) {
             chatSkills(state.skills, selectedAgent, if (chat != null) chat.projectId else project)
@@ -728,8 +743,11 @@ internal fun ChatPage(
         submissionKey = ""
         submissionId = ""
     }
-    fun send(mode: String) {
+    fun send(mode: String, plan: Boolean = planRequested, planApproval: PlanApproval? = null) {
         vm.perform {
+            require(!plan || planAvailable) {
+                "Le mode Plan nécessite Codex ou Claude Code. Désactivez Plan pour une demande ordinaire."
+            }
             val chatId =
                 id
                     ?: createdId
@@ -769,15 +787,19 @@ internal fun ChatPage(
             val selectedSpeed = speed
             val content =
                 EditChatMessage(
-                    text = draft.trim(),
+                    text =
+                        if (planApproval != null) "Implémente le plan que tu as proposé."
+                        else draft.trim(),
                     mode = mode,
                     provider = chosenProvider,
                     model = selectedModel,
                     reasoning = selectedReasoning,
+                    plan = plan,
                     speed = selectedSpeed,
                     attachmentIds = attachments.map { it.attachment.id },
                 )
-            val key = "$chatId/${editing.orEmpty()}/${wireJson.encodeToJsonElement(content)}"
+            val key =
+                "$chatId/${editing.orEmpty()}/${wireJson.encodeToJsonElement(content)}/$planApproval"
             if (key != submissionKey) {
                 submissionKey = key
                 submissionId = UUID.randomUUID().toString()
@@ -787,7 +809,7 @@ internal fun ChatPage(
                     ChatMessage(
                         id = submissionId,
                         chatId = chatId,
-                        text = draft.trim(),
+                        text = content.text,
                         model = selectedModel,
                         reasoning = selectedReasoning,
                         mode = mode,
@@ -795,6 +817,7 @@ internal fun ChatPage(
                         createdAt = System.currentTimeMillis(),
                         attachments = attachments.map { it.attachment },
                         provider = chosenProvider,
+                        plan = plan,
                         speed = selectedSpeed,
                     )
             try {
@@ -811,6 +834,8 @@ internal fun ChatPage(
                                     provider = content.provider,
                                     model = content.model,
                                     reasoning = content.reasoning,
+                                    plan = content.plan == true,
+                                    planApproval = planApproval,
                                     speed = content.speed.orEmpty(),
                                     attachmentIds = content.attachmentIds,
                                 ),
@@ -822,10 +847,19 @@ internal fun ChatPage(
                     )
             } catch (e: Exception) {
                 outgoing = null
+                if (planApproval != null && e is ApiException && e.status == 409) {
+                    submissionKey = ""
+                    submissionId = ""
+                    live.reconnect()
+                }
                 throw e
             }
             clearDraft()
-            if (id == null) openChat(chatId)
+            if (id == null) {
+                // Plan mode follows the first message into the conversation it created.
+                if (plan) vm.chatDrafts[chatId] = ChatDraft(plan = true)
+                openChat(chatId)
+            }
         }
     }
     fun edit(message: ChatMessage) {
@@ -843,8 +877,31 @@ internal fun ChatPage(
         provider = message.provider.ifBlank { currentProvider }
         model = message.model
         reasoning = message.reasoning
+        planning = message.plan == true
         speed = message.speed
         attachments = message.attachments.map { DraftAttachment(it) }
+    }
+    // Leaving plan mode is explicit: this queues an ordinary turn in the same conversation, with
+    // the agent's usual permissions.
+    fun implementPlan(entry: TimelineEntry) {
+        if (
+            draft.isNotBlank() ||
+                attachments.isNotEmpty() ||
+                rejected.isNotEmpty() ||
+                editing != null ||
+                active ||
+                pending.isNotEmpty() ||
+                delivery.sending.isNotEmpty()
+        )
+            return
+        val sourceId = entry.proposalSourceId ?: return
+        val revision = chat?.revision ?: return
+        planning = false
+        send(
+            "queue",
+            plan = false,
+            planApproval = PlanApproval(sourceId = sourceId, revision = revision),
+        )
     }
     fun steerQueued(message: ChatMessage) {
         vm.perform {
@@ -859,6 +916,7 @@ internal fun ChatPage(
                             provider = message.provider,
                             model = message.model,
                             reasoning = message.reasoning,
+                            plan = message.plan,
                             speed = message.speed,
                             attachmentIds = message.attachments.map { it.id },
                         ),
@@ -1413,6 +1471,19 @@ internal fun ChatPage(
                                                 hideRunning = chat?.run?.status == "running",
                                                 active = active,
                                                 livePlan = livePlan,
+                                                implement =
+                                                    if (it.key == implementable)
+                                                        ({ implementPlan(it) })
+                                                    else null,
+                                                canImplement =
+                                                    !state.busy &&
+                                                        !active &&
+                                                        pending.isEmpty() &&
+                                                        delivery.sending.isEmpty() &&
+                                                        editing == null &&
+                                                        draft.isBlank() &&
+                                                        attachments.isEmpty() &&
+                                                        rejected.isEmpty(),
                                             )
                                         }
                                     }
@@ -1586,6 +1657,7 @@ internal fun ChatPage(
                                                 sending.message.attachments,
                                                 sending.message.createdAt,
                                                 chat?.agentName ?: "Cairn",
+                                                planRequest = sending.message.plan == true,
                                             )
                                             Text(
                                                 sending.label,
@@ -1714,6 +1786,14 @@ internal fun ChatPage(
                                             color = MaterialTheme.colorScheme.outlineVariant,
                                         )
                                     }
+                                    if (planBlocked)
+                                        Text(
+                                            "Le mode Plan nécessite Codex ou Claude Code. Choisissez un assistant compatible ou désactivez Plan pour une demande ordinaire.",
+                                            Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                                .testTag("plan-unavailable"),
+                                            color = MaterialTheme.colorScheme.error,
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
                                     if (attachments.isNotEmpty() || rejected.isNotEmpty())
                                         ComposerAttachments(
                                             vm,
@@ -1795,7 +1875,9 @@ internal fun ChatPage(
                                                     Text(
                                                         // Any message cancels a pending wait,
                                                         // paused or not.
-                                                        if (chat?.paused == true)
+                                                        if (planRequested)
+                                                            "Que faut-il planifier ? Rien ne sera modifié"
+                                                        else if (chat?.paused == true)
                                                             if (liveWakeup(chat) != null)
                                                                 "Ajouter à la file — annule l’attente"
                                                             else "Ajouter à la file…"
@@ -1858,8 +1940,24 @@ internal fun ChatPage(
                                                 reasoning = r
                                             }
                                         }
+                                        FilterChip(
+                                            planRequested,
+                                            { planning = !planning },
+                                            label = { Text("Plan") },
+                                            modifier =
+                                                Modifier.padding(end = 4.dp).testTag("plan-toggle"),
+                                            enabled = !state.busy && (planAvailable || planning),
+                                            leadingIcon = {
+                                                Icon(
+                                                    CairnIcons.Tasks,
+                                                    null,
+                                                    Modifier.size(16.dp),
+                                                )
+                                            },
+                                        )
                                         val canSend =
-                                            !state.busy &&
+                                            !planBlocked &&
+                                                !state.busy &&
                                                 rejected.isEmpty() &&
                                                 uploadProgress.isEmpty() &&
                                                 (draft.isNotBlank() || attachments.isNotEmpty()) &&
@@ -1879,7 +1977,8 @@ internal fun ChatPage(
                                                     MaterialTheme.colorScheme.onPrimaryContainer,
                                                 outlined = false,
                                                 size = 40.dp,
-                                                enabled = canSend && !switchingProvider,
+                                                enabled =
+                                                    canSend && !switchingProvider && !steerBlocked,
                                             ) {
                                                 send(if (switchingProvider) "queue" else "steer")
                                             }

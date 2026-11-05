@@ -15,10 +15,21 @@ export function chatFixture() {
   const file = path.join(process.env.CODEX_HOME, 'fixture-conversation.json')
   // The thread's model: the requested one, else one the fixture's configuration sets.
   const configModel = path.join(process.env.CODEX_HOME, 'fixture-config-model')
+  const unknownThreadModel = path.join(process.env.CODEX_HOME, 'fixture-unknown-thread-model')
+  let thread
   const threadModel = params => params.model || (existsSync(configModel) ? readFileSync(configModel, 'utf8').trim() : 'fixture-fast')
+  const threadModelResult = (params) => {
+    const result = { thread }
+
+    if (!existsSync(unknownThreadModel))
+      result.model = threadModel(params)
+
+    return result
+  }
+
   const emit = value => process.stdout.write(`${JSON.stringify(value)}\n`)
   const notify = (method, params) => emit({ method, params })
-  let thread
+
   let active
   let counter = 0
   let hold = false
@@ -117,6 +128,30 @@ export function chatFixture() {
       return true
     }
 
+    if (method === 'collaborationMode/list') {
+      // Presets listed by Codex 0.164.0.
+      emit({
+        id: request.id,
+        result: {
+          data: [
+            {
+              name: 'Plan',
+              mode: 'plan',
+              model: null,
+              reasoning_effort: 'medium',
+            },
+            {
+              name: 'Default',
+              mode: 'default',
+              model: null,
+              reasoning_effort: null,
+            },
+          ],
+        },
+      })
+      return true
+    }
+
     if (method === 'thread/unsubscribe') {
       if (active)
         throw new Error('Cannot release an active thread')
@@ -145,7 +180,7 @@ export function chatFixture() {
         fixtureInstructions: params.developerInstructions || '',
       }
       save()
-      emit({ id: request.id, result: { thread, model: threadModel(params) } })
+      emit({ id: request.id, result: threadModelResult(params) })
     }
 
     if (method === 'thread/resume') {
@@ -156,7 +191,7 @@ export function chatFixture() {
       thread.fixtureConfig = params.config
       thread.fixtureInstructions = params.developerInstructions || ''
       counter = thread.turns.length
-      emit({ id: request.id, result: { thread: { ...thread, turns: [] }, model: threadModel(params) } })
+      emit({ id: request.id, result: { ...threadModelResult(params), thread: { ...thread, turns: [] } } })
     }
 
     if (method === 'thread/turns/list' || method === 'thread/items/list') {
@@ -181,7 +216,7 @@ export function chatFixture() {
         return true
       }
 
-      if (method === 'turn/start') {
+      if (method === 'turn/start' && !request.earlyPlanSent) {
         hold = (params.input[0].text.includes('fixture:chat-hang') || params.input[0].text.includes('fixture:hang')) && !params.input[0].text.startsWith('Continue the interrupted')
         active = {
           id: `turn-${++counter}`,
@@ -189,10 +224,42 @@ export function chatFixture() {
           items: [],
           model: params.model,
           effort: params.effort,
+          sandboxPolicy: params.sandboxPolicy,
+          collaborationMode: params.collaborationMode,
+          threadConfig: thread.fixtureConfig,
           serviceTier: params.serviceTier,
         }
         thread.turns.push(active)
         notify('turn/started', { threadId: thread.id, turn: active })
+        // Codex emits a plan item in its plan mode, which `fixture:plan-item` stands for
+        // outside a Cairn plan turn.
+        if (params.collaborationMode?.mode === 'plan' || params.input[0].text.includes('fixture:plan-item')) {
+          const plan = { id: `plan-${active.id}`, type: 'plan', text: '1. Read the composer.\n2. Add the toggle.' }
+          active.items.push(plan)
+          notify('item/completed', { threadId: thread.id, item: plan })
+        }
+
+        if (params.input[0].text.includes('fixture:early-plan')) {
+          // A later notification proves the parent consumed the early item while
+          // turn/start is still awaiting acceptance; no scheduler sleeps decide it.
+          tokenUsage(active.id, usage(12345, 0, 0), usage(12345, 0, 0))
+          const release = path.join(process.env.CODEX_HOME, 'fixture-early-plan-release')
+          const timer = setInterval(() => {
+            if (!existsSync(release))
+              return
+            clearInterval(timer)
+            if (params.input[0].text.includes('fixture:early-plan-rejected')) {
+              active.status = 'failed'
+              save()
+              active = null
+              emit({ id: request.id, error: { code: -32000, message: 'Initial turn rejected' } })
+              return
+            }
+
+            handle({ ...request, earlyPlanSent: true })
+          }, 10)
+          return true
+        }
       }
 
       const item = {

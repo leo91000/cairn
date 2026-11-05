@@ -20,6 +20,8 @@ export const providers: Record<Provider, {
   requiresModel: boolean
   /** Runs try accounts in the user's order instead of by remaining capacity. */
   ordered: boolean
+  /** Cairn can enforce a plan turn's read-only boundary for this engine. */
+  planTurns: boolean
 }> = {
   codex: {
     label: 'Codex',
@@ -28,6 +30,7 @@ export const providers: Record<Provider, {
     connection: 'oauth',
     requiresModel: false,
     ordered: false,
+    planTurns: true,
   },
   claude: {
     label: 'Claude Code',
@@ -36,6 +39,7 @@ export const providers: Record<Provider, {
     connection: 'oauth',
     requiresModel: false,
     ordered: false,
+    planTurns: true,
   },
   opencode: {
     label: 'OpenCode',
@@ -44,6 +48,8 @@ export const providers: Record<Provider, {
     connection: 'apiKey',
     requiresModel: true,
     ordered: true,
+    // OpenCode runs only in YOLO environments, without a sandbox Cairn could narrow.
+    planTurns: false,
   },
 }
 

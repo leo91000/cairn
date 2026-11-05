@@ -11,6 +11,10 @@ export interface ChatMessage {
   provider: '' | import('../../accounts').Provider
   model: string
   reasoning: string
+  /**
+   * A plan turn request. Absent on messages saved before plan turns, which never were.
+   */
+  plan?: boolean
   speed: string
   mode: MessageMode
   status: MessageStatus
