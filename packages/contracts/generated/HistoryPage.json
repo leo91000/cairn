@@ -191,6 +191,13 @@
           "minimum": -9007199254740991,
           "type": "integer"
         },
+        "legacyPlanApproval": {
+          "description": "Run-wide legacy approval eligibility, derived when an old root plan is read.\nThis is absent for authored request boundaries and non-plan events.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "payload": {
           "additionalProperties": true,
           "description": "Redacted adapter JSON, retained without constructing a second object tree.",
@@ -243,6 +250,10 @@
                 "string",
                 "null"
               ]
+            },
+            "plan": {
+              "description": "The delivered request asks for a protected Plan turn.",
+              "type": "boolean"
             },
             "questionId": {
               "type": [

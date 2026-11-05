@@ -23,15 +23,30 @@ fn rehearsal_upgrades_only_the_private_copy_and_is_stable_on_reopen() {
         result,
         json!({
             "versionBefore": 15,
-            "versionAfter": 26,
+            "versionAfter": 27,
             "quickCheck": "ok",
             "foreignKeyCheck": "ok",
         })
     );
     assert_eq!(std::fs::read(&database).unwrap(), original);
+    let migrated = Connection::open(copy.path().join("manager.db")).unwrap();
+    for table in ["chat_messages", "chat_questions"] {
+        assert_eq!(
+            migrated
+                .query_row(
+                    &format!("SELECT count(*) FROM {table} WHERE plan!=0"),
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0,
+            "copied previous rows must remain ordinary in {table}"
+        );
+    }
+    drop(migrated);
     let reopened = store_migration::upgrade_copy(copy.path()).unwrap();
-    assert_eq!(reopened["versionBefore"], 26);
-    assert_eq!(reopened["versionAfter"], 26);
+    assert_eq!(reopened["versionBefore"], 27);
+    assert_eq!(reopened["versionAfter"], 27);
 }
 
 #[test]

@@ -76,3 +76,74 @@ it('rejects an inconsistent chunk instead of accepting a partial card', async ()
   })
   await expect(readLargeTimeline('/runs/run/stream', [preview])).rejects.toThrow('Invalid timeline content length')
 })
+
+it('hydrates a large proposal with its completed identity and parent before applying it', async () => {
+  const { readLargeEvents } = await import('../src/large-timeline')
+  const proposal = {
+    id: 8,
+    runId: 'run',
+    createdAt: 1,
+    type: 'item.completed',
+    text: '🦊 detailed plan',
+    payload: { item: { id: 'p', type: 'proposed_plan', text: '🦊 detailed plan' }, parent_tool_use_id: 'child', request_id: 'request' },
+  }
+  const json = JSON.stringify(proposal)
+  const split = json.indexOf('🦊')
+  const parts = [json.slice(0, split), json.slice(split)]
+  const next = new TextEncoder().encode(parts[0]).length
+  const total = new TextEncoder().encode(json).length
+  for (const [index, data] of parts.entries()) {
+    vi.mocked(api).mockResolvedValueOnce({
+      eventId: 8,
+      runId: 'run',
+      offset: index ? next : 0,
+      totalBytes: total,
+      sha256: 'a'.repeat(64),
+      data,
+      nextOffset: index ? null : next,
+    })
+  }
+
+  const preview = { ...proposal, text: '', payload: { _cairnEventContent: true } }
+  expect(await readLargeEvents('/runs/run/stream', [preview])).toEqual([proposal])
+  expect(vi.mocked(api).mock.calls[1][0]).toBe('/runs/run/event-content')
+  expect(JSON.parse(vi.mocked(api).mock.calls[1][1]!.body as string)).toMatchObject({
+    eventId: 8,
+    runId: 'run',
+    offset: next,
+    sha256: 'a'.repeat(64),
+  })
+})
+
+it('rejects a changed proposal identity and incomplete chunks without advancing its input', async () => {
+  const { readLargeEvents } = await import('../src/large-timeline')
+  const preview = {
+    id: 8,
+    runId: 'run',
+    createdAt: 1,
+    type: 'item.completed',
+    text: '',
+    payload: { _cairnEventContent: true },
+  }
+  vi.mocked(api).mockResolvedValueOnce({
+    eventId: 9,
+    runId: 'run',
+    offset: 0,
+    totalBytes: 10,
+    sha256: 'a'.repeat(64),
+    data: 'x',
+    nextOffset: null,
+  })
+  await expect(readLargeEvents('/runs/run/stream', [preview])).rejects.toThrow('Event content changed')
+  expect(preview.payload._cairnEventContent).toBe(true)
+  vi.mocked(api).mockResolvedValueOnce({
+    eventId: 8,
+    runId: 'run',
+    offset: 0,
+    totalBytes: 10,
+    sha256: 'a'.repeat(64),
+    data: 'x',
+    nextOffset: null,
+  })
+  await expect(readLargeEvents('/runs/run/stream', [preview])).rejects.toThrow('Invalid event content length')
+})

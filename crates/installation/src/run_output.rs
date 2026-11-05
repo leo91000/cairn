@@ -5,13 +5,23 @@ use std::{path::Path, sync::LazyLock};
 pub const ACTIVITY_DETAIL_LIMIT: usize = 16 * 1024;
 const NOTICE: &str = "Details shortened: arguments and output were omitted.";
 
+/// Items whose text is what the user reads in the conversation: an answer, or the
+/// approach a plan turn proposes for approval. Unlike tool activity, they are never
+/// replaced by a preview.
+pub fn conversation_item(event: &Value) -> bool {
+    matches!(
+        event["item"]["type"].as_str(),
+        Some("agent_message" | "proposed_plan")
+    )
+}
+
 /// Serialize UI activity before it crosses the guest transport. The native
 /// session retains full tool results; the manager already stores these previews.
 pub fn event_line(event: &Value) -> Vec<u8> {
     let mut bytes = event.to_string().into_bytes();
     let activity = text(event, "type").starts_with("item.")
         && event["item"].is_object()
-        && event["item"]["type"] != "agent_message";
+        && !conversation_item(event);
     if activity && bytes.len() > ACTIVITY_DETAIL_LIMIT {
         bytes = compact_activity_preview(event, None)
             .to_string()
@@ -492,6 +502,12 @@ fn project_line(run: &Value, project: &Value) -> String {
         .map_or("", |w| text(w, "path"));
     if !path.is_empty() {
         format!("- {name} ({id}): {path}")
+    } else if run["isolated"] == true && crate::chats::planning(run) {
+        format!(
+            "- {name} ({id}): not loaded; Plan turns cannot import project files into the \
+            workspace. Include opening this project in your plan; it becomes available \
+            after the user starts implementation."
+        )
     } else if run["isolated"] == true {
         format!(
             "- {name} ({id}): not loaded; call cairn_workspace.open_project \
@@ -555,6 +571,15 @@ pub fn chat_plan(
     });
     crate::store::merge(&mut plan, &provider.adapter().chat_mcp(mcp));
     crate::coding_agent_configuration::apply(&mut plan, &run["snapshot"]["nativeConfiguration"])?;
+    // The engine sandbox of a plan turn is read-only whatever the agent's access.
+    // Adapters older than plan turns still enforce this field.
+    if crate::chats::planning(run) {
+        plan["planning"] = true.into();
+        plan["sandbox"] = "read-only".into();
+    }
+    if run["chatExecution"]["afterPlan"] == true {
+        plan["afterPlan"] = true.into();
+    }
     if let Some(session) = session {
         plan["sessionId"] = session.into();
     }

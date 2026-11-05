@@ -554,6 +554,7 @@ fn previous_answers(db: &Db<'_>, message: Option<&str>) -> Vec<PrivateAnswer> {
                     created_at: r.get(10)?,
                     question_id: r.get(11)?,
                     attachments: vec![],
+                    plan: false,
                 };
                 let raw: String = r.get(12)?;
                 Ok(PrivateAnswer {
@@ -627,6 +628,7 @@ impl StorageEntity for PrivateAnswer {
                 created_at: 1700000000000,
                 attachments: vec![],
                 question_id: Some("question".into()),
+                plan: false,
             },
             answers: Some(answers.clone()),
         };

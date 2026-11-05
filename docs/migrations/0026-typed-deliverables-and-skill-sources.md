@@ -39,9 +39,11 @@ release; synthetic qualification does not replace it.
 committed real v24 Store snapshot from main `c2e72b39` (the test-only #661
 commit uses identical native sources). The fixture applies base `f599b77c`'s
 24→25 coding-agent-configuration schema step and adds one explicitly synthetic
-configuration row. Opening this schema-25 fixture through the current Store
-runs A16's 25→26 migration. The configuration row and all prior rows/schema
-objects must remain unchanged. Artifact versions, a public link and skill
+configuration row. Opening this schema-25 fixture through the current Store runs
+A16's 25→26 migration followed by the Plan 26→27 migration. The fixture compares
+every pre-existing column and row while excluding only the two expected Plan
+columns. The configuration row and all prior rows/schema objects must remain
+unchanged. Artifact versions, a public link and skill
 sources originate in the real `b3ebdc4b` writer; the retained timeline card
 originates in the actual v22 event writer. Additional synthetic project,
 plugin instance, contribution/resource grant and credential supplier rows are

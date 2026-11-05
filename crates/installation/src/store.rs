@@ -36,7 +36,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 26;
+pub(crate) const DATABASE_VERSION: i64 = 27;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -219,6 +219,10 @@ impl Store {
         }
         if !fresh && version == 25 {
             crate::artifacts::migration::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 26 {
+            crate::chats::migration::plan_requests(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;
@@ -1017,7 +1021,9 @@ impl Db<'_> {
             AND id>? ORDER BY id LIMIT ?";
         let mut stmt = self.0.prepare_cached(sql)?;
         let rows = stmt.query_map(params![run, after, limit], event_row)?;
-        Ok(within_budget(rows, limit, EventBudget::Raw(max_bytes), false)?.0)
+        let mut events = within_budget(rows, limit, EventBudget::Raw(max_bytes), false)?.0;
+        self.mark_legacy_plan_approvals(run, &mut events)?;
+        Ok(events)
     }
 
     pub fn events_before(&self, run: &str, before: i64) -> Result<(Vec<Event>, bool)> {
@@ -1076,7 +1082,43 @@ WHERE e.run_id=? AND e.id>? AND e.id<? AND (
         let (mut events, trimmed) = within_budget(&mut rows, limit, budget, true)?;
         let more = trimmed || rows.next().transpose()?.is_some();
         events.reverse();
+        self.mark_legacy_plan_approvals(run, &mut events)?;
         Ok((events, more))
+    }
+
+    /// Legacy receipts have no request ID. Derive their approval state from the full
+    /// run rather than the bounded event page, while leaving authored payloads intact.
+    fn mark_legacy_plan_approvals(&self, run: &str, events: &mut [Event]) -> Result<()> {
+        if !events.iter().any(is_legacy_root_plan) {
+            return Ok(());
+        }
+
+        let (request_count, latest_request, latest_proposal): (i64, Option<i64>, Option<i64>) =
+            self.0.query_row(
+                "SELECT (SELECT COUNT(DISTINCT CASE
+                     WHEN json_type(payload,'$.messageId')='text'
+                       AND json_extract(payload,'$.messageId')!=''
+                     THEN 'message:' || json_extract(payload,'$.messageId')
+                     ELSE 'source:' || id
+                 END) FROM events WHERE run_id=? AND type='chat.user'),
+                 (SELECT MAX(id) FROM events WHERE run_id=? AND type='chat.user'),
+                 (SELECT MAX(id) FROM events WHERE run_id=?
+                   AND type IN ('item.started','item.updated','item.completed')
+                   AND json_extract(payload,'$.item.type')='proposed_plan'
+                   AND COALESCE(json_extract(payload,'$.item.parent_id'),'')='')",
+                rusqlite::params![run, run, run],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+
+        for event in events.iter_mut().filter(|event| is_legacy_root_plan(event)) {
+            event.legacy_plan_approval = Some(
+                request_count == 1
+                    && latest_request.is_some_and(|request| request < event.id)
+                    && latest_proposal == Some(event.id),
+            );
+        }
+
+        Ok(())
     }
 
     pub fn has_run(&self, id: &str) -> Result<bool> {
@@ -1125,6 +1167,31 @@ fn event_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
     ))
 }
 
+fn is_legacy_root_plan(event: &Event) -> bool {
+    if !matches!(
+        event.kind.as_str(),
+        "item.started" | "item.updated" | "item.completed"
+    ) {
+        return false;
+    }
+
+    let Some(payload) = &event.payload else {
+        return false;
+    };
+    let Ok(payload) = serde_json::from_str::<Value>(payload.get()) else {
+        return false;
+    };
+    let Some(item) = payload.get("item") else {
+        return false;
+    };
+
+    item.get("type").and_then(Value::as_str) == Some("proposed_plan")
+        && item
+            .get("parent_id")
+            .is_none_or(|parent| parent.is_null() || parent.as_str() == Some(""))
+        && item.get("request_id").is_none()
+}
+
 /// Serialize each candidate once and probe geometrically increasing byte batches.
 /// Large/noisy rows stop early instead of reading and compressing 1,000 rows.
 /// Backwards reads measure chronological order, as delivered to the clients.
@@ -1158,6 +1225,7 @@ fn within_budget(
             text,
             display_id: None,
             timeline: false,
+            legacy_plan_approval: None,
             payload: payload
                 .map(serde_json::value::RawValue::from_string)
                 .transpose()?,

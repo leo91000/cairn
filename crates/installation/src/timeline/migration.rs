@@ -43,6 +43,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
                     .map(serde_json::value::RawValue::from_string)
                     .transpose()?,
                 display_id: None,
+                legacy_plan_approval: None,
                 timeline: false,
             };
             replay.apply(&event).map_err(|_| invalid())?;

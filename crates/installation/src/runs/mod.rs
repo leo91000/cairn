@@ -344,7 +344,8 @@ impl Db<'_> {
     }
 
     /// Conversation cards need lifecycle/display fields, never the frozen prompt,
-    /// skill sources or other execution inputs in the snapshot.
+    /// skill sources or other execution inputs in the snapshot. The turn's plan
+    /// boundary stays, so plan decisions read the same values as the full run.
     pub(crate) fn conversation_run(&self, id: &str) -> Result<Option<Value>> {
         Ok(self.json_rows(
             "SELECT json_object(
@@ -356,7 +357,11 @@ impl Db<'_> {
                 'contextUsage',json(boundary -> '$.contextUsage'),
                 'suspendedByExclusive',json(placement_suspended_by_exclusive),
                 'restoredAt',json(boundary -> '$.restoredAt'),
-                'chatExecution',json_object('operation',json_extract(boundary,'$.chatExecution.operation'))
+                'chatExecution',json_object(
+                    'operation',json_extract(boundary,'$.chatExecution.operation'),
+                    'plan',json(CASE WHEN boundary -> '$.chatExecution.plan'='true' THEN 'true' ELSE 'false' END),
+                    'afterPlan',json(CASE WHEN boundary -> '$.chatExecution.afterPlan'='true' THEN 'true' ELSE 'false' END)
+                )
              ) FROM runs WHERE id=?",
             [id],
         )?.pop())
