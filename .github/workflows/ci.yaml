@@ -449,25 +449,25 @@ jobs:
             || path.dirname(reservation.path) !== fs.realpathSync(process.env.RUNNER_TEMP)
             || !/^cairn-native-low-space-[0-9a-f-]{36}\.reserve$/.test(path.basename(reservation.path)))
             throw new Error('Refusing an unowned proof reservation.')
+          const available = () => {
+            const filesystem = fs.statfsSync(process.cwd(), { bigint: true })
+            return `${filesystem.bavail * filesystem.bsize}`
+          }
           const descriptor = fs.openSync(reservation.path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
           try {
             const stat = fs.fstatSync(descriptor)
             if (!stat.isFile() || stat.nlink !== 1 || stat.dev !== reservation.device || stat.ino !== reservation.inode
               || stat.uid !== user.uid || stat.uid !== reservation.uid || stat.size !== reservation.size)
               throw new Error('Proof reservation identity changed.')
-            const available = () => {
-              const filesystem = fs.statfsSync(process.cwd(), { bigint: true })
-              return `${filesystem.bavail * filesystem.bsize}`
-            }
             report.availableBeforeReleaseBytes = available()
             fs.unlinkSync(reservation.path)
-            report.availableAfterReleaseBytes = available()
-            report.released = true
-            fs.writeFileSync(filename, JSON.stringify(report, null, 2) + '\n')
-            console.log(JSON.stringify(report))
           } finally {
             fs.closeSync(descriptor)
           }
+          report.availableAfterReleaseBytes = available()
+          report.released = true
+          fs.writeFileSync(filename, JSON.stringify(report, null, 2) + '\n')
+          console.log(JSON.stringify(report))
           JS
       - uses: actions/upload-artifact@v7.0.1
         if: always()
