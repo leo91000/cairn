@@ -307,6 +307,7 @@ export async function runDurableBackend({
   signal?.addEventListener('abort', stop, { once: true })
   let timer
   let periodic = Promise.resolve()
+  let checkpointing = true
   let failed = false
   let count = 0
   const snapshot = (state) => {
@@ -328,7 +329,7 @@ export async function runDurableBackend({
       failed = true
       controller.abort()
     }).then(() => {
-      if (++count < PUBLICATION_LIMIT - 2 && !controller.signal.aborted)
+      if (++count < PUBLICATION_LIMIT - 2 && checkpointing && !controller.signal.aborted)
         schedule(checkpointMs)
     })
   }, delay)
@@ -345,6 +346,10 @@ export async function runDurableBackend({
       reserveSeconds: 120,
       commandEnv: testedEnvironment(env),
       signal: controller.signal,
+      onCommandSettled: () => {
+        checkpointing = false
+        clearTimeout(timer)
+      },
       beforeCommand: async () => {
         const initial = snapshot('admitted-before-command')
         await publish(initial, { signal: controller.signal })
@@ -361,6 +366,7 @@ export async function runDurableBackend({
       scope: 'owned-command-guard',
     }
     onGuardReturn?.(guardReturn)
+    checkpointing = false
     clearTimeout(timer)
     await periodic
     clearTimeout(timer)

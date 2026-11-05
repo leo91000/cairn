@@ -137,6 +137,7 @@ export async function observeCommand({
   inventoryLimit = 4096,
   commandEnv = process.env,
   beforeCommand,
+  onCommandSettled,
   signal,
   stdout = process.stdout,
   stderr = process.stderr,
@@ -400,6 +401,10 @@ export async function observeCommand({
   const result = await Promise.race([completion, stopped])
   clearTimeout(timer)
   clearInterval(interval)
+  // Command observation has ended, but mandatory owned-process cleanup can
+  // still use the evidence reserve. Stop scheduling rolling work at this
+  // boundary rather than waiting for the guard's eventual return.
+  onCommandSettled?.()
   if (timedOut || interrupted || owned().some(row => row.pid !== child.pid && row.state !== 'Z')) {
     if (!timedOut && !interrupted) {
       interrupted = true

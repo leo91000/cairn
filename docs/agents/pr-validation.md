@@ -234,6 +234,11 @@ reserve. Cancellation reaches the credentialed publisher. The clock is checked
 again after startup commit before any heavy child can start. The full backend
 flags and normal route remain unchanged.
 
+Pending rolling checkpoints are cancelled when command observation settles,
+before mandatory owned-process cleanup uses the reserve. An upload already in
+progress must still return closed; its failure remains non-green. Final
+publication still follows guard cleanup and private trace closure.
+
 The backend foreground action captures all owned stdout/stderr bytes into its
 private raw trace independently of the public console. Raw workload output is
 not relayed to that console. Its asynchronous file writes, close and byte/hash

@@ -37,6 +37,7 @@ async function action(t, {
   mode = 'unread',
   sdk = 'success',
   timeout = false,
+  checkpointDuringCleanup = false,
   traceError = false,
   missingTrace = false,
   lifecycleError = false,
@@ -66,14 +67,14 @@ async function action(t, {
     if(${JSON.stringify(sdk)}==='fail'){console.error(process.env.ACTIONS_RUNTIME_TOKEN);process.exit(9)}
     fs.writeFileSync(${JSON.stringify(path.join(root, 'remote'))}+'/'+process.env.INPUT_NAME+'.json',JSON.stringify(p),{flag:'wx'});
     fs.appendFileSync(process.env.GITHUB_OUTPUT,'artifact-id=123\\nartifact-digest='+'a'.repeat(64)+'\\n');
-    if(p.acquisition===${JSON.stringify(cancel ?? (sdk === 'linger' ? 'finished' : 'never'))}){
+    if(p.acquisition===${JSON.stringify(cancel ?? (sdk === 'linger' ? 'finished' : sdk === 'periodic-expiry' ? 'periodic' : 'never'))}){
       const fields=fs.readFileSync('/proc/self/stat','utf8').split(') ')[1].split(' ');
       fs.writeFileSync(${JSON.stringify(path.join(root, 'hanging'))},JSON.stringify({pid:process.pid,start:fields[19]}));
       setInterval(()=>{},1000);
     }
   `)
   const waitForClose = blockedTraceClose ? `from pathlib import Path\nwhile not Path(${JSON.stringify(path.join(root, 'close-go'))}).exists(): time.sleep(.01)` : ''
-  const workload = `import sys,time\np=b'x'*${volume}\nsys.${stream}.buffer.write(p)\nsys.${stream}.buffer.flush()\n${waitForClose}\n${timeout || cancel === 'periodic' ? 'time.sleep(30)' : ''}\nraise SystemExit(${code})`
+  const workload = `import sys,time\np=b'x'*${volume}\nsys.${stream}.buffer.write(p)\nsys.${stream}.buffer.flush()\n${waitForClose}\n${timeout || cancel === 'periodic' || sdk === 'periodic-expiry' ? 'time.sleep(30)' : ''}\nraise SystemExit(${code})`
   const worker = path.join(root, 'worker.mjs')
   writeFileSync(worker, `
     import fs from 'node:fs';
@@ -95,10 +96,35 @@ async function action(t, {
       const startedAt=Date.now()-28*60000+${timeout ? 600 : 60000};
       const env={PATH:process.env.PATH,HOME:${JSON.stringify(root)},GITHUB_RUN_ATTEMPT:'1',CI_JOB_STARTED_AT:startedAt/1000,ACTIONS_RUNTIME_TOKEN:'synthetic-private-token'};
       const publish=artifactPublisher({uploader:${JSON.stringify(uploader)},directory:${JSON.stringify(path.join(root, 'publication'))},env,uploadMs:300,closeMs:50});
+      const checkpointDelivery={armed:false,delivered:false,cancelled:false};
+      if(${checkpointDuringCleanup}){
+        // Deliver the pending checkpoint only after the real guard persists
+        // its deadline, while owned-process cleanup is still in progress.
+        // This controls the phase, not the guard or publication clock/bounds.
+        const schedule=globalThis.setTimeout, cancel=globalThis.clearTimeout;
+        let pending;
+        globalThis.setTimeout=(callback,ms,...args)=>{
+          if(ms!==30||checkpointDelivery.armed)return schedule(callback,ms,...args);
+          checkpointDelivery.armed=true;
+          pending=setInterval(()=>{
+            const proof=JSON.parse(fs.readFileSync(${JSON.stringify(path.join(root, 'proof/latest.json'))}));
+            if(!proof.timedOut)return;
+            clearInterval(pending);
+            checkpointDelivery.delivered=true;
+            callback(...args);
+          },1);
+          return pending;
+        };
+        globalThis.clearTimeout=timer=>{
+          if(timer===pending){checkpointDelivery.cancelled=true;clearInterval(timer)}
+          else cancel(timer);
+        };
+      }
       const result=await runBackendAction({log:${JSON.stringify(log)},output:${JSON.stringify(path.join(root, 'proof'))},command:'python3',args:['-c',${JSON.stringify(workload)}],env,
         receipt:{clock:{jobId:123,startedAt},qualificationClaim:false},publish,firstCheckpointMs:30,checkpointMs:40,
         observeOptions:{sampleMs:20,graceMs:30,closeGraceMs:100,inventoryLimit:${incomplete ? 1 : 4096}}});
       fs.writeFileSync(${JSON.stringify(path.join(root, 'returned.json'))},JSON.stringify(result));
+      fs.writeFileSync(${JSON.stringify(path.join(root, 'checkpoint-delivery.json'))},JSON.stringify(checkpointDelivery));
       return ${numericRetirementControl ? '125' : 'result'};
     });
   `)
@@ -175,6 +201,7 @@ async function action(t, {
       ...result,
       root,
       returned,
+      checkpointDelivery: JSON.parse(readFileSync(path.join(root, 'checkpoint-delivery.json'), 'utf8')),
       receipts,
       trace,
       elapsed: Date.now() - started,
@@ -228,11 +255,30 @@ it('preserves the full ten-megabyte failure trace with unread public pipes', asy
 })
 
 it('keeps an actual guard timeout non-green after private trace closure', async (t) => {
-  const result = await action(t, { timeout: true })
+  const result = await action(t, { timeout: true, checkpointDuringCleanup: true })
   assert.equal(result.code, 124)
   assert.equal(result.returned.guardReturn.code, 124)
   assert.equal(result.returned.trace.complete, true)
   assert.deepEqual(result.trace, Buffer.alloc(65536, 'x'))
+  assert.deepEqual(result.checkpointDelivery, { armed: true, delivered: false, cancelled: true })
+  assert.equal(result.returned.ownedClosureVerified, true)
+  assert.equal(result.returned.publisherClosureVerified, true)
+  assert.equal(result.returned.finalPublicationReturned, true)
+  const final = result.receipts.find(item => item.acquisition === 'finished')
+  assert.equal(final.guardReturn.code, 124)
+  assert.equal(final.proof.timedOut, true)
+  assert.equal(final.proof.samples.at(-1).processCount, 0)
+  assert.equal(final.trace.complete, true)
+})
+
+it('keeps a real periodic uploader expiry non-green even when the guard closes its workload', async (t) => {
+  const result = await action(t, { sdk: 'periodic-expiry' })
+  assert.equal(result.code, 125)
+  assert.equal(result.returned.guardReturn.code, 130)
+  assert.equal(result.returned.trace.complete, true)
+  assert.equal(result.returned.ownedClosureVerified, true)
+  assert.equal(result.returned.publisherClosureVerified, false)
+  assert.equal(result.returned.finalPublicationReturned, false)
 })
 
 it('bounds a real private-file close blocked behind process-local filesystem workers and exits non-green', async (t) => {
