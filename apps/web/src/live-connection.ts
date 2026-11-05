@@ -2,6 +2,7 @@ import type { LiveBatch } from '../../../packages/contracts/live'
 import { watch } from 'vue'
 import { apiUrl, installationTransport, state } from './api'
 import { ProtocolMismatch } from './direct-channel'
+import { documentLifetime } from './document-lifetime'
 import { observeTransport } from './transport-observation'
 
 export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'offline'
@@ -34,7 +35,7 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
 
   function retry() {
     disconnect()
-    if (stopped)
+    if (stopped || documentLifetime.value.signal.aborted)
       return
     status(navigator.onLine ? 'reconnecting' : 'offline')
     if (navigator.onLine)
@@ -48,7 +49,7 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
 
   function connect() {
     disconnect()
-    if (stopped || state.redirecting)
+    if (stopped || state.redirecting || documentLifetime.value.signal.aborted)
       return
     if (!navigator.onLine) {
       status('offline')
@@ -166,7 +167,7 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
     status('offline')
   }
 
-  const stopNavigation = watch(() => state.redirecting, connect, { flush: 'sync' })
+  const stopNavigation = watch(() => [state.redirecting, documentLifetime.value.signal.aborted], connect, { flush: 'sync' })
   window.addEventListener('cairn-transport-change', connect)
   window.addEventListener('online', connect)
   window.addEventListener('offline', offline)
