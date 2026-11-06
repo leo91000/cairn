@@ -1,5 +1,21 @@
 # Android 0.6.0 / web parity
 
+## Folded missions and result previews in the Fil (2026-11-06)
+
+Two or more missions in a row that finished as expected and were read fold into
+one row: two stacked avatars, “3 missions finished” / « 3 missions terminées »,
+their names and the latest time. Tapping it unfolds them on a thread line. A
+lone one, a mission with delegated work below it, unread or unfinished work stay
+rows, and filtering shows every match unfolded. Web also unfolds the fold that
+holds the work open beside the Fil.
+
+Unread finished work with a result preview can be read without opening it. Web
+shows a card beside the row after a short hover (or keyboard focus), on pointers
+that hover. Android opens a sheet on a long press (with haptic feedback and an
+« Aperçu » action label) with an « Ouvrir » button. Neither marks the work read.
+Android now carries a mission run's `preview`, as web did. Presentation only: no
+contract, MCP, `cairn_installation` or stored schema changes.
+
 ## Quieter Fil rows (2026-11-06)
 
 Web and Android lead each Fil row with one status mark instead of repeating a

@@ -164,4 +164,45 @@ class CompactFilTest {
             feed.all.associate { it.key to it.finished },
         )
     }
+
+    @Test
+    fun `quiet missions fold together when two or more finished and were read in a row`() {
+        fun run(
+            task: String,
+            finishedAt: Long,
+            status: String = "succeeded",
+            unread: Boolean = false,
+        ) =
+            Run(
+                id = "$task-run",
+                taskId = task,
+                trigger = "schedule",
+                status = status,
+                finishedAt = finishedAt,
+                unread = unread,
+            )
+        val feed =
+            buildFeed(
+                listOf(Chat(id = "talk", title = "talk", status = "succeeded", updatedAt = 25)),
+                listOf(
+                    run("a", 50),
+                    run("b", 40),
+                    run("c", 30),
+                    run("d", 20),
+                    run("e", 10, status = "failed"),
+                    run("f", 5, unread = true),
+                    run("g", 4),
+                ),
+                emptyList(),
+            )
+        val entries =
+            foldFeed(threadFeed(feed.all)).map {
+                when (it) {
+                    is FeedEntry.Fold -> it.items.map { item -> item.taskId }
+                    is FeedEntry.Line -> it.item.taskId ?: it.item.chatId
+                }
+            }
+        // A lone quiet mission, a failure and unread results stay rows.
+        assertEquals(listOf(listOf("a", "b", "c"), "talk", "d", "e", "f", "g"), entries)
+    }
 }
