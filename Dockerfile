@@ -156,7 +156,7 @@ RUN npm exec --yes --package="playwright@${PLAYWRIGHT_VERSION}" -- playwright in
     && rm -rf /var/lib/apt/lists/* /root/.npm
 ENV HOST=0.0.0.0 PORT=4310 DATA_DIR=/data AGENT_HOME=/home/node WORKSPACE_ROOTS=/workspaces
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl wget git git-lfs openssh-client python3 awscli build-essential bubblewrap socat \
-    zip unzip xz-utils zstd bzip2 rsync file less tree sqlite3 postgresql-client util-linux \
+    binutils zip unzip xz-utils zstd bzip2 rsync file less tree sqlite3 postgresql-client util-linux \
     dnsutils iproute2 iputils-ping netcat-openbsd procps lsof strace patch diffutils \
     pkg-config libssl-dev libffi-dev ninja-build poppler-utils imagemagick ffmpeg \
     && rm -rf /var/lib/apt/lists/*
