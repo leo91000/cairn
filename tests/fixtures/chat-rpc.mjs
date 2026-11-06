@@ -313,6 +313,10 @@ export function chatFixture() {
             itemId: update.item ? `${id}:${update.item}` : id,
             delta: update.delta,
           })
+          if (control.ignoredNoise) {
+            notify('item/commandExecution/outputDelta', { threadId: thread.id, itemId: 'background-command', delta: 'not a supported activity event' })
+            notify('item/started', { threadId: 'foreign-thread', item: { id: 'foreign-item', type: 'agentMessage', text: 'not our conversation' } })
+          }
         }
 
         if (control.terminal === 'failed') {

@@ -3,7 +3,9 @@ const SNAPSHOT_SCALE: usize = 256;
 
 /// Cumulative snapshots remain compatible with installed clients. Wait for
 /// fresh bytes before copying the whole answer again: time-only throttling
-/// still amplifies a slowly delivered answer quadratically.
+/// still amplifies a slowly delivered answer quadratically. Idle and semantic
+/// flushes preserve live tails separately; their repeated bytes are not bounded
+/// by this growth gate.
 #[derive(Default)]
 pub(super) struct StreamedText {
     value: String,

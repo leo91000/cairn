@@ -42,6 +42,15 @@ fn prepare(root: &TempDir) -> PathBuf {
 
 #[tokio::test]
 async fn fine_text_deltas_do_not_exhaust_the_native_output_budget() {
+    check_text_stream_output_budget(false).await;
+}
+
+#[tokio::test]
+async fn ignored_provider_and_foreign_thread_notifications_do_not_force_text_snapshots() {
+    check_text_stream_output_budget(true).await;
+}
+
+async fn check_text_stream_output_budget(ignored_noise: bool) {
     use base64::{Engine, engine::general_purpose::STANDARD};
     use cairn_installation::{microvm::protocol::Event, run_output};
 
@@ -50,7 +59,7 @@ async fn fine_text_deltas_do_not_exhaust_the_native_output_budget() {
     let answer = "x".repeat(24_000);
     std::fs::write(
         home.join("fixture-text-stream.json"),
-        json!({ "text": answer, "deltaCharacters": 4 }).to_string(),
+        json!({ "text": answer, "deltaCharacters": 4, "ignoredNoise": ignored_noise }).to_string(),
     )
     .unwrap();
     let config = config(&root);
@@ -93,6 +102,40 @@ async fn fine_text_deltas_do_not_exhaust_the_native_output_budget() {
     assert!(
         encoded_bytes < 8 * 1024 * 1024,
         "24KB answer amplified into {encoded_bytes} native log bytes ({snapshots} snapshots)."
+    );
+}
+
+#[tokio::test]
+async fn idle_text_tail_reaches_live_consumers_before_they_release_more_output() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let limit = root.path().join("stream-limit");
+    std::fs::write(&limit, "5").unwrap();
+    let config = config(&root);
+    let turn = plan(&root, &format!("fixture:stream-limit:{}", limit.display()));
+    let stop = CancellationToken::new();
+    let stopping = stop.clone();
+    let (tx, mut rx) = mpsc::channel(64);
+    let task =
+        tokio::spawn(async move { chat_process::run(&config, &home, turn, tx, stopping).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = rx.recv().await.unwrap();
+            assert_ne!(event["type"], "turn.failed");
+            if event["type"] == "item.updated" && text(&event["item"], "text").ends_with(" 005") {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("A paused stream's last20freshbytes must become visible without more provider output.");
+    // The existing live/reconnect browser fixture waits for005 before releasing
+    // more text. Stop this isolated turn after proving that same boundary.
+    stop.cancel();
+    while rx.recv().await.is_some() {}
+    assert_eq!(
+        task.await.unwrap().unwrap_err().message,
+        "Conversation stopped."
     );
 }
 
