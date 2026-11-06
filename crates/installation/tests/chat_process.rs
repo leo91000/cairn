@@ -40,6 +40,62 @@ fn prepare(root: &TempDir) -> PathBuf {
     home
 }
 
+#[tokio::test]
+async fn fine_text_deltas_do_not_exhaust_the_native_output_budget() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use cairn_installation::{microvm::protocol::Event, run_output};
+
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let answer = "x".repeat(24_000);
+    std::fs::write(
+        home.join("fixture-text-stream.json"),
+        json!({ "text": answer, "deltaCharacters": 4 }).to_string(),
+    )
+    .unwrap();
+    let config = config(&root);
+    let turn = plan(&root, "fixture:bounded-text-stream");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, turn, tx, CancellationToken::new()).await
+    });
+    let mut encoded_bytes = 0;
+    let mut snapshots = 0;
+    let mut completed_text = None;
+    let mut completed_turn = false;
+    while let Some(event) = rx.recv().await {
+        // The real adapter and guest serializer feed the native controller's
+        // unchanged Output envelope. Per-line chunks conservatively include
+        // more frame overhead than a pipe joining neighboring short lines.
+        for chunk in run_output::event_line(&event).chunks(16_384) {
+            encoded_bytes += serde_json::to_vec(&Event::Output {
+                stderr: false,
+                data: STANDARD.encode(chunk),
+            })
+            .unwrap()
+            .len()
+                + 1;
+        }
+        if event["item"]["type"] == "agent_message"
+            && text(&event["item"], "id").starts_with("reply-")
+        {
+            snapshots += usize::from(event["type"] == "item.updated");
+            if event["type"] == "item.completed" {
+                completed_text = Some(text(&event["item"], "text").to_owned());
+            }
+        }
+        completed_turn |= event["type"] == "turn.completed";
+    }
+    task.await.unwrap().unwrap();
+    assert_eq!(completed_text.as_deref(), Some(answer.as_str()));
+    assert!(completed_turn);
+    assert!(snapshots > 1, "The answer must remain streamed.");
+    assert!(
+        encoded_bytes < 8 * 1024 * 1024,
+        "24KB answer amplified into {encoded_bytes} native log bytes ({snapshots} snapshots)."
+    );
+}
+
 /// Runs one turn to completion while discarding its events.
 async fn run_quietly(config: &Config, home: &Path, plan: Value) {
     let (tx, mut rx) = mpsc::channel(64);

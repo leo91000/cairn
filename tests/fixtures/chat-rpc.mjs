@@ -292,6 +292,23 @@ export function chatFixture() {
 
       const text = params.input[0].text
 
+      if (text === 'fixture:bounded-text-stream') {
+        const control = JSON.parse(readFileSync(path.join(process.env.CODEX_HOME, 'fixture-text-stream.json'), 'utf8'))
+        const id = `reply-${thread.fixtureGeneration || 'legacy'}-${active.id}`
+        notify('item/started', { threadId: thread.id, item: { id, type: 'agentMessage', text: '' } })
+        for (let offset = 0; offset < control.text.length; offset += control.deltaCharacters) {
+          notify('item/agentMessage/delta', {
+            threadId: thread.id,
+            itemId: id,
+            delta: control.text.slice(offset, offset + control.deltaCharacters),
+          })
+        }
+
+        completionText = control.text
+        finish()
+        return true
+      }
+
       const marker = path.join(process.env.CODEX_HOME, 'fixture-restart.json')
       if (text.includes('fixture:restart') || (resumed && existsSync(marker))) {
         if (resumed && existsSync(marker)) {
