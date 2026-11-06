@@ -502,6 +502,7 @@ test('a waiting mission sits in Waiting, shows its wait and can be stopped', asy
   await signIn(page)
   // The initial conversation stream can move unrelated requester-owned missions out of For you.
   // Keep this journey's row in place while that list arrives, including during its click.
+  await page.getByRole('button', { name: 'Filter the Fil', exact: true }).click()
   await page.getByRole('textbox', { name: 'Filter conversations' }).fill(task.name)
   const waiting = page.getByRole('region', { name: 'Tout', exact: true })
   await expect(waiting.getByText(task.name, { exact: true })).toBeVisible()

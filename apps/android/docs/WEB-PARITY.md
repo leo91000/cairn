@@ -16,6 +16,16 @@ over the time on hover, and spins the live mark unless reduced motion is set;
 Android keeps its row action button and a static live mark. Presentation only:
 no contract, MCP, `cairn_installation` or stored schema changes.
 
+Each row now leads with its agent's avatar (portrait or initial), the status
+mark in its corner while the row asks for something; finished rows show the
+avatar alone. The detail line gives the project, or the agent without one, with
+a repeat arrow for missions. The header names the agents at work as a stack of
+up to three avatars (“2 at work” / « 2 au travail »), which opens En cours. The
+filter hides behind a search button and unfolds below the title (`/` on web),
+staying open while it holds a query. À lire / En cours / Tout become a segmented
+control whose selection slides between views, with the counts beside each
+label. Web orbits a working agent's avatar; Android marks it in the corner.
+
 ## Task storage limit (2026-11-04)
 
 Installation owners configure the maximum native disk allowance per conversation

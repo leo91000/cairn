@@ -1,11 +1,22 @@
 package build.cairn.app.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -13,25 +24,32 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import build.cairn.app.R
 import build.cairn.app.data.*
@@ -575,6 +593,9 @@ fun FilScreen(
     val feed = buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads, now)
     var selectedView by rememberSaveable { mutableIntStateOf(0) }
     var filter by rememberSaveable { mutableStateOf("") }
+    // The filter opens on demand and stays open while it holds a query.
+    var searchOpen by rememberSaveable { mutableStateOf(false) }
+    val searching = searchOpen || filter.isNotEmpty()
     val views = listOf(feed.unread, feed.ongoing, feed.all)
     val query = filter.trim()
     val visible =
@@ -626,39 +647,34 @@ fun FilScreen(
                     account = openAccount,
                 )
                 Spacer(Modifier.height(12.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Fil", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-                    if (feed.unread.isNotEmpty())
-                        RoundAction(
-                            "Tout marquer comme lu",
-                            CairnIcons.Check,
-                            Modifier.testTag("read-all"),
-                            size = 36.dp,
-                        ) {
-                            vm.markRead(feed.unread.map { it.read })
-                        }
-                }
-                OutlinedTextField(
-                    value = filter,
-                    onValueChange = { filter = it },
-                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-                    placeholder = { Text("Filtrer le fil") },
-                    singleLine = true,
+                FilHeader(
+                    working = feed.running.filter { it.working }.distinctBy { it.agentKey },
+                    unread = feed.unread.isNotEmpty(),
+                    searching = searching,
+                    toggleSearch = {
+                        if (searching) {
+                            filter = ""
+                            searchOpen = false
+                        } else searchOpen = true
+                    },
+                    showOngoing = { selectedView = 1 },
+                    readAll = { vm.markRead(feed.unread.map { it.read }) },
                 )
-                PrimaryTabRow(selectedTabIndex = selectedView) {
-                    listOf("À lire", "En cours", "Tout").forEachIndexed { index, label ->
-                        Tab(
-                            selected = selectedView == index,
-                            onClick = { selectedView = index },
-                            text = {
-                                Text(
-                                    if (index < 2 && views[index].isNotEmpty())
-                                        "$label ${views[index].size}"
-                                    else label
-                                )
-                            },
-                        )
-                    }
+                FilSearch(
+                    searching,
+                    filter,
+                    { filter = it },
+                    close = {
+                        filter = ""
+                        searchOpen = false
+                    },
+                )
+                FilViews(
+                    listOf("À lire", "En cours", "Tout"),
+                    listOf(views[0].size, views[1].size, null),
+                    selectedView,
+                ) {
+                    selectedView = it
                 }
                 if (chats == null)
                     LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 12.dp))
@@ -704,6 +720,192 @@ fun FilScreen(
                     snooze = { setAside(item, tomorrowMorning(now)) },
                     archive = { archive(item) },
                 )
+            }
+        }
+    }
+}
+
+/** The Fil's title, the agents at work, and its filter and read-all actions. */
+@Composable
+private fun FilHeader(
+    working: List<FeedItem>,
+    unread: Boolean,
+    searching: Boolean,
+    toggleSearch: () -> Unit,
+    showOngoing: () -> Unit,
+    readAll: () -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            "Fil",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+        )
+        if (working.isNotEmpty()) {
+            Spacer(Modifier.width(10.dp))
+            Surface(
+                onClick = showOngoing,
+                shape = RoundedCornerShape(50),
+                color = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.testTag("fil-at-work"),
+            ) {
+                Row(
+                    Modifier.padding(start = 3.dp, end = 10.dp, top = 3.dp, bottom = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    working.take(3).forEachIndexed { index, item ->
+                        Box(
+                            Modifier.offset(x = (-6 * index).dp)
+                                .background(
+                                    MaterialTheme.colorScheme.primaryContainer,
+                                    RoundedCornerShape(7.dp),
+                                )
+                                .padding(1.5.dp)
+                        ) {
+                            AgentAvatar(item.agent, item.agentKey.ifBlank { item.agent }, 20.dp)
+                        }
+                    }
+                    Text(
+                        "${working.size} au travail",
+                        Modifier.offset(x = (-6 * (minOf(working.size, 3) - 1)).dp)
+                            .padding(start = 6.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.weight(1f))
+        RoundAction(
+            "Filtrer le fil",
+            CairnIcons.Search,
+            Modifier.testTag("fil-search"),
+            container =
+                if (searching) MaterialTheme.colorScheme.secondaryContainer
+                else MaterialTheme.colorScheme.surface,
+            size = 36.dp,
+            onClick = toggleSearch,
+        )
+        if (unread) {
+            Spacer(Modifier.width(6.dp))
+            RoundAction(
+                "Tout marquer comme lu",
+                CairnIcons.Check,
+                Modifier.testTag("read-all"),
+                size = 36.dp,
+                onClick = readAll,
+            )
+        }
+    }
+}
+
+/** The filter field, which unfolds from the header when the user asks to filter. */
+@Composable
+private fun FilSearch(
+    open: Boolean,
+    value: String,
+    change: (String) -> Unit,
+    close: () -> Unit,
+) {
+    val focus = remember { FocusRequester() }
+    AnimatedVisibility(
+        open,
+        enter =
+            expandVertically(tween(220)) +
+                fadeIn(tween(220)) +
+                slideInVertically(tween(220)) { -it / 3 },
+        exit = shrinkVertically(tween(180)) + fadeOut(tween(140)),
+    ) {
+        LaunchedEffect(Unit) { focus.requestFocus() }
+        OutlinedTextField(
+            value = value,
+            onValueChange = change,
+            modifier = Modifier.fillMaxWidth().padding(top = 12.dp).focusRequester(focus),
+            placeholder = { Text("Titre, agent ou projet") },
+            leadingIcon = { Icon(CairnIcons.Search, null, Modifier.size(18.dp)) },
+            trailingIcon = {
+                androidx.compose.material3.IconButton(onClick = close) {
+                    Icon(CairnIcons.Close, "Fermer le filtre", Modifier.size(18.dp))
+                }
+            },
+            shape = RoundedCornerShape(50),
+            singleLine = true,
+        )
+    }
+}
+
+/** À lire / En cours / Tout as a segmented control whose selection slides between views. */
+@Composable
+private fun FilViews(
+    labels: List<String>,
+    counts: List<Int?>,
+    selected: Int,
+    select: (Int) -> Unit,
+) {
+    BoxWithConstraints(
+        Modifier.fillMaxWidth()
+            .padding(top = 12.dp)
+            .background(
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                RoundedCornerShape(14.dp),
+            )
+            .padding(4.dp)
+            .selectableGroup()
+    ) {
+        val width = maxWidth / labels.size
+        val offset by animateDpAsState(width * selected, tween(220), label = "fil-view")
+        val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+        Box(
+            Modifier.offset(x = offset)
+                .width(width)
+                .height(36.dp)
+                .shadow(1.dp, RoundedCornerShape(10.dp))
+                .background(
+                    if (dark) MaterialTheme.colorScheme.surfaceContainerHighest
+                    else MaterialTheme.colorScheme.surface,
+                    RoundedCornerShape(10.dp),
+                )
+                .border(
+                    1.dp,
+                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    RoundedCornerShape(10.dp),
+                )
+        )
+        Row {
+            labels.forEachIndexed { index, label ->
+                val count = counts[index]?.takeIf { it > 0 }
+                val accent = MaterialTheme.colorScheme.primary
+                Box(
+                    Modifier.weight(1f).height(36.dp).clip(RoundedCornerShape(10.dp)).selectable(
+                        selected == index,
+                        role = Role.Tab,
+                    ) {
+                        select(index)
+                    },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        buildAnnotatedString {
+                            append(label)
+                            if (count != null) {
+                                append(" ")
+                                withStyle(
+                                    SpanStyle(
+                                        color = if (index == 0) accent else Color.Unspecified,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                ) {
+                                    append("$count")
+                                }
+                            }
+                        },
+                        style = MaterialTheme.typography.labelLarge,
+                        color =
+                            if (selected == index) MaterialTheme.colorScheme.onSurface
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
@@ -850,8 +1052,22 @@ internal fun Wordmark() {
     }
 }
 
-/** Where a row's text starts after its unread dot and status mark. */
-private val MarkInset = 38.dp
+/** The agent's avatar with what the row asks for in its corner; finished work stays quiet. */
+@Composable
+private fun FilAvatar(item: FeedItem, size: androidx.compose.ui.unit.Dp) {
+    Box {
+        AgentAvatar(item.agent, item.agentKey.ifBlank { item.agent }, size)
+        if (!item.finished)
+            Box(
+                Modifier.align(Alignment.BottomEnd)
+                    .offset(5.dp, 4.dp)
+                    .background(MaterialTheme.colorScheme.background, CircleShape)
+                    .padding(1.dp)
+            ) {
+                StatusMark(item)
+            }
+    }
+}
 
 /** The row's status glyph, coloured like its label: quiet once the work finished as expected. */
 @Composable
@@ -883,7 +1099,7 @@ private fun StatusMark(item: FeedItem) {
     Icon(
         icon,
         contentDescription = item.statusLabel,
-        modifier = Modifier.size(16.dp).testTag("fil-mark"),
+        modifier = Modifier.size(14.dp).testTag("fil-mark"),
         tint = tint,
     )
 }
@@ -898,6 +1114,8 @@ private fun FeedRow(
     trailing: @Composable () -> Unit,
 ) {
     val thread = MaterialTheme.colorScheme.outlineVariant
+    // Where the text below the title starts: after the unread dot, the avatar and its gap.
+    val inset = if (nested) 42.dp else 50.dp
     SwipeToTrashRow(enabled = onDelete != null, onTrash = { onDelete?.invoke() }) { swipe ->
         Surface(
             onClick = onClick,
@@ -911,7 +1129,7 @@ private fun FeedRow(
             Row(
                 Modifier.widthIn(max = 760.dp)
                     .heightIn(min = if (nested) 44.dp else 56.dp)
-                    .padding(start = if (nested) 30.dp else 10.dp, end = 16.dp)
+                    .padding(start = if (nested) 36.dp else 10.dp, end = 16.dp)
                     .then(
                         if (nested)
                             Modifier.drawBehind {
@@ -940,7 +1158,7 @@ private fun FeedRow(
                                         .semantics { contentDescription = "Non lu" }
                                 )
                         }
-                        StatusMark(item)
+                        FilAvatar(item, if (nested) 20.dp else 28.dp)
                         Spacer(Modifier.width(10.dp))
                         Text(
                             item.title,
@@ -966,7 +1184,7 @@ private fun FeedRow(
                     val label = item.statusLabel
                     if (!nested || !item.finished)
                         Row(
-                            Modifier.padding(start = MarkInset, top = 2.dp),
+                            Modifier.padding(start = inset, top = 2.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             if (!nested)
@@ -995,11 +1213,22 @@ private fun FeedRow(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
+                            if (!nested && item.taskId != null)
+                                Icon(
+                                    CairnIcons.Retry,
+                                    "Mission",
+                                    Modifier.padding(start = if (item.finished) 0.dp else 4.dp)
+                                        .size(12.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            // The avatar already names the agent: the detail line gives the
+                            // project.
                             if (!nested)
                                 Text(
-                                    if (item.finished) context(item.agent, item.project)
-                                    else " · ${context(item.agent, item.project)}",
-                                    Modifier.weight(1f),
+                                    (if (item.finished || item.taskId != null) "" else " · ") +
+                                        (item.project?.ifBlank { null } ?: item.agent),
+                                    Modifier.weight(1f)
+                                        .padding(start = if (item.taskId != null) 4.dp else 0.dp),
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
@@ -1014,7 +1243,7 @@ private fun FeedRow(
                     )
                         Text(
                             item.subtitle,
-                            Modifier.padding(start = MarkInset),
+                            Modifier.padding(start = inset),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -1028,7 +1257,7 @@ private fun FeedRow(
                         Text(
                             item.wakeAt?.let { waitLeft(it, item.condition, item.resolved, now) }
                                 ?: "Selon disponibilité",
-                            Modifier.padding(start = MarkInset).testTag("fil-wait-time"),
+                            Modifier.padding(start = inset).testTag("fil-wait-time"),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary,
                         )
@@ -1036,7 +1265,7 @@ private fun FeedRow(
                         item.requester?.let {
                             Text(
                                 "↳ Délégué par ${it.title}",
-                                Modifier.padding(start = MarkInset).testTag("fil-requester"),
+                                Modifier.padding(start = inset).testTag("fil-requester"),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
