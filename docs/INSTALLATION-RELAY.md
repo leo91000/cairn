@@ -195,9 +195,9 @@ Routes ending in `/stream`, public shared files and private run-artifact origina
 clients mirror it. The direct DataChannel always serves streams in identity
 encoding, because its clients read stream chunks without an HTTP decoder.
 File streams (`cairn_protocol::file_path`) carry one finite file. The
-installation answers one whose `Content-Length` fits `MAX_BODY` with a finite
-response, which every peer accepts on a streamed route, and streams only larger
-or unknown-length files. Like public files, private files have their own pool on
+installation answers a private file whose `Content-Length` fits `MAX_BODY` with a
+finite response, which every peer accepts on a streamed route, and streams only
+larger or unknown-length ones. Public files always stream. Like public files, private files have their own pool on
 both ends of the tunnel (`MAX_FILE_IN_FLIGHT`, eight), outside the 32 request and
 24 stream slots. The Beacon gives each account four of an installation's file
 slots; further file requests queue for up to the 30-second request deadline. It

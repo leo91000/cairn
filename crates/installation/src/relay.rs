@@ -1095,16 +1095,18 @@ async fn dispatch(
                 .map(|value| (name.to_string(), value.to_owned()))
         })
         .collect();
-    // A file that fits one frame is cheaper finite: it needs no credit round trip
-    // per chunk and releases relay capacity at once. Every peer accepts a finite
-    // response on a streamed route.
+    // A private file that fits one frame stays finite, as before it could stream:
+    // no credit round trip per chunk, and relay capacity is released at once.
+    // Every peer accepts a finite response on a streamed route. Public files keep
+    // streaming, so an anonymous reader never holds a whole file in the Beacon.
+    let private_file =
+        cairn_protocol::file_path(&input.path) && !input.path.starts_with("/api/shared-artifacts/");
     let fits_frame = response
         .headers()
         .get(axum::http::header::CONTENT_LENGTH)
         .and_then(|length| length.to_str().ok()?.parse::<usize>().ok())
         .is_some_and(|length| length <= MAX_BODY);
-    let is_stream = cairn_protocol::stream_path(&input.path)
-        && !(cairn_protocol::file_path(&input.path) && fits_frame);
+    let is_stream = cairn_protocol::stream_path(&input.path) && !(private_file && fits_frame);
     if is_stream {
         let output = streaming;
         let id = input.id;

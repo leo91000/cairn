@@ -768,6 +768,17 @@ async fn private_files_larger_than_a_relay_frame_stream_for_reads_downloads_rang
     assert_eq!(response.headers()["accept-ranges"], "bytes");
     assert!(response.bytes().await.unwrap().is_empty());
 
+    // A private file that fits one frame stays a finite response.
+    let (small_run, small) = seeded_artifact(&relay, b"small", "image/png").await;
+    let response = relay
+        .get(&format!("/runs/{small_run}/artifacts/{small}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key("x-accel-buffering"));
+    assert_eq!(response.bytes().await.unwrap().as_ref(), b"small");
+
     let metadata: Value = relay
         .get(&format!("{file}?metadata=1"))
         .send()
@@ -929,6 +940,11 @@ async fn public_svg_is_downloaded_as_an_attachment() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["content-disposition"], "attachment");
     assert_eq!(response.headers()["content-length"], "11");
+    assert_eq!(
+        response.headers()["x-accel-buffering"],
+        "no",
+        "Public files stream at every size, so the Beacon never buffers them"
+    );
     assert_eq!(response.text().await.unwrap(), "<svg></svg>");
     relay.close().await;
 }
