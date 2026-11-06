@@ -125,18 +125,27 @@ const flat = computed(() => lines.value.filter(line => !line.folded).map(line =>
 
 // A finished result's opening, beside the Fil: reading it there neither opens nor reads the work.
 const peeked = ref<{ item: FilItem, top: number, left: number } | null>(null)
+const peekCard = ref<HTMLElement>()
+let peekTarget: HTMLElement | undefined
 let peekTimer: ReturnType<typeof setTimeout> | undefined
+let hidePeekTimer: ReturnType<typeof setTimeout> | undefined
 const hoverable = typeof matchMedia === 'function' && matchMedia('(hover: hover)').matches
-onBeforeUnmount(() => clearTimeout(peekTimer))
+onBeforeUnmount(unpeek)
 
 function peek(item: FilItem, event: Event) {
   clearTimeout(peekTimer)
-  if (!item.preview || !hoverable)
+  keepPeek()
+  if (!item.preview || !hoverable) {
+    unpeek()
     return
-  const row = (event.currentTarget as HTMLElement).closest('article')!.getBoundingClientRect()
+  }
+
+  peekTarget = event.currentTarget as HTMLElement
+  const row = peekTarget.closest('article')!.getBoundingClientRect()
   const width = 320
   const beside = row.right + 12 + width <= innerWidth - 8
   peekTimer = setTimeout(() => {
+    peekTimer = undefined
     peeked.value = {
       item,
       left: beside ? row.right + 12 : Math.max(8, row.right - width),
@@ -147,7 +156,26 @@ function peek(item: FilItem, event: Event) {
 
 function unpeek() {
   clearTimeout(peekTimer)
+  clearTimeout(hidePeekTimer)
+  peekTimer = undefined
+  hidePeekTimer = undefined
+  peekTarget = undefined
   peeked.value = null
+}
+
+function keepPeek() {
+  clearTimeout(hidePeekTimer)
+  hidePeekTimer = undefined
+}
+
+function leavePeek() {
+  // Preserve focus/hover ownership and allow the pointer to cross the gap to the card.
+  if (peekTarget?.matches(':hover, :focus') || peekCard.value?.matches(':hover'))
+    return
+  clearTimeout(peekTimer)
+  peekTimer = undefined
+  keepPeek()
+  hidePeekTimer = setTimeout(unpeek, 150)
 }
 
 function toggleFold(key: string) {
@@ -286,6 +314,12 @@ function move(delta: number) {
 }
 
 function key(event: KeyboardEvent) {
+  if (!event.defaultPrevented && event.key === 'Escape' && (peeked.value || peekTimer)) {
+    event.preventDefault()
+    unpeek()
+    return
+  }
+
   if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || typingTarget(event.target) || document.querySelector('dialog[open], [popover]:popover-open'))
     return
   if (event.key === 'j' || event.key === 'k') {
@@ -483,9 +517,9 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
             :aria-describedby="peeked?.item.key === item.key ? 'fil-peek' : undefined"
             @click="open(item)"
             @mouseenter="peek(item, $event)"
-            @mouseleave="unpeek"
+            @mouseleave="leavePeek"
             @focus="peek(item, $event)"
-            @blur="unpeek"
+            @blur="leavePeek"
           >
             <span class="mt-[11px] w-1.5 shrink-0"><span
               v-if="isUnread(item)"
@@ -594,9 +628,12 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
         <div
           v-if="peeked"
           id="fil-peek"
+          ref="peekCard"
           role="tooltip"
-          class="pointer-events-none fixed z-40 w-80 rounded-xl border border-line bg-raised p-3.5 shadow-[0_12px_32px_#0000002e]"
+          class="fixed z-40 w-80 rounded-xl border border-line bg-raised p-3.5 shadow-[0_12px_32px_#0000002e]"
           :style="{ top: `${peeked.top}px`, left: `${peeked.left}px` }"
+          @mouseenter="keepPeek"
+          @mouseleave="leavePeek"
         >
           <div class="flex items-center gap-2">
             <AgentAvatar :name="peeked.item.agent" :identity="peeked.item.agentKey" :size="20" />

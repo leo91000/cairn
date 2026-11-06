@@ -11,7 +11,9 @@ holds the work open beside the Fil.
 
 Unread finished work with a result preview can be read without opening it. Web
 shows a card beside the row after a short hover (or keyboard focus), on pointers
-that hover. Android opens a sheet on a long press (with haptic feedback and an
+that hover. The card stays visible while its row has focus or either the row or
+card is hovered; Escape dismisses it, including a pending opening. Android opens
+a sheet on a long press (with haptic feedback and an
 « Aperçu » action label) with an « Ouvrir » button. Neither marks the work read.
 Android now carries a mission run's `preview`, as web did. Presentation only: no
 contract, MCP, `cairn_installation` or stored schema changes.

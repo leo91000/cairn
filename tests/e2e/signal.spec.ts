@@ -137,6 +137,64 @@ test('a Fil containing only folded missions stays populated when collapsed', asy
   await expect(list.getByText('No conversations yet.', { exact: true })).toHaveCount(0)
 })
 
+test.describe('hover previews', () => {
+  test.use({ hasTouch: false })
+
+  test('a result preview stays hovered and Escape dismisses visible and pending previews', async ({ page, workspace }) => {
+    await useRelayForHttpMocks(page)
+    const chat = await workspace.api('/api/chats', 'POST', {})
+    const now = Date.now()
+    const chats = [{
+      ...chat,
+      title: 'Unread result preview',
+      status: 'succeeded',
+      unread: true,
+      finishedAt: now,
+      updatedAt: now,
+      preview: 'The build passed and the result is ready to read.',
+    }]
+    await page.route('**/api/chats/stream?**', route => route.fulfill({
+      contentType: 'text/event-stream',
+      body: `id: 0\nevent: batch\ndata: ${JSON.stringify({
+        events: [],
+        state: {
+          run: null,
+          chat: null,
+          chats,
+          artifacts: [],
+        },
+        reset: true,
+        more: false,
+      })}\n\n`,
+    }))
+    await signIn(page)
+    const row = page.locator(`[data-fil-key="chat:${chat.id}"]`)
+    const trigger = row.getByRole('button', { name: 'Open “Unread result preview”', exact: true })
+    const tooltip = page.getByRole('tooltip')
+    await trigger.hover()
+    await expect(tooltip).toBeVisible()
+    await tooltip.hover()
+    await expect(tooltip).toBeVisible()
+    await expect(row).toHaveAttribute('data-unread', '')
+    await page.keyboard.press('Escape')
+    await expect(tooltip).toBeHidden()
+
+    await trigger.focus()
+    await expect(tooltip).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(tooltip).toBeHidden()
+    await expect(trigger).toBeFocused()
+
+    await page.getByRole('tab', { name: 'Tout', exact: true }).focus()
+    await trigger.focus()
+    await page.keyboard.press('Escape')
+    // Cover cancellation of the 350 ms opening timer, not only the rendered tooltip.
+    await page.waitForTimeout(450)
+    await expect(tooltip).toBeHidden()
+    await expect(row).toHaveAttribute('data-unread', '')
+  })
+})
+
 test('delegated conversations keep their requester in attention cards and live rows', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const parent = await workspace.api('/api/chats', 'POST', {})
