@@ -152,6 +152,15 @@ test.describe('hover previews', () => {
       finishedAt: now,
       updatedAt: now,
       preview: 'The build passed and the result is ready to read.',
+    }, {
+      ...chat,
+      id: randomUUID(),
+      title: 'Read result without a preview',
+      status: 'succeeded',
+      unread: false,
+      finishedAt: now - 1000,
+      updatedAt: now - 1000,
+      preview: null,
     }]
     await page.route('**/api/chats/stream?**', route => route.fulfill({
       contentType: 'text/event-stream',
@@ -181,6 +190,10 @@ test.describe('hover previews', () => {
 
     await trigger.focus()
     await expect(tooltip).toBeVisible()
+    await page.getByRole('button', { name: 'Open “Read result without a preview”', exact: true }).hover()
+    await expect(trigger).toBeFocused()
+    await expect(tooltip).toBeVisible()
+    await expect(tooltip).toContainText('The build passed and the result is ready to read.')
     await page.keyboard.press('Escape')
     await expect(tooltip).toBeHidden()
     await expect(trigger).toBeFocused()

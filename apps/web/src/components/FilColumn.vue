@@ -133,14 +133,19 @@ const hoverable = typeof matchMedia === 'function' && matchMedia('(hover: hover)
 onBeforeUnmount(unpeek)
 
 function peek(item: FilItem, event: Event) {
-  clearTimeout(peekTimer)
-  keepPeek()
+  const target = event.currentTarget as HTMLElement
+  // Keyboard focus owns its preview until it moves or Escape dismisses it.
+  if (event.type === 'mouseenter' && peekTarget !== target && peekTarget?.matches(':focus'))
+    return
   if (!item.preview || !hoverable) {
-    unpeek()
+    if (!peekTarget?.matches(':hover, :focus') && !peekCard.value?.matches(':hover'))
+      unpeek()
     return
   }
 
-  peekTarget = event.currentTarget as HTMLElement
+  clearTimeout(peekTimer)
+  keepPeek()
+  peekTarget = target
   const row = peekTarget.closest('article')!.getBoundingClientRect()
   const width = 320
   const beside = row.right + 12 + width <= innerWidth - 8
