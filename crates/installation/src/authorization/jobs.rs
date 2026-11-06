@@ -390,21 +390,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Copy)]
-    enum WaitPhase {
-        HandlerEntry,
-        TerminalState,
-    }
-
-    impl WaitPhase {
-        fn label(self) -> &'static str {
-            match self {
-                Self::HandlerEntry => "handler_entry",
-                Self::TerminalState => "terminal_state",
-            }
-        }
-    }
-
     async fn accepted() -> (Fixture, String, Value, Authorization) {
         let (f, bearer) = Fixture::delegated_manager().await;
         let run = crate::installation_mcp::authorize(&f.s, &bearer)
@@ -690,9 +675,8 @@ mod tests {
                             OperationState::from_value(&state)
                         });
                 panic!(
-                    "case={} phase={} elapsed_ms={} timeout_ms=10000 operation_state={}",
+                    "case={} phase=handler_entry elapsed_ms={} timeout_ms=10000 operation_state={}",
                     case.label(),
-                    WaitPhase::HandlerEntry.label(),
                     elapsed_ms,
                     operation_state.label(),
                 );
@@ -723,30 +707,45 @@ mod tests {
                 }
                 _ => {}
             }
+            if change == "complete" {
+                f.hold_upload.store(true, Ordering::SeqCst);
+            }
             f.release.notify_one();
-            let mut operation_state = OperationState::Other;
-            let phase_started = tokio::time::Instant::now();
-            let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                loop {
-                    let result = f.s.plugins.operations.get(operation).unwrap();
-                    operation_state = OperationState::from_value(&result);
-                    if result["state"] != "running" {
-                        break result;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            if change == "complete" {
+                tokio::select! {
+                    () = f.upload_entered.notified() => {},
+                    result = f.s.plugins.operations.wait_for_task(operation) => {
+                        panic!("source job exited before the upload barrier: {result:?}");
+                    },
                 }
-            })
-            .await
-            .unwrap_or_else(|_| {
-                let elapsed_ms = phase_started.elapsed().as_millis();
-                panic!(
-                    "case={} phase={} elapsed_ms={} timeout_ms=10000 operation_state={}",
-                    case.label(),
-                    WaitPhase::TerminalState.label(),
-                    elapsed_ms,
-                    operation_state.label(),
+            }
+
+            let completion = f.s.plugins.operations.wait_for_task(operation);
+            tokio::pin!(completion);
+            if change == "complete" {
+                tokio::time::pause();
+                assert!(
+                    std::future::poll_fn(|cx| {
+                        std::task::Poll::Ready(std::future::Future::poll(completion.as_mut(), cx))
+                    })
+                    .await
+                    .is_pending()
                 );
-            });
+                // A valid HTTP request can outlast the old ten-second fixture
+                // deadline while remaining inside its real fifteen-second budget.
+                tokio::time::advance(std::time::Duration::from_secs(11)).await;
+                assert!(
+                    std::future::poll_fn(|cx| {
+                        std::task::Poll::Ready(std::future::Future::poll(completion.as_mut(), cx))
+                    })
+                    .await
+                    .is_pending(),
+                    "a valid HTTP request may remain running beyond the fixture's ten seconds"
+                );
+                tokio::time::resume();
+                f.upload_release.notify_one();
+            }
+            let result = completion.await.unwrap();
             assert_eq!(
                 result["state"],
                 if matches!(change, "complete" | "delivery") {

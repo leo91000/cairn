@@ -35,6 +35,9 @@ pub(crate) struct Fixture {
     pub(crate) release: Arc<tokio::sync::Notify>,
     pub(crate) moved_parent: Arc<AtomicBool>,
     pub(crate) uploads: Arc<AtomicUsize>,
+    pub(crate) hold_upload: Arc<AtomicBool>,
+    pub(crate) upload_entered: Arc<tokio::sync::Notify>,
+    pub(crate) upload_release: Arc<tokio::sync::Notify>,
 }
 
 impl Fixture {
@@ -94,6 +97,14 @@ impl Fixture {
         let remote_parent = moved_parent.clone();
         let uploads = Arc::new(AtomicUsize::new(0));
         let uploaded = uploads.clone();
+        let hold_upload = Arc::new(AtomicBool::new(false));
+        let upload_entered = Arc::new(tokio::sync::Notify::new());
+        let upload_release = Arc::new(tokio::sync::Notify::new());
+        let (upload_hold, upload_arrived, upload_resume) = (
+            hold_upload.clone(),
+            upload_entered.clone(),
+            upload_release.clone(),
+        );
         let hold_entered = entered.clone();
         let hold_release = release.clone();
         let (paused, arrived, resume) = (pause.clone(), entered.clone(), release.clone());
@@ -139,8 +150,17 @@ impl Fixture {
                     "/upload",
                     any(move || {
                         let uploaded = uploaded.clone();
+                        let (hold, arrived, resume) = (
+                            upload_hold.clone(),
+                            upload_arrived.clone(),
+                            upload_resume.clone(),
+                        );
                         async move {
                             uploaded.fetch_add(1, Ordering::SeqCst);
+                            if hold.load(Ordering::SeqCst) {
+                                arrived.notify_one();
+                                resume.notified().await;
+                            }
                             "uploaded"
                         }
                     }),
@@ -347,6 +367,9 @@ return {
             release,
             moved_parent,
             uploads,
+            hold_upload,
+            upload_entered,
+            upload_release,
         }
     }
 
