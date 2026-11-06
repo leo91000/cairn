@@ -377,6 +377,7 @@ test('opening a mission from a conversation keeps the Fil mounted and visible', 
   await expect(page.locator('.activity-message').getByText('Navigation shell proof', { exact: true }).first()).toBeVisible()
   const fil = page.locator('.fil')
   await fil.evaluate(element => element.setAttribute('data-navigation-probe', 'mounted'))
+  await fil.getByRole('button', { name: 'Filter the Fil', exact: true }).click()
   await fil.getByRole('textbox', { name: 'Filter conversations' }).fill('Navigation')
   const width = (await fil.boundingBox())!.width
   await page.locator(`[data-fil-key="task:${run.taskId}"]`).getByRole('button', { name: /^Open/ }).click()

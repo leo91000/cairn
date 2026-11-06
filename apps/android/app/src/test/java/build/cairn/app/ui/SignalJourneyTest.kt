@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.test.core.app.ApplicationProvider
@@ -409,6 +410,17 @@ class SignalJourneyTest {
     }
 
     @Test
+    fun `finished rows retain their completion status for accessibility`() =
+        journey(feedChats = listOf(chats.last().copy(status = "succeeded"))) {
+            waitText("Relecture de la PR")
+            compose
+                .onNodeWithText("Relecture de la PR")
+                .assert(
+                    SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Terminée")
+                )
+        }
+
+    @Test
     fun `quota waits appear under scheduled resumptions without a countdown`() =
         journey(
             feedChats =
@@ -444,6 +456,9 @@ class SignalJourneyTest {
         ) {
             waitText("Choisir la pagination")
             waitText("Relecture de la PR")
+            // The filter unfolds from the header's search button.
+            compose.onNode(hasSetTextAction()).assertDoesNotExist()
+            compose.onNodeWithTag("fil-search").performClick()
             compose.onNode(hasSetTextAction()).performTextInput("  aTlAs  ")
             compose.onNodeWithText("Choisir la pagination").assertExists()
             compose.onNodeWithText("Relecture de la PR").assertExists()

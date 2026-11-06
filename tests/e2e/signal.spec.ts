@@ -72,6 +72,18 @@ async function capture(page: Page, testInfo: TestInfo, name: string) {
   await page.screenshot({ path: testInfo.outputPath(`${name}.png`) })
 }
 
+test('the Fil search toggle closes an empty focused search', async ({ page }) => {
+  await signIn(page)
+  const toggle = page.getByRole('button', { name: 'Filter the Fil', exact: true })
+  const input = page.getByRole('textbox', { name: 'Filter conversations' })
+  await toggle.click()
+  await expect(input).toBeFocused()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(input).not.toBeFocused()
+})
+
 test('delegated conversations keep their requester in attention cards and live rows', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const parent = await workspace.api('/api/chats', 'POST', {})
@@ -129,6 +141,8 @@ test('delegated conversations keep their requester in attention cards and live r
     const row = section.locator(`[data-fil-key="chat:${task.id}"]`)
     await expect(row.getByTestId('fil-requester')).toHaveText('Delegated by Review the send queue')
     await expect(row.getByRole('img', { name: 'Latest harness: Claude Code', exact: true })).toBeVisible()
+    if (task.title === 'Unread child report')
+      await expect(row.getByRole('button', { name: `Open “${task.title}”`, exact: true })).toHaveAccessibleDescription('Finished')
   }
 })
 
@@ -502,6 +516,7 @@ test('a waiting mission sits in Waiting, shows its wait and can be stopped', asy
   await signIn(page)
   // The initial conversation stream can move unrelated requester-owned missions out of For you.
   // Keep this journey's row in place while that list arrives, including during its click.
+  await page.getByRole('button', { name: 'Filter the Fil', exact: true }).click()
   await page.getByRole('textbox', { name: 'Filter conversations' }).fill(task.name)
   const waiting = page.getByRole('region', { name: 'Tout', exact: true })
   await expect(waiting.getByText(task.name, { exact: true })).toBeVisible()
