@@ -284,6 +284,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
             title="Filter the Fil (/)"
             :aria-expanded="searching"
             aria-controls="fil-search"
+            @mousedown.prevent
             @click="searching ? closeSearch() : openSearch()"
           >
             <Icon :name="Search" :size="16" />

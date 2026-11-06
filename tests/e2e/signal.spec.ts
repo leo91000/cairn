@@ -72,6 +72,18 @@ async function capture(page: Page, testInfo: TestInfo, name: string) {
   await page.screenshot({ path: testInfo.outputPath(`${name}.png`) })
 }
 
+test('the Fil search toggle closes an empty focused search', async ({ page }) => {
+  await signIn(page)
+  const toggle = page.getByRole('button', { name: 'Filter the Fil', exact: true })
+  const input = page.getByRole('textbox', { name: 'Filter conversations' })
+  await toggle.click()
+  await expect(input).toBeFocused()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(input).not.toBeFocused()
+})
+
 test('delegated conversations keep their requester in attention cards and live rows', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const parent = await workspace.api('/api/chats', 'POST', {})
