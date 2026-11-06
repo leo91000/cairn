@@ -45,6 +45,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -507,7 +508,7 @@ internal fun threadFeed(items: List<FeedItem>): List<Pair<FeedItem, Boolean>> {
 }
 
 /** The Fil in reading order, one key per item: what a swipe between pages moves through. */
-internal fun Feed.keys() = all.map { it.key }
+internal fun Feed.keys() = threadFeed(all).map { (item, _) -> item.key }
 
 /** The shell and its pages share one conversation stream and one mission poll. */
 internal data class FilSnapshot(val conversations: LiveSnapshot, val activity: List<Run>?)
@@ -1123,6 +1124,7 @@ private fun FeedRow(
             modifier =
                 swipe
                     .fillMaxWidth()
+                    .semantics { if (item.finished) stateDescription = item.statusLabel }
                     .then(if (item.unread) Modifier.testTag("unread") else Modifier)
                     .then(if (nested) Modifier.testTag("fil-nested") else Modifier),
         ) {

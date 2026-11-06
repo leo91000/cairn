@@ -141,6 +141,8 @@ test('delegated conversations keep their requester in attention cards and live r
     const row = section.locator(`[data-fil-key="chat:${task.id}"]`)
     await expect(row.getByTestId('fil-requester')).toHaveText('Delegated by Review the send queue')
     await expect(row.getByRole('img', { name: 'Latest harness: Claude Code', exact: true })).toBeVisible()
+    if (task.title === 'Unread child report')
+      await expect(row.getByRole('button', { name: `Open “${task.title}”`, exact: true })).toHaveAccessibleDescription('Finished')
   }
 })
 

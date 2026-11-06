@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.test.core.app.ApplicationProvider
@@ -407,6 +408,17 @@ class SignalJourneyTest {
                 File(dir, "$name.png").outputStream(),
             )
     }
+
+    @Test
+    fun `finished rows retain their completion status for accessibility`() =
+        journey(feedChats = listOf(chats.last().copy(status = "succeeded"))) {
+            waitText("Relecture de la PR")
+            compose
+                .onNodeWithText("Relecture de la PR")
+                .assert(
+                    SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Terminée")
+                )
+        }
 
     @Test
     fun `quota waits appear under scheduled resumptions without a countdown`() =

@@ -373,6 +373,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
           class="flex min-w-0 flex-1 items-start gap-2 py-2.5 pr-2 text-left"
           :class="nested ? 'pl-2.5' : 'pl-1.5'"
           :aria-label="`Open “${item.title}”`"
+          :aria-description="item.finished ? label(item) : undefined"
           :aria-current="opened(item) ? 'page' : undefined"
           @click="open(item)"
         >
