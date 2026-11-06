@@ -35,6 +35,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -910,7 +911,11 @@ private fun FoldRow(fold: FeedEntry.Fold, open: Boolean, now: Long, toggle: () -
 /** A finished result's opening, read without opening the work, which stays unread. */
 @Composable
 internal fun PeekSheet(item: FeedItem, now: Long, close: () -> Unit, open: () -> Unit) {
-    ModalBottomSheet(onDismissRequest = close, modifier = Modifier.testTag("fil-peek")) {
+    ModalBottomSheet(
+        onDismissRequest = close,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        modifier = Modifier.testTag("fil-peek"),
+    ) {
         Column(
             Modifier.verticalScroll(rememberScrollState())
                 .padding(start = 24.dp, end = 24.dp, bottom = 24.dp)
