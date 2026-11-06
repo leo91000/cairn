@@ -53,7 +53,8 @@ struct Pending {
     _stream_permit: Option<OwnedSemaphorePermit>,
     _account_stream_permit: Option<OwnedSemaphorePermit>,
     _mcp_permit: Option<OwnedSemaphorePermit>,
-    public_activity: Option<tokio::time::Instant>,
+    // File bodies expire after a deadline without installation progress.
+    file_activity: Option<tokio::time::Instant>,
 }
 
 struct Command {
@@ -488,8 +489,8 @@ async fn serve_socket(
     let mut pending = HashMap::<String, Pending>::new();
     let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut public_expiry = tokio::time::interval(Duration::from_secs(1));
-    public_expiry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut deadline_sweep = tokio::time::interval(Duration::from_secs(1));
+    deadline_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut received = tokio::time::Instant::now();
     let mut notification_jobs = tokio::task::JoinSet::new();
     let mut notification_ids = HashMap::new();
@@ -609,7 +610,7 @@ async fn serve_socket(
                     }
                 }
             }
-            _ = public_expiry.tick() => {
+            _ = deadline_sweep.tick() => {
                 tunnel.access.lock().unwrap().direct.retain(|_, connection| {
                     if connection.authorization.claims.expires_at <= unix_time() {
                         connection.revoked.send_replace(true);
@@ -618,11 +619,11 @@ async fn serve_socket(
                         true
                     }
                 });
-                // Expire public bodies independently of downstream polling,
+                // Expire file bodies independently of downstream polling,
                 // including readers that stopped granting stream credit.
                 let expired: Vec<_> = pending.iter()
                     .filter(|(_, request)| {
-                        request.public_activity.is_some_and(|activity| activity.elapsed() >= REQUEST_TIMEOUT)
+                        request.file_activity.is_some_and(|activity| activity.elapsed() >= REQUEST_TIMEOUT)
                     })
                     .map(|(id, _)| id.clone())
                     .collect();
@@ -797,8 +798,8 @@ async fn serve_socket(
                             Frame::StreamStart(response) => {
                                 let id = response.id.clone();
                                 if let Some(request) = pending.get_mut(&id) {
-                                    if request.public_activity.is_some() {
-                                        request.public_activity = Some(tokio::time::Instant::now());
+                                    if request.file_activity.is_some() {
+                                        request.file_activity = Some(tokio::time::Instant::now());
                                     }
                                     let valid_stream = request.stream.is_some() && response.body.is_empty();
                                     if valid_stream && let Some(reply) = request.reply.take() {
@@ -817,8 +818,8 @@ async fn serve_socket(
                             Frame::StreamChunk { id, body } => {
                                 let delivered = body.len() <= MAX_STREAM_CHUNK
                                     && pending.get_mut(&id).is_some_and(|request| {
-                                        if request.public_activity.is_some() {
-                                            request.public_activity = Some(tokio::time::Instant::now());
+                                        if request.file_activity.is_some() {
+                                            request.file_activity = Some(tokio::time::Instant::now());
                                         }
                                         request.reply.is_none()
                                             && request.stream.as_ref().is_some_and(|stream| {
@@ -1127,6 +1128,10 @@ async fn send(
     request: Request,
 ) -> Result<Response, ApiError> {
     let streaming = cairn_protocol::stream_path(target);
+    // A file body ends when its file does. It takes request capacity and an idle
+    // deadline; only live subscriptions take tunnel and account stream slots.
+    let file = cairn_protocol::file_path(target);
+    let live_stream = streaming && !file;
     let public_file = matches!(capability, Capability::PublicArtifact(_));
     let browser_session = matches!(capability, Capability::Account(_))
         .then(|| digest(super::session_token(request.headers())));
@@ -1153,7 +1158,7 @@ async fn send(
         .try_acquire_owned()
         .map_err(|_| ApiError::Http(StatusCode::SERVICE_UNAVAILABLE, "Installation busy"))?;
 
-    let stream_permit = if streaming && !public_file {
+    let stream_permit = if live_stream {
         Some(
             tunnel
                 .stream_slots
@@ -1170,7 +1175,7 @@ async fn send(
         None
     };
 
-    let account_stream_permit = if streaming && browser_session.is_some() {
+    let account_stream_permit = if live_stream && browser_session.is_some() {
         Some(
             active_slots(
                 &service.relay.account_stream_slots,
@@ -1323,7 +1328,7 @@ async fn send(
                 _stream_permit: stream_permit,
                 _account_stream_permit: account_stream_permit,
                 _mcp_permit: mcp_permit,
-                public_activity: public_file.then(tokio::time::Instant::now),
+                file_activity: file.then(tokio::time::Instant::now),
             },
         })
         .map_err(|_| {

@@ -766,6 +766,91 @@ async fn private_files_larger_than_a_relay_frame_stream_for_reads_downloads_rang
 }
 
 #[tokio::test]
+async fn private_files_use_request_capacity_not_live_streams_and_expire_when_idle() {
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    // Larger than loopback socket buffers, so these transfers remain in flight.
+    let bytes = vec![b'x'; 100_000_000];
+    let (run, artifact) = seeded_artifact(&relay, &bytes, "image/svg+xml").await;
+    let file = format!("/runs/{run}/artifacts/{artifact}");
+
+    // A gallery renders originals that have no thumbnail, such as SVGs, together.
+    let mut downloads = Vec::new();
+    for _ in 0..cairn_protocol::MAX_STREAMS_PER_ACCOUNT + 4 {
+        let response = relay.get(&file).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        downloads.push(response);
+    }
+
+    let mut live = Vec::new();
+    for _ in 0..cairn_protocol::MAX_STREAMS_PER_ACCOUNT {
+        let response = relay.get("/chats/stream").send().await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "Files must leave the account's live-stream allowance intact"
+        );
+        live.push(response);
+    }
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    drop(downloads);
+    drop(live);
+
+    // A reader that stops reading: its tiny receive window stalls the transfer.
+    let url = url::Url::parse(&format!("{}{file}", relay.base)).unwrap();
+    let mut stalled = None;
+    for address in url.socket_addrs(|| None).unwrap() {
+        let socket = if address.is_ipv4() {
+            tokio::net::TcpSocket::new_v4()
+        } else {
+            tokio::net::TcpSocket::new_v6()
+        }
+        .unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        if let Ok(stream) = socket.connect(address).await {
+            stalled = Some(stream);
+            break;
+        }
+    }
+    let mut stalled = stalled.expect("the Beacon fixture must accept a connection");
+    stalled
+        .write_all(
+            format!(
+                "GET {} HTTP/1.1\r\nHost: {}\r\nCookie: {}\r\nConnection: close\r\n\r\n",
+                url.path(),
+                url.authority(),
+                relay.cookie
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+
+    // Never read meanwhile: the tunnel's file deadline must end the transfer.
+    tokio::time::sleep(Duration::from_secs(31)).await;
+    let mut received = Vec::new();
+    tokio::time::timeout(Duration::from_secs(15), stalled.read_to_end(&mut received))
+        .await
+        .expect("An idle private file must release its transfer")
+        .ok();
+    assert!(received.starts_with(b"HTTP/1.1 200"));
+    assert!(
+        received.len() < bytes.len(),
+        "An idle private file must end incomplete, never as a complete body"
+    );
+
+    let response = relay.get(&file).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.bytes().await.unwrap().len(), bytes.len());
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn public_svg_is_downloaded_as_an_attachment() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let (run, artifact) = seeded_artifact(&relay, b"<svg></svg>", "image/svg+xml").await;

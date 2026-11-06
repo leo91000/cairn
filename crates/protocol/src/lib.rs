@@ -228,16 +228,21 @@ pub enum Frame {
 /// finite `MAX_BODY` frames: live subscriptions and file downloads. Web and
 /// Android direct clients mirror this classification.
 pub fn stream_path(path: &str) -> bool {
-    let (route, query) = path.split_once('?').unwrap_or((path, ""));
-    route.ends_with("/stream")
-        || route.starts_with("/api/shared-artifacts/")
-        || run_artifact_file(route, query)
+    let route = path.split('?').next().unwrap_or("");
+    route.ends_with("/stream") || file_path(path)
 }
 
-/// A private deliverable's original bytes, which can exceed a finite frame.
-/// Metadata and the bounded 960 px preview thumbnail remain finite, so a page of
-/// thumbnails does not hold live-stream capacity. These are the parameters the
-/// installation's artifact handler uses to select them.
+/// A stream carrying one finite file that can exceed `MAX_BODY`: a public shared
+/// file or a private deliverable's original. The Beacon relay bounds these by
+/// file progress instead of a live-subscription slot, so a page of images cannot
+/// exhaust an account's live streams.
+pub fn file_path(path: &str) -> bool {
+    let (route, query) = path.split_once('?').unwrap_or((path, ""));
+    route.starts_with("/api/shared-artifacts/") || run_artifact_file(route, query)
+}
+
+/// Artifact metadata and the bounded 960 px preview thumbnail remain finite.
+/// These are the parameters the installation's artifact handler uses to select them.
 fn run_artifact_file(route: &str, query: &str) -> bool {
     let file = matches!(
         route.split('/').collect::<Vec<_>>().as_slice(),
@@ -297,7 +302,7 @@ pub fn api_path(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::stream_path;
+    use super::{file_path, stream_path};
 
     #[test]
     fn private_artifact_files_stream_like_public_downloads() {
@@ -310,6 +315,10 @@ mod tests {
         ] {
             assert!(stream_path(path), "{path} must stream");
         }
+        assert!(file_path("/api/runs/run/artifacts/file?download=1"));
+        assert!(file_path("/api/shared-artifacts/token"));
+        assert!(!file_path("/api/runs/run/stream?after=0"));
+        assert!(!file_path("/api/runs/run/artifacts/file/stream"));
     }
 
     #[test]
@@ -326,6 +335,7 @@ mod tests {
             "/api/chats/chat/artifacts/file",
         ] {
             assert!(!stream_path(path), "{path} must stay finite");
+            assert!(!file_path(path), "{path} must stay finite");
         }
     }
 }
