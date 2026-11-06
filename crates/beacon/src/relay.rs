@@ -1159,9 +1159,9 @@ async fn send(
         return Err(unavailable());
     }
 
-    // Files larger than a frame stream for as long as their transfer lasts. Other
-    // files queue for the account's share of this installation's file slots
-    // rather than fail at once, within the request deadline.
+    // A private file holds a file slot until its transfer ends, so every private
+    // file request queues for the account's share of this installation's file
+    // slots rather than failing at once, within the request deadline.
     let waits_until = tokio::time::Instant::now() + REQUEST_TIMEOUT;
     let file_permit = if private_file && browser_session.is_some() {
         let share = active_slots(&tunnel.account_file_slots, &account, MAX_FILES_PER_ACCOUNT);

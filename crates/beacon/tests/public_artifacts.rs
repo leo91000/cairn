@@ -699,7 +699,7 @@ async fn public_files_larger_than_a_relay_frame_stream_without_truncation() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.bytes().await.unwrap().as_ref(), bytes.as_slice());
 
-    // Public files of any size stream their stored bytes with their length.
+    // Public files of any size stream, compressed as before when accepted.
     let page = "<p>public</p>\n".repeat(1_000).into_bytes();
     let (run, artifact) = seeded_artifact(&relay, &page, "text/html").await;
     let shared = visibility(&relay, &run, &artifact, "public").await;
@@ -712,10 +712,15 @@ async fn public_files_larger_than_a_relay_frame_stream_without_truncation() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(!response.headers().contains_key("content-encoding"));
-    assert_eq!(response.headers()["content-length"], page.len().to_string());
+    assert_eq!(response.headers()["content-encoding"], "gzip");
     assert_eq!(response.headers()["x-accel-buffering"], "no");
-    assert_eq!(response.bytes().await.unwrap().as_ref(), page.as_slice());
+    let mut decoded = Vec::new();
+    std::io::Read::read_to_end(
+        &mut flate2::read::GzDecoder::new(response.bytes().await.unwrap().as_ref()),
+        &mut decoded,
+    )
+    .unwrap();
+    assert_eq!(decoded, page);
     relay.close().await;
 }
 

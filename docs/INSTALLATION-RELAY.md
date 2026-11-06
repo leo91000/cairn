@@ -197,15 +197,16 @@ encoding, because its clients read stream chunks without an HTTP decoder.
 
 File streams (`cairn_protocol::file_path`) carry one finite file. A private file
 that fits one frame, like any error on a file route, is answered with a finite
-response, which every peer accepts on a streamed route, and may be compressed; a larger or unknown-length one
-streams uncompressed, with its length and byte ranges. Public files always stream
-uncompressed. Like public files, private files have their own pool on both ends
-of the tunnel (`MAX_FILE_IN_FLIGHT`, eight). The Beacon gives each account four
-of an installation's file slots; a further file request queues for up to 30
-seconds, after which the usual 30-second response deadline applies. The Beacon
-cancels a file stream after 30 seconds without installation progress and ends an
-interrupted file body with an error. The direct DataChannel, which has no idle
-deadline, counts file streams as streams.
+response, which every peer accepts on a streamed route, and may be compressed; a
+larger or unknown-length one streams uncompressed, with its length and byte
+ranges. Public files always stream and are compressed as before when the reader
+accepts it. Like public files, private files have their own pool on both ends of
+the tunnel (`MAX_FILE_IN_FLIGHT`, eight). The Beacon gives each account four of an
+installation's file slots; a further file request queues for up to 30 seconds,
+after which the usual 30-second response deadline applies. The Beacon cancels a
+file stream after 30 seconds without installation progress and ends an interrupted
+file body with an error. The direct DataChannel, which has no idle deadline,
+counts file streams as streams.
 
 Each stream gets one credit per downstream body read. Installation body polling
 pauses until credit arrives, chunks are limited to 64 KiB, and each beacon HTTP
