@@ -756,7 +756,9 @@ impl Chat<'_> {
             tokio::select! {
                 () = self.cancel.cancelled() => return Err(Error::conflict(STOPPED)),
                 result = &mut request => return result,
-                _ = tokio::time::sleep_until(flush_at.unwrap_or_else(Instant::now)), if flush_at.is_some() => self.flush_text().await?,
+                () = tokio::time::sleep_until(flush_at.unwrap_or_else(Instant::now)), if flush_at.is_some() => {
+                    self.flush_text().await?;
+                }
                 incoming = self.session.incoming.recv() => {
                     let Some(incoming) = incoming else {
                         return Err(self.session.rpc.failure().await);
@@ -1197,7 +1199,9 @@ impl Chat<'_> {
             let flush_at = self.text_flush_deadline();
             tokio::select! {
                 () = self.cancel.cancelled() => return Err(Error::conflict(STOPPED)),
-                _ = tokio::time::sleep_until(flush_at.unwrap_or_else(Instant::now)), if flush_at.is_some() => self.flush_text().await?,
+                () = tokio::time::sleep_until(flush_at.unwrap_or_else(Instant::now)), if flush_at.is_some() => {
+                    self.flush_text().await?;
+                }
                 incoming = self.session.incoming.recv() => {
                     let Some(incoming) = incoming else {
                         return Err(self.session.rpc.failure().await);
