@@ -641,6 +641,7 @@ async fn direct_private_files_larger_than_a_frame_stream_in_identity_encoding() 
     );
 
     let mut received = Vec::new();
+    let mut chunks = 0;
     for transfer in 2.. {
         send_frame(
             channel.as_ref(),
@@ -651,7 +652,10 @@ async fn direct_private_files_larger_than_a_frame_stream_in_identity_encoding() 
         )
         .await;
         match response(channel.as_ref()).await {
-            Frame::StreamChunk { body, .. } => received.extend(body),
+            Frame::StreamChunk { body, .. } => {
+                chunks += 1;
+                received.extend(body);
+            }
             Frame::StreamEnd { failed, .. } => {
                 assert!(!failed);
                 break;
@@ -660,6 +664,8 @@ async fn direct_private_files_larger_than_a_frame_stream_in_identity_encoding() 
         }
     }
     assert_eq!(received, bytes);
+    // Each chunk costs a credit round trip, so files use whole protocol chunks.
+    assert!(chunks <= bytes.len().div_ceil(cairn_protocol::MAX_STREAM_CHUNK) + 1);
     peer.close().await.unwrap();
     relay.close().await;
 }

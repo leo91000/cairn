@@ -334,10 +334,9 @@ retains 32 authenticated requests and 24 streams per installation tunnel, with
 eight browser streams per account across all installations in the beacon
 process. For one installation the maximum combined allowance is therefore 64
 requests / 48 streams, and at most 16 live browser streams for one account (eight
-on each route). On the relay, private deliverable files use the tunnel's stream
-slots but not those eight: each account has six concurrent file transfers, and a
-further file waits up to 30 seconds for its allowance and a stream slot. On direct,
-files count as streams. Relay public downloads retain their independent four-slot pool;
+on each route). Relay public downloads retain their independent four-slot pool,
+and relay private deliverable files their own eight-transfer pool (four per
+account, further files queue); on direct, files count as streams.
 MCP and direct authorization/signaling allowances are unchanged. Saturating
 reassembly or direct application capacity never borrows fallback slots. These
 transport limits do not count or cancel agent executions.

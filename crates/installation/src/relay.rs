@@ -14,9 +14,9 @@ use axum::{
     http::{HeaderName, HeaderValue, Request},
 };
 use cairn_protocol::{
-    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_NODE_CHANNELS,
-    MAX_NOTIFICATION_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK, PROTOCOL_VERSION,
-    REQUEST_TIMEOUT, Role,
+    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FILE_IN_FLIGHT, MAX_FRAME, MAX_IN_FLIGHT,
+    MAX_NODE_CHANNELS, MAX_NOTIFICATION_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK,
+    PROTOCOL_VERSION, REQUEST_TIMEOUT, Role,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -764,7 +764,9 @@ async fn connected(
     let mut active = HashMap::<String, (AbortHandle, std::sync::Arc<Semaphore>)>::new();
     let slots = std::sync::Arc::new(Semaphore::new(MAX_IN_FLIGHT));
     let public_slots = std::sync::Arc::new(Semaphore::new(MAX_PUBLIC_IN_FLIGHT));
-    let (output, mut frames) = mpsc::channel::<Frame>(MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT);
+    let file_slots = std::sync::Arc::new(Semaphore::new(MAX_FILE_IN_FLIGHT));
+    let (output, mut frames) =
+        mpsc::channel::<Frame>(MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT + MAX_FILE_IN_FLIGHT);
     let mut notifications = tokio::time::interval(Duration::from_secs(1));
     notifications.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut notification_schedule = NotificationSchedule {
@@ -986,6 +988,8 @@ async fn connected(
                         };
                         let capacity = if request.public_artifact.is_some() {
                             &public_slots
+                        } else if cairn_protocol::file_path(&request.path) {
+                            &file_slots
                         } else {
                             &slots
                         };

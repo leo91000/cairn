@@ -23,9 +23,9 @@ use axum::{
 };
 use cairn_protocol::direct::{DirectRevocation, SignalBudget, unix_time};
 use cairn_protocol::{
-    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_NODE_CHANNELS,
-    MAX_NOTIFICATION_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK, PROTOCOL_VERSION,
-    REQUEST_TIMEOUT, Role,
+    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FILE_IN_FLIGHT, MAX_FRAME, MAX_IN_FLIGHT,
+    MAX_NODE_CHANNELS, MAX_NOTIFICATION_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK,
+    PROTOCOL_VERSION, REQUEST_TIMEOUT, Role,
 };
 use futures_util::{SinkExt, StreamExt};
 use sqlx_core::query_as::query_as;
@@ -42,9 +42,8 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch}
 // Keep ordinary API capacity available even when browsers hold idle SSE bodies.
 const MAX_MCP_PER_GRANT: usize = 4;
 const MCP_BODY_TIMEOUT: Duration = Duration::from_secs(10);
-// One account's deliverable files, such as a gallery of originals, share this
-// allowance. Further file requests wait for a transfer instead of failing.
-const MAX_FILES_PER_ACCOUNT: usize = 6;
+// One account's share of the tunnel's private file transfers.
+const MAX_FILES_PER_ACCOUNT: usize = 4;
 
 struct Pending {
     account: String,
@@ -80,6 +79,7 @@ struct Tunnel {
     slots: Arc<Semaphore>,
     stream_slots: Arc<Semaphore>,
     public_slots: Arc<Semaphore>,
+    file_slots: Arc<Semaphore>,
     node_requests: mpsc::Sender<Frame>,
     // Node sockets waiting for the installation to open its side.
     node_channels: Mutex<HashMap<String, oneshot::Sender<WebSocket>>>,
@@ -363,10 +363,11 @@ async fn serve_socket(
         return;
     }
 
-    let (commands, mut receiver) = mpsc::channel::<Command>(MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT);
+    let (commands, mut receiver) =
+        mpsc::channel::<Command>(MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT + MAX_FILE_IN_FLIGHT);
     let (stop, mut stopped) = watch::channel(false);
     let (control, mut controls) =
-        mpsc::channel::<Frame>((MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT) * 2);
+        mpsc::channel::<Frame>((MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT + MAX_FILE_IN_FLIGHT) * 2);
     let (signaling, mut signals) = mpsc::channel::<Frame>(cairn_protocol::direct::MAX_DIRECT_QUEUE);
     let (node_requests, mut node_frames) = mpsc::channel::<Frame>(MAX_NODE_CHANNELS);
     let Ok(key) = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
@@ -388,6 +389,7 @@ async fn serve_socket(
         slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
         stream_slots: Arc::new(Semaphore::new(cairn_protocol::MAX_STREAMS)),
         public_slots: Arc::new(Semaphore::new(MAX_PUBLIC_IN_FLIGHT)),
+        file_slots: Arc::new(Semaphore::new(MAX_FILE_IN_FLIGHT)),
         node_requests,
         node_channels: Mutex::new(HashMap::new()),
         node_offers: Mutex::new(HashMap::new()),
@@ -1137,73 +1139,59 @@ async fn send(
     request: Request,
 ) -> Result<Response, ApiError> {
     let streaming = cairn_protocol::stream_path(target);
-    // A file body ends when its file does: it has an idle deadline and the
-    // account's file allowance instead of its live-subscription allowance.
+    // A file body ends when its file does: it has a file-progress deadline and its
+    // own capacity instead of live-subscription capacity.
     let file = cairn_protocol::file_path(target);
     let live_stream = streaming && !file;
     let public_file = matches!(capability, Capability::PublicArtifact(_));
+    let private_file = file && !public_file;
     let browser_session = matches!(capability, Capability::Account(_))
         .then(|| digest(super::session_token(request.headers())));
 
     // Browser uploads reserve capacity before reading. MCP bodies have already
     // been bounded and reauthorized before they can reserve installation slots.
-    let tunnel = tunnel.ok_or(ApiError::Http(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Installation unavailable",
-    ))?;
+    let unavailable =
+        || ApiError::Http(StatusCode::SERVICE_UNAVAILABLE, "Installation unavailable");
+    let tunnel = tunnel.ok_or_else(unavailable)?;
+    if *tunnel.stop.borrow() {
+        return Err(unavailable());
+    }
 
-    // A gallery requests several originals together, so a private file waits for
-    // its account allowance and a tunnel stream slot within the request deadline.
-    // It waits before taking a request slot, so finite requests keep theirs.
-    let waits_until = tokio::time::Instant::now() + REQUEST_TIMEOUT;
-    let file_permit = if file && browser_session.is_some() {
-        let slots = active_slots(
+    // A gallery requests many originals together. Like a browser's connection
+    // queue, a private file waits for its account's share and a file slot: each
+    // admitted transfer progresses or meets its idle deadline, so the queue moves.
+    let file_permit = if private_file && browser_session.is_some() {
+        let share = active_slots(
             &service.relay.account_file_slots,
             &account,
             MAX_FILES_PER_ACCOUNT,
         );
-        let permit = tokio::time::timeout_at(waits_until, slots.acquire_owned())
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .ok_or(ApiError::Http(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Account file capacity reached",
-            ))?;
-        Some(permit)
+        Some(share.acquire_owned().await.map_err(|_| unavailable())?)
     } else {
         None
     };
-    let file_stream_permit = if file && !public_file {
-        let slots = tunnel.stream_slots.clone();
-        let permit = tokio::time::timeout_at(waits_until, slots.acquire_owned())
+    let permit = if private_file {
+        tunnel
+            .file_slots
+            .clone()
+            .acquire_owned()
             .await
-            .ok()
-            .and_then(Result::ok)
-            .ok_or(ApiError::Http(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Installation stream capacity reached",
-            ))?;
-        Some(permit)
+            .map_err(|_| ApiError::Http(StatusCode::SERVICE_UNAVAILABLE, "Installation busy"))?
     } else {
-        None
+        let slots = if public_file {
+            &tunnel.public_slots
+        } else {
+            &tunnel.slots
+        };
+        slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ApiError::Http(StatusCode::SERVICE_UNAVAILABLE, "Installation busy"))?
     };
-
-    if *tunnel.stop.borrow() {
-        return Err(ApiError::Http(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Installation unavailable",
-        ));
+    // The tunnel can close while a file waits.
+    if private_file && *tunnel.stop.borrow() {
+        return Err(unavailable());
     }
-    let slots = if public_file {
-        &tunnel.public_slots
-    } else {
-        &tunnel.slots
-    };
-    let permit = slots
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| ApiError::Http(StatusCode::SERVICE_UNAVAILABLE, "Installation busy"))?;
 
     let stream_permit = if live_stream {
         Some(
@@ -1219,7 +1207,7 @@ async fn send(
                 })?,
         )
     } else {
-        file_stream_permit
+        None
     };
 
     let account_stream_permit = if live_stream && browser_session.is_some() {

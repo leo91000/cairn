@@ -781,9 +781,12 @@ async fn private_files_larger_than_a_relay_frame_stream_for_reads_downloads_rang
     relay.close().await;
 }
 
-/// A download whose reader never reads: its tiny receive window stalls the
-/// transfer once the response head has arrived.
-async fn stalled_download(relay: &RelayedInstallation, route: &str) -> tokio::net::TcpStream {
+/// A download whose reader never reads its body: a tiny receive window stalls
+/// the transfer. Returns the connection and its response head.
+async fn stalled_download(
+    relay: &RelayedInstallation,
+    route: &str,
+) -> (tokio::net::TcpStream, String) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let url = url::Url::parse(&format!("{}{route}", relay.base)).unwrap();
@@ -809,16 +812,20 @@ async fn stalled_download(relay: &RelayedInstallation, route: &str) -> tokio::ne
         relay.cookie
     );
     stream.write_all(request.as_bytes()).await.unwrap();
-    let mut status = [0; 12];
-    stream.read_exact(&mut status).await.unwrap();
-    assert_eq!(&status, b"HTTP/1.1 200");
-    stream
+
+    // Read only the head, one byte at a time, so no body byte is consumed.
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        head.push(stream.read_u8().await.unwrap());
+    }
+    let head = String::from_utf8(head).unwrap().to_lowercase();
+    assert!(head.starts_with("http/1.1 200"), "{head}");
+    (stream, head)
 }
 
 #[tokio::test]
-async fn private_files_wait_for_file_capacity_without_live_streams_and_expire_when_idle() {
+async fn private_files_queue_for_their_own_capacity_and_expire_when_idle() {
     use std::time::Duration;
-    use tokio::io::AsyncReadExt;
 
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     // Larger than loopback socket buffers, so unread transfers stay in flight.
@@ -826,75 +833,15 @@ async fn private_files_wait_for_file_capacity_without_live_streams_and_expire_wh
     let (run, artifact) = seeded_artifact(&relay, &bytes, "image/svg+xml").await;
     let file = format!("/runs/{run}/artifacts/{artifact}");
 
-    // Fill the account's six concurrent file transfers on the Beacon.
+    // Fill the account's four concurrent file transfers on the Beacon.
     let mut downloads = Vec::new();
-    for _ in 0..6 {
-        downloads.push(stalled_download(&relay, &file).await);
+    for _ in 0..4 {
+        let (download, head) = stalled_download(&relay, &file).await;
+        assert!(head.contains(&format!("content-length: {}", bytes.len())));
+        assert!(!head.contains("content-encoding"));
+        downloads.push(download);
     }
 
-    let mut live = Vec::new();
-    for _ in 0..cairn_protocol::MAX_STREAMS_PER_ACCOUNT {
-        let response = relay.get("/chats/stream").send().await.unwrap();
-        assert_eq!(
-            response.status(),
-            StatusCode::OK,
-            "Files must leave the account's live-stream allowance intact"
-        );
-        live.push(response);
-    }
-    assert_eq!(
-        relay.get("/chats").send().await.unwrap().status(),
-        StatusCode::OK
-    );
-
-    // A gallery's next original waits for a file transfer instead of failing.
-    let mut next = tokio::spawn(relay.get(&file).send());
-    assert!(
-        tokio::time::timeout(Duration::from_secs(2), &mut next)
-            .await
-            .is_err()
-    );
-    drop(downloads.pop());
-    let next = tokio::time::timeout(Duration::from_secs(10), next)
-        .await
-        .expect("A finished transfer must admit the waiting file")
-        .unwrap()
-        .unwrap();
-    assert_eq!(next.status(), StatusCode::OK);
-    drop(next);
-    drop(live);
-
-    // Never read meanwhile: the tunnel's file deadline must end the transfer.
-    tokio::time::sleep(Duration::from_secs(31)).await;
-    let mut received = Vec::new();
-    tokio::time::timeout(
-        Duration::from_secs(15),
-        downloads[0].read_to_end(&mut received),
-    )
-    .await
-    .expect("An idle private file must release its transfer")
-    .ok();
-    assert!(
-        received.len() < bytes.len(),
-        "An idle private file must end incomplete, never as a complete body"
-    );
-    let head = String::from_utf8_lossy(&received[..received.len().min(2048)]).to_lowercase();
-    assert!(head.contains(&format!("content-length: {}", bytes.len())));
-    assert!(!head.contains("content-encoding"));
-
-    drop(downloads);
-    let response = relay.get(&file).send().await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.bytes().await.unwrap().len(), bytes.len());
-    relay.close().await;
-}
-
-#[tokio::test]
-async fn private_files_wait_for_a_tunnel_stream_slot_instead_of_failing() {
-    use std::time::Duration;
-
-    let relay = RelayedInstallation::new(axum::Router::new()).await;
-    let (run, artifact) = seeded_artifact(&relay, b"original", "image/png").await;
     let cookies = common::stream_accounts(&relay).await;
     let mut live = Vec::new();
     for index in 0..cairn_protocol::MAX_STREAMS {
@@ -909,29 +856,55 @@ async fn private_files_wait_for_a_tunnel_stream_slot_instead_of_failing() {
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "Files must leave every live-stream slot available"
+        );
         live.push(response);
     }
-
-    let mut file = tokio::spawn(
-        relay
-            .get(&format!("/runs/{run}/artifacts/{artifact}"))
-            .send(),
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK,
+        "Files must leave finite request slots available"
     );
+
+    // A gallery's next original queues for a transfer instead of failing.
+    let mut next = tokio::spawn(relay.get(&file).send());
     assert!(
-        tokio::time::timeout(Duration::from_secs(2), &mut file)
+        tokio::time::timeout(Duration::from_secs(2), &mut next)
             .await
             .is_err()
     );
-    drop(live.pop());
-    let response = tokio::time::timeout(Duration::from_secs(10), file)
+    drop(downloads.pop());
+    let admitted = tokio::time::timeout(Duration::from_secs(10), next)
         .await
-        .expect("A released stream slot must admit the waiting file")
+        .expect("A finished transfer must admit the queued file")
         .unwrap()
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.bytes().await.unwrap().as_ref(), b"original");
+    assert_eq!(admitted.status(), StatusCode::OK);
+    drop(admitted);
     drop(live);
+
+    // The holders are never read again. Only their file deadline can release
+    // them, and the queued file must wait for that rather than fail.
+    downloads.push(stalled_download(&relay, &file).await.0);
+    let queued = tokio::time::timeout(Duration::from_secs(120), relay.get(&file).send())
+        .await
+        .expect("Idle transfers must release the queue")
+        .unwrap();
+    assert_eq!(queued.status(), StatusCode::OK);
+    drop(queued);
+
+    drop(downloads);
+    let response = relay
+        .get(&file)
+        .header("range", "bytes=0-1023")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), &bytes[..1024]);
     relay.close().await;
 }
 

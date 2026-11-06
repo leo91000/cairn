@@ -490,7 +490,11 @@ async fn serve(s: &Service, record: &Deliverable, request: Request) -> Result<Re
     let body = if request.method() == "HEAD" {
         Body::empty()
     } else {
-        Body::from_stream(tokio_util::io::ReaderStream::new(file.take(count)))
+        // Each relay chunk costs a credit round trip, so read whole chunks.
+        Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+            file.take(count),
+            cairn_protocol::MAX_STREAM_CHUNK,
+        ))
     };
     let mut response = body.into_response();
     response.extensions_mut().insert(crate::http::Uncompressed);

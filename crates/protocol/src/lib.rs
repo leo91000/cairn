@@ -17,6 +17,8 @@ pub const MAX_STREAMS: usize = 24;
 pub const MAX_STREAMS_PER_ACCOUNT: usize = 8;
 // Public files never borrow authenticated API or live-stream capacity.
 pub const MAX_PUBLIC_IN_FLIGHT: usize = 4;
+// Neither do private deliverable files, which can transfer for minutes.
+pub const MAX_FILE_IN_FLIGHT: usize = 8;
 pub const MAX_NOTIFICATION_IN_FLIGHT: usize = 4;
 pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 // A node channel carries raw HTTP bytes in binary WebSocket messages.
@@ -233,9 +235,8 @@ pub fn stream_path(path: &str) -> bool {
 }
 
 /// A stream carrying one finite file that can exceed `MAX_BODY`: a public shared
-/// file or a private deliverable's original. The Beacon relay bounds these by
-/// file progress instead of a live-subscription slot, so a page of images cannot
-/// exhaust an account's live streams.
+/// file or a private deliverable's original. On the relay these use their own
+/// request pools and a file-progress deadline instead of live-stream capacity.
 pub fn file_path(path: &str) -> bool {
     let (route, query) = path.split_once('?').unwrap_or((path, ""));
     route.starts_with("/api/shared-artifacts/") || run_artifact_file(route, query)
