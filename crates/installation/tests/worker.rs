@@ -134,6 +134,7 @@ struct Fixture {
     process: Option<Child>,
     url: String,
     clock: Option<FixtureClock>,
+    quiescence_observed: Option<Arc<tokio::sync::Notify>>,
 }
 
 struct FixtureClock {
@@ -377,6 +378,7 @@ impl Fixture {
             process: None,
             url: String::new(),
             clock: None,
+            quiescence_observed: None,
         };
         fixture.start().await;
         fixture
@@ -486,9 +488,14 @@ impl Fixture {
             Duration::from_secs(60),
             Duration::from_millis(30),
             async || {
-                self.worker_active_runs()
-                    .await
-                    .filter(|active_runs| *active_runs == 0)
+                let active_runs = self.worker_active_runs().await?;
+                if active_runs > 0 {
+                    if let Some(observed) = &self.quiescence_observed {
+                        observed.notify_one();
+                    }
+                    return None;
+                }
+                Some(active_runs)
             },
         )
         .await
@@ -696,6 +703,12 @@ async fn first_start_recovery_remains_manually_resumable_after_stop_or_exhaustio
         )
         .await
         .unwrap();
+        // Terminal state is visible before the old worker releases its cached checkpoint.
+        let retirement_socket = fixture
+            .run_directory(&run_id)
+            .join("fixture-retirement.sock");
+        let retirement_listener = (ending == "exhaustion")
+            .then(|| tokio::net::UnixListener::bind(&retirement_socket).unwrap());
         fixture.start().await;
         let mut waiting = fixture
             .until(&run_id, |run| run["retry"].is_object() || finished(run))
@@ -747,12 +760,67 @@ async fn first_start_recovery_remains_manually_resumable_after_stop_or_exhaustio
             }
             assert_eq!(waiting["status"], RunStatus::Failed, "{waiting}");
         }
-        let resumed = fixture
-            .service
-            .worker
-            .resume(&fixture.service, &run_id)
-            .await
-            .unwrap();
+        let retirement = if let Some(listener) = retirement_listener {
+            let (gate, _) = tokio::time::timeout(Duration::from_secs(60), listener.accept())
+                .await
+                .expect("fixture worker did not reach its retirement barrier")
+                .unwrap();
+            tokio::fs::remove_file(&retirement_socket).await.unwrap();
+            assert!(fixture.worker_active_runs().await.unwrap() > 0);
+            let startup: Value =
+                serde_json::from_slice(&tokio::fs::read(&marker).await.unwrap()).unwrap();
+            assert_eq!(startup["remaining"], 0);
+            assert_eq!(startup["pids"].as_array().unwrap().len(), 6);
+            let context = common::relay_fixture::context(&fixture.service).await;
+            let response = fixture
+                .service
+                .http
+                .post(format!("{}/api/runs/{run_id}/resume", fixture.url))
+                .header("x-test-relay-token", text(&context, "value"))
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert_eq!(
+                response.json::<Value>().await.unwrap()["error"],
+                "Wait for this run to finish stopping before resuming."
+            );
+            Some(gate)
+        } else {
+            None
+        };
+        let quiescence = Arc::new(tokio::sync::Notify::new());
+        fixture.quiescence_observed = Some(quiescence.clone());
+        let resumed = {
+            let resume = async {
+                fixture.until_worker_quiescent().await;
+                fixture
+                    .service
+                    .worker
+                    .resume(&fixture.service, &run_id)
+                    .await
+            };
+            tokio::pin!(resume);
+            if let Some(mut gate) = retirement {
+                use tokio::io::AsyncWriteExt;
+                tokio::select! {
+                    // Without the retirement wait, resume completes first and the
+                    // released old checkpoint deterministically restores the failure.
+                    result = &mut resume => {
+                        gate.write_all(&[1]).await.unwrap();
+                        result
+                    },
+                    () = quiescence.notified() => {
+                        gate.write_all(&[1]).await.unwrap();
+                        resume.await
+                    },
+                }
+            } else {
+                resume.await
+            }
+        }
+        .unwrap();
         assert!(
             resumed["retry"].is_null(),
             "Manual resume starts a new budget"
