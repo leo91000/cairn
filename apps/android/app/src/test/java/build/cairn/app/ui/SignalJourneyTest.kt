@@ -444,6 +444,9 @@ class SignalJourneyTest {
         ) {
             waitText("Choisir la pagination")
             waitText("Relecture de la PR")
+            // The filter unfolds from the header's search button.
+            compose.onNode(hasSetTextAction()).assertDoesNotExist()
+            compose.onNodeWithTag("fil-search").performClick()
             compose.onNode(hasSetTextAction()).performTextInput("  aTlAs  ")
             compose.onNodeWithText("Choisir la pagination").assertExists()
             compose.onNodeWithText("Relecture de la PR").assertExists()
