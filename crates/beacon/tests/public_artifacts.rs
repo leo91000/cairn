@@ -886,14 +886,20 @@ async fn private_files_queue_for_their_own_capacity_and_expire_when_idle() {
     drop(admitted);
     drop(live);
 
-    // The holders are never read again. Only their file deadline can release
-    // them, and the queued file must wait for that rather than fail.
+    // The holders are never read again, so only their file deadline can release
+    // them. A queued file may meet its own deadline first and is then retried.
     downloads.push(stalled_download(&relay, &file).await.0);
-    let queued = tokio::time::timeout(Duration::from_secs(120), relay.get(&file).send())
-        .await
-        .expect("Idle transfers must release the queue")
-        .unwrap();
-    assert_eq!(queued.status(), StatusCode::OK);
+    let queued = tokio::time::timeout(Duration::from_secs(150), async {
+        loop {
+            let response = relay.get(&file).send().await.unwrap();
+            if response.status() == StatusCode::OK {
+                break response;
+            }
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+    })
+    .await
+    .expect("Idle transfers must release their capacity");
     drop(queued);
 
     drop(downloads);

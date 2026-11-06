@@ -73,6 +73,72 @@ async fn a_stalled_file_without_a_length_ends_as_an_error_not_a_complete_body() 
 }
 
 #[tokio::test]
+async fn private_files_queue_within_the_request_deadline_behind_progressing_transfers() {
+    // A file of unknown length streams; this one makes progress forever.
+    let routes = Router::new().route(
+        "/api/runs/{run}/artifacts/{artifact}",
+        get(|| async {
+            let progress = futures_util::stream::unfold((), |()| async {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                Some((Ok::<_, std::io::Error>(b"progress".to_vec()), ()))
+            });
+            Body::from_stream(progress)
+        }),
+    );
+    let relay = RelayedInstallation::new(routes).await;
+    let file = format!(
+        "/runs/{}/artifacts/{}",
+        uuid::Uuid::new_v4(),
+        uuid::Uuid::new_v4()
+    );
+    let read = |mut response: reqwest::Response| {
+        tokio::spawn(async move { while let Ok(Some(_)) = response.chunk().await {} })
+    };
+
+    // Fill the account's four concurrent file transfers on this installation.
+    let mut transfers = Vec::new();
+    for _ in 0..4 {
+        let response = relay.get(&file).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        transfers.push(read(response));
+    }
+
+    // The next file queues for the account's share and is admitted when one ends.
+    let mut next = tokio::spawn(relay.get(&file).send());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), &mut next)
+            .await
+            .is_err()
+    );
+    transfers.pop().unwrap().abort();
+    let admitted = tokio::time::timeout(Duration::from_secs(10), next)
+        .await
+        .expect("A finished transfer must admit the queued file")
+        .unwrap()
+        .unwrap();
+    assert_eq!(admitted.status(), StatusCode::OK);
+    transfers.push(read(admitted));
+
+    // Progressing transfers are never cut, so the queue answers within its deadline.
+    let started = tokio::time::Instant::now();
+    let response = tokio::time::timeout(Duration::from_secs(60), relay.get(&file).send())
+        .await
+        .expect("A queued file must be answered within the request deadline")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(started.elapsed() >= Duration::from_secs(25));
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    for transfer in transfers {
+        transfer.abort();
+    }
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn an_oversized_response_fails_only_its_request() {
     let routes = Router::new().route(
         "/api/fixture/oversized",

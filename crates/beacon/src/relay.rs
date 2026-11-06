@@ -42,7 +42,7 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch}
 // Keep ordinary API capacity available even when browsers hold idle SSE bodies.
 const MAX_MCP_PER_GRANT: usize = 4;
 const MCP_BODY_TIMEOUT: Duration = Duration::from_secs(10);
-// One account's share of the tunnel's private file transfers.
+// One account's share of an installation's private file transfers.
 const MAX_FILES_PER_ACCOUNT: usize = 4;
 
 struct Pending {
@@ -80,6 +80,8 @@ struct Tunnel {
     stream_slots: Arc<Semaphore>,
     public_slots: Arc<Semaphore>,
     file_slots: Arc<Semaphore>,
+    // Each account's share of this installation's file slots.
+    account_file_slots: Mutex<HashMap<String, Weak<Semaphore>>>,
     node_requests: mpsc::Sender<Frame>,
     // Node sockets waiting for the installation to open its side.
     node_channels: Mutex<HashMap<String, oneshot::Sender<WebSocket>>>,
@@ -117,7 +119,6 @@ pub struct Relay {
     closing: Arc<AtomicBool>,
     mcp_slots: Arc<Mutex<HashMap<String, Weak<Semaphore>>>>,
     account_stream_slots: Arc<Mutex<HashMap<String, Weak<Semaphore>>>>,
-    account_file_slots: Arc<Mutex<HashMap<String, Weak<Semaphore>>>>,
 }
 
 #[derive(Default)]
@@ -390,6 +391,7 @@ async fn serve_socket(
         stream_slots: Arc::new(Semaphore::new(cairn_protocol::MAX_STREAMS)),
         public_slots: Arc::new(Semaphore::new(MAX_PUBLIC_IN_FLIGHT)),
         file_slots: Arc::new(Semaphore::new(MAX_FILE_IN_FLIGHT)),
+        account_file_slots: Mutex::new(HashMap::new()),
         node_requests,
         node_channels: Mutex::new(HashMap::new()),
         node_offers: Mutex::new(HashMap::new()),
@@ -1157,26 +1159,34 @@ async fn send(
         return Err(unavailable());
     }
 
-    // A gallery requests many originals together. Like a browser's connection
-    // queue, a private file waits for its account's share and a file slot: each
-    // admitted transfer progresses or meets its idle deadline, so the queue moves.
+    // Files larger than a frame stream for as long as their transfer lasts. Other
+    // files queue for the account's share of this installation's file slots
+    // rather than fail at once, within the request deadline.
+    let waits_until = tokio::time::Instant::now() + REQUEST_TIMEOUT;
     let file_permit = if private_file && browser_session.is_some() {
-        let share = active_slots(
-            &service.relay.account_file_slots,
-            &account,
-            MAX_FILES_PER_ACCOUNT,
-        );
-        Some(share.acquire_owned().await.map_err(|_| unavailable())?)
+        let share = active_slots(&tunnel.account_file_slots, &account, MAX_FILES_PER_ACCOUNT);
+        let permit = tokio::time::timeout_at(waits_until, share.acquire_owned())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .ok_or(ApiError::Http(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Account file capacity reached",
+            ))?;
+        Some(permit)
     } else {
         None
     };
     let permit = if private_file {
-        tunnel
-            .file_slots
-            .clone()
-            .acquire_owned()
+        let slots = tunnel.file_slots.clone();
+        tokio::time::timeout_at(waits_until, slots.acquire_owned())
             .await
-            .map_err(|_| ApiError::Http(StatusCode::SERVICE_UNAVAILABLE, "Installation busy"))?
+            .ok()
+            .and_then(Result::ok)
+            .ok_or(ApiError::Http(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Installation file capacity reached",
+            ))?
     } else {
         let slots = if public_file {
             &tunnel.public_slots

@@ -194,14 +194,17 @@ Routes ending in `/stream`, public shared files and private run-artifact origina
 `cairn_protocol::stream_path` defines this set and the web and Android direct
 clients mirror it. The direct DataChannel always serves streams in identity
 encoding, because its clients read stream chunks without an HTTP decoder.
-File streams (`cairn_protocol::file_path`) carry one finite file. Like public
-files, private files have their own pool on both ends of the tunnel
-(`MAX_FILE_IN_FLIGHT`, eight), outside the 32 request and 24 stream slots. The
-Beacon gives each account four of them and queues further file requests until a
-transfer ends. It cancels a file after 30 seconds without installation progress,
-so the queue always moves, and ends an interrupted file body with an error. The
-installation never compresses deliverable files. The direct DataChannel, which
-has no idle deadline, counts file streams as streams.
+File streams (`cairn_protocol::file_path`) carry one finite file. The
+installation answers one whose `Content-Length` fits `MAX_BODY` with a finite
+response, which every peer accepts on a streamed route, and streams only larger
+or unknown-length files. Like public files, private files have their own pool on
+both ends of the tunnel (`MAX_FILE_IN_FLIGHT`, eight), outside the 32 request and
+24 stream slots. The Beacon gives each account four of an installation's file
+slots; further file requests queue for up to the 30-second request deadline. It
+cancels a file stream after 30 seconds without installation progress and ends an
+interrupted file body with an error. The installation never compresses
+deliverable files. The direct DataChannel, which has no idle deadline, counts
+file streams as streams.
 Each stream gets one credit per downstream body read. Installation body polling
 pauses until credit arrives, chunks are limited to 64 KiB, and each beacon HTTP
 body has a one-chunk queue. Streams can use 24 of the 32 request slots;

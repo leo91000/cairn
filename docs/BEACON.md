@@ -550,8 +550,9 @@ process, across installations and sessions. This complements the existing
 release the allowance together with the remote subscription. Extra streams return
 503 and use the client's existing retry behavior. MCP grants and public downloads
 retain their independent allowances. Private deliverable files have their own
-pool of eight transfers per installation, four per account, which further files
-queue for, and the 30-second idle-progress deadline. Filling one member's eight streams leaves
+pool of eight transfers per installation, four per account on each installation,
+which further files queue for up to 30 seconds, and the 30-second idle-progress
+deadline. Filling one member's eight streams leaves
 installation slots for the owner's live views and ordinary requests.
 
 ## Web push notifications

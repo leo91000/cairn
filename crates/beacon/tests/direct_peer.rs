@@ -615,14 +615,27 @@ async fn direct_private_files_larger_than_a_frame_stream_in_identity_encoding() 
         .repeat(cairn_protocol::MAX_BODY / 18 + 10_000)
         .into_bytes();
     let (run, artifact) = common::seeded_artifact(&relay, &bytes, "text/plain").await;
+    let (small_run, small) = common::seeded_artifact(&relay, b"small file", "text/plain").await;
     let (peer, channel, _) = client(&relay).await;
+
+    // A file that fits one frame stays finite: no credit round trip per chunk.
+    send_frame(
+        channel.as_ref(),
+        1,
+        &request("small", &format!("/api/runs/{small_run}/artifacts/{small}")),
+    )
+    .await;
+    let Frame::Response(reply) = response(channel.as_ref()).await else {
+        panic!("a file that fits one frame must stay finite")
+    };
+    assert_eq!(reply.body, b"small file");
 
     // A client predating this route's stream classification still asks for gzip.
     let mut download = request("download", &format!("/api/runs/{run}/artifacts/{artifact}"));
     if let Frame::Request(request) = &mut download {
         request.headers = vec![("accept-encoding".into(), "gzip".into())];
     }
-    send_frame(channel.as_ref(), 1, &download).await;
+    send_frame(channel.as_ref(), 2, &download).await;
     let Frame::StreamStart(start) = response(channel.as_ref()).await else {
         panic!("artifact files must stream")
     };
@@ -642,7 +655,7 @@ async fn direct_private_files_larger_than_a_frame_stream_in_identity_encoding() 
 
     let mut received = Vec::new();
     let mut chunks = 0;
-    for transfer in 2.. {
+    for transfer in 3.. {
         send_frame(
             channel.as_ref(),
             transfer,

@@ -1095,7 +1095,16 @@ async fn dispatch(
                 .map(|value| (name.to_string(), value.to_owned()))
         })
         .collect();
-    let is_stream = cairn_protocol::stream_path(&input.path);
+    // A file that fits one frame is cheaper finite: it needs no credit round trip
+    // per chunk and releases relay capacity at once. Every peer accepts a finite
+    // response on a streamed route.
+    let fits_frame = response
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|length| length.to_str().ok()?.parse::<usize>().ok())
+        .is_some_and(|length| length <= MAX_BODY);
+    let is_stream = cairn_protocol::stream_path(&input.path)
+        && !(cairn_protocol::file_path(&input.path) && fits_frame);
     if is_stream {
         let output = streaming;
         let id = input.id;
