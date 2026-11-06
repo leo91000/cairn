@@ -1145,14 +1145,24 @@ async fn send(
     let browser_session = matches!(capability, Capability::Account(_))
         .then(|| digest(super::session_token(request.headers())));
 
-    // Wait before reserving installation capacity; the deadline bounds the wait.
+    // Browser uploads reserve capacity before reading. MCP bodies have already
+    // been bounded and reauthorized before they can reserve installation slots.
+    let tunnel = tunnel.ok_or(ApiError::Http(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Installation unavailable",
+    ))?;
+
+    // A gallery requests several originals together, so a private file waits for
+    // its account allowance and a tunnel stream slot within the request deadline.
+    // It waits before taking a request slot, so finite requests keep theirs.
+    let waits_until = tokio::time::Instant::now() + REQUEST_TIMEOUT;
     let file_permit = if file && browser_session.is_some() {
         let slots = active_slots(
             &service.relay.account_file_slots,
             &account,
             MAX_FILES_PER_ACCOUNT,
         );
-        let permit = tokio::time::timeout(REQUEST_TIMEOUT, slots.acquire_owned())
+        let permit = tokio::time::timeout_at(waits_until, slots.acquire_owned())
             .await
             .ok()
             .and_then(Result::ok)
@@ -1164,13 +1174,21 @@ async fn send(
     } else {
         None
     };
+    let file_stream_permit = if file && !public_file {
+        let slots = tunnel.stream_slots.clone();
+        let permit = tokio::time::timeout_at(waits_until, slots.acquire_owned())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .ok_or(ApiError::Http(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Installation stream capacity reached",
+            ))?;
+        Some(permit)
+    } else {
+        None
+    };
 
-    // Browser uploads reserve capacity before reading. MCP bodies have already
-    // been bounded and reauthorized before they can reserve installation slots.
-    let tunnel = tunnel.ok_or(ApiError::Http(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Installation unavailable",
-    ))?;
     if *tunnel.stop.borrow() {
         return Err(ApiError::Http(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1187,7 +1205,7 @@ async fn send(
         .try_acquire_owned()
         .map_err(|_| ApiError::Http(StatusCode::SERVICE_UNAVAILABLE, "Installation busy"))?;
 
-    let stream_permit = if streaming && !public_file {
+    let stream_permit = if live_stream {
         Some(
             tunnel
                 .stream_slots
@@ -1201,7 +1219,7 @@ async fn send(
                 })?,
         )
     } else {
-        None
+        file_stream_permit
     };
 
     let account_stream_permit = if live_stream && browser_session.is_some() {

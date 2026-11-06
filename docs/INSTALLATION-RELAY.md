@@ -197,7 +197,8 @@ encoding, because its clients read stream chunks without an HTTP decoder.
 File streams (`cairn_protocol::file_path`) carry one finite file. On the Beacon,
 private files use the tunnel's stream slots but not the account's live-stream
 allowance; each account has six concurrent file transfers, and further file
-requests wait up to 30 seconds for one. The Beacon cancels a file after 30 seconds
+requests wait up to 30 seconds for one and for a stream slot, before taking a
+request slot. The Beacon cancels a file after 30 seconds
 without installation progress, as for public files, and ends an interrupted file
 body with an error. The installation never compresses deliverable files. The
 direct DataChannel, which has no idle deadline, counts file streams as streams.

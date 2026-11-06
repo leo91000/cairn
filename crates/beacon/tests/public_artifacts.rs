@@ -890,6 +890,52 @@ async fn private_files_wait_for_file_capacity_without_live_streams_and_expire_wh
 }
 
 #[tokio::test]
+async fn private_files_wait_for_a_tunnel_stream_slot_instead_of_failing() {
+    use std::time::Duration;
+
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let (run, artifact) = seeded_artifact(&relay, b"original", "image/png").await;
+    let cookies = common::stream_accounts(&relay).await;
+    let mut live = Vec::new();
+    for index in 0..cairn_protocol::MAX_STREAMS {
+        let response = relay
+            .app
+            .client
+            .get(format!("{}/chats/stream", relay.base))
+            .header(
+                "cookie",
+                &cookies[index / cairn_protocol::MAX_STREAMS_PER_ACCOUNT],
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        live.push(response);
+    }
+
+    let mut file = tokio::spawn(
+        relay
+            .get(&format!("/runs/{run}/artifacts/{artifact}"))
+            .send(),
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), &mut file)
+            .await
+            .is_err()
+    );
+    drop(live.pop());
+    let response = tokio::time::timeout(Duration::from_secs(10), file)
+        .await
+        .expect("A released stream slot must admit the waiting file")
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), b"original");
+    drop(live);
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn public_svg_is_downloaded_as_an_attachment() {
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let (run, artifact) = seeded_artifact(&relay, b"<svg></svg>", "image/svg+xml").await;
