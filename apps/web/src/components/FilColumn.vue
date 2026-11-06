@@ -433,7 +433,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
       :aria-label="tabs.find(view => view.key === tab)?.label"
       @scroll.passive="unpeek"
     >
-      <p v-if="!flat.length" class="px-3 py-10 text-center text-[13px] text-muted">
+      <p v-if="!lines.length" class="px-3 py-10 text-center text-[13px] text-muted">
         {{ filter ? `Nothing matches “${filter}”.` : tab === 'unread' ? 'All read. Your tasks are in En cours and Tout.' : tab === 'ongoing' ? 'No work in progress.' : 'No conversations yet.' }}
       </p>
       <template v-for="{ key: lineKey, item, nested, folded, open: unfoldedLine } in lines" :key="lineKey">

@@ -84,6 +84,59 @@ test('the Fil search toggle closes an empty focused search', async ({ page }) =>
   await expect(input).not.toBeFocused()
 })
 
+test('a Fil containing only folded missions stays populated when collapsed', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const tasks = ['First quiet mission', 'Second quiet mission'].map(name => workspace.service.task({
+    name,
+    prompt: 'Check the build.',
+    agentId: MAIN_AGENT_ID,
+    projectId: null,
+    skills: null,
+    worktree: false,
+    enabled: false,
+    cron: null,
+  }))
+  const now = Date.now()
+  await page.route('**/api/tasks/activity**', route => route.fulfill({
+    json: tasks.map((task, index) => ({
+      id: randomUUID(),
+      taskId: task.id,
+      trigger: 'schedule',
+      status: 'succeeded',
+      agentName: 'Main',
+      createdAt: now - index * 1000,
+      finishedAt: now - index * 1000,
+      unread: false,
+    })),
+  }))
+  await page.route('**/api/chats/stream?**', route => route.fulfill({
+    contentType: 'text/event-stream',
+    body: `id: 0\nevent: batch\ndata: ${JSON.stringify({
+      events: [],
+      state: {
+        run: null,
+        chat: null,
+        chats: [],
+        artifacts: [],
+      },
+      reset: true,
+      more: false,
+    })}\n\n`,
+  }))
+  await signIn(page)
+  const list = page.getByRole('region', { name: 'Tout', exact: true })
+  const fold = list.locator('[data-fil-fold]')
+  await expect(fold).toHaveCount(1)
+  await expect(fold).toHaveAttribute('aria-expanded', 'false')
+  await expect(list.locator('[data-fil-key]')).toHaveCount(0)
+  await expect(list.getByText('No conversations yet.', { exact: true })).toHaveCount(0)
+  await fold.click()
+  await expect(list.locator('[data-fil-key]')).toHaveCount(2)
+  await fold.click()
+  await expect(list.locator('[data-fil-key]')).toHaveCount(0)
+  await expect(list.getByText('No conversations yet.', { exact: true })).toHaveCount(0)
+})
+
 test('delegated conversations keep their requester in attention cards and live rows', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const parent = await workspace.api('/api/chats', 'POST', {})
