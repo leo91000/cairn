@@ -1121,10 +1121,13 @@ async fn dispatch(
     // streaming, so an anonymous reader never holds a whole file in the Beacon.
     let private_file =
         cairn_protocol::file_path(&input.path) && !input.path.starts_with("/api/shared-artifacts/");
-    let fits_frame = response
-        .extensions()
-        .get::<crate::http::FiniteFile>()
-        .is_some()
+    // A route error is a small handler body, even after compression removes its
+    // Content-Length.
+    let fits_frame = !(200..300).contains(&status)
+        || response
+            .extensions()
+            .get::<crate::http::FiniteFile>()
+            .is_some()
         || response
             .headers()
             .get(axum::http::header::CONTENT_LENGTH)

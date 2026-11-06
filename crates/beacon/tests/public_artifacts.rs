@@ -797,6 +797,24 @@ async fn private_files_larger_than_a_relay_frame_stream_for_reads_downloads_rang
     assert!(!response.headers().contains_key("x-accel-buffering"));
     assert_eq!(response.bytes().await.unwrap().as_ref(), b"small");
 
+    // Errors on a file route stay finite as well.
+    let response = relay
+        .get(&format!("/runs/{run}/artifacts/{}", uuid::Uuid::new_v4()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(!response.headers().contains_key("x-accel-buffering"));
+    let response = relay
+        .get(&format!("/runs/{small_run}/artifacts/{small}"))
+        .header("range", "bytes=100-")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(response.headers()["content-range"], "bytes */5");
+    assert!(response.bytes().await.unwrap().is_empty());
+
     // A compressible file that fits one frame keeps the compression it had
     // before files could stream.
     let report = "<tr><td>row</td></tr>\n".repeat(20_000).into_bytes();

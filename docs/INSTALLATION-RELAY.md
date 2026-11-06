@@ -196,8 +196,8 @@ clients mirror it. The direct DataChannel always serves streams in identity
 encoding, because its clients read stream chunks without an HTTP decoder.
 
 File streams (`cairn_protocol::file_path`) carry one finite file. A private file
-that fits one frame is answered with a finite response, which every peer accepts
-on a streamed route, and may be compressed; a larger or unknown-length one
+that fits one frame, like any error on a file route, is answered with a finite
+response, which every peer accepts on a streamed route, and may be compressed; a larger or unknown-length one
 streams uncompressed, with its length and byte ranges. Public files always stream
 uncompressed. Like public files, private files have their own pool on both ends
 of the tunnel (`MAX_FILE_IN_FLIGHT`, eight). The Beacon gives each account four

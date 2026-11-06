@@ -139,6 +139,42 @@ async fn private_files_queue_within_the_request_deadline_behind_progressing_tran
 }
 
 #[tokio::test]
+async fn an_error_on_a_file_route_stays_finite_without_a_length() {
+    // Compression removes an error body's Content-Length, as this body has none.
+    let routes = Router::new().route(
+        "/api/runs/{run}/artifacts/{artifact}",
+        get(|| async {
+            let body = futures_util::stream::once(async {
+                Ok::<_, std::io::Error>(
+                    br#"{"error":"This file is no longer available."}"#.to_vec(),
+                )
+            });
+            (StatusCode::NOT_FOUND, Body::from_stream(body))
+        }),
+    );
+    let relay = RelayedInstallation::new(routes).await;
+    let response = relay
+        .get(&format!(
+            "/runs/{}/artifacts/{}",
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(
+        !response.headers().contains_key("x-accel-buffering"),
+        "An older Beacon cancels an unexpected stream, so errors must stay finite"
+    );
+    assert_eq!(
+        response.text().await.unwrap(),
+        r#"{"error":"This file is no longer available."}"#
+    );
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn an_oversized_response_fails_only_its_request() {
     let routes = Router::new().route(
         "/api/fixture/oversized",
