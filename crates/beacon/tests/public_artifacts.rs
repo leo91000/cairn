@@ -1,53 +1,8 @@
-use common::MissionFixture;
-
 mod common;
 
-use common::RelayedInstallation;
+use common::{RelayedInstallation, seeded_artifact};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
-
-async fn seeded_artifact(
-    relay: &RelayedInstallation,
-    bytes: &[u8],
-    media_type: &str,
-) -> (String, String) {
-    let installation = &relay.installation;
-    let task = installation
-        .task_fixture(
-            json!({
-                "name": "Report",
-                "prompt": "Make a report",
-                "agentId": cairn_installation::config::MAIN_AGENT_ID,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let run = installation
-        .enqueue(task["id"].as_str().unwrap(), "manual", None)
-        .await
-        .unwrap();
-    let run = run["id"].as_str().unwrap().to_owned();
-    let artifact = uuid::Uuid::new_v4().to_string();
-    let directory = installation.config.data_dir.join("artifacts");
-    tokio::fs::create_dir_all(&directory).await.unwrap();
-    tokio::fs::write(directory.join(&artifact), bytes)
-        .await
-        .unwrap();
-    let record: cairn_contracts::Deliverable = serde_json::from_value(json!({
-        "id": artifact, "runId": run, "messageId": null,
-        "key": "report", "version": 1, "group": "", "kind": "file", "size": bytes.len(), "createdAt": 1,
-        "name": "report.html", "title": "Report", "mediaType": media_type,
-        "visibility": "private", "previewStatus": "none",
-        "url": format!("/api/runs/{run}/artifacts/{artifact}"),
-    })).unwrap();
-    installation
-        .store
-        .transaction(move |db| db.insert_artifact(&record))
-        .await
-        .unwrap();
-    (run, artifact)
-}
 
 async fn visibility(relay: &RelayedInstallation, run: &str, artifact: &str, value: &str) -> Value {
     let response = relay
@@ -743,6 +698,294 @@ async fn public_files_larger_than_a_relay_frame_stream_without_truncation() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.bytes().await.unwrap().as_ref(), bytes.as_slice());
+
+    // Public files of any size stream, compressed as before when accepted.
+    let page = "<p>public</p>\n".repeat(1_000).into_bytes();
+    let (run, artifact) = seeded_artifact(&relay, &page, "text/html").await;
+    let shared = visibility(&relay, &run, &artifact, "public").await;
+    let response = relay
+        .app
+        .client
+        .get(shared["publicUrl"].as_str().unwrap())
+        .header("accept-encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-encoding"], "gzip");
+    assert_eq!(response.headers()["x-accel-buffering"], "no");
+    let mut decoded = Vec::new();
+    std::io::Read::read_to_end(
+        &mut flate2::read::GzDecoder::new(response.bytes().await.unwrap().as_ref()),
+        &mut decoded,
+    )
+    .unwrap();
+    assert_eq!(decoded, page);
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn private_files_larger_than_a_relay_frame_stream_for_reads_downloads_ranges_and_head() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let bytes = (0..cairn_protocol::MAX_BODY + 100_000)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let (run, artifact) = seeded_artifact(&relay, &bytes, "video/mp4").await;
+    let file = format!("/runs/{run}/artifacts/{artifact}");
+
+    for route in [file.clone(), format!("{file}?download=1")] {
+        let response = relay.get(&route).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{route}");
+        assert_eq!(response.headers()["content-type"], "video/mp4");
+        assert_eq!(
+            response.headers()["content-disposition"],
+            "attachment; filename*=UTF-8''report.html"
+        );
+        assert_eq!(response.bytes().await.unwrap().as_ref(), bytes.as_slice());
+    }
+
+    // Deliverable files keep their stored bytes, length and byte ranges.
+    let response = relay
+        .get(&file)
+        .header("accept-encoding", "gzip, br")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key("content-encoding"));
+    assert_eq!(
+        response.headers()["content-length"],
+        bytes.len().to_string()
+    );
+    assert_eq!(response.headers()["accept-ranges"], "bytes");
+    assert_eq!(response.bytes().await.unwrap().as_ref(), bytes.as_slice());
+
+    let tail = cairn_protocol::MAX_BODY - 10;
+    let response = relay
+        .get(&file)
+        .header("range", format!("bytes={tail}-"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        response.headers()["content-range"],
+        format!("bytes {tail}-{}/{}", bytes.len() - 1, bytes.len())
+    );
+    assert_eq!(response.bytes().await.unwrap().as_ref(), &bytes[tail..]);
+
+    let response = relay
+        .app
+        .client
+        .head(format!("{}{file}", relay.base))
+        .header("cookie", &relay.cookie)
+        .header("origin", &relay.app.url)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-length"],
+        bytes.len().to_string()
+    );
+    assert_eq!(response.headers()["accept-ranges"], "bytes");
+    assert!(response.bytes().await.unwrap().is_empty());
+
+    // A private file that fits one frame stays a finite response.
+    let (small_run, small) = seeded_artifact(&relay, b"small", "image/png").await;
+    let response = relay
+        .get(&format!("/runs/{small_run}/artifacts/{small}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key("x-accel-buffering"));
+    assert_eq!(response.bytes().await.unwrap().as_ref(), b"small");
+
+    // Errors on a file route stay finite as well.
+    let response = relay
+        .get(&format!("/runs/{run}/artifacts/{}", uuid::Uuid::new_v4()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(!response.headers().contains_key("x-accel-buffering"));
+    let response = relay
+        .get(&format!("/runs/{small_run}/artifacts/{small}"))
+        .header("range", "bytes=100-")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(response.headers()["content-range"], "bytes */5");
+    assert!(response.bytes().await.unwrap().is_empty());
+
+    // A compressible file that fits one frame keeps the compression it had
+    // before files could stream.
+    let report = "<tr><td>row</td></tr>\n".repeat(20_000).into_bytes();
+    let (report_run, report_id) = seeded_artifact(&relay, &report, "text/html").await;
+    let response = relay
+        .get(&format!("/runs/{report_run}/artifacts/{report_id}"))
+        .header("accept-encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-encoding"], "gzip");
+    assert!(!response.headers().contains_key("x-accel-buffering"));
+    let compressed = response.bytes().await.unwrap();
+    assert!(compressed.len() < report.len() / 10);
+    let mut decoded = Vec::new();
+    std::io::Read::read_to_end(
+        &mut flate2::read::GzDecoder::new(compressed.as_ref()),
+        &mut decoded,
+    )
+    .unwrap();
+    assert_eq!(decoded, report);
+
+    let metadata: Value = relay
+        .get(&format!("{file}?metadata=1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(metadata["id"], artifact);
+    assert_eq!(metadata["size"], bytes.len());
+    relay.close().await;
+}
+
+/// A download whose reader never reads its body: a tiny receive window stalls
+/// the transfer. Returns the connection and its response head.
+async fn stalled_download(
+    relay: &RelayedInstallation,
+    route: &str,
+) -> (tokio::net::TcpStream, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let url = url::Url::parse(&format!("{}{route}", relay.base)).unwrap();
+    let mut connected = None;
+    for address in url.socket_addrs(|| None).unwrap() {
+        let socket = if address.is_ipv4() {
+            tokio::net::TcpSocket::new_v4()
+        } else {
+            tokio::net::TcpSocket::new_v6()
+        }
+        .unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        if let Ok(stream) = socket.connect(address).await {
+            connected = Some(stream);
+            break;
+        }
+    }
+    let mut stream = connected.expect("the Beacon fixture must accept a connection");
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nCookie: {}\r\nAccept-Encoding: gzip, br\r\nConnection: close\r\n\r\n",
+        url.path(),
+        url.authority(),
+        relay.cookie
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+
+    // Read only the head, one byte at a time, so no body byte is consumed.
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        head.push(stream.read_u8().await.unwrap());
+    }
+    let head = String::from_utf8(head).unwrap().to_lowercase();
+    assert!(head.starts_with("http/1.1 200"), "{head}");
+    (stream, head)
+}
+
+#[tokio::test]
+async fn private_files_queue_for_their_own_capacity_and_expire_when_idle() {
+    use std::time::Duration;
+
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    // Larger than loopback socket buffers, so unread transfers stay in flight.
+    let bytes = vec![b'x'; 100_000_000];
+    let (run, artifact) = seeded_artifact(&relay, &bytes, "image/svg+xml").await;
+    let file = format!("/runs/{run}/artifacts/{artifact}");
+
+    // Fill the account's four concurrent file transfers on the Beacon.
+    let mut downloads = Vec::new();
+    for _ in 0..4 {
+        let (download, head) = stalled_download(&relay, &file).await;
+        assert!(head.contains(&format!("content-length: {}", bytes.len())));
+        assert!(!head.contains("content-encoding"));
+        downloads.push(download);
+    }
+
+    let cookies = common::stream_accounts(&relay).await;
+    let mut live = Vec::new();
+    for index in 0..cairn_protocol::MAX_STREAMS {
+        let response = relay
+            .app
+            .client
+            .get(format!("{}/chats/stream", relay.base))
+            .header(
+                "cookie",
+                &cookies[index / cairn_protocol::MAX_STREAMS_PER_ACCOUNT],
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "Files must leave every live-stream slot available"
+        );
+        live.push(response);
+    }
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK,
+        "Files must leave finite request slots available"
+    );
+
+    // A gallery's next original queues for a transfer instead of failing.
+    let mut next = tokio::spawn(relay.get(&file).send());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), &mut next)
+            .await
+            .is_err()
+    );
+    drop(downloads.pop());
+    let admitted = tokio::time::timeout(Duration::from_secs(10), next)
+        .await
+        .expect("A finished transfer must admit the queued file")
+        .unwrap()
+        .unwrap();
+    assert_eq!(admitted.status(), StatusCode::OK);
+    drop(admitted);
+    drop(live);
+
+    // The holders are never read again, so only their file deadline can release
+    // them. A queued file may meet its own deadline first and is then retried.
+    downloads.push(stalled_download(&relay, &file).await.0);
+    let queued = tokio::time::timeout(Duration::from_secs(150), async {
+        loop {
+            let response = relay.get(&file).send().await.unwrap();
+            if response.status() == StatusCode::OK {
+                break response;
+            }
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+    })
+    .await
+    .expect("Idle transfers must release their capacity");
+    drop(queued);
+
+    drop(downloads);
+    let response = relay
+        .get(&file)
+        .header("range", "bytes=0-1023")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), &bytes[..1024]);
     relay.close().await;
 }
 
@@ -761,6 +1004,11 @@ async fn public_svg_is_downloaded_as_an_attachment() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["content-disposition"], "attachment");
     assert_eq!(response.headers()["content-length"], "11");
+    assert_eq!(
+        response.headers()["x-accel-buffering"],
+        "no",
+        "Public files stream at every size, so the Beacon never buffers them"
+    );
     assert_eq!(response.text().await.unwrap(), "<svg></svg>");
     relay.close().await;
 }

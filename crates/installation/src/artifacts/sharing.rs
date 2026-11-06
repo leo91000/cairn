@@ -163,6 +163,11 @@ pub async fn http(s: &Service, token: &str, request: Request) -> Result<Response
         })
         .await?;
     let mut response = super::serve(s, &record, request).await?;
+    // Public files always stream and keep the compression they had; an
+    // interrupted public body ends with an error, so truncation stays visible.
+    response
+        .extensions_mut()
+        .remove::<crate::http::Uncompressed>();
     response
         .headers_mut()
         .insert("access-control-allow-origin", HeaderValue::from_static("*"));

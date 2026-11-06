@@ -14,9 +14,9 @@ use axum::{
     http::{HeaderName, HeaderValue, Request},
 };
 use cairn_protocol::{
-    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FRAME, MAX_IN_FLIGHT, MAX_NODE_CHANNELS,
-    MAX_NOTIFICATION_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK, PROTOCOL_VERSION,
-    REQUEST_TIMEOUT, Role,
+    ApiRequest, ApiResponse, Frame, MAX_BODY, MAX_FILE_IN_FLIGHT, MAX_FRAME, MAX_IN_FLIGHT,
+    MAX_NODE_CHANNELS, MAX_NOTIFICATION_IN_FLIGHT, MAX_PUBLIC_IN_FLIGHT, MAX_STREAM_CHUNK,
+    PROTOCOL_VERSION, REQUEST_TIMEOUT, Role,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -764,7 +764,9 @@ async fn connected(
     let mut active = HashMap::<String, (AbortHandle, std::sync::Arc<Semaphore>)>::new();
     let slots = std::sync::Arc::new(Semaphore::new(MAX_IN_FLIGHT));
     let public_slots = std::sync::Arc::new(Semaphore::new(MAX_PUBLIC_IN_FLIGHT));
-    let (output, mut frames) = mpsc::channel::<Frame>(MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT);
+    let file_slots = std::sync::Arc::new(Semaphore::new(MAX_FILE_IN_FLIGHT));
+    let (output, mut frames) =
+        mpsc::channel::<Frame>(MAX_IN_FLIGHT + MAX_PUBLIC_IN_FLIGHT + MAX_FILE_IN_FLIGHT);
     let mut notifications = tokio::time::interval(Duration::from_secs(1));
     notifications.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut notification_schedule = NotificationSchedule {
@@ -984,20 +986,32 @@ async fn connected(
                             }
                             _ => return Err(Error::bad("Unexpected relay frame.")),
                         };
+                        let file = request.public_artifact.is_none()
+                            && cairn_protocol::file_path(&request.path);
                         let capacity = if request.public_artifact.is_some() {
                             &public_slots
+                        } else if file {
+                            &file_slots
                         } else {
                             &slots
                         };
-                        let Ok(permit) = capacity.clone().try_acquire_owned() else {
-                            let response = request_failure(request.id, 503, "Installation busy.");
-                            let frame = serde_json::to_string(&Frame::Response(response))?;
-                            socket
-                                .send(Message::Text(frame.into()))
-                                .await
-                                .map_err(Error::internal)?;
-                            continue;
+                        // The Beacon admits a queued file once its own slot is free, which can
+                        // be just before a cancelled task here releases this side's slot.
+                        let permit = match capacity.clone().try_acquire_owned() {
+                            Ok(permit) => Some(permit),
+                            Err(_) if file => None,
+                            Err(_) => {
+                                let response =
+                                    request_failure(request.id, 503, "Installation busy.");
+                                let frame = serde_json::to_string(&Frame::Response(response))?;
+                                socket
+                                    .send(Message::Text(frame.into()))
+                                    .await
+                                    .map_err(Error::internal)?;
+                                continue;
+                            }
                         };
+                        let file_slots = file_slots.clone();
 
                         let request_id = request.id.clone();
                         let router = router.clone();
@@ -1007,7 +1021,17 @@ async fn connected(
                             credit: credit.clone(),
                         };
                         let task = requests.spawn(async move {
-                            let _permit = permit;
+                            let _permit = match permit {
+                                Some(permit) => permit,
+                                None => tokio::time::timeout(
+                                    Duration::from_secs(5),
+                                    file_slots.acquire_owned(),
+                                )
+                                .await
+                                .ok()
+                                .and_then(std::result::Result::ok)
+                                .ok_or_else(|| Error::unavailable("Installation busy."))?,
+                            };
                             dispatch(router, request, streaming).await
                         });
                         active.insert(request_id.clone(), (task.clone(), credit));
@@ -1091,7 +1115,25 @@ async fn dispatch(
                 .map(|value| (name.to_string(), value.to_owned()))
         })
         .collect();
-    let is_stream = cairn_protocol::stream_path(&input.path);
+    // A private file that fits one frame stays finite, as before it could stream:
+    // no credit round trip per chunk, and relay capacity is released at once.
+    // Every peer accepts a finite response on a streamed route. Public files keep
+    // streaming, so an anonymous reader never holds a whole file in the Beacon.
+    let private_file =
+        cairn_protocol::file_path(&input.path) && !input.path.starts_with("/api/shared-artifacts/");
+    // A route error is a small handler body, even after compression removes its
+    // Content-Length.
+    let fits_frame = !(200..300).contains(&status)
+        || response
+            .extensions()
+            .get::<crate::http::FiniteFile>()
+            .is_some()
+        || response
+            .headers()
+            .get(axum::http::header::CONTENT_LENGTH)
+            .and_then(|length| length.to_str().ok()?.parse::<usize>().ok())
+            .is_some_and(|length| length <= MAX_BODY);
+    let is_stream = cairn_protocol::stream_path(&input.path) && !(private_file && fits_frame);
     if is_stream {
         let output = streaming;
         let id = input.id;

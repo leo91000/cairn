@@ -490,9 +490,22 @@ async fn serve(s: &Service, record: &Deliverable, request: Request) -> Result<Re
     let body = if request.method() == "HEAD" {
         Body::empty()
     } else {
-        Body::from_stream(tokio_util::io::ReaderStream::new(file.take(count)))
+        // Each relay chunk costs a credit round trip, so read whole chunks.
+        Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
+            file.take(count),
+            cairn_protocol::MAX_STREAM_CHUNK,
+        ))
     };
     let mut response = body.into_response();
+    // A file that fits one relay frame stays finite and may be compressed, as before
+    // files could stream. The margin covers compression overhead on incompressible
+    // bytes. A larger file streams with its stored length and byte ranges.
+    let finite_limit = (cairn_protocol::MAX_BODY - cairn_protocol::MAX_STREAM_CHUNK) as u64;
+    if count <= finite_limit {
+        response.extensions_mut().insert(crate::http::FiniteFile);
+    } else {
+        response.extensions_mut().insert(crate::http::Uncompressed);
+    }
     if let Some((a, b)) = range {
         *response.status_mut() = StatusCode::PARTIAL_CONTENT;
         response.headers_mut().insert(

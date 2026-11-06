@@ -22,7 +22,10 @@ use std::{
     net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
 };
-use tower_http::compression::{CompressionLayer, CompressionLevel};
+use tower_http::compression::{
+    CompressionLayer, CompressionLevel,
+    predicate::{DefaultPredicate, Predicate},
+};
 
 #[derive(Clone)]
 pub struct App {
@@ -125,10 +128,34 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
         .route("/mcp-gateway/{id}", any(crate::mcp_server::handle))
         .route("/api/{*path}", any(api))
         .fallback(|| async { Error::unauthorized("Access this installation through the Beacon.") })
-        .layer(CompressionLayer::new().quality(CompressionLevel::Fastest))
+        .layer(
+            CompressionLayer::new()
+                .quality(CompressionLevel::Fastest)
+                .compress_when(DefaultPredicate::new().and(compressible)),
+        )
         .merge(internal)
         .layer(middleware::from_fn_with_state(app.clone(), security))
         .with_state(app))
+}
+
+/// Marks a response whose bytes must reach the client as stored: a deliverable
+/// file keeps its Content-Length and byte ranges, so a download can resume and a
+/// transfer that ends early is detected as incomplete.
+#[derive(Clone, Copy)]
+pub(crate) struct Uncompressed;
+
+/// Marks a private deliverable that fits one relay frame, so the relay keeps it
+/// finite even when compression removes its Content-Length.
+#[derive(Clone, Copy)]
+pub(crate) struct FiniteFile;
+
+fn compressible(
+    _: StatusCode,
+    _: axum::http::Version,
+    _: &HeaderMap,
+    extensions: &axum::http::Extensions,
+) -> bool {
+    extensions.get::<Uncompressed>().is_none()
 }
 
 fn header<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {

@@ -51,6 +51,20 @@ function bytes(value: string, limit = MAX_BODY) {
   return decoded
 }
 
+/**
+ * Mirrors cairn-protocol `stream_path`: live subscriptions and file downloads use credited
+ * streams. Private artifact metadata and bounded preview thumbnails remain finite responses.
+ */
+export function streamedRoute(path: string) {
+  const separator = path.indexOf('?')
+  const route = separator < 0 ? path : path.slice(0, separator)
+  const query = separator < 0 ? '' : path.slice(separator + 1)
+  const [empty, api, runs, run, artifacts, artifact, ...rest] = route.split('/')
+  const artifactFile = empty === '' && api === 'api' && runs === 'runs' && !!run && artifacts === 'artifacts' && !!artifact && !rest.length
+  const finite = query.split('&').some(parameter => parameter === 'metadata=1' || parameter.split('=')[0] === 'preview')
+  return route.endsWith('/stream') || route.startsWith('/api/shared-artifacts/') || (artifactFile && !finite)
+}
+
 function base64(value: Uint8Array) {
   let text = ''
   for (let start = 0; start < value.length; start += 16384)
@@ -219,8 +233,7 @@ export class DirectChannel {
   request(path: string, options: RequestInit = {}, onSent = () => {}) {
     if (this.closed || this.channel.readyState !== 'open')
       return Promise.reject(new TransportNotSent())
-    const route = path.split('?')[0]
-    const streaming = route.endsWith('/stream') || route.startsWith('/api/shared-artifacts/')
+    const streaming = streamedRoute(path)
     const streams = [...this.pending.values()].filter(value => value.streaming).length
     if (this.pending.size >= 32 || (streaming && streams >= 8))
       return Promise.reject(new TransportNotSent())

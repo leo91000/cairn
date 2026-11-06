@@ -108,6 +108,15 @@ impl DirectTraffic {
                                 continue;
                             };
 
+                            // Direct clients hand stream chunks to readers verbatim, without an
+                            // HTTP decoder. A client predating this route's classification may
+                            // still ask for gzip, so streamed bodies always use identity.
+                            if stream {
+                                request
+                                    .headers
+                                    .retain(|(name, _)| !name.eq_ignore_ascii_case("accept-encoding"));
+                            }
+
                             // Only the verified lease supplies identity and capabilities.
                             request.account_id.clone_from(&lease.claims.account_id);
                             request.role = lease.claims.role;
