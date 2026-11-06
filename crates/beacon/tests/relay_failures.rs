@@ -37,6 +37,42 @@ async fn a_full_size_attachment_streams_without_the_buffered_response_limit() {
 }
 
 #[tokio::test]
+async fn a_stalled_file_without_a_length_ends_as_an_error_not_a_complete_body() {
+    let routes = Router::new().route(
+        "/api/runs/{run}/artifacts/{artifact}",
+        get(|| async {
+            let partial =
+                futures_util::stream::once(async { Ok::<_, std::io::Error>(b"partial".to_vec()) });
+            Body::from_stream(futures_util::StreamExt::chain(
+                partial,
+                futures_util::stream::pending(),
+            ))
+        }),
+    );
+    let relay = RelayedInstallation::new(routes).await;
+    let run = uuid::Uuid::new_v4();
+    let response = relay
+        .get(&format!("/runs/{run}/artifacts/{}", uuid::Uuid::new_v4()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key("content-length"));
+
+    // The installation stops making progress, so the Beacon's file deadline ends
+    // the transfer. Without a length, only an error can mark the body incomplete.
+    let body = tokio::time::timeout(Duration::from_secs(45), response.bytes())
+        .await
+        .expect("The file deadline must end the transfer");
+    assert!(body.is_err(), "A truncated file must not look complete");
+    assert_eq!(
+        relay.get("/chats").send().await.unwrap().status(),
+        StatusCode::OK
+    );
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn an_oversized_response_fails_only_its_request() {
     let routes = Router::new().route(
         "/api/fixture/oversized",

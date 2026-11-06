@@ -59,6 +59,8 @@ struct Pending {
     _mcp_permit: Option<OwnedSemaphorePermit>,
     // File bodies expire after a deadline without installation progress.
     file_activity: Option<tokio::time::Instant>,
+    // Set only when the installation completed the response itself.
+    finished: Arc<AtomicBool>,
 }
 
 struct Command {
@@ -793,6 +795,7 @@ async fn serve_socket(
                             Frame::Response(response) => {
                                 if let Some(mut completed) = pending.remove(&response.id) {
                                     if let Some(reply) = completed.reply.take() {
+                                        completed.finished.store(true, Ordering::Release);
                                         let _ = reply.send(response);
                                     } else if let Some(stream) = completed.stream {
                                         let _ = stream.try_send(Err(std::io::Error::other("Installation handler failed")));
@@ -838,11 +841,12 @@ async fn serve_socket(
                                 }
                             }
                             Frame::StreamEnd { id, failed } => {
-                                if let Some(completed) = pending.remove(&id)
-                                    && failed
-                                    && let Some(stream) = completed.stream
-                                {
-                                    let _ = stream.try_send(Err(std::io::Error::other("Installation stream failed")));
+                                if let Some(completed) = pending.remove(&id) {
+                                    if !failed {
+                                        completed.finished.store(true, Ordering::Release);
+                                    } else if let Some(stream) = completed.stream {
+                                        let _ = stream.try_send(Err(std::io::Error::other("Installation stream failed")));
+                                    }
                                 }
                                 None
                             }
@@ -1286,6 +1290,7 @@ async fn send(
 
     let (reply, response) = oneshot::channel();
     let id = api_request.id.clone();
+    let finished = Arc::new(AtomicBool::new(false));
     let (chunks, receiver) = mpsc::channel(1);
     let browser = if streaming {
         let (revoked, revocation) = watch::channel(false);
@@ -1314,6 +1319,7 @@ async fn send(
             revoked: revocation,
             id: id.clone(),
             file,
+            finished: finished.clone(),
         })
     } else {
         None
@@ -1356,6 +1362,7 @@ async fn send(
                 _file_permit: file_permit,
                 _mcp_permit: mcp_permit,
                 file_activity: file.then(tokio::time::Instant::now),
+                finished,
             },
         })
         .map_err(|_| {
@@ -1389,7 +1396,12 @@ async fn send(
                 _ = browser.revoked.changed() => return browser.interrupted(),
                 chunk = browser.receiver.recv() => chunk,
             };
-            chunk.map(|chunk| (chunk, browser))
+            match chunk {
+                Some(chunk) => Some((chunk, browser)),
+                // Expiry, cancellation and a lost tunnel also close the channel.
+                None if !browser.finished.load(Ordering::Acquire) => browser.interrupted(),
+                None => None,
+            }
         });
         Body::from_stream(stream)
     } else {
@@ -1460,6 +1472,7 @@ struct BrowserStream {
     id: String,
     // An interrupted file must end with an error, never as a complete body.
     file: bool,
+    finished: Arc<AtomicBool>,
 }
 
 impl BrowserStream {
