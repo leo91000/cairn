@@ -24,10 +24,18 @@ import {
   Archive,
   Check,
   CheckCheck,
+  Circle,
+  CircleAlert,
+  CircleCheck,
+  CirclePause,
+  CircleX,
   Clock,
   CornerDownRight,
+  Hourglass,
   ListFilter,
+  LoaderCircle,
   MoreHorizontal,
+  RefreshCw,
   RotateCcw,
   X,
 } from '../icons'
@@ -37,6 +45,7 @@ import { typingTarget } from '../shortcuts'
 import {
   dismissible,
   filOf,
+  filThread,
   filViews,
   isUnread,
   shortAge,
@@ -68,10 +77,11 @@ const tabs = computed(() => [
   { key: 'ongoing' as const, label: 'En cours', count: views.value.ongoing.length },
   { key: 'all' as const, label: 'Tout', count: null },
 ])
-const flat = computed(() => views.value[tab.value].filter((item) => {
+const rows = computed(() => filThread(views.value[tab.value].filter((item) => {
   const query = filter.value.trim().toLowerCase()
   return !query || [item.title, item.subtitle, item.agent, item.project ?? ''].some(value => value.toLowerCase().includes(query))
-}))
+})))
+const flat = computed(() => rows.value.map(row => row.item))
 const opened = (item: FilItem) => (item.chatId && item.chatId === props.selected) || (item.runId && item.runId === props.selectedRun)
 const current = (item: FilItem) => opened(item) || cursor.value === item.key
 watch(() => [props.selected, props.selectedRun], () => {
@@ -88,6 +98,24 @@ function tone(item: FilItem) {
   if (['running', 'queued', 'waiting', 'snoozed', 'suspended'].includes(item.kind))
     return 'text-accent'
   return 'text-muted'
+}
+
+function mark(item: FilItem) {
+  if (item.kind === 'question' || (item.kind === 'review' && item.outcome === 'needs_input'))
+    return CircleAlert
+  if (item.kind === 'failed' || item.kind === 'failed-mission')
+    return CircleX
+  if (item.kind === 'review' || item.kind === 'paused')
+    return CirclePause
+  if (item.kind === 'running')
+    return LoaderCircle
+  if (['queued', 'waiting', 'snoozed', 'suspended'].includes(item.kind))
+    return Clock
+  if (item.kind === 'set-aside')
+    return Hourglass
+  if (item.finished)
+    return item.taskId ? RefreshCw : CircleCheck
+  return Circle
 }
 
 function label(item: FilItem) {
@@ -266,37 +294,45 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
         {{ filter ? `Nothing matches “${filter}”.` : tab === 'unread' ? 'All read. Your tasks are in En cours and Tout.' : tab === 'ongoing' ? 'No work in progress.' : 'No conversations yet.' }}
       </p>
       <article
-        v-for="item in flat"
+        v-for="{ item, nested } in rows"
         :key="item.key"
         :data-fil-key="item.key"
         :data-fil-kind="item.kind"
         :data-unread="isUnread(item) ? '' : undefined"
-        class="group relative flex items-center border-b border-line/60"
-        :class="current(item) ? 'bg-hover' : 'hover:bg-hover/70'"
+        :data-fil-nested="nested ? '' : undefined"
+        class="group relative flex items-center rounded-lg"
+        :class="[current(item) ? 'bg-hover' : 'hover:bg-hover/70', nested && 'ml-[27px] rounded-l-none border-l border-line']"
       >
         <button
           type="button"
-          class="flex min-h-16 min-w-0 flex-1 items-start gap-2 px-3 py-3 text-left"
+          class="flex min-w-0 flex-1 items-start gap-2 py-2.5 pr-2 text-left"
+          :class="nested ? 'pl-2.5' : 'pl-1.5'"
           :aria-label="`Open “${item.title}”`"
           :aria-current="opened(item) ? 'page' : undefined"
           @click="open(item)"
         >
-          <span class="mt-1.5 w-1.5 shrink-0"><span
+          <span class="mt-[7px] w-1.5 shrink-0"><span
             v-if="isUnread(item)"
             class="block size-1.5 rounded-full bg-accent"
             role="img"
             aria-label="Unread"
           /></span>
+          <Icon
+            :name="mark(item)"
+            :size="15"
+            class="mt-px shrink-0"
+            :class="[tone(item) === 'text-muted' ? 'text-subtle' : tone(item), item.kind === 'running' && 'motion-safe:animate-spin']"
+          />
           <span class="min-w-0 flex-1">
-            <span class="flex items-start gap-2"><span class="line-clamp-2 text-[13px] leading-snug text-ink" :class="isUnread(item) ? 'font-semibold' : 'font-medium'">{{ item.title }}</span><span class="ml-auto shrink-0 text-[10px] tabular-nums text-subtle">{{ shortAge(item.at, now) }}</span></span>
-            <span class="mt-1 flex min-w-0 items-center gap-1.5 text-[11px]">
-              <span class="truncate" :class="tone(item)">{{ label(item) }}</span><span class="text-subtle">·</span><HarnessMark v-if="item.harness" :provider="item.harness" /><span class="truncate text-muted">{{ item.project || item.agent }}</span>
+            <span class="flex items-baseline gap-2"><span class="truncate text-[13px] leading-snug" :class="[isUnread(item) ? 'font-semibold text-ink' : 'font-medium', !isUnread(item) && (nested ? 'text-muted' : 'text-ink/85')]">{{ item.title }}</span><span class="ml-auto shrink-0 text-[10px] tabular-nums text-subtle group-hover:invisible group-has-[[aria-expanded=true]]:invisible phone:visible!">{{ shortAge(item.at, now) }}</span></span>
+            <span v-if="!nested || !item.finished" class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-subtle">
+              <span :class="item.finished ? 'sr-only' : ['truncate font-medium', tone(item)]">{{ label(item) }}</span><span v-if="!item.finished && !nested">·</span><template v-if="!nested"><HarnessMark v-if="item.harness" :provider="item.harness" /><span class="truncate">{{ item.project || item.agent }}</span></template>
             </span>
-            <span v-if="item.requester" class="mt-1 flex items-center gap-1 truncate text-[10px] text-subtle" data-testid="fil-requester"><Icon :name="CornerDownRight" :size="10" />Delegated by {{ item.requester.title }}</span>
-            <span v-if="item.wakeAt !== undefined" class="mt-1 block text-[10px] text-accent">{{ waitLeft({ wakeAt: item.wakeAt, condition: item.condition, resolved: item.resolved }, now) }}</span>
+            <span v-if="item.requester && !nested" class="mt-0.5 flex items-center gap-1 truncate text-[10px] text-subtle" data-testid="fil-requester"><Icon :name="CornerDownRight" :size="10" />Delegated by {{ item.requester.title }}</span>
+            <span v-if="item.wakeAt !== undefined" class="mt-0.5 block text-[10px] text-accent">{{ waitLeft({ wakeAt: item.wakeAt, condition: item.condition, resolved: item.resolved }, now) }}</span>
           </span>
         </button>
-        <MenuButton :label="`More actions for “${item.title}”`" trigger-class="mr-1 grid size-7 shrink-0 place-items-center rounded-md text-muted opacity-0 group-hover:opacity-100 focus:opacity-100 phone:opacity-100 hover:bg-hover" :width="210">
+        <MenuButton :label="`More actions for “${item.title}”`" trigger-class="absolute right-1 top-1.5 grid size-7 shrink-0 place-items-center rounded-md bg-hover text-muted opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-ink aria-expanded:opacity-100 phone:static phone:mr-1 phone:bg-transparent phone:opacity-100" :width="210">
           <template #trigger>
             <Icon :name="MoreHorizontal" :size="15" />
           </template>

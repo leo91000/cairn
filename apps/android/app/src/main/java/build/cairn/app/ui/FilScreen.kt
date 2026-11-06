@@ -9,6 +9,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -20,6 +21,8 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.colorResource
@@ -104,6 +107,8 @@ internal data class FeedItem(
     val project: String? = null,
     val unread: Boolean = kind == FeedKind.UNREAD_CHAT || kind == FeedKind.UNREAD_TASK,
     val readAt: Long = stamp,
+    /** It finished as expected: its row shows no status label, only a quiet mark. */
+    val finished: Boolean = false,
 ) {
     /** Only a blocked outcome can be dismissed; input the agent asked for can only be snoozed. */
     val dismissible
@@ -291,16 +296,21 @@ internal fun buildFeed(
                     unreadNow("chat:${chat.id}", chat.readAt ?: chat.finishedAt) ->
                     toRead +=
                         item(FeedKind.UNREAD_CHAT, context(agent, chat.projectName))
-                            .copy(stamp = chat.finishedAt ?: chat.updatedAt, preview = chat.preview)
+                            .copy(
+                                stamp = chat.finishedAt ?: chat.updatedAt,
+                                preview = chat.preview,
+                                finished = chat.status == "succeeded",
+                            )
                 else ->
                     recent +=
                         item(
-                            FeedKind.CHAT,
-                            if (chat.paused) "En pause · ${context(agent, chat.projectName)}"
-                            else if (chat.status == "succeeded")
-                                "Terminée · ${context(agent, chat.projectName)}"
-                            else context(agent, chat.projectName),
-                        )
+                                FeedKind.CHAT,
+                                if (chat.paused) "En pause · ${context(agent, chat.projectName)}"
+                                else if (chat.status == "succeeded")
+                                    "Terminée · ${context(agent, chat.projectName)}"
+                                else context(agent, chat.projectName),
+                            )
+                            .copy(finished = !chat.paused && chat.status == "succeeded")
             }
         }
     val names = tasks.associateBy { it.id }
@@ -427,10 +437,13 @@ internal fun buildFeed(
                 run.status == "succeeded" &&
                     run.unread &&
                     unreadNow("task:${run.taskId}", run.finishedAt) ->
-                    toRead += item(FeedKind.UNREAD_TASK, "Mission terminée · $agent")
+                    toRead +=
+                        item(FeedKind.UNREAD_TASK, "Mission terminée · $agent")
+                            .copy(finished = true)
                 else ->
                     recent +=
-                        item(FeedKind.UNREAD_TASK, "Mission terminée · $agent").copy(unread = false)
+                        item(FeedKind.UNREAD_TASK, "Mission terminée · $agent")
+                            .copy(unread = false, finished = run.status == "succeeded")
             }
         }
     return Feed(
@@ -440,6 +453,39 @@ internal fun buildFeed(
         // A wait whose result arrived resumes first, before any deadline.
         waiting.sortedWith(compareBy({ !it.resolved }, { it.wakeAt ?: Long.MAX_VALUE })),
     )
+}
+
+/**
+ * Rows in reading order, each delegated conversation or mission right below the work that started
+ * it when both are listed. One that started without its requester in the list stays in place and
+ * names it instead. The second value tells whether the row is nested.
+ */
+internal fun threadFeed(items: List<FeedItem>): List<Pair<FeedItem, Boolean>> {
+    val byChat = items.filter { it.chatId != null }.associateBy { it.chatId }
+    val byRun = items.filter { it.runId != null }.associateBy { it.runId }
+    val childrenOf = mutableMapOf<String, MutableList<FeedItem>>()
+    val roots = mutableListOf<FeedItem>()
+    items.forEach { item ->
+        val parent =
+            item.requester?.let { requester ->
+                requester.chatId?.let { byChat[it] } ?: requester.runId?.let { byRun[it] }
+            }
+        if (parent != null && parent.key != item.key)
+            childrenOf.getOrPut(parent.key) { mutableListOf() } += item
+        else roots += item
+    }
+
+    val rows = mutableListOf<Pair<FeedItem, Boolean>>()
+    val placed = mutableSetOf<String>()
+    fun place(item: FeedItem, nested: Boolean) {
+        if (!placed.add(item.key)) return
+        rows += item to nested
+        childrenOf[item.key]?.forEach { place(it, true) }
+    }
+    roots.forEach { place(it, false) }
+    // A requester cycle has no root: keep those rows rather than losing them.
+    items.forEach { place(it, false) }
+    return rows
 }
 
 /** The Fil in reading order, one key per item: what a swipe between pages moves through. */
@@ -639,12 +685,13 @@ fun FilScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-        items(visible, key = { it.key }) { item ->
+        items(threadFeed(visible), key = { it.first.key }) { (item, nested) ->
             FeedRow(
                 item,
                 { open(item) },
                 onDelete = item.chatId?.let { id -> { trash.trash(id) } },
                 now = now,
+                nested = nested,
             ) {
                 ForYouAction(
                     item,
@@ -803,14 +850,54 @@ internal fun Wordmark() {
     }
 }
 
+/** Where a row's text starts after its unread dot and status mark. */
+private val MarkInset = 38.dp
+
+/** The row's status glyph, coloured like its label: quiet once the work finished as expected. */
+@Composable
+private fun StatusMark(item: FeedItem) {
+    val (icon, tint) =
+        when {
+            item.kind == FeedKind.QUESTION ||
+                (item.kind == FeedKind.REVIEW_TASK && item.outcome == "needs_input") ->
+                CairnIcons.CircleAlert to signal.answer
+            item.kind == FeedKind.RECONNECT -> CairnIcons.CircleAlert to signal.warning
+            item.kind == FeedKind.FAILED_CHAT || item.kind == FeedKind.FAILED_TASK ->
+                CairnIcons.CircleX to signal.attention
+            item.kind == FeedKind.REVIEW_TASK -> CairnIcons.CirclePause to signal.warning
+            item.kind == FeedKind.RUNNING_CHAT || item.kind == FeedKind.RUNNING_TASK ->
+                CairnIcons.CircleProgress to MaterialTheme.colorScheme.primary
+            item.kind == FeedKind.WAITING_CHAT ||
+                item.kind == FeedKind.WAITING_TASK ||
+                item.kind == FeedKind.SNOOZED_TASK ->
+                CairnIcons.Clock to MaterialTheme.colorScheme.primary
+            item.kind == FeedKind.SET_ASIDE_TASK ->
+                CairnIcons.Hourglass to MaterialTheme.colorScheme.onSurfaceVariant
+            item.finished ->
+                (if (item.taskId != null) CairnIcons.Retry else CairnIcons.CircleCheck) to
+                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+            item.kind == FeedKind.CHAT && item.statusLabel == "En pause" ->
+                CairnIcons.CirclePause to MaterialTheme.colorScheme.onSurfaceVariant
+            else -> CairnIcons.Circle to MaterialTheme.colorScheme.onSurfaceVariant
+        }
+    Icon(
+        icon,
+        contentDescription = item.statusLabel,
+        modifier = Modifier.size(16.dp).testTag("fil-mark"),
+        tint = tint,
+    )
+}
+
 @Composable
 private fun FeedRow(
     item: FeedItem,
     onClick: () -> Unit,
     onDelete: (() -> Unit)? = null,
     now: Long,
+    nested: Boolean = false,
     trailing: @Composable () -> Unit,
 ) {
+    val thread = MaterialTheme.colorScheme.outlineVariant
     SwipeToTrashRow(enabled = onDelete != null, onTrash = { onDelete?.invoke() }) { swipe ->
         Surface(
             onClick = onClick,
@@ -818,34 +905,54 @@ private fun FeedRow(
             modifier =
                 swipe
                     .fillMaxWidth()
-                    .then(if (item.unread) Modifier.testTag("unread") else Modifier),
+                    .then(if (item.unread) Modifier.testTag("unread") else Modifier)
+                    .then(if (nested) Modifier.testTag("fil-nested") else Modifier),
         ) {
             Row(
                 Modifier.widthIn(max = 760.dp)
-                    .heightIn(min = 64.dp)
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                    .heightIn(min = if (nested) 44.dp else 56.dp)
+                    .padding(start = if (nested) 30.dp else 10.dp, end = 16.dp)
+                    .then(
+                        if (nested)
+                            Modifier.drawBehind {
+                                drawLine(
+                                    thread,
+                                    Offset(0f, 0f),
+                                    Offset(0f, size.height),
+                                    1.dp.toPx(),
+                                )
+                            }
+                        else Modifier
+                    )
+                    .padding(start = if (nested) 8.dp else 0.dp, top = 8.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (item.unread) {
-                            Box(
-                                Modifier.size(6.dp)
-                                    .background(
-                                        MaterialTheme.colorScheme.primary,
-                                        androidx.compose.foundation.shape.CircleShape,
-                                    )
-                                    .semantics { contentDescription = "Non lu" }
-                            )
-                            Spacer(Modifier.width(7.dp))
+                        Box(Modifier.width(12.dp)) {
+                            if (item.unread)
+                                Box(
+                                    Modifier.size(6.dp)
+                                        .background(
+                                            MaterialTheme.colorScheme.primary,
+                                            androidx.compose.foundation.shape.CircleShape,
+                                        )
+                                        .semantics { contentDescription = "Non lu" }
+                                )
                         }
+                        StatusMark(item)
+                        Spacer(Modifier.width(10.dp))
                         Text(
                             item.title,
                             modifier = Modifier.weight(1f),
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight =
                                 if (item.unread) FontWeight.SemiBold else FontWeight.Medium,
-                            maxLines = 2,
+                            color =
+                                if (nested && !item.unread)
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                else MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                         Spacer(Modifier.width(8.dp))
@@ -857,38 +964,48 @@ private fun FeedRow(
                     val failed =
                         item.kind == FeedKind.FAILED_CHAT || item.kind == FeedKind.FAILED_TASK
                     val label = item.statusLabel
-                    Row(
-                        Modifier.padding(top = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        item.harness?.let {
-                            Box(
-                                Modifier.padding(end = 5.dp).testTag("harness-$it").semantics {
-                                    contentDescription = "Dernier harness : ${providerLabel(it)}"
+                    if (!nested || !item.finished)
+                        Row(
+                            Modifier.padding(start = MarkInset, top = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (!nested)
+                                item.harness?.let {
+                                    Box(
+                                        Modifier.padding(end = 5.dp)
+                                            .testTag("harness-$it")
+                                            .semantics {
+                                                contentDescription =
+                                                    "Dernier harness : ${providerLabel(it)}"
+                                            }
+                                    ) {
+                                        ProviderMark(it, 12.dp)
+                                    }
                                 }
-                            ) {
-                                ProviderMark(it, 12.dp)
-                            }
+                            if (!item.finished)
+                                Text(
+                                    label,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Medium,
+                                    color =
+                                        if (needsAnswer) signal.answer
+                                        else if (failed) signal.attention
+                                        else if (item.kind == FeedKind.REVIEW_TASK) signal.warning
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            if (!nested)
+                                Text(
+                                    if (item.finished) context(item.agent, item.project)
+                                    else " · ${context(item.agent, item.project)}",
+                                    Modifier.weight(1f),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
                         }
-                        Text(
-                            label,
-                            style = MaterialTheme.typography.labelMedium,
-                            color =
-                                if (needsAnswer) signal.answer
-                                else if (failed) signal.attention
-                                else MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            " · ${context(item.agent, item.project)}",
-                            Modifier.weight(1f),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
                     if (
                         item.kind == FeedKind.SET_ASIDE_TASK ||
                             item.kind == FeedKind.SNOOZED_TASK ||
@@ -897,6 +1014,7 @@ private fun FeedRow(
                     )
                         Text(
                             item.subtitle,
+                            Modifier.padding(start = MarkInset),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -910,20 +1028,21 @@ private fun FeedRow(
                         Text(
                             item.wakeAt?.let { waitLeft(it, item.condition, item.resolved, now) }
                                 ?: "Selon disponibilité",
-                            Modifier.testTag("fil-wait-time"),
+                            Modifier.padding(start = MarkInset).testTag("fil-wait-time"),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary,
                         )
-                    item.requester?.let {
-                        Text(
-                            "↳ Délégué par ${it.title}",
-                            Modifier.testTag("fil-requester"),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
+                    if (!nested)
+                        item.requester?.let {
+                            Text(
+                                "↳ Délégué par ${it.title}",
+                                Modifier.padding(start = MarkInset).testTag("fil-requester"),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                 }
                 trailing()
             }

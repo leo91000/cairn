@@ -1,5 +1,21 @@
 # Android 0.6.0 / web parity
 
+## Quieter Fil rows (2026-11-06)
+
+Web and Android lead each Fil row with one status mark instead of repeating a
+status word: a check for finished conversations, a repeat arrow for finished
+missions, and coloured marks for questions (violet), failures (coral), blocked
+missions (amber), live work and waits. The status word stays only when the row
+needs attention or is not finished; finished rows keep it for screen readers.
+Titles take one line; the detail line holds the coding agent's mark and the
+context. Rows have no separators. A delegated conversation, or a mission waiting
+on its requester, sits right below the work that started it when both are in
+the view, on a thread line and without « ↳ Délégué par … » / “Delegated by …”;
+otherwise it stays in place and names its requester. Web opens the row menu
+over the time on hover, and spins the live mark unless reduced motion is set;
+Android keeps its row action button and a static live mark. Presentation only:
+no contract, MCP, `cairn_installation` or stored schema changes.
+
 ## Task storage limit (2026-11-04)
 
 Installation owners configure the maximum native disk allowance per conversation
