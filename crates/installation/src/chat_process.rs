@@ -18,6 +18,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub mod resident;
+mod streamed_text;
+
+use streamed_text::StreamedText;
 
 const STOPPED: &str = "Conversation stopped.";
 const MAX_MESSAGE: usize = 5_000_000;
@@ -238,7 +241,9 @@ struct Chat<'a> {
     seen: HashSet<String>,
     attempted: HashSet<String>,
     turn_submitted: bool,
-    texts: HashMap<String, String>,
+    texts: HashMap<String, StreamedText>,
+    /// Only the latest cumulative update is pending; switching items flushes it.
+    pending_text: Option<(String, Option<String>)>,
     /// Subagents this conversation started, by the ID of the item that started them.
     subagents: HashMap<String, Value>,
     /// The subagent each spawned thread works for.
@@ -578,18 +583,7 @@ impl Chat<'_> {
                     text(params, "turnId"),
                     text(params, "itemId")
                 );
-                let value = self.texts.entry(id.clone()).or_default();
-                if value.len() + text(params, "delta").len() > MAX_MESSAGE {
-                    return Ok(());
-                }
-                value.push_str(text(params, "delta"));
-                let item = json!({
-                    "id": id,
-                    "type": "subagent_message",
-                    "text": value,
-                    "parent_id": parent,
-                });
-                self.emit(json!({ "type": "item.updated", "item": item }))
+                self.text_delta(&id, Some(parent), text(params, "delta"))
                     .await
             }
             "turn/plan/updated" => {
@@ -622,18 +616,57 @@ impl Chat<'_> {
     }
 
     async fn message_delta(&mut self, params: &Value) -> Result<()> {
-        let delta = text(params, "delta");
-        let value = self
-            .texts
-            .entry(text(params, "itemId").to_owned())
-            .or_default();
+        self.text_delta(text(params, "itemId"), None, text(params, "delta"))
+            .await
+    }
+
+    async fn text_delta(&mut self, id: &str, parent: Option<&str>, delta: &str) -> Result<()> {
+        if delta.is_empty() {
+            return Ok(());
+        }
+        if self
+            .pending_text
+            .as_ref()
+            .is_some_and(|pending| pending.0 != id)
+        {
+            self.flush_text().await?;
+        }
+        let value = self.texts.entry(id.to_owned()).or_default();
         if value.len() + delta.len() > MAX_MESSAGE {
+            if parent.is_some() {
+                return Ok(());
+            }
             return Err(Error::bad_gateway(
                 "Conversation output exceeded the supported limit.",
             ));
         }
-        value.push_str(delta);
-        let item = json!({ "id": params["itemId"], "type": "agent_message", "text": value });
+        value.append(delta);
+        let ready = value.ready();
+        self.pending_text = Some((id.to_owned(), parent.map(str::to_owned)));
+        if ready {
+            self.flush_text().await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_text(&mut self) -> Result<()> {
+        let Some((id, parent)) = self.pending_text.take() else {
+            return Ok(());
+        };
+        let value = self.texts.get_mut(&id).unwrap().publish();
+        let kind = if parent.is_some() {
+            "subagent_message"
+        } else {
+            "agent_message"
+        };
+        let mut item = json!({
+            "id": id,
+            "type": kind,
+            "text": value,
+        });
+        if let Some(parent) = parent {
+            item["parent_id"] = parent.into();
+        }
         self.emit(json!({ "type": "item.updated", "item": item }))
             .await
     }
@@ -645,6 +678,7 @@ impl Chat<'_> {
         let params = incoming.params;
         if let Some(request_id) = incoming.id {
             if incoming.method == "item/tool/requestUserInput" {
+                self.flush_text().await?;
                 return self
                     .session
                     .rpc
@@ -652,6 +686,11 @@ impl Chat<'_> {
                     .await;
             }
             return self.session.rpc.reject(request_id).await;
+        }
+        // Text must precede the tool, control, terminal or replay event following
+        // it, even when the provider never supplies a completed message item.
+        if incoming.method != "item/agentMessage/delta" {
+            self.flush_text().await?;
         }
         let thread = text(&params, "threadId");
         let other_thread = params["threadId"].is_string()
@@ -1327,6 +1366,7 @@ async fn run_session(
         attempted: HashSet::new(),
         turn_submitted: false,
         texts: HashMap::new(),
+        pending_text: None,
         subagents: HashMap::new(),
         children: HashMap::new(),
         context: None,
@@ -1336,6 +1376,13 @@ async fn run_session(
         starting_items: None,
     };
     let mut result = chat.execute(&plan).await;
+    // EOF, cancellation and transport errors can end without another provider
+    // notification. Preserve the last accepted text before reporting the failure.
+    if let Err(error) = chat.flush_text().await
+        && result.is_ok()
+    {
+        result = Err(error);
+    }
     if let Err(error) = &result
         && !chat.turn_submitted
         && let Some(failure) = crate::run_retry::startup_failure(error)

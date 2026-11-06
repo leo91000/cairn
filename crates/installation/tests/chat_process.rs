@@ -96,6 +96,126 @@ async fn fine_text_deltas_do_not_exhaust_the_native_output_budget() {
     );
 }
 
+#[tokio::test]
+async fn partial_utf8_text_is_flushed_before_provider_failure_and_eof() {
+    for terminal in ["failed", "eof"] {
+        let root = TempDir::new().unwrap();
+        let home = prepare(&root);
+        let answer = "é🌱\n\"fin\"";
+        std::fs::write(
+            home.join("fixture-text-stream.json"),
+            json!({ "text": answer, "deltaCharacters": 1, "terminal": terminal }).to_string(),
+        )
+        .unwrap();
+        let config = config(&root);
+        let turn = plan(&root, "fixture:bounded-text-stream");
+        let (tx, mut rx) = mpsc::channel(64);
+        let task = tokio::spawn(async move {
+            chat_process::run(&config, &home, turn, tx, CancellationToken::new()).await
+        });
+        let mut partial = String::new();
+        let mut failed = false;
+        while let Some(event) = rx.recv().await {
+            if event["type"] == "item.updated" && text(&event["item"], "id").starts_with("reply-") {
+                assert!(!failed, "Pending text must precede the failure marker.");
+                partial = text(&event["item"], "text").to_owned();
+            }
+            failed |= event["type"] == "turn.failed";
+            assert_ne!(event["type"], "turn.completed");
+        }
+        assert!(task.await.unwrap().is_err());
+        assert_eq!(partial, answer, "{terminal}");
+        assert_eq!(failed, terminal == "failed");
+    }
+}
+
+#[tokio::test]
+async fn cancellation_flushes_accepted_text_that_has_not_reached_a_snapshot_boundary() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let answer = "é🌱\n\"fin\"";
+    std::fs::write(
+        home.join("fixture-text-stream.json"),
+        json!({ "text": answer, "deltaCharacters": 1, "terminal": "cancel" }).to_string(),
+    )
+    .unwrap();
+    let config = config(&root);
+    let turn = plan(&root, "fixture:bounded-text-stream");
+    let stop = CancellationToken::new();
+    let stopping = stop.clone();
+    let processed = home.join("fixture-text-stream-processed");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task =
+        tokio::spawn(async move { chat_process::run(&config, &home, turn, tx, stopping).await });
+    let first = loop {
+        let event = rx.recv().await.unwrap();
+        if event["type"] == "item.updated" && text(&event["item"], "id").starts_with("reply-") {
+            break text(&event["item"], "text").to_owned();
+        }
+    };
+    assert_eq!(first, "é");
+    common::eventually(
+        Duration::from_secs(5),
+        Duration::from_millis(10),
+        async || processed.exists().then_some(()),
+    )
+    .await;
+    stop.cancel();
+    let mut latest = first;
+    while let Some(event) = rx.recv().await {
+        if event["type"] == "item.updated" && text(&event["item"], "id").starts_with("reply-") {
+            latest = text(&event["item"], "text").to_owned();
+        }
+        assert_ne!(event["type"], "turn.completed");
+    }
+    assert!(task.await.unwrap().is_err());
+    assert_eq!(latest, answer);
+}
+
+#[tokio::test]
+async fn interleaved_message_items_keep_their_latest_text_in_order() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let updates = json!([
+        { "item": "a", "delta": "A" },
+        { "item": "a", "delta": "é" },
+        { "item": "b", "delta": "B" },
+        { "item": "b", "delta": "🌱" },
+        { "item": "a", "delta": "!" },
+    ]);
+    std::fs::write(
+        home.join("fixture-text-stream.json"),
+        json!({ "text": "Done", "updates": updates }).to_string(),
+    )
+    .unwrap();
+    let config = config(&root);
+    let turn = plan(&root, "fixture:bounded-text-stream");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, turn, tx, CancellationToken::new()).await
+    });
+    let mut received = Vec::new();
+    while let Some(event) = rx.recv().await {
+        let item = &event["item"];
+        if event["type"] == "item.updated" && text(item, "id").starts_with("reply-") {
+            let suffix = text(item, "id").rsplit(':').next().unwrap().to_owned();
+            received.push((suffix, text(item, "text").to_owned()));
+        }
+    }
+    task.await.unwrap().unwrap();
+    assert_eq!(
+        received,
+        [
+            ("a", "A"),
+            ("a", "Aé"),
+            ("b", "B"),
+            ("b", "B🌱"),
+            ("a", "Aé!")
+        ]
+        .map(|(id, text)| (id.to_owned(), text.to_owned()))
+    );
+}
+
 /// Runs one turn to completion while discarding its events.
 async fn run_quietly(config: &Config, home: &Path, plan: Value) {
     let (tx, mut rx) = mpsc::channel(64);
