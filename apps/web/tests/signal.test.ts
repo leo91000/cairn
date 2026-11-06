@@ -5,6 +5,7 @@ import { exclusiveSuspensionLabel } from '../src/run-status'
 import {
   backgroundWait,
   dismissible,
+  filFolds,
   filOf,
   filThread,
   filViews,
@@ -541,6 +542,42 @@ describe('delegated conversations', () => {
       }),
     ], [], [])
     expect(filThread(filViews(fil).ongoing)).toEqual([{ item: expect.objectContaining({ title: 'Review R51' }), nested: false }])
+  })
+})
+
+describe('quiet missions', () => {
+  const fold = (fil: ReturnType<typeof filOf>) => filFolds(filThread(filViews(fil).all)).map(entry => entry.folded ? entry.folded.map(item => item.title) : entry.item.title)
+
+  it('fold together when two or more finished and were read in a row', () => {
+    const fil = filOf([chat('talk', { title: 'talk', updatedAt: 25 })], [task('a'), task('b'), task('c'), task('d'), task('e')], [
+      run('a-1', 'a', { finishedAt: 50 }),
+      run('b-1', 'b', { finishedAt: 40 }),
+      run('c-1', 'c', { finishedAt: 30 }),
+      run('d-1', 'd', { finishedAt: 20 }),
+      // A lone quiet mission stays a row.
+      run('e-1', 'e', { status: 'failed', finishedAt: 10 }),
+    ])
+    expect(fold(fil)).toEqual([['a', 'b', 'c'], 'talk', 'd', 'e'])
+  })
+
+  it('stay rows while unread, unfinished or followed by the work they delegated', () => {
+    const fil = filOf([], [task('a'), task('b'), task('c'), task('child')], [
+      run('a-1', 'a', { finishedAt: 50, unread: true }),
+      run('b-1', 'b', { finishedAt: 40 }),
+      run('c-1', 'c', { finishedAt: 30 }),
+      run('child-1', 'child', {
+        finishedAt: 20,
+        outcome: {
+          status: 'blocked',
+          reason: 'Waits on c',
+          evidence: [],
+          reportedAt: 20,
+          waitingOn: 'requester',
+        },
+        requestedBy: { runId: 'c-1', taskId: 'c' },
+      }),
+    ])
+    expect(fold(fil)).toEqual(['a', 'b', 'c', 'child'])
   })
 })
 

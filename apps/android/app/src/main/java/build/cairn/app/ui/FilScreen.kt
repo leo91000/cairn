@@ -1,3 +1,8 @@
+@file:OptIn(
+    androidx.compose.material3.ExperimentalMaterial3Api::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+)
+
 package build.cairn.app.ui
 
 import androidx.compose.animation.AnimatedVisibility
@@ -11,33 +16,42 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
@@ -458,7 +472,7 @@ internal fun buildFeed(
                     unreadNow("task:${run.taskId}", run.finishedAt) ->
                     toRead +=
                         item(FeedKind.UNREAD_TASK, "Mission terminée · $agent")
-                            .copy(finished = true)
+                            .copy(finished = true, preview = run.preview)
                 else ->
                     recent +=
                         item(FeedKind.UNREAD_TASK, "Mission terminée · $agent")
@@ -505,6 +519,47 @@ internal fun threadFeed(items: List<FeedItem>): List<Pair<FeedItem, Boolean>> {
     // A requester cycle has no root: keep those rows rather than losing them.
     items.forEach { place(it, false) }
     return rows
+}
+
+/** A Fil row, or a run of quiet missions folded into one. */
+internal sealed interface FeedEntry {
+    data class Line(val item: FeedItem, val nested: Boolean) : FeedEntry
+
+    data class Fold(val items: List<FeedItem>) : FeedEntry {
+        val key
+            get() = "fold:${items.first().key}"
+    }
+}
+
+/**
+ * Folds consecutive missions that finished as expected and were read into one row, so that
+ * scheduled checks stop crowding the work worth reading. A lone one, a mission with delegated work
+ * below it, and nested rows stay as they are.
+ */
+internal fun foldFeed(rows: List<Pair<FeedItem, Boolean>>): List<FeedEntry> {
+    fun quiet(index: Int): Boolean {
+        val (item, nested) = rows[index]
+        return !nested &&
+            item.taskId != null &&
+            item.finished &&
+            !item.unread &&
+            rows.getOrNull(index + 1)?.second != true
+    }
+
+    val entries = mutableListOf<FeedEntry>()
+    var index = 0
+    while (index < rows.size) {
+        var end = index
+        while (end < rows.size && quiet(end)) end++
+        if (end - index >= 2) {
+            entries += FeedEntry.Fold(rows.subList(index, end).map { it.first })
+            index = end
+        } else {
+            entries += FeedEntry.Line(rows[index].first, rows[index].second)
+            index++
+        }
+    }
+    return entries
 }
 
 /** The Fil in reading order, one key per item: what a swipe between pages moves through. */
@@ -596,6 +651,9 @@ fun FilScreen(
     var filter by rememberSaveable { mutableStateOf("") }
     // The filter opens on demand and stays open while it holds a query.
     var searchOpen by rememberSaveable { mutableStateOf(false) }
+    var unfolded by rememberSaveable { mutableStateOf(listOf<String>()) }
+    // A finished result previewed by a long press, without opening or reading it.
+    var peeked by remember { mutableStateOf<FeedItem?>(null) }
     val searching = searchOpen || filter.isNotEmpty()
     val views = listOf(feed.unread, feed.ongoing, feed.all)
     val query = filter.trim()
@@ -633,6 +691,12 @@ fun FilScreen(
             item.kind == FeedKind.RECONNECT -> openConnections()
             item.chatId != null -> openChat(item.chatId)
             item.runId != null -> openRun(item.runId)
+        }
+    }
+    peeked?.let { item ->
+        PeekSheet(item, now, close = { peeked = null }) {
+            peeked = null
+            open(item)
         }
     }
     LazyColumn(
@@ -702,13 +766,45 @@ fun FilScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-        items(threadFeed(visible), key = { it.first.key }) { (item, nested) ->
+        // Quiet missions fold together, except while filtering, which looks for each row.
+        val rows = threadFeed(visible)
+        val entries =
+            if (query.isEmpty()) foldFeed(rows)
+            else rows.map { (item, nested) -> FeedEntry.Line(item, nested) }
+        val lines = entries.flatMap { entry ->
+            when (entry) {
+                is FeedEntry.Line -> listOf(entry)
+                is FeedEntry.Fold ->
+                    listOf(entry) +
+                        if (entry.key in unfolded)
+                            entry.items.map { FeedEntry.Line(it, nested = true) }
+                        else emptyList()
+            }
+        }
+        items(
+            lines,
+            key = {
+                when (it) {
+                    is FeedEntry.Line -> it.item.key
+                    is FeedEntry.Fold -> it.key
+                }
+            },
+        ) { line ->
+            if (line is FeedEntry.Fold) {
+                FoldRow(line, line.key in unfolded, now) {
+                    unfolded =
+                        if (line.key in unfolded) unfolded - line.key else unfolded + line.key
+                }
+                return@items
+            }
+            val (item, nested) = line as FeedEntry.Line
             FeedRow(
                 item,
                 { open(item) },
                 onDelete = item.chatId?.let { id -> { trash.trash(id) } },
                 now = now,
                 nested = nested,
+                onPeek = item.preview?.ifBlank { null }?.let { { peeked = item } },
             ) {
                 ForYouAction(
                     item,
@@ -721,6 +817,147 @@ fun FilScreen(
                     snooze = { setAside(item, tomorrowMorning(now)) },
                     archive = { archive(item) },
                 )
+            }
+        }
+    }
+}
+
+/** Quiet missions folded into one row: two stacked avatars, their count and names. */
+@Composable
+private fun FoldRow(fold: FeedEntry.Fold, open: Boolean, now: Long, toggle: () -> Unit) {
+    val rotation by
+        androidx.compose.animation.core.animateFloatAsState(
+            if (open) 180f else 0f,
+            tween(200),
+            label = "fil-fold",
+        )
+    Surface(
+        onClick = toggle,
+        color = Color.Transparent,
+        modifier =
+            Modifier.fillMaxWidth().testTag("fil-fold").semantics {
+                stateDescription = if (open) "Déplié" else "Replié"
+            },
+    ) {
+        Row(
+            Modifier.widthIn(max = 760.dp)
+                .heightIn(min = 56.dp)
+                .padding(start = 22.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(28.dp)) {
+                Box(Modifier.align(Alignment.TopStart).alpha(0.8f)) {
+                    AgentAvatar(
+                        fold.items[1].agent,
+                        fold.items[1].agentKey.ifBlank { fold.items[1].agent },
+                        19.dp,
+                    )
+                }
+                Box(
+                    Modifier.align(Alignment.BottomEnd)
+                        .background(MaterialTheme.colorScheme.background, RoundedCornerShape(7.dp))
+                        .padding(1.5.dp)
+                ) {
+                    AgentAvatar(
+                        fold.items[0].agent,
+                        fold.items[0].agentKey.ifBlank { fold.items[0].agent },
+                        19.dp,
+                    )
+                }
+            }
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "${fold.items.size} missions terminées",
+                        Modifier.weight(1f),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Stamp(fold.items.first().stamp, now)
+                }
+                Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        CairnIcons.Retry,
+                        null,
+                        Modifier.size(12.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        fold.items.joinToString(" · ") { it.title },
+                        Modifier.weight(1f).padding(start = 4.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            // Where other rows have their actions, so times line up.
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                Icon(
+                    CairnIcons.Down,
+                    null,
+                    Modifier.size(20.dp).rotate(rotation),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/** A finished result's opening, read without opening the work, which stays unread. */
+@Composable
+internal fun PeekSheet(item: FeedItem, now: Long, close: () -> Unit, open: () -> Unit) {
+    ModalBottomSheet(
+        onDismissRequest = close,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        modifier = Modifier.testTag("fil-peek"),
+    ) {
+        Column(
+            Modifier.verticalScroll(rememberScrollState())
+                .padding(start = 24.dp, end = 24.dp, bottom = 24.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AgentAvatar(item.agent, item.agentKey.ifBlank { item.agent }, 24.dp)
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    listOfNotNull(item.agent, item.project?.ifBlank { null }).joinToString(" · "),
+                    Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Stamp(item.stamp, now)
+            }
+            Text(
+                item.title,
+                Modifier.padding(top = 12.dp),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                item.preview.orEmpty(),
+                Modifier.padding(top = 8.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 12,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                "Reste non lu jusqu’à l’ouverture.",
+                Modifier.padding(top = 12.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            androidx.compose.material3.Button(
+                onClick = open,
+                modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+            ) {
+                Text("Ouvrir")
             }
         }
     }
@@ -1112,19 +1349,32 @@ private fun FeedRow(
     onDelete: (() -> Unit)? = null,
     now: Long,
     nested: Boolean = false,
+    /** Previews a finished result without opening it. */
+    onPeek: (() -> Unit)? = null,
     trailing: @Composable () -> Unit,
 ) {
     val thread = MaterialTheme.colorScheme.outlineVariant
+    val haptics = LocalHapticFeedback.current
     // Where the text below the title starts: after the unread dot, the avatar and its gap.
     val inset = if (nested) 42.dp else 50.dp
     SwipeToTrashRow(enabled = onDelete != null, onTrash = { onDelete?.invoke() }) { swipe ->
         Surface(
-            onClick = onClick,
             color = Color.Transparent,
             modifier =
                 swipe
                     .fillMaxWidth()
                     .semantics { if (item.finished) stateDescription = item.statusLabel }
+                    .combinedClickable(
+                        onClick = onClick,
+                        onLongClickLabel = onPeek?.let { "Aperçu" },
+                        onLongClick =
+                            onPeek?.let {
+                                {
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    it()
+                                }
+                            },
+                    )
                     .then(if (item.unread) Modifier.testTag("unread") else Modifier)
                     .then(if (nested) Modifier.testTag("fil-nested") else Modifier),
         ) {

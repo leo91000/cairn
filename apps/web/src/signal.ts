@@ -373,6 +373,39 @@ export function filThread(items: FilItem[]): { item: FilItem, nested: boolean }[
   return rows
 }
 
+/** A Fil row, or a run of quiet missions folded into one. */
+export type FilEntry = { item: FilItem, nested: boolean, folded?: undefined } | { item: FilItem, nested: false, folded: FilItem[] }
+
+/**
+ * Folds consecutive missions that finished as expected and were read into one row, so that
+ * scheduled checks stop crowding the work worth reading. A lone one, a mission with delegated
+ * work below it, and nested rows stay as they are.
+ */
+export function filFolds(rows: { item: FilItem, nested: boolean }[]): FilEntry[] {
+  const quiet = (index: number) => {
+    const { item, nested } = rows[index]
+    return !nested && !!item.taskId && !!item.finished && !isUnread(item) && !rows[index + 1]?.nested
+  }
+
+  const entries: FilEntry[] = []
+  for (let index = 0; index < rows.length;) {
+    let end = index
+    while (end < rows.length && quiet(end))
+      end++
+    if (end - index >= 2) {
+      const folded = rows.slice(index, end).map(row => row.item)
+      entries.push({ item: folded[0], nested: false, folded })
+      index = end
+    }
+    else {
+      entries.push(rows[index])
+      index++
+    }
+  }
+
+  return entries
+}
+
 /**
  * What the working indicator says: the step in progress, or the last one reached. `waiting`
  * lists the background tasks an idle agent waits for; `since` is then when it began waiting.
