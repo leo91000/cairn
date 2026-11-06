@@ -986,22 +986,32 @@ async fn connected(
                             }
                             _ => return Err(Error::bad("Unexpected relay frame.")),
                         };
+                        let file = request.public_artifact.is_none()
+                            && cairn_protocol::file_path(&request.path);
                         let capacity = if request.public_artifact.is_some() {
                             &public_slots
-                        } else if cairn_protocol::file_path(&request.path) {
+                        } else if file {
                             &file_slots
                         } else {
                             &slots
                         };
-                        let Ok(permit) = capacity.clone().try_acquire_owned() else {
-                            let response = request_failure(request.id, 503, "Installation busy.");
-                            let frame = serde_json::to_string(&Frame::Response(response))?;
-                            socket
-                                .send(Message::Text(frame.into()))
-                                .await
-                                .map_err(Error::internal)?;
-                            continue;
+                        // The Beacon admits a queued file once its own slot is free, which can
+                        // be just before a cancelled task here releases this side's slot.
+                        let permit = match capacity.clone().try_acquire_owned() {
+                            Ok(permit) => Some(permit),
+                            Err(_) if file => None,
+                            Err(_) => {
+                                let response =
+                                    request_failure(request.id, 503, "Installation busy.");
+                                let frame = serde_json::to_string(&Frame::Response(response))?;
+                                socket
+                                    .send(Message::Text(frame.into()))
+                                    .await
+                                    .map_err(Error::internal)?;
+                                continue;
+                            }
                         };
+                        let file_slots = file_slots.clone();
 
                         let request_id = request.id.clone();
                         let router = router.clone();
@@ -1011,7 +1021,17 @@ async fn connected(
                             credit: credit.clone(),
                         };
                         let task = requests.spawn(async move {
-                            let _permit = permit;
+                            let _permit = match permit {
+                                Some(permit) => permit,
+                                None => tokio::time::timeout(
+                                    Duration::from_secs(5),
+                                    file_slots.acquire_owned(),
+                                )
+                                .await
+                                .ok()
+                                .and_then(std::result::Result::ok)
+                                .ok_or_else(|| Error::unavailable("Installation busy."))?,
+                            };
                             dispatch(router, request, streaming).await
                         });
                         active.insert(request_id.clone(), (task.clone(), credit));
@@ -1102,10 +1122,14 @@ async fn dispatch(
     let private_file =
         cairn_protocol::file_path(&input.path) && !input.path.starts_with("/api/shared-artifacts/");
     let fits_frame = response
-        .headers()
-        .get(axum::http::header::CONTENT_LENGTH)
-        .and_then(|length| length.to_str().ok()?.parse::<usize>().ok())
-        .is_some_and(|length| length <= MAX_BODY);
+        .extensions()
+        .get::<crate::http::FiniteFile>()
+        .is_some()
+        || response
+            .headers()
+            .get(axum::http::header::CONTENT_LENGTH)
+            .and_then(|length| length.to_str().ok()?.parse::<usize>().ok())
+            .is_some_and(|length| length <= MAX_BODY);
     let is_stream = cairn_protocol::stream_path(&input.path) && !(private_file && fits_frame);
     if is_stream {
         let output = streaming;

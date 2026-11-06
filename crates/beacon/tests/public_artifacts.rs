@@ -698,6 +698,24 @@ async fn public_files_larger_than_a_relay_frame_stream_without_truncation() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.bytes().await.unwrap().as_ref(), bytes.as_slice());
+
+    // Public files of any size stream their stored bytes with their length.
+    let page = "<p>public</p>\n".repeat(1_000).into_bytes();
+    let (run, artifact) = seeded_artifact(&relay, &page, "text/html").await;
+    let shared = visibility(&relay, &run, &artifact, "public").await;
+    let response = relay
+        .app
+        .client
+        .get(shared["publicUrl"].as_str().unwrap())
+        .header("accept-encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key("content-encoding"));
+    assert_eq!(response.headers()["content-length"], page.len().to_string());
+    assert_eq!(response.headers()["x-accel-buffering"], "no");
+    assert_eq!(response.bytes().await.unwrap().as_ref(), page.as_slice());
     relay.close().await;
 }
 
@@ -778,6 +796,29 @@ async fn private_files_larger_than_a_relay_frame_stream_for_reads_downloads_rang
     assert_eq!(response.status(), StatusCode::OK);
     assert!(!response.headers().contains_key("x-accel-buffering"));
     assert_eq!(response.bytes().await.unwrap().as_ref(), b"small");
+
+    // A compressible file that fits one frame keeps the compression it had
+    // before files could stream.
+    let report = "<tr><td>row</td></tr>\n".repeat(20_000).into_bytes();
+    let (report_run, report_id) = seeded_artifact(&relay, &report, "text/html").await;
+    let response = relay
+        .get(&format!("/runs/{report_run}/artifacts/{report_id}"))
+        .header("accept-encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-encoding"], "gzip");
+    assert!(!response.headers().contains_key("x-accel-buffering"));
+    let compressed = response.bytes().await.unwrap();
+    assert!(compressed.len() < report.len() / 10);
+    let mut decoded = Vec::new();
+    std::io::Read::read_to_end(
+        &mut flate2::read::GzDecoder::new(compressed.as_ref()),
+        &mut decoded,
+    )
+    .unwrap();
+    assert_eq!(decoded, report);
 
     let metadata: Value = relay
         .get(&format!("{file}?metadata=1"))

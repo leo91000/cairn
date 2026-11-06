@@ -497,7 +497,15 @@ async fn serve(s: &Service, record: &Deliverable, request: Request) -> Result<Re
         ))
     };
     let mut response = body.into_response();
-    response.extensions_mut().insert(crate::http::Uncompressed);
+    // A file that fits one relay frame stays finite and may be compressed, as before
+    // files could stream. The margin covers compression overhead on incompressible
+    // bytes. A larger file streams with its stored length and byte ranges.
+    let finite_limit = (cairn_protocol::MAX_BODY - cairn_protocol::MAX_STREAM_CHUNK) as u64;
+    if count <= finite_limit {
+        response.extensions_mut().insert(crate::http::FiniteFile);
+    } else {
+        response.extensions_mut().insert(crate::http::Uncompressed);
+    }
     if let Some((a, b)) = range {
         *response.status_mut() = StatusCode::PARTIAL_CONTENT;
         response.headers_mut().insert(

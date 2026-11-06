@@ -144,6 +144,11 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
 #[derive(Clone, Copy)]
 pub(crate) struct Uncompressed;
 
+/// Marks a private deliverable that fits one relay frame, so the relay keeps it
+/// finite even when compression removes its Content-Length.
+#[derive(Clone, Copy)]
+pub(crate) struct FiniteFile;
+
 fn compressible(
     _: StatusCode,
     _: axum::http::Version,
