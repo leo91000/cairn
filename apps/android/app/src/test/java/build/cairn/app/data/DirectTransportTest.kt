@@ -114,8 +114,37 @@ class DirectTransportTest {
     }
 
     @Test
+    fun `private artifact files stream like the Rust stream_path contract`() {
+        for (path in
+            listOf(
+                "/api/runs/run/artifacts/file",
+                "/api/runs/run/artifacts/file?download=1",
+                "/api/runs/run/artifacts/file?download=1&metadata=0",
+                "/api/shared-artifacts/token",
+                "/api/runs/run/stream?after=0",
+            )) assertTrue(path, DirectChannel.streamedRoute(path))
+        for (path in
+            listOf(
+                "/api/runs/run/artifacts/file?metadata=1",
+                "/api/runs/run/artifacts/file?download=1&metadata=1",
+                "/api/runs/run/artifacts/file?preview=1",
+                "/api/runs/run/artifacts/file?preview",
+                "/api/runs/run/artifacts",
+                "/api/runs/run/artifacts/",
+                "/api/runs/run/artifacts/file/visibility",
+                "/api/runs//artifacts/file",
+                "/api/chats/chat/artifacts/file",
+            )) assertFalse(path, DirectChannel.streamedRoute(path))
+    }
+
+    @Test
     fun `stream paths request identity so JSON errors remain readable`() = runTest {
-        for (path in listOf("/runs/r/stream?history=invalid", "/shared-artifacts/a/file")) {
+        for (path in
+            listOf(
+                "/runs/r/stream?history=invalid",
+                "/shared-artifacts/a/file",
+                "/runs/r/artifacts/a?download=1",
+            )) {
             MockWebServer().use { server ->
                 server.start()
                 lateinit var channel: DirectChannel

@@ -1,53 +1,8 @@
-use common::MissionFixture;
-
 mod common;
 
-use common::RelayedInstallation;
+use common::{RelayedInstallation, seeded_artifact};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
-
-async fn seeded_artifact(
-    relay: &RelayedInstallation,
-    bytes: &[u8],
-    media_type: &str,
-) -> (String, String) {
-    let installation = &relay.installation;
-    let task = installation
-        .task_fixture(
-            json!({
-                "name": "Report",
-                "prompt": "Make a report",
-                "agentId": cairn_installation::config::MAIN_AGENT_ID,
-            }),
-            None,
-        )
-        .await
-        .unwrap();
-    let run = installation
-        .enqueue(task["id"].as_str().unwrap(), "manual", None)
-        .await
-        .unwrap();
-    let run = run["id"].as_str().unwrap().to_owned();
-    let artifact = uuid::Uuid::new_v4().to_string();
-    let directory = installation.config.data_dir.join("artifacts");
-    tokio::fs::create_dir_all(&directory).await.unwrap();
-    tokio::fs::write(directory.join(&artifact), bytes)
-        .await
-        .unwrap();
-    let record: cairn_contracts::Deliverable = serde_json::from_value(json!({
-        "id": artifact, "runId": run, "messageId": null,
-        "key": "report", "version": 1, "group": "", "kind": "file", "size": bytes.len(), "createdAt": 1,
-        "name": "report.html", "title": "Report", "mediaType": media_type,
-        "visibility": "private", "previewStatus": "none",
-        "url": format!("/api/runs/{run}/artifacts/{artifact}"),
-    })).unwrap();
-    installation
-        .store
-        .transaction(move |db| db.insert_artifact(&record))
-        .await
-        .unwrap();
-    (run, artifact)
-}
 
 async fn visibility(relay: &RelayedInstallation, run: &str, artifact: &str, value: &str) -> Value {
     let response = relay
@@ -743,6 +698,70 @@ async fn public_files_larger_than_a_relay_frame_stream_without_truncation() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.bytes().await.unwrap().as_ref(), bytes.as_slice());
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn private_files_larger_than_a_relay_frame_stream_for_reads_downloads_ranges_and_head() {
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let bytes = (0..cairn_protocol::MAX_BODY + 100_000)
+        .map(|index| (index % 251) as u8)
+        .collect::<Vec<_>>();
+    let (run, artifact) = seeded_artifact(&relay, &bytes, "video/mp4").await;
+    let file = format!("/runs/{run}/artifacts/{artifact}");
+
+    for route in [file.clone(), format!("{file}?download=1")] {
+        let response = relay.get(&route).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{route}");
+        assert_eq!(response.headers()["content-type"], "video/mp4");
+        assert_eq!(
+            response.headers()["content-disposition"],
+            "attachment; filename*=UTF-8''report.html"
+        );
+        assert_eq!(response.bytes().await.unwrap().as_ref(), bytes.as_slice());
+    }
+
+    let tail = cairn_protocol::MAX_BODY - 10;
+    let response = relay
+        .get(&file)
+        .header("range", format!("bytes={tail}-"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        response.headers()["content-range"],
+        format!("bytes {tail}-{}/{}", bytes.len() - 1, bytes.len())
+    );
+    assert_eq!(response.bytes().await.unwrap().as_ref(), &bytes[tail..]);
+
+    let response = relay
+        .app
+        .client
+        .head(format!("{}{file}", relay.base))
+        .header("cookie", &relay.cookie)
+        .header("origin", &relay.app.url)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-length"],
+        bytes.len().to_string()
+    );
+    assert_eq!(response.headers()["accept-ranges"], "bytes");
+    assert!(response.bytes().await.unwrap().is_empty());
+
+    let metadata: Value = relay
+        .get(&format!("{file}?metadata=1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(metadata["id"], artifact);
+    assert_eq!(metadata["size"], bytes.len());
     relay.close().await;
 }
 

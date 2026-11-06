@@ -327,7 +327,31 @@ it('requests identity when browser gzip decompression is unavailable', async () 
   expect(await response).toEqual({ events: [] })
 })
 
-it.each(['/api/runs/r/stream?history=invalid', '/api/shared-artifacts/a/file'])('requests identity on streamed route %s so JSON errors remain readable', async (path) => {
+it('streams private artifact files like the Rust stream_path contract', async () => {
+  const { streamedRoute } = await import('../src/direct-channel')
+  for (const path of [
+    '/api/runs/run/artifacts/file',
+    '/api/runs/run/artifacts/file?download=1',
+    '/api/runs/run/artifacts/file?download=1&metadata=0',
+    '/api/shared-artifacts/token',
+    '/api/runs/run/stream?after=0',
+  ])
+    expect(streamedRoute(path), path).toBe(true)
+  for (const path of [
+    '/api/runs/run/artifacts/file?metadata=1',
+    '/api/runs/run/artifacts/file?download=1&metadata=1',
+    '/api/runs/run/artifacts/file?preview=1',
+    '/api/runs/run/artifacts/file?preview',
+    '/api/runs/run/artifacts',
+    '/api/runs/run/artifacts/',
+    '/api/runs/run/artifacts/file/visibility',
+    '/api/runs//artifacts/file',
+    '/api/chats/chat/artifacts/file',
+  ])
+    expect(streamedRoute(path), path).toBe(false)
+})
+
+it.each(['/api/runs/r/stream?history=invalid', '/api/shared-artifacts/a/file', '/api/runs/r/artifacts/a?download=1'])('requests identity on streamed route %s so JSON errors remain readable', async (path) => {
   const { DirectChannel } = await import('../src/direct-channel')
   const channel = new Channel()
   channel.readyState = 'open'

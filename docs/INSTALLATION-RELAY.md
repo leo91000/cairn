@@ -189,6 +189,11 @@ There is no negotiation: any different or missing version is rejected before the
 installation becomes online, with an update-required WebSocket close reason.
 All peers support credited streams, notifications, direct control and node channels.
 
+Routes ending in `/stream`, public shared files and private run-artifact originals
+(`/api/runs/{run}/artifacts/{id}` without `metadata=1` or `preview`) are streams;
+`cairn_protocol::stream_path` defines this set and the web and Android direct
+clients mirror it. The direct DataChannel always serves streams in identity
+encoding, because its clients read stream chunks without an HTTP decoder.
 Each stream gets one credit per downstream body read. Installation body polling
 pauses until credit arrives, chunks are limited to 64 KiB, and each beacon HTTP
 body has a one-chunk queue. Streams can use 24 of the 32 request slots;

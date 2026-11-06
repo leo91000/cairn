@@ -608,6 +608,63 @@ async fn direct_stream_uses_the_same_body_with_credit_and_cancel_during_fragment
 }
 
 #[tokio::test]
+async fn direct_private_files_larger_than_a_frame_stream_in_identity_encoding() {
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    production_connector(&mut relay).await;
+    let bytes = "compressible text\n"
+        .repeat(cairn_protocol::MAX_BODY / 18 + 10_000)
+        .into_bytes();
+    let (run, artifact) = common::seeded_artifact(&relay, &bytes, "text/plain").await;
+    let (peer, channel, _) = client(&relay).await;
+
+    // A client predating this route's stream classification still asks for gzip.
+    let mut download = request("download", &format!("/api/runs/{run}/artifacts/{artifact}"));
+    if let Frame::Request(request) = &mut download {
+        request.headers = vec![("accept-encoding".into(), "gzip".into())];
+    }
+    send_frame(channel.as_ref(), 1, &download).await;
+    let Frame::StreamStart(start) = response(channel.as_ref()).await else {
+        panic!("artifact files must stream")
+    };
+    assert_eq!(start.status, 200);
+    assert!(
+        !start
+            .headers
+            .iter()
+            .any(|(name, _)| name == "content-encoding"),
+        "direct stream chunks are read without an HTTP decoder"
+    );
+    assert!(
+        start
+            .headers
+            .contains(&("content-length".into(), bytes.len().to_string()))
+    );
+
+    let mut received = Vec::new();
+    for transfer in 2.. {
+        send_frame(
+            channel.as_ref(),
+            transfer,
+            &Frame::StreamCredit {
+                id: "download".into(),
+            },
+        )
+        .await;
+        match response(channel.as_ref()).await {
+            Frame::StreamChunk { body, .. } => received.extend(body),
+            Frame::StreamEnd { failed, .. } => {
+                assert!(!failed);
+                break;
+            }
+            _ => panic!("stream frame expected"),
+        }
+    }
+    assert_eq!(received, bytes);
+    peer.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn fragmented_request_and_response_keep_body_bytes_and_verified_capabilities() {
     use axum::{Extension, body::Bytes, routing::post};
     use cairn_installation::auth::{InstallationIdentity, InstallationRole};

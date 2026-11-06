@@ -224,9 +224,30 @@ pub enum Frame {
     },
 }
 
+/// Routes whose responses cross the tunnel as credited streams rather than
+/// finite `MAX_BODY` frames: live subscriptions and file downloads. Web and
+/// Android direct clients mirror this classification.
 pub fn stream_path(path: &str) -> bool {
-    let route = path.split('?').next().unwrap_or("");
-    route.ends_with("/stream") || route.starts_with("/api/shared-artifacts/")
+    let (route, query) = path.split_once('?').unwrap_or((path, ""));
+    route.ends_with("/stream")
+        || route.starts_with("/api/shared-artifacts/")
+        || run_artifact_file(route, query)
+}
+
+/// A private deliverable's original bytes, which can exceed a finite frame.
+/// Metadata and the bounded 960 px preview thumbnail remain finite, so a page of
+/// thumbnails does not hold live-stream capacity. These are the parameters the
+/// installation's artifact handler uses to select them.
+fn run_artifact_file(route: &str, query: &str) -> bool {
+    let file = matches!(
+        route.split('/').collect::<Vec<_>>().as_slice(),
+        ["", "api", "runs", run, "artifacts", artifact] if !run.is_empty() && !artifact.is_empty()
+    );
+    let finite = query.split('&').any(|parameter| {
+        parameter == "metadata=1" || parameter.split('=').next() == Some("preview")
+    });
+
+    file && !finite
 }
 
 pub fn request_header(name: &str) -> bool {
@@ -272,4 +293,39 @@ pub fn api_path(path: &str) -> bool {
         && !route
             .split('/')
             .any(|segment| segment == "." || segment == "..")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stream_path;
+
+    #[test]
+    fn private_artifact_files_stream_like_public_downloads() {
+        for path in [
+            "/api/runs/run/artifacts/file",
+            "/api/runs/run/artifacts/file?download=1",
+            "/api/runs/run/artifacts/file?download=1&metadata=0",
+            "/api/shared-artifacts/token",
+            "/api/runs/run/stream?after=0",
+        ] {
+            assert!(stream_path(path), "{path} must stream");
+        }
+    }
+
+    #[test]
+    fn artifact_metadata_previews_and_lists_stay_finite() {
+        for path in [
+            "/api/runs/run/artifacts/file?metadata=1",
+            "/api/runs/run/artifacts/file?download=1&metadata=1",
+            "/api/runs/run/artifacts/file?preview=1",
+            "/api/runs/run/artifacts/file?preview",
+            "/api/runs/run/artifacts",
+            "/api/runs/run/artifacts/",
+            "/api/runs/run/artifacts/file/visibility",
+            "/api/runs//artifacts/file",
+            "/api/chats/chat/artifacts/file",
+        ] {
+            assert!(!stream_path(path), "{path} must stay finite");
+        }
+    }
 }
