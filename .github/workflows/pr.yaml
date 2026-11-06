@@ -126,8 +126,7 @@ jobs:
           JS
       - name: Install the pinned Rust toolchain and build dependencies
         run: |
-          apt-get update -qq
-          apt-get install -y --no-install-recommends build-essential curl libclang-dev libssl-dev pkg-config
+          node scripts/prepare-browser-build-dependencies.mjs
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Build the manager fixtures and web assets
