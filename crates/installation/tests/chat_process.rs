@@ -40,6 +40,225 @@ fn prepare(root: &TempDir) -> PathBuf {
     home
 }
 
+#[tokio::test]
+async fn fine_text_deltas_do_not_exhaust_the_native_output_budget() {
+    check_text_stream_output_budget(false).await;
+}
+
+#[tokio::test]
+async fn ignored_provider_and_foreign_thread_notifications_do_not_force_text_snapshots() {
+    check_text_stream_output_budget(true).await;
+}
+
+async fn check_text_stream_output_budget(ignored_noise: bool) {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use cairn_installation::{microvm::protocol::Event, run_output};
+
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let answer = "x".repeat(24_000);
+    std::fs::write(
+        home.join("fixture-text-stream.json"),
+        json!({ "text": answer, "deltaCharacters": 4, "ignoredNoise": ignored_noise }).to_string(),
+    )
+    .unwrap();
+    let config = config(&root);
+    let turn = plan(&root, "fixture:bounded-text-stream");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, turn, tx, CancellationToken::new()).await
+    });
+    let mut encoded_bytes = 0;
+    let mut snapshots = 0;
+    let mut completed_text = None;
+    let mut completed_turn = false;
+    while let Some(event) = rx.recv().await {
+        // The real adapter and guest serializer feed the native controller's
+        // unchanged Output envelope. Per-line chunks conservatively include
+        // more frame overhead than a pipe joining neighboring short lines.
+        for chunk in run_output::event_line(&event).chunks(16_384) {
+            encoded_bytes += serde_json::to_vec(&Event::Output {
+                stderr: false,
+                data: STANDARD.encode(chunk),
+            })
+            .unwrap()
+            .len()
+                + 1;
+        }
+        if event["item"]["type"] == "agent_message"
+            && text(&event["item"], "id").starts_with("reply-")
+        {
+            snapshots += usize::from(event["type"] == "item.updated");
+            if event["type"] == "item.completed" {
+                completed_text = Some(text(&event["item"], "text").to_owned());
+            }
+        }
+        completed_turn |= event["type"] == "turn.completed";
+    }
+    task.await.unwrap().unwrap();
+    assert_eq!(completed_text.as_deref(), Some(answer.as_str()));
+    assert!(completed_turn);
+    assert!(snapshots > 1, "The answer must remain streamed.");
+    assert!(
+        encoded_bytes < 8 * 1024 * 1024,
+        "24KB answer amplified into {encoded_bytes} native log bytes ({snapshots} snapshots)."
+    );
+}
+
+#[tokio::test]
+async fn idle_text_tail_reaches_live_consumers_before_they_release_more_output() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let limit = root.path().join("stream-limit");
+    std::fs::write(&limit, "5").unwrap();
+    let config = config(&root);
+    let turn = plan(&root, &format!("fixture:stream-limit:{}", limit.display()));
+    let stop = CancellationToken::new();
+    let stopping = stop.clone();
+    let (tx, mut rx) = mpsc::channel(64);
+    let task =
+        tokio::spawn(async move { chat_process::run(&config, &home, turn, tx, stopping).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = rx.recv().await.unwrap();
+            assert_ne!(event["type"], "turn.failed");
+            if event["type"] == "item.updated" && text(&event["item"], "text").ends_with(" 005") {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("A paused stream's last20freshbytes must become visible without more provider output.");
+    // The existing live/reconnect browser fixture waits for005 before releasing
+    // more text. Stop this isolated turn after proving that same boundary.
+    stop.cancel();
+    while rx.recv().await.is_some() {}
+    assert_eq!(
+        task.await.unwrap().unwrap_err().message,
+        "Conversation stopped."
+    );
+}
+
+#[tokio::test]
+async fn partial_utf8_text_is_flushed_before_provider_failure_and_eof() {
+    for terminal in ["failed", "eof"] {
+        let root = TempDir::new().unwrap();
+        let home = prepare(&root);
+        let answer = "é🌱\n\"fin\"";
+        std::fs::write(
+            home.join("fixture-text-stream.json"),
+            json!({ "text": answer, "deltaCharacters": 1, "terminal": terminal }).to_string(),
+        )
+        .unwrap();
+        let config = config(&root);
+        let turn = plan(&root, "fixture:bounded-text-stream");
+        let (tx, mut rx) = mpsc::channel(64);
+        let task = tokio::spawn(async move {
+            chat_process::run(&config, &home, turn, tx, CancellationToken::new()).await
+        });
+        let mut partial = String::new();
+        let mut failed = false;
+        while let Some(event) = rx.recv().await {
+            if event["type"] == "item.updated" && text(&event["item"], "id").starts_with("reply-") {
+                assert!(!failed, "Pending text must precede the failure marker.");
+                partial = text(&event["item"], "text").to_owned();
+            }
+            failed |= event["type"] == "turn.failed";
+            assert_ne!(event["type"], "turn.completed");
+        }
+        assert!(task.await.unwrap().is_err());
+        assert_eq!(partial, answer, "{terminal}");
+        assert_eq!(failed, terminal == "failed");
+    }
+}
+
+#[tokio::test]
+async fn cancellation_flushes_accepted_text_that_has_not_reached_a_snapshot_boundary() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let answer = "é🌱\n\"fin\"";
+    std::fs::write(
+        home.join("fixture-text-stream.json"),
+        json!({ "text": answer, "deltaCharacters": 1, "terminal": "cancel" }).to_string(),
+    )
+    .unwrap();
+    let config = config(&root);
+    let turn = plan(&root, "fixture:bounded-text-stream");
+    let stop = CancellationToken::new();
+    let stopping = stop.clone();
+    let processed = home.join("fixture-text-stream-processed");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task =
+        tokio::spawn(async move { chat_process::run(&config, &home, turn, tx, stopping).await });
+    let first = loop {
+        let event = rx.recv().await.unwrap();
+        if event["type"] == "item.updated" && text(&event["item"], "id").starts_with("reply-") {
+            break text(&event["item"], "text").to_owned();
+        }
+    };
+    assert_eq!(first, "é");
+    common::eventually(
+        Duration::from_secs(5),
+        Duration::from_millis(10),
+        async || processed.exists().then_some(()),
+    )
+    .await;
+    stop.cancel();
+    let mut latest = first;
+    while let Some(event) = rx.recv().await {
+        if event["type"] == "item.updated" && text(&event["item"], "id").starts_with("reply-") {
+            latest = text(&event["item"], "text").to_owned();
+        }
+        assert_ne!(event["type"], "turn.completed");
+    }
+    assert!(task.await.unwrap().is_err());
+    assert_eq!(latest, answer);
+}
+
+#[tokio::test]
+async fn interleaved_message_items_keep_their_latest_text_in_order() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let updates = json!([
+        { "item": "a", "delta": "A" },
+        { "item": "a", "delta": "é" },
+        { "item": "b", "delta": "B" },
+        { "item": "b", "delta": "🌱" },
+        { "item": "a", "delta": "!" },
+    ]);
+    std::fs::write(
+        home.join("fixture-text-stream.json"),
+        json!({ "text": "Done", "updates": updates }).to_string(),
+    )
+    .unwrap();
+    let config = config(&root);
+    let turn = plan(&root, "fixture:bounded-text-stream");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, turn, tx, CancellationToken::new()).await
+    });
+    let mut received = Vec::new();
+    while let Some(event) = rx.recv().await {
+        let item = &event["item"];
+        if event["type"] == "item.updated" && text(item, "id").starts_with("reply-") {
+            let suffix = text(item, "id").rsplit(':').next().unwrap().to_owned();
+            received.push((suffix, text(item, "text").to_owned()));
+        }
+    }
+    task.await.unwrap().unwrap();
+    assert_eq!(
+        received,
+        [
+            ("a", "A"),
+            ("a", "Aé"),
+            ("b", "B"),
+            ("b", "B🌱"),
+            ("a", "Aé!")
+        ]
+        .map(|(id, text)| (id.to_owned(), text.to_owned()))
+    );
+}
+
 /// Runs one turn to completion while discarding its events.
 async fn run_quietly(config: &Config, home: &Path, plan: Value) {
     let (tx, mut rx) = mpsc::channel(64);

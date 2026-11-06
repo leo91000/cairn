@@ -14,13 +14,17 @@ use std::{
     path::Path,
     time::Duration,
 };
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 pub mod resident;
+mod streamed_text;
+
+use streamed_text::StreamedText;
 
 const STOPPED: &str = "Conversation stopped.";
 const MAX_MESSAGE: usize = 5_000_000;
+const TEXT_IDLE_FLUSH: Duration = Duration::from_millis(250);
 
 /// A Codex thread item as a chat item: snake_case names, as the conversation events use.
 /// `planning` is a Cairn plan turn, whose boundary Cairn enforces.
@@ -238,7 +242,9 @@ struct Chat<'a> {
     seen: HashSet<String>,
     attempted: HashSet<String>,
     turn_submitted: bool,
-    texts: HashMap<String, String>,
+    texts: HashMap<String, StreamedText>,
+    /// Only the latest cumulative update is pending; switching items flushes it.
+    pending_text: Option<(String, Option<String>, Instant)>,
     /// Subagents this conversation started, by the ID of the item that started them.
     subagents: HashMap<String, Value>,
     /// The subagent each spawned thread works for.
@@ -279,11 +285,18 @@ impl Chat<'_> {
         Ok(())
     }
 
-    async fn emit(&self, value: Value) -> Result<()> {
+    async fn send(&self, value: Value) -> Result<()> {
         self.events
             .send(value)
             .await
             .map_err(|_| Error::unavailable("Conversation output stopped."))
+    }
+
+    async fn emit(&mut self, value: Value) -> Result<()> {
+        // Only a visible event is a causal boundary. Ignored provider output
+        // notifications and foreign threads cannot force extra text snapshots.
+        self.flush_text().await?;
+        self.send(value).await
     }
 
     async fn acknowledge(&mut self, id: &str) -> Result<()> {
@@ -578,18 +591,7 @@ impl Chat<'_> {
                     text(params, "turnId"),
                     text(params, "itemId")
                 );
-                let value = self.texts.entry(id.clone()).or_default();
-                if value.len() + text(params, "delta").len() > MAX_MESSAGE {
-                    return Ok(());
-                }
-                value.push_str(text(params, "delta"));
-                let item = json!({
-                    "id": id,
-                    "type": "subagent_message",
-                    "text": value,
-                    "parent_id": parent,
-                });
-                self.emit(json!({ "type": "item.updated", "item": item }))
+                self.text_delta(&id, Some(parent), text(params, "delta"))
                     .await
             }
             "turn/plan/updated" => {
@@ -622,20 +624,65 @@ impl Chat<'_> {
     }
 
     async fn message_delta(&mut self, params: &Value) -> Result<()> {
-        let delta = text(params, "delta");
-        let value = self
-            .texts
-            .entry(text(params, "itemId").to_owned())
-            .or_default();
+        self.text_delta(text(params, "itemId"), None, text(params, "delta"))
+            .await
+    }
+
+    async fn text_delta(&mut self, id: &str, parent: Option<&str>, delta: &str) -> Result<()> {
+        if delta.is_empty() {
+            return Ok(());
+        }
+        if self
+            .pending_text
+            .as_ref()
+            .is_some_and(|pending| pending.0 != id)
+        {
+            self.flush_text().await?;
+        }
+        let value = self.texts.entry(id.to_owned()).or_default();
         if value.len() + delta.len() > MAX_MESSAGE {
+            if parent.is_some() {
+                return Ok(());
+            }
             return Err(Error::bad_gateway(
                 "Conversation output exceeded the supported limit.",
             ));
         }
-        value.push_str(delta);
-        let item = json!({ "id": params["itemId"], "type": "agent_message", "text": value });
-        self.emit(json!({ "type": "item.updated", "item": item }))
+        value.append(delta);
+        let ready = value.ready();
+        self.pending_text = Some((id.to_owned(), parent.map(str::to_owned), Instant::now()));
+        if ready {
+            self.flush_text().await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_text(&mut self) -> Result<()> {
+        let Some((id, parent, _)) = self.pending_text.take() else {
+            return Ok(());
+        };
+        let value = self.texts.get_mut(&id).unwrap().publish();
+        let kind = if parent.is_some() {
+            "subagent_message"
+        } else {
+            "agent_message"
+        };
+        let mut item = json!({
+            "id": id,
+            "type": kind,
+            "text": value,
+        });
+        if let Some(parent) = parent {
+            item["parent_id"] = parent.into();
+        }
+        self.send(json!({ "type": "item.updated", "item": item }))
             .await
+    }
+
+    fn text_flush_deadline(&self) -> Option<Instant> {
+        self.pending_text
+            .as_ref()
+            .map(|pending| pending.2 + TEXT_IDLE_FLUSH)
     }
 
     async fn incoming(&mut self, incoming: Incoming) -> Result<()> {
@@ -645,6 +692,7 @@ impl Chat<'_> {
         let params = incoming.params;
         if let Some(request_id) = incoming.id {
             if incoming.method == "item/tool/requestUserInput" {
+                self.flush_text().await?;
                 return self
                     .session
                     .rpc
@@ -704,9 +752,13 @@ impl Chat<'_> {
         let request = rpc.request(method, params);
         tokio::pin!(request);
         loop {
+            let flush_at = self.text_flush_deadline();
             tokio::select! {
                 () = self.cancel.cancelled() => return Err(Error::conflict(STOPPED)),
                 result = &mut request => return result,
+                () = tokio::time::sleep_until(flush_at.unwrap_or_else(Instant::now)), if flush_at.is_some() => {
+                    self.flush_text().await?;
+                }
                 incoming = self.session.incoming.recv() => {
                     let Some(incoming) = incoming else {
                         return Err(self.session.rpc.failure().await);
@@ -1144,8 +1196,12 @@ impl Chat<'_> {
         let mut interval = tokio::time::interval(Duration::from_millis(250));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         while self.completed.is_none() {
+            let flush_at = self.text_flush_deadline();
             tokio::select! {
                 () = self.cancel.cancelled() => return Err(Error::conflict(STOPPED)),
+                () = tokio::time::sleep_until(flush_at.unwrap_or_else(Instant::now)), if flush_at.is_some() => {
+                    self.flush_text().await?;
+                }
                 incoming = self.session.incoming.recv() => {
                     let Some(incoming) = incoming else {
                         return Err(self.session.rpc.failure().await);
@@ -1228,7 +1284,7 @@ impl Chat<'_> {
         Ok(())
     }
 
-    async fn finish(&self, plan: &Value) -> Result<()> {
+    async fn finish(&mut self, plan: &Value) -> Result<()> {
         atomic_write(
             Path::new(text(plan, "output")),
             self.last_message.as_bytes(),
@@ -1327,6 +1383,7 @@ async fn run_session(
         attempted: HashSet::new(),
         turn_submitted: false,
         texts: HashMap::new(),
+        pending_text: None,
         subagents: HashMap::new(),
         children: HashMap::new(),
         context: None,
@@ -1336,6 +1393,13 @@ async fn run_session(
         starting_items: None,
     };
     let mut result = chat.execute(&plan).await;
+    // EOF, cancellation and transport errors can end without another provider
+    // notification. Preserve the last accepted text before reporting the failure.
+    if let Err(error) = chat.flush_text().await
+        && result.is_ok()
+    {
+        result = Err(error);
+    }
     if let Err(error) = &result
         && !chat.turn_submitted
         && let Some(failure) = crate::run_retry::startup_failure(error)

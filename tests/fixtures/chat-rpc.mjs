@@ -107,6 +107,13 @@ export function chatFixture() {
 
   const handle = (request) => {
     const { method, params } = request
+    if (!method && request.id === 'text-stream-barrier') {
+      if (!request.error)
+        throw new Error('The private fixture request must be rejected')
+      writeFileSync(path.join(process.env.CODEX_HOME, 'fixture-text-stream-processed'), '')
+      return true
+    }
+
     if (!method && request.id === 'auth-refresh') {
       if (!request.result?.accessToken?.endsWith('-refreshed') || request.result.chatgptAccountId !== globalThis.fixtureAccountId || request.result.refresh_token)
         throw new Error('Invalid external token refresh')
@@ -291,6 +298,52 @@ export function chatFixture() {
       }
 
       const text = params.input[0].text
+
+      if (text === 'fixture:bounded-text-stream') {
+        const control = JSON.parse(readFileSync(path.join(process.env.CODEX_HOME, 'fixture-text-stream.json'), 'utf8'))
+        const id = `reply-${thread.fixtureGeneration || 'legacy'}-${active.id}`
+        notify('item/started', { threadId: thread.id, item: { id, type: 'agentMessage', text: '' } })
+        const characters = Array.from(control.text)
+        const updates = control.updates ?? []
+        for (let offset = 0; !control.updates && offset < characters.length; offset += control.deltaCharacters)
+          updates.push({ delta: characters.slice(offset, offset + control.deltaCharacters).join('') })
+        for (const update of updates) {
+          notify('item/agentMessage/delta', {
+            threadId: thread.id,
+            itemId: update.item ? `${id}:${update.item}` : id,
+            delta: update.delta,
+          })
+          if (control.ignoredNoise) {
+            notify('item/commandExecution/outputDelta', { threadId: thread.id, itemId: 'background-command', delta: 'not a supported activity event' })
+            notify('item/started', { threadId: 'foreign-thread', item: { id: 'foreign-item', type: 'agentMessage', text: 'not our conversation' } })
+          }
+        }
+
+        if (control.terminal === 'failed') {
+          active.status = 'failed'
+          active.error = { message: 'Fixture text stream failed' }
+          save()
+          notify('turn/completed', { threadId: thread.id, turn: active })
+          active = null
+          return true
+        }
+
+        if (control.terminal === 'eof') {
+          process.stdout.write('', () => process.exit(0))
+          return true
+        }
+
+        if (control.terminal === 'cancel') {
+          // Rejection proves the adapter consumed every preceding delta. This
+          // private request produces no conversation event or text flush.
+          emit({ id: 'text-stream-barrier', method: 'fixture/text-stream-barrier', params: {} })
+          return true
+        }
+
+        completionText = control.text
+        finish()
+        return true
+      }
 
       const marker = path.join(process.env.CODEX_HOME, 'fixture-restart.json')
       if (text.includes('fixture:restart') || (resumed && existsSync(marker))) {
