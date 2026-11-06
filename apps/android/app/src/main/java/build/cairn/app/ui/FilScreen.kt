@@ -20,10 +20,12 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -907,9 +909,12 @@ private fun FoldRow(fold: FeedEntry.Fold, open: Boolean, now: Long, toggle: () -
 
 /** A finished result's opening, read without opening the work, which stays unread. */
 @Composable
-private fun PeekSheet(item: FeedItem, now: Long, close: () -> Unit, open: () -> Unit) {
+internal fun PeekSheet(item: FeedItem, now: Long, close: () -> Unit, open: () -> Unit) {
     ModalBottomSheet(onDismissRequest = close, modifier = Modifier.testTag("fil-peek")) {
-        Column(Modifier.padding(start = 24.dp, end = 24.dp, bottom = 24.dp)) {
+        Column(
+            Modifier.verticalScroll(rememberScrollState())
+                .padding(start = 24.dp, end = 24.dp, bottom = 24.dp)
+        ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 AgentAvatar(item.agent, item.agentKey.ifBlank { item.agent }, 24.dp)
                 Spacer(Modifier.width(10.dp))
