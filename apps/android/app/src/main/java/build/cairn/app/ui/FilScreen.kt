@@ -1,34 +1,70 @@
+@file:OptIn(
+    androidx.compose.material3.ExperimentalMaterial3Api::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+)
+
 package build.cairn.app.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import build.cairn.app.R
 import build.cairn.app.data.*
@@ -104,6 +140,8 @@ internal data class FeedItem(
     val project: String? = null,
     val unread: Boolean = kind == FeedKind.UNREAD_CHAT || kind == FeedKind.UNREAD_TASK,
     val readAt: Long = stamp,
+    /** It finished as expected: its row shows no status label, only a quiet mark. */
+    val finished: Boolean = false,
 ) {
     /** Only a blocked outcome can be dismissed; input the agent asked for can only be snoozed. */
     val dismissible
@@ -291,16 +329,21 @@ internal fun buildFeed(
                     unreadNow("chat:${chat.id}", chat.readAt ?: chat.finishedAt) ->
                     toRead +=
                         item(FeedKind.UNREAD_CHAT, context(agent, chat.projectName))
-                            .copy(stamp = chat.finishedAt ?: chat.updatedAt, preview = chat.preview)
+                            .copy(
+                                stamp = chat.finishedAt ?: chat.updatedAt,
+                                preview = chat.preview,
+                                finished = chat.status == "succeeded",
+                            )
                 else ->
                     recent +=
                         item(
-                            FeedKind.CHAT,
-                            if (chat.paused) "En pause · ${context(agent, chat.projectName)}"
-                            else if (chat.status == "succeeded")
-                                "Terminée · ${context(agent, chat.projectName)}"
-                            else context(agent, chat.projectName),
-                        )
+                                FeedKind.CHAT,
+                                if (chat.paused) "En pause · ${context(agent, chat.projectName)}"
+                                else if (chat.status == "succeeded")
+                                    "Terminée · ${context(agent, chat.projectName)}"
+                                else context(agent, chat.projectName),
+                            )
+                            .copy(finished = !chat.paused && chat.status == "succeeded")
             }
         }
     val names = tasks.associateBy { it.id }
@@ -427,10 +470,13 @@ internal fun buildFeed(
                 run.status == "succeeded" &&
                     run.unread &&
                     unreadNow("task:${run.taskId}", run.finishedAt) ->
-                    toRead += item(FeedKind.UNREAD_TASK, "Mission terminée · $agent")
+                    toRead +=
+                        item(FeedKind.UNREAD_TASK, "Mission terminée · $agent")
+                            .copy(finished = true, preview = run.preview)
                 else ->
                     recent +=
-                        item(FeedKind.UNREAD_TASK, "Mission terminée · $agent").copy(unread = false)
+                        item(FeedKind.UNREAD_TASK, "Mission terminée · $agent")
+                            .copy(unread = false, finished = run.status == "succeeded")
             }
         }
     return Feed(
@@ -442,8 +488,82 @@ internal fun buildFeed(
     )
 }
 
+/**
+ * Rows in reading order, each delegated conversation or mission right below the work that started
+ * it when both are listed. One that started without its requester in the list stays in place and
+ * names it instead. The second value tells whether the row is nested.
+ */
+internal fun threadFeed(items: List<FeedItem>): List<Pair<FeedItem, Boolean>> {
+    val byChat = items.filter { it.chatId != null }.associateBy { it.chatId }
+    val byRun = items.filter { it.runId != null }.associateBy { it.runId }
+    val childrenOf = mutableMapOf<String, MutableList<FeedItem>>()
+    val roots = mutableListOf<FeedItem>()
+    items.forEach { item ->
+        val parent =
+            item.requester?.let { requester ->
+                requester.chatId?.let { byChat[it] } ?: requester.runId?.let { byRun[it] }
+            }
+        if (parent != null && parent.key != item.key)
+            childrenOf.getOrPut(parent.key) { mutableListOf() } += item
+        else roots += item
+    }
+
+    val rows = mutableListOf<Pair<FeedItem, Boolean>>()
+    val placed = mutableSetOf<String>()
+    fun place(item: FeedItem, nested: Boolean) {
+        if (!placed.add(item.key)) return
+        rows += item to nested
+        childrenOf[item.key]?.forEach { place(it, true) }
+    }
+    roots.forEach { place(it, false) }
+    // A requester cycle has no root: keep those rows rather than losing them.
+    items.forEach { place(it, false) }
+    return rows
+}
+
+/** A Fil row, or a run of quiet missions folded into one. */
+internal sealed interface FeedEntry {
+    data class Line(val item: FeedItem, val nested: Boolean) : FeedEntry
+
+    data class Fold(val items: List<FeedItem>) : FeedEntry {
+        val key
+            get() = "fold:${items.first().key}"
+    }
+}
+
+/**
+ * Folds consecutive missions that finished as expected and were read into one row, so that
+ * scheduled checks stop crowding the work worth reading. A lone one, a mission with delegated work
+ * below it, and nested rows stay as they are.
+ */
+internal fun foldFeed(rows: List<Pair<FeedItem, Boolean>>): List<FeedEntry> {
+    fun quiet(index: Int): Boolean {
+        val (item, nested) = rows[index]
+        return !nested &&
+            item.taskId != null &&
+            item.finished &&
+            !item.unread &&
+            rows.getOrNull(index + 1)?.second != true
+    }
+
+    val entries = mutableListOf<FeedEntry>()
+    var index = 0
+    while (index < rows.size) {
+        var end = index
+        while (end < rows.size && quiet(end)) end++
+        if (end - index >= 2) {
+            entries += FeedEntry.Fold(rows.subList(index, end).map { it.first })
+            index = end
+        } else {
+            entries += FeedEntry.Line(rows[index].first, rows[index].second)
+            index++
+        }
+    }
+    return entries
+}
+
 /** The Fil in reading order, one key per item: what a swipe between pages moves through. */
-internal fun Feed.keys() = all.map { it.key }
+internal fun Feed.keys() = threadFeed(all).map { (item, _) -> item.key }
 
 /** The shell and its pages share one conversation stream and one mission poll. */
 internal data class FilSnapshot(val conversations: LiveSnapshot, val activity: List<Run>?)
@@ -529,6 +649,12 @@ fun FilScreen(
     val feed = buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads, now)
     var selectedView by rememberSaveable { mutableIntStateOf(0) }
     var filter by rememberSaveable { mutableStateOf("") }
+    // The filter opens on demand and stays open while it holds a query.
+    var searchOpen by rememberSaveable { mutableStateOf(false) }
+    var unfolded by rememberSaveable { mutableStateOf(listOf<String>()) }
+    // A finished result previewed by a long press, without opening or reading it.
+    var peeked by remember { mutableStateOf<FeedItem?>(null) }
+    val searching = searchOpen || filter.isNotEmpty()
     val views = listOf(feed.unread, feed.ongoing, feed.all)
     val query = filter.trim()
     val visible =
@@ -567,6 +693,12 @@ fun FilScreen(
             item.runId != null -> openRun(item.runId)
         }
     }
+    peeked?.let { item ->
+        PeekSheet(item, now, close = { peeked = null }) {
+            peeked = null
+            open(item)
+        }
+    }
     LazyColumn(
         Modifier.fillMaxSize().testTag("fil"),
         contentPadding = PaddingValues(bottom = 24.dp),
@@ -580,39 +712,34 @@ fun FilScreen(
                     account = openAccount,
                 )
                 Spacer(Modifier.height(12.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("Fil", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-                    if (feed.unread.isNotEmpty())
-                        RoundAction(
-                            "Tout marquer comme lu",
-                            CairnIcons.Check,
-                            Modifier.testTag("read-all"),
-                            size = 36.dp,
-                        ) {
-                            vm.markRead(feed.unread.map { it.read })
-                        }
-                }
-                OutlinedTextField(
-                    value = filter,
-                    onValueChange = { filter = it },
-                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-                    placeholder = { Text("Filtrer le fil") },
-                    singleLine = true,
+                FilHeader(
+                    working = feed.running.filter { it.working }.distinctBy { it.agentKey },
+                    unread = feed.unread.isNotEmpty(),
+                    searching = searching,
+                    toggleSearch = {
+                        if (searching) {
+                            filter = ""
+                            searchOpen = false
+                        } else searchOpen = true
+                    },
+                    showOngoing = { selectedView = 1 },
+                    readAll = { vm.markRead(feed.unread.map { it.read }) },
                 )
-                PrimaryTabRow(selectedTabIndex = selectedView) {
-                    listOf("À lire", "En cours", "Tout").forEachIndexed { index, label ->
-                        Tab(
-                            selected = selectedView == index,
-                            onClick = { selectedView = index },
-                            text = {
-                                Text(
-                                    if (index < 2 && views[index].isNotEmpty())
-                                        "$label ${views[index].size}"
-                                    else label
-                                )
-                            },
-                        )
-                    }
+                FilSearch(
+                    searching,
+                    filter,
+                    { filter = it },
+                    close = {
+                        filter = ""
+                        searchOpen = false
+                    },
+                )
+                FilViews(
+                    listOf("À lire", "En cours", "Tout"),
+                    listOf(views[0].size, views[1].size, null),
+                    selectedView,
+                ) {
+                    selectedView = it
                 }
                 if (chats == null)
                     LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 12.dp))
@@ -639,12 +766,45 @@ fun FilScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-        items(visible, key = { it.key }) { item ->
+        // Quiet missions fold together, except while filtering, which looks for each row.
+        val rows = threadFeed(visible)
+        val entries =
+            if (query.isEmpty()) foldFeed(rows)
+            else rows.map { (item, nested) -> FeedEntry.Line(item, nested) }
+        val lines = entries.flatMap { entry ->
+            when (entry) {
+                is FeedEntry.Line -> listOf(entry)
+                is FeedEntry.Fold ->
+                    listOf(entry) +
+                        if (entry.key in unfolded)
+                            entry.items.map { FeedEntry.Line(it, nested = true) }
+                        else emptyList()
+            }
+        }
+        items(
+            lines,
+            key = {
+                when (it) {
+                    is FeedEntry.Line -> it.item.key
+                    is FeedEntry.Fold -> it.key
+                }
+            },
+        ) { line ->
+            if (line is FeedEntry.Fold) {
+                FoldRow(line, line.key in unfolded, now) {
+                    unfolded =
+                        if (line.key in unfolded) unfolded - line.key else unfolded + line.key
+                }
+                return@items
+            }
+            val (item, nested) = line as FeedEntry.Line
             FeedRow(
                 item,
                 { open(item) },
                 onDelete = item.chatId?.let { id -> { trash.trash(id) } },
                 now = now,
+                nested = nested,
+                onPeek = item.preview?.ifBlank { null }?.let { { peeked = item } },
             ) {
                 ForYouAction(
                     item,
@@ -657,6 +817,333 @@ fun FilScreen(
                     snooze = { setAside(item, tomorrowMorning(now)) },
                     archive = { archive(item) },
                 )
+            }
+        }
+    }
+}
+
+/** Quiet missions folded into one row: two stacked avatars, their count and names. */
+@Composable
+private fun FoldRow(fold: FeedEntry.Fold, open: Boolean, now: Long, toggle: () -> Unit) {
+    val rotation by
+        androidx.compose.animation.core.animateFloatAsState(
+            if (open) 180f else 0f,
+            tween(200),
+            label = "fil-fold",
+        )
+    Surface(
+        onClick = toggle,
+        color = Color.Transparent,
+        modifier =
+            Modifier.fillMaxWidth().testTag("fil-fold").semantics {
+                stateDescription = if (open) "Déplié" else "Replié"
+            },
+    ) {
+        Row(
+            Modifier.widthIn(max = 760.dp)
+                .heightIn(min = 56.dp)
+                .padding(start = 22.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(28.dp)) {
+                Box(Modifier.align(Alignment.TopStart).alpha(0.8f)) {
+                    AgentAvatar(
+                        fold.items[1].agent,
+                        fold.items[1].agentKey.ifBlank { fold.items[1].agent },
+                        19.dp,
+                    )
+                }
+                Box(
+                    Modifier.align(Alignment.BottomEnd)
+                        .background(MaterialTheme.colorScheme.background, RoundedCornerShape(7.dp))
+                        .padding(1.5.dp)
+                ) {
+                    AgentAvatar(
+                        fold.items[0].agent,
+                        fold.items[0].agentKey.ifBlank { fold.items[0].agent },
+                        19.dp,
+                    )
+                }
+            }
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "${fold.items.size} missions terminées",
+                        Modifier.weight(1f),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Stamp(fold.items.first().stamp, now)
+                }
+                Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        CairnIcons.Retry,
+                        null,
+                        Modifier.size(12.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        fold.items.joinToString(" · ") { it.title },
+                        Modifier.weight(1f).padding(start = 4.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            // Where other rows have their actions, so times line up.
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                Icon(
+                    CairnIcons.Down,
+                    null,
+                    Modifier.size(20.dp).rotate(rotation),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+/** A finished result's opening, read without opening the work, which stays unread. */
+@Composable
+internal fun PeekSheet(item: FeedItem, now: Long, close: () -> Unit, open: () -> Unit) {
+    ModalBottomSheet(
+        onDismissRequest = close,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        modifier = Modifier.testTag("fil-peek"),
+    ) {
+        Column(
+            Modifier.verticalScroll(rememberScrollState())
+                .padding(start = 24.dp, end = 24.dp, bottom = 24.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AgentAvatar(item.agent, item.agentKey.ifBlank { item.agent }, 24.dp)
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    listOfNotNull(item.agent, item.project?.ifBlank { null }).joinToString(" · "),
+                    Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Stamp(item.stamp, now)
+            }
+            Text(
+                item.title,
+                Modifier.padding(top = 12.dp),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                item.preview.orEmpty(),
+                Modifier.padding(top = 8.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 12,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                "Reste non lu jusqu’à l’ouverture.",
+                Modifier.padding(top = 12.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            androidx.compose.material3.Button(
+                onClick = open,
+                modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+            ) {
+                Text("Ouvrir")
+            }
+        }
+    }
+}
+
+/** The Fil's title, the agents at work, and its filter and read-all actions. */
+@Composable
+private fun FilHeader(
+    working: List<FeedItem>,
+    unread: Boolean,
+    searching: Boolean,
+    toggleSearch: () -> Unit,
+    showOngoing: () -> Unit,
+    readAll: () -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            "Fil",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+        )
+        if (working.isNotEmpty()) {
+            Spacer(Modifier.width(10.dp))
+            Surface(
+                onClick = showOngoing,
+                shape = RoundedCornerShape(50),
+                color = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.testTag("fil-at-work"),
+            ) {
+                Row(
+                    Modifier.padding(start = 3.dp, end = 10.dp, top = 3.dp, bottom = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    working.take(3).forEachIndexed { index, item ->
+                        Box(
+                            Modifier.offset(x = (-6 * index).dp)
+                                .background(
+                                    MaterialTheme.colorScheme.primaryContainer,
+                                    RoundedCornerShape(7.dp),
+                                )
+                                .padding(1.5.dp)
+                        ) {
+                            AgentAvatar(item.agent, item.agentKey.ifBlank { item.agent }, 20.dp)
+                        }
+                    }
+                    Text(
+                        "${working.size} au travail",
+                        Modifier.offset(x = (-6 * (minOf(working.size, 3) - 1)).dp)
+                            .padding(start = 6.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.weight(1f))
+        RoundAction(
+            "Filtrer le fil",
+            CairnIcons.Search,
+            Modifier.testTag("fil-search"),
+            container =
+                if (searching) MaterialTheme.colorScheme.secondaryContainer
+                else MaterialTheme.colorScheme.surface,
+            size = 36.dp,
+            onClick = toggleSearch,
+        )
+        if (unread) {
+            Spacer(Modifier.width(6.dp))
+            RoundAction(
+                "Tout marquer comme lu",
+                CairnIcons.Check,
+                Modifier.testTag("read-all"),
+                size = 36.dp,
+                onClick = readAll,
+            )
+        }
+    }
+}
+
+/** The filter field, which unfolds from the header when the user asks to filter. */
+@Composable
+private fun FilSearch(
+    open: Boolean,
+    value: String,
+    change: (String) -> Unit,
+    close: () -> Unit,
+) {
+    val focus = remember { FocusRequester() }
+    AnimatedVisibility(
+        open,
+        enter =
+            expandVertically(tween(220)) +
+                fadeIn(tween(220)) +
+                slideInVertically(tween(220)) { -it / 3 },
+        exit = shrinkVertically(tween(180)) + fadeOut(tween(140)),
+    ) {
+        LaunchedEffect(Unit) { focus.requestFocus() }
+        OutlinedTextField(
+            value = value,
+            onValueChange = change,
+            modifier = Modifier.fillMaxWidth().padding(top = 12.dp).focusRequester(focus),
+            placeholder = { Text("Titre, agent ou projet") },
+            leadingIcon = { Icon(CairnIcons.Search, null, Modifier.size(18.dp)) },
+            trailingIcon = {
+                androidx.compose.material3.IconButton(onClick = close) {
+                    Icon(CairnIcons.Close, "Fermer le filtre", Modifier.size(18.dp))
+                }
+            },
+            shape = RoundedCornerShape(50),
+            singleLine = true,
+        )
+    }
+}
+
+/** À lire / En cours / Tout as a segmented control whose selection slides between views. */
+@Composable
+private fun FilViews(
+    labels: List<String>,
+    counts: List<Int?>,
+    selected: Int,
+    select: (Int) -> Unit,
+) {
+    BoxWithConstraints(
+        Modifier.fillMaxWidth()
+            .padding(top = 12.dp)
+            .background(
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                RoundedCornerShape(14.dp),
+            )
+            .padding(4.dp)
+            .selectableGroup()
+    ) {
+        val width = maxWidth / labels.size
+        val offset by animateDpAsState(width * selected, tween(220), label = "fil-view")
+        val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+        Box(
+            Modifier.offset(x = offset)
+                .width(width)
+                .height(36.dp)
+                .shadow(1.dp, RoundedCornerShape(10.dp))
+                .background(
+                    if (dark) MaterialTheme.colorScheme.surfaceContainerHighest
+                    else MaterialTheme.colorScheme.surface,
+                    RoundedCornerShape(10.dp),
+                )
+                .border(
+                    1.dp,
+                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    RoundedCornerShape(10.dp),
+                )
+        )
+        Row {
+            labels.forEachIndexed { index, label ->
+                val count = counts[index]?.takeIf { it > 0 }
+                val accent = MaterialTheme.colorScheme.primary
+                Box(
+                    Modifier.weight(1f).height(36.dp).clip(RoundedCornerShape(10.dp)).selectable(
+                        selected == index,
+                        role = Role.Tab,
+                    ) {
+                        select(index)
+                    },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        buildAnnotatedString {
+                            append(label)
+                            if (count != null) {
+                                append(" ")
+                                withStyle(
+                                    SpanStyle(
+                                        color = if (index == 0) accent else Color.Unspecified,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                ) {
+                                    append("$count")
+                                }
+                            }
+                        },
+                        style = MaterialTheme.typography.labelLarge,
+                        color =
+                            if (selected == index) MaterialTheme.colorScheme.onSurface
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
@@ -803,49 +1290,139 @@ internal fun Wordmark() {
     }
 }
 
+/** The agent's avatar with what the row asks for in its corner; finished work stays quiet. */
+@Composable
+private fun FilAvatar(item: FeedItem, size: androidx.compose.ui.unit.Dp) {
+    Box {
+        AgentAvatar(item.agent, item.agentKey.ifBlank { item.agent }, size)
+        if (!item.finished)
+            Box(
+                Modifier.align(Alignment.BottomEnd)
+                    .offset(5.dp, 4.dp)
+                    .background(MaterialTheme.colorScheme.background, CircleShape)
+                    .padding(1.dp)
+            ) {
+                StatusMark(item)
+            }
+    }
+}
+
+/** The row's status glyph, coloured like its label: quiet once the work finished as expected. */
+@Composable
+private fun StatusMark(item: FeedItem) {
+    val (icon, tint) =
+        when {
+            item.kind == FeedKind.QUESTION ||
+                (item.kind == FeedKind.REVIEW_TASK && item.outcome == "needs_input") ->
+                CairnIcons.CircleAlert to signal.answer
+            item.kind == FeedKind.RECONNECT -> CairnIcons.CircleAlert to signal.warning
+            item.kind == FeedKind.FAILED_CHAT || item.kind == FeedKind.FAILED_TASK ->
+                CairnIcons.CircleX to signal.attention
+            item.kind == FeedKind.REVIEW_TASK -> CairnIcons.CirclePause to signal.warning
+            item.kind == FeedKind.RUNNING_CHAT || item.kind == FeedKind.RUNNING_TASK ->
+                CairnIcons.CircleProgress to MaterialTheme.colorScheme.primary
+            item.kind == FeedKind.WAITING_CHAT ||
+                item.kind == FeedKind.WAITING_TASK ||
+                item.kind == FeedKind.SNOOZED_TASK ->
+                CairnIcons.Clock to MaterialTheme.colorScheme.primary
+            item.kind == FeedKind.SET_ASIDE_TASK ->
+                CairnIcons.Hourglass to MaterialTheme.colorScheme.onSurfaceVariant
+            item.finished ->
+                (if (item.taskId != null) CairnIcons.Retry else CairnIcons.CircleCheck) to
+                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+            item.kind == FeedKind.CHAT && item.statusLabel == "En pause" ->
+                CairnIcons.CirclePause to MaterialTheme.colorScheme.onSurfaceVariant
+            else -> CairnIcons.Circle to MaterialTheme.colorScheme.onSurfaceVariant
+        }
+    Icon(
+        icon,
+        contentDescription = item.statusLabel,
+        modifier = Modifier.size(14.dp).testTag("fil-mark"),
+        tint = tint,
+    )
+}
+
 @Composable
 private fun FeedRow(
     item: FeedItem,
     onClick: () -> Unit,
     onDelete: (() -> Unit)? = null,
     now: Long,
+    nested: Boolean = false,
+    /** Previews a finished result without opening it. */
+    onPeek: (() -> Unit)? = null,
     trailing: @Composable () -> Unit,
 ) {
+    val thread = MaterialTheme.colorScheme.outlineVariant
+    val haptics = LocalHapticFeedback.current
+    // Where the text below the title starts: after the unread dot, the avatar and its gap.
+    val inset = if (nested) 42.dp else 50.dp
     SwipeToTrashRow(enabled = onDelete != null, onTrash = { onDelete?.invoke() }) { swipe ->
         Surface(
-            onClick = onClick,
             color = Color.Transparent,
             modifier =
                 swipe
                     .fillMaxWidth()
-                    .then(if (item.unread) Modifier.testTag("unread") else Modifier),
+                    .semantics { if (item.finished) stateDescription = item.statusLabel }
+                    .combinedClickable(
+                        onClick = onClick,
+                        onLongClickLabel = onPeek?.let { "Aperçu" },
+                        onLongClick =
+                            onPeek?.let {
+                                {
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    it()
+                                }
+                            },
+                    )
+                    .then(if (item.unread) Modifier.testTag("unread") else Modifier)
+                    .then(if (nested) Modifier.testTag("fil-nested") else Modifier),
         ) {
             Row(
                 Modifier.widthIn(max = 760.dp)
-                    .heightIn(min = 64.dp)
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                    .heightIn(min = if (nested) 44.dp else 56.dp)
+                    .padding(start = if (nested) 36.dp else 10.dp, end = 16.dp)
+                    .then(
+                        if (nested)
+                            Modifier.drawBehind {
+                                drawLine(
+                                    thread,
+                                    Offset(0f, 0f),
+                                    Offset(0f, size.height),
+                                    1.dp.toPx(),
+                                )
+                            }
+                        else Modifier
+                    )
+                    .padding(start = if (nested) 8.dp else 0.dp, top = 8.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (item.unread) {
-                            Box(
-                                Modifier.size(6.dp)
-                                    .background(
-                                        MaterialTheme.colorScheme.primary,
-                                        androidx.compose.foundation.shape.CircleShape,
-                                    )
-                                    .semantics { contentDescription = "Non lu" }
-                            )
-                            Spacer(Modifier.width(7.dp))
+                        Box(Modifier.width(12.dp)) {
+                            if (item.unread)
+                                Box(
+                                    Modifier.size(6.dp)
+                                        .background(
+                                            MaterialTheme.colorScheme.primary,
+                                            androidx.compose.foundation.shape.CircleShape,
+                                        )
+                                        .semantics { contentDescription = "Non lu" }
+                                )
                         }
+                        FilAvatar(item, if (nested) 20.dp else 28.dp)
+                        Spacer(Modifier.width(10.dp))
                         Text(
                             item.title,
                             modifier = Modifier.weight(1f),
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight =
                                 if (item.unread) FontWeight.SemiBold else FontWeight.Medium,
-                            maxLines = 2,
+                            color =
+                                if (nested && !item.unread)
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                else MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                         Spacer(Modifier.width(8.dp))
@@ -857,38 +1434,59 @@ private fun FeedRow(
                     val failed =
                         item.kind == FeedKind.FAILED_CHAT || item.kind == FeedKind.FAILED_TASK
                     val label = item.statusLabel
-                    Row(
-                        Modifier.padding(top = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        item.harness?.let {
-                            Box(
-                                Modifier.padding(end = 5.dp).testTag("harness-$it").semantics {
-                                    contentDescription = "Dernier harness : ${providerLabel(it)}"
+                    if (!nested || !item.finished)
+                        Row(
+                            Modifier.padding(start = inset, top = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (!nested)
+                                item.harness?.let {
+                                    Box(
+                                        Modifier.padding(end = 5.dp)
+                                            .testTag("harness-$it")
+                                            .semantics {
+                                                contentDescription =
+                                                    "Dernier harness : ${providerLabel(it)}"
+                                            }
+                                    ) {
+                                        ProviderMark(it, 12.dp)
+                                    }
                                 }
-                            ) {
-                                ProviderMark(it, 12.dp)
-                            }
+                            if (!item.finished)
+                                Text(
+                                    label,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Medium,
+                                    color =
+                                        if (needsAnswer) signal.answer
+                                        else if (failed) signal.attention
+                                        else if (item.kind == FeedKind.REVIEW_TASK) signal.warning
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            if (!nested && item.taskId != null)
+                                Icon(
+                                    CairnIcons.Retry,
+                                    "Mission",
+                                    Modifier.padding(start = if (item.finished) 0.dp else 4.dp)
+                                        .size(12.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            // The avatar already names the agent: the detail line gives the
+                            // project.
+                            if (!nested)
+                                Text(
+                                    (if (item.finished || item.taskId != null) "" else " · ") +
+                                        (item.project?.ifBlank { null } ?: item.agent),
+                                    Modifier.weight(1f)
+                                        .padding(start = if (item.taskId != null) 4.dp else 0.dp),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
                         }
-                        Text(
-                            label,
-                            style = MaterialTheme.typography.labelMedium,
-                            color =
-                                if (needsAnswer) signal.answer
-                                else if (failed) signal.attention
-                                else MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            " · ${context(item.agent, item.project)}",
-                            Modifier.weight(1f),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
                     if (
                         item.kind == FeedKind.SET_ASIDE_TASK ||
                             item.kind == FeedKind.SNOOZED_TASK ||
@@ -897,6 +1495,7 @@ private fun FeedRow(
                     )
                         Text(
                             item.subtitle,
+                            Modifier.padding(start = inset),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -910,20 +1509,21 @@ private fun FeedRow(
                         Text(
                             item.wakeAt?.let { waitLeft(it, item.condition, item.resolved, now) }
                                 ?: "Selon disponibilité",
-                            Modifier.testTag("fil-wait-time"),
+                            Modifier.padding(start = inset).testTag("fil-wait-time"),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary,
                         )
-                    item.requester?.let {
-                        Text(
-                            "↳ Délégué par ${it.title}",
-                            Modifier.testTag("fil-requester"),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
+                    if (!nested)
+                        item.requester?.let {
+                            Text(
+                                "↳ Délégué par ${it.title}",
+                                Modifier.padding(start = inset).testTag("fil-requester"),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                 }
                 trailing()
             }

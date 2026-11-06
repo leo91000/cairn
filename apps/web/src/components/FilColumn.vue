@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import type { ChatView } from '../../../../packages/contracts/chats'
-import type { FilItem } from '../signal'
+import type { FilEntry, FilItem } from '../signal'
 import {
   computed,
+  nextTick,
   onBeforeUnmount,
   onMounted,
   ref,
@@ -24,11 +25,19 @@ import {
   Archive,
   Check,
   CheckCheck,
+  ChevronDown,
+  Circle,
+  CircleAlert,
+  CirclePause,
+  CircleX,
   Clock,
   CornerDownRight,
+  Hourglass,
   ListFilter,
   MoreHorizontal,
+  RefreshCw,
   RotateCcw,
+  Search,
   X,
 } from '../icons'
 import { refreshMissionRuns, useMissionRuns } from '../mission-runs'
@@ -36,12 +45,15 @@ import { localReads, markRead } from '../reads'
 import { typingTarget } from '../shortcuts'
 import {
   dismissible,
+  filFolds,
   filOf,
+  filThread,
   filViews,
   isUnread,
   shortAge,
   tomorrowMorning,
 } from '../signal'
+import AgentAvatar from './AgentAvatar.vue'
 import HarnessMark from './HarnessMark.vue'
 import Icon from './Icon.vue'
 import InstallationHeader from './InstallationHeader.vue'
@@ -68,12 +80,137 @@ const tabs = computed(() => [
   { key: 'ongoing' as const, label: 'En cours', count: views.value.ongoing.length },
   { key: 'all' as const, label: 'Tout', count: null },
 ])
-const flat = computed(() => views.value[tab.value].filter((item) => {
+const rows = computed(() => filThread(views.value[tab.value].filter((item) => {
   const query = filter.value.trim().toLowerCase()
   return !query || [item.title, item.subtitle, item.agent, item.project ?? ''].some(value => value.toLowerCase().includes(query))
-}))
+})))
 const opened = (item: FilItem) => (item.chatId && item.chatId === props.selected) || (item.runId && item.runId === props.selectedRun)
 const current = (item: FilItem) => opened(item) || cursor.value === item.key
+// Quiet missions fold together, except while filtering, which looks for each row.
+const unfolded = ref(new Set<string>())
+const lines = computed(() => (filter.value.trim() ? rows.value as FilEntry[] : filFolds(rows.value)).flatMap((entry) => {
+  if (!entry.folded) {
+    return [{
+      key: entry.item.key,
+      item: entry.item,
+      nested: entry.nested,
+      folded: undefined,
+      open: false,
+    }]
+  }
+
+  const key = `fold:${entry.item.key}`
+  // The work open beside the Fil stays visible in its fold.
+  const open = unfolded.value.has(key) || entry.folded.some(opened)
+  return [
+    {
+      key,
+      item: entry.item,
+      nested: false,
+      folded: entry.folded,
+      open,
+    },
+    ...(open
+      ? entry.folded.map(item => ({
+          key: item.key,
+          item,
+          nested: true,
+          folded: undefined,
+          open: false,
+        }))
+      : []),
+  ]
+}))
+const flat = computed(() => lines.value.filter(line => !line.folded).map(line => line.item))
+
+// A finished result's opening, beside the Fil: reading it there neither opens nor reads the work.
+const peeked = ref<{ item: FilItem, top: number, left: number } | null>(null)
+const peekCard = ref<HTMLElement>()
+let peekTarget: HTMLElement | undefined
+let peekTimer: ReturnType<typeof setTimeout> | undefined
+let hidePeekTimer: ReturnType<typeof setTimeout> | undefined
+const hoverable = typeof matchMedia === 'function' && matchMedia('(hover: hover)').matches
+onBeforeUnmount(unpeek)
+
+function peek(item: FilItem, event: Event) {
+  const target = event.currentTarget as HTMLElement
+  // Keyboard focus owns its preview until it moves or Escape dismisses it.
+  if (event.type === 'mouseenter' && peekTarget !== target && peekTarget?.matches(':focus'))
+    return
+  if (!item.preview || !hoverable) {
+    if (!peekTarget?.matches(':hover, :focus') && !peekCard.value?.matches(':hover'))
+      unpeek()
+    return
+  }
+
+  clearTimeout(peekTimer)
+  keepPeek()
+  peekTarget = target
+  const row = peekTarget.closest('article')!.getBoundingClientRect()
+  const width = 320
+  const beside = row.right + 12 + width <= innerWidth - 8
+  peekTimer = setTimeout(() => {
+    peekTimer = undefined
+    peeked.value = {
+      item,
+      left: beside ? row.right + 12 : Math.max(8, row.right - width),
+      top: Math.max(8, Math.min(beside ? row.top : row.bottom + 4, innerHeight - 240)),
+    }
+  }, 350)
+}
+
+function unpeek() {
+  clearTimeout(peekTimer)
+  clearTimeout(hidePeekTimer)
+  peekTimer = undefined
+  hidePeekTimer = undefined
+  peekTarget = undefined
+  peeked.value = null
+}
+
+function keepPeek() {
+  clearTimeout(hidePeekTimer)
+  hidePeekTimer = undefined
+}
+
+function leavePeek() {
+  // Preserve focus/hover ownership and allow the pointer to cross the gap to the card.
+  if (peekTarget?.matches(':hover, :focus') || peekCard.value?.matches(':hover'))
+    return
+  clearTimeout(peekTimer)
+  peekTimer = undefined
+  keepPeek()
+  hidePeekTimer = setTimeout(unpeek, 150)
+}
+
+function toggleFold(key: string) {
+  const next = new Set(unfolded.value)
+  if (!next.delete(key))
+    next.add(key)
+  unfolded.value = next
+}
+
+const tabIndex = computed(() => tabs.value.findIndex(view => view.key === tab.value))
+// The agents at work, once each, for the header's stack of avatars.
+const working = computed(() => [...new Map(views.value.all
+  .filter(item => item.kind === 'running')
+  .map(item => [item.agentKey || item.agent, item])).values()])
+// The filter opens on demand and stays open while it holds a query.
+const searchOpen = ref(false)
+const searching = computed(() => searchOpen.value || !!filter.value)
+
+async function openSearch() {
+  searchOpen.value = true
+  await nextTick()
+  filterInput.value?.focus()
+}
+
+function closeSearch() {
+  filter.value = ''
+  searchOpen.value = false
+  filterInput.value?.blur()
+}
+
 watch(() => [props.selected, props.selectedRun], () => {
   cursor.value = views.value.all.find(opened)?.key ?? null
 }, { immediate: true })
@@ -90,6 +227,21 @@ function tone(item: FilItem) {
   return 'text-muted'
 }
 
+// The corner of the agent's avatar: what the row asks for, while finished work stays quiet.
+function mark(item: FilItem) {
+  if (item.kind === 'question' || (item.kind === 'review' && item.outcome === 'needs_input'))
+    return CircleAlert
+  if (item.kind === 'failed' || item.kind === 'failed-mission')
+    return CircleX
+  if (item.kind === 'review' || item.kind === 'paused')
+    return CirclePause
+  if (['queued', 'waiting', 'snoozed', 'suspended'].includes(item.kind))
+    return Clock
+  if (item.kind === 'set-aside')
+    return Hourglass
+  return Circle
+}
+
 function label(item: FilItem) {
   if (item.kind === 'question' || (item.kind === 'review' && item.outcome === 'needs_input'))
     return 'Answer'
@@ -103,6 +255,7 @@ function label(item: FilItem) {
 }
 
 function open(item: FilItem) {
+  unpeek()
   cursor.value = item.key
   // Only the synced detail acknowledges the work once it has actually been displayed.
   void router.push(item.to)
@@ -166,6 +319,12 @@ function move(delta: number) {
 }
 
 function key(event: KeyboardEvent) {
+  if (!event.defaultPrevented && event.key === 'Escape' && (peeked.value || peekTimer)) {
+    event.preventDefault()
+    unpeek()
+    return
+  }
+
   if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || typingTarget(event.target) || document.querySelector('dialog[open], [popover]:popover-open'))
     return
   if (event.key === 'j' || event.key === 'k') {
@@ -188,7 +347,7 @@ function key(event: KeyboardEvent) {
   }
   else if (event.key === '/') {
     event.preventDefault()
-    filterInput.value?.focus()
+    void openSearch()
   }
 }
 
@@ -207,44 +366,90 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
 </script>
 
 <template>
-  <div class="fil flex h-full min-h-0 flex-col">
+  <div class="fil flex h-full min-h-0 flex-col [--fil-bg:var(--color-inset)] tablet:[--fil-bg:var(--color-canvas)]">
     <header class="shrink-0 px-5 pb-2" :class="compact ? 'pt-5' : 'pt-6 phone:px-4 phone:pt-[max(10px,env(safe-area-inset-top))]'">
       <InstallationHeader v-if="!compact" class="mb-4" />
-      <div class="flex items-center gap-2">
-        <h1 class="font-heading text-lg! font-bold! text-ink">
+      <div class="flex h-9 items-center gap-2">
+        <h1 class="font-heading text-xl! font-bold! tracking-tight text-ink">
           Fil
         </h1>
-        <span v-if="views.unread.length" class="rounded-md bg-soft px-1.5 text-[11px] font-semibold tabular-nums text-accent">{{ views.unread.length }}</span>
         <button
-          v-if="views.unread.length"
+          v-if="working.length"
           type="button"
-          class="ml-auto rounded-lg px-2 py-1 text-[11px] text-muted hover:bg-hover hover:text-ink"
-          aria-label="Mark all as read"
-          @click="readAll"
+          class="ml-1 flex items-center gap-1.5 rounded-full bg-soft py-0.5 pl-0.5 pr-2.5 text-[11px] font-medium text-accent transition-colors hover:bg-soft/70"
+          data-testid="fil-at-work"
+          @click="tab = 'ongoing'"
         >
-          <Icon :name="CheckCheck" :size="14" />
+          <span class="flex -space-x-1">
+            <span v-for="item in working.slice(0, 3)" :key="item.key" class="rounded-[7px] ring-2 ring-soft">
+              <AgentAvatar :name="item.agent" :identity="item.agentKey" :size="18" />
+            </span>
+          </span>
+          {{ working.length }} at work
         </button>
+        <div class="ml-auto flex items-center gap-0.5">
+          <button
+            type="button"
+            class="grid size-8 place-items-center rounded-lg transition-colors hover:bg-hover hover:text-ink"
+            :class="searching ? 'bg-hover text-ink' : 'text-muted'"
+            aria-label="Filter the Fil"
+            title="Filter the Fil (/)"
+            :aria-expanded="searching"
+            aria-controls="fil-search"
+            @mousedown.prevent
+            @click="searching ? closeSearch() : openSearch()"
+          >
+            <Icon :name="Search" :size="16" />
+          </button>
+          <button
+            v-if="views.unread.length"
+            type="button"
+            class="grid size-8 place-items-center rounded-lg text-muted transition-colors hover:bg-hover hover:text-ink"
+            aria-label="Mark all as read"
+            title="Mark all as read"
+            @click="readAll"
+          >
+            <Icon :name="CheckCheck" :size="16" />
+          </button>
+        </div>
       </div>
-      <label class="fil-filter mt-4 flex h-9 flex-row! items-center gap-2 rounded-lg border border-line bg-surface px-3 text-muted focus-within:border-accent">
-        <Icon :name="ListFilter" :size="15" />
-        <input
-          ref="filterInput"
-          v-model="filter"
-          class="min-h-0! min-w-0 flex-1 border-0! bg-transparent! p-0! text-[12px] text-ink shadow-none! outline-none"
-          placeholder="Filter the Fil"
-          aria-label="Filter conversations"
-          @keydown.esc.stop="filter = ''; filterInput?.blur()"
-        >
-        <kbd v-if="!filter" class="keycap phone:hidden">/</kbd>
-        <button
-          v-else
-          type="button"
-          class="grid size-6 place-items-center rounded-md hover:bg-hover"
-          aria-label="Clear filter"
-          @click="filter = ''"
-        ><Icon :name="X" :size="14" /></button>
-      </label>
-      <div role="tablist" aria-label="Fil views" class="mt-3 flex gap-5 border-b border-line">
+      <div
+        id="fil-search"
+        class="fil-search grid transition-[grid-template-rows,opacity,margin] duration-200 ease-out motion-reduce:transition-none"
+        :class="searching ? 'mt-3 grid-rows-[1fr] opacity-100' : 'mt-0 grid-rows-[0fr] opacity-0'"
+        :inert="!searching"
+      >
+        <div class="min-h-0 overflow-hidden">
+          <label
+            class="fil-filter flex h-9 flex-row! items-center gap-2 rounded-full border border-line bg-surface px-3.5 text-muted transition-transform duration-200 ease-out focus-within:border-accent motion-reduce:transition-none"
+            :class="searching ? 'translate-y-0 scale-100' : '-translate-y-2 scale-[0.97]'"
+          >
+            <Icon :name="ListFilter" :size="15" />
+            <input
+              ref="filterInput"
+              v-model="filter"
+              class="min-h-0! min-w-0 flex-1 border-0! bg-transparent! p-0! text-[12px] text-ink shadow-none! outline-none"
+              placeholder="Title, agent or project"
+              aria-label="Filter conversations"
+              @keydown.esc.stop="closeSearch"
+              @blur="searchOpen = !!filter"
+            >
+            <button
+              type="button"
+              class="grid size-6 place-items-center rounded-full hover:bg-hover"
+              aria-label="Close the filter"
+              @mousedown.prevent
+              @click="closeSearch"
+            ><Icon :name="X" :size="14" /></button>
+          </label>
+        </div>
+      </div>
+      <div role="tablist" aria-label="Fil views" class="relative mt-3 grid grid-cols-3 rounded-xl bg-variant/60 p-1">
+        <span
+          aria-hidden="true"
+          class="absolute inset-y-1 left-1 w-[calc((100%-8px)/3)] rounded-lg bg-surface shadow-[0_1px_2px_#0000001f] ring-1 ring-line/70 transition-transform duration-200 ease-out motion-reduce:transition-none"
+          :style="{ transform: `translateX(${tabIndex * 100}%)` }"
+        />
         <button
           v-for="(view, index) in tabs"
           :key="view.key"
@@ -252,117 +457,205 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
           role="tab"
           :aria-selected="tab === view.key"
           :tabindex="tab === view.key ? 0 : -1"
-          class="-mb-px flex items-center gap-1.5 border-b-2 px-0 pb-2.5 pt-1 text-[12px] font-medium"
-          :class="tab === view.key ? 'border-accent text-ink' : 'border-transparent text-muted hover:text-ink'"
+          class="relative flex h-7 items-center justify-center gap-1.5 rounded-lg text-[12px] font-medium transition-colors"
+          :class="tab === view.key ? 'text-ink' : 'text-muted hover:text-ink'"
           @click="tab = view.key"
           @keydown="tabKey($event, index)"
         >
-          {{ view.label }}<span v-if="view.count" class="text-[10px] tabular-nums text-subtle">{{ view.count }}</span>
+          {{ view.label }}<span v-if="view.count" class="min-w-4 rounded-full px-1 text-center text-[10px] font-semibold leading-4 tabular-nums" :class="view.key === 'unread' ? 'bg-accent text-surface' : 'bg-line text-muted'">{{ view.count }}</span>
         </button>
       </div>
     </header>
-    <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-10 [scrollbar-width:thin] phone:pb-32" role="region" :aria-label="tabs.find(view => view.key === tab)?.label">
-      <p v-if="!flat.length" class="px-3 py-10 text-center text-[13px] text-muted">
+    <div
+      class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-10 [scrollbar-width:thin] phone:pb-32"
+      role="region"
+      :aria-label="tabs.find(view => view.key === tab)?.label"
+      @scroll.passive="unpeek"
+    >
+      <p v-if="!lines.length" class="px-3 py-10 text-center text-[13px] text-muted">
         {{ filter ? `Nothing matches “${filter}”.` : tab === 'unread' ? 'All read. Your tasks are in En cours and Tout.' : tab === 'ongoing' ? 'No work in progress.' : 'No conversations yet.' }}
       </p>
-      <article
-        v-for="item in flat"
-        :key="item.key"
-        :data-fil-key="item.key"
-        :data-fil-kind="item.kind"
-        :data-unread="isUnread(item) ? '' : undefined"
-        class="group relative flex items-center border-b border-line/60"
-        :class="current(item) ? 'bg-hover' : 'hover:bg-hover/70'"
-      >
+      <template v-for="{ key: lineKey, item, nested, folded, open: unfoldedLine } in lines" :key="lineKey">
         <button
+          v-if="folded"
           type="button"
-          class="flex min-h-16 min-w-0 flex-1 items-start gap-2 px-3 py-3 text-left"
-          :aria-label="`Open “${item.title}”`"
-          :aria-current="opened(item) ? 'page' : undefined"
-          @click="open(item)"
+          class="flex w-full items-start gap-2 rounded-lg py-2.5 pr-2 pl-1.5 text-left transition-colors hover:bg-hover/70"
+          :aria-expanded="unfoldedLine"
+          :aria-label="`${folded.length} missions finished: ${folded.map(entry => entry.title).join(', ')}`"
+          :data-fil-fold="lineKey"
+          @click="toggleFold(lineKey)"
         >
-          <span class="mt-1.5 w-1.5 shrink-0"><span
-            v-if="isUnread(item)"
-            class="block size-1.5 rounded-full bg-accent"
-            role="img"
-            aria-label="Unread"
-          /></span>
+          <span class="w-1.5 shrink-0" />
+          <span class="relative mt-0.5 size-[26px] shrink-0">
+            <span class="absolute top-0 left-0 opacity-80"><AgentAvatar :name="folded[1].agent" :identity="folded[1].agentKey" :size="18" /></span>
+            <span class="absolute right-0 bottom-0 rounded-[7px] ring-2 ring-(--fil-bg)"><AgentAvatar :name="folded[0].agent" :identity="folded[0].agentKey" :size="18" /></span>
+          </span>
           <span class="min-w-0 flex-1">
-            <span class="flex items-start gap-2"><span class="line-clamp-2 text-[13px] leading-snug text-ink" :class="isUnread(item) ? 'font-semibold' : 'font-medium'">{{ item.title }}</span><span class="ml-auto shrink-0 text-[10px] tabular-nums text-subtle">{{ shortAge(item.at, now) }}</span></span>
-            <span class="mt-1 flex min-w-0 items-center gap-1.5 text-[11px]">
-              <span class="truncate" :class="tone(item)">{{ label(item) }}</span><span class="text-subtle">·</span><HarnessMark v-if="item.harness" :provider="item.harness" /><span class="truncate text-muted">{{ item.project || item.agent }}</span>
+            <span class="flex items-baseline gap-2"><span class="truncate text-[13px] leading-snug font-medium text-ink/85">{{ folded.length }} missions finished</span><span class="ml-auto shrink-0 text-[10px] text-subtle tabular-nums">{{ shortAge(item.at, now) }}</span></span>
+            <span class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-subtle">
+              <Icon :name="RefreshCw" :size="10" /><span class="truncate">{{ folded.map(entry => entry.title).join(' · ') }}</span>
+              <Icon
+                :name="ChevronDown"
+                :size="13"
+                class="ml-auto shrink-0 transition-transform duration-200 motion-reduce:transition-none"
+                :class="unfoldedLine && 'rotate-180'"
+              />
             </span>
-            <span v-if="item.requester" class="mt-1 flex items-center gap-1 truncate text-[10px] text-subtle" data-testid="fil-requester"><Icon :name="CornerDownRight" :size="10" />Delegated by {{ item.requester.title }}</span>
-            <span v-if="item.wakeAt !== undefined" class="mt-1 block text-[10px] text-accent">{{ waitLeft({ wakeAt: item.wakeAt, condition: item.condition, resolved: item.resolved }, now) }}</span>
           </span>
         </button>
-        <MenuButton :label="`More actions for “${item.title}”`" trigger-class="mr-1 grid size-7 shrink-0 place-items-center rounded-md text-muted opacity-0 group-hover:opacity-100 focus:opacity-100 phone:opacity-100 hover:bg-hover" :width="210">
-          <template #trigger>
-            <Icon :name="MoreHorizontal" :size="15" />
-          </template>
-          <template #default="{ select }">
-            <button
-              v-if="isUnread(item) && item.readAt"
-              type="button"
-              role="menuitem"
-              tabindex="-1"
-              class="menu-item"
-              @click="select(() => read(item))"
-            >
-              <Icon :name="Check" :size="16" />Mark as read
-            </button>
-            <button
-              type="button"
-              role="menuitem"
-              tabindex="-1"
-              class="menu-item"
-              @click="select(() => open(item))"
-            >
-              Open conversation
-            </button>
-            <button
-              v-if="dismissible(item)"
-              type="button"
-              role="menuitem"
-              tabindex="-1"
-              class="menu-item"
-              @click="select(() => dismiss(item))"
-            >
-              <Icon :name="Check" :size="16" />Dismiss outcome
-            </button>
-            <button
-              v-if="item.kind === 'review'"
-              type="button"
-              role="menuitem"
-              tabindex="-1"
-              class="menu-item"
-              @click="select(() => snooze(item))"
-            >
-              <Icon :name="Clock" :size="16" />Remind me tomorrow
-            </button>
-            <button
-              v-if="item.taskId"
-              type="button"
-              role="menuitem"
-              tabindex="-1"
-              class="menu-item"
-              @click="select(() => runAgain(item))"
-            >
-              <Icon :name="RotateCcw" :size="16" />Run again
-            </button>
-            <button
-              v-if="item.taskId"
-              type="button"
-              role="menuitem"
-              tabindex="-1"
-              class="menu-item"
-              @click="select(() => archive(item))"
-            >
-              <Icon :name="Archive" :size="16" />Archive mission
-            </button>
-          </template>
-        </MenuButton>
-      </article>
+        <article
+          v-else
+          :data-fil-key="item.key"
+          :data-fil-kind="item.kind"
+          :data-unread="isUnread(item) ? '' : undefined"
+          :data-fil-nested="nested ? '' : undefined"
+          class="group relative flex items-center rounded-lg"
+          :class="[current(item) ? 'bg-hover' : 'hover:bg-hover/70', nested && 'ml-[33px] rounded-l-none border-l border-line']"
+        >
+          <button
+            type="button"
+            class="flex min-w-0 flex-1 items-start gap-2 py-2.5 pr-2 text-left"
+            :class="nested ? 'pl-2.5' : 'pl-1.5'"
+            :aria-label="`Open “${item.title}”`"
+            :aria-description="item.finished ? label(item) : undefined"
+            :aria-current="opened(item) ? 'page' : undefined"
+            :aria-describedby="peeked?.item.key === item.key ? 'fil-peek' : undefined"
+            @click="open(item)"
+            @mouseenter="peek(item, $event)"
+            @mouseleave="leavePeek"
+            @focus="peek(item, $event)"
+            @blur="leavePeek"
+          >
+            <span class="mt-[11px] w-1.5 shrink-0"><span
+              v-if="isUnread(item)"
+              class="block size-1.5 rounded-full bg-accent"
+              role="img"
+              aria-label="Unread"
+            /></span>
+            <span class="relative mt-0.5 shrink-0">
+              <AgentAvatar
+                :name="item.agent"
+                :identity="item.agentKey"
+                :size="nested ? 20 : 26"
+                :working="item.kind === 'running'"
+              />
+              <span
+                v-if="!item.finished && item.kind !== 'running'"
+                class="absolute -right-1.5 -bottom-1 grid size-4 place-items-center rounded-full bg-(--fil-bg)"
+                data-testid="fil-mark"
+              ><Icon :name="mark(item)" :size="13" :class="tone(item) === 'text-muted' ? 'text-subtle' : tone(item)" /></span>
+            </span>
+            <span class="min-w-0 flex-1">
+              <span class="flex items-baseline gap-2"><span class="truncate text-[13px] leading-snug" :class="[isUnread(item) ? 'font-semibold text-ink' : 'font-medium', !isUnread(item) && (nested ? 'text-muted' : 'text-ink/85')]">{{ item.title }}</span><span class="ml-auto shrink-0 text-[10px] tabular-nums text-subtle group-hover:invisible group-has-[[aria-expanded=true]]:invisible phone:visible!">{{ shortAge(item.at, now) }}</span></span>
+              <span v-if="!nested || !item.finished" class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-subtle">
+                <span :class="item.finished ? 'sr-only' : ['truncate font-medium', tone(item)]">{{ label(item) }}</span><span v-if="!item.finished && !nested">·</span><template v-if="!nested"><HarnessMark v-if="item.harness" :provider="item.harness" /><Icon v-if="item.taskId" :name="RefreshCw" :size="10" /><span class="truncate">{{ item.project || item.agent }}</span></template>
+              </span>
+              <span v-if="item.requester && !nested" class="mt-0.5 flex items-center gap-1 truncate text-[10px] text-subtle" data-testid="fil-requester"><Icon :name="CornerDownRight" :size="10" />Delegated by {{ item.requester.title }}</span>
+              <span v-if="item.wakeAt !== undefined" class="mt-0.5 block text-[10px] text-accent">{{ waitLeft({ wakeAt: item.wakeAt, condition: item.condition, resolved: item.resolved }, now) }}</span>
+            </span>
+          </button>
+          <MenuButton :label="`More actions for “${item.title}”`" trigger-class="absolute right-1 top-1.5 grid size-7 shrink-0 place-items-center rounded-md bg-hover text-muted opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-ink aria-expanded:opacity-100 phone:static phone:mr-1 phone:bg-transparent phone:opacity-100" :width="210">
+            <template #trigger>
+              <Icon :name="MoreHorizontal" :size="15" />
+            </template>
+            <template #default="{ select }">
+              <button
+                v-if="isUnread(item) && item.readAt"
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                class="menu-item"
+                @click="select(() => read(item))"
+              >
+                <Icon :name="Check" :size="16" />Mark as read
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                class="menu-item"
+                @click="select(() => open(item))"
+              >
+                Open conversation
+              </button>
+              <button
+                v-if="dismissible(item)"
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                class="menu-item"
+                @click="select(() => dismiss(item))"
+              >
+                <Icon :name="Check" :size="16" />Dismiss outcome
+              </button>
+              <button
+                v-if="item.kind === 'review'"
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                class="menu-item"
+                @click="select(() => snooze(item))"
+              >
+                <Icon :name="Clock" :size="16" />Remind me tomorrow
+              </button>
+              <button
+                v-if="item.taskId"
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                class="menu-item"
+                @click="select(() => runAgain(item))"
+              >
+                <Icon :name="RotateCcw" :size="16" />Run again
+              </button>
+              <button
+                v-if="item.taskId"
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                class="menu-item"
+                @click="select(() => archive(item))"
+              >
+                <Icon :name="Archive" :size="16" />Archive mission
+              </button>
+            </template>
+          </MenuButton>
+        </article>
+      </template>
     </div>
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition duration-150 ease-out motion-reduce:transition-none"
+        enter-from-class="opacity-0 -translate-x-1"
+        leave-active-class="transition duration-100 ease-in motion-reduce:transition-none"
+        leave-to-class="opacity-0"
+      >
+        <div
+          v-if="peeked"
+          id="fil-peek"
+          ref="peekCard"
+          role="tooltip"
+          class="fixed z-40 w-80 rounded-xl border border-line bg-raised p-3.5 shadow-[0_12px_32px_#0000002e]"
+          :style="{ top: `${peeked.top}px`, left: `${peeked.left}px` }"
+          @mouseenter="keepPeek"
+          @mouseleave="leavePeek"
+        >
+          <div class="flex items-center gap-2">
+            <AgentAvatar :name="peeked.item.agent" :identity="peeked.item.agentKey" :size="20" />
+            <span class="truncate text-[12px] font-medium text-muted">{{ [peeked.item.agent, peeked.item.project].filter(Boolean).join(' · ') }}</span>
+            <span class="ml-auto shrink-0 text-[10px] text-subtle tabular-nums">{{ shortAge(peeked.item.at, now) }}</span>
+          </div>
+          <p class="mt-2 line-clamp-2 text-[13px] font-semibold text-ink">
+            {{ peeked.item.title }}
+          </p>
+          <p class="mt-1.5 line-clamp-6 text-[12.5px] leading-relaxed whitespace-pre-line text-muted">
+            {{ peeked.item.preview }}
+          </p>
+          <p class="mt-2.5 text-[10.5px] text-subtle">
+            Open it to read it all. It stays unread until then.
+          </p>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>

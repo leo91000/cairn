@@ -72,6 +72,142 @@ async function capture(page: Page, testInfo: TestInfo, name: string) {
   await page.screenshot({ path: testInfo.outputPath(`${name}.png`) })
 }
 
+test('the Fil search toggle closes an empty focused search', async ({ page }) => {
+  await signIn(page)
+  const toggle = page.getByRole('button', { name: 'Filter the Fil', exact: true })
+  const input = page.getByRole('textbox', { name: 'Filter conversations' })
+  await toggle.click()
+  await expect(input).toBeFocused()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(input).not.toBeFocused()
+})
+
+test('a Fil containing only folded missions stays populated when collapsed', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const tasks = ['First quiet mission', 'Second quiet mission'].map(name => workspace.service.task({
+    name,
+    prompt: 'Check the build.',
+    agentId: MAIN_AGENT_ID,
+    projectId: null,
+    skills: null,
+    worktree: false,
+    enabled: false,
+    cron: null,
+  }))
+  const now = Date.now()
+  await page.route('**/api/tasks/activity**', route => route.fulfill({
+    json: tasks.map((task, index) => ({
+      id: randomUUID(),
+      taskId: task.id,
+      trigger: 'schedule',
+      status: 'succeeded',
+      agentName: 'Main',
+      createdAt: now - index * 1000,
+      finishedAt: now - index * 1000,
+      unread: false,
+    })),
+  }))
+  await page.route('**/api/chats/stream?**', route => route.fulfill({
+    contentType: 'text/event-stream',
+    body: `id: 0\nevent: batch\ndata: ${JSON.stringify({
+      events: [],
+      state: {
+        run: null,
+        chat: null,
+        chats: [],
+        artifacts: [],
+      },
+      reset: true,
+      more: false,
+    })}\n\n`,
+  }))
+  await signIn(page)
+  const list = page.getByRole('region', { name: 'Tout', exact: true })
+  const fold = list.locator('[data-fil-fold]')
+  await expect(fold).toHaveCount(1)
+  await expect(fold).toHaveAttribute('aria-expanded', 'false')
+  await expect(list.locator('[data-fil-key]')).toHaveCount(0)
+  await expect(list.getByText('No conversations yet.', { exact: true })).toHaveCount(0)
+  await fold.click()
+  await expect(list.locator('[data-fil-key]')).toHaveCount(2)
+  await fold.click()
+  await expect(list.locator('[data-fil-key]')).toHaveCount(0)
+  await expect(list.getByText('No conversations yet.', { exact: true })).toHaveCount(0)
+})
+
+test.describe('hover previews', () => {
+  test.use({ hasTouch: false })
+
+  test('a result preview stays hovered and Escape dismisses visible and pending previews', async ({ page, workspace }) => {
+    await useRelayForHttpMocks(page)
+    const chat = await workspace.api('/api/chats', 'POST', {})
+    const now = Date.now()
+    const chats = [{
+      ...chat,
+      title: 'Unread result preview',
+      status: 'succeeded',
+      unread: true,
+      finishedAt: now,
+      updatedAt: now,
+      preview: 'The build passed and the result is ready to read.',
+    }, {
+      ...chat,
+      id: randomUUID(),
+      title: 'Read result without a preview',
+      status: 'succeeded',
+      unread: false,
+      finishedAt: now - 1000,
+      updatedAt: now - 1000,
+      preview: null,
+    }]
+    await page.route('**/api/chats/stream?**', route => route.fulfill({
+      contentType: 'text/event-stream',
+      body: `id: 0\nevent: batch\ndata: ${JSON.stringify({
+        events: [],
+        state: {
+          run: null,
+          chat: null,
+          chats,
+          artifacts: [],
+        },
+        reset: true,
+        more: false,
+      })}\n\n`,
+    }))
+    await signIn(page)
+    const row = page.locator(`[data-fil-key="chat:${chat.id}"]`)
+    const trigger = row.getByRole('button', { name: 'Open “Unread result preview”', exact: true })
+    const tooltip = page.getByRole('tooltip')
+    await trigger.hover()
+    await expect(tooltip).toBeVisible()
+    await tooltip.hover()
+    await expect(tooltip).toBeVisible()
+    await expect(row).toHaveAttribute('data-unread', '')
+    await page.keyboard.press('Escape')
+    await expect(tooltip).toBeHidden()
+
+    await trigger.focus()
+    await expect(tooltip).toBeVisible()
+    await page.getByRole('button', { name: 'Open “Read result without a preview”', exact: true }).hover()
+    await expect(trigger).toBeFocused()
+    await expect(tooltip).toBeVisible()
+    await expect(tooltip).toContainText('The build passed and the result is ready to read.')
+    await page.keyboard.press('Escape')
+    await expect(tooltip).toBeHidden()
+    await expect(trigger).toBeFocused()
+
+    await page.getByRole('tab', { name: 'Tout', exact: true }).focus()
+    await trigger.focus()
+    await page.keyboard.press('Escape')
+    // Cover cancellation of the 350 ms opening timer, not only the rendered tooltip.
+    await page.waitForTimeout(450)
+    await expect(tooltip).toBeHidden()
+    await expect(row).toHaveAttribute('data-unread', '')
+  })
+})
+
 test('delegated conversations keep their requester in attention cards and live rows', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const parent = await workspace.api('/api/chats', 'POST', {})
@@ -129,6 +265,8 @@ test('delegated conversations keep their requester in attention cards and live r
     const row = section.locator(`[data-fil-key="chat:${task.id}"]`)
     await expect(row.getByTestId('fil-requester')).toHaveText('Delegated by Review the send queue')
     await expect(row.getByRole('img', { name: 'Latest harness: Claude Code', exact: true })).toBeVisible()
+    if (task.title === 'Unread child report')
+      await expect(row.getByRole('button', { name: `Open “${task.title}”`, exact: true })).toHaveAccessibleDescription('Finished')
   }
 })
 
@@ -502,6 +640,7 @@ test('a waiting mission sits in Waiting, shows its wait and can be stopped', asy
   await signIn(page)
   // The initial conversation stream can move unrelated requester-owned missions out of For you.
   // Keep this journey's row in place while that list arrives, including during its click.
+  await page.getByRole('button', { name: 'Filter the Fil', exact: true }).click()
   await page.getByRole('textbox', { name: 'Filter conversations' }).fill(task.name)
   const waiting = page.getByRole('region', { name: 'Tout', exact: true })
   await expect(waiting.getByText(task.name, { exact: true })).toBeVisible()

@@ -60,7 +60,14 @@ export interface FilItem {
   /** Why a blocked mission sits in Recent rather than For you. */
   setAside?: SetAside
   /** The conversation or mission that started this one, while it still exists. */
-  requester?: { title: string, to: string }
+  requester?: {
+    title: string
+    to: string
+    chatId?: string
+    runId?: string
+  }
+  /** It finished as expected: its row shows no status label, only a quiet mark. */
+  finished?: boolean
 }
 export interface Fil {
   forYou: FilItem[]
@@ -121,7 +128,7 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
       unread: !!chat.unread && unreadNow(`chat:${chat.id}`, chat.readAt ?? chat.finishedAt)
         && (!chat.requestedBy || chat.pendingQuestions > 0),
       // A delegated conversation names the conversation that delegated it.
-      requester: chat.requester ? { title: chat.requester.title || 'New conversation', to: chatPath({ id: chat.requester.chatId }) } : undefined,
+      requester: chat.requester ? { title: chat.requester.title || 'New conversation', to: chatPath({ id: chat.requester.chatId }), chatId: chat.requester.chatId } : undefined,
     }
     if (chat.pendingQuestions > 0) {
       forYou.push({ ...base, kind: 'question', subtitle: chat.pendingQuestions > 1 ? `${chat.pendingQuestions} questions need your answer` : 'Needs your answer' })
@@ -161,11 +168,17 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
         kind: 'unread',
         at: chat.finishedAt ?? chat.updatedAt,
         subtitle: 'Finished',
+        finished: true,
         preview: chat.preview || undefined,
       })
     }
     else {
-      recent.push({ ...base, kind: 'recent', subtitle: chat.status === 'succeeded' ? 'Finished' : chat.paused ? 'Paused' : [chat.agentName, chat.projectName].filter(Boolean).join(' · ') })
+      recent.push({
+        ...base,
+        kind: 'recent',
+        finished: chat.status === 'succeeded',
+        subtitle: chat.status === 'succeeded' ? 'Finished' : chat.paused ? 'Paused' : [chat.agentName, chat.projectName].filter(Boolean).join(' · '),
+      })
     }
   }
 
@@ -183,11 +196,11 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
     const { chatId, taskId } = run.requestedBy ?? {}
     const chat = chatId ? chats.find(chat => chat.id === chatId && (!chat.lifecycle || chat.lifecycle === 'active')) : undefined
     if (chat)
-      return { title: chat.title || 'New conversation', to: chatPath(chat) }
+      return { title: chat.title || 'New conversation', to: chatPath(chat), chatId: chat.id }
     const mission = taskId ? tasks.find(task => task.id === taskId && !task.archived) : undefined
     const missionRun = mission && latest.get(mission.id)
     if (mission && missionRun)
-      return { title: mission.name, to: filRunPath(missionRun.id) }
+      return { title: mission.name, to: filRunPath(missionRun.id), runId: missionRun.id }
     return undefined
   }
 
@@ -289,11 +302,17 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
         ...base,
         kind: 'unread',
         subtitle: 'Mission finished',
+        finished: true,
         preview: run.preview || undefined,
       })
     }
     else {
-      recent.push({ ...base, kind: 'recent', subtitle: run.status === 'succeeded' ? 'Mission finished' : run.status })
+      recent.push({
+        ...base,
+        kind: 'recent',
+        finished: run.status === 'succeeded',
+        subtitle: run.status === 'succeeded' ? 'Mission finished' : run.status,
+      })
     }
   }
 
@@ -316,6 +335,75 @@ export function filViews(fil: Fil) {
   const ongoing = all.filter(item => ['question', 'running', 'queued', 'waiting', 'snoozed', 'suspended', 'review'].includes(item.kind)
     || (item.kind === 'set-aside' && item.setAside !== 'dismissed'))
   return { unread: all.filter(isUnread), ongoing, all }
+}
+
+/**
+ * Rows in reading order, each delegated conversation or mission right below the work that
+ * started it when both are listed. One that started without its requester in the list stays
+ * in place and names it instead.
+ */
+export function filThread(items: FilItem[]): { item: FilItem, nested: boolean }[] {
+  const byChat = new Map(items.filter(item => item.chatId).map(item => [item.chatId, item]))
+  const byRun = new Map(items.filter(item => item.runId).map(item => [item.runId, item]))
+  const childrenOf = new Map<FilItem, FilItem[]>()
+  const roots: FilItem[] = []
+  for (const item of items) {
+    const { chatId, runId } = item.requester ?? {}
+    const parent = (chatId && byChat.get(chatId)) || (runId && byRun.get(runId)) || undefined
+    if (parent && parent !== item)
+      childrenOf.set(parent, [...childrenOf.get(parent) ?? [], item])
+    else
+      roots.push(item)
+  }
+
+  const rows: { item: FilItem, nested: boolean }[] = []
+  const placed = new Set<FilItem>()
+  const place = (item: FilItem, nested: boolean) => {
+    if (placed.has(item))
+      return
+    placed.add(item)
+    rows.push({ item, nested })
+    for (const child of childrenOf.get(item) ?? [])
+      place(child, true)
+  }
+
+  roots.forEach(item => place(item, false))
+  // A requester cycle has no root: keep those rows rather than losing them.
+  items.forEach(item => place(item, false))
+  return rows
+}
+
+/** A Fil row, or a run of quiet missions folded into one. */
+export type FilEntry = { item: FilItem, nested: boolean, folded?: undefined } | { item: FilItem, nested: false, folded: FilItem[] }
+
+/**
+ * Folds consecutive missions that finished as expected and were read into one row, so that
+ * scheduled checks stop crowding the work worth reading. A lone one, a mission with delegated
+ * work below it, and nested rows stay as they are.
+ */
+export function filFolds(rows: { item: FilItem, nested: boolean }[]): FilEntry[] {
+  const quiet = (index: number) => {
+    const { item, nested } = rows[index]
+    return !nested && !!item.taskId && !!item.finished && !isUnread(item) && !rows[index + 1]?.nested
+  }
+
+  const entries: FilEntry[] = []
+  for (let index = 0; index < rows.length;) {
+    let end = index
+    while (end < rows.length && quiet(end))
+      end++
+    if (end - index >= 2) {
+      const folded = rows.slice(index, end).map(row => row.item)
+      entries.push({ item: folded[0], nested: false, folded })
+      index = end
+    }
+    else {
+      entries.push(rows[index])
+      index++
+    }
+  }
+
+  return entries
 }
 
 /**

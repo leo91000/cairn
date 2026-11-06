@@ -1,6 +1,7 @@
 package build.cairn.app.ui
 
 import build.cairn.app.data.*
+import build.cairn.contracts.ChatRequester
 import build.cairn.contracts.ConversationRequester
 import org.junit.Assert.*
 import org.junit.Test
@@ -94,5 +95,114 @@ class CompactFilTest {
         assertTrue(feed.unread.isEmpty())
         assertEquals(listOf("input"), feed.ongoing.map { it.taskId })
         assertEquals(setOf("mission", "input"), feed.all.map { it.taskId }.toSet())
+    }
+
+    @Test
+    fun `delegated work sits below the work that started it when both are listed`() {
+        val requester = ChatRequester(chatId = "ship", title = "Ship PR 382")
+        val chats =
+            listOf(
+                Chat(id = "ship", title = "Ship PR 382", status = "succeeded", updatedAt = 10),
+                Chat(
+                    id = "review",
+                    title = "Review R51",
+                    status = "succeeded",
+                    updatedAt = 30,
+                    requester = requester,
+                ),
+                Chat(id = "other", title = "Other work", status = "succeeded", updatedAt = 20),
+                Chat(
+                    id = "orphan",
+                    title = "Orphan review",
+                    status = "succeeded",
+                    updatedAt = 5,
+                    requester = ChatRequester(chatId = "gone", title = "Deleted"),
+                ),
+            )
+        val feed = buildFeed(chats, emptyList(), emptyList())
+        assertEquals(
+            listOf(
+                "Other work" to false,
+                "Ship PR 382" to false,
+                "Review R51" to true,
+                "Orphan review" to false,
+            ),
+            threadFeed(feed.all).map { (item, nested) -> item.title to nested },
+        )
+        // Without its requester in the view, the row stays in place and names it.
+        assertEquals(
+            listOf("Review R51" to false),
+            threadFeed(feed.all.filter { it.chatId == "review" }).map { (item, nested) ->
+                item.title to nested
+            },
+        )
+    }
+
+    @Test
+    fun `finished work is marked quiet unlike work that needs attention`() {
+        val feed =
+            buildFeed(
+                listOf(
+                    Chat(id = "done", status = "succeeded"),
+                    Chat(id = "failed", status = "failed"),
+                    Chat(id = "paused", status = "succeeded", paused = true),
+                    Chat(id = "unread", status = "succeeded", unread = true, finishedAt = 20),
+                ),
+                listOf(
+                    Run(id = "run", taskId = "mission", trigger = "manual", status = "succeeded")
+                ),
+                emptyList(),
+            )
+        assertEquals(
+            mapOf(
+                "chat:done" to true,
+                "chat:failed" to false,
+                "chat:paused" to false,
+                "chat:unread" to true,
+                "run:run" to true,
+            ),
+            feed.all.associate { it.key to it.finished },
+        )
+    }
+
+    @Test
+    fun `quiet missions fold together when two or more finished and were read in a row`() {
+        fun run(
+            task: String,
+            finishedAt: Long,
+            status: String = "succeeded",
+            unread: Boolean = false,
+        ) =
+            Run(
+                id = "$task-run",
+                taskId = task,
+                trigger = "schedule",
+                status = status,
+                finishedAt = finishedAt,
+                unread = unread,
+            )
+        val feed =
+            buildFeed(
+                listOf(Chat(id = "talk", title = "talk", status = "succeeded", updatedAt = 25)),
+                listOf(
+                    run("a", 50),
+                    run("b", 40),
+                    run("c", 30),
+                    run("d", 20),
+                    run("e", 10, status = "failed"),
+                    run("f", 5, unread = true),
+                    run("g", 4),
+                ),
+                emptyList(),
+            )
+        val entries =
+            foldFeed(threadFeed(feed.all)).map {
+                when (it) {
+                    is FeedEntry.Fold -> it.items.map { item -> item.taskId }
+                    is FeedEntry.Line -> it.item.taskId ?: it.item.chatId
+                }
+            }
+        // A lone quiet mission, a failure and unread results stay rows.
+        assertEquals(listOf(listOf("a", "b", "c"), "talk", "d", "e", "f", "g"), entries)
     }
 }

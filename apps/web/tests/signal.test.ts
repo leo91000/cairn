@@ -5,7 +5,9 @@ import { exclusiveSuspensionLabel } from '../src/run-status'
 import {
   backgroundWait,
   dismissible,
+  filFolds,
   filOf,
+  filThread,
   filViews,
   identityColor,
   liveElapsed,
@@ -496,8 +498,102 @@ describe('delegated conversations', () => {
     const requester = chat('requester', { title: 'Refactor the send queue', slug: 'refactor' })
     const delegated = chat('delegated', { status: 'running', requester: { chatId: 'requester', title: 'Refactor the send queue' } })
     const fil = filOf([requester, delegated], [], [])
-    expect(fil.live.find(item => item.chatId === 'delegated')?.requester).toEqual({ title: 'Refactor the send queue', to: '/chats/requester' })
+    expect(fil.live.find(item => item.chatId === 'delegated')?.requester).toEqual({ title: 'Refactor the send queue', to: '/chats/requester', chatId: 'requester' })
     expect(fil.recent.find(item => item.chatId === 'requester')?.requester).toBeUndefined()
+  })
+
+  it('sit right below the work that started them when both are listed', () => {
+    const fil = filOf([
+      chat('ship', { title: 'Ship PR 382', updatedAt: 10 }),
+      chat('review', { title: 'Review R51', updatedAt: 30, requester: { chatId: 'ship', title: 'Ship PR 382' } }),
+      chat('other', { title: 'Other work', updatedAt: 20 }),
+      chat('orphan', { title: 'Orphan review', updatedAt: 5, requester: { chatId: 'gone', title: 'Deleted' } }),
+    ], [task('proof')], [
+      run('proof-1', 'proof', {
+        finishedAt: 1,
+        outcome: {
+          status: 'blocked',
+          reason: 'CI belongs to the parent',
+          evidence: [],
+          reportedAt: 1,
+          waitingOn: 'requester',
+        },
+        requestedBy: { runId: 'chat-run', chatId: 'review' },
+      }),
+    ])
+    const rows = filThread(filViews(fil).all)
+    expect(rows.map(({ item, nested }) => [item.title, nested])).toEqual([
+      ['Other work', false],
+      ['Ship PR 382', false],
+      ['Review R51', true],
+      ['proof', true],
+      ['Orphan review', false],
+    ])
+  })
+
+  it('stay in place when their requester is not listed', () => {
+    const fil = filOf([
+      chat('ship', { title: 'Ship PR 382', updatedAt: 10 }),
+      chat('review', {
+        title: 'Review R51',
+        status: 'running',
+        updatedAt: 30,
+        requester: { chatId: 'ship', title: 'Ship PR 382' },
+      }),
+    ], [], [])
+    expect(filThread(filViews(fil).ongoing)).toEqual([{ item: expect.objectContaining({ title: 'Review R51' }), nested: false }])
+  })
+})
+
+describe('quiet missions', () => {
+  const fold = (fil: ReturnType<typeof filOf>) => filFolds(filThread(filViews(fil).all)).map(entry => entry.folded ? entry.folded.map(item => item.title) : entry.item.title)
+
+  it('fold together when two or more finished and were read in a row', () => {
+    const fil = filOf([chat('talk', { title: 'talk', updatedAt: 25 })], [task('a'), task('b'), task('c'), task('d'), task('e')], [
+      run('a-1', 'a', { finishedAt: 50 }),
+      run('b-1', 'b', { finishedAt: 40 }),
+      run('c-1', 'c', { finishedAt: 30 }),
+      run('d-1', 'd', { finishedAt: 20 }),
+      // A lone quiet mission stays a row.
+      run('e-1', 'e', { status: 'failed', finishedAt: 10 }),
+    ])
+    expect(fold(fil)).toEqual([['a', 'b', 'c'], 'talk', 'd', 'e'])
+  })
+
+  it('stay rows while unread, unfinished or followed by the work they delegated', () => {
+    const fil = filOf([], [task('a'), task('b'), task('c'), task('child')], [
+      run('a-1', 'a', { finishedAt: 50, unread: true }),
+      run('b-1', 'b', { finishedAt: 40 }),
+      run('c-1', 'c', { finishedAt: 30 }),
+      run('child-1', 'child', {
+        finishedAt: 20,
+        outcome: {
+          status: 'blocked',
+          reason: 'Waits on c',
+          evidence: [],
+          reportedAt: 20,
+          waitingOn: 'requester',
+        },
+        requestedBy: { runId: 'c-1', taskId: 'c' },
+      }),
+    ])
+    expect(fold(fil)).toEqual(['a', 'b', 'c', 'child'])
+  })
+})
+
+describe('finished work', () => {
+  it('is marked so its row can stay quiet, unlike work that needs attention', () => {
+    const fil = filOf([
+      chat('done', { title: 'done', status: 'succeeded' }),
+      chat('failed', { title: 'failed', status: 'failed' }),
+      chat('paused', { title: 'paused', status: 'succeeded', paused: true }),
+    ], [task('mission')], [run('mission-1', 'mission', { status: 'succeeded' })])
+    expect(filViews(fil).all.map(item => [item.title, !!item.finished]).sort()).toEqual([
+      ['done', true],
+      ['failed', false],
+      ['mission', true],
+      ['paused', false],
+    ])
   })
 })
 

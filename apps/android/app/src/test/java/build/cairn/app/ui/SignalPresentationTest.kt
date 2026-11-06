@@ -547,6 +547,12 @@ class SignalPresentationTest {
                 Chat(id = "question", title = "Choisir", pendingQuestions = 1, updatedAt = 5),
                 Chat(id = "live", title = "Refonte", status = "running", updatedAt = 4),
                 Chat(id = "idle", title = "Relecture", updatedAt = 3),
+                Chat(
+                    id = "child",
+                    title = "Revue déléguée",
+                    updatedAt = 10,
+                    requester = ChatRequester(chatId = "idle", title = "Relecture"),
+                ),
             )
         val activity =
             listOf(
@@ -574,7 +580,14 @@ class SignalPresentationTest {
                 )
                 .keys()
         assertEquals(
-            listOf("run:failed", "chat:question", "chat:live", "chat:idle", "run:running"),
+            listOf(
+                "run:failed",
+                "chat:question",
+                "chat:live",
+                "chat:idle",
+                "chat:child",
+                "run:running",
+            ),
             fil,
         )
         assertEquals(fil, pagerKeys(fil, listOf("run:failed"), 0))

@@ -60,8 +60,45 @@ pub(super) async fn execute(
     let fenced = fence(s, &checkpoint).await?;
     stop_heartbeat.cancel();
     let _ = heartbeat.await;
+    #[cfg(feature = "worker-fixture-hooks")]
+    await_fixture_retirement(s, checkpoint.id.as_str()).await?;
     checkpoint.persist().await?;
     release(s, &checkpoint, admission.account.as_ref(), fenced).await
+}
+
+/// The disposable worker fixture can retain the actual final checkpoint write.
+/// Default production builds contain neither the socket probe nor this barrier.
+#[cfg(feature = "worker-fixture-hooks")]
+async fn await_fixture_retirement(s: &Service, run_id: &str) -> Result<()> {
+    use tokio::io::AsyncReadExt;
+
+    let socket = s
+        .config
+        .data_dir
+        .join("runs")
+        .join(run_id)
+        .join("fixture-retirement.sock");
+    if !tokio::fs::try_exists(&socket).await? {
+        return Ok(());
+    }
+    let state = s.store.run_state(run_id).await?;
+    if !matches!(state.status, RunStatus::Failed | RunStatus::Cancelled) {
+        return Ok(());
+    }
+
+    let mut gate = tokio::net::UnixStream::connect(socket).await?;
+    let mut released = [0];
+    // Match the fixture's existing observation budget, without changing any run deadline.
+    tokio::select! {
+        () = s.shutdown.cancelled() => return Ok(()),
+        result = tokio::time::timeout(Duration::from_secs(60), gate.read_exact(&mut released)) => {
+            result.map_err(|_| Error::timeout("Fixture retirement release was not received."))??;
+        },
+    }
+    if released != [1] {
+        return Err(Error::bad("Invalid fixture retirement release."));
+    }
+    Ok(())
 }
 
 /// Keeps the checkpoint, node lease and pending moves current while the run executes.

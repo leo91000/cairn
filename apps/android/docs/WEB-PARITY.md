@@ -1,5 +1,50 @@
 # Android 0.6.0 / web parity
 
+## Folded missions and result previews in the Fil (2026-11-06)
+
+Two or more missions in a row that finished as expected and were read fold into
+one row: two stacked avatars, “3 missions finished” / « 3 missions terminées »,
+their names and the latest time. Tapping it unfolds them on a thread line. A
+lone one, a mission with delegated work below it, unread or unfinished work stay
+rows, and filtering shows every match unfolded. Web also unfolds the fold that
+holds the work open beside the Fil.
+
+Unread finished work with a result preview can be read without opening it. Web
+shows a card beside the row after a short hover (or keyboard focus), on pointers
+that hover. The card stays visible while its row has focus or either the row or
+card is hovered; Escape dismisses it, including a pending opening. Android opens
+a sheet on a long press (with haptic feedback and an
+« Aperçu » action label) with an « Ouvrir » button. The sheet opens fully and scrolls so this
+action stays reachable on short screens and with enlarged text. Neither marks the work read.
+Android now carries a mission run's `preview`, as web did. Presentation only: no
+contract, MCP, `cairn_installation` or stored schema changes.
+
+## Quieter Fil rows (2026-11-06)
+
+Web and Android lead each Fil row with one status mark instead of repeating a
+status word: a check for finished conversations, a repeat arrow for finished
+missions, and coloured marks for questions (violet), failures (coral), blocked
+missions (amber), live work and waits. The status word stays only when the row
+needs attention or is not finished; finished rows keep it for screen readers.
+Titles take one line; the detail line holds the coding agent's mark and the
+context. Rows have no separators. A delegated conversation, or a mission waiting
+on its requester, sits right below the work that started it when both are in
+the view, on a thread line and without « ↳ Délégué par … » / “Delegated by …”;
+otherwise it stays in place and names its requester. Web opens the row menu
+over the time on hover, and spins the live mark unless reduced motion is set;
+Android keeps its row action button and a static live mark. Presentation only:
+no contract, MCP, `cairn_installation` or stored schema changes.
+
+Each row now leads with its agent's avatar (portrait or initial), the status
+mark in its corner while the row asks for something; finished rows show the
+avatar alone. The detail line gives the project, or the agent without one, with
+a repeat arrow for missions. The header names the agents at work as a stack of
+up to three avatars (“2 at work” / « 2 au travail »), which opens En cours. The
+filter hides behind a search button and unfolds below the title (`/` on web),
+staying open while it holds a query. À lire / En cours / Tout become a segmented
+control whose selection slides between views, with the counts beside each
+label. Web orbits a working agent's avatar; Android marks it in the corner.
+
 ## Task storage limit (2026-11-04)
 
 Installation owners configure the maximum native disk allowance per conversation

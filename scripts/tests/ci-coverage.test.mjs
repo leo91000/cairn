@@ -405,6 +405,11 @@ describe('parallel CI coverage', () => {
     expect(browser.needs).toBe('scope')
     expect(browser.if).toBe('needs.scope.outputs.browser == \'true\'')
     expect(browser.permissions).toEqual({ contents: 'read' })
+    expect(browser['timeout-minutes']).toBe(25)
+    const dependencies = browser.steps.find(step => step.name === 'Install the pinned Rust toolchain and build dependencies')
+    expect(dependencies.run).toContain('node scripts/prepare-browser-build-dependencies.mjs')
+    expect(dependencies.run).toContain('--default-toolchain 1.97.1')
+    expect(dependencies.run).not.toContain('apt-get')
     expect(browser.services.postgres.image).toBe('postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24')
     expect(browser.services.postgres.env).toEqual({
       POSTGRES_USER: 'cairn',
