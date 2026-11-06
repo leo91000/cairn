@@ -42,6 +42,9 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch}
 // Keep ordinary API capacity available even when browsers hold idle SSE bodies.
 const MAX_MCP_PER_GRANT: usize = 4;
 const MCP_BODY_TIMEOUT: Duration = Duration::from_secs(10);
+// One account's deliverable files, such as a gallery of originals, share this
+// allowance. Further file requests wait for a transfer instead of failing.
+const MAX_FILES_PER_ACCOUNT: usize = 6;
 
 struct Pending {
     account: String,
@@ -52,6 +55,7 @@ struct Pending {
     _permit: OwnedSemaphorePermit,
     _stream_permit: Option<OwnedSemaphorePermit>,
     _account_stream_permit: Option<OwnedSemaphorePermit>,
+    _file_permit: Option<OwnedSemaphorePermit>,
     _mcp_permit: Option<OwnedSemaphorePermit>,
     // File bodies expire after a deadline without installation progress.
     file_activity: Option<tokio::time::Instant>,
@@ -111,6 +115,7 @@ pub struct Relay {
     closing: Arc<AtomicBool>,
     mcp_slots: Arc<Mutex<HashMap<String, Weak<Semaphore>>>>,
     account_stream_slots: Arc<Mutex<HashMap<String, Weak<Semaphore>>>>,
+    account_file_slots: Arc<Mutex<HashMap<String, Weak<Semaphore>>>>,
 }
 
 #[derive(Default)]
@@ -1128,13 +1133,33 @@ async fn send(
     request: Request,
 ) -> Result<Response, ApiError> {
     let streaming = cairn_protocol::stream_path(target);
-    // A file body ends when its file does. It takes request capacity and an idle
-    // deadline; only live subscriptions take tunnel and account stream slots.
+    // A file body ends when its file does: it has an idle deadline and the
+    // account's file allowance instead of its live-subscription allowance.
     let file = cairn_protocol::file_path(target);
     let live_stream = streaming && !file;
     let public_file = matches!(capability, Capability::PublicArtifact(_));
     let browser_session = matches!(capability, Capability::Account(_))
         .then(|| digest(super::session_token(request.headers())));
+
+    // Wait before reserving installation capacity; the deadline bounds the wait.
+    let file_permit = if file && browser_session.is_some() {
+        let slots = active_slots(
+            &service.relay.account_file_slots,
+            &account,
+            MAX_FILES_PER_ACCOUNT,
+        );
+        let permit = tokio::time::timeout(REQUEST_TIMEOUT, slots.acquire_owned())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .ok_or(ApiError::Http(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Account file capacity reached",
+            ))?;
+        Some(permit)
+    } else {
+        None
+    };
 
     // Browser uploads reserve capacity before reading. MCP bodies have already
     // been bounded and reauthorized before they can reserve installation slots.
@@ -1158,7 +1183,7 @@ async fn send(
         .try_acquire_owned()
         .map_err(|_| ApiError::Http(StatusCode::SERVICE_UNAVAILABLE, "Installation busy"))?;
 
-    let stream_permit = if live_stream {
+    let stream_permit = if streaming && !public_file {
         Some(
             tunnel
                 .stream_slots
@@ -1288,6 +1313,7 @@ async fn send(
             stopped: tunnel.stop.subscribe(),
             revoked: revocation,
             id: id.clone(),
+            file,
         })
     } else {
         None
@@ -1327,6 +1353,7 @@ async fn send(
                 _permit: permit,
                 _stream_permit: stream_permit,
                 _account_stream_permit: account_stream_permit,
+                _file_permit: file_permit,
                 _mcp_permit: mcp_permit,
                 file_activity: file.then(tokio::time::Instant::now),
             },
@@ -1344,7 +1371,7 @@ async fn send(
     let body = if is_stream && let Some(browser) = browser {
         let stream = futures_util::stream::unfold(browser, |mut browser| async move {
             if *browser.stopped.borrow() || *browser.revoked.borrow() {
-                return None;
+                return browser.interrupted();
             }
             if browser
                 .tunnel
@@ -1354,12 +1381,12 @@ async fn send(
                 })
                 .is_err()
             {
-                return None;
+                return browser.interrupted();
             }
             let chunk = tokio::select! {
                 biased;
-                _ = browser.stopped.changed() => None,
-                _ = browser.revoked.changed() => None,
+                _ = browser.stopped.changed() => return browser.interrupted(),
+                _ = browser.revoked.changed() => return browser.interrupted(),
                 chunk = browser.receiver.recv() => chunk,
             };
             chunk.map(|chunk| (chunk, browser))
@@ -1431,6 +1458,19 @@ struct BrowserStream {
     stopped: watch::Receiver<bool>,
     revoked: watch::Receiver<bool>,
     id: String,
+    // An interrupted file must end with an error, never as a complete body.
+    file: bool,
+}
+
+impl BrowserStream {
+    fn interrupted(mut self) -> Option<(Result<Vec<u8>, std::io::Error>, Self)> {
+        std::mem::take(&mut self.file).then(|| {
+            (
+                Err(std::io::Error::other("File transfer interrupted")),
+                self,
+            )
+        })
+    }
 }
 
 impl Drop for BrowserStream {

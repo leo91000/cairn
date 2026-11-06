@@ -549,8 +549,9 @@ process, across installations and sessions. This complements the existing
 24-stream/32-request limits per installation; cancellation, expiry and revocation
 release the allowance together with the remote subscription. Extra streams return
 503 and use the client's existing retry behavior. MCP grants and public downloads
-retain their independent allowances. Private deliverable files are not browser
-streams: they use request slots and the 30-second idle-progress deadline. Filling one member's eight streams leaves
+retain their independent allowances. Private deliverable files use six
+separate transfers per account, which further files wait for, and the
+30-second idle-progress deadline. Filling one member's eight streams leaves
 installation slots for the owner's live views and ordinary requests.
 
 ## Web push notifications

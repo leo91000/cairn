@@ -493,6 +493,7 @@ async fn serve(s: &Service, record: &Deliverable, request: Request) -> Result<Re
         Body::from_stream(tokio_util::io::ReaderStream::new(file.take(count)))
     };
     let mut response = body.into_response();
+    response.extensions_mut().insert(crate::http::Uncompressed);
     if let Some((a, b)) = range {
         *response.status_mut() = StatusCode::PARTIAL_CONTENT;
         response.headers_mut().insert(

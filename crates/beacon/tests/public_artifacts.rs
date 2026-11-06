@@ -721,6 +721,22 @@ async fn private_files_larger_than_a_relay_frame_stream_for_reads_downloads_rang
         assert_eq!(response.bytes().await.unwrap().as_ref(), bytes.as_slice());
     }
 
+    // Deliverable files keep their stored bytes, length and byte ranges.
+    let response = relay
+        .get(&file)
+        .header("accept-encoding", "gzip, br")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key("content-encoding"));
+    assert_eq!(
+        response.headers()["content-length"],
+        bytes.len().to_string()
+    );
+    assert_eq!(response.headers()["accept-ranges"], "bytes");
+    assert_eq!(response.bytes().await.unwrap().as_ref(), bytes.as_slice());
+
     let tail = cairn_protocol::MAX_BODY - 10;
     let response = relay
         .get(&file)
@@ -765,23 +781,55 @@ async fn private_files_larger_than_a_relay_frame_stream_for_reads_downloads_rang
     relay.close().await;
 }
 
-#[tokio::test]
-async fn private_files_use_request_capacity_not_live_streams_and_expire_when_idle() {
-    use std::time::Duration;
+/// A download whose reader never reads: its tiny receive window stalls the
+/// transfer once the response head has arrived.
+async fn stalled_download(relay: &RelayedInstallation, route: &str) -> tokio::net::TcpStream {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    let url = url::Url::parse(&format!("{}{route}", relay.base)).unwrap();
+    let mut connected = None;
+    for address in url.socket_addrs(|| None).unwrap() {
+        let socket = if address.is_ipv4() {
+            tokio::net::TcpSocket::new_v4()
+        } else {
+            tokio::net::TcpSocket::new_v6()
+        }
+        .unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        if let Ok(stream) = socket.connect(address).await {
+            connected = Some(stream);
+            break;
+        }
+    }
+    let mut stream = connected.expect("the Beacon fixture must accept a connection");
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nCookie: {}\r\nAccept-Encoding: gzip, br\r\nConnection: close\r\n\r\n",
+        url.path(),
+        url.authority(),
+        relay.cookie
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut status = [0; 12];
+    stream.read_exact(&mut status).await.unwrap();
+    assert_eq!(&status, b"HTTP/1.1 200");
+    stream
+}
+
+#[tokio::test]
+async fn private_files_wait_for_file_capacity_without_live_streams_and_expire_when_idle() {
+    use std::time::Duration;
+    use tokio::io::AsyncReadExt;
+
     let relay = RelayedInstallation::new(axum::Router::new()).await;
-    // Larger than loopback socket buffers, so these transfers remain in flight.
+    // Larger than loopback socket buffers, so unread transfers stay in flight.
     let bytes = vec![b'x'; 100_000_000];
     let (run, artifact) = seeded_artifact(&relay, &bytes, "image/svg+xml").await;
     let file = format!("/runs/{run}/artifacts/{artifact}");
 
-    // A gallery renders originals that have no thumbnail, such as SVGs, together.
+    // Fill the account's six concurrent file transfers on the Beacon.
     let mut downloads = Vec::new();
-    for _ in 0..cairn_protocol::MAX_STREAMS_PER_ACCOUNT + 4 {
-        let response = relay.get(&file).send().await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        downloads.push(response);
+    for _ in 0..6 {
+        downloads.push(stalled_download(&relay, &file).await);
     }
 
     let mut live = Vec::new();
@@ -798,52 +846,43 @@ async fn private_files_use_request_capacity_not_live_streams_and_expire_when_idl
         relay.get("/chats").send().await.unwrap().status(),
         StatusCode::OK
     );
-    drop(downloads);
-    drop(live);
 
-    // A reader that stops reading: its tiny receive window stalls the transfer.
-    let url = url::Url::parse(&format!("{}{file}", relay.base)).unwrap();
-    let mut stalled = None;
-    for address in url.socket_addrs(|| None).unwrap() {
-        let socket = if address.is_ipv4() {
-            tokio::net::TcpSocket::new_v4()
-        } else {
-            tokio::net::TcpSocket::new_v6()
-        }
-        .unwrap();
-        socket.set_recv_buffer_size(4096).unwrap();
-        if let Ok(stream) = socket.connect(address).await {
-            stalled = Some(stream);
-            break;
-        }
-    }
-    let mut stalled = stalled.expect("the Beacon fixture must accept a connection");
-    stalled
-        .write_all(
-            format!(
-                "GET {} HTTP/1.1\r\nHost: {}\r\nCookie: {}\r\nConnection: close\r\n\r\n",
-                url.path(),
-                url.authority(),
-                relay.cookie
-            )
-            .as_bytes(),
-        )
+    // A gallery's next original waits for a file transfer instead of failing.
+    let mut next = tokio::spawn(relay.get(&file).send());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), &mut next)
+            .await
+            .is_err()
+    );
+    drop(downloads.pop());
+    let next = tokio::time::timeout(Duration::from_secs(10), next)
         .await
+        .expect("A finished transfer must admit the waiting file")
+        .unwrap()
         .unwrap();
+    assert_eq!(next.status(), StatusCode::OK);
+    drop(next);
+    drop(live);
 
     // Never read meanwhile: the tunnel's file deadline must end the transfer.
     tokio::time::sleep(Duration::from_secs(31)).await;
     let mut received = Vec::new();
-    tokio::time::timeout(Duration::from_secs(15), stalled.read_to_end(&mut received))
-        .await
-        .expect("An idle private file must release its transfer")
-        .ok();
-    assert!(received.starts_with(b"HTTP/1.1 200"));
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        downloads[0].read_to_end(&mut received),
+    )
+    .await
+    .expect("An idle private file must release its transfer")
+    .ok();
     assert!(
         received.len() < bytes.len(),
         "An idle private file must end incomplete, never as a complete body"
     );
+    let head = String::from_utf8_lossy(&received[..received.len().min(2048)]).to_lowercase();
+    assert!(head.contains(&format!("content-length: {}", bytes.len())));
+    assert!(!head.contains("content-encoding"));
 
+    drop(downloads);
     let response = relay.get(&file).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.bytes().await.unwrap().len(), bytes.len());
