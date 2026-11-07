@@ -727,25 +727,24 @@ pub(crate) async fn publish_inbox(
 }
 
 impl Service {
-    pub(crate) async fn side_question_ask_authorized<F>(
+    pub(crate) async fn side_question_ask_live(
         &self,
         chat_id: &str,
         mut input: SideQuestionInput,
-        authorize: F,
-    ) -> Result<Value>
-    where
-        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
-    {
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let origin = crate::native::policy::origin();
         if origin.known() {
             crate::native::policy::refresh_chat(self, chat_id).await?;
         }
         input.validate().map_err(Error::bad)?;
         let chat_id = chat_id.to_owned();
+        authorize.recheck().await?;
         let question = self
             .store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 ask(db, &chat_id, input, &origin)
             })
             .await?;
@@ -753,24 +752,23 @@ impl Service {
         Ok(serde_json::to_value(question)?)
     }
 
-    pub(crate) async fn side_question_cancel_authorized<F>(
+    pub(crate) async fn side_question_cancel_live(
         &self,
         chat_id: &str,
         id: &str,
-        authorize: F,
-    ) -> Result<Value>
-    where
-        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
-    {
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let origin = crate::native::policy::origin();
         if origin.known() {
             crate::native::policy::refresh_chat(self, chat_id).await?;
         }
         let (chat_id, id) = (chat_id.to_owned(), id.to_owned());
+        authorize.recheck().await?;
         let question = self
             .store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 let chat = conversation(db, &chat_id)?;
                 crate::native::policy::chat_grant(db, &serde_json::to_value(&chat)?, &origin)?;
                 cancel(db, &chat_id, &id)

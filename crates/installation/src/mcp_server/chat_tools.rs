@@ -533,12 +533,12 @@ pub(crate) async fn invoke(
     if name == "ask_chat_side_question" {
         let question = serde_json::from_value(args["question"].clone())?;
         return s
-            .side_question_ask_authorized(text(&args, "chatId"), question, commit_authority)
+            .side_question_ask_live(text(&args, "chatId"), question, authorize)
             .await;
     }
     if name == "cancel_chat_side_question" {
         return s
-            .side_question_cancel_authorized(
+            .side_question_cancel_live(
                 text(&args, "chatId"),
                 text(&args, "sideQuestionId"),
                 authorize,
