@@ -58,6 +58,46 @@ describe('parallel CI coverage', () => {
     expect(quality.jobs.quality.steps.some(step => step.run === 'pnpm validate:pr contracts')).toBe(true)
   })
 
+  it('keeps measurement-only evidence separate from full and diagnostic backend qualification', () => {
+    const backend = quality.jobs.backend
+    const normal = backend.steps.find(step => step.name === 'Run backend tests across binaries with isolated credentials')
+    const measurement = backend.steps.find(step => step.name === 'Measure controlled direct publication scheduling')
+    const tails = backend.steps.filter(step => [
+      'Measure the bounded bootstrap observer without filesystem work',
+      'Measure bounded Native terminal-reason metadata',
+      'Qualify native backend namespace isolation with ordinary private bind mounts',
+      'Check Rust documentation examples',
+    ].includes(step.name))
+    expect(tails).toHaveLength(4)
+    expect(quality.on.workflow_dispatch.inputs['publication-measurement'].default).toBe(false)
+    expect(backend['timeout-minutes']).toBe(30)
+    expect(measurement.run).toContain('pipeline_tests::measurement::direct_publication_window_comparison -- --exact --ignored --nocapture --test-threads=1')
+    expect(normal.run).toContain('--nextest --test-threads 8 --no-fail-fast --color never --status-level all')
+    expect(backend.steps.some(step => step.run === 'pnpm validate:pr rust')).toBe(false)
+
+    const selected = (step, backendOnly, measure, diagnostic) => runInNewContext(step.if
+      .replaceAll('inputs.backend-only', 'backendOnly')
+      .replaceAll('inputs.publication-measurement', 'measure')
+      .replaceAll('inputs.ci-diagnostic', 'diagnostic'), {
+      backendOnly,
+      measure,
+      diagnostic,
+    }, { timeout: 1000 })
+    for (const [backendOnly, measure, diagnostic, full, measured, tail] of [
+      [false, false, 'none', true, false, true],
+      [true, false, '', true, false, true],
+      [true, true, 'none', false, true, false],
+      [true, true, '', false, true, false],
+      [true, true, 'backend', false, false, true],
+      [false, true, 'none', true, false, true],
+    ]) {
+      expect(selected(normal, backendOnly, measure, diagnostic)).toBe(full)
+      expect(selected(measurement, backendOnly, measure, diagnostic)).toBe(measured)
+      for (const step of tails)
+        expect(selected(step, backendOnly, measure, diagnostic)).toBe(tail)
+    }
+  })
+
   it('runs the selected physical migration case in a separate bounded job after the backend suite', () => {
     const input = quality.on.workflow_dispatch.inputs['backend-qualification']
     expect(input).toEqual({
