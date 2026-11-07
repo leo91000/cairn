@@ -661,6 +661,16 @@ async fn a_plan_turn_reads_delegated_tasks_without_delegating_or_cancelling() {
     let child = text(&delegated, "chatId").to_owned();
     f.finish(&turn).await;
 
+    f.s.store
+        .transaction(|db| {
+            db.set(
+                "chat-plan-settings",
+                &json!({ "enabled": true, "revision": "fixture" }),
+                None,
+            )
+        })
+        .await
+        .unwrap();
     f.s.chat_send(
         &turn.chat,
         json!({ "id": id(), "text": "Plan the follow-up", "plan": true }),

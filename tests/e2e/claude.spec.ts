@@ -21,6 +21,8 @@ let existingRunIds: Set<string>
 test.beforeEach(async ({ workspace }) => {
   // Independent scenarios share durable data, not an HTTP request budget.
   await workspace.restart()
+  const planSettings = await workspace.api('/api/settings/chat-plan')
+  await workspace.api('/api/settings/chat-plan', 'PUT', { ...planSettings, enabled: true })
 
   existingAccountIds = new Set((await workspace.api('/api/accounts')).accounts.map((account: { id: string }) => account.id))
   existingChatIds = new Set(workspace.service.store.list('chats').map(chat => chat.id))
@@ -1113,3 +1115,32 @@ for (const [fromPlan, toPlan] of [[true, false], [false, true]] as const) {
     }
   })
 }
+
+test('installation Plan opt-in controls the composer live and preserves an explicit draft choice', async ({ page, workspace }) => {
+  const current = await workspace.api('/api/settings/chat-plan')
+  await workspace.api('/api/settings/chat-plan', 'PUT', { ...current, enabled: false })
+  await page.goto(workspacePath('/chats'))
+  await authenticateWorkspace(page)
+  await expect(page.getByTestId('plan-toggle')).toHaveCount(0)
+  await page.goto(workspacePath('/settings/installation'))
+  const enable = page.getByRole('switch', { name: 'Enable chat Plan mode' })
+  await expect(enable).toHaveAttribute('aria-checked', 'false')
+  await enable.click()
+  await expect(page.getByRole('switch', { name: 'Disable chat Plan mode' })).toHaveAttribute('aria-checked', 'true')
+  await page.goto(workspacePath('/chats'))
+  const toggle = page.getByTestId('plan-toggle')
+  await expect(toggle).toBeVisible()
+  await toggle.click()
+  await page.getByRole('textbox', { name: 'Message' }).fill('Explore before changing files')
+  const enabled = await workspace.api('/api/settings/chat-plan')
+  await workspace.api('/api/settings/chat-plan', 'PUT', { ...enabled, enabled: false })
+  await expect(page.getByTestId('plan-unavailable')).toContainText('Plan is disabled for this installation')
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeDisabled()
+  await page.reload()
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByTestId('plan-unavailable')).toBeVisible()
+  await toggle.click()
+  await expect(toggle).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled()
+})
