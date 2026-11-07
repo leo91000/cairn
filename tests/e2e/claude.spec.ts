@@ -1144,3 +1144,25 @@ test('installation Plan opt-in controls the composer live and preserves an expli
   await expect(toggle).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled()
 })
+
+test('disabling Plan preserves editing for an accepted queued Plan request', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: true })
+  const id = crypto.randomUUID()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id, text: 'Accepted plan request', plan: true })
+  const enabled = await workspace.api('/api/settings/chat-plan')
+  await workspace.api('/api/settings/chat-plan', 'PUT', { ...enabled, enabled: false })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'Queued message options: Accepted plan request' }).click()
+  await page.getByRole('dialog', { name: 'Queued message' }).getByRole('button', { name: 'Edit', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Message' }).fill('Accepted plan request with more context')
+  await expect(page.getByTestId('plan-toggle')).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByTestId('plan-unavailable')).toHaveCount(0)
+  await page.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect.poll(async () => {
+    const detail = await workspace.api(`/api/chats/${chat.id}`)
+    const message = detail.messages.find((message: { id: string }) => message.id === id)
+    return { text: message?.text, plan: message?.plan }
+  }).toEqual({ text: 'Accepted plan request with more context', plan: true })
+})
