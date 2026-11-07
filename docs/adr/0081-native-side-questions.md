@@ -65,5 +65,6 @@ the rest of its output before they are stored. Side questions are additive key-v
 records (`chat-side-question:{chatId}:{id}`), with a small
 `chat-side-question-open:{chatId}:{id}` marker while the reply may still receive the
 question or its withdrawal, so the chat tick and conversation lists never read past
-answers. Both are removed with their conversation; earlier releases ignore them. Database version 28 adds a partial index for history turn
-boundaries; older binaries reject the upgraded database.
+answers. Both are removed with their conversation; earlier releases ignore them.
+Database version 28 adds a partial index for native turn boundaries and manager attempt
+markers; older binaries reject the upgraded database.

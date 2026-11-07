@@ -197,6 +197,7 @@ test('anchors an event-less question before an item ID is reused', async ({ page
   const asked = await workspace.api(`/api/chats/${chat.id}/side-questions`, 'POST', question)
   expect(asked.replyEventId).not.toBe('')
   workspace.service.store.event(run, 'turn.completed', '')
+  workspace.service.store.event(run, 'status', 'Preparing workspace', { attempt: true })
   workspace.service.store.event(run, 'item.completed', '', { item: { id: 'reused-reply', type: 'agent_message', text: 'Second distinct reply' } })
   const retried = await workspace.api(`/api/chats/${chat.id}/side-questions`, 'POST', question)
   expect(retried.replyEventId).toBe(asked.replyEventId)
@@ -218,8 +219,9 @@ test('links reused native item IDs to the selected reply', async ({ page, worksp
   workspace.service.store.event(run, 'turn.started', '')
   workspace.service.store.event(run, 'item.updated', '', { item: { id: 'reused-reply', type: 'agent_message', text: 'First draft' } })
   workspace.service.store.event(run, 'item.completed', '', { item: { id: 'reused-reply', type: 'agent_message', text: 'First distinct reply' } })
-  // Claude emits completion, not a new turn.started, between turns.
+  // Claude may omit a native turn start; the manager marks each new execution attempt.
   workspace.service.store.event(run, 'turn.completed', '')
+  workspace.service.store.event(run, 'status', 'Preparing workspace', { attempt: true })
   workspace.service.store.event(run, 'item.completed', '', { item: { id: 'reused-reply', type: 'agent_message', text: 'Second distinct reply' } })
   await expect(workspace.api(`/api/chats/${chat.id}/side-questions`, 'POST', {
     id: randomUUID(),

@@ -229,7 +229,7 @@ impl Store {
             let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let current: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
             if current == 27 {
-                tx.execute_batch("CREATE INDEX IF NOT EXISTS events_turn_boundaries ON events(run_id,id) WHERE type IN ('turn.started','turn.completed','turn.failed');")?;
+                tx.execute_batch("CREATE INDEX IF NOT EXISTS events_turn_boundaries ON events(run_id,id) WHERE (type IN ('turn.started','turn.completed','turn.failed') OR (type='status' AND json_type(payload,'$.attempt')='true'));")?;
                 tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
             } else if current != DATABASE_VERSION {
                 return Err(Error::bad(
@@ -254,7 +254,7 @@ CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at
             // Backwards history excludes superseded text snapshots. These small keys
             // bound both the next-turn lookup and the same-message revision lookup.
             tx.execute_batch("CREATE INDEX IF NOT EXISTS events_turns ON events(run_id,id) WHERE type='turn.started';
-CREATE INDEX IF NOT EXISTS events_turn_boundaries ON events(run_id,id) WHERE type IN ('turn.started','turn.completed','turn.failed');
+CREATE INDEX IF NOT EXISTS events_turn_boundaries ON events(run_id,id) WHERE (type IN ('turn.started','turn.completed','turn.failed') OR (type='status' AND json_type(payload,'$.attempt')='true'));
 CREATE INDEX IF NOT EXISTS events_user_input ON events(run_id,id) WHERE type='chat.user';
 CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload,'$.item.id'),id) WHERE json_extract(payload,'$.item.type')='agent_message';")?;
             tx.execute_batch(crate::runs::SCHEMA)?;
@@ -1086,7 +1086,7 @@ impl Db<'_> {
 CASE WHEN json_extract(e.payload,'$.item.type')='agent_message'
  AND COALESCE(json_extract(e.payload,'$.item.id'),'')!='' THEN (
  SELECT MIN(a.id) FROM events a WHERE a.run_id=e.run_id AND a.id<=e.id
-  AND a.id>COALESCE((SELECT MAX(t.id) FROM events t WHERE t.run_id=e.run_id AND t.type IN ('turn.started','turn.completed','turn.failed') AND t.id<e.id),0)
+  AND a.id>COALESCE((SELECT MAX(t.id) FROM events t WHERE t.run_id=e.run_id AND (t.type IN ('turn.started','turn.completed','turn.failed') OR (t.type='status' AND json_type(t.payload,'$.attempt')='true')) AND t.id<e.id),0)
   AND json_extract(a.payload,'$.item.type')='agent_message'
   AND json_extract(a.payload,'$.item.id')=json_extract(e.payload,'$.item.id')
 ) ELSE NULL END FROM events e
@@ -1097,7 +1097,7 @@ WHERE e.run_id=? AND e.id>? AND e.id<? AND (
   SELECT 1 FROM events n WHERE n.run_id=e.run_id
    AND json_extract(n.payload,'$.item.type')='agent_message'
    AND json_extract(n.payload,'$.item.id')=json_extract(e.payload,'$.item.id')
-   AND n.id>e.id AND n.id<COALESCE((SELECT t.id FROM events t WHERE t.run_id=e.run_id AND t.type IN ('turn.started','turn.completed','turn.failed') AND t.id>e.id ORDER BY t.id LIMIT 1),9223372036854775807)
+   AND n.id>e.id AND n.id<COALESCE((SELECT t.id FROM events t WHERE t.run_id=e.run_id AND (t.type IN ('turn.started','turn.completed','turn.failed') OR (t.type='status' AND json_type(t.payload,'$.attempt')='true')) AND t.id>e.id ORDER BY t.id LIMIT 1),9223372036854775807)
  )) ORDER BY e.id DESC LIMIT ?";
         let mut stmt = self.0.prepare_cached(sql)?;
         let mut rows = stmt.query_map(params![run, after, before, limit + 1], event_row)?;
@@ -1527,7 +1527,7 @@ mod schema_tests {
         );
         for direction in ["id>? ORDER BY id", "id<? ORDER BY id DESC"] {
             let sql = format!(
-                "EXPLAIN QUERY PLAN SELECT id FROM events WHERE run_id=? AND type IN ('turn.started','turn.completed','turn.failed') AND {direction} LIMIT 1"
+                "EXPLAIN QUERY PLAN SELECT id FROM events WHERE run_id=? AND (type IN ('turn.started','turn.completed','turn.failed') OR (type='status' AND json_type(payload,'$.attempt')='true')) AND {direction} LIMIT 1"
             );
             let plan: String = db
                 .query_row(&sql, params!["run", 10], |row| row.get(3))

@@ -7,7 +7,7 @@
 //! The adapter of a running reply announces `chat.side.available` once its native
 //! session can answer one: Claude Code's `side_question` control request, which runs
 //! with every tool denied. Codex and OpenCode have no side mechanism that Cairn can make
-//! tool-less before the model runs (ADR-0078), so their adapters never announce it.
+//! tool-less before the model runs (ADR-0081), so their adapters never announce it.
 //! Adapters that do not announce it never receive side questions in their inbox and
 //! cannot mistake one for steering.
 use super::{chat_for_run, conversation, is_compaction, require_live};
@@ -193,7 +193,8 @@ fn save(db: &Db<'_>, question: &ChatSideQuestion) -> Result<()> {
 }
 
 /// The start of the agent reply `item_id`, so the agent knows which reply a question is
-/// about when it quotes no passage.
+/// about when it quotes no passage. Native turn boundaries and the manager's attempt
+/// markers both stop the lookup: recovery can replace a reply without a native turn marker.
 fn reply_start(
     db: &Db<'_>,
     run_id: &str,
@@ -206,7 +207,7 @@ fn reply_start(
     let mut resolved = event_id;
     if event_id.is_none() {
         let turns: i64 = db.0.query_row(
-            "SELECT COUNT(DISTINCT COALESCE((SELECT MAX(t.id) FROM events t WHERE t.run_id=e.run_id AND t.type IN ('turn.started','turn.completed','turn.failed') AND t.id<e.id),0))
+            "SELECT COUNT(DISTINCT COALESCE((SELECT MAX(t.id) FROM events t WHERE t.run_id=e.run_id AND (t.type IN ('turn.started','turn.completed','turn.failed') OR (t.type='status' AND json_type(t.payload,'$.attempt')='true')) AND t.id<e.id),0))
              FROM events e WHERE e.run_id=?1 AND json_extract(e.payload,'$.item.type')='agent_message' AND json_extract(e.payload,'$.item.id')=?2",
             rusqlite::params![run_id, item_id],
             |row| row.get(0),
@@ -229,7 +230,7 @@ fn reply_start(
         db.0.prepare_cached(
             "SELECT COALESCE(json_extract(e.payload,'$.item.text'),e.text) FROM events e
              WHERE e.run_id=?1 AND e.id>=?2
-               AND e.id<COALESCE((SELECT MIN(t.id) FROM events t WHERE t.run_id=?1 AND t.type IN ('turn.started','turn.completed','turn.failed') AND t.id>?2),9223372036854775807)
+               AND e.id<COALESCE((SELECT MIN(t.id) FROM events t WHERE t.run_id=?1 AND (t.type IN ('turn.started','turn.completed','turn.failed') OR (t.type='status' AND json_type(t.payload,'$.attempt')='true')) AND t.id>?2),9223372036854775807)
                AND json_extract(e.payload,'$.item.type')='agent_message' AND json_extract(e.payload,'$.item.id')=?3
                AND COALESCE(json_extract(e.payload,'$.item.text'),e.text)!=''
                AND EXISTS (SELECT 1 FROM events a WHERE a.run_id=?1 AND a.id=?2 AND json_extract(a.payload,'$.item.type')='agent_message' AND json_extract(a.payload,'$.item.id')=?3)
@@ -879,6 +880,82 @@ mod tests {
             assert_eq!(later.display_id, None);
             Ok(())
         }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reply_lookup_stays_with_its_timeline_attempt_without_native_turn_markers() {
+        use cairn_contracts::EventKind;
+
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({
+                        "id": "r",
+                        "taskId": "r",
+                        "createdAt": 0,
+                        "status": "running",
+                    }),
+                    None,
+                )
+            })
+            .await
+            .unwrap();
+        let reply = |text| {
+            json!({
+                "item": {
+                    "id": "reused",
+                    "type": "agent_message",
+                    "text": text,
+                },
+            })
+        };
+        for (kind, payload) in [
+            (EventKind::Status, json!({ "attempt": true })),
+            (EventKind::ItemUpdated, reply("First draft")),
+            (EventKind::ItemCompleted, reply("First reply")),
+            (EventKind::Status, json!({ "attempt": true })),
+            (EventKind::ItemUpdated, reply("Later reply")),
+        ] {
+            store.event("r", &kind, "", Some(payload)).await.unwrap();
+        }
+        store
+            .read(|db| {
+                let (first, last): (i64, i64) = db.0.query_row(
+                    "SELECT MIN(id),MAX(id) FROM events WHERE run_id='r' AND json_extract(payload,'$.item.id')='reused'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let cards: i64 = db.0.query_row(
+                    "SELECT COUNT(*) FROM timeline_entries WHERE run_id='r' AND kind='agentMessage'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(cards, 2, "The production timeline keeps these attempts distinct.");
+                assert_eq!(
+                    reply_start(db, "r", "reused", Some(first))?,
+                    ("First reply".to_owned(), Some(first)),
+                );
+                assert_eq!(
+                    reply_start(db, "r", "reused", Some(last))?,
+                    ("Later reply".to_owned(), Some(last)),
+                );
+                assert!(
+                    reply_start(db, "r", "reused", None).is_err(),
+                    "An event-less reused identity is ambiguous across attempts.",
+                );
+                let (history, _) = db.events_before("r", i64::MAX)?;
+                let earlier = history.iter().find(|event| event.display_id == Some(first));
+                assert!(
+                    earlier.is_some(),
+                    "History must retain the first attempt's final snapshot and anchor.",
+                );
+                assert!(history.iter().any(|event| event.id == last));
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[test]
