@@ -623,6 +623,46 @@ abstract class PlanTurnCases {
         }
     }
 
+    @Test
+    fun disabledInstallationHidesPlanAndBlocksARestoredPlanDraftUntilExplicitlyCleared() =
+        withPlanServer { server ->
+            val calls = CopyOnWriteArrayList<String>()
+            val chat = Chat(id = CHAT, agentId = MAIN_AGENT_ID, title = "Plan désactivé")
+            val vm =
+                mountPlanChat(
+                    server,
+                    chat,
+                    emptyList(),
+                    calls,
+                    savedDraft = ChatDraft(text = "Examiner sans modifier", plan = true),
+                    planEnabled = false,
+                )
+            try {
+                compose.waitUntil(20000) {
+                    compose.onAllNodesWithTag("plan-unavailable").fetchSemanticsNodes().isNotEmpty()
+                }
+                compose
+                    .onNodeWithTag("plan-unavailable")
+                    .assertTextContains("Plan est désactivé", substring = true)
+                compose.onNodeWithTag("conversation-send").assertIsNotEnabled()
+                assertTrue(calls.isEmpty())
+                compose.onNodeWithTag("plan-toggle").assertIsSelected().performClick()
+                compose.onNodeWithTag("plan-toggle").assertDoesNotExist()
+                compose.onNodeWithTag("conversation-send").assertIsEnabled().performClick()
+                compose.waitUntil(20000) { calls.size == 1 }
+                assertEquals(
+                    false,
+                    wireJson
+                        .parseToJsonElement(calls[0])
+                        .jsonObject["plan"]
+                        ?.jsonPrimitive
+                        ?.boolean,
+                )
+            } finally {
+                vm.api.closeStreams()
+            }
+        }
+
     private fun mountPlanChat(
         server: MockWebServer,
         chat: Chat,
@@ -631,6 +671,7 @@ abstract class PlanTurnCases {
         savedDraft: ChatDraft? = null,
         initialSnapshot: CountDownLatch? = null,
         rejectApproval: Boolean = false,
+        planEnabled: Boolean = true,
         streamRequests: AtomicInteger? = null,
         approvalResponse: CountDownLatch? = null,
     ): CairnViewModel {
@@ -674,7 +715,13 @@ abstract class PlanTurnCases {
         }
         val batch =
             wireJson.encodeToString(
-                LiveBatch(markers, LiveState(chat = chat), true, false, entries = cards)
+                LiveBatch(
+                    markers,
+                    LiveState(chat = chat, planTurnsEnabled = planEnabled),
+                    true,
+                    false,
+                    entries = cards,
+                )
             )
         server.dispatcher =
             object : Dispatcher() {

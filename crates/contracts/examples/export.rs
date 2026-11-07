@@ -1143,6 +1143,8 @@ fn main() {
     export::<OutcomeDismissal>(root, &mut generator, Contract::Serialize);
     export::<SetOutcomeAsideOutput>(root, &mut generator, Contract::Serialize);
     export::<GetInstallationSettingsInput>(root, &mut generator, Contract::Deserialize);
+    export::<GetChatPlanSettingsInput>(root, &mut generator, Contract::Deserialize);
+    export::<ChatPlanSettings>(root, &mut generator, Contract::Deserialize);
     export::<GetTaskStorageLimitsInput>(root, &mut generator, Contract::Deserialize);
     export::<TaskStorageLimits>(root, &mut generator, Contract::Deserialize);
     export::<CodingAgentConfigurationInput>(root, &mut generator, Contract::Deserialize);
@@ -1165,6 +1167,8 @@ fn main() {
     export::<CheckStorageInput>(root, &mut generator, Contract::Deserialize);
     export::<StorageCheck>(root, &mut generator, Contract::Serialize);
     let settings_clients = serde_json::json!([
+        { "name": "getChatPlanSettings", "input": "GetChatPlanSettingsInput", "output": "ChatPlanSettings", "method": "GET", "path": "/settings/chat-plan" },
+        { "name": "saveChatPlanSettings", "input": "ChatPlanSettings", "output": "ChatPlanSettings", "method": "PUT", "path": "/settings/chat-plan" },
         { "name": "getTaskStorageLimits", "input": "GetTaskStorageLimitsInput", "output": "TaskStorageLimits", "method": "GET", "path": "/settings/task-storage" },
         { "name": "saveTaskStorageLimits", "input": "TaskStorageLimits", "output": "TaskStorageLimits", "method": "PUT", "path": "/settings/task-storage" },
         { "name": "getCodingAgentConfiguration", "input": "CodingAgentConfigurationInput", "output": "CodingAgentConfiguration", "method": "POST", "path": "/settings/coding-agents/read" },

@@ -569,11 +569,12 @@ const chosenProvider = computed({
   },
 })
 const switchingProvider = computed(() => !!detail.value?.run && chosenProvider.value !== currentProvider.value)
+const planEnabled = computed(() => live.snapshot.value?.planTurnsEnabled === true)
 const planAvailable = computed(() => providers[chosenProvider.value].planTurns)
 // Availability can block submission, but must not erase the requested boundary.
 const planRequested = computed(() => planning.value)
-const planBlocked = computed(() => planRequested.value && !planAvailable.value)
-const planUnavailableMessage = 'Plan requires Codex or Claude Code. Choose a compatible agent, or turn Plan off to send an ordinary request.'
+const planBlocked = computed(() => planRequested.value && (!planEnabled.value || !planAvailable.value))
+const planUnavailableMessage = computed(() => planEnabled.value ? 'Plan requires Codex or Claude Code. Choose a compatible agent, or turn Plan off to send an ordinary request.' : 'Plan is disabled for this installation. Enable it in installation settings, or turn Plan off to send an ordinary request.')
 const canSend = computed(() => !planBlocked.value && !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
 // A plan request cannot join a turn that can already change files.
 const steerBlocked = computed(() => planRequested.value && !detail.value?.run?.chatExecution?.plan)
@@ -1673,13 +1674,14 @@ function key(event: KeyboardEvent) {
                       @reasoning-choice="setResumeReasoningIntent"
                     />
                     <button
+                      v-if="planEnabled || planRequested"
                       type="button"
                       class="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full px-3 text-sm font-medium disabled:opacity-50"
                       :class="planRequested ? 'bg-soft text-accent' : 'text-muted hover:bg-hover'"
                       :aria-pressed="planRequested"
                       aria-label="Plan first"
-                      :title="planAvailable ? 'Plan first: the agent explores and proposes an approach without changing files, using the network from its shell or calling tools with external effects. Implement it afterwards in this conversation.' : planUnavailableMessage"
-                      :disabled="busy || (!planAvailable && !planRequested)"
+                      :title="planEnabled && planAvailable ? 'Plan first: the agent explores and proposes an approach without changing files, using the network from its shell or calling tools with external effects. Implement it afterwards in this conversation.' : planUnavailableMessage"
+                      :disabled="busy || ((!planEnabled || !planAvailable) && !planRequested)"
                       data-testid="plan-toggle"
                       @click="planning = !planning"
                     >
