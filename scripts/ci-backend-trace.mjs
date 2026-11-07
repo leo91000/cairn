@@ -4,7 +4,7 @@ import process from 'node:process'
 import { Writable } from 'node:stream'
 
 const EXIT_FAILURE = 125
-const LOCAL_CLOSE_MS = 1000 // Taken from the existing evidence reserve, not a new job budget.
+export const LOCAL_CLOSE_MS = 1000 // Taken from the existing evidence reserve, not a new job budget.
 
 export function createPrivateTrace(file, { deadline, closeMs = LOCAL_CLOSE_MS, onFailure }) {
   const raw = createWriteStream(file, { flags: 'wx', mode: 0o600 })
