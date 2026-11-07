@@ -141,7 +141,7 @@ function select(action: () => void, restore = true) {
 }
 
 onBeforeUnmount(() => hide(false))
-defineExpose({ show, hide })
+defineExpose({ show, hide, trigger })
 </script>
 
 <template>

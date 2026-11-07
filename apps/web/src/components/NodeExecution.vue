@@ -35,7 +35,11 @@ import VirtualSelect from './VirtualSelect.vue'
 
 type Mode = 'automatic' | 'preferred' | 'fixed'
 
-const props = defineProps<{ run: Run }>()
+const props = withDefaults(defineProps<{
+  run: Run
+  /** `attention` shows the chip only while the node needs attention or is changing; routine sync stays in the menu. */
+  variant?: 'chip' | 'attention'
+}>(), { variant: 'chip' })
 // Lets hosts drop the row around the chip while it renders nothing.
 const emit = defineEmits<{ relevance: [relevant: boolean] }>()
 const nodes = ref<ExecutionNode[]>([])
@@ -85,6 +89,8 @@ const saved = ref('')
 const open = ref(false)
 const moving = ref(false)
 const chip = ref<HTMLButtonElement>()
+// Where focus returns when the panel was opened from elsewhere, such as the conversation menu.
+let opener: HTMLElement | undefined
 const panel = ref<HTMLDialogElement>()
 const position = ref<Record<string, string>>({ left: '16px', top: '80px', maxHeight: 'calc(100dvh - 96px)' })
 const sheet = ref(false)
@@ -136,6 +142,13 @@ const status = computed((): { tone: 'bad' | 'warn' | 'busy' | 'ok' | 'idle', lab
     return { tone: 'ok', label: `Synced ${relativeAge(run.backup.capturedAt, now.value)}` }
   return { tone: 'idle', label: 'No sync yet' }
 })
+// Failures, waits and moves interrupt the work; saving, unsaved bytes and sync age are routine.
+const attention = computed(() => {
+  const run = props.run
+  return !!(run.movementError || run.backup?.error || run.storage?.waitingFor || run.storage?.backupDegraded || run.capacityWaitUntil || run.nodeState
+    || (run.status === 'running' && run.suspendedByExclusive))
+})
+const showChip = computed(() => props.variant === 'chip' || attention.value)
 const chipTone = {
   bad: 'border-coral/40 bg-coral-soft text-coral',
   warn: 'border-warning/40 bg-warning-surface text-warning',
@@ -243,15 +256,22 @@ function close(returnFocus = false) {
   panel.value?.close()
   open.value = false
   if (returnFocus)
-    chip.value?.focus()
+    (opener?.isConnected && opener.getClientRects().length ? opener : chip.value)?.focus()
+  opener = undefined
 }
 
-async function toggle() {
-  if (open.value) {
+function toggle() {
+  if (open.value)
     close(true)
-    return
-  }
+  else
+    void show()
+}
 
+/** Opens the details, below `anchor` when given (the chip may be hidden), else below the chip. */
+async function show(anchor?: HTMLElement) {
+  if (open.value)
+    return
+  opener = anchor
   open.value = true
   await nextTick()
   // Phones open the details as a bottom sheet: the chip can sit low (in the Connection sheet),
@@ -269,9 +289,11 @@ async function toggle() {
     }
   }
   else {
-    const rect = chip.value?.getBoundingClientRect()
+    const rect = (anchor ?? chip.value)?.getBoundingClientRect()
     const top = Math.min((rect?.bottom ?? 60) + 8, window.innerHeight - 220)
-    position.value = { maxHeight: `${window.innerHeight - top - 16}px`, left: `${Math.max(16, Math.min(rect?.left ?? 16, window.innerWidth - 416))}px`, top: `${top}px` }
+    // An anchor at the end of the header aligns the panel's right edge with it.
+    const left = anchor && rect ? rect.right - 400 : rect?.left ?? 16
+    position.value = { maxHeight: `${window.innerHeight - top - 16}px`, left: `${Math.max(16, Math.min(left, window.innerWidth - 416))}px`, top: `${top}px` }
   }
 
   panel.value?.showModal()
@@ -299,6 +321,12 @@ function resized() {
 }
 
 window.addEventListener('resize', resized)
+defineExpose({
+  show,
+  relevant,
+  nodeName,
+  status,
+})
 onUnmounted(() => {
   clearInterval(timer)
   window.removeEventListener('resize', resized)
@@ -306,8 +334,9 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div v-if="relevant" class="relative inline-flex max-w-full" @keydown.esc.stop="close(true)">
+  <div v-if="relevant" :class="showChip ? 'relative inline-flex max-w-full' : 'hidden'" @keydown.esc.stop="close(true)">
     <button
+      v-if="showChip"
       ref="chip"
       type="button"
       class="flex min-w-0 max-w-full items-center gap-1.5 rounded-full border py-0.5 pr-2.5 pl-2 text-[11px] leading-5 transition-colors hover:border-control hover:text-ink"
@@ -318,9 +347,9 @@ onUnmounted(() => {
       @click="toggle"
     >
       <Icon :name="Server" :size="13" class="shrink-0" />
-      <span class="truncate">{{ nodeName }}</span>
+      <span v-if="variant === 'chip'" class="truncate">{{ nodeName }}</span>
       <template v-if="status.label">
-        <span aria-hidden="true" class="opacity-40">|</span>
+        <span v-if="variant === 'chip'" aria-hidden="true" class="opacity-40">|</span>
         <Icon
           v-if="status.tone === 'busy' || (status.tone === 'warn' && run.backup?.status === 'saving')"
           :name="LoaderCircle"

@@ -51,26 +51,34 @@ internal fun chatWaitNotice(run: Run?, now: Long = System.currentTimeMillis()): 
 }
 
 /**
- * What the conversation header says: [live] while the agent runs (working, or only waiting for
- * background tasks), otherwise its [status], which names a failed or interrupted response.
+ * What the conversation header says. It speaks only when the [status] says more than the avatar: a
+ * wait, a pause, a background task or a [failed] response; otherwise it names the project, or the
+ * agent without one. [working] turns the avatar's ring while the agent runs.
  */
-internal data class ConversationState(val status: String, val live: String?)
+internal data class ConversationState(
+    val status: String,
+    val working: Boolean,
+    val failed: Boolean = false,
+)
 
 internal fun conversationState(
     chat: Chat?,
     agentName: String,
     wait: BackgroundWait?,
-    installation: String? = null,
-    /** A conversation not created yet still names its agent; a loading one stays quiet. */
+    project: String? = null,
+    /**
+     * A conversation not created yet still names its project or agent; a loading one stays quiet.
+     */
     newChat: Boolean = false,
     now: Long = System.currentTimeMillis(),
 ): ConversationState {
-    // The project lives in the Connexion sheet; the header names where the agent runs.
-    val identity = listOfNotNull(agentName, installation).joinToString(" · ")
-    if (chat == null) return ConversationState(if (newChat) identity else "", null)
+    val place = project?.takeIf { it.isNotBlank() } ?: agentName
+    if (chat == null) return ConversationState(if (newChat) place else "", false)
 
     val run = chat.run?.status.orEmpty()
     val quota = chatQuota(chat.run, emptyList())
+    val working = run == "running" && !chat.exclusiveSuspended && quota == null
+    val tasks = wait?.tasks?.size ?: 0
     val status =
         when {
             chat.paused -> "En pause"
@@ -78,18 +86,14 @@ internal fun conversationState(
             quota != null -> "En attente de quota"
             run == "queued" -> "En attente"
             scheduledWakeup(chat) != null -> waitStatus(chat.wakeup!!, now)
-            run in listOf("failed", "interrupted") -> "${statusLabel(run)} · $identity"
-            else -> identity
+            run in listOf("failed", "interrupted") ->
+                return ConversationState(statusLabel(run), working = false, failed = true)
+            // The agent waits rather than works: say so.
+            working && tasks == 1 -> "Tâche en arrière-plan"
+            working && tasks > 1 -> "$tasks tâches en arrière-plan"
+            else -> place
         }
-    val tasks = wait?.tasks?.size ?: 0
-    val live =
-        when {
-            run != "running" || chat.exclusiveSuspended || quota != null -> null
-            tasks == 1 -> "Tâche en arrière-plan"
-            tasks > 1 -> "$tasks tâches en arrière-plan"
-            else -> "$agentName travaille"
-        }
-    return ConversationState(status, live)
+    return ConversationState(status, working)
 }
 
 /** The error shown above the conversation, including a response that stopped before finishing. */
@@ -260,8 +264,9 @@ internal fun CompletionEvidence(
 }
 
 /**
- * One compact bar: back, who is working and on what, live status, then the few actions that matter.
- * Secondary information belongs in the details sheet.
+ * One compact bar: back, the conversation and its project, then the few actions that matter. It
+ * names a status only when it needs a look; the avatar's ring shows work. Secondary information
+ * belongs in the menu and the details sheet.
  */
 @Composable
 internal fun ConversationHeader(
@@ -269,11 +274,13 @@ internal fun ConversationHeader(
     agent: String,
     agentKey: String,
     status: String,
-    live: String?,
+    working: Boolean,
     /** The coding agent of the latest turn, marked on the avatar. */
     harness: String? = null,
-    liveSince: Long?,
+    failed: Boolean = false,
     route: ConnectionRoute,
+    /** Names the installation the connection dot describes. */
+    installation: String? = null,
     back: () -> Unit,
     choose: () -> Unit,
     /** A scheduled wait: its status counts down here, without recomposing the whole page. */
@@ -310,7 +317,7 @@ internal fun ConversationHeader(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         // The comet ring turns while the agent is running this conversation.
-                        if (live != null) WorkingAvatar(agent, agentKey, 36.dp, harness)
+                        if (working) WorkingAvatar(agent, agentKey, 36.dp, harness)
                         else AgentAvatar(agent, agentKey, 36.dp, harness = harness)
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
@@ -328,28 +335,26 @@ internal fun ConversationHeader(
                                     Modifier.padding(start = 2.dp).size(16.dp),
                                 )
                             }
-                            if (live != null || status.isNotBlank())
+                            if (status.isNotBlank())
                                 Row(
                                     Modifier.padding(top = 2.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
-                                    ConnectionDot(route)
+                                    ConnectionDot(
+                                        route,
+                                        description =
+                                            "Connexion : ${listOfNotNull(installation, route.label).joinToString(" · ")}",
+                                    )
                                     Spacer(Modifier.width(6.dp))
-                                    if (live != null) {
-                                        val now = rememberNow(liveSince)
-                                        val label =
-                                            listOf(live, elapsed(liveSince, now))
-                                                .filter { it.isNotBlank() }
-                                                .joinToString(" · ")
-                                        LiveChip(label)
-                                    } else if (status.isNotBlank())
-                                        Text(
-                                            status,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
+                                    Text(
+                                        status,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color =
+                                            if (failed) MaterialTheme.colorScheme.error
+                                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
                                 }
                         }
                     }

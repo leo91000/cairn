@@ -8,6 +8,7 @@ import {
   expect,
   expectSingleScroll,
   grantFullAccess,
+  headerStatus,
   openAgentSection,
   test,
   useRelayForHttpMocks,
@@ -106,7 +107,7 @@ test('a Claude spend limit waits automatically and appears once in the real conv
     await page.emulateMedia({ colorScheme: 'dark' })
     await page.screenshot({ path: testInfo.outputPath('quota-web-desktop-dark.png'), animations: 'disabled' })
     await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: true })
-    await expect(page.getByText('Paused', { exact: true }).first()).toBeVisible()
+    await expect(headerStatus(page, /^Paused$/)).toBeVisible()
     await expect(card.getByText('Work resumes automatically when an account is available.')).toBeVisible()
     await expect(card.getByRole('button', { name: 'Resume conversation', exact: true })).toHaveCount(0)
     await card.getByRole('link', { name: 'Manage accounts' }).click()
@@ -504,7 +505,7 @@ test('an agent idle until its background build finishes says it is waiting, not 
   await expect(waiting).toHaveAccessibleName('Waiting for a background task: Wait for build. The agent resumes when it finishes.')
   await expect(waiting.getByText('Wait for build', { exact: true })).toBeVisible()
   await expect(page.locator('.agent-working')).toHaveCount(0)
-  await expect(page.getByText('Background task', { exact: true }).first()).toBeVisible()
+  await expect(headerStatus(page, /^Background task$/)).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('claude-background-wait.png'), animations: 'disabled' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
   await expect(waiting).toHaveCount(0)

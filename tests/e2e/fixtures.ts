@@ -419,16 +419,37 @@ export async function expectFollowing(page: Page) {
   await page.setViewportSize(viewport)
 }
 
-// Mobile keeps status in Chat details instead of a permanent metadata row.
-export async function expectChatReady(page: Page) {
-  const details = page.getByRole('button', { name: 'Chat details', exact: true })
+// The conversation menu: a dropdown on desktop, a bottom sheet on phones.
+export async function openChatDetails(page: Page) {
+  const mobile = (page.viewportSize()?.width ?? 1280) <= 640
+  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  const details = page.getByRole(mobile ? 'dialog' : 'menu', { name: 'Chat details', exact: true })
+  await expect(details).toBeVisible()
+  return {
+    details,
+    action: (name: string) => details.getByRole(mobile ? 'button' : 'menuitem', { name, exact: true }),
+  }
+}
+
+export async function closeChatDetails(page: Page) {
   const mobile = (page.viewportSize()?.width ?? 1280) <= 640
   if (mobile)
-    await details.click()
-  const context = mobile ? page.getByRole('dialog', { name: 'Chat details', exact: true }) : page
-  await expect(context.getByText('Ready', { exact: true })).toBeVisible()
-  if (mobile)
-    await page.getByRole('button', { name: 'Close dialog', exact: true }).click()
+    await page.getByRole('dialog', { name: 'Chat details', exact: true }).getByRole('button', { name: 'Close dialog', exact: true }).click()
+  else
+    await page.keyboard.press('Escape')
+  await expect(page.getByRole(mobile ? 'dialog' : 'menu', { name: 'Chat details', exact: true })).toBeHidden()
+}
+
+// The status the conversation header names when it needs a look: beside the title, or under it on phones.
+export function headerStatus(page: Page, text: string | RegExp) {
+  return page.locator('.chat-header').getByRole('status').filter({ hasText: text }).filter({ visible: true })
+}
+
+// The header stays quiet while the agent works or waits: its status lives in the conversation menu.
+export async function expectChatReady(page: Page) {
+  const { details } = await openChatDetails(page)
+  await expect(details.getByText('Ready', { exact: true })).toBeVisible()
+  await closeChatDetails(page)
 }
 
 // The agent page: sections open from its navigation, on phones through the section list.

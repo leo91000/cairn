@@ -770,33 +770,31 @@ abstract class BackgroundWaitCases {
         }
 
     @Test
-    fun headerWaitTimeAdvancesWithoutStreamEvents() {
+    fun headerNamesABackgroundWaitAndTurnsTheAvatarRing() {
         compose.setContent {
             CairnTheme {
-                val started = remember { System.currentTimeMillis() - 58_000 }
                 ConversationHeader(
                     title = "Conversation de test",
                     agent = "Agent principal",
                     agentKey = MAIN_AGENT_ID,
-                    status = "",
-                    live = "Tâche en arrière-plan",
-                    liveSince = started,
+                    status = "Tâche en arrière-plan",
+                    working = true,
                     route = ConnectionRoute.DIRECT,
+                    installation = "Maison",
                     back = {},
                     choose = {},
                     actions = {},
                 )
             }
         }
+        // The agent waits rather than works: the header says so, without a running label or timer.
+        compose.onNodeWithText("Tâche en arrière-plan", useUnmergedTree = true).assertExists()
         compose
-            .onNodeWithText("Tâche en arrière-plan · < 1 min", useUnmergedTree = true)
+            .onAllNodesWithText("travaille", substring = true, useUnmergedTree = true)
+            .assertCountEquals(0)
+        compose
+            .onNodeWithContentDescription("Connexion : Maison · Direct", useUnmergedTree = true)
             .assertExists()
-        compose.waitUntil(5000) {
-            compose
-                .onAllNodesWithText("Tâche en arrière-plan · 1 min", useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
     }
 
     @Test
@@ -805,7 +803,12 @@ abstract class BackgroundWaitCases {
             val message =
                 "La réponse s’est arrêtée avant la fin. Reprenez la conversation pour continuer."
             compose.onNodeWithText(message).assertIsDisplayed()
-            compose.onNodeWithText("Échec · Agent principal · Installation de test").assertExists()
+            compose
+                .onNode(
+                    hasText("Échec") and hasAnyAncestor(hasTestTag("conversation-header")),
+                    useUnmergedTree = true,
+                )
+                .assertExists()
             compose.onAllNodesWithTag("agent-waiting").assertCountEquals(0)
             compose.onNodeWithContentDescription("Masquer l’erreur").performClick()
             compose.onNodeWithText(message).assertDoesNotExist()

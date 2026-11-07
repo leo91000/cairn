@@ -79,7 +79,7 @@ class ConversationPresentationTest {
             )
         val chat = Chat(id = "chat", run = run)
         assertEquals(
-            ConversationState("En attente de quota", null),
+            ConversationState("En attente de quota", working = false),
             conversationState(chat, "Agent", null),
         )
         assertTrue(chatQuota(run, emptyList())!!.automatic)
@@ -281,11 +281,11 @@ class ConversationPresentationTest {
             )
         val chat = Chat(id = "chat", status = "running", run = running)
         assertEquals(
-            ConversationState("Suspendue (exclusivité)", null),
-            conversationState(chat, "Cairn", BackgroundWait(listOf("Build"), 1), "Maison"),
+            ConversationState("Suspendue (exclusivité)", working = false),
+            conversationState(chat, "Cairn", BackgroundWait(listOf("Build"), 1), "Site"),
         )
         assertEquals(
-            ConversationState("Suspendue (exclusivité)", null),
+            ConversationState("Suspendue (exclusivité)", working = false),
             conversationState(
                 chat.copy(run = null, suspendedByExclusive = reservation),
                 "Cairn",
@@ -294,12 +294,12 @@ class ConversationPresentationTest {
         )
         assertEquals("En pause", conversationState(chat.copy(paused = true), "Cairn", null).status)
         assertEquals(
-            ConversationState("Échec · Cairn · Maison", null),
+            ConversationState("Échec", working = false, failed = true),
             conversationState(
                 chat.copy(run = running.copy(status = "failed")),
                 "Cairn",
                 null,
-                "Maison",
+                "Site",
             ),
         )
         assertEquals("failed", runPresentationStatus(running.copy(status = "failed")))
@@ -562,8 +562,9 @@ class ConversationPresentationTest {
     }
 
     @Test
-    fun `the header names a background wait, a failure or an interruption`() {
-        // The subtitle names the agent and its installation; the project moved to the sheet.
+    fun `the header stays quiet while the agent works and names a background wait or a failure`() {
+        // The ring on the avatar shows work; the subtitle names the project, or the agent without
+        // one.
         val run =
             Run(
                 id = "run",
@@ -573,73 +574,65 @@ class ConversationPresentationTest {
             )
         val chat = Chat(id = "chat", agentName = "Cairn", projectName = "Site", run = run)
         assertEquals(
-            ConversationState("Cairn · Maison", "Cairn travaille"),
-            conversationState(chat, "Cairn", null, "Maison"),
+            ConversationState("Site", working = true),
+            conversationState(chat, "Cairn", null, "Site"),
         )
         assertEquals(
-            ConversationState("Cairn · Maison", "Tâche en arrière-plan"),
-            conversationState(chat, "Cairn", BackgroundWait(listOf("Build"), 1), "Maison"),
+            ConversationState("Cairn", working = true),
+            conversationState(chat, "Cairn", null, null),
+        )
+        assertEquals(
+            ConversationState("Tâche en arrière-plan", working = true),
+            conversationState(chat, "Cairn", BackgroundWait(listOf("Build"), 1), "Site"),
         )
         assertEquals(
             "2 tâches en arrière-plan",
-            conversationState(chat, "Cairn", BackgroundWait(listOf("Build", "Lint"), 1), "Maison")
-                .live,
+            conversationState(chat, "Cairn", BackgroundWait(listOf("Build", "Lint"), 1), "Site")
+                .status,
         )
         // A wait announced earlier does not outlive the run.
         val failed = chat.copy(run = run.copy(status = "failed"))
         assertEquals(
-            ConversationState("Échec · Cairn · Maison", null),
-            conversationState(failed, "Cairn", BackgroundWait(listOf("Build"), 1), "Maison"),
+            ConversationState("Échec", working = false, failed = true),
+            conversationState(failed, "Cairn", BackgroundWait(listOf("Build"), 1), "Site"),
         )
         assertEquals(
-            "Interrompue · Cairn · Maison",
+            ConversationState("Interrompue", working = false, failed = true),
             conversationState(
-                    chat.copy(run = run.copy(status = "interrupted")),
-                    "Cairn",
-                    null,
-                    "Maison",
-                )
-                .status,
+                chat.copy(run = run.copy(status = "interrupted")),
+                "Cairn",
+                null,
+                "Site",
+            ),
         )
         assertEquals(
             "En pause",
-            conversationState(chat.copy(paused = true), "Cairn", null, "Maison").status,
+            conversationState(chat.copy(paused = true), "Cairn", null, "Site").status,
         )
         assertEquals(
-            "En attente",
-            conversationState(chat.copy(run = run.copy(status = "queued")), "Cairn", null, "Maison")
-                .status,
+            ConversationState("En attente", working = false),
+            conversationState(chat.copy(run = run.copy(status = "queued")), "Cairn", null, "Site"),
         )
-        // A loading conversation stays quiet; a new one already names its agent and installation.
-        assertEquals(ConversationState("", null), conversationState(null, "Cairn", null, "Maison"))
         assertEquals(
-            ConversationState("Cairn · Maison", null),
-            conversationState(null, "Cairn", null, "Maison", newChat = true),
-        )
-    }
-
-    @Test
-    fun `the header names only the agent while no installation is known`() {
-        val chat = Chat(id = "chat", agentName = "Cairn", projectName = "Site")
-        assertEquals(ConversationState("Cairn", null), conversationState(chat, "Cairn", null, null))
-        assertEquals(
-            "Échec · Cairn",
+            ConversationState("Site", working = false),
             conversationState(
-                    chat.copy(
-                        run =
-                            Run(
-                                id = "run",
-                                status = "failed",
-                                taskId = "",
-                            )
-                    ),
-                    "Cairn",
-                    null,
-                )
-                .status,
+                chat.copy(run = run.copy(status = "succeeded")),
+                "Cairn",
+                null,
+                "Site",
+            ),
+        )
+        // A loading conversation stays quiet; a new one already names its project or agent.
+        assertEquals(
+            ConversationState("", working = false),
+            conversationState(null, "Cairn", null, "Site"),
         )
         assertEquals(
-            ConversationState("Cairn", null),
+            ConversationState("Site", working = false),
+            conversationState(null, "Cairn", null, "Site", newChat = true),
+        )
+        assertEquals(
+            ConversationState("Cairn", working = false),
             conversationState(null, "Cairn", null, null, newChat = true),
         )
     }

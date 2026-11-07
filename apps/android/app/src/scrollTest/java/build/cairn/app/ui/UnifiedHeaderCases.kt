@@ -266,8 +266,19 @@ abstract class UnifiedHeaderCases {
                 assertTopsUnderSystemInsets(header)
                 val height = header.fetchSemanticsNode().boundsInRoot.height / density
                 assertTrue("Conversation chrome is $height dp", height <= 60f)
+                // The subtitle names the project; the connection dot names the installation and
+                // route.
                 compose
-                    .onNodeWithText("Agent principal · Maison", useUnmergedTree = true)
+                    .onNode(
+                        hasText("Cairn") and hasAnyAncestor(hasTestTag("conversation-header")),
+                        useUnmergedTree = true,
+                    )
+                    .assertExists()
+                compose
+                    .onNodeWithContentDescription(
+                        "Connexion : Maison · Relais",
+                        useUnmergedTree = true,
+                    )
                     .assertExists()
                 compose.onNodeWithContentDescription("Options de la conversation").performClick()
                 compose.onNodeWithText("Connexion").performClick()

@@ -4,10 +4,13 @@ import type { ResumeDiagnosticRecord } from './resume-diagnostic'
 import { randomUUID } from 'node:crypto'
 import {
   signIn as authenticateWorkspace,
+  closeChatDetails,
   expect,
   expectChatReady,
   expectSingleScroll,
+  headerStatus,
   initializeRepository,
+  openChatDetails,
   test,
   useRelayForHttpMocks,
   workspacePath,
@@ -188,8 +191,8 @@ test('new conversation on the same route clears an uncertain submission with ide
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page.getByText('Connection unavailable. Please try again.', { exact: true })).toBeVisible()
   await expect(page).toHaveURL(workspacePath('/chats'))
-  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
-  await page.getByRole('dialog', { name: 'Chat details', exact: true }).getByRole('button', { name: 'New chat', exact: true }).click()
+  await page.getByRole('button', { name: 'Conversations', exact: true }).click()
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click()
   await expect(composer).toHaveValue('')
   await composer.fill('Same content, separate conversation')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
@@ -216,8 +219,8 @@ test('new conversation on the same route clears the abandoned attempt’s error'
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   const failure = page.getByText('Simulated send failure', { exact: true })
   await expect(failure).toBeVisible()
-  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
-  await page.getByRole('dialog', { name: 'Chat details', exact: true }).getByRole('button', { name: 'New chat', exact: true }).click()
+  await page.getByRole('button', { name: 'Conversations', exact: true }).click()
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click()
   await expect(page).toHaveURL(workspacePath('/chats'))
   await expect(composer).toHaveValue('')
   await expect(failure).toBeHidden()
@@ -283,7 +286,7 @@ test('a durable scheduled wait survives restart and resumes without a user messa
   const card = page.locator('.chat-wait')
   await expect(card).toHaveCount(1)
   await expect(card).toContainText(/Resumes at .+Wait for CI.*in \d+ min/)
-  await expect(page.getByText(/^Resumes in \d+ min$/).first()).toBeVisible()
+  await expect(headerStatus(page, /^Resumes in \d+ min$/)).toBeVisible()
   await expect(page.getByRole('button', { name: 'Cancel scheduled wait', exact: true })).toBeVisible()
   await expect(page.getByRole('textbox', { name: 'Message' })).toHaveAttribute('placeholder', 'Reply now — this cancels the wait')
   // The Fil lists it apart, until it resumes.
@@ -411,7 +414,7 @@ test('a durable condition wait follows a dependency across restart and queue pau
     await page.goto(workspacePath(`/chats/${chat.id}`))
     await authenticateWorkspace(page)
     await expect(page.locator('.chat-wait')).toContainText(/Waiting for another run to finish.*Join dependency.*up to \d+ min/)
-    await expect(page.getByText(/^Awaiting result · up to \d+ min$/).first()).toBeVisible()
+    await expect(headerStatus(page, /^Awaiting result · up to \d+ min$/)).toBeVisible()
     await page.getByRole('tab', { name: /^En cours/ }).click()
     await expect(page.getByRole('region', { name: 'En cours', exact: true }).locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('Another run')
     await expect(page.locator('.agent-waiting')).toHaveCount(0)
@@ -946,8 +949,8 @@ test('conversation switcher preserves drafts and supports search, keyboard and m
   const dialog = page.getByRole('dialog', { name: /Conversations/ })
   for (const colorScheme of ['dark', 'light'] as const) {
     await page.emulateMedia({ colorScheme })
-    // Desktop lists conversations in the Fil column; tablets and phones open them from the header.
-    for (const width of [800, 390, 320]) {
+    // Every width opens conversations from the title's chevron; phones from the title itself.
+    for (const width of [1440, 800, 390, 320]) {
       await page.setViewportSize({ width, height: width === 320 ? 600 : 900 })
       await trigger.click()
       await expect(dialog).toBeVisible()
@@ -970,14 +973,14 @@ test('conversation switcher preserves drafts and supports search, keyboard and m
     }
   }
 
-  // Crossing a breakpoint while open hides the tablet trigger: focus returns to the ⋯ menu instead.
+  // Crossing into phone widths while open swaps the trigger: focus returns to the visible one.
   await page.setViewportSize({ width: 800, height: 900 })
   await trigger.click()
   await expect(dialog).toBeVisible()
-  await page.setViewportSize({ width: 1440, height: 900 })
-  expect((await dialog.boundingBox())!.y).toBeGreaterThan(40)
+  await page.setViewportSize({ width: 390, height: 844 })
   await page.keyboard.press('Escape')
-  await expect(page.getByRole('button', { name: 'Chat details', exact: true })).toBeFocused()
+  await expect(dialog).toHaveCount(0)
+  await expect(trigger).toBeFocused()
 
   await page.setViewportSize({ width: 320, height: 600 })
   await trigger.click()
@@ -1042,48 +1045,39 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
 
   await page.setViewportSize({ width: 390, height: 844 })
   await details.click()
-  await panel.getByRole('button', { name: 'Search conversations', exact: true }).click()
-  await expect(page.getByRole('searchbox', { name: 'Search conversations' })).toBeFocused()
-  await page.keyboard.press('Escape')
-  await details.click()
+  // The ⋯ menu acts on this conversation only: workspace search, navigation and appearance live elsewhere.
+  for (const elsewhere of ['New chat', 'Search conversations', 'Search workspace', 'Workspace navigation', 'Follow latest output'])
+    await expect(panel.getByRole('button', { name: elsewhere, exact: true })).toHaveCount(0)
+  await expect(panel.getByRole('button', { name: /Appearance:/ })).toHaveCount(0)
   await panel.getByRole('button', { name: 'Open activity fullscreen', exact: true }).click()
   await expect(page.getByRole('dialog', { name: 'Fullscreen activity' })).toBeVisible()
   await page.getByRole('button', { name: 'Exit fullscreen', exact: true }).click()
   await expect(details).toBeFocused()
-  await details.click()
-  await panel.getByRole('button', { name: 'Follow latest output', exact: true }).click()
-  await expect(panel).toHaveCount(0)
-  await details.click()
-  await panel.getByRole('button', { name: 'Search workspace', exact: true }).click()
-  await expect(page.getByRole('dialog', { name: 'Search and commands' })).toBeVisible()
-  await page.keyboard.press('Escape')
-  await expect(details).toBeFocused()
-  await details.click()
-  await panel.getByRole('button', { name: /Appearance:/ }).click()
-  await panel.locator('.theme-popover').getByText('Dark', { exact: true }).click()
-  await expect(panel.getByRole('button', { name: 'Appearance: dark' })).toBeVisible()
-  await page.keyboard.press('Escape')
-  await details.click()
-  await panel.getByRole('button', { name: 'Workspace navigation', exact: true }).click()
-  await expect(page).toHaveURL(workspacePath('/'))
-  await expect(page.getByRole('navigation', { name: 'Quick navigation' })).toBeVisible()
-  await page.goBack()
   await expect(message).toHaveValue('Keep my draft while browsing details')
   await page.setViewportSize({ width: 1440, height: 1000 })
   await expect(page.getByRole('navigation', { name: 'Workspace navigation' })).toBeVisible()
-  // Desktop keeps one header row: fullscreen and the same ⋯ menu, no separate activity toolbar.
+  // Desktop keeps one quiet header row; fullscreen moves into the ⋯ dropdown.
   await expect(page.locator('.activity-toolbar')).not.toBeVisible()
-  await expect(page.getByRole('button', { name: 'Open activity fullscreen', exact: true })).toBeVisible()
-  await expect(details).toBeVisible()
+  await expect(page.locator('.chat-header').getByRole('button', { name: 'Open activity fullscreen' })).toHaveCount(0)
+  await details.click()
+  const menu = page.getByRole('menu', { name: 'Chat details', exact: true })
+  await expect(menu.getByText('Ready', { exact: true })).toBeVisible()
+  await expect(menu.getByRole('menuitem').first()).toBeFocused()
+  await expect(menu.getByRole('menuitem', { name: 'Open activity fullscreen', exact: true })).toBeVisible()
+  await page.keyboard.press('End')
+  await expect(menu.getByRole('menuitem', { name: 'Delete conversation', exact: true })).toBeFocused()
+  await page.keyboard.press('Escape')
+  await expect(menu).toBeHidden()
+  await expect(details).toBeFocused()
   await expect(message).toHaveValue('Keep my draft while browsing details')
   await page.setViewportSize({ width: 390, height: 844 })
-  // New chat moves from the phone header into the ⋯ menu.
+  // New conversations start from the conversation list.
   await expect(page.getByRole('link', { name: 'New chat', exact: true })).toBeHidden()
-  await details.click()
-  await panel.getByRole('button', { name: 'New chat', exact: true }).click()
+  await page.getByRole('button', { name: 'Conversations', exact: true }).click()
+  await page.getByRole('button', { name: 'New conversation', exact: true }).click()
   await expect(page).toHaveURL(workspacePath('/chats'))
   await details.click()
-  await expect(panel.getByText('New conversation', { exact: true })).toBeVisible()
+  await expect(panel.getByRole('button', { name: 'Connection', exact: true })).toBeVisible()
   await expect(panel.getByRole('button', { name: 'Open activity fullscreen' })).toHaveCount(0)
   await page.keyboard.press('Escape')
   await expectSingleScroll(page)
@@ -1117,10 +1111,10 @@ test('phone headers carry the installation, its route and the conversation conne
   await connection.getByRole('button', { name: 'Installation settings', exact: true }).click()
   await expect(page).toHaveURL(workspacePath('/settings/installation'))
 
-  // A conversation keeps one row: agent, title and installation, files and the ⋯ menu.
+  // A conversation keeps one row: agent, title and its route, files and the ⋯ menu. The installation names the route.
   await page.goto(workspacePath(`/chats/${chat.id}`))
   const header = page.locator('.chat-header')
-  await expect(header.getByRole('button', { name: 'Conversations', exact: true })).toContainText('Browser workspace')
+  await expect(header.getByRole('button', { name: 'Conversations', exact: true }).getByTitle(/^Browser workspace · /)).toBeVisible()
   await expect(header.getByRole('button', { name: 'Conversations', exact: true })).toHaveAccessibleDescription('Latest harness: Codex')
   expect(Math.round((await header.boundingBox())!.height)).toBeLessThanOrEqual(60)
   await expect(header.getByRole('button', { name: /^Files: \d+$/ })).toBeVisible()
@@ -1904,7 +1898,8 @@ test('starts project chats, steers, edits the queue and preserves a compact mobi
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Review our component architecture. fixture:chat-hang')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page).toHaveURL(/\/chats\/[a-z]+-[a-z]+-[a-f0-9]{8}$/)
-  await expect(page.getByText('Working', { exact: true }).first()).toBeVisible()
+  // The header stays quiet while the agent works: the avatar's ring says it.
+  await expect(page.locator('.chat-header .avatar-orbit')).toHaveCount(1)
   await expect(page.getByTestId('agent-actions').filter({ hasText: 'Followed the run' })).toHaveCount(0)
   await expect(page.locator('.activity-message').filter({ hasText: 'Review our component architecture' })).toBeVisible()
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Add a regression test for the composer')
@@ -2022,9 +2017,7 @@ test('answers in-flight questions with choices or free text on desktop and mobil
   await expect.poll(() => workspace.service.questions.list(chatId)[0].status).toBe('answered')
   await expectChatReady(page)
   await page.setViewportSize({ width: 390, height: 844 })
-  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
-  await page.getByRole('link', { name: 'Question notifications' }).click()
-  await expect(page).toHaveURL(workspacePath('/settings/account'))
+  await page.goto(workspacePath('/settings/account'))
   await expect(page.getByRole('heading', { name: 'Question notifications' })).toBeVisible()
   await page.screenshot({ path: test.info().outputPath('notifications-mobile.png'), animations: 'disabled' })
 })
@@ -2033,10 +2026,11 @@ test('installation push registration is removed in favor of the beacon account',
   await workspace.restart()
   await page.goto(workspacePath('/chats'))
   await authenticateWorkspace(page)
-  // Notifications belong to the account, not to a conversation.
+  // Notifications belong to the account, not to a conversation: its menu no longer links them.
   await page.getByRole('button', { name: 'Chat details', exact: true }).click()
-  await page.getByRole('link', { name: 'Question notifications' }).click()
-  await expect(page).toHaveURL(workspacePath('/settings/account'))
+  await expect(page.getByRole('menu', { name: 'Chat details', exact: true }).getByRole('link', { name: 'Question notifications' })).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await page.goto(workspacePath('/settings/account'))
   await expect(page.getByText('Know when your agent needs your input, across all your installations, even with the app closed. Question content stays private.')).toBeVisible()
   await expect(page.getByText('Sign in to your Cairn account to manage push notifications on this device.')).toHaveCount(0)
   expect((await page.request.get(`${workspace.url}/api/installations/${workspace.installationId}/api/notifications`)).status()).toBe(404)
@@ -2102,18 +2096,15 @@ test('conversation deletion is visible, confirmed and permanent on desktop and m
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('An unsent draft to remove')
-  const openConversations = async () => {
-    await page.getByRole('button', { name: 'Chat details', exact: true }).click()
-    await page.getByRole('dialog', { name: 'Chat details', exact: true }).getByRole('button', { name: 'Search conversations', exact: true }).click()
-  }
+  const openConversations = () => page.getByRole('button', { name: 'Conversations', exact: true }).click()
 
   const dialog = page.getByRole('dialog', { name: /Conversations/ })
   const confirmation = page.getByRole('dialog', { name: 'Delete conversation?', exact: true })
   await page.getByRole('button', { name: 'Chat details', exact: true }).click()
-  const details = page.getByRole('dialog', { name: 'Chat details', exact: true })
-  await expect(details.getByRole('button', { name: 'Delete conversation', exact: true })).toBeVisible()
+  const details = page.getByRole('menu', { name: 'Chat details', exact: true })
+  await expect(details.getByRole('menuitem', { name: 'Delete conversation', exact: true })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('delete-chat-details-1280.png'), animations: 'disabled' })
-  await details.getByRole('button', { name: 'Delete conversation', exact: true }).click()
+  await details.getByRole('menuitem', { name: 'Delete conversation', exact: true }).click()
   await expect(confirmation).toBeVisible()
   await confirmation.getByRole('button', { name: 'Keep conversation' }).click()
   for (const [width, colorScheme] of [[1280, 'light'], [390, 'dark']] as const) {
@@ -2302,18 +2293,18 @@ test('context usage shows the latest request and an explicit compaction keeps th
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
 
-  // Codex reports the latest request (40,900 tokens), not the thread's cumulative total.
-  const indicator = page.getByTestId('context-indicator')
-  await expect(indicator).toHaveText('Context 41K / 258K · 16%')
+  // Codex reports the latest request (40,900 tokens), not the thread's cumulative total. The header
+  // mentions the context only once the window is nearly full; the ⋯ menu always shows it.
+  await expect(page.getByTestId('context-indicator')).toHaveCount(0)
   const earlierReply = page.getByRole('region', { name: 'Run conversation', exact: true })
     .getByText('Ready for the next step.', { exact: true })
   await expect(earlierReply).toBeVisible()
-  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
-  const details = page.getByRole('dialog', { name: 'Chat details', exact: true })
+  let { details, action } = await openChatDetails(page)
+  await expect(details.getByTestId('context-usage')).toContainText('41K / 258K · 16%')
   await expect(details.getByTestId('context-usage')).toContainText('40,900 of 258,400 tokens (16%)')
   await expect(details.getByTestId('context-usage')).toContainText('36,000 tokens read from cache')
   await page.screenshot({ path: testInfo.outputPath('context-details.png'), animations: 'disabled' })
-  await details.getByRole('button', { name: 'Compact context', exact: true }).click()
+  await action('Compact context').click()
   const confirmation = page.getByRole('dialog', { name: 'Compact the agent context?', exact: true })
   await expect(confirmation).toContainText('Every message stays visible')
   await confirmation.getByRole('button', { name: 'Compact context', exact: true }).click()
@@ -2322,7 +2313,10 @@ test('context usage shows the latest request and an explicit compaction keeps th
   const divider = page.getByTestId('context-compaction')
   await expect(divider).toHaveCount(1)
   await expect(divider).toContainText('Context compacted', { timeout: 15000 })
-  await expect(indicator).toHaveText('Context ≈ 6K / 258K · 2%')
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).contextUsage?.contextTokens).toBe(6200)
+  ;({ details } = await openChatDetails(page))
+  await expect(details.getByTestId('context-usage')).toContainText('≈ 6K / 258K · 2%')
+  await closeChatDetails(page)
   // The earlier reply and request stay in the transcript; no reply or new finish is invented.
   await expect(earlierReply).toBeVisible()
   await expect(page.locator('.user-bubble').filter({ hasText: 'Measure the context' })).toBeVisible()
@@ -2351,9 +2345,9 @@ test('context usage shows the latest request and an explicit compaction keeps th
   }
 
   // On phones the details sheet carries the same measurement and action.
-  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  ;({ details, action } = await openChatDetails(page))
   await expect(details.getByTestId('context-usage')).toContainText('Estimated by the coding agent')
-  await expect(details.getByRole('button', { name: 'Compact context', exact: true })).toBeEnabled()
+  await expect(action('Compact context')).toBeEnabled()
   await page.screenshot({ path: testInfo.outputPath('context-details-phone.png'), animations: 'disabled' })
 })
 
@@ -2363,9 +2357,9 @@ test('compaction is unavailable while a turn runs and explains why', async ({ pa
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 15000 }).toBe('running')
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
-  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
-  const details = page.getByRole('dialog', { name: 'Chat details', exact: true })
-  await expect(details.getByRole('button', { name: 'Compact context', exact: true })).toBeDisabled()
+  const { details, action } = await openChatDetails(page)
+  await expect(action('Compact context')).toBeDisabled()
+  await expect(action('Compact context')).toHaveAccessibleDescription('Wait for the current turn to finish before compacting.')
   await expect(details).toContainText('Wait for the current turn to finish before compacting.')
   await expect(workspace.api(`/api/chats/${chat.id}/compact`, 'POST', {})).rejects.toThrow(/Wait for the current turn to finish/)
   await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})

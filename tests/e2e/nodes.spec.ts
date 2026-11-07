@@ -396,10 +396,15 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   workspace.service.store.updateRun(detail.run.id, { nodeId: node.nodeId, resources: { cpu: 2, memoryMiB: 4096, diskMiB: 32768 }, backup: { capturedAt: Date.now() - 120000, status: 'ready' } } as any)
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
-  const header = page.getByRole('button', { name: 'Execution node', exact: true }).filter({ visible: true })
-  await expect(header).toContainText('Recovery server')
-  await expect(header).toContainText('Synced 2 min ago', { timeout: 30000 })
-  await header.click()
+  // Routine synchronization stays out of the header: the conversation menu names the node and its sync.
+  const chip = page.locator('.chat-header').getByRole('button', { name: 'Execution node', exact: true })
+  const details = page.getByRole('button', { name: 'Chat details', exact: true })
+  const nodeAction = page.getByRole('menu', { name: 'Chat details', exact: true }).getByRole('menuitem', { name: 'Execution node', exact: true })
+  await details.click()
+  await expect(nodeAction).toHaveAccessibleDescription(/^Recovery server · /)
+  await expect(nodeAction).toHaveAccessibleDescription('Recovery server · Synced 2 min ago', { timeout: 30000 })
+  await expect(chip).toHaveCount(0)
+  await nodeAction.click()
   const panel = page.getByRole('dialog', { name: 'Execution node', exact: true })
   await expect(panel).toContainText('Disk synchronized 2 min ago')
   // The placement choices share the panel's full width.
@@ -420,7 +425,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await expect.poll(async () => (await workspace.api(`/api/nodes/placement/${detail.run.id}`)).pinnedNodeId).toBe(node.nodeId)
   await page.keyboard.press('Escape')
   await expect(panel).toHaveCount(0)
-  await expect(header).toBeFocused()
+  await expect(details).toBeFocused()
   // A legacy native file workspace is only saved once execution stops.
   workspace.service.store.updateRun(detail.run.id, {
     status: 'running',
@@ -428,12 +433,13 @@ test('conversation placement distinguishes a preference from a strict pin and sh
     storage: { mode: 'native', localBytes: 191392768, dirtyBytes: 0 },
   } as any)
   await heartbeat()
-  await expect(header).toContainText('Local work · saved when execution stops', { timeout: 15000 })
+  await details.click()
+  await expect(nodeAction).toHaveAccessibleDescription(/Local work · saved when execution stops/, { timeout: 15000 })
   // A running native ublk conversation synchronizes like a VM: its last sync stays visible.
   workspace.service.store.updateRun(detail.run.id, { storage: { mode: 'on-demand', localBytes: 191392768, dirtyBytes: 0 } } as any)
   await heartbeat()
-  await expect(header).not.toContainText('saved when execution stops', { timeout: 15000 })
-  await expect(header).toContainText('Synced 2 min ago')
+  await expect(nodeAction).toHaveAccessibleDescription(/Synced 2 min ago/, { timeout: 15000 })
+  await expect(chip).toHaveCount(0)
   const nativePlacement = await workspace.api(`/api/nodes/placement/${detail.run.id}`)
   let privilegeStatus = 'pending'
   const privilegeGeneration = randomUUID()
@@ -454,7 +460,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
           }),
     },
   }))
-  await header.click()
+  await nodeAction.click()
   await expect(panel).toContainText('Last execution: Native protected · shared host GPU · files load on demand')
   await expect(panel).toContainText('Node privilege change in progress; current privileges are unconfirmed. New placements are blocked.')
   privilegeStatus = 'failed'
@@ -476,8 +482,9 @@ test('conversation placement distinguishes a preference from a strict pin and sh
     backup: { capturedAt: Date.now() - 120000, status: 'saving' },
   } as any)
   await heartbeat()
-  await expect(header).toContainText('Saving…', { timeout: 15000 })
-  await header.click()
+  await details.click()
+  await expect(nodeAction).toHaveAccessibleDescription(/Saving…/, { timeout: 15000 })
+  await nodeAction.click()
   await expect(panel).toContainText('182.5 MiB on this node')
   await expect(panel).toContainText('175.4 MiB not yet saved')
   workspace.service.store.updateRun(detail.run.id, {
@@ -490,18 +497,22 @@ test('conversation placement distinguishes a preference from a strict pin and sh
     },
   } as any)
   await heartbeat()
-  await expect(header).toContainText('Sync overdue', { timeout: 15000 })
+  // Overdue synchronization needs a look: the header names it, without the node.
+  await expect(chip).toHaveText('Sync overdue', { timeout: 15000 })
   await expect(panel).toContainText('Work can continue while local storage is safe')
   workspace.service.store.updateRun(detail.run.id, { storage: { backupDegraded: false } } as any)
   await heartbeat()
-  await expect(header).toContainText('Saving…', { timeout: 15000 })
+  await expect(chip).toHaveCount(0, { timeout: 15000 })
   await page.screenshot({ path: 'test-results/execution-desktop.png' })
   await page.keyboard.press('Escape')
   await page.setViewportSize({ width: 390, height: 844 })
-  // Phones keep the runner in the Connection sheet, not above the conversation.
+  // Phones reach the runner from the conversation menu and the Connection sheet, not above the conversation.
+  const header = page.getByRole('button', { name: 'Execution node', exact: true }).filter({ visible: true })
   await expect(header).toHaveCount(0)
-  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
-  await page.getByRole('dialog', { name: 'Chat details', exact: true }).getByRole('button', { name: 'Connection', exact: true }).click()
+  await details.click()
+  const sheet = page.getByRole('dialog', { name: 'Chat details', exact: true })
+  await expect(sheet.getByRole('button', { name: 'Execution node', exact: true })).toHaveAccessibleDescription(/^Recovery server · /)
+  await sheet.getByRole('button', { name: 'Connection', exact: true }).click()
   const connection = page.getByRole('dialog', { name: 'Connection', exact: true })
   await expect(connection.getByRole('button', { name: 'Execution node', exact: true })).toContainText('Recovery server')
   await header.click()
@@ -553,6 +564,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   })
   await page.reload()
   await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: 'Chat details', exact: true }).getByRole('button', { name: 'Execution node', exact: true })).toHaveCount(0)
   await page.getByRole('dialog', { name: 'Chat details', exact: true }).getByRole('button', { name: 'Connection', exact: true }).click()
   await expect(connection.getByText('Role', { exact: true }).locator('..')).toContainText('Member')
   await expect(connection.getByText('Runner', { exact: true })).toHaveCount(0)
@@ -892,7 +904,8 @@ for (const { automatic, expired } of [{ automatic: false, expired: false }, { au
     })
     await page.goto(workspacePath(`/chats/${chat.id}`))
     await authenticateWorkspace(page)
-    await page.getByRole('button', { name: 'Execution node', exact: true }).click()
+    await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+    await page.getByRole('menuitem', { name: 'Execution node', exact: true }).click()
     await page.getByRole('button', { name: 'Migrate this conversation…', exact: true }).click()
     const confirm = page.getByRole('dialog', { name: 'Migrate this conversation?', exact: true })
     await expect(confirm).toContainText('fresh engine session')

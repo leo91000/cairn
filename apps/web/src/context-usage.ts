@@ -53,6 +53,11 @@ export function contextSummary(usage: ContextUsage | null | undefined): ContextS
   }
 }
 
+/** A nearly full window is worth a glance in the header; below that, the occupancy waits in the menu. */
+export function contextNeedsAttention(summary: ContextSummary) {
+  return (summary.percent ?? 0) >= 80
+}
+
 export interface CompactionEntry {
   kind: 'compaction'
   id: string

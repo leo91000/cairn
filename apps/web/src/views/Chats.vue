@@ -10,6 +10,7 @@ import type { ResumeExecutionSelection } from '../../../../packages/contracts/ge
 import type { DraftState } from '../attachments'
 import type { LiveWait } from '../chat-wait'
 import type { CachedHistory } from '../history-cache'
+import type { IconName } from '../icons'
 import type { ResumeReasoningIntent } from '../speeds'
 import {
   computed,
@@ -62,7 +63,9 @@ import ChatSwitcher from '../components/ChatSwitcher.vue'
 import ComposerAttachments from '../components/ComposerAttachments.vue'
 import ConnectionSheet from '../components/ConnectionSheet.vue'
 import ConversationDeletion from '../components/ConversationDeletion.vue'
+import ConversationSummary from '../components/ConversationSummary.vue'
 import Icon from '../components/Icon.vue'
+import MenuButton from '../components/MenuButton.vue'
 import MessageAttachments from '../components/MessageAttachments.vue'
 import Modal from '../components/Modal.vue'
 import NodeExecution from '../components/NodeExecution.vue'
@@ -72,38 +75,35 @@ import RecoveryNotice from '../components/RecoveryNotice.vue'
 import SkillTextarea from '../components/SkillTextarea.vue'
 import SubagentBar from '../components/SubagentBar.vue'
 import SubagentPanel from '../components/SubagentPanel.vue'
-import ThemeControl from '../components/ThemeControl.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 import UiNotice from '../components/UiNotice.vue'
 import VirtualSelect from '../components/VirtualSelect.vue'
-import { contextSummary } from '../context-usage'
+import { contextNeedsAttention, contextSummary } from '../context-usage'
 import {
-  ArrowDown,
   ArrowUp,
   ArrowUpRight,
-  Bell,
   Bot,
   Check,
   ChevronDown,
   ChevronLeft,
   CornerDownRight,
-  FileText,
   FolderGit2,
   Hourglass,
   KeyRound,
   Layers,
   LoaderCircle,
   Maximize2,
-  Menu,
+  Minimize2,
   MoreHorizontal,
   NotebookPen,
   Paperclip,
   Plug,
   Plus,
-  Search,
+  Server,
   Shield,
   Trash2,
+  TriangleAlert,
   X,
   Zap,
 } from '../icons'
@@ -111,7 +111,7 @@ import { connectionTone, installationKey, routeLabel } from '../installation-con
 import { modelCatalogs } from '../models'
 import { useReadWhileOpen } from '../reads'
 import { useRetryState } from '../run-retry'
-import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
+import { exclusiveSuspensionLabel, headerStatus, isExclusivelySuspended } from '../run-status'
 import { backgroundWait } from '../signal'
 import { chatSkills } from '../skill-mentions'
 import {
@@ -124,7 +124,6 @@ import {
 import { delegatedChatsKey, openSubagentKey, subagentState } from '../subagents'
 import { iconButton } from '../ui'
 import { useLiveRun } from '../use-live-run'
-import { workspaceActionsKey } from '../workspace-actions'
 import { chatPath } from '../workspace-links'
 
 type ResumeDiagnosticStage
@@ -292,7 +291,6 @@ const detailsOpen = ref(false)
 const detailsButton = ref<HTMLButtonElement>()
 const activity = ref<InstanceType<typeof ActivityFeed>>()
 const textarea = ref<InstanceType<typeof SkillTextarea>>()
-const workspaceActions = inject(workspaceActionsKey)
 const installation = inject(installationKey, null)
 const currentInstallation = computed(() => installation?.current.value ?? null)
 const connectionOpen = ref(false)
@@ -542,6 +540,7 @@ const chatStatus = computed(() => {
     return sleepStatus.value
   return 'Ready'
 })
+const headerState = computed(() => detail.value ? headerStatus(chatStatus.value) : null)
 const outgoing = ref<ChatMessage | null>(null)
 const delivery = computed(() => chatDelivery(detail.value, timeline.value, outgoing.value))
 const pending = computed(() => delivery.value.queued)
@@ -846,6 +845,82 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
 const newSession = ref(false)
 const compacting = ref(false)
 const context = computed(() => contextSummary(detail.value?.contextUsage))
+const contextAlert = computed(() => contextNeedsAttention(context.value))
+const nodeExecution = ref<InstanceType<typeof NodeExecution>>()
+const menuButton = ref<InstanceType<typeof MenuButton>>()
+
+interface ConversationAction {
+  id: string
+  label: string
+  /** A second, muted line: why an action is unavailable, or the current state. */
+  hint?: string
+  icon: IconName
+  disabled?: boolean
+  danger?: boolean
+  advanced?: boolean
+  run: (anchor?: HTMLElement) => void
+}
+
+// The ⋯ menu holds only what acts on this conversation: the workspace has its own navigation.
+const conversationActions = computed(() => {
+  const chat = detail.value
+  const actions: ConversationAction[] = []
+  if (chat?.compaction?.supported && !inactive.value) {
+    actions.push({
+      id: 'compact',
+      label: chat.compaction.running ? 'Compacting context…' : 'Compact context',
+      hint: chat.compaction.running ? undefined : chat.compaction.reason ?? undefined,
+      icon: Minimize2,
+      disabled: !chat.compaction.available,
+      run: () => { compacting.value = true },
+    })
+  }
+
+  if (chat?.run) {
+    actions.push({
+      id: 'fullscreen',
+      label: 'Open activity fullscreen',
+      icon: Maximize2,
+      run: () => activity.value?.enterFullscreen(),
+    })
+  }
+
+  const node = nodeExecution.value
+  if (node?.relevant) {
+    actions.push({
+      id: 'node',
+      label: 'Execution node',
+      hint: [node.nodeName, node.status.label].filter(Boolean).join(' · '),
+      icon: Server,
+      advanced: true,
+      run: anchor => void node.show(anchor),
+    })
+  }
+
+  actions.push({
+    id: 'connection',
+    label: 'Connection',
+    icon: Plug,
+    advanced: true,
+    run: () => { connectionOpen.value = true },
+  })
+  if (chat && !inactive.value) {
+    actions.push({
+      id: 'delete',
+      label: 'Delete conversation',
+      icon: Trash2,
+      danger: true,
+      run: () => { deletingConversation.value = chat },
+    })
+  }
+
+  return actions
+})
+const actionGroups = computed(() => [
+  { id: 'conversation', label: '', actions: conversationActions.value.filter(action => !action.advanced && !action.danger) },
+  { id: 'advanced', label: 'Advanced', actions: conversationActions.value.filter(action => action.advanced) },
+  { id: 'danger', label: '', actions: conversationActions.value.filter(action => action.danger) },
+].filter(group => group.actions.length))
 
 async function action(name: 'pause' | 'stop' | 'restore' | 'new-session' | 'compact', body?: { paused?: boolean, confirm?: boolean }) {
   if (!detail.value || busy.value)
@@ -1057,6 +1132,9 @@ function key(event: KeyboardEvent) {
     <div class="p-6">
       <p>The coding agent summarizes its earlier context to free space in its window. This uses the agent's model, like a short turn.</p>
       <p>Every message stays visible in this conversation. Messages you send meanwhile wait for the compaction to finish.</p>
+      <p v-if="detail?.compaction?.reason && !detail.compaction.available" class="text-muted">
+        {{ detail.compaction.reason }}
+      </p>
       <UiButton :disabled="busy || !detail?.compaction?.available" @click="action('compact').then((succeeded) => { if (succeeded) compacting = false })">
         Compact context
       </UiButton>
@@ -1077,105 +1155,44 @@ function key(event: KeyboardEvent) {
     :return-focus="detailsButton"
     @close="detailsOpen = false"
   >
-    <div class="px-5 pb-5">
-      <p class="mt-1! mb-5! text-sm leading-relaxed wrap-anywhere">
-        {{ detail?.title || 'New conversation' }}
-      </p>
-      <dl class="grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-3 border-y border-line py-4 text-xs">
-        <dt class="text-muted">
-          Agent
-        </dt><dd class="m-0 wrap-anywhere">
-          {{ detail?.agentName || selectedAgent?.name || 'Main agent' }}
-        </dd>
-        <dt class="text-muted">
-          Project
-        </dt><dd class="m-0 wrap-anywhere">
-          {{ detail?.projectName || state.projects.find(project => project.id === projectId)?.name || 'No project' }}
-        </dd>
-        <template v-if="detail?.requester">
-          <dt class="text-muted">
-            From
-          </dt><dd class="m-0 wrap-anywhere">
-            <RouterLink :to="chatPath({ id: detail.requester.chatId })" class="font-semibold text-accent" @click="detailsOpen = false">
-              Delegated by {{ detail.requester.title || 'New conversation' }}
-            </RouterLink>
-          </dd>
-        </template>
-        <dt class="text-muted">
-          Status
-        </dt><dd class="m-0 flex items-center gap-2">
-          <span class="size-1.5 rounded-full bg-accent" />{{ chatStatus }}
-        </dd>
-        <template v-if="detail?.run">
-          <dt class="text-muted">
-            Context
-          </dt><dd class="m-0" data-testid="context-usage">
-            <span class="block">{{ context.label }}</span>
-            <span v-for="line in context.details" :key="line" class="block text-muted">{{ line }}</span>
-          </dd>
-        </template>
-      </dl>
-      <button class="chat-detail-action" @click="detailAction(newConversation)">
-        <Icon :name="Plus" :size="18" />New chat
-      </button>
-      <button
-        v-if="detail?.run"
-        class="chat-detail-action"
-        :disabled="!fileCount"
-        @click="detailAction(() => activity?.openFiles())"
+    <div class="px-3 pb-4">
+      <ConversationSummary
+        :agent-name="heading?.agentName || selectedAgent?.name || 'Main agent'"
+        :agent-id="heading?.agentId || selectedAgent?.id"
+        :provider="heading?.provider"
+        :project-name="heading ? heading.projectName : state.projects.find(project => project.id === projectId)?.name"
+        :status="detail ? chatStatus : undefined"
+        :failed="headerState?.failed"
+        :context="detail?.run ? context : undefined"
+      />
+      <RouterLink
+        v-if="detail?.requester"
+        :to="chatPath({ id: detail.requester.chatId })"
+        class="chat-detail-action font-semibold text-accent!"
+        @click="detailsOpen = false"
       >
-        <Icon :name="FileText" :size="18" />Files <span class="ml-auto text-muted">{{ fileCount }}</span>
-      </button>
-      <template v-if="detail?.compaction?.supported && !inactive">
-        <button
-          class="chat-detail-action"
-          aria-haspopup="dialog"
-          :disabled="!detail.compaction.available"
-          :aria-describedby="detail.compaction.reason ? 'compaction-reason' : undefined"
-          @click="detailAction(() => { compacting = true })"
-        >
-          <Icon :name="Layers" :size="18" />{{ detail.compaction.running ? 'Compacting context…' : 'Compact context' }}
-        </button>
-        <p v-if="detail.compaction.reason && !detail.compaction.running" id="compaction-reason" class="m-0! mb-1! px-3 text-2xs text-muted">
-          {{ detail.compaction.reason }}
-        </p>
-      </template>
-      <button class="chat-detail-action" @click="detailAction(() => { history = true })">
-        <Icon :name="Search" :size="18" />Search conversations
-      </button>
-      <RouterLink to="/settings/account" class="chat-detail-action" @click="detailsOpen = false">
-        <Icon :name="Bell" :size="18" />Question notifications
+        <Icon :name="CornerDownRight" :size="18" />Delegated by {{ detail.requester.title || 'New conversation' }}
       </RouterLink>
-      <button class="chat-detail-action" aria-haspopup="dialog" @click="detailAction(() => { connectionOpen = true })">
-        <Icon :name="Plug" :size="18" />Connection
-      </button>
-      <template v-if="detail?.run">
-        <button class="chat-detail-action" @click="detailAction(() => activity?.followLatest())">
-          <Icon :name="ArrowDown" :size="18" />Follow latest output
-        </button>
-        <button class="chat-detail-action" @click="detailAction(() => activity?.enterFullscreen())">
-          <Icon :name="Maximize2" :size="18" />Open activity fullscreen
+      <template v-for="group in actionGroups" :key="group.id">
+        <div v-if="group.id === 'danger'" class="my-1 border-t border-line" />
+        <p v-if="group.label" class="m-0! px-3 pt-3 pb-1 text-[10.5px] font-semibold uppercase tracking-wider text-muted">
+          {{ group.label }}
+        </p>
+        <button
+          v-for="item in group.actions"
+          :key="item.id"
+          class="chat-detail-action"
+          :class="{ 'text-danger!': item.danger }"
+          :disabled="item.disabled"
+          :aria-label="item.label"
+          :aria-describedby="item.hint ? `conversation-action-${item.id}` : undefined"
+          @click="detailAction(() => item.run(detailsButton))"
+        >
+          <Icon :name="item.icon" :size="18" /><span class="min-w-0 text-left">
+            <span class="block">{{ item.label }}</span><span v-if="item.hint" :id="`conversation-action-${item.id}`" class="block text-2xs leading-snug text-muted">{{ item.hint }}</span>
+          </span>
         </button>
       </template>
-      <button
-        v-if="detail && !inactive"
-        class="chat-detail-action text-danger!"
-        aria-haspopup="dialog"
-        @click="detailAction(() => { deletingConversation = detail! })"
-      >
-        <Icon :name="Trash2" :size="18" />Delete conversation
-      </button>
-      <div class="border-t border-line pt-1">
-        <button class="chat-detail-action" @click="detailAction(() => workspaceActions?.search())">
-          <Icon :name="Search" :size="18" />Search workspace
-        </button>
-        <button class="chat-detail-action" @click="detailAction(() => workspaceActions?.navigation())">
-          <Icon :name="Menu" :size="18" />Workspace navigation
-        </button>
-        <div class="flex min-h-12 items-center justify-between text-xs">
-          <span>Appearance</span><ThemeControl compact />
-        </div>
-      </div>
     </div>
   </Modal>
   <ConversationDeletion
@@ -1232,9 +1249,9 @@ function key(event: KeyboardEvent) {
               <span class="flex min-w-0 items-center gap-1 text-[14px] font-semibold leading-tight text-ink">
                 <span class="truncate">{{ heading?.title || 'New conversation' }}</span><Icon :name="ChevronDown" :size="14" class="shrink-0 text-muted" />
               </span>
-              <span class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11.5px] font-normal leading-tight text-muted" :title="currentInstallation ? `${currentInstallation.status} · ${routeLabel(state.transportRoute)}` : undefined">
+              <span class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11.5px] font-normal leading-tight" :class="headerState?.failed ? 'text-coral' : 'text-muted'" :title="currentInstallation ? `${currentInstallation.name} · ${currentInstallation.status} · ${routeLabel(state.transportRoute)}` : undefined">
                 <span class="size-1.5 shrink-0 rounded-full" :class="connectionTone(currentInstallation, state.transportRoute)" />
-                <span class="truncate">{{ [heading?.agentName || selectedAgent?.name || 'Main agent', currentInstallation?.name].filter(Boolean).join(' · ') }}</span>
+                <span class="truncate" :role="headerState ? 'status' : undefined">{{ headerState?.label || heading?.projectName || heading?.agentName || selectedAgent?.name || 'Main agent' }}</span>
               </span>
             </span>
           </span>
@@ -1248,57 +1265,65 @@ function key(event: KeyboardEvent) {
             :harness="heading.provider"
             :working="detail?.run?.status === 'running' && !detail.paused && !suspended && !quota"
           />
-          <div class="min-w-0 flex-1">
-            <div class="flex min-w-0 items-center gap-1">
-              <h1 class="truncate text-base! font-semibold! leading-snug! tracking-tight!">
-                {{ heading?.title || 'New conversation' }}
-              </h1>
-              <button
-                ref="tabletHistoryButton"
-                :class="iconButton"
-                class="-my-2 hidden! size-10! tablet:inline-flex!"
-                aria-label="Conversations"
-                aria-haspopup="dialog"
-                :aria-expanded="history"
-                @click="history = true"
-              >
-                <Icon :name="ChevronDown" :size="16" />
-              </button>
-            </div>
-            <div v-if="heading" class="m-0! mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted">
-              <span class="flex min-w-0 items-center gap-1.5"><Icon :name="Bot" :size="13" /><span class="truncate max-w-40">{{ heading.agentName }}</span></span>
-              <template v-if="heading.projectName">
-                <span aria-hidden="true" class="text-muted/40">/</span>
-                <span class="flex min-w-0 items-center gap-1.5"><Icon :name="FolderGit2" :size="13" /><span class="truncate max-w-48">{{ heading.projectName }}</span></span>
-              </template>
-              <RouterLink
-                v-if="heading.requester"
-                :to="chatPath({ id: heading.requester.chatId })"
-                class="flex min-w-0 items-center gap-1.5 font-semibold text-accent hover:underline"
-                data-testid="chat-requester"
-              >
-                <Icon :name="CornerDownRight" :size="13" /><span class="truncate max-w-56">Delegated by {{ heading.requester.title || 'New conversation' }}</span>
-              </RouterLink>
-              <span v-if="detail" class="flex items-center gap-1.5 font-semibold" :class="chatStatus === 'Working' ? 'text-accent' : chatStatus === 'Failed' || chatStatus === 'Interrupted' ? 'text-coral' : ''"><span v-if="chatStatus !== 'Working'" class="size-1 shrink-0 rounded-full" :class="active ? 'bg-accent' : 'bg-muted'" />{{ chatStatus }}<span v-if="chatStatus === 'Working'" class="working-wave"><i /><i /><i /></span></span>
-              <span
-                v-if="context.percent !== null || detail?.contextUsage"
-                class="tabular-nums"
-                :class="(context.percent ?? 0) >= 85 ? 'text-coral' : ''"
-                :title="[context.label, ...context.details].join('\n')"
-                data-testid="context-indicator"
-              >Context {{ context.short }}</span>
-              <NodeExecution v-if="detail?.run && state.installationRole === 'owner'" :key="detail.run.id" :run="detail.run" />
-            </div>
+          <div class="flex min-w-0 flex-1 items-center gap-2.5 text-xs text-muted">
+            <h1 class="min-w-0 truncate text-base! font-semibold! leading-snug! tracking-tight! text-ink">
+              {{ heading?.title || 'New conversation' }}
+            </h1>
+            <button
+              ref="tabletHistoryButton"
+              :class="iconButton"
+              class="-my-2 -ml-2 size-8! shrink-0"
+              aria-label="Conversations"
+              aria-haspopup="dialog"
+              :aria-expanded="history"
+              @click="history = true"
+            >
+              <Icon :name="ChevronDown" :size="16" />
+            </button>
+            <span v-if="heading?.projectName" class="flex min-w-0 shrink items-center gap-1.5"><Icon :name="FolderGit2" :size="13" class="shrink-0" /><span class="truncate max-w-48">{{ heading.projectName }}</span></span>
+            <RouterLink
+              v-if="heading?.requester"
+              :to="chatPath({ id: heading.requester.chatId })"
+              class="flex min-w-0 shrink items-center gap-1.5 font-semibold text-accent hover:underline"
+              data-testid="chat-requester"
+            >
+              <Icon :name="CornerDownRight" :size="13" class="shrink-0" /><span class="truncate max-w-56">Delegated by {{ heading.requester.title || 'New conversation' }}</span>
+            </RouterLink>
+            <span
+              v-if="headerState"
+              role="status"
+              class="flex shrink-0 items-center gap-1.5 rounded-full px-2.5 leading-6 font-medium whitespace-nowrap"
+              :class="headerState.failed ? 'bg-coral-soft text-coral' : 'bg-hover'"
+            ><Icon v-if="headerState.failed" :name="TriangleAlert" :size="12" />{{ headerState.label }}</span>
+            <button
+              v-if="contextAlert"
+              class="flex shrink-0 items-center gap-1.5 rounded-full px-2.5 leading-6 font-medium tabular-nums whitespace-nowrap"
+              :class="(context.percent ?? 0) >= 85 ? 'bg-coral-soft text-coral' : 'bg-warning-surface text-warning'"
+              :title="[context.label, ...context.details].join('\n')"
+              aria-haspopup="dialog"
+              data-testid="context-indicator"
+              @click="compacting = true"
+            >
+              Context {{ context.percent }}%
+            </button>
+            <NodeExecution
+              v-if="detail?.run && state.installationRole === 'owner'"
+              ref="nodeExecution"
+              :key="detail.run.id"
+              variant="attention"
+              :run="detail.run"
+            />
           </div>
         </div>
         <div class="flex shrink-0 items-center gap-1">
           <button
             v-if="detail?.run && fileCount"
-            class="mr-1 flex min-h-9 items-center gap-2 rounded-full bg-accent/12 px-3.5 text-xs font-semibold text-accent hover:bg-accent/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent phone:hidden"
+            :class="iconButton"
+            class="w-auto! gap-1.5 px-2.5! text-xs font-semibold tabular-nums phone:hidden!"
             :aria-label="`Files: ${fileCount}`"
             @click="activity?.openFiles()"
           >
-            <Icon :name="Layers" :size="16" />Files<span aria-hidden="true" class="grid h-4.5 min-w-4.5 place-items-center rounded-full bg-accent px-1 text-[10px] font-bold text-surface">{{ fileCount }}</span>
+            <Icon :name="Layers" :size="18" /><span aria-hidden="true">{{ fileCount }}</span>
           </button>
           <button
             v-if="detail?.run"
@@ -1311,18 +1336,53 @@ function key(event: KeyboardEvent) {
             <Icon :name="Layers" :size="19" />
             <span v-if="fileCount" aria-hidden="true" class="absolute right-1 top-1 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 text-[10px] font-bold text-surface">{{ fileCount }}</span>
           </button>
-          <button
-            v-if="detail?.run"
-            :class="iconButton"
-            class="phone:hidden!"
-            aria-label="Open activity fullscreen"
-            @click="activity?.enterFullscreen()"
+          <MenuButton
+            ref="menuButton"
+            label="Chat details"
+            :width="300"
+            :trigger-class="[iconButton, 'phone:hidden!']"
           >
-            <Icon :name="Maximize2" :size="18" />
-          </button>
+            <template #trigger>
+              <Icon :name="MoreHorizontal" :size="20" />
+            </template>
+            <template #default="{ select }">
+              <ConversationSummary
+                :agent-name="heading?.agentName || selectedAgent?.name || 'Main agent'"
+                :agent-id="heading?.agentId || selectedAgent?.id"
+                :provider="heading?.provider"
+                :project-name="heading ? heading.projectName : state.projects.find(project => project.id === projectId)?.name"
+                :status="detail ? chatStatus : undefined"
+                :failed="headerState?.failed"
+                :context="detail?.run ? context : undefined"
+              />
+              <template v-for="group in actionGroups" :key="group.id">
+                <div v-if="group.id === 'danger'" role="separator" class="my-1 h-px bg-line" />
+                <p v-if="group.label" role="presentation" class="m-0! px-2.5 pt-2.5 pb-1 text-[10.5px] font-semibold uppercase tracking-wider text-muted">
+                  {{ group.label }}
+                </p>
+                <button
+                  v-for="item in group.actions"
+                  :key="item.id"
+                  type="button"
+                  role="menuitem"
+                  class="menu-item"
+                  :class="{ 'text-danger!': item.danger }"
+                  :disabled="item.disabled"
+                  :aria-label="item.label"
+                  :aria-describedby="item.hint ? `conversation-action-${item.id}` : undefined"
+                  @click="select(() => item.run(menuButton?.trigger))"
+                >
+                  <Icon :name="item.icon" :size="16" :class="item.danger ? '' : 'text-muted'" /><span class="min-w-0">
+                    <span class="block">{{ item.label }}</span><span v-if="item.hint" :id="`conversation-action-${item.id}`" class="block text-2xs leading-snug text-muted">{{ item.hint }}</span>
+                  </span>
+                </button>
+              </template>
+            </template>
+          </MenuButton>
           <button
             ref="detailsButton"
             :class="iconButton"
+            class="hidden! phone:inline-flex!"
             aria-label="Chat details"
             aria-haspopup="dialog"
             :aria-expanded="detailsOpen"

@@ -598,8 +598,17 @@ class ChatJourneyTest {
             }
             compose.onNode(hasSetTextAction()).performTextInput("Brouillon à conserver")
             compose.onNode(hasSetTextAction() and hasText("Brouillon à conserver")).assertExists()
-            compose.onNodeWithContentDescription("Options de la conversation").performClick()
-            compose.onNodeWithText("Nouvelle conversation").performClick()
+            // New conversations start from the conversation list, not the conversation's options.
+            compose
+                .onNode(hasContentDescription("Changer de conversation", substring = true))
+                .performClick()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodesWithContentDescription("Nouvelle conversation")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithContentDescription("Nouvelle conversation").performClick()
             assertEquals("Brouillon à conserver", vm.chatDrafts[chatId]?.text)
             compose
                 .onNode(hasContentDescription("Changer de conversation", substring = true))
