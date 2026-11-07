@@ -20,6 +20,8 @@ data class NodeCapabilities(
     val os: String,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val ublk: Boolean = false,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val vmDisks: Boolean = false,
 ) {
     init {
         require(Regex("^(firecracker|native)\$").containsMatchIn(backend))

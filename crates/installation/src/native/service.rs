@@ -551,9 +551,11 @@ impl Controller {
             let mut code = controller.execution_status(&id, result).await;
             let mut finalization_failed = false;
             // Deliver the result path consumed by the node connector.
-            let result = root.join("data/output/result.md");
-            if let Ok(file) = crate::artifacts::file::open_export(&result, &root.join("data")).await
-            {
+            let output = block::view(&controller.state, text(&plan, "runId"))
+                .await
+                .map_or_else(|_| root.join("data/output"), |view| view.output);
+            let result = output.join("result.md");
+            if let Ok(file) = crate::artifacts::file::open_export(&result, &output).await {
                 let file = tokio::fs::File::from_std(file);
                 let mut bytes = Vec::new();
                 if file.take(1_000_001).read_to_end(&mut bytes).await.is_ok()
@@ -875,12 +877,32 @@ impl Controller {
                 trace.phase(Phase::FilesystemInitialize);
                 let from_base = self.bases().initialize(plan, stop).await?;
                 trace.phase(Phase::Mount);
+                let runtime_path =
+                    storage::environment::directory(&self.state, text(plan, "runId"))?
+                        .join("runtime.json");
+                let runtime = match tokio::fs::read(runtime_path).await {
+                    Ok(bytes) => serde_json::from_slice::<Value>(&bytes)?,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Value::Null,
+                    Err(error) => return Err(error.into()),
+                };
+                let identity = if runtime["disk"] == "vm" {
+                    trace.phase(Phase::IdentityProvision);
+                    let mut identity =
+                        super::identity::provision(&self.state, text(plan, "runId")).await?;
+                    if plan["nativeMode"]["mode"] == "administrator" {
+                        identity.host_engine = Some((self.identity.uid, self.identity.gid));
+                    }
+                    Some(identity)
+                } else {
+                    None
+                };
                 let mounted = block::mount(
                     &self.state,
                     text(plan, "runId"),
                     plan,
                     stop,
                     &self.backend_namespace,
+                    identity.as_ref(),
                 )
                 .await?;
                 Ok((from_base, mounted))
@@ -1012,7 +1034,12 @@ impl Controller {
             &serde_json::to_vec(&plan["resources"])?,
         )
         .await?;
-        let data = root.join("data");
+        let mut execution_plan = plan.clone();
+        execution_plan["guestDataRoot"] = guest_data(plan, &self.data)
+            .to_string_lossy()
+            .into_owned()
+            .into();
+        let plan = &execution_plan;
         let runtime = plan["runtimeId"]
             .as_str()
             .ok_or_else(|| Error::bad("Missing pinned native runtime."))?;
@@ -1033,6 +1060,8 @@ impl Controller {
         if administrator {
             identity.host_engine = Some((self.identity.uid, self.identity.gid));
         }
+        let view = block::view(&self.state, text(plan, "runId")).await?;
+        let data = view.filesystems[0].clone();
         trace.phase(Phase::FilesystemInitialize);
         block::initialize(
             &self.state,
@@ -1059,9 +1088,20 @@ impl Controller {
         private_dir(&temporary).await?;
         workspace::own_tree(&temporary, identity.uid(), identity.gid()).await?;
         let stage = self.data.join("runs").join(text(plan, "runId"));
-        let bindings =
-            super::home::prepare_for_identity(&stage.join("home"), &data, &identity, &trace)
-                .await?;
+        let bindings = if view.mapped {
+            view.prepare(identity.uid(), identity.gid()).await?;
+            let bindings = super::home::prepare(
+                &stage.join("home"),
+                &view.home,
+                identity.uid(),
+                identity.gid(),
+            )
+            .await?;
+            super::workspace::own_tree(&stage.join("home"), identity.uid(), identity.gid()).await?;
+            bindings
+        } else {
+            super::home::prepare_for_identity(&stage.join("home"), &data, &identity, &trace).await?
+        };
         // Keep the existing prepared-base admission marker. The authoritative
         // ownership mapping now travels inside the published filesystem.
         atomic_write(
@@ -1073,7 +1113,16 @@ impl Controller {
         let docker_data = data.join("docker");
         // Only namespace root may access raw daemon metadata. Engine access is
         // exclusively through the mandatory authorization plugin.
-        tokio::fs::create_dir_all(&docker_data).await?;
+        if view.mapped {
+            block::directory_beneath(
+                &data,
+                &docker_data,
+                Some((identity.root_uid, identity.root_gid)),
+            )
+            .await?;
+        } else {
+            tokio::fs::create_dir_all(&docker_data).await?;
+        }
         std::os::unix::fs::lchown(
             &docker_data,
             Some(identity.root_uid),
@@ -1204,9 +1253,9 @@ impl Controller {
             plan: &plan,
             data: &self.data,
             root: &container,
-            home: &data.join("home"),
-            workspace: &data.join("workspaces"),
-            output: &data.join("output"),
+            home: &view.home,
+            workspace: &view.workspace,
+            output: &view.output,
             identity: &self.identity,
             conversation: (!administrator).then_some(&identity),
             docker_data: (!administrator).then_some(docker_data.as_path()),
@@ -1294,7 +1343,7 @@ impl Controller {
                 _ = timer.tick() => {
                     let leased = self.leased(id).await;
                     let expired = self.expired(id, plan["expires"].as_i64()).await;
-                    let workspace_bytes = block::used_bytes(&data)?;
+                    let workspace_bytes = view.filesystems.iter().try_fold(0u64, |total, path| block::used_bytes(path).map(|used| total.saturating_add(used)))?;
                     let temporary_bytes = disk::bytes_if_present(&temporary).await?;
                     let conversation_bytes = workspace_bytes.saturating_add(temporary_bytes);
                     let conversation_limit = self.monitor_capacity(id, &plan, workspace_bytes, temporary_bytes).await?;
@@ -2318,18 +2367,18 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             // supervision and cancellation remain free to inspect active runs.
             let plan = controller.plan(id).await?;
             let environment = workspace::directory(&controller.state, &run)?;
-            let root = environment.join("data");
+            let view = block::view(&controller.state, &run).await?;
             let path = Path::new(text(&value, "path"));
             let project_root = Path::new(text(&plan, "projectRoot"));
             let (source, allowed) = if let Ok(relative) = path.strip_prefix(project_root) {
-                (root.join("workspaces").join(relative), root.clone())
+                (view.workspace.join(relative), view.workspace.clone())
             } else if let Ok(relative) = path.strip_prefix(
                 guest_data(&plan, &controller.data)
                     .join("runs")
                     .join(&run)
                     .join("output"),
             ) {
-                (root.join("output").join(relative), root.clone())
+                (view.output.join(relative), view.output.clone())
             } else if let Ok(relative) = path.strip_prefix("/tmp") {
                 let temporary = environment.join("tmp");
                 (temporary.join(relative), temporary)
@@ -2407,16 +2456,15 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             {
                 return Err(Error::forbidden("Invalid native project path."));
             }
-            let target = workspace::directory(&controller.state, &run)?
-                .join("data/workspaces")
-                .join(project);
+            let view = block::view(&controller.state, &run).await?;
+            let target = view.workspace.join(project);
             if !target.exists() {
-                let data = workspace::directory(&controller.state, &run)?.join("data");
+                let data = view.filesystem_of(&view.workspace)?;
                 // Stage on the mounted filesystem so installation is an atomic
                 // rename, and do not walk all lazy files to estimate free space.
-                let staged = tempfile::tempdir_in(&data)?;
+                let staged = tempfile::tempdir_in(data)?;
                 let received = staged.path().join("project");
-                let remaining = block::free_bytes(&data)?;
+                let remaining = block::free_bytes(data)?;
                 workspace::copy(
                     &source,
                     &received,

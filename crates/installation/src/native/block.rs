@@ -8,10 +8,11 @@ use crate::{
     storage::{self, Disk, environment, runtime::Volume},
     validation::text,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     future::Future,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -21,6 +22,148 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) const KIND: &str = "native-ext4-v1";
 pub(crate) const STORAGE: &str = "ublk-rootless-v1";
+
+/// Whether a native controller mounts this checkpoint as a block journal: a
+/// disk created natively, or a VM disk that native nodes mount in place.
+pub(crate) fn mounts_block(manifest: &Value) -> bool {
+    manifest["kind"] == KIND || vm_disk(&manifest["runtime"]) && manifest["kind"].is_null()
+}
+
+/// A VM disk mounted natively records its VM image for a later move back.
+fn vm_disk(runtime: &Value) -> bool {
+    runtime["backend"] == "native" && runtime["disk"] == "vm"
+}
+
+/// Where a conversation's files live in its mounted filesystems. Native disks
+/// keep them at the filesystem root; VM disks keep the guest's layout, with
+/// owners translated by an idmapped mount.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct View {
+    pub home: PathBuf,
+    pub workspace: PathBuf,
+    pub output: PathBuf,
+    /// Mounted filesystem roots, in mount order.
+    pub filesystems: Vec<PathBuf>,
+    /// Whether file owners are translated from the VM agent identity.
+    pub mapped: bool,
+}
+
+impl View {
+    fn native(root: &Path) -> Self {
+        let data = root.join("data");
+        Self {
+            home: data.join("home"),
+            workspace: data.join("workspaces"),
+            output: data.join("output"),
+            filesystems: vec![data],
+            mapped: false,
+        }
+    }
+
+    /// Current VM disks keep their writable guest overlay in `upper`.
+    fn vm(root: &Path, plan: &Value) -> Result<Self> {
+        let data = root.join("data");
+        let locate = |guest: &Path| -> Result<PathBuf> {
+            if !guest.is_absolute()
+                || guest
+                    .components()
+                    .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
+            {
+                return Err(Error::bad("Invalid saved guest path."));
+            }
+            Ok(data.join("upper").join(guest.strip_prefix("/").unwrap()))
+        };
+        let output = PathBuf::from(
+            plan["guestDataRoot"]
+                .as_str()
+                .ok_or_else(|| Error::bad("Missing native guest data root."))?,
+        )
+        .join("runs")
+        .join(text(plan, "runId"))
+        .join("output");
+        Ok(Self {
+            home: locate(Path::new("/home/node"))?,
+            workspace: locate(Path::new(text(plan, "projectRoot")))?,
+            output: locate(&output)?,
+            filesystems: vec![data],
+            mapped: true,
+        })
+    }
+
+    /// The mounted filesystem holding `path`, for same-filesystem staging.
+    pub(crate) fn filesystem_of(&self, path: &Path) -> Result<&Path> {
+        self.filesystems
+            .iter()
+            .rev()
+            .find(|root| path.starts_with(root))
+            .map(PathBuf::as_path)
+            .ok_or_else(|| Error::bad("Path is outside the conversation's filesystems."))
+    }
+
+    /// Validate every guest-written bind source before the controller writes it.
+    pub(super) async fn prepare(&self, uid: u32, gid: u32) -> Result<()> {
+        for path in [
+            &self.home,
+            &self.workspace,
+            &self.output,
+            &self.home.join(".local"),
+        ] {
+            directory_beneath(self.filesystem_of(path)?, path, Some((uid, gid))).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Walks from `root` to `path` without following links. Missing components
+/// are created when `owner` is given; the final one is owned by it. Returns
+/// whether `path` exists as a directory afterwards.
+pub(super) async fn directory_beneath(
+    root: &Path,
+    path: &Path,
+    owner: Option<(u32, u32)>,
+) -> Result<bool> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| Error::bad("Path is outside its filesystem."))?;
+    let mut current = root.to_owned();
+    let count = relative.components().count();
+    for (index, part) in relative.components().enumerate() {
+        let Component::Normal(part) = part else {
+            return Err(Error::bad("Invalid conversation path."));
+        };
+        current.push(part);
+        match tokio::fs::symlink_metadata(&current).await {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(Error::conflict(
+                    "A conversation directory on this disk is a link or a file.",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let Some((uid, gid)) = owner else {
+                    return Ok(false);
+                };
+                tokio::fs::create_dir(&current).await?;
+                if index + 1 == count {
+                    std::os::unix::fs::lchown(&current, Some(uid), Some(gid))?;
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(true)
+}
+
+/// The view recorded when the conversation was last mounted here.
+pub(crate) async fn view(state: &Path, run: &str) -> Result<View> {
+    let root = workspace::directory(state, run)?;
+    match tokio::fs::read(root.join("view.json")).await {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(View::native(&root)),
+        Err(error) => Err(error.into()),
+    }
+}
 
 pub(crate) const DISK_BUSY: &str = "Native disk is active.";
 
@@ -50,7 +193,7 @@ fn preparation_size(directory: &Path, requested: u64) -> Result<u64> {
 }
 
 async fn record_runtime(directory: &Path, plan: &Value) -> Result<()> {
-    let runtime = json!({
+    let mut runtime = json!({
         "backend": "native",
         "storage": STORAGE,
         "os": "linux",
@@ -60,6 +203,11 @@ async fn record_runtime(directory: &Path, plan: &Value) -> Result<()> {
     if directory.join("runtime.json").exists() {
         let previous: Value =
             serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
+        for field in ["disk", "vmRuntimeId"] {
+            if let Some(value) = previous.get(field) {
+                runtime[field] = value.clone();
+            }
+        }
         if ["backend", "os", "arch"]
             .iter()
             .any(|field| previous[*field] != runtime[*field])
@@ -303,12 +451,13 @@ impl Completion {
     }
 }
 
-pub async fn mount(
+pub(super) async fn mount(
     state: &Path,
     run: &str,
     plan: &Value,
     stop: &CancellationToken,
     namespace: &storage::ublk::BackendNamespace,
+    identity: Option<&super::identity::Identity>,
 ) -> Result<Mounted> {
     {
         let owner = environment::ownership(state, run, DISK_BUSY).await?;
@@ -349,6 +498,20 @@ pub async fn mount(
         let physical = crate::file_lock::exclusive(&directory.join("lock"), DISK_BUSY)?;
         record_runtime(directory, plan).await?;
         let volume = storage::runtime::load(directory).await?;
+        let runtime: Value =
+            serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
+        let vm = vm_disk(&runtime);
+        if vm && !root.join("block-initialized").exists() {
+            return Err(Error::conflict(
+                "A VM disk must be restored before it runs natively.",
+            ));
+        }
+        let view = if vm {
+            View::vm(&root, plan)?
+        } else {
+            View::native(&root)
+        };
+        atomic_write(&root.join("view.json"), &serde_json::to_vec(&view)?).await?;
         let target = root.join("data");
         if !root.join("block-initialized").exists() && !root.join("block-seeding").exists() {
             atomic_write(&root.join("block-seeding"), b"1").await?;
@@ -375,8 +538,18 @@ pub async fn mount(
         let device = Arc::new(std::sync::Mutex::new(device));
         let source = jail.join("disk.blk");
         let destination = target.clone();
+        let identity = identity.cloned();
         let mut mounting = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
             use std::os::unix::ffi::OsStrExt;
+            if vm {
+                return super::idmap::mount_ext4(
+                    &source,
+                    &destination,
+                    identity
+                        .as_ref()
+                        .ok_or_else(|| std::io::Error::other("Missing VM mount identity"))?,
+                );
+            }
             let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
             let target = std::ffi::CString::new(destination.as_os_str().as_bytes())?;
             if unsafe {
@@ -900,7 +1073,7 @@ async fn freeze(target: &Path, stop: CancellationToken) -> Result<Option<Frozen>
 
 pub async fn restore(state: &Path, run: &str, request: Value) -> Result<Value> {
     let manifest = &request["manifest"];
-    if manifest["kind"] != KIND
+    if !mounts_block(manifest)
         || manifest["runtime"]["backend"] != "native"
         || !matches!(
             manifest["runtime"]["storage"].as_str(),
@@ -1127,6 +1300,36 @@ pub fn used_bytes(path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn vm_views_reject_redirected_bind_and_runtime_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let run = crate::config::id();
+        let plan =
+            json!({ "runId": run, "guestDataRoot": "/data", "projectRoot": "/data/workspace" });
+        let view = View::vm(root.path(), &plan).unwrap();
+        assert_eq!(
+            view.workspace,
+            root.path().join("data/upper/data/workspace")
+        );
+        assert_eq!(view.home, root.path().join("data/upper/home/node"));
+        std::fs::create_dir_all(root.path().join("data/upper/home")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("data/upper/home/node"))
+            .unwrap();
+        assert!(view.prepare(1000, 1000).await.is_err());
+        std::os::unix::fs::symlink(outside.path(), root.path().join("data/docker")).unwrap();
+        assert!(
+            directory_beneath(
+                &root.path().join("data"),
+                &root.path().join("data/docker"),
+                Some((1000, 1000))
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn completed_close_preserves_cancellation_without_a_flush_failure() {

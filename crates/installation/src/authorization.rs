@@ -24,6 +24,7 @@ pub(crate) struct Authorization {
     live: Option<Authority>,
     job: Option<Arc<jobs::Accepted>>,
     job_bearer: Option<String>,
+    movement_admission: Option<Arc<crate::nodes::moves::Authorization>>,
 }
 
 impl Default for Authorization {
@@ -46,6 +47,7 @@ impl Authorization {
             live: None,
             job: None,
             job_bearer: None,
+            movement_admission: None,
         }
     }
 
@@ -89,6 +91,7 @@ impl Authorization {
             live: Some(authority),
             job: None,
             job_bearer: None,
+            movement_admission: None,
         }
     }
 
@@ -115,6 +118,7 @@ impl Authorization {
             live: self.live,
             job: self.job,
             job_bearer: self.job_bearer,
+            movement_admission: self.movement_admission,
         }
     }
 
@@ -147,6 +151,9 @@ impl Authorization {
     }
 
     pub(crate) fn check_local(&self, db: &Db<'_>) -> Result<()> {
+        if let Some(movement) = &self.movement_admission {
+            movement.check(db)?;
+        }
         if let Some(authority) = &self.live {
             authority.authorize(db)?;
         }
@@ -181,6 +188,9 @@ impl Authorization {
             if let Some(job) = &self.job {
                 job.recheck(service).await?;
             }
+            if let Some(movement) = &self.movement_admission {
+                movement.recheck(service).await?;
+            }
             let check = self.clone();
             service.store.read(move |db| check.check_local(db)).await
         }))
@@ -213,7 +223,47 @@ impl Authorization {
         // The request's one-shot callback still runs in its admission transaction.
         // It is not a reusable background grant or a second publication callback.
         self.admission = None;
+        // As for an ordinary admitted node move, a lost HTTP request or a
+        // cancelled capacity wait cannot revoke the accepted background effect.
+        // The original authorization still checks these in the admission writer.
+        self.movement_admission = None;
         Ok(self)
+    }
+
+    pub(crate) fn with_movement_admission(
+        self,
+        s: &Service,
+        movement: crate::nodes::moves::Authorization,
+    ) -> Self {
+        Self {
+            movement_admission: Some(Arc::new(movement)),
+            ..self.for_service(s)
+        }
+    }
+
+    /// Retain only this workspace execution's accepted conversion, never a
+    /// general installation-management grant. The proof stays revocable.
+    pub(crate) fn workspace_move<'a>(
+        s: &'a Service,
+        bearer: &'a str,
+        run: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, Result<Self>> {
+        Box::pin(async move {
+            let job = jobs::Accepted::capture_workspace_move(s, bearer, run).await?;
+            Ok(Self {
+                job: Some(job),
+                ..Self::new(s, |_| Ok(()))
+            })
+        })
+    }
+
+    pub(crate) fn bind_self_move(&self, run: &str, operation: &str) -> Result<()> {
+        self.job
+            .as_ref()
+            .ok_or_else(|| {
+                Error::forbidden("A self-conversion needs an accepted execution proof.")
+            })?
+            .bind_self_move(run, operation)
     }
 
     pub(crate) async fn cancelled(&self) {

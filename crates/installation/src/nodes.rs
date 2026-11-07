@@ -125,6 +125,13 @@ pub(crate) fn run_agent(run: &Value) -> &str {
     text(&run["snapshot"]["agent"], "id")
 }
 
+/// A VM disk keeps its format when a native controller mounts it in place.
+pub(crate) fn vm_disk(checkpoint: &Value) -> bool {
+    checkpoint["prepared"]["diskFormat"] == "vm"
+        || checkpoint["prepared"]["diskFormat"].is_null()
+            && checkpoint["prepared"]["backend"] == "firecracker"
+}
+
 /// The run's resume checkpoint, or `null` when none was recorded.
 pub(crate) async fn checkpoint(s: &Service, run: &str) -> Result<Value> {
     Ok(s.store.checkpoint_boundary(run).await?.unwrap_or_default())

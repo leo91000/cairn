@@ -1143,7 +1143,14 @@ pub(crate) async fn invoke(
     let authorize = crate::installation_mcp::management_authorization(s, bearer).await?;
     match name {
         "get_chat_backend_migration" => {
-            crate::backend_migration::preview_live(s, text(&args, "chatId"), authorize).await
+            crate::backend_migration::preview_live(
+                s,
+                args["runId"]
+                    .as_str()
+                    .unwrap_or_else(|| text(&args, "chatId")),
+                authorize,
+            )
+            .await
         }
         "migrate_chat_backend" => s.migrate_chat_backend_live(args, authorize).await,
 

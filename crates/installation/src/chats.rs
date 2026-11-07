@@ -24,7 +24,7 @@ use crate::{
     store::Db,
     validation::text,
 };
-use handoff::handoff_context;
+pub(crate) use handoff::handoff_context;
 use questions::{find_question, questions, save_question};
 use rusqlite::OptionalExtension;
 use serde::Serialize;

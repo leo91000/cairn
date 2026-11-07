@@ -681,7 +681,7 @@ mod tests {
                     ..Default::default()
                 },
                 crate::runs::RunChanges {
-                    placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {move_request: Some(Some(crate::nodes::run_placement::MoveRequest { reservation:id(),node_id:crate::nodes::LOCAL_NODE_ID.into(),resources:cairn_contracts::NodeResources::default(),requested_at:Some(time),automatic:false,idle:None,required_tags:None,backup_id:None })), ..Default::default() })),
+                    placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {move_request: Some(Some(crate::nodes::run_placement::MoveRequest { backend: None, source_read_ready: None, reservation:id(),node_id:crate::nodes::LOCAL_NODE_ID.into(),resources:cairn_contracts::NodeResources::default(),requested_at:Some(time),automatic:false,idle:None,idle_status:None,required_tags:None,backup_id:None })), ..Default::default() })),
                     ..Default::default()
                 },
                 crate::runs::RunChanges {

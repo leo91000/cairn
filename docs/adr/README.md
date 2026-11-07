@@ -88,6 +88,7 @@ for current behavior.
 | 0077 | [Native close with independent backend namespaces](0077-native-close-with-independent-backend-namespaces.md) |
 | 0078 | [La sémantique de la timeline appartient à Cairn](0078-cairn-timeline.md) |
 | 0080 | [Les tours de plan sont bornés par Cairn, pas par le modèle](0080-plan-turns.md) |
+| 0081 | [Explicit backend moves reuse VM disks](0081-move-vm-disks-between-execution-backends.md) |
 | 0079 | [Une configuration native commune aux deux modes d’édition](0079-native-coding-agent-configuration.md) |
 
 ## Renumbered collisions

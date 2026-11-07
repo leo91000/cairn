@@ -1,5 +1,17 @@
 # Android 0.6.0 / web parity
 
+## Explicit VM/native moves (2026-11-07)
+
+Web and Android label node destinations with their backend and permit an explicit
+cross-backend move, including a first native-born conversion without an engine
+session after failure. VM-created disks retain their engine session without
+copying files. Native-born conversion explains chat next-message continuation
+and automatic mission continuation. Both apps track pending moves/conversions,
+show failures for retry and retain the expired-environment confirmation flow.
+Public MCP and the installation tool expose the same preview and confirmed
+compatibility entry point, with chatId or runId, plus ordinary move_to_node.
+
+
 ## Folded missions and result previews in the Fil (2026-11-06)
 
 Two or more missions in a row that finished as expected and were read fold into
