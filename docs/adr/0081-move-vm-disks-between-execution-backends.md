@@ -46,7 +46,9 @@ run it. Keep the source until publication and destination restore succeed.
 Preserve the existing refusal when rootless Docker state requires export or
 cleanup. Conversion supports missions without chat records: active missions
 continue with visible history in a fresh engine session, including after a
-failed conversion is retried; chats wait for their next message. A self-directed
+failed conversion is retried; chats wait for their next message. A converted
+chat can move its initialized disk again while still awaiting that first fresh
+session; publishing a disk and recording an engine session are independent. A self-directed
 conversion retains a bounded operation proof after its engine stops, and checks
 cancellation and current grants before subsequent effects. Public scope and
 capacity-wait cancellation remain checked through conversion admission. The

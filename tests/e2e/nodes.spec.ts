@@ -466,7 +466,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await page.keyboard.press('Escape')
   await expect(panel).toHaveCount(0)
   await page.unroute(`**/nodes/placement/${detail.run.id}`)
-  workspace.service.store.updateRun(detail.run.id, { status: 'succeeded', executionBackend: null } as any)
+  workspace.service.store.updateRun(detail.run.id, { status: 'succeeded', sessionId: null, executionBackend: null } as any)
   workspace.service.store.updateRun(detail.run.id, {
     storage: {
       mode: 'on-demand',
@@ -474,7 +474,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
       dirtyBytes: 183890000,
       dirtySince: Date.now() - 60000,
     },
-    backup: { capturedAt: Date.now() - 120000, status: 'saving' },
+    backup: { id: randomUUID(), capturedAt: Date.now() - 120000, status: 'saving' },
   } as any)
   await heartbeat()
   await expect(header).toContainText('Saving…', { timeout: 15000 })
@@ -518,8 +518,8 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await panel.getByRole('button', { name: 'Move…' }).click()
   const move = page.getByRole('dialog', { name: 'Move to another node', exact: true })
   await move.getByRole('combobox', { name: 'Destination', exact: true }).click()
-  await move.getByRole('option', { name: 'Destination server', exact: true }).click()
-  await expect(move.getByRole('combobox', { name: 'Destination', exact: true })).toHaveValue('Destination server')
+  await move.getByRole('option', { name: 'Destination server · Firecracker VM', exact: true }).click()
+  await expect(move.getByRole('combobox', { name: 'Destination', exact: true })).toHaveValue('Destination server · Firecracker VM')
   await expect(move.getByRole('button', { name: 'Move now' })).toBeEnabled()
   await expect(move.getByRole('spinbutton')).toHaveCount(0)
   // Omission preserves existing tag constraints; an explicit [] would clear them.

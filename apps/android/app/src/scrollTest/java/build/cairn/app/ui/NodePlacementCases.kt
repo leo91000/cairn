@@ -1134,6 +1134,7 @@ abstract class NodePlacementCases {
 
     @Test
     fun ownerCanPreferOrPinAnAuthorizedNodeAndSeeSynchronizationAge() {
+        val publishedDisk = mutableStateOf(false)
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<JsonObject>()
             server.dispatcher =
@@ -1232,6 +1233,9 @@ abstract class NodePlacementCases {
                                         ),
                                     backup =
                                         NodeBackup(
+                                            id =
+                                                if (publishedDisk.value) "retained-converted-disk"
+                                                else null,
                                             capturedAt = System.currentTimeMillis() - 120000,
                                             status = "ready",
                                         ),
@@ -1288,9 +1292,11 @@ abstract class NodePlacementCases {
             assertEquals(JsonNull, saved[1]["selection"]?.jsonObject?.get("preferredNodeId"))
             compose.onNodeWithText("Dernière synchronisation", substring = true).assertExists()
             compose.onNodeWithText("Préférence enregistrée", substring = true).assertExists()
-            // Without a recorded provider session there is nothing to resume elsewhere yet.
+            // A sessionless run needs a retained published disk before it can move.
             compose.onNodeWithText("Déplacer…").performScrollTo().performClick()
             compose.onNodeWithText("Déplacer maintenant").performScrollTo().assertIsNotEnabled()
+            compose.runOnIdle { publishedDisk.value = true }
+            compose.onNodeWithText("Déplacer maintenant").assertIsEnabled()
         }
     }
 

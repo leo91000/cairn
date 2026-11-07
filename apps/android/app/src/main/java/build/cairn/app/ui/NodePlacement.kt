@@ -359,7 +359,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                         destination.isNotEmpty() &&
                         (run.status in listOf("running", "succeeded") ||
                             nativeToVm && run.status in listOf("failed", "cancelled")) &&
-                        (run.sessionId != null || nativeToVm) &&
+                        (run.sessionId != null || run.backup?.id != null || nativeToVm) &&
                         run.nodeState == null,
                 onClick = {
                     request(

@@ -521,12 +521,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     assert_files(&owner, &vm_node, &run, false).await;
     // The VM image constraint from conversion must not poison the next native
     // admission, including an idle move whose reservation has been released.
-    owner
-        .service
-        .store
-        .change_run_fixture(&run, json!({ "sessionId": "converted-session" }))
-        .await
-        .unwrap();
+    assert!(owner.run(&run).await["sessionId"].is_null());
     for destination in [&native_node, &vm_node] {
         let response = moves::request_by_agent(
             &owner.service,
@@ -542,6 +537,10 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         let settled = owner.run(&run).await;
         assert!(settled["movementError"].is_null(), "{settled}");
         assert_eq!(settled["nodeId"], *destination);
+        assert!(
+            settled["sessionId"].is_null(),
+            "An idle move must not invent an engine session"
+        );
         assert!(settled["requiredRuntime"].is_null());
         let next = id();
         let selected = placement::reserve(&owner.service, &settled, &next)

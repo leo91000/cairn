@@ -528,7 +528,10 @@ async fn requested_inner(
             RunStatus::of(run),
             Some(RunStatus::Failed | RunStatus::Cancelled)
         );
-    let idle = ((run["status"] == RunStatus::Succeeded && run["sessionId"].is_string())
+    let retained_environment = checkpoint["workspaceInitialized"] == true
+        && checkpoint["prepared"]["projectRoot"].is_string();
+    let idle = ((run["status"] == RunStatus::Succeeded
+        && (run["sessionId"].is_string() || retained_environment))
         || stopped_crossing)
         && matches!(
             checkpoint["prepared"]["backend"].as_str(),

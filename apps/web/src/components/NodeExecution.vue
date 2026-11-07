@@ -39,7 +39,7 @@ const props = defineProps<{ run: Run }>()
 // Lets hosts drop the row around the chip while it renders nothing.
 const emit = defineEmits<{ relevance: [relevant: boolean] }>()
 const nodes = ref<ExecutionNode[]>([])
-const nodeOptions = computed(() => nodes.value.map(node => ({ value: node.id, label: `${node.name} · ${node.capabilities.backend === 'native' ? 'Native' : 'Firecracker VM'}` })))
+const nodeOptions = computed(() => nodes.value.map(node => ({ value: node.id, label: node.name })))
 const labels: Record<string, string> = {
   'pausing': 'Pausing execution',
   'saving': 'Saving the environment',
@@ -104,7 +104,7 @@ watch(relevant, value => emit('relevance', value), { immediate: true })
 const destinations = computed(() => nodes.value.filter(candidate => candidate.id !== props.run.nodeId))
 const destinationOptions = computed(() => destinations.value.map(node => ({ value: node.id, label: `${node.name} · ${node.capabilities.backend === 'native' ? 'Native' : 'Firecracker VM'}` })))
 const nativeToVm = computed(() => props.run.executionBackend === 'native' && nodes.value.find(node => node.id === destination.value)?.capabilities.backend === 'firecracker')
-const canMove = computed(() => (!!props.run.sessionId || nativeToVm.value) && !busy.value && !!destination.value && destination.value !== props.run.nodeId && (['running', 'succeeded'].includes(props.run.status) || (nativeToVm.value && ['failed', 'cancelled'].includes(props.run.status))) && !props.run.nodeState)
+const canMove = computed(() => (!!props.run.sessionId || !!props.run.backup?.id || nativeToVm.value) && !busy.value && !!destination.value && destination.value !== props.run.nodeId && (['running', 'succeeded'].includes(props.run.status) || (nativeToVm.value && ['failed', 'cancelled'].includes(props.run.status))) && !props.run.nodeState)
 const changed = computed(() => mode.value !== savedPlacement.value.mode || (mode.value !== 'automatic' && selection.value !== savedPlacement.value.selection))
 const dirtyBytes = computed(() => props.run.storage?.dirtyBytes || 0)
 const localBytes = computed(() => props.run.storage?.localBytes)
