@@ -34,7 +34,7 @@ async function executeSetup(fault = '', {
   const closedControl = fault === 'closed-control' ? createServer(socket => socket.end()) : undefined
   if (closedControl)
     await new Promise(resolve => closedControl.listen(closedControlPath, resolve))
-  const recordSpawn = `import childProcess from 'node:child_process';import{syncBuiltinESMExports}from'node:module';import{appendFileSync}from'node:fs';const original=childProcess.spawn;childProcess.spawn=function(command,...args){if(command==='apt-get')appendFileSync(${JSON.stringify(history)},JSON.stringify({phase:'apt-spawn',pid:process.pid})+'\\n');return original.call(this,command,...args)};syncBuiltinESMExports();`
+  const recordSpawn = `import childProcess from 'node:child_process';import{syncBuiltinESMExports}from'node:module';import{appendFileSync}from'node:fs';const original=childProcess.spawn;childProcess.spawn=function(command,...args){const child=original.call(this,command,...args);if(command==='apt-get')appendFileSync(${JSON.stringify(history)},JSON.stringify({phase:'apt-spawn',pid:process.pid})+'\\n');return child};const originalSync=childProcess.spawnSync;childProcess.spawnSync=function(command,...args){const result=originalSync.call(this,command,...args);if(${JSON.stringify(fault)}==='stalled-supervision'&&command==='/usr/bin/printf'&&args[0].some(value=>value.includes('event=apt-start')))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5000);return result};syncBuiltinESMExports();`
   const fixture = `#!${process.execPath}
 const { spawn, spawnSync } = require('node:child_process')
 const { appendFileSync } = require('node:fs')
@@ -50,14 +50,17 @@ if (phase === 'entry' && fault === 'delayed-entry') {
   appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase: 'entry-resumed', pid: process.pid }) + '\\n')
   args.splice(args.indexOf(process.execPath) + 1, 0, '--import', ${JSON.stringify(`data:text/javascript,${encodeURIComponent(recordSpawn)}`)})
 }
+if (phase === 'entry' && fault === 'stalled-supervision')
+  args.splice(args.indexOf(process.execPath) + 1, 0, '--import', ${JSON.stringify(`data:text/javascript,${encodeURIComponent(recordSpawn)}`)})
 if (phase === 'entry' && fault === 'closed-control')
   args[args.length - 1] = ${JSON.stringify(closedControlPath)}
 if (phase === fault) {
   setInterval(() => {}, 1000)
-} else if (phase === 'update' && ['hard-stall', 'orphan-stall', 'fail-descendant', 'success-descendant'].includes(fault)) {
-  if (fault === 'hard-stall') process.on('SIGTERM', () => {})
+} else if (phase === 'update' && ['hard-stall', 'orphan-stall', 'fail-descendant', 'success-descendant', 'stalled-supervision', 'owner-crash'].includes(fault)) {
+  if (['hard-stall', 'stalled-supervision', 'owner-crash'].includes(fault)) process.on('SIGTERM', () => {})
   const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: 'inherit' })
   appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase: 'descendant', pid: child.pid }) + '\\n')
+  if (fault === 'owner-crash') process.kill(process.ppid, 'SIGKILL')
   if (fault === 'fail-descendant') process.exit(42)
   if (fault === 'success-descendant') process.exit(0)
   setInterval(() => {}, 1000)
@@ -258,6 +261,26 @@ describe('native CI dependency setup', () => {
     expect(result.calls.filter(call => call.phase === 'descendant')).toHaveLength(1)
     expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(0)
     expect(result.survivingFixturePids).toEqual([])
+  })
+
+  it.each(['native', 'android-network'])('cleans APT before public exit when its privileged controller stalls (%s)', async (profile) => {
+    const result = await executeSetup('stalled-supervision', { profile })
+    expect(result.status).toBe(137)
+    expect(result.harnessKilled).toBe(false)
+    expect(result.calls.filter(call => call.phase === 'descendant')).toHaveLength(1)
+    expect(result.liveAtPublicExit).toEqual([])
+    expect(result.survivingFixturePids).toEqual([])
+    expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(0)
+  })
+
+  it.each(['native', 'android-network'])('cleans APT before public exit if its privileged shell is lost (%s)', async (profile) => {
+    const result = await executeSetup('owner-crash', { profile })
+    expect(result.status).toBe(137)
+    expect(result.harnessKilled).toBe(false)
+    expect(result.calls.filter(call => call.phase === 'descendant')).toHaveLength(1)
+    expect(result.liveAtPublicExit).toEqual([])
+    expect(result.survivingFixturePids).toEqual([])
+    expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(0)
   })
 
   it.each([['SIGINT', 130], ['SIGTERM', 143]])('finishes privileged cleanup before public %s exit', async (interruptSignal, code) => {

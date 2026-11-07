@@ -16,6 +16,54 @@ const profiles = {
   'android-network': { seconds: { update: 90, install: 90 }, packages: ['iproute2', 'iptables', 'util-linux'] },
 }
 
+// The privileged shell owns APT's group until cleanup finishes. Its GNU
+// deadline runs independently of the Node control loop, including after an APT
+// leader exits while descendants retain its group. No plan values enter shell
+// source: the closed APT arguments are passed as positional parameters.
+const aptOwner = String.raw`
+set +e
+set +m
+grace="$1"
+shift
+stopped=0
+trap 'stopped=124' ALRM
+trap 'stopped=130' INT
+trap 'stopped=143' TERM
+
+if [ "$stopped" -ne 0 ]; then
+  exit "$stopped"
+fi
+# The session leader reports its group before waiting for admission. EOF refuses
+# package work, including if the controller disappears before registering it.
+setsid bash -c '
+  printf "%s\n" "$$" >&3 || exit 1
+  IFS= read -r admission <&4 || exit 143
+  [ "$admission" = START ] || exit 143
+  exec 3>&- 4<&-
+  exec "$@"
+' cairn-native-apt-worker "$@" &
+apt_pid=$!
+if [ "$stopped" -eq 0 ]; then
+  wait "$apt_pid" 2>/dev/null
+  status=$?
+else
+  status=$stopped
+fi
+trap '' ALRM INT TERM
+if [ "$stopped" -ne 0 ]; then
+  status=$stopped
+fi
+
+if kill -0 -- "-$apt_pid" 2>/dev/null; then
+  kill -TERM -- "-$apt_pid" 2>/dev/null || :
+  sleep "$grace"
+  kill -KILL -- "-$apt_pid" 2>/dev/null || :
+fi
+wait "$apt_pid" 2>/dev/null || :
+printf "CLOSED\n" >&3 || exit 1
+exit "$status"
+`
+
 // A full or closed diagnostic pipe must not hold supervision open. printf has no
 // descendants, and its bounded write cannot leave pending I/O in the owner.
 function writeMarker(line) {
@@ -59,8 +107,11 @@ export async function runAptPhase(phase, seconds, cleanupGraceMs = 1000, profile
     let child
     let stopping = false
     let finished = false
-    let cleanupTimer
-    let workTimer
+    let stoppedCode
+    let aptPid
+    let ownerClosed = false
+    let ownerInput = ''
+    let fallbackTimer
     let controlSocket
     let controlInput = ''
     const terminate = () => cleanup(128 + constants.signals.SIGTERM)
@@ -91,27 +142,12 @@ export async function runAptPhase(phase, seconds, cleanupGraceMs = 1000, profile
         startApt()
     }
 
-    function killGroup(signal) {
-      if (!child?.pid)
-        return false
-      try {
-        process.kill(-child.pid, signal)
-        return true
-      }
-      catch (error) {
-        if (error.code === 'ESRCH')
-          return false
-        marker(writeMarker, phase, 'cleanup-error', `signal=${signal}`)
-        return true
-      }
-    }
-
     function finish(status) {
       if (finished)
         return
       finished = true
-      clearTimeout(cleanupTimer)
-      clearTimeout(workTimer)
+      clearTimeout(fallbackTimer)
+      child?.stdio[4]?.destroy()
       process.removeListener('SIGTERM', terminate)
       process.removeListener('SIGINT', interrupt)
       controlSocket?.destroy()
@@ -122,18 +158,21 @@ export async function runAptPhase(phase, seconds, cleanupGraceMs = 1000, profile
       if (stopping)
         return
       stopping = true
-      clearTimeout(workTimer)
-      if (!killGroup('SIGTERM')) {
+      stoppedCode = status
+      child?.stdio[4]?.end()
+      if (!child?.pid) {
         finish(status)
         return
       }
 
-      // A leader exiting does not prove its descendants stopped. Keep supervision
-      // alive until the owned group receives its hard kill, even after leader exit.
-      cleanupTimer = setTimeout(() => {
-        killGroup('SIGKILL')
-        finish(status)
-      }, cleanupGraceMs)
+      // Ask the independent privileged guard to stop. It returns only after its
+      // group cleanup; killing it here would discard that ownership boundary.
+      try {
+        child.kill('SIGTERM')
+      }
+      catch {
+        marker(writeMarker, phase, 'cleanup-error', 'signal=SIGTERM')
+      }
     }
 
     process.on('SIGTERM', terminate)
@@ -141,17 +180,87 @@ export async function runAptPhase(phase, seconds, cleanupGraceMs = 1000, profile
 
     function startApt() {
       const args = phase === 'install' ? [...specification.args, ...profileSpecification.packages] : specification.args
-      child = spawn('apt-get', args, { detached: true, stdio: ['ignore', 'inherit', 'inherit'] })
-      workTimer = setTimeout(cleanup, limitSeconds * 1000, 124)
-      child.on('error', () => {
-        if (!stopping)
+      const graceSeconds = cleanupGraceMs / 1000
+      child = spawn('timeout', [
+        '--preserve-status',
+        '--signal=ALRM',
+        `--kill-after=${graceSeconds * 2}s`,
+        `${limitSeconds}s`,
+        'bash',
+        '-c',
+        aptOwner,
+        'cairn-native-apt-owner',
+        `${graceSeconds}`,
+        'apt-get',
+        ...args,
+      ], { detached: true, stdio: ['ignore', 'inherit', 'inherit', 'pipe', 'pipe'] })
+      // Register the owned group before admitting APT. The independent shell
+      // handles a stalled Node loop; Node retains cleanup if that shell dies.
+      child.stdio[4].on('error', () => cleanup(1))
+      child.stdio[3].on('error', () => cleanup(1))
+      child.stdio[3].on('data', (bytes) => {
+        ownerInput += bytes
+        if (ownerInput.length > 64) {
           cleanup(1)
+          return
+        }
+
+        while (ownerInput.includes('\n')) {
+          const boundary = ownerInput.indexOf('\n')
+          const message = ownerInput.slice(0, boundary)
+          ownerInput = ownerInput.slice(boundary + 1)
+          if (!aptPid && /^[1-9]\d{0,9}$/.test(message)) {
+            const reportedPid = Number(message)
+            if (reportedPid > 2147483647 || [process.pid, process.ppid, child.pid].includes(reportedPid)) {
+              cleanup(1)
+              return
+            }
+
+            aptPid = reportedPid
+            if (!stopping) {
+              child.stdio[4].end('START\n')
+              marker(writeMarker, phase, 'apt-start', `profile=${profile}`)
+            }
+          }
+          else if (aptPid && message === 'CLOSED' && !ownerClosed) {
+            ownerClosed = true
+          }
+          else {
+            cleanup(1)
+          }
+        }
       })
-      child.on('exit', (status, signal) => {
-        if (!stopping)
-          cleanup(exitCode({ status, signal }))
+      child.on('error', () => cleanup(1))
+      child.on('close', (status, signal) => {
+        const observed = stoppedCode ?? exitCode({ status, signal })
+        if (ownerClosed) {
+          finish(observed)
+          return
+        }
+
+        // A lost guard cannot turn an incomplete phase green. Its private
+        // registered group is the only cleanup target; no process-name sweep.
+        const failed = observed || 1
+        if (!aptPid) {
+          finish(failed)
+          return
+        }
+
+        const signalGroup = (signal) => {
+          try {
+            process.kill(-aptPid, signal)
+          }
+          catch {
+            // The owned group already exited.
+          }
+        }
+
+        signalGroup('SIGTERM')
+        fallbackTimer = setTimeout(() => {
+          signalGroup('SIGKILL')
+          finish(failed)
+        }, cleanupGraceMs)
       })
-      marker(writeMarker, phase, 'apt-start', `profile=${profile}`)
     }
 
     // Connect only after privilege entry. The live launcher then authorizes
