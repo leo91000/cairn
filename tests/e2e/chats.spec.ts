@@ -1373,6 +1373,10 @@ test('failed replies show the current error instead of an old answer and can be 
   await page.goto(workspacePath(`/chats/${chat.id}`))
   // The failure card gives the reason once; the banner above the composer does not repeat it.
   await expect(page.getByRole('note').filter({ hasText: 'Codex' })).toHaveCount(1)
+  // The header names the failure in the error tone: under the title on phones, beside it on desktop.
+  await expect(headerStatus(page, /^Failed$/).locator('..')).toHaveClass(/text-coral/)
+  await page.setViewportSize({ width: 1280, height: 800 })
+  await expect(headerStatus(page, /^Failed$/)).toHaveClass(/text-coral/)
   await expect(page.getByRole('alert')).toHaveCount(0)
   for (const colorScheme of ['dark', 'light'] as const) {
     await page.emulateMedia({ colorScheme })
@@ -2389,7 +2393,12 @@ test('context usage shows the latest request and an explicit compaction keeps th
   await expect(indicator).toHaveAttribute('title', /227,400 of 258,400 tokens \(88%\)/)
   await page.screenshot({ path: testInfo.outputPath('context-header-full.png'), animations: 'disabled' })
   await indicator.click()
-  await expect(page.getByRole('dialog', { name: 'Compact the agent context?', exact: true })).toBeVisible()
+  const confirmCompaction = page.getByRole('dialog', { name: 'Compact the agent context?', exact: true })
+  await expect(confirmCompaction).toBeVisible()
+  // The pill leaves once compaction lands, so focus returns to the ⋯ menu instead.
+  await page.keyboard.press('Escape')
+  await expect(confirmCompaction).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Chat details', exact: true })).toBeFocused()
 })
 
 test('compaction is unavailable while a turn runs and explains why', async ({ page, workspace }) => {

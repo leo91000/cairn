@@ -132,16 +132,6 @@
   to { opacity: 0.22; }
 }
 
-/* "Working" followed by three dots rising in a wave. */
-.working-wave { display: inline-flex; align-items: flex-end; gap: 2px; height: 0.8em; margin-left: 3px; }
-.working-wave > i { width: 3px; height: 3px; border-radius: 99px; background: currentColor; animation: working-wave 1.2s ease-in-out infinite; }
-.working-wave > i:nth-child(2) { animation-delay: 0.15s; }
-.working-wave > i:nth-child(3) { animation-delay: 0.3s; }
-@keyframes working-wave {
-  0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
-  30% { transform: translateY(-4px); opacity: 1; }
-}
-
 .live-dot { width: 7px; height: 7px; border-radius: 99px; background: var(--color-accent); animation: live-ping 1.6s ease-out infinite; }
 @keyframes live-ping {
   from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent) 50%, transparent); }
@@ -177,7 +167,7 @@
 .signal-veil-enter-from, .signal-veil-leave-to { opacity: 0; }
 
 @media (prefers-reduced-motion: reduce) {
-  .souffle-halo::after, .souffle-halo > .souffle-core, .veille-ring::before, .veille-dot, .working-wave > i, .live-dot, .unread-dot, .avatar-orbit, .avatar-orbit::before { animation: none; }
+  .souffle-halo::after, .souffle-halo > .souffle-core, .veille-ring::before, .veille-dot, .live-dot, .unread-dot, .avatar-orbit, .avatar-orbit::before { animation: none; }
   .souffle-sweep { color: var(--color-ink); background: none; }
   .avatar-orbit { background: none; }
   .avatar-orbit::before { opacity: 0.35; }

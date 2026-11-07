@@ -556,6 +556,7 @@ const connectionDescription = computed(() => currentInstallation.value
   ? `${currentInstallation.value.name} · ${currentInstallation.value.status} · ${routeLabel(state.transportRoute)}`
   : '')
 const phoneDescription = computed(() => [
+  headerState.value?.label ?? '',
   heading.value?.provider ? `Latest harness: ${providers[heading.value.provider].label}` : '',
   connectionDescription.value,
 ].filter(Boolean).join(' · '))
@@ -865,11 +866,19 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
 
 const newSession = ref(false)
 const compacting = ref(false)
+// Where focus returns after the compaction dialog: the header pill may be gone by then.
+const compactionOpener = ref<HTMLElement>()
+
 const context = computed(() => contextSummary(detail.value?.contextUsage))
 const contextAlert = computed(() => contextNeedsAttention(context.value))
 const canCompact = computed(() => !!detail.value?.compaction?.supported && !inactive.value)
 const nodeExecution = ref<InstanceType<typeof NodeExecution>>()
 const menuButton = ref<InstanceType<typeof MenuButton>>()
+
+function openCompactionFromHeader() {
+  compactionOpener.value = menuButton.value?.trigger
+  compacting.value = true
+}
 
 interface ConversationAction {
   id: string
@@ -880,6 +889,8 @@ interface ConversationAction {
   disabled?: boolean
   danger?: boolean
   advanced?: boolean
+  /** Opens a dialog, which the phone sheet's buttons announce. */
+  dialog?: boolean
   run: (anchor?: HTMLElement) => void
 }
 
@@ -894,7 +905,11 @@ const conversationActions = computed(() => {
       hint: chat.compaction.running ? undefined : chat.compaction.reason ?? undefined,
       icon: Minimize2,
       disabled: !chat.compaction.available,
-      run: () => { compacting.value = true },
+      dialog: true,
+      run: (anchor) => {
+        compactionOpener.value = anchor
+        compacting.value = true
+      },
     })
   }
 
@@ -915,6 +930,7 @@ const conversationActions = computed(() => {
       hint: [node.nodeName, node.status.label].filter(Boolean).join(' · '),
       icon: Server,
       advanced: true,
+      dialog: true,
       run: anchor => void node.show(anchor),
     })
   }
@@ -924,6 +940,7 @@ const conversationActions = computed(() => {
     label: 'Connection',
     icon: Plug,
     advanced: true,
+    dialog: true,
     run: (anchor) => {
       connectionOpener.value = anchor
       connectionOpen.value = true
@@ -935,6 +952,7 @@ const conversationActions = computed(() => {
       label: 'Delete conversation',
       icon: Trash2,
       danger: true,
+      dialog: true,
       run: () => { deletingConversation.value = chat },
     })
   }
@@ -1158,7 +1176,12 @@ function key(event: KeyboardEvent) {
 </script>
 
 <template>
-  <Modal v-if="compacting" title="Compact the agent context?" @close="compacting = false">
+  <Modal
+    v-if="compacting"
+    title="Compact the agent context?"
+    :return-focus="compactionOpener"
+    @close="compacting = false"
+  >
     <div class="p-6">
       <p>The coding agent summarizes its earlier context to free space in its window. This uses the agent's model, like a short turn.</p>
       <p>Every message stays visible in this conversation. Messages you send meanwhile wait for the compaction to finish.</p>
@@ -1221,6 +1244,7 @@ function key(event: KeyboardEvent) {
           :disabled="item.disabled"
           :aria-label="item.label"
           :aria-describedby="item.hint ? `conversation-action-${item.id}` : undefined"
+          :aria-haspopup="item.dialog ? 'dialog' : undefined"
           @click="detailAction(() => item.run(detailsButton))"
         >
           <Icon :name="item.icon" :size="18" /><span class="min-w-0 text-left">
@@ -1346,7 +1370,7 @@ function key(event: KeyboardEvent) {
               :title="[context.label, ...context.details].join('\n')"
               :aria-haspopup="canCompact ? 'dialog' : undefined"
               data-testid="context-indicator"
-              @click="canCompact && (compacting = true)"
+              @click="canCompact && openCompactionFromHeader()"
             >
               Context {{ context.percent }}%
             </component>

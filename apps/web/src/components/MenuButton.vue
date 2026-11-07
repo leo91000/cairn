@@ -33,7 +33,9 @@ let frame = 0
 
 function place() {
   const rect = trigger.value!.getBoundingClientRect()
-  const height = menu.value?.offsetHeight ?? 0
+  // The natural height, not the height a previous placement capped.
+  const box = menu.value
+  const height = box ? box.scrollHeight + box.offsetHeight - box.clientHeight : 0
   const left = Math.max(8, Math.min(props.align === 'start' ? rect.left : rect.right - props.width, innerWidth - props.width - 8))
   const below = rect.bottom + 6
   const above = rect.top - height - 6
