@@ -43,6 +43,7 @@ async function action(t, {
   lifecycleError = false,
   incomplete = false,
   blockedTraceClose = false,
+  publicationDelayMs = 0,
   numericRetirementControl = false,
   receiptMode = 'complete',
   cancel,
@@ -107,7 +108,11 @@ async function action(t, {
       }
       const startedAt=Date.now()-28*60000+${timeout ? 600 : 60000};
       const env={PATH:process.env.PATH,HOME:${JSON.stringify(root)},GITHUB_RUN_ATTEMPT:'1',CI_JOB_STARTED_AT:startedAt/1000,ACTIONS_RUNTIME_TOKEN:'synthetic-private-token'};
-      const publish=artifactPublisher({uploader:${JSON.stringify(uploader)},directory:${JSON.stringify(path.join(root, 'publication'))},env,uploadMs:300,closeMs:50});
+      const publishArtifact=artifactPublisher({uploader:${JSON.stringify(uploader)},directory:${JSON.stringify(path.join(root, 'publication'))},env,uploadMs:300,closeMs:50});
+      const publish=async(...args)=>{
+        if(${publicationDelayMs})await new Promise(resolve=>setTimeout(resolve,${publicationDelayMs}));
+        return publishArtifact(...args);
+      };
       const checkpointDelivery={armed:false,delivered:false,cancelled:false};
       if(${checkpointDuringCleanup}){
         // Deliver the pending checkpoint only after the real guard persists
@@ -134,6 +139,9 @@ async function action(t, {
       }
       const result=await runBackendAction({log:${JSON.stringify(log)},output:${JSON.stringify(path.join(root, 'proof'))},command:'python3',args:['-c',${JSON.stringify(workload)}],env,
         receipt:{clock:{jobId:123,startedAt},qualificationClaim:false},publish,firstCheckpointMs:30,checkpointMs:40,
+        // Keep both real local-I/O waits inside the unchanged outer exit bound,
+        // alongside the fixture's shortened guard and publisher waits.
+        localCloseMs:${blockedTraceClose ? 100 : 'undefined'},
         observeOptions:{sampleMs:20,graceMs:30,closeGraceMs:100,inventoryLimit:${incomplete ? 1 : 4096}}});
       fs.writeFileSync(${JSON.stringify(path.join(root, 'returned.json'))},JSON.stringify(result));
       fs.writeFileSync(${JSON.stringify(path.join(root, 'checkpoint-delivery.json'))},JSON.stringify(checkpointDelivery));
@@ -306,6 +314,27 @@ it('bounds a real private-file close blocked behind process-local filesystem wor
   assert.equal(result.returned.exitDecision.kind, 'signal')
   assert.equal(result.returned.ownedClosureVerified, true)
   assert.equal(result.returned.publisherClosureVerified, true)
+  assert.deepEqual(result.trace, Buffer.from('x'))
+})
+
+it('bounds blocked private closure with stopped public readers and delayed real publication', async (t) => {
+  const result = await action(t, {
+    code: 0,
+    volume: 1,
+    mode: 'stopped',
+    blockedTraceClose: true,
+    publicationDelayMs: 250,
+  })
+  assert.equal(result.code, null)
+  assert.equal(result.signal, 'SIGKILL')
+  assert.equal(result.returned.guardReturn.code, 0)
+  assert.equal(result.returned.trace.complete, false)
+  assert.equal(result.returned.trace.state, 'unknown')
+  assert.equal(result.returned.exitDecision.kind, 'signal')
+  assert.equal(result.returned.ownedClosureVerified, true)
+  assert.equal(result.returned.publisherClosureVerified, true)
+  assert.equal(result.returned.finalPublicationReturned, true)
+  assert.equal(result.returned.lifecycleRecord, 'unknown')
   assert.deepEqual(result.trace, Buffer.from('x'))
 })
 
