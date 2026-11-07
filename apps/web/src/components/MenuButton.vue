@@ -37,10 +37,16 @@ function place() {
   const left = Math.max(8, Math.min(props.align === 'start' ? rect.left : rect.right - props.width, innerWidth - props.width - 8))
   const below = rect.bottom + 6
   const above = rect.top - height - 6
-  const top = props.placement === 'above'
+  const top = Math.max(8, props.placement === 'above'
     ? (above >= 8 ? above : below)
-    : (below + height > innerHeight - 8 && above >= 8 ? above : below)
-  position.value = { left: `${left}px`, top: `${Math.max(8, top)}px`, width: `${props.width}px` }
+    : (below + height > innerHeight - 8 && above >= 8 ? above : below))
+  // A short window scrolls a long menu instead of cutting off its last items.
+  position.value = {
+    left: `${left}px`,
+    top: `${top}px`,
+    width: `${props.width}px`,
+    maxHeight: `${innerHeight - top - 8}px`,
+  }
 }
 
 function items() {
@@ -167,7 +173,7 @@ defineExpose({ show, hide, trigger })
     ref="menu"
     popover="manual"
     :style="position"
-    class="fixed inset-auto m-0 rounded-xl border border-line bg-raised p-1.5 text-ink shadow-[0_9px_25px_#0003]"
+    class="fixed inset-auto m-0 overflow-y-auto overscroll-contain rounded-xl border border-line bg-raised p-1.5 text-ink shadow-[0_9px_25px_#0003]"
     @keydown="menuKeydown"
     @click.stop
   >

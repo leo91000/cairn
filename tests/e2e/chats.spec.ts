@@ -1081,6 +1081,14 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
   await page.keyboard.press('Escape')
   await expect(menu).toBeHidden()
   await expect(details).toBeFocused()
+  // A short window scrolls the dropdown, so its last actions stay reachable.
+  await page.setViewportSize({ width: 844, height: 390 })
+  await details.click()
+  await page.keyboard.press('End')
+  await expect(menu.getByRole('menuitem', { name: 'Delete conversation', exact: true })).toBeFocused()
+  await expect(menu.getByRole('menuitem', { name: 'Delete conversation', exact: true })).toBeInViewport({ ratio: 1 })
+  await page.keyboard.press('Escape')
+  await page.setViewportSize({ width: 1440, height: 1000 })
   await expect(message).toHaveValue('Keep my draft while browsing details')
   await page.setViewportSize({ width: 390, height: 844 })
   // New conversations start from the conversation list.

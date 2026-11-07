@@ -353,7 +353,7 @@ async function detailAction(action: () => void) {
 const historyButton = ref<HTMLButtonElement>()
 const tabletHistoryButton = ref<HTMLButtonElement>()
 
-// Desktop lists conversations in the Fil column; narrower layouts open them from the header.
+// The title's chevron opens the conversation list on every width; phones use the title itself.
 function switcherAnchor() {
   return [historyButton.value, tabletHistoryButton.value, detailsButton.value].find(button => button?.getClientRects().length)
 }
@@ -1119,6 +1119,7 @@ watch(chatId, (id) => {
   openedSubagent.value = null
   history.value = false
   detailsOpen.value = false
+  menuButton.value?.hide(false)
   connectionOpen.value = false
   newSession.value = false
   editing.value = null
@@ -1419,6 +1420,7 @@ function key(event: KeyboardEvent) {
                   :key="item.id"
                   type="button"
                   role="menuitem"
+                  tabindex="-1"
                   class="menu-item"
                   :class="{ 'text-danger!': item.danger }"
                   :disabled="item.disabled"
