@@ -14,7 +14,12 @@ import {
 import path from 'node:path'
 import process from 'node:process'
 import { dependencyOptions, verifyBackendDependencies } from './ci-backend-dependencies.mjs'
-import { createPrivateTrace, exitCode, writeLifecycle } from './ci-backend-trace.mjs'
+import {
+  createPrivateTrace,
+  exitCode,
+  LOCAL_CLOSE_MS,
+  writeLifecycle,
+} from './ci-backend-trace.mjs'
 import { observeCommand } from './ci-deadline.mjs'
 
 export const UPLOADER_SHA = '043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' // upload-artifact v7.0.1
@@ -386,10 +391,13 @@ export async function runDurableBackend({
   }
 }
 
-export async function runBackendAction({ log, ...options }) {
+export async function runBackendAction({ log, localCloseMs = LOCAL_CLOSE_MS, ...options }) {
+  // Tests may tighten local waits alongside guard/publisher bounds. Callers
+  // cannot widen the existing per-operation bound or the job deadline.
+  const closeMs = Math.max(0, Math.min(localCloseMs, LOCAL_CLOSE_MS))
   const deadline = options.receipt.clock.startedAt + 30 * 60000
   const traceFailure = new AbortController()
-  const trace = createPrivateTrace(log, { deadline, onFailure: () => traceFailure.abort() })
+  const trace = createPrivateTrace(log, { deadline, closeMs, onFailure: () => traceFailure.abort() })
   let guardReturn = { state: 'unavailable', scope: 'owned-command-guard' }
   let status = 125
   let finalPublicationReturned = false
@@ -461,7 +469,7 @@ export async function runBackendAction({ log, ...options }) {
     exitDecision: decision(!traceResult.fileClosed || !traceResult.streamClosed),
     foregroundExit: 'not-observed',
   }
-  const record = await writeLifecycle(path.join(options.output, 'action-lifecycle.json'), lifecycle, deadline)
+  const record = await writeLifecycle(path.join(options.output, 'action-lifecycle.json'), lifecycle, deadline, closeMs)
   if (record !== 'written')
     return { ...lifecycle, lifecycleRecord: record, exitDecision: record === 'unknown' ? decision(true) : { kind: 'code', code: 125, scope: 'lifecycle-record-failed' } }
   return lifecycle
