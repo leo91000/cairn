@@ -185,7 +185,7 @@ it('exposes the selector only on the existing diagnostic action and retains norm
   // eslint-disable-next-line no-template-curly-in-string -- exact allowlisted workflow expression
   assert.equal(action.env.BACKEND_DIAGNOSTIC_SELECTOR, '${{ inputs.backend-diagnostic-selector || \'full\' }}')
   const normal = yaml.jobs.backend.steps.find(step => step.name === 'Run backend tests across binaries with isolated credentials')
-  assert.equal(normal.if, 'inputs.ci-diagnostic != \'backend\'')
+  assert.equal(normal.if, 'inputs.ci-diagnostic != \'backend\' && (inputs.backend-only != true || inputs.publication-measurement != true)')
   assert.ok(normal.run.includes('node scripts/test-backend.mjs --nextest --test-threads 8 --no-fail-fast --color never --status-level all'))
   assert.equal(yaml.jobs.backend['timeout-minutes'], 30)
 })

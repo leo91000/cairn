@@ -328,6 +328,16 @@ fn registry() -> &'static Mutex<Vec<NodeEntry>> {
     ENTRIES.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+#[cfg(test)]
+pub(crate) fn node_metrics_for_test(attempt: &str) -> Option<Arc<Metrics>> {
+    registry()
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|entry| entry.metrics.attempt == attempt)
+        .map(|entry| entry.metrics.clone())
+}
+
 pub(crate) struct NodeSummary {
     pub(crate) metrics: Arc<Metrics>,
     final_batch: bool,

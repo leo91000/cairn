@@ -637,10 +637,17 @@ internal fun ChatPage(
         reasoning = ""
         speed = ""
     }
+    val planEnabled = live.state?.planTurnsEnabled == true
+    // Editing an accepted queued Plan request preserves its existing boundary.
+    val planAllowed =
+        planEnabled ||
+            chat?.messages.orEmpty().any {
+                it.id == editing && it.plan == true && it.status == "queued"
+            }
     val planAvailable = codingAgent(chosenProvider).planTurns
     // Availability blocks submission; it never removes the requested boundary.
     val planRequested = planning
-    val planBlocked = planRequested && !planAvailable
+    val planBlocked = planRequested && (!planAllowed || !planAvailable)
     // A plan request cannot join a turn that can already change files.
     val steerBlocked = planRequested && chat?.run?.chatExecution?.plan != true
     val skillOptions =
@@ -745,7 +752,7 @@ internal fun ChatPage(
     }
     fun send(mode: String, plan: Boolean = planRequested, planApproval: PlanApproval? = null) {
         vm.perform {
-            require(!plan || planAvailable) {
+            require(!plan || (planAllowed && planAvailable)) {
                 "Le mode Plan nécessite Codex ou Claude Code. Désactivez Plan pour une demande ordinaire."
             }
             val chatId =
@@ -1828,7 +1835,10 @@ internal fun ChatPage(
                                     }
                                     if (planBlocked)
                                         Text(
-                                            "Le mode Plan nécessite Codex ou Claude Code. Choisissez un assistant compatible ou désactivez Plan pour une demande ordinaire.",
+                                            if (planAllowed)
+                                                "Le mode Plan nécessite Codex ou Claude Code. Choisissez un assistant compatible ou désactivez Plan pour une demande ordinaire."
+                                            else
+                                                "Plan est désactivé pour cette installation. Activez-le dans les paramètres ou désactivez Plan pour une demande ordinaire.",
                                             Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                                                 .testTag("plan-unavailable"),
                                             color = MaterialTheme.colorScheme.error,
@@ -1980,21 +1990,24 @@ internal fun ChatPage(
                                                 reasoning = r
                                             }
                                         }
-                                        FilterChip(
-                                            planRequested,
-                                            { planning = !planning },
-                                            label = { Text("Plan") },
-                                            modifier =
-                                                Modifier.padding(end = 4.dp).testTag("plan-toggle"),
-                                            enabled = !state.busy && (planAvailable || planning),
-                                            leadingIcon = {
-                                                Icon(
-                                                    CairnIcons.Tasks,
-                                                    null,
-                                                    Modifier.size(16.dp),
-                                                )
-                                            },
-                                        )
+                                        if (planAllowed || planRequested)
+                                            FilterChip(
+                                                planRequested,
+                                                { planning = !planning },
+                                                label = { Text("Plan") },
+                                                modifier =
+                                                    Modifier.padding(end = 4.dp)
+                                                        .testTag("plan-toggle"),
+                                                enabled =
+                                                    !state.busy && (planAvailable || planning),
+                                                leadingIcon = {
+                                                    Icon(
+                                                        CairnIcons.Tasks,
+                                                        null,
+                                                        Modifier.size(16.dp),
+                                                    )
+                                                },
+                                            )
                                         val canSend =
                                             !planBlocked &&
                                                 !state.busy &&

@@ -6,6 +6,28 @@ use crate::*;
 #[serde(deny_unknown_fields)]
 pub struct GetInstallationSettingsInput {}
 
+/// Installation opt-in for new chat plan requests. Missing policy means disabled.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChatPlanSettings {
+    pub enabled: bool,
+    #[schemars(length(min = 1, max = 200))]
+    pub revision: String,
+}
+
+impl Default for ChatPlanSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            revision: "default".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct GetChatPlanSettingsInput {}
+
 pub const DEFAULT_TASK_DISK_GIB: u16 = 150;
 pub const MIN_TASK_DISK_GIB: u16 = 32;
 pub const MAX_TASK_DISK_GIB: u16 = 1024;
