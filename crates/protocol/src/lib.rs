@@ -17,6 +17,8 @@ pub const MAX_STREAMS: usize = 24;
 pub const MAX_STREAMS_PER_ACCOUNT: usize = 8;
 // Public files never borrow authenticated API or live-stream capacity.
 pub const MAX_PUBLIC_IN_FLIGHT: usize = 4;
+// Neither do private deliverable files, which can transfer for minutes.
+pub const MAX_FILE_IN_FLIGHT: usize = 8;
 pub const MAX_NOTIFICATION_IN_FLIGHT: usize = 4;
 pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 // A node channel carries raw HTTP bytes in binary WebSocket messages.
@@ -224,9 +226,34 @@ pub enum Frame {
     },
 }
 
+/// Routes whose responses cross the tunnel as credited streams rather than
+/// finite `MAX_BODY` frames: live subscriptions and file downloads. Web and
+/// Android direct clients mirror this classification.
 pub fn stream_path(path: &str) -> bool {
     let route = path.split('?').next().unwrap_or("");
-    route.ends_with("/stream") || route.starts_with("/api/shared-artifacts/")
+    route.ends_with("/stream") || file_path(path)
+}
+
+/// A stream carrying one finite file that can exceed `MAX_BODY`: a public shared
+/// file or a private deliverable's original. On the relay these use their own
+/// request pools and a file-progress deadline instead of live-stream capacity.
+pub fn file_path(path: &str) -> bool {
+    let (route, query) = path.split_once('?').unwrap_or((path, ""));
+    route.starts_with("/api/shared-artifacts/") || run_artifact_file(route, query)
+}
+
+/// Artifact metadata and the bounded 960 px preview thumbnail remain finite.
+/// These are the parameters the installation's artifact handler uses to select them.
+fn run_artifact_file(route: &str, query: &str) -> bool {
+    let file = matches!(
+        route.split('/').collect::<Vec<_>>().as_slice(),
+        ["", "api", "runs", run, "artifacts", artifact] if !run.is_empty() && !artifact.is_empty()
+    );
+    let finite = query.split('&').any(|parameter| {
+        parameter == "metadata=1" || parameter.split('=').next() == Some("preview")
+    });
+
+    file && !finite
 }
 
 pub fn request_header(name: &str) -> bool {
@@ -272,4 +299,44 @@ pub fn api_path(path: &str) -> bool {
         && !route
             .split('/')
             .any(|segment| segment == "." || segment == "..")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{file_path, stream_path};
+
+    #[test]
+    fn private_artifact_files_stream_like_public_downloads() {
+        for path in [
+            "/api/runs/run/artifacts/file",
+            "/api/runs/run/artifacts/file?download=1",
+            "/api/runs/run/artifacts/file?download=1&metadata=0",
+            "/api/shared-artifacts/token",
+            "/api/runs/run/stream?after=0",
+        ] {
+            assert!(stream_path(path), "{path} must stream");
+        }
+        assert!(file_path("/api/runs/run/artifacts/file?download=1"));
+        assert!(file_path("/api/shared-artifacts/token"));
+        assert!(!file_path("/api/runs/run/stream?after=0"));
+        assert!(!file_path("/api/runs/run/artifacts/file/stream"));
+    }
+
+    #[test]
+    fn artifact_metadata_previews_and_lists_stay_finite() {
+        for path in [
+            "/api/runs/run/artifacts/file?metadata=1",
+            "/api/runs/run/artifacts/file?download=1&metadata=1",
+            "/api/runs/run/artifacts/file?preview=1",
+            "/api/runs/run/artifacts/file?preview",
+            "/api/runs/run/artifacts",
+            "/api/runs/run/artifacts/",
+            "/api/runs/run/artifacts/file/visibility",
+            "/api/runs//artifacts/file",
+            "/api/chats/chat/artifacts/file",
+        ] {
+            assert!(!stream_path(path), "{path} must stay finite");
+            assert!(!file_path(path), "{path} must stay finite");
+        }
+    }
 }

@@ -19,7 +19,7 @@ import {
   removeHistory,
   writeHistory,
 } from './history-cache'
-import { readLargeTimeline } from './large-timeline'
+import { readLargeEvents, readLargeTimeline } from './large-timeline'
 import { liveConnection } from './live-connection'
 import { LiveTimeline } from './live-timeline'
 
@@ -174,12 +174,13 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
           ? await readRunHistory(api, { runId, before, history: expected })
           : await api<HistoryPage>(`${value.replace(/\/stream$/, '')}/history?before=${before}&history=${encodeURIComponent(expected)}`)
         const large = await readLargeTimeline(value, page.largeEntries ?? [])
+        const events = await readLargeEvents(value, page.events)
         if (disposed || current !== generation || history !== expected || page.history !== expected || replacements !== baseline)
           return
         if (page.hasOlder && page.oldest >= before)
           throw new Error('Invalid history page')
         const candidate = accumulator.copy()
-        candidate.merge(page.events, [...page.entries, ...large])
+        candidate.merge(events, [...page.entries, ...large])
         accumulator = candidate
         oldest = page.oldest
         older = page.hasOlder
@@ -199,7 +200,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
 
     let checking = false
     connection = liveConnection(value, (batch, accepted, signal) => {
-      const apply = (large: TimelineEntry[]) => {
+      const apply = (large: TimelineEntry[], events = batch.events) => {
         if (signal?.aborted || disposed || current !== generation)
           return
         if (batch.state?.cacheRevision) {
@@ -229,7 +230,7 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
 
         // Persist a complete snapshot only. An interrupted catch-up cannot corrupt it.
         const candidate = accumulator.copy()
-        candidate.apply(batch.events, [...(batch.entries ?? []), ...large.map(entry => ({ kind: 'upsert' as const, entry }))], accepted)
+        candidate.apply(events, [...(batch.entries ?? []), ...large.map(entry => ({ kind: 'upsert' as const, entry }))], accepted)
         accumulator = candidate
         if (batch.state)
           detail = batch.state
@@ -260,8 +261,13 @@ export function useLiveRun(path: () => string | undefined, options: LiveRunOptio
         error.value = ''
       }
 
-      if (batch.largeEntries?.length)
-        return readLargeTimeline(value, batch.largeEntries, signal).then(apply)
+      if (batch.largeEntries?.length || batch.events.some(event => event.payload?._cairnEventContent === true)) {
+        return Promise.all([
+          readLargeTimeline(value, batch.largeEntries ?? [], signal),
+          readLargeEvents(value, batch.events, signal),
+        ]).then(([large, events]) => apply(large, events))
+      }
+
       apply([])
     }, (connectionStatus, opening = false) => {
       if (options.list && opening)

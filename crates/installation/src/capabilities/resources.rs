@@ -171,36 +171,42 @@ impl ResourceOperation {
             ResumeContext::Public(..) => Audience::Public,
             ResumeContext::Installation(bearer) => Audience::from_bearer(Some(bearer), false),
         };
-        let authority = Authority::new(s, context, self.scope).await?;
+        let mut authority = Authority::new(s, context, self.scope, self.deferred()).await?;
         if self.deferred() {
+            let result_authority = authority.retain_result_authority();
             let service = s.clone();
             let name = self.name;
-            return s.plugins.operations.start(s.clone(), audience, async move {
-                let result = Box::pin(
-                    resource_operation(name)
-                        .unwrap()
-                        .execute(&service, input, authority),
-                )
-                .await?;
-                Ok(match name {
-                    "import_project" => PluginOperationResult::Project {
-                        project: Box::new(serde_json::from_value(result)?),
-                    },
-                    "list_source_projects" => PluginOperationResult::SourceProjects {
-                        page: Box::new(serde_json::from_value(result)?),
-                    },
-                    "import_skill" => PluginOperationResult::SkillImport {
-                        imported: Box::new(serde_json::from_value(result)?),
-                    },
-                    "get_skill_source_status" => PluginOperationResult::SkillSource {
-                        status: Box::new(serde_json::from_value(result)?),
-                    },
-                    "update_skill_source" => PluginOperationResult::SkillBundle {
-                        bundle: Box::new(serde_json::from_value(result)?),
-                    },
-                    _ => unreachable!(),
-                })
-            });
+            return s.plugins.operations.start_with_result_authority(
+                s.clone(),
+                audience,
+                result_authority,
+                async move {
+                    let result = Box::pin(
+                        resource_operation(name)
+                            .unwrap()
+                            .execute(&service, input, authority),
+                    )
+                    .await?;
+                    Ok(match name {
+                        "import_project" => PluginOperationResult::Project {
+                            project: Box::new(serde_json::from_value(result)?),
+                        },
+                        "list_source_projects" => PluginOperationResult::SourceProjects {
+                            page: Box::new(serde_json::from_value(result)?),
+                        },
+                        "import_skill" => PluginOperationResult::SkillImport {
+                            imported: Box::new(serde_json::from_value(result)?),
+                        },
+                        "get_skill_source_status" => PluginOperationResult::SkillSource {
+                            status: Box::new(serde_json::from_value(result)?),
+                        },
+                        "update_skill_source" => PluginOperationResult::SkillBundle {
+                            bundle: Box::new(serde_json::from_value(result)?),
+                        },
+                        _ => unreachable!(),
+                    })
+                },
+            );
         }
         self.execute(s, input, authority).await
     }

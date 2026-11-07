@@ -119,6 +119,15 @@
             }
           ]
         },
+        "codingAgentDefaults": {
+          "additionalProperties": {
+            "$ref": "#/definitions/CodingAgentPreferences"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "createdAt": {
           "format": "int64",
           "maximum": 9007199254740991,
@@ -249,6 +258,26 @@
         "status",
         "revision",
         "url"
+      ],
+      "type": "object"
+    },
+    "CodingAgentPreferences": {
+      "description": "Safe display defaults. These are inherited preferences, never profile overrides.",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "reasoning": {
+          "type": "string"
+        },
+        "speed": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "reasoning",
+        "speed"
       ],
       "type": "object"
     }

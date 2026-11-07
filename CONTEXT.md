@@ -99,6 +99,9 @@ Possibilité de travail vérifiée sur une node, distincte de la seule présence
 Part des ressources d’une node attribuée à une exécution dans les plafonds configurés. Elle est prise en compte avant d’accepter d’autres travaux sur cette node.
 Pour le disque natif compatible, le manager protège aussi la capacité accordée mais encore inutilisée ; il peut l’agrandir automatiquement par incréments dans le budget commun. Le workspace et le `/tmp` géré consomment la même capacité.
 
+**Limite de stockage par tâche** :
+Plafond d’agrandissement d’un environnement de travail, commun aux conversations et aux exécutions de mission d’une installation, fixé par son propriétaire. Une baisse conserve les capacités déjà accordées ; un agent ne peut pas relever cette limite.
+
 **Déplacement d’une conversation** :
 Changement de node d’exécution d’une même conversation, avec une pause puis une reprise de sa session et de son environnement de travail. Il ne conserve pas les processus en cours ni leur mémoire.
 
@@ -131,6 +134,13 @@ Retour d’une conversation à l’état actif, sans relancer l’agent, les env
 Le moteur qui exécute le travail d’un agent : Codex (OpenAI), Claude Code (Anthropic) ou OpenCode. Chaque agent en choisit un, et une conversation peut en changer d’un message à l’autre. Quand un quota bloque la demande en cours, l’utilisateur peut choisir un autre agent de code disposant d’un compte disponible pour reprendre cette même demande avec son historique et ses fichiers.
 _À éviter_ : fournisseur, driver, assistant de code.
 
+**Configuration d’un agent de code** :
+Les réglages propres à un moteur de code, communs par défaut à l’installation et personnalisables pour chaque agent Cairn.
+_À éviter_ : profil (qui suggère une configuration réutilisable indépendante), compte d’agent de code.
+
+**Personnalisation d’un agent de code** :
+Un réglage propre à un agent Cairn qui remplace la valeur de l’installation. Retirer cette personnalisation fait suivre à nouveau les changements du défaut de l’installation, même lorsque les deux valeurs étaient identiques.
+
 **Compte d’agent de code** :
 Un abonnement connecté à un agent de code (un compte ChatGPT pour Codex, un compte Claude pour Claude Code) ou une clé API liée à un fournisseur de modèles pour OpenCode (par exemple OpenCode Zen). Les exécutions consomment son usage. Un agent de code peut avoir plusieurs comptes ; un compte en pause n’est plus choisi pour les nouvelles exécutions.
 _À éviter_ : connexion Claude, compte Codex (sauf pour désigner un compte de cet agent de code).
@@ -146,6 +156,13 @@ Le nombre maximal d’exécutions simultanées sur un compte. Le réduire laisse
 
 **Réinitialisation en réserve** :
 Une remise à zéro de fenêtre d’usage offerte par Codex, utilisée automatiquement quand la capacité restante d’un compte actif tombe à 2 %. Elle n’existe pas pour Claude Code.
+
+**Tour de plan** :
+Un tour de conversation où l’agent explore et propose une approche sans rien modifier :
+Cairn y borne lui-même les fichiers, le réseau du shell et les outils à effets, quels
+que soient les droits de l’agent. L’implémentation commence par un message ordinaire
+dans le même fil, avec les droits habituels de l’agent.
+_À éviter_ : plan de travail (la liste de progression d’un agent qui travaille).
 
 **Vitesse** :
 Le niveau de service Codex demandé pour un tour (Standard, Fast, Ultrafast…), choisi indépendamment du modèle et du raisonnement pour le prochain message ou par défaut sur un agent. Seuls les niveaux que le catalogue Codex d’un compte annonce pour le modèle sont proposés ; une vitesse plus rapide consomme plus vite l’usage du compte. Claude Code et OpenCode n’en proposent pas.

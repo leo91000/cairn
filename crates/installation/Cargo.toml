@@ -117,9 +117,16 @@ zip = { version = "6", default-features = false, features = [ "deflate-flate2" ]
 ext4-view = { version = "=1.0.0", features = [ "std" ] }
 mail-builder = { version = "=0.4.4", default-features = false }
 mime_guess = "=2.0.5"
+toml = "0.9"
+toml_edit = { version = "0.25", features = [ "serde" ] }
+jsonc-parser = { version = "0.34", features = [
+  "cst",
+  "serde"
+] }
 
 [dev-dependencies]
 tempfile = "3"
+tracing-core = "0.1"
 tower = { version = "0.5", features = [ "util" ] }
 tokio = { version = "1", features = [ "test-util" ] }
 

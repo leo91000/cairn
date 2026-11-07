@@ -324,6 +324,7 @@ impl Turn<'_> {
                 self.receipt.operational_notices.insert(id.to_owned());
             }
             if id.is_empty()
+                || !crate::chat_inbox::joins_turn(&message, self.plan)
                 || self.submitted.contains(id)
                 || self.receipt.delivered.contains(id)
                 || self.receipt.previously_delivered.contains(id)
@@ -716,7 +717,11 @@ async fn execute(
     native["share"] = "disabled".into();
     native["autoupdate"] = false.into();
     native["plugin"] = json!([]);
-    native["compaction"] = json!({ "auto": false, "prune": false });
+    if !native["compaction"].is_object() {
+        native["compaction"] = json!({});
+    }
+    native["compaction"]["auto"] = false.into();
+    native["compaction"]["prune"] = false.into();
     if native["permission"].is_null() {
         native["permission"] = json!({ "*": "allow" });
     }

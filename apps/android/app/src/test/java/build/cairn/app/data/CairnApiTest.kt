@@ -448,7 +448,7 @@ class CairnApiTest {
     @Test
     fun `Markdown file links resolve only known artifacts on the connected origin`() {
         val origin = "https://cairn.example/".toHttpUrl()
-        val file = Deliverable("file", "run", key = "report")
+        val file = Deliverable(id = "file", runId = "run", key = "report")
         assertEquals(
             file,
             artifactForLink("/api/runs/run/artifacts/file?download=1", origin, listOf(file)),

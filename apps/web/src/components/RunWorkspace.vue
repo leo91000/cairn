@@ -89,7 +89,7 @@ const converting = ref(false)
 // As on Android, a run opens on its conversation.
 const tab = ref('events')
 // Only acknowledge output that is displayed, including a mission finishing while it is open.
-useReadWhileOpen(() => ['events', 'result'].includes(tab.value) && live.synced.value && !loading.value && run.value?.trigger !== 'chat' && run.value?.status === 'succeeded' && run.value.finishedAt ? { key: `task:${run.value.taskId}`, at: run.value.finishedAt } : null)
+useReadWhileOpen(() => live.synced.value && !loading.value && run.value?.trigger !== 'chat' && run.value?.finishedAt ? { key: `task:${run.value.taskId}`, at: run.value.finishedAt } : null)
 // Where the Fil holds this run's blocked outcome, while it is its mission's latest.
 const missionRuns = useMissionRuns()
 const outcomeItem = computed(() => {

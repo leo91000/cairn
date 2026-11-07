@@ -10,12 +10,15 @@ data class CodingAgent(
     val requiresModel: Boolean = false,
     /** Runs try accounts in the user's order instead of by remaining capacity. */
     val ordered: Boolean = false,
+    /** Cairn can enforce a plan turn's read-only boundary for this engine. */
+    val planTurns: Boolean = false,
 )
 
 val codingAgents =
     listOf(
-        CodingAgent("codex", "OpenAI", "Compte ChatGPT", "Codex"),
-        CodingAgent("claude", "Anthropic", "Compte Claude", "Claude Code"),
+        CodingAgent("codex", "OpenAI", "Compte ChatGPT", "Codex", planTurns = true),
+        CodingAgent("claude", "Anthropic", "Compte Claude", "Claude Code", planTurns = true),
+        // OpenCode runs only in YOLO environments, without a sandbox Cairn could narrow.
         CodingAgent(
             "opencode",
             "Fournisseurs de modèles",

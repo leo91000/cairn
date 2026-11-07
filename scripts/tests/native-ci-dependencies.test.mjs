@@ -16,6 +16,7 @@ import { parse } from 'yaml'
 
 const root = new URL('../../', import.meta.url)
 const workflow = parse(readFileSync(new URL('.github/workflows/ci.yaml', root), 'utf8'))
+const realSudo = process.env.CAIRN_TEST_REAL_SUDO === '1'
 const setup = workflow.jobs.backend.steps.find(step => step.name === 'Install native test dependencies')
 
 async function executeSetup(fault = '', {
@@ -42,7 +43,7 @@ const { constants } = require('node:os')
 const name = basename(process.argv[1])
 const args = process.argv.slice(2)
 const phase = name === 'sudo' ? 'entry' : args.includes('update') ? 'update' : 'install'
-appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase, pid: process.pid, args }) + '\\n')
+appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase, pid: process.pid, uid: process.getuid(), args }) + '\\n')
 const fault = ${JSON.stringify(fault)}
 if (phase === 'entry' && fault === 'delayed-entry') {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150)
@@ -65,7 +66,7 @@ if (phase === fault) {
 } else {
   if (args[0] === '-n') args.shift()
   const command = args.shift()
-  const result = spawnSync(command, args, { stdio: 'inherit' })
+  const result = ${realSudo ? `spawnSync('/usr/bin/sudo', ['-n', 'env', ${JSON.stringify(`PATH=${directory}${path.delimiter}${process.env.PATH}`)}, command, ...args], { stdio: 'inherit' })` : `spawnSync(command, args, { stdio: 'inherit' })`}
   process.exit(result.status ?? (128 + (constants.signals[result.signal] ?? 0)))
 }
 `
@@ -78,13 +79,13 @@ if (phase === fault) {
   const driver = `import { writeSync, appendFileSync } from 'node:fs'; import { installNativeCiDependencies } from ${JSON.stringify(new URL('scripts/install-native-ci-dependencies.mjs', root).href)}; ${blockedOutput ? fillOutput : ''} process.exitCode = await installNativeCiDependencies({ profile: ${JSON.stringify(profile)}, phaseSeconds: { update: ${workSeconds}, install: ${workSeconds} }, entryAllowanceSeconds: 0.65, killAfterSeconds: 0.4${throwingMarker ? ', write: () => { throw new Error("fixture marker failure") }' : ''} });`
   const unsupportedProfile = !['native', 'android-network'].includes(profile)
   const useDriver = fault || closeOutput || blockedOutput || throwingMarker
-  const androidSetup = workflow.jobs['android-direct'].steps.find(step => step.name === 'Install Android network test dependencies' || step.run?.includes('iproute2 iptables util-linux'))
+  const androidCommand = 'node scripts/install-native-ci-dependencies.mjs --profile android-network'
   const command = interruptSignal || unsupportedProfile || useDriver ? process.execPath : '/bin/bash'
   const args = (interruptSignal && interruptPhase === 'descendant') || unsupportedProfile
     ? [fileURLToPath(new URL('scripts/install-native-ci-dependencies.mjs', root)), '--profile', profile]
     : useDriver
       ? ['--input-type=module', '-e', driver]
-      : ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', profile === 'android-network' ? androidSetup.run : setup.run]
+      : ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', profile === 'android-network' ? androidCommand : setup.run]
   const child = spawn(command, args, {
     cwd: root,
     detached: true,
@@ -143,6 +144,13 @@ if (phase === fault) {
   try {
     const result = await new Promise(resolve => child.on('close', (status, signal) => resolve({ status, signal })))
     const calls = readFileSync(history, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+    if (realSudo) {
+      for (const call of calls.filter(call => ['update', 'install', 'descendant'].includes(call.phase))) {
+        if (call.phase !== 'descendant')
+          expect(call.uid).toBe(0)
+      }
+    }
+
     const controlDirectoriesRemaining = calls.filter(call => call.phase === 'entry')
       .map(call => call.args.at(-1))
       .filter(candidate => typeof candidate === 'string' && path.basename(candidate) === 'owner.sock')
@@ -325,16 +333,16 @@ describe('native CI dependency setup', () => {
     expect(result.survivingFixturePids).toEqual([])
   })
 
-  it('uses the same bounded installer in all three native dependency callers', () => {
-    for (const name of ['rust-check', 'backend', 'node-checks']) {
+  it('uses the same bounded installer in all native dependency callers with the same package set', () => {
+    for (const name of ['rust-check', 'backend', 'cli-qualification', 'backend-migration-qualification', 'node-checks']) {
       const step = workflow.jobs[name].steps.find(step => step.name === 'Install native test dependencies')
       expect(step.run).toBe('node scripts/install-native-ci-dependencies.mjs')
       expect(step['timeout-minutes']).toBe(10)
     }
 
-    const android = workflow.jobs['android-direct'].steps.find(step => step.name === 'Install Android network test dependencies')
-    expect(android.run).toBe('node scripts/install-native-ci-dependencies.mjs --profile android-network')
-    expect(android['timeout-minutes']).toBe(5)
+    const android = workflow.jobs['android-direct'].steps.find(step => step.name === 'Prepare the native Android network toolchain')
+    expect(android.run).toBe('node scripts/prepare-network-tools.mjs android-direct')
+    expect(workflow.jobs['android-direct'].steps.some(step => step.run?.includes('install-native-ci-dependencies'))).toBe(false)
     expect(workflow.jobs['android-direct']['timeout-minutes']).toBe(20)
   })
 })

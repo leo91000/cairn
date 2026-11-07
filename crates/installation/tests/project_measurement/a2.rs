@@ -49,6 +49,7 @@ fn row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
     let provider: String = row.get(2)?;
     let status: Option<String> = row.get(15)?;
     Ok(Agent {
+        coding_agent_defaults: None,
         id: AgentId(identifier),
         settings: AgentSettings {
             name: row.get(1)?,

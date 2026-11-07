@@ -354,13 +354,10 @@ fn artifacts(db: &Db<'_>, run: &str) -> Result<Vec<Value>> {
     if run.is_empty() {
         return Ok(Vec::new());
     }
-    let mut artifacts: Vec<_> = db
-        .keys(&format!("artifact:{run}:"))?
+    db.artifacts(Some(run))?
         .into_iter()
-        .map(|(_, v)| v)
-        .collect();
-    artifacts.sort_by_key(|v| v["createdAt"].as_i64().unwrap_or(0));
-    Ok(artifacts)
+        .map(|item| Ok(serde_json::to_value(item)?))
+        .collect()
 }
 
 fn scoped_run(db: &Db<'_>, scope: &Scope, chat: &Value) -> Result<Value> {
@@ -876,6 +873,50 @@ pub async fn content(s: &Service, kind: &str, id: &str, input: &Input) -> Result
         .await
 }
 
+/// Read a source event through the same bounded content chunks used by public tools.
+/// A chat changing its run invalidates the reference rather than reading another run.
+pub async fn event_content(s: &Service, kind: &str, id: &str, input: &Input) -> Result<Value> {
+    uuid(id)?;
+    let args: cairn_contracts::ReadRunContentInput = serde_json::from_value(input.body.clone())?;
+    if args
+        .event_id
+        .is_none_or(|id| !(1..=9_007_199_254_740_991).contains(&id))
+        || args.entry_id.is_some()
+        || args.timeline_snapshot.is_some()
+        || !(0..=9_007_199_254_740_991).contains(&args.offset)
+        || args.sha256.as_ref().is_some_and(|sha| {
+            sha.len() != 64
+                || !sha
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+    {
+        return Err(Error::bad("Invalid event content reference."));
+    }
+    let scope = Scope::new(kind, id, "");
+    s.store
+        .read(move |db| {
+            let tx = rusqlite::Transaction::new_unchecked(
+                db.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let db = Db(&tx);
+            let run = if scope.chat {
+                crate::chats::history_run(&db, &scope.id)?
+            } else {
+                text(&scoped_run(&db, &scope, &Value::Null)?, "id").to_owned()
+            };
+            if run != args.run_id.to_string() {
+                return Err(Error::conflict(
+                    "Conversation history changed. Reconnect before reading content.",
+                ));
+            }
+            crate::conversation_lifecycle::require_active_run(&db, &run)?;
+            crate::mcp_server::read_run_content(&db, &args)
+        })
+        .await
+}
+
 /// The UI receives a reply through its timeline card, never as raw snapshots;
 /// other events the timeline presents remain boundaries of unconverted families.
 pub fn ui_events(events: Vec<crate::store::Event>) -> Vec<crate::store::Event> {
@@ -884,6 +925,26 @@ pub fn ui_events(events: Vec<crate::store::Event>) -> Vec<crate::store::Event> {
         .filter_map(|mut event| {
             let (reply, covered) = crate::timeline::presentation(&event);
             event.timeline = covered;
+            if !reply
+                && crate::validation::encoded_size(&event)
+                    .is_ok_and(|size| size > PAGE_BYTES - 1024)
+                && event.payload.as_ref().is_some_and(|payload| {
+                    serde_json::from_str::<Value>(payload.get())
+                        .ok()
+                        .is_some_and(|payload| {
+                            payload.pointer("/item/type").and_then(Value::as_str)
+                                == Some("proposed_plan")
+                        })
+                })
+            {
+                event.text.clear();
+                event.payload = Some(
+                    serde_json::value::to_raw_value(
+                        &serde_json::json!({"_cairnEventContent": true}),
+                    )
+                    .expect("static event reference"),
+                );
+            }
             (!reply).then_some(event)
         })
         .collect()
@@ -914,8 +975,10 @@ pub(crate) fn large_reference(mut entry: TimelineEntry) -> LargeTimelineReferenc
             question_id,
             sent_at,
             attachments,
+            plan,
         } => {
             text.clear();
+            *plan = false;
             *message_id = None;
             *question_id = None;
             *sent_at = 0;

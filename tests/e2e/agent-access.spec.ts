@@ -1139,3 +1139,82 @@ for (const outcome of ['success', 'assertion failure']) {
     }
   })
 }
+
+const contextRouteTest = test.extend<object, {
+  routeServer: {
+    url: string
+    received: Promise<void>
+    finished: number
+    release: () => void
+  }
+}>({
+  // This lifecycle regression needs only synthetic HTTP, without an installation.
+  // eslint-disable-next-line no-empty-pattern
+  baseURL: async ({}, use) => use(undefined),
+  // eslint-disable-next-line no-empty-pattern
+  routeServer: [async ({}, use) => {
+    const received = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let requests = 0
+    const server = createServer(async (request, response) => {
+      if (request.url?.startsWith('/pending/')) {
+        if (++requests === 3)
+          received.resolve()
+        await release.promise
+        response.writeHead(200, { 'content-type': 'application/json' }).end('{}')
+        return
+      }
+
+      response.writeHead(200, { 'content-type': 'text/html' }).end('<!doctype html><title>Shared route lifetime</title>')
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    try {
+      await use({
+        url: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+        received: received.promise,
+        finished: 0,
+        release: () => release.resolve(),
+      })
+    }
+    finally {
+      release.resolve()
+      server.closeAllConnections()
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+    }
+  }, { scope: 'worker' }],
+})
+
+contextRouteTest('shared context owns pending routes on pages and the context', async ({ page, context, routeServer }) => {
+  const other = await context.newPage()
+  try {
+    for (const [owner, pathname] of [[page, 'page'], [other, 'other-page'], [context, 'context']] as const) {
+      await owner.route(`**/pending/${pathname}`, async (route) => {
+        const response = await route.fetch()
+        await route.fulfill({ response, json: await response.json() })
+        routeServer.finished++
+      })
+    }
+
+    await Promise.all([page.goto(routeServer.url), other.goto(routeServer.url)])
+    await page.evaluate(() => {
+      void fetch('/pending/page')
+      void fetch('/pending/context')
+    })
+    await other.evaluate(() => {
+      void fetch('/pending/other-page')
+    })
+    await routeServer.received
+    expect(routeServer.finished).toBe(0)
+  }
+  finally {
+    // Complete after the body returns, including assertion failures, so fixture
+    // teardown owns the active routes without leaving an intentional gate held.
+    setTimeout(routeServer.release, 25)
+  }
+})
+
+contextRouteTest('shared context finishes its routes before the next test', async ({ page, routeServer }) => {
+  expect(routeServer.finished).toBe(3)
+  await page.goto(routeServer.url)
+})

@@ -608,6 +608,82 @@ async fn direct_stream_uses_the_same_body_with_credit_and_cancel_during_fragment
 }
 
 #[tokio::test]
+async fn direct_private_files_larger_than_a_frame_stream_in_identity_encoding() {
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    production_connector(&mut relay).await;
+    let bytes = "compressible text\n"
+        .repeat(cairn_protocol::MAX_BODY / 18 + 10_000)
+        .into_bytes();
+    let (run, artifact) = common::seeded_artifact(&relay, &bytes, "text/plain").await;
+    let (small_run, small) = common::seeded_artifact(&relay, b"small file", "text/plain").await;
+    let (peer, channel, _) = client(&relay).await;
+
+    // A file that fits one frame stays finite: no credit round trip per chunk.
+    send_frame(
+        channel.as_ref(),
+        1,
+        &request("small", &format!("/api/runs/{small_run}/artifacts/{small}")),
+    )
+    .await;
+    let Frame::Response(reply) = response(channel.as_ref()).await else {
+        panic!("a file that fits one frame must stay finite")
+    };
+    assert_eq!(reply.body, b"small file");
+
+    // A client predating this route's stream classification still asks for gzip.
+    let mut download = request("download", &format!("/api/runs/{run}/artifacts/{artifact}"));
+    if let Frame::Request(request) = &mut download {
+        request.headers = vec![("accept-encoding".into(), "gzip".into())];
+    }
+    send_frame(channel.as_ref(), 2, &download).await;
+    let Frame::StreamStart(start) = response(channel.as_ref()).await else {
+        panic!("artifact files must stream")
+    };
+    assert_eq!(start.status, 200);
+    assert!(
+        !start
+            .headers
+            .iter()
+            .any(|(name, _)| name == "content-encoding"),
+        "direct stream chunks are read without an HTTP decoder"
+    );
+    assert!(
+        start
+            .headers
+            .contains(&("content-length".into(), bytes.len().to_string()))
+    );
+
+    let mut received = Vec::new();
+    let mut chunks = 0;
+    for transfer in 3.. {
+        send_frame(
+            channel.as_ref(),
+            transfer,
+            &Frame::StreamCredit {
+                id: "download".into(),
+            },
+        )
+        .await;
+        match response(channel.as_ref()).await {
+            Frame::StreamChunk { body, .. } => {
+                chunks += 1;
+                received.extend(body);
+            }
+            Frame::StreamEnd { failed, .. } => {
+                assert!(!failed);
+                break;
+            }
+            _ => panic!("stream frame expected"),
+        }
+    }
+    assert_eq!(received, bytes);
+    // Each chunk costs a credit round trip, so files use whole protocol chunks.
+    assert!(chunks <= bytes.len().div_ceil(cairn_protocol::MAX_STREAM_CHUNK) + 1);
+    peer.close().await.unwrap();
+    relay.close().await;
+}
+
+#[tokio::test]
 async fn fragmented_request_and_response_keep_body_bytes_and_verified_capabilities() {
     use axum::{Extension, body::Bytes, routing::post};
     use cairn_installation::auth::{InstallationIdentity, InstallationRole};

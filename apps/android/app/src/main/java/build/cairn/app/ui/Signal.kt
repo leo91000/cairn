@@ -498,8 +498,7 @@ internal data class FilAttention(val needsYou: Int = 0, val toRead: Int = 0) {
                 .joinToString(" · ")
 }
 
-internal fun filAttention(feed: Feed) =
-    FilAttention(feed.forYou.size - feed.unread.size, feed.unread.size)
+internal fun filAttention(feed: Feed) = FilAttention(toRead = feed.unread.size)
 
 @Composable
 internal fun FilNavigationBadge(attention: FilAttention, content: @Composable () -> Unit) {

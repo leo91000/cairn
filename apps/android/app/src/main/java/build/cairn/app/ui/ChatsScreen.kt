@@ -55,8 +55,10 @@ import build.cairn.contracts.ConfirmChatInput
 import build.cairn.contracts.CreateChatInput
 import build.cairn.contracts.EditChatMessage
 import build.cairn.contracts.EditChatMessageInput
+import build.cairn.contracts.PlanApproval
 import build.cairn.contracts.QuestionAnswerInput
-import build.cairn.contracts.ResumeRunInput
+import build.cairn.contracts.ResumeChatInput
+import build.cairn.contracts.ResumeExecutionSelection
 import build.cairn.contracts.SendChatMessageInput
 import build.cairn.contracts.SetChatPausedInput
 import build.cairn.contracts.answerChatQuestion
@@ -67,7 +69,7 @@ import build.cairn.contracts.deleteChatMessage
 import build.cairn.contracts.editChatMessage
 import build.cairn.contracts.restartChatSession
 import build.cairn.contracts.restoreChat
-import build.cairn.contracts.resumeRun
+import build.cairn.contracts.resumeChat
 import build.cairn.contracts.sendChatMessage
 import build.cairn.contracts.setChatPaused
 import build.cairn.contracts.stopChat
@@ -377,12 +379,31 @@ internal fun ChatPage(
                 current = { savedIsCurrent(it, conversations.state?.chats) },
             )
     val chat = live.state?.chat?.takeIf { it.id == id }
+    val savedResumeRun = chat?.run
+    val savedResumeAgent = savedResumeRun?.snapshot?.agent
+    val savedResumeTurnId = savedResumeRun?.chatExecution?.messageId
+    val resumeReasoningContext =
+        listOf(
+                id,
+                chat?.id,
+                savedResumeRun?.id,
+                savedResumeTurnId,
+                savedResumeAgent?.id,
+                savedResumeAgent?.provider,
+                savedResumeAgent?.model,
+                savedResumeAgent?.reasoning,
+                savedResumeAgent?.speed,
+            )
+            .joinToString("\u0000") { value ->
+                val normalized = value.orEmpty()
+                "${normalized.length}:$normalized"
+            }
     ReadWhileOpen(
         vm,
         chat
             ?.run
-            ?.takeIf { selected && live.synced && !live.catchingUp && it.status == "succeeded" }
-            ?.finishedAt
+            ?.takeIf { selected && live.synced && !live.catchingUp }
+            ?.let { chat.readAt ?: it.finishedAt }
             ?.let { "chat:${chat.id}" to it },
     )
     var createdId by rememberSaveable(id) { mutableStateOf<String?>(null) }
@@ -400,7 +421,33 @@ internal fun ChatPage(
     var provider by rememberSaveable(id) { mutableStateOf(savedDraft.provider) }
     var model by rememberSaveable(id) { mutableStateOf(savedDraft.model) }
     var reasoning by rememberSaveable(id) { mutableStateOf(savedDraft.reasoning) }
+    var planning by rememberSaveable(id) { mutableStateOf(savedDraft.plan) }
     var speed by rememberSaveable(id) { mutableStateOf(savedDraft.speed) }
+    var reasoningIntentKind by
+        rememberSaveable(id, resumeReasoningContext) { mutableStateOf("untouched") }
+    var reasoningIntentValue by rememberSaveable(id, resumeReasoningContext) { mutableStateOf("") }
+    fun setResumeReasoningIntent(intent: ResumeReasoningIntent) {
+        when (intent) {
+            is ResumeReasoningIntent.Effort -> {
+                reasoningIntentKind = "effort"
+                reasoningIntentValue = intent.value
+            }
+            ResumeReasoningIntent.ModelDefault -> {
+                reasoningIntentKind = "model-default"
+                reasoningIntentValue = ""
+            }
+            ResumeReasoningIntent.Untouched -> {
+                reasoningIntentKind = "untouched"
+                reasoningIntentValue = ""
+            }
+        }
+    }
+    val currentResumeReasoningIntent =
+        when (reasoningIntentKind) {
+            "model-default" -> ResumeReasoningIntent.ModelDefault
+            "effort" -> ResumeReasoningIntent.Effort(reasoningIntentValue)
+            else -> ResumeReasoningIntent.Untouched
+        }
     var attachments by rememberForm(savedDraft.attachments)
     // Per-file states of the composer: refused before upload, uploading, or failed to upload.
     var rejected by rememberForm(savedDraft.rejected)
@@ -436,6 +483,7 @@ internal fun ChatPage(
                     submissionKey,
                     provider,
                     rejected,
+                    planning,
                     speed,
                 )
     }
@@ -480,6 +528,12 @@ internal fun ChatPage(
         }
     val chats = conversations.state?.chats
     val timeline = remember(history, chats) { history.followingDelegations(chats) }
+    // Approval uses the latest durable source, not the row chosen for reading.
+    val implementable =
+        remember(timeline, live.events, live.entries) {
+            val sourceId = proposedPlanApproval(live.events, live.entries)
+            timeline.lastOrNull { sourceId != null && it.proposalSourceId == sourceId }?.key
+        }
     var asking by remember { mutableStateOf<ChatQuestion?>(null) }
     var stopping by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<ChatMessage?>(null) }
@@ -559,18 +613,36 @@ internal fun ChatPage(
     val switchingProvider = chat?.run != null && chosenProvider != currentProvider
     val conversationAssistant = chat?.run?.snapshot?.agent
     val inheritConversation = chosenProvider == conversationAssistant?.provider
+    val nativeDefaults = selectedAgent?.codingAgentDefaults?.get(chosenProvider)
     val inheritedAssistant =
-        if (inheritConversation) conversationAssistant
-        else selectedAgent?.takeIf { it.provider == chosenProvider }
+        if (inheritConversation)
+            chat?.nextSelection
+                ?: conversationAssistant?.let {
+                    build.cairn.contracts.CodingAgentPreferences(it.model, it.reasoning, it.speed)
+                }
+        else if (selectedAgent?.provider == chosenProvider) {
+            build.cairn.contracts.CodingAgentPreferences(
+                model = selectedAgent.model.ifBlank { nativeDefaults?.model.orEmpty() },
+                reasoning = selectedAgent.reasoning.ifBlank { nativeDefaults?.reasoning.orEmpty() },
+                speed = selectedAgent.speed.ifBlank { nativeDefaults?.speed.orEmpty() },
+            )
+        } else nativeDefaults
     val defaultModel = inheritedAssistant?.model.orEmpty()
     val defaultReasoning = inheritedAssistant?.reasoning.orEmpty()
     val defaultSpeed = inheritedAssistant?.speed.orEmpty()
     fun chooseProvider(value: String) {
+        setResumeReasoningIntent(ResumeReasoningIntent.Untouched)
         provider = value
         model = ""
         reasoning = ""
         speed = ""
     }
+    val planAvailable = codingAgent(chosenProvider).planTurns
+    // Availability blocks submission; it never removes the requested boundary.
+    val planRequested = planning
+    val planBlocked = planRequested && !planAvailable
+    // A plan request cannot join a turn that can already change files.
+    val steerBlocked = planRequested && chat?.run?.chatExecution?.plan != true
     val skillOptions =
         remember(state.skills, selectedAgent, chat?.projectId, project, chat == null) {
             chatSkills(state.skills, selectedAgent, if (chat != null) chat.projectId else project)
@@ -661,6 +733,7 @@ internal fun ChatPage(
         uploadErrors.remove(key)
     }
     fun clearDraft() {
+        setResumeReasoningIntent(ResumeReasoningIntent.Untouched)
         vm.files.discard(attachments)
         attachments = emptyList()
         rejected = emptyList()
@@ -670,8 +743,11 @@ internal fun ChatPage(
         submissionKey = ""
         submissionId = ""
     }
-    fun send(mode: String) {
+    fun send(mode: String, plan: Boolean = planRequested, planApproval: PlanApproval? = null) {
         vm.perform {
+            require(!plan || planAvailable) {
+                "Le mode Plan nécessite Codex ou Claude Code. Désactivez Plan pour une demande ordinaire."
+            }
             val chatId =
                 id
                     ?: createdId
@@ -705,23 +781,25 @@ internal fun ChatPage(
                     if (it.attachment.id == uploaded.id) it.copy(attachment = uploaded) else it
                 }
             }
-            val selectedModel = model.ifBlank { defaultModel }
-            val selectedReasoning = reasoning.ifBlank {
-                if (model.isBlank()) defaultReasoning else ""
-            }
-            // The speed survives a model change, so it is inherited even with a new model.
-            val selectedSpeed = speed.ifBlank { defaultSpeed }
+            // Keep inheritance live; only explicit choices override the next turn.
+            val selectedModel = model
+            val selectedReasoning = reasoning
+            val selectedSpeed = speed
             val content =
                 EditChatMessage(
-                    text = draft.trim(),
+                    text =
+                        if (planApproval != null) "Implémente le plan que tu as proposé."
+                        else draft.trim(),
                     mode = mode,
                     provider = chosenProvider,
                     model = selectedModel,
                     reasoning = selectedReasoning,
+                    plan = plan,
                     speed = selectedSpeed,
                     attachmentIds = attachments.map { it.attachment.id },
                 )
-            val key = "$chatId/${editing.orEmpty()}/${wireJson.encodeToJsonElement(content)}"
+            val key =
+                "$chatId/${editing.orEmpty()}/${wireJson.encodeToJsonElement(content)}/$planApproval"
             if (key != submissionKey) {
                 submissionKey = key
                 submissionId = UUID.randomUUID().toString()
@@ -731,7 +809,7 @@ internal fun ChatPage(
                     ChatMessage(
                         id = submissionId,
                         chatId = chatId,
-                        text = draft.trim(),
+                        text = content.text,
                         model = selectedModel,
                         reasoning = selectedReasoning,
                         mode = mode,
@@ -739,6 +817,7 @@ internal fun ChatPage(
                         createdAt = System.currentTimeMillis(),
                         attachments = attachments.map { it.attachment },
                         provider = chosenProvider,
+                        plan = plan,
                         speed = selectedSpeed,
                     )
             try {
@@ -755,6 +834,8 @@ internal fun ChatPage(
                                     provider = content.provider,
                                     model = content.model,
                                     reasoning = content.reasoning,
+                                    plan = content.plan == true,
+                                    planApproval = planApproval,
                                     speed = content.speed.orEmpty(),
                                     attachmentIds = content.attachmentIds,
                                 ),
@@ -766,10 +847,19 @@ internal fun ChatPage(
                     )
             } catch (e: Exception) {
                 outgoing = null
+                if (planApproval != null && e is ApiException && e.status == 409) {
+                    submissionKey = ""
+                    submissionId = ""
+                    live.reconnect()
+                }
                 throw e
             }
             clearDraft()
-            if (id == null) openChat(chatId)
+            if (id == null) {
+                // Plan mode follows the first message into the conversation it created.
+                if (plan) vm.chatDrafts[chatId] = ChatDraft(plan = true)
+                openChat(chatId)
+            }
         }
     }
     fun edit(message: ChatMessage) {
@@ -782,12 +872,36 @@ internal fun ChatPage(
             return
         }
         editing = message.id
+        setResumeReasoningIntent(ResumeReasoningIntent.Untouched)
         composer.setTextAndPlaceCursorAtEnd(message.text)
         provider = message.provider.ifBlank { currentProvider }
         model = message.model
         reasoning = message.reasoning
+        planning = message.plan == true
         speed = message.speed
         attachments = message.attachments.map { DraftAttachment(it) }
+    }
+    // Leaving plan mode is explicit: this queues an ordinary turn in the same conversation, with
+    // the agent's usual permissions.
+    fun implementPlan(entry: TimelineEntry) {
+        if (
+            draft.isNotBlank() ||
+                attachments.isNotEmpty() ||
+                rejected.isNotEmpty() ||
+                editing != null ||
+                active ||
+                pending.isNotEmpty() ||
+                delivery.sending.isNotEmpty()
+        )
+            return
+        val sourceId = entry.proposalSourceId ?: return
+        val revision = chat?.revision ?: return
+        planning = false
+        send(
+            "queue",
+            plan = false,
+            planApproval = PlanApproval(sourceId = sourceId, revision = revision),
+        )
     }
     fun steerQueued(message: ChatMessage) {
         vm.perform {
@@ -802,6 +916,7 @@ internal fun ChatPage(
                             provider = message.provider,
                             model = message.model,
                             reasoning = message.reasoning,
+                            plan = message.plan,
                             speed = message.speed,
                             attachmentIds = message.attachments.map { it.id },
                         ),
@@ -1356,6 +1471,19 @@ internal fun ChatPage(
                                                 hideRunning = chat?.run?.status == "running",
                                                 active = active,
                                                 livePlan = livePlan,
+                                                implement =
+                                                    if (it.key == implementable)
+                                                        ({ implementPlan(it) })
+                                                    else null,
+                                                canImplement =
+                                                    !state.busy &&
+                                                        !active &&
+                                                        pending.isEmpty() &&
+                                                        delivery.sending.isEmpty() &&
+                                                        editing == null &&
+                                                        draft.isBlank() &&
+                                                        attachments.isEmpty() &&
+                                                        rejected.isEmpty(),
                                             )
                                         }
                                     }
@@ -1374,12 +1502,126 @@ internal fun ChatPage(
                                                     resume = {
                                                         chat?.let { current ->
                                                             vm.perform {
-                                                                if (current.run?.status == "failed")
-                                                                    api.resumeRun(
-                                                                        ResumeRunInput(
-                                                                            current.run.id
+                                                                val run = current.run
+                                                                if (
+                                                                    run != null &&
+                                                                        run.status in
+                                                                            setOf(
+                                                                                "failed",
+                                                                                "interrupted",
+                                                                                "cancelled",
+                                                                            )
+                                                                ) {
+                                                                    val savedAgent =
+                                                                        run.snapshot?.agent
+                                                                    val selection =
+                                                                        if (
+                                                                            run.resumeAvailable &&
+                                                                                savedAgent !=
+                                                                                    null &&
+                                                                                chosenProvider ==
+                                                                                    savedAgent
+                                                                                        .provider &&
+                                                                                !run.chatExecution
+                                                                                    ?.messageId
+                                                                                    .isNullOrBlank()
+                                                                        ) {
+                                                                            val catalog =
+                                                                                state.modelCatalog(
+                                                                                    chosenProvider
+                                                                                )
+                                                                            val selectedRow =
+                                                                                selectedModel(
+                                                                                    catalog,
+                                                                                    model,
+                                                                                    savedAgent
+                                                                                        .model,
+                                                                                )
+                                                                            val selectedModelChanged =
+                                                                                model
+                                                                                    .isNotBlank() &&
+                                                                                    model !=
+                                                                                        savedAgent
+                                                                                            .model
+                                                                            val selectedReasoning =
+                                                                                resumeSelectionReasoning(
+                                                                                    currentResumeReasoningIntent,
+                                                                                    reasoning,
+                                                                                    savedAgent
+                                                                                        .reasoning,
+                                                                                    selectedModelChanged,
+                                                                                    selectedRow
+                                                                                        ?.defaultReasoningEffort
+                                                                                        .orEmpty(),
+                                                                                )
+                                                                            val selectedModelName =
+                                                                                resumeSelectionModelId(
+                                                                                    selectedRow,
+                                                                                    model,
+                                                                                    savedAgent
+                                                                                        .model,
+                                                                                )
+                                                                            val preserveModel =
+                                                                                savedAgent.model
+                                                                                    .isEmpty() &&
+                                                                                    model.isBlank()
+                                                                            val selectionModelName =
+                                                                                if (preserveModel)
+                                                                                    savedAgent.model
+                                                                                else
+                                                                                    selectedModelName
+                                                                            val selectedDisplayedSpeed =
+                                                                                pickerAppliedSpeed(
+                                                                                    chosenProvider,
+                                                                                    selectedRow,
+                                                                                    speed,
+                                                                                    savedAgent
+                                                                                        .speed,
+                                                                                )
+                                                                            val selectedSpeed =
+                                                                                resumeSelectionSpeed(
+                                                                                    chosenProvider,
+                                                                                    selectedRow,
+                                                                                    speed,
+                                                                                    savedAgent
+                                                                                        .speed,
+                                                                                )
+                                                                            if (
+                                                                                needsResumeSelection(
+                                                                                    selectionModelName,
+                                                                                    selectedReasoning,
+                                                                                    selectedDisplayedSpeed,
+                                                                                    savedAgent
+                                                                                        .model,
+                                                                                    savedAgent
+                                                                                        .reasoning,
+                                                                                    savedAgent
+                                                                                        .speed,
+                                                                                )
+                                                                            ) {
+                                                                                ResumeExecutionSelection(
+                                                                                    model =
+                                                                                        selectionModelName,
+                                                                                    reasoning =
+                                                                                        selectedReasoning,
+                                                                                    speed =
+                                                                                        selectedSpeed,
+                                                                                    preserveModel =
+                                                                                        preserveModel,
+                                                                                )
+                                                                            } else null
+                                                                        } else null
+                                                                    api.resumeChat(
+                                                                        ResumeChatInput(
+                                                                            chatId = current.id,
+                                                                            runId = run.id,
+                                                                            turnId =
+                                                                                run.chatExecution
+                                                                                    ?.messageId,
+                                                                            selection = selection,
                                                                         )
                                                                     )
+                                                                }
                                                                 api.request(
                                                                     "POST",
                                                                     "/chats/${segment(current.id)}/pause",
@@ -1415,6 +1657,7 @@ internal fun ChatPage(
                                                 sending.message.attachments,
                                                 sending.message.createdAt,
                                                 chat?.agentName ?: "Cairn",
+                                                planRequest = sending.message.plan == true,
                                             )
                                             Text(
                                                 sending.label,
@@ -1543,6 +1786,14 @@ internal fun ChatPage(
                                             color = MaterialTheme.colorScheme.outlineVariant,
                                         )
                                     }
+                                    if (planBlocked)
+                                        Text(
+                                            "Le mode Plan nécessite Codex ou Claude Code. Choisissez un assistant compatible ou désactivez Plan pour une demande ordinaire.",
+                                            Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                                                .testTag("plan-unavailable"),
+                                            color = MaterialTheme.colorScheme.error,
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
                                     if (attachments.isNotEmpty() || rejected.isNotEmpty())
                                         ComposerAttachments(
                                             vm,
@@ -1624,7 +1875,9 @@ internal fun ChatPage(
                                                     Text(
                                                         // Any message cancels a pending wait,
                                                         // paused or not.
-                                                        if (chat?.paused == true)
+                                                        if (planRequested)
+                                                            "Que faut-il planifier ? Rien ne sera modifié"
+                                                        else if (chat?.paused == true)
                                                             if (liveWakeup(chat) != null)
                                                                 "Ajouter à la file — annule l’attente"
                                                             else "Ajouter à la file…"
@@ -1681,13 +1934,30 @@ internal fun ChatPage(
                                                 speed = speed,
                                                 defaultSpeed = defaultSpeed,
                                                 changeSpeed = { speed = it },
+                                                onReasoningIntent = ::setResumeReasoningIntent,
                                             ) { m, r ->
                                                 model = m
                                                 reasoning = r
                                             }
                                         }
+                                        FilterChip(
+                                            planRequested,
+                                            { planning = !planning },
+                                            label = { Text("Plan") },
+                                            modifier =
+                                                Modifier.padding(end = 4.dp).testTag("plan-toggle"),
+                                            enabled = !state.busy && (planAvailable || planning),
+                                            leadingIcon = {
+                                                Icon(
+                                                    CairnIcons.Tasks,
+                                                    null,
+                                                    Modifier.size(16.dp),
+                                                )
+                                            },
+                                        )
                                         val canSend =
-                                            !state.busy &&
+                                            !planBlocked &&
+                                                !state.busy &&
                                                 rejected.isEmpty() &&
                                                 uploadProgress.isEmpty() &&
                                                 (draft.isNotBlank() || attachments.isNotEmpty()) &&
@@ -1707,7 +1977,8 @@ internal fun ChatPage(
                                                     MaterialTheme.colorScheme.onPrimaryContainer,
                                                 outlined = false,
                                                 size = 40.dp,
-                                                enabled = canSend && !switchingProvider,
+                                                enabled =
+                                                    canSend && !switchingProvider && !steerBlocked,
                                             ) {
                                                 send(if (switchingProvider) "queue" else "steer")
                                             }

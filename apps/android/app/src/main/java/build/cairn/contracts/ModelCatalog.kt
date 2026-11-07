@@ -13,6 +13,8 @@ data class ModelCatalog(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val models: List<CodingAgentModel> = listOf(),
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val nativeDefaults: CodingAgentPreferences? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val stale: Boolean = false,
 ) {
     init {}

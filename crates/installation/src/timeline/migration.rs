@@ -10,7 +10,7 @@ use rusqlite::{Connection, TransactionBehavior};
 pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == 22 {
+    if (22..=crate::store::DATABASE_VERSION).contains(&version) {
         return Ok(());
     }
     if version != 21 {
@@ -43,6 +43,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
                     .map(serde_json::value::RawValue::from_string)
                     .transpose()?,
                 display_id: None,
+                legacy_plan_approval: None,
                 timeline: false,
             };
             replay.apply(&event).map_err(|_| invalid())?;

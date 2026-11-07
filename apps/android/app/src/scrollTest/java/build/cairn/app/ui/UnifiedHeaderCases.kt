@@ -86,7 +86,12 @@ abstract class UnifiedHeaderCases {
                                     chat = chat,
                                     artifacts =
                                         (1..4).map {
-                                            Deliverable("a$it", "run", key = "a$it", name = "a$it")
+                                            Deliverable(
+                                                id = "a$it",
+                                                runId = "run",
+                                                key = "a$it",
+                                                name = "a$it",
+                                            )
                                         },
                                 )
                             )
@@ -210,6 +215,8 @@ abstract class UnifiedHeaderCases {
             val vm = fixture(server)
             try {
                 setApp(vm, server)
+                waitText("Tout")
+                compose.onNodeWithText("Tout").performClick()
                 waitText(chat.title)
                 capture("fil")
 
@@ -281,6 +288,8 @@ abstract class UnifiedHeaderCases {
             val vm = fixture(server)
             try {
                 setApp(vm, server, dark = false)
+                waitText("Tout")
+                compose.onNodeWithText("Tout").performClick()
                 waitText(chat.title)
                 compose.onNode(installationHeader("Maison")).performClick()
                 waitText("Réglages de l’installation")

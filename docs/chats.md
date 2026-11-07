@@ -47,6 +47,8 @@ The composer options contain searchable model and reasoning selectors for the ne
 
 Model discovery is authenticated and cached for five minutes per enabled Codex account. Usage polling refreshes it using the existing account session. The picker combines available models, hides catalog-hidden entries except a saved selection, and offers the reasoning levels shared by accounts exposing that model. It offers every speed any enabled account lists for that model and marks a speed as `limited` when some signed-in account able to run the model lacks it or cannot confirm it. Account selection uses fresh catalogs to avoid routing a known model to an account that does not expose it. Discovery failures keep the last catalog with a visible retry status. Custom provider aliases remain supported by the API. [Codex model discovery protocol](https://learn.chatgpt.com/docs/app-server#models).
 
+For OpenCode, `hidden` is catalog presentation metadata, not a general access rule: a selected `provider/model` route remains pinned even if it is deprecated. An `auto/<model>` entry needs at least one available provider route; when every route is deprecated, its parent is hidden and resume rejects it without choosing a different model.
+
 ## Speed
 
 Codex models can offer faster **service tiers** in exchange for higher usage. The picker shows a **Speed** row inside the chosen Codex model's card, with **Standard** and every tier that model lists in the live catalog (`model/list` `serviceTiers`, for example `priority`, which Codex names **Fast**). The description under the choices is Codex's own wording for that model and account, such as "1.5x speed, increased usage", followed by a link to [OpenAI's speed page](https://learn.chatgpt.com/docs/agent-configuration/speed). Cairn does not display usage multipliers itself: on 24 October 2026 that page listed Fast at 2.5× and Ultrafast at 8× the Standard rate for included subscription limits, 2× and 6× for purchased credits and Enterprise pay-as-you-go, and API-key billing by tokens; the rates differ per plan and change over time. Ultrafast appears only when the account's catalog offers it (OpenAI limits it to Pro $500, eligible Enterprise and Edu plans).
@@ -54,6 +56,35 @@ Codex models can offer faster **service tiers** in exchange for higher usage. Th
 The speed is independent of the model and the reasoning level: changing either keeps it. **Agent default** / **Conversation default** inherits the agent's or conversation's speed; without one, **Default** is Standard. Codex's app server does not apply a model's catalog `defaultServiceTier` (only Codex's own terminal client does), so Cairn never shows it as the speed in use. Agent settings save a default speed. Each message, including queued ones, keeps the speed chosen when it was written; editing a queued message restores it (an editor that sends no speed keeps it), and steering cannot change the speed of the running turn. Switching to Claude Code or OpenCode drops the speed: they expose no speed setting, and the API rejects a speed for a message whose turn runs with them, whether it names the coding agent or inherits it from the queue or conversation. Messages and agents saved before speeds existed carry none and run at Standard, as they did before.
 
 Codex accepts the tier in `turn/start` and keeps it for the thread, even across `thread/resume`. Cairn therefore sends a tier with every turn: the chosen one, or `default` for Standard and for turns without a speed, so a turn never silently keeps an earlier turn's faster tier. Codex 0.164.0 silently omits a Fast or Ultrafast tier its catalog does not advertise for the model (it passes `flex` through). Routing prefers accounts whose cached catalog confirms the tier: usage polls refresh each account's catalog before it expires, and for speeds a catalog stays authoritative for 30 minutes, since polls skip a busy account. The decision belongs to the turn: just before `turn/start`, each attempt asks the Codex process that will run it for its `model/list`, the catalog Codex itself applies. When that list names the model without the tier, the turn asks for Standard and the conversation shows **This turn runs at Standard speed**. When the list cannot be read, or does not name the model exactly (a custom alias, or a dated version Codex may match to a listed model), the turn still asks for the tier and the conversation shows **Speed not confirmed for this turn**: it may run at Standard. A turn without a chosen model is checked against the model Codex reports for the thread, which its configuration may set; routing only uses the catalog default to order accounts. Codex answers `model/list` with its built-in list, which offers Fast for its main models, when it cannot fetch the account's, and says nothing about it; Cairn's cached account catalogs come from the same call. So a list that names the model without the tier is the account's own and decides: when the process's list or the account's recent cached catalog does so, the turn asks for Standard with the notice above. When both name the tier, the conversation shows **Selected speed requested for this turn**: a request, since the account's plan decides whether it applies, and Cairn does not measure speed. When the account's catalog is unknown or older than 30 minutes, the turn shows **Speed not confirmed for this turn** instead. Notices are recorded only for an attempt Codex accepted. A retried or resumed attempt, possibly on another account, checks again, and the conversation only shows a change of outcome, such as the selected speed after an earlier attempt ran at Standard. A speed must be a `serviceTiers` id from the catalog or `standard`; Codex's list does not name another id, such as its own `fast` alias, so Cairn asks for Standard for it and the notice says so. The picker marks a speed *limited* when some account able to run the model lacks or does not confirm it; the picker label then says the speed is *requested*, as it does when the model's speeds are unknown. Queued messages and the Android agent overview always call a faster speed *requested*, adding *not listed for this model* when the model's catalog lacks it, since each turn reports how it runs. A run without a connected account uses the local Codex catalog the same way, and the speed Cairn sends replaces a `service_tier` set in the host's `~/.codex/config.toml`, which such runs otherwise copy: choose the speed in Cairn instead.
+
+## Plan turns
+
+**Plan** in the composer makes the next messages plan turns: the agent explores and
+proposes an approach without changing anything. Each such message shows a **Plan**
+badge. The proposal appears as a **Proposed plan** card; **Implement** on the latest
+one queues an ordinary message in the same conversation, which runs with the agent's
+usual permissions. Turning **Plan** off and writing a message does the same.
+
+A selected or saved Plan choice is never silently converted to an ordinary request. If the current engine cannot run Plan (OpenCode), sending is blocked until you choose Codex or Claude Code, or explicitly turn Plan off. The same rule applies after restoring a draft or switching engines.
+
+Cairn enforces the boundary rather than asking the model to respect it. During a plan
+turn the engine's sandbox is read-only with no shell network access, whatever the
+agent's access. Connected third-party MCP servers are omitted during Plan because
+their `readOnlyHint` is not trusted; Cairn-owned tools retain their policy checks.
+`cairn_installation` only offers `read` operations. `cairn_workspace` only offers
+`list_nodes`, `exclusive_status`, `ask_questions`, `pending_questions`,
+`withdraw_question` and, for an agent that delegates, `task_status`; `open_project`
+is unavailable because it imports project files into the runner workspace.
+Delegating or cancelling a task, plugin tools and plugin commands are unavailable.
+Builds and tests that write files fail. Claude Code runs in its plan permission mode; Codex receives the
+`plan` collaboration preset it lists. Subagents of either engine stay inside the
+same boundary, including Codex subagents an earlier turn started: the resident Codex
+process is replaced for a plan turn and the turn after it. Claude Code's auto-mode
+classifier never decides in place of Cairn. OpenCode cannot run plan turns. A plan request cannot steer a running turn
+that may change files: queue it. One sent to steer while no turn runs waits for its
+own plan turn rather than joining a later turn. See
+[the plan-turn decision](adr/0080-plan-turns.md), which also records the native
+qualification of each engine release.
 
 ## Invoking skills with `$`
 
@@ -68,6 +99,8 @@ All executions, including missions, use the chat protocol. Codex uses app-server
 `Chats` owns durable user messages and dispatch. `Worker` owns account selection, project locks, timeout budgets, restart fencing and execution. `chat-process.ts` adapts app-server notifications to the shared Activity artifact format. Each active reply has a supervised process; idle chats hold no account or worker slot. Restricted agents run the same adapter inside the isolated container, with a read-only inbox containing only that run's steering messages.
 
 Messages use client-generated IDs. Requests can be retried without duplicating submissions. On recovery, Codex's persisted user-message client IDs reconcile accepted messages, using paginated turn history when required. A completed saved reply is recovered without another model turn. Interrupted replies continue with the existing workspace and conversation. Failures pause follow-ups for review. Usage exhaustion follows the existing account failover path.
+
+A stopped chat can resume its saved run with a same-provider model, reasoning or Codex speed choice. An untouched blank model remains blank in the saved request, even while the picker displays the catalog default. If reasoning or speed changes, `preserveModel: true` keeps that blank model instead of replacing it with the displayed default. An empty model without that flag keeps its existing API meaning and resolves to the current catalog default. Failed turns that ended before process launch can also be retried without a saved session or selection.
 
 SQLite schema version 4 adds indexed chat messages; records and task runs are preserved. Chat events are excluded from the normal 30-day task-event pruning and event-count cap. Workspace cleanup disables further messages in that conversation.
 
@@ -136,3 +169,12 @@ selected mission stays in the URL across reloads.
 offers **Result**, **Files** and **Mission brief**. The conversation reads like a chat: the
 agent's actions between messages collapse into one sentence, expand into a timeline and
 open each step's command, output and details in a sheet.
+
+During Plan, `ask_questions`, `pending_questions` and `withdraw_question` keep the
+common questionnaire lifecycle available. Withdrawal only retires a pending
+question owned by the current execution and conversation; it never supplies an
+answer or authorizes implementation. Questions answered in ordinary chat or made
+unnecessary by exploration should be withdrawn. Delegation and tools with external
+effects remain unavailable.
+
+Oversized proposed-plan events are sent as bounded source references on app streams and history pages. Web and Android hydrate the complete redacted event through checksum-bound `event-content` chunks before presenting it or committing the cursor; public MCP and `cairn_installation` use the same `read_run_content` implementation. Content, completion identity, authored request and parent attribution remain intact.

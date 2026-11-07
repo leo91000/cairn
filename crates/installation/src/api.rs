@@ -70,6 +70,15 @@ async fn dispatch_inner(s: &Arc<Service>, input: &Input) -> Result<Value> {
 /// Agents, projects, tasks and their scheduling.
 async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
     let agent_command = match route {
+        ("GET", ["agents", id, "plugin-grants"]) => {
+            Some(("get_agent_plugin_grants", json!({ "agentId": id })))
+        }
+        ("PUT", ["agents", id, "plugin-grants"]) => {
+            if input.body["agentId"] != *id {
+                return Err(Error::bad("Agent identity does not match the path."));
+            }
+            Some(("replace_agent_plugin_grants", input.body.clone()))
+        }
         ("GET", ["agents"]) => Some(("list_agents", json!({}))),
         ("GET", ["agents", id]) => Some(("get_agent", json!({ "agentId": id }))),
         ("POST", ["agents"]) => Some(("save_agent", input.body.clone())),
@@ -221,6 +230,9 @@ async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result
         ("GET", [kind @ ("chats" | "runs"), id, "history"]) => {
             crate::live::history(s, kind, id, input).await?
         }
+        ("POST", [kind @ ("chats" | "runs"), id, "event-content"]) => {
+            crate::live::event_content(s, kind, id, input).await?
+        }
         ("POST", [kind @ ("chats" | "runs"), id, "timeline-content"]) => {
             crate::live::content(s, kind, id, input).await?
         }
@@ -300,6 +312,26 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
             )
             .await?
         }
+        ("POST", ["chats", id, "resume"]) => {
+            let mut args = if input.body.is_null() {
+                json!({})
+            } else {
+                input.body.clone()
+            };
+            let Some(fields) = args.as_object_mut() else {
+                return Err(Error::bad("Resume input must be an object."));
+            };
+            if fields
+                .get("chatId")
+                .is_some_and(|requested| requested.as_str() != Some(id))
+            {
+                return Err(Error::conflict(
+                    "Resume chatId must match the conversation in the request path.",
+                ));
+            }
+            fields.insert("chatId".into(), (*id).into());
+            chat_command(s, input, "resume_chat", args).await?
+        }
         ("POST", ["chats", id, "compact"]) => {
             chat_command(s, input, "compact_chat", json!({ "chatId": id })).await?
         }
@@ -364,6 +396,7 @@ async fn chat_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
                             | "model"
                             | "reasoning"
                             | "speed"
+                            | "plan"
                     )
                 });
             }
@@ -481,7 +514,18 @@ async fn settings_routes(
     route: Route<'_>,
 ) -> Result<Option<Value>> {
     let (name, body) = match route {
+        ("POST", ["settings", "coding-agents", "read"]) => {
+            ("get_coding_agent_configuration", input.body.clone())
+        }
+        ("POST", ["settings", "coding-agents", "preview"]) => {
+            ("preview_coding_agent_configuration", input.body.clone())
+        }
+        ("PUT", ["settings", "coding-agents"]) => {
+            ("save_coding_agent_configuration", input.body.clone())
+        }
         ("GET", ["settings"]) => ("get_installation_settings", json!({})),
+        ("GET", ["settings", "task-storage"]) => ("get_task_storage_limits", json!({})),
+        ("PUT", ["settings", "task-storage"]) => ("save_task_storage_limits", input.body.clone()),
         ("GET", ["overview"]) => ("get_installation_overview", json!({})),
         ("GET", ["audit"]) => ("list_audit", json!({})),
         ("GET", ["settings", "storage"]) => ("get_storage_settings", json!({})),

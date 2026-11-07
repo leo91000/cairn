@@ -70,6 +70,26 @@
       },
       "type": "object"
     },
+    "CodingAgentPreferences": {
+      "description": "Safe display defaults. These are inherited preferences, never profile overrides.",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "reasoning": {
+          "type": "string"
+        },
+        "speed": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "reasoning",
+        "speed"
+      ],
+      "type": "object"
+    },
     "ModelRoute": {
       "properties": {
         "billing": {
@@ -157,6 +177,16 @@
         "$ref": "#/definitions/CodingAgentModel"
       },
       "type": "array"
+    },
+    "nativeDefaults": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/CodingAgentPreferences"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "stale": {
       "default": false,

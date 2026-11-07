@@ -52,10 +52,13 @@ impl Audience {
 }
 
 struct Entry {
+    #[cfg(test)]
+    task_finished: tokio::sync::watch::Receiver<()>,
     operation: Operation,
     audience: Audience,
     cancellation: tokio_util::sync::CancellationToken,
     resource: Option<Arc<super::resources::Read>>,
+    result_authority: Option<crate::capabilities::plugin_packages::Authority>,
 }
 
 pub struct Operations {
@@ -79,7 +82,7 @@ impl Operations {
         audience: Audience,
         work: impl Future<Output = Result<PluginOperationResult>> + Send + 'static,
     ) -> Result<Value> {
-        self.start_with_resource(s, audience, None, work)
+        self.start_with_resource(s, audience, None, None, work)
     }
 
     pub(crate) fn start_resource_read(
@@ -89,7 +92,17 @@ impl Operations {
         resource: Arc<super::resources::Read>,
         work: impl Future<Output = Result<PluginOperationResult>> + Send + 'static,
     ) -> Result<Value> {
-        self.start_with_resource(s, audience, Some(resource), work)
+        self.start_with_resource(s, audience, Some(resource), None, work)
+    }
+
+    pub(crate) fn start_with_result_authority(
+        &self,
+        s: Arc<Service>,
+        audience: Audience,
+        authority: crate::capabilities::plugin_packages::Authority,
+        work: impl Future<Output = Result<PluginOperationResult>> + Send + 'static,
+    ) -> Result<Value> {
+        self.start_with_resource(s, audience, None, Some(authority), work)
     }
 
     fn start_with_resource(
@@ -97,6 +110,7 @@ impl Operations {
         s: Arc<Service>,
         audience: Audience,
         resource: Option<Arc<super::resources::Read>>,
+        result_authority: Option<crate::capabilities::plugin_packages::Authority>,
         work: impl Future<Output = Result<PluginOperationResult>> + Send + 'static,
     ) -> Result<Value> {
         let permit =
@@ -105,6 +119,8 @@ impl Operations {
             })?;
         let id = uuid::Uuid::new_v4().to_string();
         let cancellation = tokio_util::sync::CancellationToken::new();
+        #[cfg(test)]
+        let (task_finished, completion) = tokio::sync::watch::channel(());
         {
             let mut entries = self.entries.lock().unwrap();
             if entries.len() >= 64 {
@@ -119,8 +135,11 @@ impl Operations {
             entries.insert(
                 id.clone(),
                 Entry {
+                    #[cfg(test)]
+                    task_finished: completion,
                     audience,
                     resource,
+                    result_authority,
                     cancellation: cancellation.clone(),
                     operation: Operation {
                         id: id.clone(),
@@ -134,6 +153,9 @@ impl Operations {
         }
         let operation_id = id.clone();
         tokio::spawn(async move {
+            // Closing the test observer follows every task exit, including unwind.
+            #[cfg(test)]
+            let _task_finished = task_finished;
             let _permit = permit;
             let _cancellation_guard = cancellation.clone().drop_guard();
             let work = PREPARATION.scope(cancellation.clone(), work);
@@ -192,6 +214,17 @@ impl Operations {
         Ok(())
     }
 
+    pub(crate) fn result_authority(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::capabilities::plugin_packages::Authority>> {
+        let entries = self.entries.lock().unwrap();
+        let entry = entries
+            .get(id)
+            .ok_or_else(|| Error::not_found("Operation not found."))?;
+        Ok(entry.result_authority.clone())
+    }
+
     pub(crate) fn resource_read(
         &self,
         id: &str,
@@ -219,11 +252,116 @@ impl Operations {
         Ok(())
     }
 
+    /// Observe the real preparation task instead of imposing a fixture deadline.
+    /// The sole sender closes on normal return, cancellation, or panic.
+    #[cfg(test)]
+    pub(crate) async fn wait_for_task(&self, id: &str) -> Result<Value> {
+        let mut completion = self
+            .entries
+            .lock()
+            .unwrap()
+            .get(id)
+            .ok_or_else(|| Error::not_found("Operation not found."))?
+            .task_finished
+            .clone();
+
+        let _ = completion.changed().await;
+        let result = self.get(id)?;
+        if result["state"] == "running" {
+            return Err(Error::new(
+                500,
+                "Preparation task exited without publishing a terminal state.",
+            ));
+        }
+
+        Ok(result)
+    }
+
     pub fn get(&self, id: &str) -> Result<Value> {
         let entries = self.entries.lock().unwrap();
         let operation = entries.get(id).ok_or_else(|| {
             Error::not_found("This operation is no longer available. Refresh the plugin.")
         })?;
         Ok(serde_json::to_value(&operation.operation)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn task_observer_reports_terminal_failure_to_late_waiters() {
+        let root = tempfile::TempDir::new().unwrap();
+        let s = Service::new(crate::common::config(root.path()))
+            .await
+            .unwrap();
+
+        let pending = s
+            .plugins
+            .operations
+            .start(s.clone(), Audience::Owner, async {
+                Err(Error::bad("Fixture refusal."))
+            })
+            .unwrap();
+        let id = pending["operation"].as_str().unwrap();
+        assert_eq!(
+            s.plugins.operations.wait_for_task(id).await.unwrap()["state"],
+            "failed"
+        );
+        assert_eq!(
+            s.plugins.operations.wait_for_task(id).await.unwrap()["state"],
+            "failed"
+        );
+
+        s.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn task_observer_reports_explicit_cancellation() {
+        let root = tempfile::TempDir::new().unwrap();
+        let s = Service::new(crate::common::config(root.path()))
+            .await
+            .unwrap();
+
+        let pending = s
+            .plugins
+            .operations
+            .start(s.clone(), Audience::Owner, std::future::pending())
+            .unwrap();
+        let id = pending["operation"].as_str().unwrap();
+        s.plugins.operations.cancel(id).unwrap();
+        assert_eq!(
+            s.plugins.operations.wait_for_task(id).await.unwrap()["state"],
+            "cancelled"
+        );
+
+        s.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn task_observer_refuses_a_panic_before_terminal_publication() {
+        let root = tempfile::TempDir::new().unwrap();
+        let s = Service::new(crate::common::config(root.path()))
+            .await
+            .unwrap();
+
+        let pending = s
+            .plugins
+            .operations
+            .start(s.clone(), Audience::Owner, async {
+                panic!("Fixture preparation panic.");
+            })
+            .unwrap();
+        let id = pending["operation"].as_str().unwrap();
+        let error = s.plugins.operations.wait_for_task(id).await.unwrap_err();
+        assert_eq!(error.status, 500);
+        assert!(
+            error
+                .message
+                .contains("without publishing a terminal state")
+        );
+
+        s.shutdown.cancel();
     }
 }

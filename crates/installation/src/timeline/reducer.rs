@@ -666,6 +666,7 @@ impl<C: Cards> Reducer<'_, C> {
             self.create(
                 format!("user:{}", event.id),
                 TimelineContent::UserMessage {
+                    plan: false,
                     text: String::new(),
                     message_id: None,
                     question_id: None,

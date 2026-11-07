@@ -2076,7 +2076,7 @@ async fn public_plugin_upload_rechecks_its_grant_after_compilation() {
 }
 
 #[tokio::test]
-async fn plugin_revalidation_distinguishes_read_from_manage_and_rejects_revoked_tokens() {
+async fn pending_revalidation_distinguishes_scopes_and_rejects_revoked_tokens() {
     use sha2::{Digest, Sha256};
     let relay = RelayedInstallation::new(axum::Router::new()).await;
     let app = &relay.app;
@@ -2096,7 +2096,7 @@ async fn plugin_revalidation_distinguishes_read_from_manage_and_rejects_revoked_
         "{}/api/relay/{installation_id}/plugin-mcp-authorization",
         app.url
     );
-    for granted in ["read", "manage"] {
+    for granted in ["read", "run", "manage"] {
         let response = owner_post(
             &relay,
             &format!("/api/installations/{installation_id}/tokens"),
@@ -2111,7 +2111,7 @@ async fn plugin_revalidation_distinguishes_read_from_manage_and_rejects_revoked_
         let grant: Value = response.json().await.unwrap();
         let credential_digest =
             hex::encode(Sha256::digest(grant["token"].as_str().unwrap().as_bytes()));
-        for required in [None, Some("read"), Some("manage")] {
+        for required in [None, Some("read"), Some("run"), Some("manage")] {
             let mut input = json!({"credentialDigest":credential_digest});
             if let Some(scope) = required {
                 input["scope"] = scope.into();

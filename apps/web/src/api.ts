@@ -15,6 +15,12 @@ import { listSkills } from '../../../packages/contracts/generated/listSkills'
 import { beaconOrigin, installationHost } from './beacon-location'
 import { clientPerformance } from './client-performance'
 import { ProtocolMismatch } from './direct-channel'
+import {
+  departDocument,
+  documentLifetime,
+  documentSignal,
+  resumeDocument,
+} from './document-lifetime'
 import { clearHistoryCache } from './history-cache'
 import { InstallationTransport } from './installation-transport'
 import { observeTransport } from './transport-observation'
@@ -55,9 +61,9 @@ watch(() => state.signingOut || (state.ready && !state.authenticated), (clear) =
     void clearHistoryCache()
 }, { flush: 'sync' })
 export const installationTransport = new InstallationTransport(state)
-watch(() => [state.ready, state.authenticated, state.installationId, state.signingOut, state.redirecting, state.installationOnline], () => {
+watch(() => [state.ready, state.authenticated, state.installationId, state.signingOut, state.redirecting, state.installationOnline, documentLifetime.value.signal.aborted], () => {
   installationTransport.availabilityChanged(state.installationOnline)
-  if (beaconEntry && state.ready && state.authenticated && !state.signingOut && !state.redirecting)
+  if (beaconEntry && state.ready && state.authenticated && !state.signingOut && !state.redirecting && !documentLifetime.value.signal.aborted)
     installationTransport.start()
   else if (typeof window !== 'undefined')
     installationTransport.stop()
@@ -101,9 +107,9 @@ const recoveries = new Map<string, {
   reconcile: boolean
 }>()
 
-watch(() => [connectionScope(), state.authenticated, state.signingOut], () => {
+watch(() => [connectionScope(), state.authenticated, state.signingOut, documentLifetime.value.signal.aborted], () => {
   for (const [probe, recovery] of recoveries) {
-    if (recovery.scope !== connectionScope() || !state.authenticated || state.signingOut) {
+    if (documentLifetime.value.signal.aborted || recovery.scope !== connectionScope() || !state.authenticated || state.signingOut) {
       recoveries.delete(probe)
       recovery.controller.abort()
     }
@@ -167,13 +173,14 @@ function recoverConnection(scope: string, reconcile: boolean, [probe, request]: 
   }
 
   const controller = new AbortController()
+  const signal = documentSignal(controller.signal)
   state.connectionLost = true
   const promise = (async () => {
     let delay = 1000
     while (true) {
-      await recoveryDelay(delay, controller.signal)
+      await recoveryDelay(delay, signal)
       try {
-        await request(controller.signal)
+        await request(signal)
         return
       }
       catch (error) {
@@ -198,10 +205,10 @@ function recoverConnection(scope: string, reconcile: boolean, [probe, request]: 
   recoveries.set(probe, attempt)
   // Mutations are never replayed; reload lists to reconcile an uncertain result.
   void promise.then(async () => {
-    if (attempt.reconcile && connectionScope() === scope && state.authenticated && !state.signingOut)
+    if (!signal.aborted && attempt.reconcile && connectionScope() === scope && state.authenticated && !state.signingOut)
       await refresh()
   }).catch((error) => {
-    if (connectionScope() === scope && state.authenticated && !state.signingOut)
+    if (!signal.aborted && connectionScope() === scope && state.authenticated && !state.signingOut)
       state.error = (error as Error).message
   })
   return promise
@@ -209,9 +216,11 @@ function recoverConnection(scope: string, reconcile: boolean, [probe, request]: 
 
 export function redirect(url: string) {
   const resume = () => {
+    resumeDocument()
     state.redirecting = false
   }
 
+  departDocument()
   state.redirecting = true
   // Restore polling if Back returns this document from the browser's page cache.
   window.addEventListener('pageshow', resume, { once: true })
@@ -242,11 +251,13 @@ function transportPath(url: string) {
 }
 
 async function apiResponse(url: string, options: RequestInit) {
-  const requestOptions = { ...options, headers: apiHeaders(options) }
+  const requestOptions = { ...options, signal: documentSignal(options.signal), headers: apiHeaders(options) }
   const path = transportPath(url)
-  return path
+  const response = path
     ? await installationTransport.request(path, url, requestOptions)
     : await fetch(url, requestOptions)
+  requestOptions.signal.throwIfAborted()
+  return response
 }
 
 function failure(status: number, data: any) {
@@ -265,6 +276,7 @@ async function requestOnce<T = any>(
   try {
     response = await apiResponse(url, options)
     text = await response.text()
+    options.signal?.throwIfAborted()
   }
   catch (error) {
     if (options.signal?.aborted)
@@ -299,11 +311,13 @@ async function requestOnce<T = any>(
 }
 
 async function requestApi<T = any>(url: string, options: RequestInit = {}, account = false): Promise<T> {
+  options = { ...options, signal: documentSignal(options.signal) }
   const measurement = clientPerformance.capture()
   const method = (options.method || 'GET').toUpperCase()
   const finish = clientPerformance.begin(method === 'GET' || method === 'HEAD' ? 'API_READ' : 'API_WRITE', measurement)
   try {
     const result = await recoverableRequest<T>(url, options, account, measurement)
+    options.signal?.throwIfAborted()
     finish?.('ok')
     return result
   }
@@ -345,10 +359,17 @@ async function recoverableRequest<T = any>(url: string, options: RequestInit, ac
 
 /** A binary installation resource, through the same transport and credentials as `api()`. */
 export async function apiBlob(url: string, options: RequestInit = {}): Promise<Blob> {
-  const response = await apiResponse(apiUrl(url), options)
-  if (!response.ok)
-    throw failure(response.status, await response.json().catch(() => null))
-  return response.blob()
+  const signal = documentSignal(options.signal)
+  const response = await apiResponse(apiUrl(url), { ...options, signal })
+  if (!response.ok) {
+    const data = await response.json().catch(() => null)
+    signal.throwIfAborted()
+    throw failure(response.status, data)
+  }
+
+  const blob = await response.blob()
+  signal.throwIfAborted()
+  return blob
 }
 
 /**
@@ -356,6 +377,7 @@ export async function apiBlob(url: string, options: RequestInit = {}): Promise<B
  * (it only carries string bodies), so `api()` would use `fetch` with these same headers.
  */
 export function apiUpload<T = any>(url: string, body: Blob, options: { method?: string, headers?: Record<string, string>, onProgress?: (fraction: number) => void } = {}): Promise<T> {
+  const signal = documentSignal()
   const target = apiUrl(url)
   const method = options.method ?? 'PUT'
   const headers = apiHeaders({ body, headers: options.headers })
@@ -371,9 +393,17 @@ export function apiUpload<T = any>(url: string, body: Blob, options: { method?: 
         options.onProgress?.(event.loaded / event.total)
     }
 
+    const abort = () => request.abort()
+    signal.addEventListener('abort', abort, { once: true })
+    request.onloadend = () => signal.removeEventListener('abort', abort)
     request.onerror = () => reject(new TypeError('Upload failed. Check your connection and try again.'))
     request.onabort = () => reject(new DOMException('Upload cancelled.', 'AbortError'))
     request.onload = () => {
+      if (signal.aborted) {
+        reject(signal.reason)
+        return
+      }
+
       let data: any = null
       try {
         data = JSON.parse(request.responseText)

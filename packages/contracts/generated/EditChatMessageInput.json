@@ -25,6 +25,13 @@
           "pattern": "^[\\w./:\\[\\]-]*$",
           "type": "string"
         },
+        "plan": {
+          "description": "Plan turn request; an edit without it keeps the stored one.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "provider": {
           "default": "",
           "pattern": "^(|codex|claude|opencode)$",

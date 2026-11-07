@@ -84,7 +84,7 @@ export function newAgentDraft(): AgentDraft {
     instructions: '',
     provider: 'codex',
     model: '',
-    reasoning: 'high',
+    reasoning: '',
     speed: '',
     timeoutMinutes: 0,
     access: {

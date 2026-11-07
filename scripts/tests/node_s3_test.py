@@ -11,6 +11,7 @@ import subprocess
 from threading import Lock
 
 import boto3
+from moto.core.model_instances import model_data
 from moto.server import ThreadedMotoServer
 
 NATIVE_S3_KEY_BUFFER_BYTES = 64 * 1024
@@ -35,8 +36,16 @@ class SnapshotS3Application:
             try:
                 return list(response)
             finally:
-                if hasattr(response, 'close'):
-                    response.close()
+                try:
+                    if hasattr(response, 'close'):
+                        response.close()
+                finally:
+                    # Moto's inspection registries strongly retain copied keys
+                    # and delete markers that own payloads from version listings.
+                    # Backend dictionaries retain live S3 state; the dashboard
+                    # history must not keep completed request spools alive.
+                    for model in model_data['s3'].values():
+                        model.instances_tracked.clear()
 
 
 def s3_server(native=False):

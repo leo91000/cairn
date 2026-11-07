@@ -10,6 +10,7 @@ pub mod codex;
 pub(crate) mod lenient;
 pub(crate) mod migration;
 pub mod opencode;
+pub(crate) mod output_redactions;
 mod record;
 mod sign_in;
 pub mod sql;
@@ -157,6 +158,13 @@ impl Provider {
 
 #[derive(Default)]
 pub struct Accounts {
+    output_credentials: output_redactions::Registry,
+    #[cfg(test)]
+    pub(crate) claude_rotation_probes:
+        std::sync::Mutex<HashMap<String, Arc<claude::RotationProbe>>>,
+    #[cfg(test)]
+    pub(crate) codex_materialize_probes:
+        std::sync::Mutex<HashMap<String, Arc<codex::MaterializeProbe>>>,
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     initialized: OnceCell<()>,
     attempted: Mutex<HashMap<String, i64>>,
@@ -710,8 +718,13 @@ impl Accounts {
     }
 
     pub async fn poll(&self, s: &Service, only_due: bool) -> Result<()> {
-        let Ok(_guard) = self.polling.try_lock() else {
-            return Ok(());
+        let _guard = if only_due {
+            let Ok(guard) = self.polling.try_lock() else {
+                return Ok(());
+            };
+            guard
+        } else {
+            self.polling.lock().await
         };
         self.initialize(s).await?;
         let mut due = Vec::new();
@@ -1014,6 +1027,27 @@ impl Accounts {
         public_credential: Option<&str>,
         authorize: impl Fn(&Db<'_>) -> Result<()> + Send + 'static,
     ) -> Result<CodingAgentAccount> {
+        self.update_live(
+            s,
+            id,
+            revision,
+            input,
+            public_credential,
+            crate::authorization::Authorization::local(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn update_live(
+        &self,
+        s: &Service,
+        id: &str,
+        revision: &str,
+        input: &AccountSettings,
+        public_credential: Option<&str>,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<CodingAgentAccount> {
+        authorize.recheck().await?;
         let _guard = self.lock(id).await;
         if self.connecting.lock().await.as_deref() == Some(id) {
             return Err(Error::conflict(
@@ -1036,9 +1070,10 @@ impl Accounts {
         }
         account.enabled = input.enabled;
         account.max_concurrent_runs = Some(input.max_concurrent_runs);
+        authorize.recheck().await?;
         s.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 db.save_coding_account(&account)
             })
             .await?;
@@ -1068,6 +1103,25 @@ impl Accounts {
         public_credential: Option<&str>,
         authorize: impl Fn(&Db<'_>) -> Result<()> + Send + 'static,
     ) -> Result<CodingAgentAccounts> {
+        self.reorder_live(
+            s,
+            provider,
+            ids,
+            public_credential,
+            crate::authorization::Authorization::local(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn reorder_live(
+        &self,
+        s: &Service,
+        provider: Provider,
+        ids: &[String],
+        public_credential: Option<&str>,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<CodingAgentAccounts> {
+        authorize.recheck().await?;
         if !provider.driver().ordered() {
             return Err(Error::bad("This coding agent does not order its accounts."));
         }
@@ -1091,9 +1145,10 @@ impl Accounts {
             crate::relay::authorize_plugin_mcp(s, credential).await?;
         }
         let ids = ids.to_vec();
+        authorize.recheck().await?;
         s.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 let mut accounts = stored(db)?;
                 accounts.retain(|a| a.provider == provider);
                 let mut expected = accounts.iter().map(|a| a.id.as_str()).collect::<Vec<_>>();

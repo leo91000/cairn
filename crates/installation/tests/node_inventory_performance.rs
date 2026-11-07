@@ -2,8 +2,12 @@
 //! Run through scripts/test-backend.mjs with --ignored --nocapture --test-threads=1.
 mod common;
 
-use cairn_installation::{config::now, nodes, service::Service};
-use common::{node_fixture::DbNodeFixture, run_fixture::DbRunFixture};
+use cairn_installation::{
+    config::now, nodes, nodes::run_placement::PlacementChanges, service::Service,
+};
+use common::{
+    attempt_fixture::DbAttemptFixture, node_fixture::DbNodeFixture, run_fixture::DbRunFixture,
+};
 use serde_json::json;
 use std::time::Instant;
 
@@ -30,12 +34,27 @@ async fn inventory_preserves_active_and_moving_disk_fences() {
                 db.add_run_fixture(
                     &json!({
                         "id": name, "taskId": name, "status": "succeeded",
-                        "moveRequest": if name == "moving" { json!({}) } else { json!(null) },
-                        "moveReservation": if name == "reserved" { json!("lease") } else { json!(null) },
+                        "moveRequest": if name == "moving" { json!({
+                            "reservation": "moving-lease", "nodeId": nodes::LOCAL_NODE_ID,
+                            "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+                        }) } else { json!(null) },
                         "snapshot": { "agent": { "instructions": "private frozen instructions" } },
                     }),
                     None,
                 )?;
+                if name == "reserved" {
+                    db.put_attempt_fixture(&json!({
+                        "id": "lease", "runId": name, "nodeId": NODE,
+                        "role": "destination", "released": true,
+                    }))?;
+                    db.update_run_placement(
+                        name,
+                        PlacementChanges {
+                            move_reservation: Some(Some("lease".into())),
+                            ..Default::default()
+                        },
+                    )?;
+                }
                 let checkpoint = match name {
                     "older" => json!(NODE),
                     "unknown" => json!(null),
@@ -64,13 +83,10 @@ async fn inventory_preserves_active_and_moving_disk_fences() {
             }
             // An execution on another node must not hide the stale source disk.
             for (run, node) in [("executing", NODE), ("moved", nodes::LOCAL_NODE_ID)] {
-                db.put(
-                    "node-attempts",
-                    &json!({
-                        "id": format!("attempt-{run}"), "runId": run,
-                        "nodeId": node, "released": false,
-                    }),
-                )?;
+                db.put_attempt_fixture(&json!({
+                    "id": format!("attempt-{run}"), "runId": run,
+                    "nodeId": node, "released": false,
+                }))?;
             }
             Ok(())
         })

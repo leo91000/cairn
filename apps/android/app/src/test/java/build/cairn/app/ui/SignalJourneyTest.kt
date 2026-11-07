@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.test.core.app.ApplicationProvider
@@ -15,7 +16,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -360,6 +360,8 @@ class SignalJourneyTest {
                 compose.waitUntil(30000) {
                     vm.state.value.installation != null && !vm.state.value.busy
                 }
+                waitText("Tout")
+                compose.onNodeWithText("Tout").performClick()
                 body(vm)
             } finally {
                 runCatching { vm.api }.getOrNull()?.closeStreams()
@@ -408,6 +410,17 @@ class SignalJourneyTest {
     }
 
     @Test
+    fun `finished rows retain their completion status for accessibility`() =
+        journey(feedChats = listOf(chats.last().copy(status = "succeeded"))) {
+            waitText("Relecture de la PR")
+            compose
+                .onNodeWithText("Relecture de la PR")
+                .assert(
+                    SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Terminée")
+                )
+        }
+
+    @Test
     fun `quota waits appear under scheduled resumptions without a countdown`() =
         journey(
             feedChats =
@@ -422,9 +435,9 @@ class SignalJourneyTest {
                 )
         ) {
             waitText("Attendre le quota")
-            compose.onNodeWithText("REPRISE PRÉVUE").assertExists()
+            compose.onNodeWithText("Tout").assertIsSelected()
             compose.onNodeWithText("En attente de quota").assertExists()
-            compose.onNodeWithText("Selon disponibilité").assertExists()
+            compose.onNodeWithText("En attente de quota").assertExists()
             compose.onNodeWithText("EN COURS").assertDoesNotExist()
             compose
                 .onAllNodesWithTag("chat-working-avatar", useUnmergedTree = true)
@@ -432,29 +445,75 @@ class SignalJourneyTest {
         }
 
     @Test
+    fun `compact fil finds questions and failures by their displayed project`() =
+        journey(
+            feedChats =
+                listOf(
+                    chats.first().copy(projectName = "Atlas"),
+                    chats.last().copy(status = "failed", projectName = "Atlas"),
+                    chats[1],
+                )
+        ) {
+            waitText("Choisir la pagination")
+            waitText("Relecture de la PR")
+            // The filter unfolds from the header's search button.
+            compose.onNode(hasSetTextAction()).assertDoesNotExist()
+            compose.onNodeWithTag("fil-search").performClick()
+            compose.onNode(hasSetTextAction()).performTextInput("  aTlAs  ")
+            compose.onNodeWithText("Choisir la pagination").assertExists()
+            compose.onNodeWithText("Relecture de la PR").assertExists()
+            compose.onNodeWithText("Refonte de l’application").assertDoesNotExist()
+            compose.onNode(hasSetTextAction()).performTextReplacement("Absent")
+            compose.onNodeWithText("Choisir la pagination").assertDoesNotExist()
+            compose.onNodeWithText("Relecture de la PR").assertDoesNotExist()
+            compose.onNodeWithText("Aucun résultat").assertExists()
+        }
+
+    @Test
+    fun `compact fil keeps the scheduled resume time`() =
+        journey(
+            feedChats =
+                listOf(
+                    Chat(
+                        id = "ace4e77b-1dbf-57a6-9875-4dc3aa7f563b",
+                        title = "Reprise CI",
+                        status = "succeeded",
+                        wakeup =
+                            build.cairn.contracts.ChatWakeup(
+                                id = "wait",
+                                messageId = null,
+                                reason = "CI",
+                                seconds = 420,
+                                createdAt = now,
+                                wakeAt = now + 420_000,
+                            ),
+                    )
+                )
+        ) {
+            waitText("Reprise CI")
+            compose
+                .onNodeWithTag("fil-wait-time", useUnmergedTree = true)
+                .assertTextContains("min", substring = true)
+        }
+
+    @Test
     fun `fil groups what needs the user, live work and recent conversations`() = journey {
         waitText("Choisir la pagination")
-        compose.onNodeWithText("POUR VOUS").assertExists()
-        compose.onNodeWithText("EN COURS").assertExists()
-        compose.onNodeWithText("RÉCENTS").assertExists()
+        compose.onNodeWithText("Tout").assertIsSelected()
         // Conversations and mission activity arrive through separate requests.
-        waitText("1 agent au travail · 2 éléments pour vous")
-        compose.onNodeWithText("Une question vous attend").assertExists()
-        compose.onNodeWithText("14 min").assertExists()
+        waitText("Revue quotidienne")
+        compose.onNodeWithText("Répondre").assertExists()
+        compose.onNodeWithText("En cours", useUnmergedTree = true).assertExists()
         compose.onNodeWithText("Revue quotidienne").assertExists()
         // The running conversation animates in the Fil: comet ring and "En cours" with its wave.
         compose
             .onAllNodesWithTag("chat-working-avatar", useUnmergedTree = true)
-            .assertCountEquals(1)
-        assertTrue(
-            compose
-                .onAllNodesWithText("En cours", useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        )
+            .assertCountEquals(0)
+        compose.onNodeWithText("En cours 2").assertExists()
         capture("fil-light")
         // A failed mission is retried in place and its new run opens.
-        compose.onNodeWithContentDescription("Relancer Revue quotidienne").performClick()
+        compose.onNodeWithContentDescription("Autres actions pour Revue quotidienne").performClick()
+        compose.onNodeWithText("Relancer").performClick()
         waitCall(
             "POST",
             "/api/installations/fixture/api/tasks/a05f5991-ec1e-57a2-a8e5-ec314581a110/run",
@@ -484,7 +543,7 @@ class SignalJourneyTest {
 
     @Test
     fun `a mission opens beside its conversations and swipes follow the Fil`() = journey {
-        waitText("1 agent au travail · 2 éléments pour vous")
+        waitText("Revue quotidienne")
         compose.onNodeWithText("Revue quotidienne").performClick()
         waitPage("run-page:failed-run")
         // The mission itself is one tab away from its run.
@@ -493,13 +552,11 @@ class SignalJourneyTest {
         waitText("Lancer maintenant")
         compose.onNodeWithContentDescription("Modifier la mission").assertExists()
         capture("fil-mission-light")
-        // Pour vous: the question, then this mission; then the live conversation.
+        // Tout is chronological: question, running conversation, failed mission, older chat.
         val pager = compose.onNodeWithTag("conversation-pager")
-        pager.performTouchInput { swipeLeft() }
+        pager.performTouchInput { swipeRight() }
         waitPage("chat-page:451f26a2-b83b-5559-b07e-9a031e6de7cb")
         waitDescription("Changer de conversation : Refonte de l’application")
-        pager.performTouchInput { swipeRight() }
-        waitPage("run-page:failed-run")
         pager.performTouchInput { swipeRight() }
         waitPage("chat-page:765886cd-efa2-5d30-bdce-99340ee87a3d")
         waitDescription("Changer de conversation : Choisir la pagination")

@@ -8,6 +8,14 @@ export interface ChatExecution {
   attachments: Array<ChatAttachment>
   recovery: boolean
   context?: string
+  /**
+   * A plan turn: the agent explores and proposes without changing anything.
+   */
+  plan?: boolean
+  /**
+   * The previous turn of this run was a plan turn, whose engine mode may persist.
+   */
+  afterPlan?: boolean
   operation?: string
   previous?: CompactionReply
 }

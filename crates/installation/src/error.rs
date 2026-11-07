@@ -10,6 +10,7 @@ pub struct Error {
     pub status: u16,
     pub message: String,
     pub oauth: Option<String>,
+    pub code: Option<String>,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -20,7 +21,14 @@ impl Error {
             status,
             message: message.into(),
             oauth: None,
+            code: None,
         }
+    }
+
+    pub fn coded(status: u16, code: impl Into<String>, message: impl Into<String>) -> Self {
+        let mut error = Self::new(status, message);
+        error.code = Some(code.into());
+        error
     }
 
     pub fn bad(message: impl Into<String>) -> Self {
@@ -96,6 +104,7 @@ impl Error {
             status: 400,
             message: message.into(),
             oauth: Some(code.into()),
+            code: None,
         }
     }
 
@@ -115,10 +124,15 @@ impl std::error::Error for Error {}
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let body = match self.oauth {
+        let mut body = match self.oauth {
             Some(code) => json!({ "error": code, "error_description": self.message }),
             None => json!({ "error": self.message }),
         };
+        if let Some(code) = self.code
+            && let Some(body) = body.as_object_mut()
+        {
+            body.insert("code".into(), code.into());
+        }
         (
             StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             Json(body),
@@ -154,4 +168,32 @@ impl From<serde_json::Error> for Error {
 
 pub fn required<T>(value: Option<T>, message: &str) -> Result<T> {
     value.ok_or_else(|| Error::not_found(message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    #[tokio::test]
+    async fn coded_errors_add_a_code_without_changing_legacy_error_bodies() {
+        let legacy = Error::conflict("legacy conflict").into_response();
+        let legacy_body = to_bytes(legacy.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&legacy_body).unwrap(),
+            json!({ "error": "legacy conflict" })
+        );
+
+        let coded =
+            Error::coded(409, "missing_native_journal", "journal unavailable").into_response();
+        assert_eq!(coded.status(), StatusCode::CONFLICT);
+        let coded_body = to_bytes(coded.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&coded_body).unwrap(),
+            json!({
+                "error": "journal unavailable",
+                "code": "missing_native_journal"
+            })
+        );
+    }
 }

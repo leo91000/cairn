@@ -186,6 +186,7 @@ internal val CairnDarkColors =
 /** Colours outside Material's roles: attention (coral), success and the ink surfaces. */
 @androidx.compose.runtime.Immutable
 internal data class CairnSignal(
+    val answer: Color,
     val attention: Color,
     val attentionSoft: Color,
     val success: Color,
@@ -200,6 +201,7 @@ internal data class CairnSignal(
 
 internal val LightSignal =
     CairnSignal(
+        answer = Color(0xFF7150A0),
         attention = Color(0xFFE2512F),
         attentionSoft = Color(0xFFFBE6DF),
         success = Color(0xFF1E8A57),
@@ -212,6 +214,7 @@ internal val LightSignal =
     )
 internal val DarkSignal =
     CairnSignal(
+        answer = Color(0xFFC4B5FD),
         attention = Color(0xFFFF7B5E),
         attentionSoft = Color(0xFF38211C),
         success = Color(0xFF4FDB98),

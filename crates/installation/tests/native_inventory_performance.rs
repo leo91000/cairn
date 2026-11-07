@@ -1,8 +1,15 @@
 //! Synthetic retained-native-cache qualification; no real workspaces are opened.
 mod common;
 
-use cairn_installation::{config::now, nodes, service::Service};
-use common::{node_fixture::DbNodeFixture, run_fixture::DbRunFixture};
+use cairn_installation::{
+    config::now,
+    nodes,
+    nodes::run_placement::{MoveRequest, PlacementChanges},
+    service::Service,
+};
+use common::{
+    attempt_fixture::DbAttemptFixture, node_fixture::DbNodeFixture, run_fixture::DbRunFixture,
+};
 use serde_json::{Map, json};
 use std::time::Instant;
 
@@ -15,6 +22,7 @@ async fn seed_retained_caches(service: &Service, kib: usize, count: u32) {
             let instructions = "x".repeat(kib * 1024);
             let finished = now() - 60_000;
             let mut retained = Map::new();
+            db.put_node_fixture(&json!({ "id": NODE }))?;
             for index in 0..count {
                 let run = format!("run-{index}");
                 let attempt = format!("attempt-{index}");
@@ -36,13 +44,10 @@ async fn seed_retained_caches(service: &Service, kib: usize, count: u32) {
                         "prepared": { "instructions": instructions },
                     }),
                 )?;
-                db.put(
-                    "node-attempts",
-                    &json!({
+                db.put_attempt_fixture(&json!({
                         "id": attempt, "runId": run, "nodeId": NODE,
-                        "released": true, "releasedAt": finished,
-                    }),
-                )?;
+                        "released": true, "releasedAt": finished, "createdAt": finished - 1000,
+                    }))?;
                 db.put(
                     "node-volumes",
                     &json!({
@@ -89,9 +94,16 @@ async fn retained_cache_accounting_preserves_eviction_fences_and_queued_resumes(
     service.store.transaction(|db| {
         common::run_fixture::change_run_fixture(db, "run-0", &json!({ "status": "running", "finishedAt": null }))?;
         common::run_fixture::change_run_fixture(db, "run-1", &json!({ "recoveryPending": true }))?;
-        db.update_run_boundary("run-2", &json!({ "moveRequest": {} }))?;
+        db.update_run_placement("run-2", PlacementChanges {
+            move_request: Some(Some(MoveRequest {
+                reservation: "destination-attempt".into(), node_id: nodes::LOCAL_NODE_ID.into(),
+                resources: serde_json::from_value(json!({ "cpu": 1, "memoryMiB": 128, "diskMiB": 128 }))?,
+                requested_at: None, automatic: false, idle: None, required_tags: None, backup_id: None,
+            })),
+            ..Default::default()
+        })?;
         db.save_checkpoint_boundary("run-3", &json!({ "nodeId": nodes::LOCAL_NODE_ID, "runnerId": "attempt-3" }))?;
-        db.put("node-attempts", &json!({
+        db.put_attempt_fixture(&json!({
             "id": "attempt-4", "runId": "run-4", "nodeId": NODE, "released": false,
         }))?;
         db.update_run_boundary("run-5", &json!({ "storage": { "mode": "on-demand", "dirtyBytes": 1 } }))?;

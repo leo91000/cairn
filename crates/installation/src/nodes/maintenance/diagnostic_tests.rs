@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    attempt_fixture::{DbAttemptFixture, StoreAttemptFixture},
     config::{Config, id},
     node_fixture::StoreNodeFixture,
     object_storage::tests::fixture_storage_at,
@@ -438,7 +439,7 @@ async fn actual_drain_reports(
     assert_ne!(
         service
             .store
-            .get("node-attempts", &attempt)
+            .attempt_fixture(&attempt)
             .await
             .unwrap()
             .unwrap()["released"],
@@ -508,7 +509,7 @@ async fn actual_drain_reports(
         assert_eq!(
             service
                 .store
-                .get("node-attempts", &attempt)
+                .attempt_fixture(&attempt)
                 .await
                 .unwrap()
                 .unwrap()["released"],
@@ -532,7 +533,7 @@ async fn actual_drain_reports(
     assert_ne!(
         service
             .store
-            .get("node-attempts", &attempt)
+            .attempt_fixture(&attempt)
             .await
             .unwrap()
             .unwrap()["released"],
@@ -586,7 +587,7 @@ async fn actual_drain_reports(
         assert_ne!(
             service
                 .store
-                .get("node-attempts", &attempt)
+                .attempt_fixture(&attempt)
                 .await
                 .unwrap()
                 .unwrap()["released"],
@@ -675,16 +676,13 @@ async fn add_attempt(
                     "runnerId": checkpoint_attempt,
                 }),
             )?;
-            db.put(
-                "node-attempts",
-                &json!({
-                    "id": attempt_id,
-                    "runId": run_id,
-                    "nodeId": node_id,
-                    "role": "execution",
-                    "released": false,
-                }),
-            )?;
+            db.put_attempt_fixture(&json!({
+                "id": attempt_id,
+                "runId": run_id,
+                "nodeId": node_id,
+                "role": "execution",
+                "released": false,
+            }))?;
             Ok(())
         })
         .await

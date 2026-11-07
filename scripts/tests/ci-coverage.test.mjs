@@ -1,11 +1,18 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
+import {
+  AVD_HOST_HEADROOM_BYTES,
+  AVD_USERDATA_BYTES_REQUIRED,
+  capacityPlan,
+  sdkPackagesToRemove,
+} from '../android-emulator-sdk.mjs'
 
 const quality = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
 const android = parse(readFileSync(new URL('../../.github/workflows/android.yaml', import.meta.url), 'utf8'))
 const pr = parse(readFileSync(new URL('../../.github/workflows/pr.yaml', import.meta.url), 'utf8'))
+const chatJourneySource = readFileSync(new URL('../../tests/e2e/chats.spec.ts', import.meta.url), 'utf8')
 
 describe('parallel CI coverage', () => {
   it.each(['image', 'beacon-image'])('exports %s layers for main and version tags without giving PR refs a cache writer', (name) => {
@@ -43,7 +50,7 @@ describe('parallel CI coverage', () => {
     expect(Object.keys(pr.on).sort()).toEqual(['pull_request', 'push'])
     expect(pr.on.push.branches).toEqual(['main'])
     expect(pr.jobs.required.if).toBe('always()')
-    expect(pr.jobs.required.needs).toEqual(['scope', 'quality', 'contracts', 'android'])
+    expect(pr.jobs.required.needs).toEqual(['scope', 'quality', 'contracts', 'android', 'browser'])
     expect(pr.jobs.quality.steps.some(step => step.run === 'pnpm validate:pr quality')).toBe(true)
     expect(pr.jobs.contracts.steps.some(step => step.run === 'pnpm validate:pr contracts')).toBe(true)
     expect(pr.jobs.android.steps.some(step => step.run === 'pnpm validate:pr android')).toBe(true)
@@ -51,33 +58,553 @@ describe('parallel CI coverage', () => {
     expect(quality.jobs.quality.steps.some(step => step.run === 'pnpm validate:pr contracts')).toBe(true)
   })
 
+  it('runs the selected physical migration case in a separate bounded job after the backend suite', () => {
+    const input = quality.on.workflow_dispatch.inputs['backend-qualification']
+    expect(input).toEqual({
+      description: 'Run physical backend migration in a separate job after the backend suite',
+      type: 'choice',
+      options: ['none', 'backend-migration'],
+      default: 'none',
+    })
+
+    const backend = quality.jobs.backend
+    expect(backend['timeout-minutes']).toBe(30)
+    expect(backend.steps.some(step => step.name === 'Qualify physical backend migration from this commit')).toBe(false)
+    expect(backend.steps.some(step => step.run?.includes('--nextest --test-threads'))).toBe(true)
+    expect(backend.steps.some(step => step.name === 'Measure the bounded bootstrap observer without filesystem work')).toBe(true)
+    expect(backend.steps.some(step => step.name === 'Qualify native backend namespace isolation with ordinary private bind mounts')).toBe(true)
+    expect(backend.steps.some(step => step.name === 'Check Rust documentation examples')).toBe(true)
+    expect(backend.steps.some(step => step.name === 'Qualify the resolved OpenCode release against its native adapter')).toBe(false)
+    expect(backend.steps.some(step => step.name === 'Qualify the resolved Claude Code release against its native adapter')).toBe(false)
+    expect(backend.steps.some(step => step.run?.includes('--test native_plan_turns'))).toBe(false)
+    expect(backend.steps.some(step => step.name === 'Check all Rust targets for a backend-only qualification')).toBe(false)
+    expect(backend.steps.some(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'before-build')).toBe(true)
+    expect(backend.steps.some(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'after-build')).toBe(true)
+
+    const rustCheck = quality.jobs['rust-check']
+    expect(rustCheck.needs).toBe('resolve')
+    expect(rustCheck.if).toContain('inputs.backend-only == true')
+    const rustCondition = rustCheck.if
+      .replaceAll('inputs.backend-only', 'backendOnly')
+      .replaceAll('inputs.ci-diagnostic', 'diagnostic')
+      .replace(/\bneeds\.([a-z0-9-]+)\b/g, (_match, name) => `needs[${JSON.stringify(name)}]`)
+    const runsRustCheck = (backendOnly, resolveResult, reuse) => runInNewContext(rustCondition, {
+      backendOnly,
+      diagnostic: '',
+      needs: { resolve: { result: resolveResult, outputs: { reuse } } },
+      github: { ref: 'refs/heads/feature' },
+      always: () => true,
+      cancelled: () => false,
+    }, { timeout: 1000 })
+    expect(runsRustCheck(true, 'skipped', '')).toBe(true)
+    expect(runsRustCheck(false, 'success', 'false')).toBe(true)
+    expect(runsRustCheck(false, 'success', 'true')).toBe(false)
+
+    const selected = quality.jobs['backend-migration-qualification']
+    expect(selected.needs).toEqual(['backend', 'cli-qualification'])
+    expect(selected['timeout-minutes']).toBe(30)
+    expect(selected.if).not.toContain('needs.resolve')
+    expect(backend.if).toContain('inputs.backend-only == true')
+    const backendCondition = backend.if
+      .replaceAll('inputs.backend-only', 'backendOnly')
+      .replaceAll('inputs.ci-diagnostic', 'diagnostic')
+      .replaceAll('inputs.backend-qualification', 'selection')
+      .replace(/\bneeds\.([a-z0-9-]+)\b/g, (_match, name) => `needs[${JSON.stringify(name)}]`)
+    const runsBackend = (backendOnly, selection, resolveResult, reuse) => runInNewContext(backendCondition, {
+      backendOnly,
+      diagnostic: '',
+      selection,
+      needs: { resolve: { result: resolveResult, outputs: { reuse } } },
+      github: { ref: 'refs/heads/feature' },
+      always: () => true,
+      cancelled: () => false,
+    }, { timeout: 1000 })
+    expect(runsBackend(false, 'backend-migration', 'success', 'true')).toBe(true)
+    expect(runsBackend(false, 'none', 'success', 'true')).toBe(false)
+    expect(runsBackend(false, 'none', 'success', 'false')).toBe(true)
+    expect(runsBackend(true, 'none', 'skipped', '')).toBe(true)
+    expect(runsBackend(false, 'backend-migration', 'failure', 'true')).toBe(false)
+    const enabled = selected.if
+      .replaceAll('inputs.backend-qualification', 'selection')
+      .replaceAll('inputs.backend-only', 'backendOnly')
+      .replaceAll('needs.cli-qualification', 'needs.cliQualification')
+    for (const [selection, backendResult, expected] of [
+      ['backend-migration', 'success', true],
+      ['backend-migration', 'failure', false],
+      ['backend-migration', 'skipped', false],
+      ['backend-migration', 'cancelled', false],
+      ['none', 'success', false],
+      [undefined, 'success', false],
+    ]) {
+      expect(runInNewContext(enabled, {
+        selection,
+        backendOnly: false,
+        needs: { backend: { result: backendResult }, cliQualification: { result: 'success' } },
+        always: () => true,
+        cancelled: () => false,
+      }, { timeout: 1000 })).toBe(expected)
+    }
+
+    expect(selected.steps[0].uses).toBe('actions/checkout@v7.0.1')
+    expect(selected.steps[1]).toEqual({ uses: './.github/actions/setup-pnpm', with: { cache: true } })
+    expect(selected.steps[2].run).toBe('rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1')
+    expect(selected.steps[3].run).toBe('sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot')
+    expect(selected.env).toEqual({ CARGO_PROFILE_DEV_DEBUG: '0', CARGO_INCREMENTAL: '0' })
+    expect(selected.steps.some(step => step.uses?.startsWith('actions/download-artifact@'))).toBe(false)
+    const step = selected.steps.find(step => step.name === 'Qualify physical backend migration from this commit')
+    expect(step).toBeDefined()
+    expect(step.run).toContain('set -o pipefail')
+    expect(step.run).toContain('\'moto[server]==5.2.3\' awscli blake3==1.0.8')
+    expect(step.run).toContain('scripts/tests/node_s3_test.py --case backend_migration_keeps_chat_and_files_both_directions_and_preserves_source_on_failure')
+    expect(step.run).toContain('1 passed; 0 failed; 0 ignored;')
+    expect(step.run).not.toContain('${{')
+    expect(step.run).not.toContain('CAIRN_TEST_REUSED_BUILD')
+    expect(step.run).not.toContain('--archive-file')
+  })
+
+  it('qualifies the exact resolved CLIs in their own bounded job after the normal backend', () => {
+    const job = quality.jobs['cli-qualification']
+    expect(job).toBeDefined()
+    expect(job.needs).toEqual(['resolve', 'backend'])
+    expect(job['timeout-minutes']).toBe(30)
+    expect(job.env).toEqual({ CARGO_PROFILE_DEV_DEBUG: '0', CARGO_INCREMENTAL: '0' })
+    expect(job.steps[0]).toEqual({ uses: 'actions/checkout@v7.0.1' })
+    expect(job.steps[1]).toEqual({ uses: './.github/actions/setup-pnpm', with: { cache: true } })
+    expect(job.steps[2].run).toBe('rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1')
+    expect(job.steps[3].run).toBe('sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot')
+    const qualifications = job.steps.filter(step => step.name?.startsWith('Qualify'))
+    expect(qualifications.map(step => step.name)).toEqual([
+      'Qualify the resolved OpenCode release against its native adapter',
+      'Qualify the resolved Claude Code release against its native adapter',
+      'Qualify plan turns of the resolved Claude Code and Codex releases',
+    ])
+    for (const step of qualifications) {
+      expect(step.if).toBe('inputs.backend-only != true')
+      expect(step.run).toContain('node scripts/test-backend.mjs -p cairn-installation --test ')
+      expect(step.run).toContain('--ignored')
+      expect(step.run).not.toContain('CAIRN_TEST_REUSED_BUILD')
+    }
+
+    /* eslint-disable no-template-curly-in-string -- exact GitHub expressions shared with the image build */
+    expect(qualifications[0].env).toEqual({
+      OPENCODE_VERSION: '${{ needs.resolve.outputs.opencode }}',
+      SERVED_OPENCODE: '${{ needs.resolve.outputs.served-opencode }}',
+    })
+    expect(qualifications[1].env).toEqual({
+      CLAUDE_VERSION: '${{ needs.resolve.outputs.claude }}',
+      SERVED_CLAUDE: '${{ needs.resolve.outputs.served-claude }}',
+    })
+    expect(qualifications[2].env).toEqual({
+      CLAUDE_VERSION: '${{ needs.resolve.outputs.claude }}',
+      CODEX_VERSION: '${{ needs.resolve.outputs.codex }}',
+    })
+    /* eslint-enable no-template-curly-in-string */
+    expect(qualifications[2].run).toContain('--test native_plan_turns -- --ignored --test-threads 1')
+    expect(quality.jobs.backend.steps.find(step => step.run?.includes('--nextest --test-threads')).run).toContain('--nextest --test-threads 8 --no-fail-fast --color never --status-level all')
+  })
+
+  it('preserves CLI selection and combined migration prerequisites across full, reuse and isolated modes', () => {
+    function runs(name, inputs, backendResult, cliResult, resolveResult = 'success', reuse = 'false', ref = 'refs/heads/feature', cancelled = false) {
+      const job = quality.jobs[name]
+      expect(job).toBeDefined()
+      const expression = job.if.replace(/\b(inputs|needs)\.([a-z0-9-]+)\b/g, (_match, scope, property) => `${scope}[${JSON.stringify(property)}]`)
+      const needs = {
+        'resolve': { result: resolveResult, outputs: { reuse } },
+        'backend': { result: backendResult },
+        'cli-qualification': { result: cliResult },
+      }
+      // Match Actions' implicit success guard for any job without a status function.
+      const dependencies = Array.isArray(job.needs) ? job.needs : [job.needs]
+      if (!expression.includes('always()') && dependencies.some(name => needs[name].result !== 'success'))
+        return false
+      return Boolean(runInNewContext(expression, {
+        inputs: { 'ci-diagnostic': '', ...inputs },
+        needs,
+        github: { ref },
+        always: () => true,
+        cancelled: () => cancelled,
+      }, { timeout: 1000 }))
+    }
+
+    for (const cliResult of ['success', 'failure', 'cancelled', 'skipped']) {
+      for (const backendResult of ['success', 'failure', 'cancelled', 'skipped']) {
+        for (const reuse of ['false', 'true']) {
+          for (const validationOnly of [false, true]) {
+            const full = {
+              'ci-diagnostic': 'none',
+              'backend-only': false,
+              'validation-only': validationOnly,
+              'backend-qualification': 'backend-migration',
+            }
+            expect(runs('cli-qualification', full, backendResult, cliResult, 'success', reuse)).toBe(backendResult === 'success')
+            expect(runs('backend-migration-qualification', full, backendResult, cliResult, 'success', reuse)).toBe(backendResult === 'success' && cliResult === 'success')
+            const backendOnly = { ...full, 'backend-only': true }
+            expect(runs('cli-qualification', backendOnly, backendResult, cliResult, 'skipped', reuse)).toBe(false)
+            expect(runs('backend-migration-qualification', backendOnly, backendResult, cliResult, 'skipped', reuse)).toBe(backendResult === 'success')
+          }
+        }
+      }
+    }
+
+    for (const diagnostic of ['backend', 'native']) {
+      for (const backendOnly of [false, true]) {
+        for (const cliResult of ['success', 'failure', 'cancelled', 'skipped']) {
+          const inputs = { 'ci-diagnostic': diagnostic, 'backend-only': backendOnly }
+          expect(runs('cli-qualification', inputs, 'success', cliResult)).toBe(false)
+        }
+      }
+    }
+
+    for (const diagnostic of ['', 'none']) {
+      for (const ref of ['refs/heads/main', 'refs/heads/feature', 'refs/tags/v0.75.0']) {
+        expect(runs('cli-qualification', { 'ci-diagnostic': diagnostic }, 'success', 'skipped', 'success', 'false', ref)).toBe(true)
+      }
+    }
+
+    for (const [diagnostic, backendOnly, selection, reuse, ref, expected] of [
+      ['none', false, 'none', 'false', 'refs/heads/feature', [true, true, false]],
+      ['none', false, 'backend-migration', 'false', 'refs/heads/feature', [true, true, true]],
+      ['', false, 'none', 'true', 'refs/heads/main', [true, true, false]],
+      ['none', false, 'none', 'true', 'refs/heads/feature', [false, false, false]],
+      ['none', false, 'backend-migration', 'true', 'refs/heads/feature', [true, true, true]],
+      ['none', true, 'backend-migration', '', 'refs/heads/feature', [true, false, true]],
+      ['backend', true, 'none', '', 'refs/heads/feature', [true, false, false]],
+      ['native', true, 'none', '', 'refs/heads/feature', [false, false, false]],
+    ]) {
+      for (const validationOnly of [false, true]) {
+        const inputs = {
+          'ci-diagnostic': diagnostic,
+          'backend-only': backendOnly,
+          'backend-qualification': selection,
+          'validation-only': validationOnly,
+        }
+        const resolveResult = backendOnly ? 'skipped' : 'success'
+        const backend = runs('backend', inputs, 'skipped', 'skipped', resolveResult, reuse, ref)
+        const backendResult = backend ? 'success' : 'skipped'
+        const cli = runs('cli-qualification', inputs, backendResult, 'skipped', resolveResult, reuse, ref)
+        const migration = runs('backend-migration-qualification', inputs, backendResult, cli ? 'success' : 'skipped', resolveResult, reuse, ref)
+        expect([backend, cli, migration]).toEqual(expected)
+      }
+    }
+
+    for (const resolveResult of ['failure', 'cancelled', 'skipped'])
+      expect(runs('cli-qualification', {}, 'success', 'success', resolveResult)).toBe(false)
+    expect(runs('cli-qualification', {}, 'success', 'success', 'success', 'false', undefined, true)).toBe(false)
+    for (const selection of ['none', undefined])
+      expect(runs('backend-migration-qualification', { 'backend-qualification': selection }, 'success', 'success')).toBe(false)
+    expect(runs('backend-migration-qualification', { 'backend-qualification': 'backend-migration' }, 'success', 'success', 'success', 'false', undefined, true)).toBe(false)
+  })
+
+  it('requires the selected physical qualification for image publication and bypasses it when unselected', () => {
+    const publish = quality.jobs.publish
+    expect(publish.needs).toContain('backend-migration-qualification')
+    expect(publish.if).toContain('inputs.backend-qualification != \'backend-migration\' || needs.backend-migration-qualification.result == \'success\'')
+
+    const expression = publish.if
+      .replaceAll('inputs.backend-qualification', 'selection')
+      .replaceAll('inputs.validation-only', 'validationOnly')
+      .replace(/\bneeds\.([a-z0-9-]+)\b/g, (_match, name) => `needs[${JSON.stringify(name)}]`)
+    const baseNeeds = {
+      'resolve': { outputs: { reuse: 'false' } },
+      'build': { result: 'success' },
+      'quality': { result: 'success' },
+      'rust-check': { result: 'success' },
+      'backend': { result: 'success' },
+      'cli-qualification': { result: 'success' },
+      'node-checks': { result: 'success' },
+      'browser': { result: 'success' },
+      'network-bench': { result: 'success' },
+      'native-runtime': { result: 'success' },
+      'android-direct-build': { result: 'success' },
+      'android-direct': { result: 'success' },
+      'image': { result: 'success', outputs: { published: 'true' } },
+      'beacon-image': { result: 'success', outputs: { published: 'true' } },
+    }
+    const canPublish = (selection, migrationResult, backendResult = 'success', reuse = 'false', validationOnly = false, cliResult = 'success') => runInNewContext(expression, {
+      selection,
+      validationOnly,
+      needs: {
+        ...baseNeeds,
+        'resolve': { outputs: { reuse } },
+        'backend': { result: backendResult },
+        'cli-qualification': { result: cliResult },
+        'backend-migration-qualification': { result: migrationResult },
+      },
+      always: () => true,
+      cancelled: () => false,
+    }, { timeout: 1000 })
+
+    expect(canPublish('backend-migration', 'success')).toBe(true)
+    expect(canPublish('backend-migration', 'failure')).toBe(false)
+    expect(canPublish('backend-migration', 'skipped')).toBe(false)
+    expect(canPublish('backend-migration', 'cancelled')).toBe(false)
+    for (const cliResult of ['success', 'failure', 'cancelled', 'skipped']) {
+      for (const selection of ['none', 'backend-migration']) {
+        expect(canPublish(selection, selection === 'none' ? 'skipped' : 'success', 'success', 'false', false, cliResult)).toBe(cliResult === 'success')
+        expect(canPublish(selection, 'success', 'success', 'true', false, cliResult)).toBe(false)
+        expect(canPublish(selection, 'success', 'success', 'false', true, cliResult)).toBe(false)
+      }
+    }
+
+    expect(canPublish('none', 'skipped')).toBe(true)
+    expect(canPublish(undefined, 'skipped')).toBe(true)
+    expect(canPublish(undefined, 'skipped', 'success', 'true')).toBe(false)
+    expect(canPublish(undefined, 'skipped', 'success', 'false', true)).toBe(false)
+  })
+
+  it('requires the selected physical qualification before re-promoting a reused image', () => {
+    const promote = quality.jobs.promote
+    expect(promote.needs).toContain('resolve')
+    expect(promote.needs).toContain('backend-migration-qualification')
+    expect(promote.if).toContain('needs.resolve.outputs.reuse == \'true\'')
+    expect(promote.if).toContain('inputs.backend-qualification != \'backend-migration\' || needs.backend-migration-qualification.result == \'success\'')
+
+    const expression = promote.if
+      .replaceAll('inputs.backend-qualification', 'selection')
+      .replaceAll('inputs.validation-only', 'validationOnly')
+      .replace(/\bneeds\.([a-z0-9-]+)\b/g, (_match, name) => `needs[${JSON.stringify(name)}]`)
+    const canPromote = (selection, migrationResult, reuse, validationOnly = false) => runInNewContext(expression, {
+      selection,
+      validationOnly,
+      needs: {
+        'resolve': { outputs: { reuse } },
+        'backend-migration-qualification': { result: migrationResult },
+      },
+      always: () => true,
+      cancelled: () => false,
+    }, { timeout: 1000 })
+
+    expect(canPromote('backend-migration', 'success', 'true')).toBe(true)
+    expect(canPromote('backend-migration', 'failure', 'true')).toBe(false)
+    expect(canPromote('backend-migration', 'skipped', 'true')).toBe(false)
+    expect(canPromote('backend-migration', 'cancelled', 'true')).toBe(false)
+    expect(canPromote('none', 'skipped', 'true')).toBe(true)
+    expect(canPromote(undefined, 'skipped', 'true')).toBe(true)
+    expect(canPromote('backend-migration', 'success', 'false')).toBe(false)
+    expect(canPromote(undefined, 'skipped', 'true', true)).toBe(false)
+
+    const migrationExpression = quality.jobs['backend-migration-qualification'].if
+      .replace(/\b(inputs|needs)\.([a-z0-9-]+)\b/g, (_match, scope, property) => `${scope}[${JSON.stringify(property)}]`)
+    for (const cliResult of ['success', 'failure', 'cancelled', 'skipped']) {
+      const migrationRuns = runInNewContext(migrationExpression, {
+        inputs: { 'backend-qualification': 'backend-migration', 'backend-only': false },
+        needs: { 'backend': { result: 'success' }, 'cli-qualification': { result: cliResult } },
+        always: () => true,
+        cancelled: () => false,
+      }, { timeout: 1000 })
+      const migrationResult = migrationRuns ? 'success' : 'skipped'
+      expect(canPromote('backend-migration', migrationResult, 'true')).toBe(cliResult === 'success')
+      expect(canPromote('backend-migration', migrationResult, 'true', true)).toBe(false)
+      // Without selected migration, reuse retains the trusted prior exact-tree proof.
+      expect(canPromote('none', 'skipped', 'true')).toBe(true)
+    }
+  })
+
+  it('keeps the PR browser lane conditional, read-only and limited to the saved-chat journey', () => {
+    const browser = pr.jobs.browser
+    expect(browser.needs).toBe('scope')
+    expect(browser.if).toBe('needs.scope.outputs.browser == \'true\'')
+    expect(browser.permissions).toEqual({ contents: 'read' })
+    expect(browser['timeout-minutes']).toBe(25)
+    const dependencies = browser.steps.find(step => step.name === 'Install the pinned Rust toolchain and build dependencies')
+    expect(dependencies.run).toContain('node scripts/prepare-browser-build-dependencies.mjs')
+    expect(dependencies.run).toContain('--default-toolchain 1.97.1')
+    expect(dependencies.run).not.toContain('apt-get')
+    expect(browser.services.postgres.image).toBe('postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24')
+    expect(browser.services.postgres.env).toEqual({
+      POSTGRES_USER: 'cairn',
+      POSTGRES_PASSWORD: 'test-only',
+      POSTGRES_DB: 'cairn_beacon_test',
+    })
+    expect(browser.container.image).toBe('mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f')
+
+    const build = browser.steps.find(step => step.name === 'Build the manager fixtures and web assets')
+    expect(build.run.trim().split('\n').map(line => line.trim())).toEqual([
+      'cargo build --locked -p cairn-installation --bin cairn --example worker_fixture --example browser_fixture',
+      'cargo build --locked -p cairn-beacon --bin cairn-beacon --example beacon_sql_fixture',
+      'VITE_CAIRN_TEST_RESUME_DIAGNOSTICS=true pnpm exec vite build --config apps/web/vite.config.ts',
+    ])
+    const journey = browser.steps.find(step => step.name === 'Run the saved-chat resume journey')
+    expect(journey['timeout-minutes']).toBe(10)
+    expect(journey.run).toBe('pnpm test:e2e --project=journeys-chats tests/e2e/chats.spec.ts --grep \'same-provider quota resume\' --workers=1 --fail-on-flaky-tests')
+    const grep = journey.run.match(/--grep '([^']+)'/)?.[1]
+    const project = journey.run.match(/--project=([^ ]+)/)?.[1]
+    const testFile = journey.run.match(/ (tests\/e2e\/chats\.spec\.ts) --grep/)?.[1]
+    expect(grep).toBe('same-provider quota resume')
+    expect(project).toBe('journeys-chats')
+    expect(testFile).toBe('tests/e2e/chats.spec.ts')
+
+    const resumeTitles = [...chatJourneySource.matchAll(/^test\('([^']+)'/gm)]
+      .map(([, title]) => title)
+      .filter(title => title.startsWith('same-provider quota resume'))
+    expect(resumeTitles).toEqual([
+      'same-provider quota resume submits the saved turn with the picker-applied speed',
+      'same-provider quota resume retries a prelaunch turn without selection',
+      'same-provider quota resume preserves an inherited blank model',
+      'same-provider quota resume submits the changed model default and unchanged saved effort',
+    ])
+
+    const matches = new RegExp(grep)
+    for (const title of resumeTitles) {
+      const combinedTitle = `${project} ${testFile} ${title}`
+      expect(matches.test(combinedTitle), title).toBe(true)
+    }
+
+    expect(matches.test(`${project} ${testFile} unrelated chat case`)).toBe(false)
+
+    const uploads = browser.steps.filter(step => step.uses?.startsWith('actions/upload-artifact@'))
+    expect(uploads).toHaveLength(1)
+    expect(uploads[0].if).toBe('always()')
+    expect(uploads[0].with.path.trim().split('\n').map(path => path.trim())).toEqual([
+      'playwright-report/',
+      'test-results/',
+    ])
+    expect(uploads[0].with['retention-days']).toBe(14)
+    expect(browser.steps.some(step => step.uses?.startsWith('docker/build-push-action@'))).toBe(false)
+    expect(browser.environment).toBeUndefined()
+  })
+
   it('keeps every split validation in the image publication gate', () => {
-    for (const name of ['build', 'quality', 'rust-check', 'backend', 'node-checks', 'browser', 'network-bench', 'native-runtime', 'android-direct-build', 'android-direct', 'image', 'beacon-image']) {
+    for (const name of ['build', 'quality', 'rust-check', 'backend', 'cli-qualification', 'node-checks', 'browser', 'network-bench', 'native-runtime', 'android-direct-build', 'android-direct', 'image', 'beacon-image']) {
       expect(quality.jobs.publish.needs).toContain(name)
       expect(quality.jobs.publish.if).toContain(`needs.${name}.result == 'success'`)
     }
   })
 
-  it('refreshes one compiled cache per commit and restores compatible earlier builds', () => {
-    const action = parse(readFileSync(new URL('../../.github/actions/cache-rust/action.yaml', import.meta.url), 'utf8'))
-    const key = action.runs.steps.find(step => step.id === 'key')
-    expect(key.env.CACHE_REVISION).toContain('github.sha')
-    expect(key.run).toContain('primary=$CACHE_PREFIX-$CACHE_REVISION')
-    expect(key.run).toContain('fallback=$CACHE_PREFIX-')
-    const writer = action.runs.steps.find(step => step.uses?.startsWith('actions/cache@'))
-    const reader = action.runs.steps.find(step => step.uses?.startsWith('actions/cache/restore@'))
-    expect(writer.if).toBe('inputs.save == \'true\'')
-    expect(reader.if).toBe('inputs.save != \'true\'')
-    expect(writer.with).toEqual(reader.with)
-    expect(writer.with['restore-keys']).toContain('steps.key.outputs.fallback')
-    const bootstrap = action.runs.steps.find(step => step.id === 'bootstrap')
-    expect(bootstrap.run).toContain('! -d target/debug/deps')
-    const legacy = action.runs.steps.find(step => step.name === 'Bootstrap from the previous cache format')
-    expect(legacy.if).toContain('steps.bootstrap.outputs.needed == \'true\'')
-    expect(legacy.with.path.trim().split('\n').map(line => line.trim())).toEqual(['~/.cargo/registry/', '~/.cargo/git/', 'target/'])
-    const owners = Object.entries(quality.jobs).filter(([, job]) => job.steps?.some(step => step.uses === './.github/actions/cache-rust' && step.with?.save === true))
-    // Keep cache publication out of the long-running backend qualification.
-    expect(owners.map(([name]) => name)).toEqual(['build'])
+  it('keeps shared Rust preparation cold and preserves only exact native reference caching', () => {
+    expect(existsSync(new URL('../../.github/actions/cache-rust/action.yaml', import.meta.url))).toBe(false)
+    for (const name of ['build', 'rust-check', 'backend', 'cli-qualification', 'node-checks']) {
+      const steps = quality.jobs[name].steps
+      expect(steps.some(step => step.uses === './.github/actions/cache-rust')).toBe(false)
+      expect(steps.some(step => step.uses?.startsWith('actions/cache'))).toBe(false)
+    }
+
+    const referenceCaches = quality.jobs['native-runtime'].steps.filter(step => step.uses?.startsWith('actions/cache'))
+    expect(referenceCaches).toHaveLength(2)
+    for (const step of referenceCaches) {
+      expect(step.with.path).toBe('reference-native/')
+      expect(step.with.key).toContain('steps.native-reference-key.outputs.key')
+    }
+
+    expect(referenceCaches[0].with.key).toBe(referenceCaches[1].with.key)
+  })
+
+  it('observes capacity around actual cold builds without introducing a cache or writer mode', () => {
+    const action = parse(readFileSync(new URL('../../.github/actions/observe-rust-build/action.yaml', import.meta.url), 'utf8'))
+    expect(Object.keys(action.inputs)).toEqual(['phase'])
+    expect(action.runs.steps.some(step => step.uses?.startsWith('actions/cache'))).toBe(false)
+    const observation = action.runs.steps.find(step => step.run?.includes('ci-rust-build-observation.mjs'))
+    expect(observation['continue-on-error']).toBe(true)
+    const upload = action.runs.steps.find(step => step.uses?.startsWith('actions/upload-artifact'))
+    expect(upload['continue-on-error']).toBe(true)
+    expect(upload.with.path).toContain('runner.temp')
+    for (const name of ['build', 'rust-check', 'backend', 'cli-qualification', 'node-checks']) {
+      const steps = quality.jobs[name].steps
+      const before = steps.findIndex(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'before-build')
+      const after = steps.findIndex(step => step.uses === './.github/actions/observe-rust-build' && step.with?.phase === 'after-build')
+      expect(before).toBeGreaterThan(-1)
+      expect(after).toBeGreaterThan(before)
+      expect(after).toBe(steps.length - 1)
+      expect(steps[after].if).toBe('always()')
+    }
+  })
+
+  it('observes exact archived native fixtures symmetrically while keeping original binaries and qualification flags', () => {
+    const steps = quality.jobs['native-runtime'].steps
+    const reference = steps.find(step => step.name === 'Qualify the exact reference on the current disposable host')
+    const candidate = steps.find(step => step.name === 'Qualify real ublk, S3, eviction, systemd ownership and crash recovery')
+    expect(reference.run).toContain('git archive "$REFERENCE_SHA" scripts/tests deploy/nodes/native-host.py')
+    // eslint-disable-next-line no-template-curly-in-string -- literal shell fallback is the provenance contract
+    expect(candidate.run).toContain('git archive "${DIAGNOSTIC_CANDIDATE:-HEAD}" scripts/tests deploy/nodes/native-host.py')
+    // eslint-disable-next-line no-template-curly-in-string -- literal GitHub expression is the provenance contract
+    expect(candidate.env.DIAGNOSTIC_CANDIDATE).toBe('${{ inputs.ci-diagnostic == \'native\' && inputs.diagnostic-candidate || \'\' }}')
+    expect(reference.run).toContain('native_admission_overlay.py "$reference_fixture" reference')
+    expect(candidate.run).toContain('native_admission_overlay.py "$candidate_fixture" candidate')
+    expect(reference.run).toContain('--repo "$reference_fixture" --native-runtime reference-native/cairn --qualifier reference-native/examples/native_storage_qualifier')
+    expect(candidate.run).toContain('--repo "$candidate_fixture" --native-runtime target/debug/cairn --qualifier target/debug/examples/native_storage_qualifier')
+    expect(candidate.run).toContain('CAIRN_NATIVE_DOCKER_QUALIFY=1')
+    expect(reference.run).not.toContain('CAIRN_NATIVE_DOCKER_QUALIFY=1')
+    expect(steps.indexOf(candidate)).toBeGreaterThan(steps.indexOf(reference))
+  })
+
+  it('keeps all native preparation tests after their verified candidate producer', () => {
+    const steps = quality.jobs['native-runtime'].steps
+    const host = steps.findIndex(step => step.name === 'Prepare disposable host block storage and synthetic S3')
+    const toolchain = steps.findIndex(step => step.run === 'rustup toolchain install 1.97.1 --profile minimal')
+    const pair = steps.findIndex(step => step.name === 'Build the immutable diagnostic pair')
+    const verify = steps.findIndex(step => step.name === 'Verify the exact reference binaries')
+    const consumers = steps.filter(step => step.run?.includes('-p test_native_s3_memory.py'))
+    expect(consumers).toHaveLength(1)
+    const consumer = consumers[0]
+    const index = steps.indexOf(consumer)
+    expect(host).toBeLessThan(toolchain)
+    expect(toolchain).toBeLessThan(pair)
+    expect(steps[pair].run.indexOf('apt-get install -y --no-install-recommends libclang-dev')).toBeLessThan(steps[pair].run.indexOf('scripts/ci-diagnostic-native-build.mjs'))
+    expect(pair).toBeLessThan(verify)
+    expect(verify).toBeLessThan(index)
+    expect(index).toBeLessThan(steps.findIndex(step => step.name === 'Qualify the exact reference on the current disposable host'))
+    expect(steps[host].run).not.toContain('test_native_s3_memory.py')
+    expect(consumer.if).toBeUndefined()
+    // eslint-disable-next-line no-template-curly-in-string -- exact absolute candidate fixture path in the workflow
+    expect(consumer.env.CAIRN_TEST_NATIVE_QUALIFIER).toBe('${{ github.workspace }}/target/debug/examples/native_storage_qualifier')
+    expect(consumer.run).toContain('scripts/ci-deadline.mjs "$PWD/native-diagnostics/preparation" 90 -- .native-s3-test/bin/python -m unittest discover -s scripts/tests -p test_native_s3_memory.py -v')
+    expect(consumer.run).not.toMatch(/(?:--filter|--ignore|\s-k\s)/)
+    expect(steps.filter(step => step.run?.includes('node scripts/ci-diagnostic-native-build.mjs'))).toHaveLength(1)
+    const memoryTests = readFileSync(new URL('./test_native_s3_memory.py', import.meta.url), 'utf8')
+    expect(memoryTests.match(/^\s+def test_/gm)).toHaveLength(8)
+  })
+
+  it('isolates each diagnostic job even when legacy independent inputs are populated', () => {
+    function runsWith(inputs, event = 'workflow_dispatch') {
+      const results = {}
+
+      function run(name) {
+        if (Object.hasOwn(results, name))
+          return results[name]
+        const job = quality.jobs[name]
+        const dependencies = Array.isArray(job.needs) ? job.needs : job.needs ? [job.needs] : []
+        const needs = Object.fromEntries(dependencies.map(dependency => [dependency, {
+          result: run(dependency) ? 'success' : 'skipped',
+          outputs: { reuse: results[dependency] ? 'false' : '' },
+        }]))
+        const expression = (job.if ?? 'true')
+          .replace(/\b(inputs|needs)\.([a-z0-9-]+)\b/g, (_match, scope, property) => `${scope}[${JSON.stringify(property)}]`)
+        const failedDependency = dependencies.some(dependency => !results[dependency])
+        const enabled = !failedDependency || expression.includes('always()')
+        results[name] = enabled && Boolean(runInNewContext(expression, {
+          inputs,
+          needs,
+          github: { event_name: event, ref: 'refs/heads/feature' },
+          always: () => true,
+          cancelled: () => false,
+          startsWith: (value, prefix) => value.startsWith(prefix),
+        }, { timeout: 1000 }))
+        return results[name]
+      }
+
+      for (const name of Object.keys(quality.jobs))
+        run(name)
+      return Object.keys(results).filter(name => results[name]).sort()
+    }
+
+    const legacy = {
+      'backend-only': true,
+      'validation-only': true,
+      'backend-qualification': 'none',
+      'plan-storage-reference': '06829d1b5f3d7accb9791c09d49522e7e2d2ab25',
+      'exclusive-android': true,
+      'browser-workers': '2',
+    }
+    for (const mode of ['backend', 'native']) {
+      expect(runsWith({ ...legacy, 'ci-diagnostic': mode })).toEqual([mode === 'native' ? 'native-runtime' : 'backend'])
+    }
+
+    for (const mode of ['', 'none']) {
+      expect(runsWith({ ...legacy, 'ci-diagnostic': mode })).toEqual(['backend', 'plan-storage', 'rust-check'])
+    }
+
+    expect(quality.on.pull_request).toBeUndefined()
+    expect(quality.on.push.tags).toEqual(['v*'])
   })
 
   it('gives installer and update fixtures their own database and web assets', () => {
@@ -95,6 +622,95 @@ describe('parallel CI coverage', () => {
     const scenarios = quality.jobs['network-bench'].strategy.matrix.include.flatMap(group => group.scenarios.split(' '))
     expect(scenarios.sort()).toEqual(['same-lan', 'mdns-only-client', 'nat-client', 'nat-installation', 'nat-both', 'udp-blocked', 'symmetric-nat', 'symmetric-client', 'same-server', 'network-change', 'packet-loss', 'qualification'].sort())
     expect(quality.jobs['network-bench'].strategy['fail-fast']).toBe(false)
+  })
+
+  it('runs the actual missing-only network preparer before every unchanged topology suite', () => {
+    for (const name of ['network-bench', 'android-direct']) {
+      const steps = quality.jobs[name].steps
+      expect(steps.some(step => step.run === `node scripts/prepare-network-tools.mjs ${name}`)).toBe(true)
+      expect(steps.some(step => step.run?.startsWith('sudo apt-get update'))).toBe(false)
+    }
+
+    const network = quality.jobs['network-bench'].steps.find(step => step.name === 'Validate real network topology and authenticated sessions')
+    expect(network.run).toContain('python3 tests/network_bench_test.py')
+    expect(network.run).toContain('python3 tests/network_probe_test.py')
+    expect(network.run).toContain('python3 tests/stun_docker_test.py')
+  })
+
+  it('reclaims only unused Android SDK packages and checks userdata headroom before emulator boot', () => {
+    const job = quality.jobs['android-direct']
+    const steps = job.steps
+    const prune = steps.findIndex(step => step.run === 'node scripts/android-emulator-sdk.mjs prune')
+    const install = steps.findIndex(step => step.uses === './.github/actions/setup-android-emulator')
+    const preflight = steps.findIndex(step => step.run === 'node scripts/android-emulator-sdk.mjs preflight')
+    const emulatorIndex = steps.findIndex(step => step.uses?.startsWith('reactivecircus/android-emulator-runner@'))
+
+    expect(prune).toBeGreaterThan(-1)
+    expect(prune).toBeLessThan(install)
+    expect(install).toBeLessThan(emulatorIndex)
+    expect(install).toBeLessThan(preflight)
+    expect(preflight).toBeLessThan(emulatorIndex)
+    expect(job['timeout-minutes']).toBe(20)
+
+    expect(steps[install].with['build-packages']).toBe('build-tools;37.0.0 platforms;android-36')
+
+    const emulator = steps[emulatorIndex]
+    expect(emulator.with).toMatchObject({
+      'api-level': 36,
+      'arch': 'x86_64',
+      'target': 'google_apis',
+      'profile': 'pixel_6',
+    })
+    expect(emulator.with['disk-size']).toBeUndefined()
+    expect(emulator.with['pre-emulator-launch-script']).toBe('node scripts/android-emulator-sdk.mjs preflight')
+    expect(emulator.with['working-directory']).toBeUndefined()
+    expect(emulator.with['emulator-boot-timeout']).toBeUndefined()
+    expect(emulator.with.script).toContain('python3 tests/network-bench.py')
+    expect(steps[preflight].name).toBe('Check emulator userdata disk headroom')
+
+    const packages = [
+      'build-tools;34.0.0 | 34.0.0 | Android SDK Build-Tools 34',
+      'build-tools;37.0.0 | 37.0.0 | Android SDK Build-Tools 37',
+      'cmake;3.31.5 | 3.31.5 | CMake 3.31.5',
+      'ndk;27.3.13750724 | 27.3.13750724 | NDK',
+      'platforms;android-35 | 3 | Android SDK Platform 35',
+      'platforms;android-36 | 2 | Android SDK Platform 36',
+      'system-images;android-35;google_apis;x86_64 | 1 | Android image 35',
+      'system-images;android-36;google_apis;x86_64 | 7 | Android image 36',
+    ].join('\n')
+
+    expect(sdkPackagesToRemove(packages)).toEqual([
+      'build-tools;34.0.0',
+      'cmake;3.31.5',
+      'ndk;27.3.13750724',
+      'platforms;android-35',
+      'system-images;android-35;google_apis;x86_64',
+    ])
+
+    expect(capacityPlan(AVD_USERDATA_BYTES_REQUIRED + AVD_HOST_HEADROOM_BYTES).sufficient).toBe(true)
+    expect(capacityPlan(AVD_USERDATA_BYTES_REQUIRED + AVD_HOST_HEADROOM_BYTES - 1).sufficient).toBe(false)
+    expect(AVD_USERDATA_BYTES_REQUIRED).toBe(7_730_941_133)
+    expect(AVD_USERDATA_BYTES_REQUIRED + AVD_HOST_HEADROOM_BYTES).toBe(8_267_812_045)
+    expect(capacityPlan(7_909_670_912).sufficient).toBe(false)
+    expect(capacityPlan(8_267_812_044).sufficient).toBe(false)
+    expect(capacityPlan(8_267_812_045).sufficient).toBe(true)
+  })
+
+  it('delivers the pinned local package closure from this build before network preparation', () => {
+    const build = quality.jobs.build.steps
+    const acquire = build.findIndex(step => step.run === 'node scripts/ci-network-package-closure.mjs acquire target/ci-network-tools')
+    const upload = build.findIndex(step => step.with?.name === 'network-tools-noble-amd64-v1')
+    expect(acquire).toBeGreaterThan(-1)
+    expect(upload).toBeGreaterThan(acquire)
+    expect(build[upload].with).toMatchObject({ 'path': 'target/ci-network-tools/', 'retention-days': 1 })
+    const consumer = quality.jobs['network-bench']
+    expect(consumer.needs).toContain('build')
+    const download = consumer.steps.findIndex(step => step.with?.name === 'network-tools-noble-amd64-v1')
+    const prepare = consumer.steps.findIndex(step => step.run === 'node scripts/prepare-network-tools.mjs network-bench')
+    expect(download).toBeGreaterThan(-1)
+    expect(download).toBeLessThan(prepare)
+    expect(consumer.steps[download].with).toEqual({ name: 'network-tools-noble-amd64-v1', path: 'target/ci-network-tools/' })
+    expect(quality.jobs['android-direct'].steps.some(step => step.with?.name === 'network-tools-noble-amd64-v1')).toBe(false)
   })
 
   it('runs every native network scenario once with one shared APK producer', () => {
@@ -120,6 +736,24 @@ describe('parallel CI coverage', () => {
     for (const projects of ['journeys*', 'layout-webkit-*'])
       expect(groups.filter(group => group.projects === projects).map(group => group.shard).sort()).toEqual(['1/4', '2/4', '3/4', '4/4'])
     expect(groups.filter(group => group.projects === 'layout-chromium-*')).toHaveLength(1)
+  })
+
+  it('builds and delivers the SQL fixture before real Postgres and browser qualification without psql installation', () => {
+    const build = quality.jobs.build.steps
+    expect(build.find(step => step.name === 'Build the browser-test backend and frontend').run).toContain('--example beacon_sql_fixture')
+    expect(build.find(step => step.with?.name === 'browser-backend').with.path).toContain('target/debug/examples/beacon_sql_fixture')
+    for (const name of ['browser', 'network-bench', 'android-direct']) {
+      const steps = quality.jobs[name].steps
+      expect(steps.some(step => step.run?.includes('chmod +x') && step.run.includes('target/debug/examples/beacon_sql_fixture'))).toBe(true)
+    }
+
+    const steps = quality.jobs.browser.steps
+    expect(steps.some(step => step.run?.includes('postgresql-client'))).toBe(false)
+    const sql = steps.findIndex(step => step.run === 'pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts')
+    const journeys = steps.findIndex(step => step.run?.includes('pnpm test:e2e'))
+    expect(sql).toBeGreaterThan(-1)
+    expect(sql).toBeLessThan(journeys)
+    expect(quality.jobs.browser.services.postgres.image).toContain('postgres:17-alpine@sha256:')
   })
 
   it('keeps the browser execution deadline independent of slow preparation and evidence upload', () => {

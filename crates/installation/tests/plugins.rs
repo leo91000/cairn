@@ -1,4 +1,5 @@
 use cairn_contracts::EventKind;
+use common::run_fixture::*;
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
 
@@ -2536,7 +2537,7 @@ async fn optional_questions_are_not_republished_on_later_turns() {
     let event = json!({ "name": "message", "revision": connection.revision, "authorId": "300", "payload": { "id": "551" } });
     let receipt = work::submit(&s, &context(&connection, &event), &json!({ "text": "Another thing", "thread": "550", "shared": true, "reply": first["reply"] })).await.unwrap();
     s.store
-        .update_run_boundary(
+        .update_run_boundary_fixture(
             run,
             json!({ "chatExecution": { "messageId": receipt["messageId"] } }),
         )

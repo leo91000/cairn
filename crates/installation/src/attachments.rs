@@ -247,6 +247,25 @@ impl Service {
     where
         F: Fn(&Db<'_>) -> Result<()> + Send + Sync + Clone + 'static,
     {
+        self.store_attachment_live(
+            chat,
+            id,
+            name,
+            bytes,
+            crate::authorization::Authorization::local(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn store_attachment_live(
+        &self,
+        chat: &str,
+        id: &str,
+        name: &str,
+        bytes: &[u8],
+        authorize: crate::authorization::Authorization,
+    ) -> Result<ChatAttachment> {
+        authorize.recheck().await?;
         uuid(chat)?;
         uuid(id)?;
         if bytes.len() > MAX_FILE {
@@ -268,7 +287,7 @@ impl Service {
             height: dimensions.map(|(_, h)| h),
         };
         self.attachments
-            .upload(
+            .upload_live(
                 self.store.clone(),
                 self.config.data_dir.join("chat-attachments"),
                 attachment,

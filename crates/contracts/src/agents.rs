@@ -249,6 +249,10 @@ pub struct AgentAvatar {
 #[serde(rename_all = "camelCase")]
 pub struct Agent {
     pub id: AgentId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub coding_agent_defaults:
+        Option<std::collections::BTreeMap<String, crate::CodingAgentPreferences>>,
     #[serde(flatten)]
     #[ts(flatten)]
     pub settings: AgentSettings,

@@ -60,6 +60,18 @@ test('claims, detaches and reclaims the same private installation through the ap
     await exited
   }
 
+  async function waitForOnlineInstallation(installationId: string) {
+    await expect.poll(async () => {
+      const response = await page.request.get(`${url}/api/installations`)
+      expect(response.ok()).toBe(true)
+      const statuses = await response.json()
+      const installation = statuses.find(
+        (item: { id: string, online: boolean }) => item.id === installationId,
+      )
+      return installation?.online
+    }).toBe(true)
+  }
+
   async function claim() {
     const child = start('target/debug/cairn', ['claim'], managerEnv)
     let output = ''
@@ -141,6 +153,7 @@ test('claims, detaches and reclaims the same private installation through the ap
       await expect(page.getByRole('heading', { name: 'Fil', exact: true })).toBeVisible()
       await expect(page.getByRole('alert')).toHaveCount(0)
     }).toPass()
+    await waitForOnlineInstallation(old.installationId)
     await page.getByRole('link', { name: 'New conversation', exact: true }).first().click()
     await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Data survives detachment')
     await page.getByRole('button', { name: 'Send', exact: true }).click()
@@ -175,6 +188,7 @@ test('claims, detaches and reclaims the same private installation through the ap
     expect(renewed.token !== old.token).toBe(true)
     manager = start('target/debug/cairn', [], managerEnv)
     await page.getByRole('button', { name: /^Claimed machine · (Online|Offline)$/ }).click()
+    await waitForOnlineInstallation(renewed.installationId)
     await expect(async () => {
       await page.goto(conversationUrl)
       await expect(page.getByRole('heading', { name: 'Data survives detachment', exact: true })).toBeVisible()
