@@ -632,3 +632,14 @@ animates the working avatar's orbit (with its reduced-motion fallback). Status
 labels and all action/tool interfaces are unchanged. Shared JVM/device
 `FilAttentionCases.avatarLoaderAnimatesOnlyWhileWorking` compares rendered frames
 and checks that queuing stops the animation and completion removes the badge.
+
+## Installation opt-in for chat Plan mode
+
+Web and Android installation settings let the owner enable or disable new Plan
+requests. New and existing installations default to disabled until explicitly
+enabled. Both composers follow the live installation policy. A restored Plan draft
+stays blocked until Plan is enabled or the user explicitly turns its Plan choice
+off; it is never silently sent as an ordinary request. Accepted queued requests,
+active turns and their questionnaire answers retain their Plan boundary. The public
+MCP and `cairn_installation` expose the same revision-guarded setting with read/manage
+authorization. Web uses an English switch button; Android uses a native French switch.

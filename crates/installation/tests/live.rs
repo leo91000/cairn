@@ -2262,3 +2262,32 @@ async fn member_can_hydrate_native_proposals_without_execution_authority_or_reta
         }
     }
 }
+
+#[tokio::test]
+async fn installation_plan_policy_reaches_open_chat_streams_without_text_events() {
+    let f = Fixture::new().await;
+    let mut stream = f.open_path("/api/chats/stream", None).await;
+    let (_, initial) = stream.batch().await;
+    assert_eq!(initial["state"]["planTurnsEnabled"], false);
+    for enabled in [true, false] {
+        let response = reqwest::Client::new()
+            .get(format!("{}/api/settings/chat-plan", f.url))
+            .header("x-test-relay-token", &f.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let settings: Value = response.json().await.unwrap();
+        let response = reqwest::Client::new()
+            .put(format!("{}/api/settings/chat-plan", f.url))
+            .header("x-test-relay-token", &f.token)
+            .json(&json!({ "enabled": enabled, "revision": settings["revision"] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let (_, batch) = stream.batch().await;
+        assert_eq!(batch["state"]["planTurnsEnabled"], enabled);
+        assert!(batch["events"].as_array().unwrap().is_empty());
+    }
+}
