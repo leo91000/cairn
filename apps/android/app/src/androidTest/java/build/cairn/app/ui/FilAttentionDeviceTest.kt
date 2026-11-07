@@ -15,4 +15,6 @@ class FilAttentionDeviceTest {
     @Test
     fun avatarLoaderAnimatesOnlyWhileWorking() =
         FilAttentionCases(compose).avatarLoaderAnimatesOnlyWhileWorking()
+
+    @Test fun conversationReadCheck() = FilAttentionCases(compose).conversationReadCheck()
 }
