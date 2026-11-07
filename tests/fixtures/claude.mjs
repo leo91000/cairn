@@ -114,6 +114,7 @@ else {
   const sides = new Map()
   // The first message of a reply that keeps working until a steering message arrives.
   let working
+  let sideCompaction
   // Like Claude Code 2.1.280: the last response's prompt (cached or not) is the context,
   // and a local estimate stands in before the first response or after `/compact`.
   let lastUsage = null
@@ -197,6 +198,8 @@ else {
     }
 
     if (value.type === 'control_request' && value.request.subtype === 'side_question') {
+      if (sideCompaction?.active)
+        writeFileSync(path.join(home, 'side-during-compaction'), 'received a native side request while compacting')
       // Like Claude Code 2.1.308: answered beside the turn, never written to the transcript.
       appendFileSync(path.join(home, 'side-questions.jsonl'), `${JSON.stringify(value)}\n`)
       out({
@@ -375,6 +378,51 @@ else {
     appendFileSync(path.join(home, 'inputs.jsonl'), `${JSON.stringify(value)}\n`)
     const prompt = value.message.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
     const correlation = { user_message_uuid: value.uuid }
+    if (prompt.startsWith('fixture:side-autocompact')) {
+      sideCompaction = { failed: prompt.includes('failure'), active: true, uuids: [value.uuid] }
+      out(value)
+      out({
+        type: 'system',
+        subtype: 'status',
+        status: 'compacting',
+        session_id: session,
+      })
+      return
+    }
+
+    if (prompt === 'fixture:release-side-compaction' && sideCompaction?.active) {
+      sideCompaction.uuids.push(value.uuid)
+      out(value)
+      if (sideCompaction.failed) {
+        out({
+          type: 'system',
+          subtype: 'status',
+          compact_result: 'failed',
+          session_id: session,
+        })
+      }
+      else {
+        compacted = true
+        out({
+          type: 'system',
+          subtype: 'compact_boundary',
+          session_id: session,
+          compact_metadata: { trigger: 'auto', pre_tokens: 167500, post_tokens: 9100 },
+        })
+      }
+
+      sideCompaction.active = false
+      // Keep the main turn open until a further steering message, so a deferred
+      // side request can answer after the compaction finishes.
+      return
+    }
+
+    if (prompt === 'fixture:finish-side-compaction' && sideCompaction && !sideCompaction.active) {
+      complete('Finished after side compaction', false, { user_message_uuids: [...sideCompaction.uuids, value.uuid] })
+      sideCompaction = undefined
+      return
+    }
+
     if (prompt.includes('fixture:close-before-side'))
       process.stdin.destroy()
     if (working) {

@@ -724,6 +724,8 @@ impl Turn<'_> {
             if value["status"] == "compacting" && self.compaction.is_none() {
                 let id = self.compaction_id();
                 self.compaction = Some(id.clone());
+                self.emit(json!({ "type": "chat.side.compacting", "compacting": true }))
+                    .await?;
                 let item =
                     json!({ "id": id, "type": "context_compaction", "status": "in_progress" });
                 self.emit(json!({ "type": "item.started", "item": item }))
@@ -735,6 +737,8 @@ impl Turn<'_> {
             if failed && let Some(id) = self.compaction.take() {
                 let item = json!({ "id": id, "type": "context_compaction", "status": "failed" });
                 self.emit(json!({ "type": "item.completed", "item": item }))
+                    .await?;
+                self.emit(json!({ "type": "chat.side.compacting", "compacting": false }))
                     .await?;
             }
             return Ok(());
@@ -760,6 +764,8 @@ impl Turn<'_> {
             }
         }
         self.emit(json!({ "type": "item.completed", "item": item }))
+            .await?;
+        self.emit(json!({ "type": "chat.side.compacting", "compacting": false }))
             .await?;
         // The next response measures the compacted context; until then show Claude Code's estimate.
         self.request_context().await?;
@@ -800,6 +806,11 @@ impl Turn<'_> {
                 continue;
             }
             if message["sideQuestion"].is_object() {
+                // Leave stale entries unsubmitted until compaction finishes. Withdrawals
+                // above remain independent, including for a side request already in flight.
+                if self.compaction.is_some() {
+                    continue;
+                }
                 self.ask_side(&message["sideQuestion"]).await?;
                 self.submitted.insert(id.into());
                 continue;

@@ -128,6 +128,46 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn side_compaction_controls_update_transient_state_without_entering_history() {
+    let mut fixture = Fixture::new().await;
+    let id = fixture.id.clone();
+    let before = fixture
+        .service
+        .store
+        .read(move |db| db.events_fixture(&id, 0, 1000))
+        .await
+        .unwrap();
+    fixture
+        .event(json!({ "type": "chat.side.available" }))
+        .await;
+    for compacting in [true, false] {
+        fixture
+            .event(json!({ "type": "chat.side.compacting", "compacting": compacting }))
+            .await;
+        let run = fixture.service.store.run(&fixture.id).await.unwrap();
+        assert_eq!(run["sideQuestions"], true);
+        assert_eq!(run["sideQuestionsCompacting"], compacting);
+    }
+    fixture
+        .event(json!({ "type": "chat.side.compacting", "compacting": true }))
+        .await;
+    fixture
+        .event(json!({ "type": "chat.side.unavailable" }))
+        .await;
+    let run = fixture.service.store.run(&fixture.id).await.unwrap();
+    assert_eq!(run["sideQuestions"], false);
+    assert_eq!(run["sideQuestionsCompacting"], false);
+    let id = fixture.id.clone();
+    let after = fixture
+        .service
+        .store
+        .read(move |db| db.events_fixture(&id, 0, 1000))
+        .await
+        .unwrap();
+    assert_eq!(after, before);
+}
+
+#[tokio::test]
 async fn runtime_disk_notice_preserves_publication_metadata_and_redacts_all_payloads() {
     let mut fixture = Fixture::new().await;
     let storage = json!({ "mode": "on-demand", "grantId": "retained-grant", "dirtyBytes": 123,

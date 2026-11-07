@@ -1291,6 +1291,7 @@ fn continue_run(
             "environmentState": null,
             // The next turn's adapter announces again whether it can answer side questions.
             "sideQuestions": null,
+            "sideQuestionsCompacting": null,
         })),
         ..Default::default()
     };

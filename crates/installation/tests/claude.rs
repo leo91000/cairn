@@ -2186,6 +2186,7 @@ async fn engine_retries_limits_and_notices_are_reported_without_ending_the_turn(
         "thread.started",
         "chat.side.available",
         "chat.side.unavailable",
+        "chat.side.compacting",
         "context.usage",
         "chat.delivered",
         "engine.retry",
@@ -2908,6 +2909,51 @@ async fn context_usage_uses_the_native_report_and_each_response_prompt() {
         requests.trim(),
         json!({ "subtype": "get_context_usage", "detail": "summary" }).to_string()
     );
+}
+
+#[tokio::test]
+async fn automatic_compaction_defers_stale_side_requests_until_it_succeeds_or_fails() {
+    for prompt in [
+        "fixture:side-autocompact",
+        "fixture:side-autocompact-failure",
+    ] {
+        let (_root, c, events) = with_side_questions(prompt, |root, event| {
+            if event["type"] == "item.started" && event["item"]["type"] == "context_compaction" {
+                // The same inbox poll sees a stale side request before the steering
+                // that releases compaction. The fixture records premature native dispatch.
+                deliver(root, &json!([
+                    side_question("a1b2c3d4-0000-4000-8000-000000000001", "Why this order?"),
+                    { "id": "a1b2c3d4-0000-4000-8000-000000000011", "text": "fixture:release-side-compaction" },
+                ]));
+            }
+            if event["type"] == "chat.side.answered" {
+                deliver(root, &json!([
+                    { "id": "a1b2c3d4-0000-4000-8000-000000000012", "text": "fixture:finish-side-compaction" },
+                ]));
+            }
+        }).await;
+        assert!(
+            !c.home.join(".claude/side-during-compaction").exists(),
+            "{prompt}"
+        );
+        let completed = events
+            .iter()
+            .position(|event| {
+                event["type"] == "item.completed" && event["item"]["type"] == "context_compaction"
+            })
+            .unwrap();
+        assert!(
+            position(&events, "chat.side.answered") > completed,
+            "{prompt}"
+        );
+        let states = events
+            .iter()
+            .filter(|event| event["type"] == "chat.side.compacting")
+            .map(|event| event["compacting"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(states, vec![json!(true), json!(false)], "{prompt}");
+        assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+    }
 }
 
 #[tokio::test]

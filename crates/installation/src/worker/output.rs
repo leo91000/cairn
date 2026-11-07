@@ -475,6 +475,10 @@ async fn handle_chat_control(
         }
         "chat.side.available" => s.side_questions_available(id, true).await?,
         "chat.side.unavailable" => s.side_questions_available(id, false).await?,
+        "chat.side.compacting" => {
+            s.side_questions_compacting(id, event["compacting"] != false)
+                .await?;
+        }
         // Answers come from the live context, which can hold output Cairn masks elsewhere.
         "chat.side.answered" | "chat.side.failed" => {
             s.side_question_settle(id, &run_output::payload(event, secrets))

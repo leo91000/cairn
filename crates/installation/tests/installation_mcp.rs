@@ -6335,6 +6335,121 @@ async fn pruned_side_question_ids_cannot_be_replayed_or_reused() {
 }
 
 #[tokio::test]
+async fn automatic_compaction_closes_side_questions_on_http_and_both_mcp_surfaces() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let claude = s
+        .agent_fixture(json!({ "name": "Claude", "provider": "claude" }), None)
+        .await
+        .unwrap();
+    let (target, _) = active_run(&s, &claude).await;
+    let run_id = target["id"].as_str().unwrap();
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = target["id"].clone();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    s.side_questions_available(run_id, true).await.unwrap();
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let owner = common::RelayContext::new(&common::relay_fixture::context(&s).await);
+
+    for compacting in [true, false] {
+        s.store
+            .update_run_boundary(run_id, json!({ "sideQuestionsCompacting": compacting }))
+            .await
+            .unwrap();
+        let read = owner
+            .authorize(common::request("GET", &format!("/api/chats/{chat_id}")))
+            .body(Body::empty())
+            .unwrap();
+        let response = common::send(&app, read).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let view = common::read_json(response).await;
+        assert_eq!(view["canAskSideQuestion"], !compacting, "{view}");
+        for response in [
+            call(
+                &s,
+                &configuration,
+                "list_chat_side_questions",
+                json!({ "chatId": chat_id }),
+            )
+            .await,
+            public_call(
+                &s,
+                &["read"],
+                "list_chat_side_questions",
+                json!({ "chatId": chat_id }),
+            )
+            .await,
+        ] {
+            assert_eq!(
+                result(&response)["canAskSideQuestion"],
+                !compacting,
+                "{response}"
+            );
+            if compacting {
+                assert_eq!(result(&response)["sideQuestionUnavailable"], "compacting");
+            }
+        }
+        for response in [
+            call(&s, &configuration, "list_chats", json!({})).await,
+            public_call(&s, &["read"], "list_chats", json!({})).await,
+        ] {
+            let view = result(&response)["chats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == chat_id)
+                .unwrap();
+            assert_eq!(view["canAskSideQuestion"], !compacting, "{view}");
+        }
+        let body = || json!({ "id": uuid::Uuid::new_v4(), "text": "Why this order?" });
+        let write = owner
+            .authorize(common::request(
+                "POST",
+                &format!("/api/chats/{chat_id}/side-questions"),
+            ))
+            .body(Body::from(body().to_string()))
+            .unwrap();
+        let response = common::send(&app, write).await;
+        assert_eq!(
+            response.status(),
+            if compacting {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::OK
+            }
+        );
+        for response in [
+            call(
+                &s,
+                &configuration,
+                "ask_chat_side_question",
+                json!({ "chatId": chat_id, "question": body() }),
+            )
+            .await,
+            public_call(
+                &s,
+                &["run"],
+                "ask_chat_side_question",
+                json!({ "chatId": chat_id, "question": body() }),
+            )
+            .await,
+        ] {
+            assert_eq!(
+                response["result"]["isError"] == true,
+                compacting,
+                "{response}"
+            );
+            if compacting {
+                assert!(response.to_string().contains("compacting"), "{response}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_reply() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;

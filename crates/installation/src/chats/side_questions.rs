@@ -280,7 +280,7 @@ pub(crate) fn unavailable(run: Option<&Value>) -> Option<SideQuestionUnavailable
     if !run["cancelRequestedAt"].is_null() {
         return Some(SideQuestionUnavailable::Stopping);
     }
-    if is_compaction(run) {
+    if is_compaction(run) || run["sideQuestionsCompacting"] == true {
         return Some(SideQuestionUnavailable::Compacting);
     }
     if run["sideQuestions"] == false {
@@ -506,13 +506,15 @@ pub(crate) fn deliveries(db: &Db<'_>, chat_id: &str, run: &Value) -> Result<Vec<
     let mut entries = Vec::new();
     for (question, about) in questions {
         match question.status {
-            SideQuestionStatus::Pending => entries.push(json!({
-                "id": format!("side-question:{}", question.id),
-                "sideQuestion": {
-                    "id": question.id,
-                    "text": wire_text(&question, &about),
-                },
-            })),
+            SideQuestionStatus::Pending if run["sideQuestionsCompacting"] != true => {
+                entries.push(json!({
+                    "id": format!("side-question:{}", question.id),
+                    "sideQuestion": {
+                        "id": question.id,
+                        "text": wire_text(&question, &about),
+                    },
+                }));
+            }
             SideQuestionStatus::Cancelled => entries.push(json!({
                 "id": format!("withdraw-side-question:{}", question.id),
                 "sideQuestionId": question.id,
@@ -674,7 +676,10 @@ pub(crate) async fn withdraw_announcement(
     let id = run_id.to_owned();
     store
         .transaction(move |db| {
-            db.update_run_boundary(&id, &json!({ "sideQuestions": null }))?;
+            db.update_run_boundary(
+                &id,
+                &json!({ "sideQuestions": null, "sideQuestionsCompacting": null }),
+            )?;
             if let Some(chat) = chat_for_run(db, &id)? {
                 expire_attempt(db, text(&chat, "id"), &id)?;
             }
@@ -783,7 +788,19 @@ impl Service {
     /// so once its native session started.
     pub async fn side_questions_available(&self, run_id: &str, available: bool) -> Result<()> {
         self.store
-            .update_run_boundary(run_id, json!({ "sideQuestions": available }))
+            .update_run_boundary(
+                run_id,
+                json!({ "sideQuestions": available, "sideQuestionsCompacting": false }),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Native automatic compaction temporarily stops new side requests without
+    /// withdrawing the release qualification or blocking an existing request's cancellation.
+    pub async fn side_questions_compacting(&self, run_id: &str, compacting: bool) -> Result<()> {
+        self.store
+            .update_run_boundary(run_id, json!({ "sideQuestionsCompacting": compacting }))
             .await?;
         Ok(())
     }
@@ -1030,6 +1047,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_defers_pending_deliveries_but_not_withdrawals() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                for (id, status) in [
+                    ("pending", SideQuestionStatus::Pending),
+                    ("withdrawn", SideQuestionStatus::Cancelled),
+                ] {
+                    let mut entry = question("");
+                    entry.id = id.into();
+                    entry.status = status;
+                    open_question(db, &entry, "turn", "")?;
+                }
+                let mut run = json!({
+                    "id": "r",
+                    "status": "running",
+                    "chatExecution": { "messageId": "turn" },
+                    "snapshot": { "agent": { "provider": "claude" } },
+                    "sideQuestions": true,
+                    "sideQuestionsCompacting": true,
+                });
+                let held = deliveries(db, "c", &run)?;
+                assert_eq!(held.len(), 1);
+                assert_eq!(held[0]["sideQuestionCancelled"], true);
+                assert_eq!(held[0]["sideQuestionId"], "withdrawn");
+                run["sideQuestionsCompacting"] = json!(false);
+                assert_eq!(deliveries(db, "c", &run)?.len(), 2);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn ending_an_attempt_fails_its_questions_before_the_same_turn_resumes() {
         let root = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(root.path()).unwrap();
@@ -1041,7 +1093,7 @@ mod tests {
                     &json!({
                         "id": "r", "taskId": "r", "createdAt": 0, "status": "running",
                         "snapshot": { "agent": { "provider": "claude" } },
-                        "chatExecution": { "messageId": "same-turn" }, "sideQuestions": true,
+                        "chatExecution": { "messageId": "same-turn" }, "sideQuestions": true, "sideQuestionsCompacting": false,
                     }),
                     None,
                 )?;
@@ -1086,11 +1138,18 @@ mod tests {
             .to_string(),
         )
         .unwrap();
+        // The inbox entry predates compaction, which must also be cleared when
+        // a replacement attempt withdraws the old execution's announcement.
+        store
+            .update_run_boundary("r", json!({ "sideQuestionsCompacting": true }))
+            .await
+            .unwrap();
         withdraw_announcement(&store, "r", root.path())
             .await
             .unwrap();
         let run = store.run("r").await.unwrap();
         assert!(run["sideQuestions"].is_null());
+        assert!(run["sideQuestionsCompacting"].is_null());
         assert!(unavailable(Some(&run)).is_some());
         let cleaned: Value =
             serde_json::from_slice(&std::fs::read(inbox.join("messages.json")).unwrap()).unwrap();

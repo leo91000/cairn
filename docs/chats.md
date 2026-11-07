@@ -165,6 +165,10 @@ side-question panel, when its earlier questions open it, and the API and tools
 (`sideQuestionReason`) say why. No second coding agent with write access is started,
 and the conversation's own transcript never contains the side question.
 
+During automatic compaction, side questions already accepted wait for compaction
+to end; withdrawals remain available. They become unanswered if the reply ends
+first, without delaying its completion.
+
 The adapter of the running turn announces when its native session can answer a
 side question. Before that (while starting, and again after a resume, retry or
 recovery) and between replies, the action is unavailable and the API returns 409
