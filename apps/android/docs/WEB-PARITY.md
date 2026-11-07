@@ -1,5 +1,17 @@
 # Android 0.6.0 / web parity
 
+## Direct conversation read action in the Fil (2026-11-07)
+
+Conversation rows no longer have an overflow menu on web or Android. Unread
+conversations that can be acknowledged show a check button instead: “Mark … as
+read” / « Marquer comme lu : … ». One click marks the result read without opening
+the conversation; read conversations and work without a read action have no row
+button. Web reveals the check on hover or keyboard focus and keeps it visible on
+phones; Android uses its native round check action. Mission menus retain their
+existing actions. This changes presentation only: both apps still use the same
+account-scoped read operation already exposed by public MCP and
+`cairn_installation`; no authorization or contract changes.
+
 ## Folded missions and result previews in the Fil (2026-11-06)
 
 Two or more missions in a row that finished as expected and were read fold into
