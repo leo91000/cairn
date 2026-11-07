@@ -44,11 +44,12 @@ async function action(t, {
   incomplete = false,
   blockedTraceClose = false,
   numericRetirementControl = false,
+  receiptMode = 'complete',
   cancel,
 } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'cairn-action-exit-'))
   onTestFinished(() => rmSync(root, { recursive: true, force: true }))
-  for (const name of ['proof', 'publication', 'remote'])
+  for (const name of ['proof', 'publication', 'remote', 'staging'])
     mkdirSync(path.join(root, name))
   if (blockedTraceClose) {
     const result = spawnSync('python3', ['-c', 'import os,sys\nfor i in range(4): os.mkfifo(sys.argv[1]+"/fifo"+str(i))', root])
@@ -65,12 +66,23 @@ async function action(t, {
     const owned={pid:process.pid,start:fs.readFileSync('/proc/self/stat','utf8').split(') ')[1].split(' ')[19]};
     fs.writeFileSync(${JSON.stringify(path.join(root, 'publication'))}+'/'+process.env.INPUT_NAME+'.pid',JSON.stringify(owned));
     if(${JSON.stringify(sdk)}==='fail'){console.error(process.env.ACTIONS_RUNTIME_TOKEN);process.exit(9)}
-    fs.writeFileSync(${JSON.stringify(path.join(root, 'remote'))}+'/'+process.env.INPUT_NAME+'.json',JSON.stringify(p),{flag:'wx'});
-    fs.appendFileSync(process.env.GITHUB_OUTPUT,'artifact-id=123\\nartifact-digest='+'a'.repeat(64)+'\\n');
-    if(p.acquisition===${JSON.stringify(cancel ?? (sdk === 'linger' ? 'finished' : sdk === 'periodic-expiry' ? 'periodic' : 'never'))}){
+    const receipt=${JSON.stringify(path.join(root, 'remote'))}+'/'+process.env.INPUT_NAME+'.json';
+    const stagedReceipt=${JSON.stringify(path.join(root, 'staging'))}+'/'+process.env.INPUT_NAME+'.partial';
+    if(${JSON.stringify(receiptMode)}==='interrupted'&&p.acquisition==='finished'){
+      fs.writeFileSync(stagedReceipt,JSON.stringify(p).slice(0,32),{flag:'wx'});
       const fields=fs.readFileSync('/proc/self/stat','utf8').split(') ')[1].split(' ');
       fs.writeFileSync(${JSON.stringify(path.join(root, 'hanging'))},JSON.stringify({pid:process.pid,start:fields[19]}));
       setInterval(()=>{},1000);
+    }else{
+      fs.writeFileSync(stagedReceipt,JSON.stringify(p),{flag:'wx'});
+      // A cancelled or size-capped write must not look like a committed upload.
+      fs.renameSync(stagedReceipt,receipt);
+      fs.appendFileSync(process.env.GITHUB_OUTPUT,'artifact-id=123\\nartifact-digest='+'a'.repeat(64)+'\\n');
+      if(p.acquisition===${JSON.stringify(cancel ?? (sdk === 'linger' ? 'finished' : sdk === 'periodic-expiry' ? 'periodic' : 'never'))}){
+        const fields=fs.readFileSync('/proc/self/stat','utf8').split(') ')[1].split(' ');
+        fs.writeFileSync(${JSON.stringify(path.join(root, 'hanging'))},JSON.stringify({pid:process.pid,start:fields[19]}));
+        setInterval(()=>{},1000);
+      }
     }
   `)
   const waitForClose = blockedTraceClose ? `from pathlib import Path\nwhile not Path(${JSON.stringify(path.join(root, 'close-go'))}).exists(): time.sleep(.01)` : ''
@@ -185,6 +197,8 @@ async function action(t, {
     assert.ok(result, 'foreground action did not autonomously exit with public readers stopped')
     assert.equal(result.signal, blockedTraceClose ? 'SIGKILL' : null)
     const returned = JSON.parse(readFileSync(path.join(root, 'returned.json'), 'utf8'))
+    if (receiptMode === 'interrupted')
+      assert.equal(returned.publisherClosureVerified, false)
     const receipts = readdirSync(path.join(root, 'remote')).map(name => JSON.parse(readFileSync(path.join(root, 'remote', name), 'utf8')))
     const trace = existsSync(log) ? readFileSync(log) : undefined
     for (const name of readdirSync(path.join(root, 'publication')).filter(name => name.endsWith('.pid'))) {
@@ -203,6 +217,7 @@ async function action(t, {
       returned,
       checkpointDelivery: JSON.parse(readFileSync(path.join(root, 'checkpoint-delivery.json'), 'utf8')),
       receipts,
+      stagedReceipts: readdirSync(path.join(root, 'staging')),
       trace,
       elapsed: Date.now() - started,
     }
@@ -303,6 +318,18 @@ it('retains a red-capable control: numeric process.exit alone can wait on the bl
   })
   assert.equal(result.aliveAtBound, true)
   assert.equal(result.returned.exitDecision.kind, 'signal')
+})
+
+it('does not treat an interrupted local upload as a committed receipt', async (t) => {
+  const result = await action(t, {
+    code: 0,
+    cancel: 'finished',
+    receiptMode: 'interrupted',
+  })
+  assert.equal(result.code, 130)
+  assert.equal(result.returned.publisherClosureVerified, false)
+  assert.equal(result.receipts.some(receipt => receipt.acquisition === 'finished'), false)
+  assert.equal(result.stagedReceipts.length, 1)
 })
 
 for (const [name, options] of [
