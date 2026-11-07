@@ -204,6 +204,7 @@ impl ConversationLists {
 #[derive(Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct State {
+    plan_turns_enabled: bool,
     run: Value,
     chat: Value,
     artifacts: Vec<Value>,
@@ -465,6 +466,7 @@ fn read_page(
                 + crate::validation::encoded_size(&events)?
                 > PAGE_BYTES);
     let state = State {
+        plan_turns_enabled: crate::chat_plan_settings::view(db)?.enabled,
         artifacts: artifacts(db, run_id)?,
         run,
         chat,
