@@ -86,6 +86,8 @@ pub struct NodeCapabilities {
     #[serde(default)]
     pub ublk: bool,
     #[serde(default)]
+    pub vm_disks: bool,
+    #[serde(default)]
     pub native_mode_protocol: u32,
     pub cpu: u32,
     #[ts(type = "number")]

@@ -160,7 +160,7 @@
   },
   {
     "name": "get_chat_backend_migration",
-    "description": "Inspect a conversation whose agent execution backend changed. Returns its current and configured backend, authorized destination nodes, pending migration and errors. Migration preserves the same chat and files and starts a fresh engine session. environmentExpired reports that the old environment was already deleted; explicit confirmation selects an empty destination environment while retaining history, uploads and published artifacts.",
+    "description": "Preview and track an explicit backend move or native-born disk conversion. Select chatId or runId. Reports whether conversion is needed, pending work, failure/retry details and authorized destinations; expired environments require no retained disk.",
     "scope": "read",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -169,17 +169,31 @@
         "chatId": {
           "type": "string",
           "format": "uuid"
+        },
+        "runId": {
+          "type": "string",
+          "format": "uuid"
         }
       },
-      "required": [
-        "chatId"
-      ],
-      "additionalProperties": false
+      "required": [],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "chatId"
+          ]
+        },
+        {
+          "required": [
+            "runId"
+          ]
+        }
+      ]
     }
   },
   {
     "name": "migrate_chat_backend",
-    "description": "Explicitly migrate an existing conversation to the backend currently configured on its agent. Stops execution, publishes its original environment, copies home/workspaces/output into a fresh runtime and restores it on an authorized node. Keeps the same chat and history. Operating-system packages may need reinstalling; the next message starts a fresh engine session with preserved context. Failure retains the original environment. Returns immediately; poll get_chat_backend_migration. Requires explicit confirmation and installation management access; never grants additional native node authority. If environmentExpired is true, updates the authorized backend immediately without reading or restoring a deleted disk; the next message creates an empty environment. The chosen node is pinned for fresh admission; its placement preference remains editable. Confirmation and the same live management, destination and provenance checks still apply.",
+    "description": "Explicitly change a conversation or mission backend on an authorized node. Select chatId or runId and confirm. VM-created disks reuse the same disk and engine session across VM/native nodes without copying files. A native-created disk converts once before VM execution; a chat resumes on the next message and a mission continues automatically in a fresh session with its visible history. Running commands stop and system packages do not follow. Failed conversion retains the source. Poll get_chat_backend_migration. Native provenance, administrator approvals and live management grants remain enforced. An expired environment selects its new backend without reading deleted files; the next message creates an empty environment.",
     "scope": "manage",
     "destructive": true,
     "inputSchema": {
@@ -204,15 +218,48 @@
         "confirm": {
           "type": "boolean",
           "const": true
+        },
+        "runId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "waitSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3600
+        },
+        "requiredTags": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40,
+            "pattern": "^[A-Za-z0-9_:./-]+$"
+          }
         }
       },
       "required": [
-        "chatId",
         "nodeId",
         "backend",
         "confirm"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "chatId"
+          ]
+        },
+        {
+          "required": [
+            "runId"
+          ]
+        }
+      ]
     }
   }
 ]

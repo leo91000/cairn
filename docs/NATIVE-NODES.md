@@ -35,8 +35,8 @@ Start a new conversation as a trusted person. An authorized coordinator can also
 start a conversation with that native agent through its installation tools. Each
 follow-up, resume, scheduled dispatch and delegated run retains and rechecks its
 originating permission. Previously unattributed conversations and external plugin
-origins cannot silently gain host access. When changing an existing agent's backend,
-start a new conversation; environments cannot switch backend in place.
+origins cannot silently gain host access. Explicit node moves may change an
+existing conversation’s backend under those same checks; see ADR-0081.
 
 ## Switching an existing machine
 
@@ -53,13 +53,14 @@ Revoking it from there also returns conversations fixed
 to or preferring that node to automatic placement; a plain revocation keeps those
 explicit choices waiting. Switch each agent's backend on its page and allow the
 new node. Existing conversations show **Migrate this conversation…** in their
-execution-node details on web and Android. Confirm the destination to preserve the
-same conversation, history, private home, workspace and output. Execution stops;
-the next message opens a fresh engine session with the conversation context.
-System packages and running processes do not transfer; dependencies may need
-reinstalling. Migration needs a coherent source capture, S3 access, temporary
-manager disk space (including the logical destination disk budget), fakeroot and e2fsprogs. An interrupted or
-failed migration retains the source and stays paused; retry from the same action.
+execution-node details on web and Android. Confirm the destination to preserve
+the same conversation, history, private home, workspace and output. A VM-created
+disk reuses the same ext4 filesystem and engine session in both directions,
+without copying its files. A native-created disk needs one physical conversion
+before VM execution: chats wait for the next message; active missions continue
+automatically in a fresh session with their visible history. System packages and
+running processes do not follow. Only physical conversion needs temporary manager
+space, fakeroot and e2fsprogs. Failure retains the source and permits retry.
 Finally run the uninstall command shown for the previous runtime after the
 conversations you want to keep have migrated.
 
@@ -73,8 +74,9 @@ configure its native trust when applicable, and grant agents through `update_age
 Only after the replacement is ready, revoke the old identity with
 `releasePlacements: true`. Plain revocation preserves existing placement choices.
 `get_chat_backend_migration` previews the saved/profile backend difference and
-authorized destinations. `migrate_chat_backend` requires `chatId`, `nodeId`, the
-profile's current `backend` and `confirm: true`; it returns `status: "migrating"`.
+authorized destinations. `migrate_chat_backend` accepts either `chatId` or `runId`, plus `nodeId`, the
+destination `backend` and `confirm: true`. VM disks use an ordinary fenced move;
+native-born disks return `status: "migrating"` while conversion runs.
 Poll the preview until `pending` is false and `required` is false. An `error` with
 `required: true` means the source remains and migration can be retried. These tools
 neither install nor uninstall a runtime on the host.
@@ -125,6 +127,9 @@ Conversations use their own lazy [rootless Docker enclave](NATIVE-DOCKER.md) for
 builds, containers and Compose. Published ports are private to that conversation's
 network; GPU containers and privileged Docker features are unavailable. Images,
 build cache and named volumes follow the durable environment's native storage.
+On a VM-created disk, the native rootless store is separate from the VM's rootful
+Docker store. Both persist across moves; each backend sees its own images, cache
+and named volumes.
 Graphics tests must use headless/offscreen APIs. Cairn bundles the coding engines,
 including Codex's `codex-code-mode-host` companion beside its executable, Node.js
 and `gh`; other toolchains use this node's installed binaries/libraries or

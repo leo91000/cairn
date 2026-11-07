@@ -1114,6 +1114,7 @@ async fn node_storage_layouts() {
                 },
                 kvm: n % 2 != 0,
                 ublk: true,
+                vm_disks: false,
                 cpu: 16,
                 memory_mi_b: 65536,
                 disk_mi_b: 262144,

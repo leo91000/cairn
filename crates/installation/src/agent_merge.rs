@@ -96,19 +96,24 @@ pub(crate) fn merge(
     let target = required(db.agent(target_id)?, "Destination agent not found")?;
     let source_snapshot = serde_json::to_value(&source)?;
     let target_snapshot = serde_json::to_value(&target)?;
-    if crate::native::policy::supports(&source_snapshot, "native")
-        || crate::native::policy::supports(&target_snapshot, "native")
-    {
-        return Err(Error::conflict(
-            "Agents permitting native execution cannot be merged. Their execution approvals are tied to the agent.",
-        ));
-    }
     if !covers(&target_snapshot, &source_snapshot)
         || !nodes_covered(&target_snapshot, &source_snapshot)
     {
         return Err(Error::conflict(
             "The destination must already cover all source access, including nodes.",
         ));
+    }
+    for node in db.nodes_boundary()? {
+        if crate::native::policy::supports(&source_snapshot, "native")
+            && node["revoked"] != true
+            && crate::native::policy::node_native(&node)
+            && crate::nodes::agent_allows(&source_snapshot, text(&node, "id"))
+            && !crate::nodes::native_mode::reviewed(&node, &target_snapshot)
+        {
+            return Err(Error::conflict(
+                "The destination needs its own administrator approval before merging.",
+            ));
+        }
     }
     for grants in [
         crate::agent_grants::plugins,
@@ -144,6 +149,7 @@ pub(crate) fn merge(
     if runs.iter().any(|run| {
         crate::run_status::RunStatus::of(run).is_some_and(crate::run_status::RunStatus::is_active)
             || run["recoveryPending"] == true
+            || crate::backend_migration::pending(run)
             || executing.iter().any(|id| run["id"] == *id)
     }) {
         return Err(Error::conflict(

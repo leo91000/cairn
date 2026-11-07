@@ -10,6 +10,7 @@ pub(crate) mod disk;
 pub mod docker;
 mod home;
 mod identity;
+pub(crate) mod idmap;
 pub(crate) mod limits;
 mod mode;
 pub mod policy;

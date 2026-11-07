@@ -95,10 +95,10 @@ async fn retained_cache_accounting_preserves_eviction_fences_and_queued_resumes(
         common::run_fixture::change_run_fixture(db, "run-0", &json!({ "status": "running", "finishedAt": null }))?;
         common::run_fixture::change_run_fixture(db, "run-1", &json!({ "recoveryPending": true }))?;
         db.update_run_placement("run-2", PlacementChanges {
-            move_request: Some(Some(MoveRequest {
+            move_request: Some(Some(MoveRequest { backend: None, source_read_ready: None,
                 reservation: "destination-attempt".into(), node_id: nodes::LOCAL_NODE_ID.into(),
                 resources: serde_json::from_value(json!({ "cpu": 1, "memoryMiB": 128, "diskMiB": 128 }))?,
-                requested_at: None, automatic: false, idle: None, required_tags: None, backup_id: None,
+                requested_at: None, automatic: false, idle: None, idle_status: None, required_tags: None, backup_id: None,
             })),
             ..Default::default()
         })?;

@@ -220,6 +220,10 @@
         "ublk": {
           "default": false,
           "type": "boolean"
+        },
+        "vmDisks": {
+          "default": false,
+          "type": "boolean"
         }
       },
       "required": [
