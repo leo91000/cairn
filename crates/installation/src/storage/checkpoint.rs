@@ -362,6 +362,7 @@ impl SealedCapture {
         manifest["runtime"] =
             serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
         if manifest["runtime"]["backend"] == "native"
+            && manifest["runtime"]["disk"] != "vm"
             && matches!(
                 manifest["runtime"]["storage"].as_str(),
                 Some("ublk") | Some(crate::native::block::STORAGE)

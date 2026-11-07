@@ -39,7 +39,7 @@ const props = defineProps<{ run: Run }>()
 // Lets hosts drop the row around the chip while it renders nothing.
 const emit = defineEmits<{ relevance: [relevant: boolean] }>()
 const nodes = ref<ExecutionNode[]>([])
-const nodeOptions = computed(() => nodes.value.map(node => ({ value: node.id, label: node.name })))
+const nodeOptions = computed(() => nodes.value.map(node => ({ value: node.id, label: `${node.name} · ${node.capabilities.backend === 'native' ? 'Native' : 'Firecracker VM'}` })))
 const labels: Record<string, string> = {
   'pausing': 'Pausing execution',
   'saving': 'Saving the environment',
@@ -102,8 +102,9 @@ const relevant = computed(() => (!!props.run.nodeId && props.run.nodeId !== LOCA
   || !!(props.run.nodeState || props.run.movementError || props.run.restoredAt || props.run.capacityWaitUntil || props.run.backup?.error))
 watch(relevant, value => emit('relevance', value), { immediate: true })
 const destinations = computed(() => nodes.value.filter(candidate => candidate.id !== props.run.nodeId))
-const destinationOptions = computed(() => destinations.value.map(node => ({ value: node.id, label: node.name })))
-const canMove = computed(() => !!props.run.sessionId && !busy.value && !!destination.value && destination.value !== props.run.nodeId && ['running', 'succeeded'].includes(props.run.status) && !props.run.nodeState)
+const destinationOptions = computed(() => destinations.value.map(node => ({ value: node.id, label: `${node.name} · ${node.capabilities.backend === 'native' ? 'Native' : 'Firecracker VM'}` })))
+const nativeToVm = computed(() => props.run.executionBackend === 'native' && nodes.value.find(node => node.id === destination.value)?.capabilities.backend === 'firecracker')
+const canMove = computed(() => (!!props.run.sessionId || nativeToVm.value) && !busy.value && !!destination.value && destination.value !== props.run.nodeId && (['running', 'succeeded'].includes(props.run.status) || (nativeToVm.value && ['failed', 'cancelled'].includes(props.run.status))) && !props.run.nodeState)
 const changed = computed(() => mode.value !== savedPlacement.value.mode || (mode.value !== 'automatic' && selection.value !== savedPlacement.value.selection))
 const dirtyBytes = computed(() => props.run.storage?.dirtyBytes || 0)
 const localBytes = computed(() => props.run.storage?.localBytes)
@@ -504,7 +505,7 @@ onUnmounted(() => {
           :disabled="busy"
         />
         <p class="m-0! mt-2!">
-          Reserves the destination, pauses the conversation, transfers its environment and resumes it there. Running commands are interrupted. The disk cannot shrink.
+          Reserves the destination, pauses the conversation and resumes it there. VM-created disks keep their files and engine session across VM and native nodes. An environment created natively needs a one-time conversion before a VM can run it: chats wait for the next message, missions resume automatically in a fresh session. Running commands stop; system packages do not follow. The disk cannot shrink.
         </p>
         <div class="mt-3 flex justify-end">
           <UiButton size="small" :disabled="!canMove" type="submit">

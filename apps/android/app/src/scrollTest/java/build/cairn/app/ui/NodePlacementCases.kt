@@ -1395,7 +1395,11 @@ abstract class NodePlacementCases {
             }
             compose.onNodeWithText("Migrer cette conversation…").performScrollTo().performClick()
             compose
-                .onNodeWithText("Le prochain message ouvre une nouvelle session", substring = true)
+                .onNodeWithText(
+                    if (expired) "Le prochain message ouvre une nouvelle session"
+                    else "sans copie des fichiers",
+                    substring = true,
+                )
                 .assertExists()
             if (expired) {
                 compose
@@ -1428,7 +1432,7 @@ abstract class NodePlacementCases {
             elapse(2000)
             compose.waitUntil(10000) {
                 compose
-                    .onAllNodesWithText("Migration terminée.", substring = true)
+                    .onAllNodesWithText("Mode d’exécution changé.", substring = true)
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }

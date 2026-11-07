@@ -20,7 +20,7 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
-const MOVE_DESCRIPTION: &str = "Move this conversation to an authorized node. Call list_nodes first to see ids, tags, shared budgets and free slots. Failure leaves the current conversation running. Success saves, pauses and resumes on the destination, interrupting running commands. Optional waitSeconds respects the configured wait limit.";
+const MOVE_DESCRIPTION: &str = "Move this conversation to an authorized node. VM-created disks keep their disk and engine session across VM/native nodes without copying files. A native-born disk converts once before VM execution: chats resume on the next message; missions continue automatically in a fresh session with their history. Running commands stop and system packages do not follow. Call list_nodes first to see ids, tags, shared budgets and free slots. Failure leaves the current conversation running. Success saves, pauses and resumes on the destination, interrupting running commands. Optional waitSeconds respects the configured wait limit.";
 const LIST_NODES_DESCRIPTION: &str = "List authorized execution nodes with their tags, shared CPU/RAM/disk budgets, slot availability and current resource pressure. Use a returned node id with move_to_node. Resources are shared automatically; agents do not request allocations.";
 /// A requested move waits this long for the conversation to settle before pausing it.
 const PAUSE_DELAY_MS: i64 = 2000;
@@ -60,6 +60,8 @@ pub fn list_tool() -> Value {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct NodeSummary<'a> {
+    backend: &'a Value,
+    vm_disks: bool,
     id: &'a Value,
     name: &'a Value,
     tags: Vec<&'a Value>,
@@ -81,6 +83,8 @@ struct NodeSummary<'a> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MoveRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend: Option<&'a str>,
     reservation: &'a str,
     node_id: &'a Value,
     resources: &'a Value,
@@ -90,6 +94,8 @@ struct MoveRequest<'a> {
     automatic: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     idle: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idle_status: Option<RunStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     required_tags: Option<&'a Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -114,6 +120,8 @@ pub async fn list(s: &Service, run: &Value) -> Result<Value> {
         .filter(|node| node["revoked"] != true && crate::service::allowed(scope, text(node, "id")))
         .map(|node| {
             serde_json::to_value(NodeSummary {
+                backend: &node["capabilities"]["backend"],
+                vm_disks: node["capabilities"]["vmDisks"] == true,
                 id: &node["id"],
                 name: &node["name"],
                 tags: super::node_tags(node).collect(),
@@ -154,6 +162,8 @@ pub(crate) struct Authorization {
     management_authorization: Option<crate::authorization::Authorization>,
     cancellation: CancellationToken,
     admitted: Arc<AtomicBool>,
+    origin: Option<crate::native::policy::Origin>,
+    workspace_bearer: Option<String>,
 }
 
 impl Default for Authorization {
@@ -173,7 +183,22 @@ impl Authorization {
             management_authorization: None,
             cancellation: CancellationToken::new(),
             admitted: Arc::new(AtomicBool::new(false)),
+            origin: None,
+            workspace_bearer: None,
         }
+    }
+
+    pub(crate) fn workspace_bearer(&self) -> Option<String> {
+        self.workspace_bearer.clone()
+    }
+
+    pub(crate) fn management_authorization(&self) -> Option<crate::authorization::Authorization> {
+        self.management_authorization.clone()
+    }
+
+    pub(crate) fn with_origin(mut self, origin: crate::native::policy::Origin) -> Self {
+        self.origin = Some(origin);
+        self
     }
 
     pub(crate) fn with_management_authorization(
@@ -185,10 +210,11 @@ impl Authorization {
     }
 
     pub(crate) fn workspace(bearer: &str, run: &Value) -> Self {
-        let bearer = bearer.to_owned();
+        let retained_bearer = bearer.to_owned();
+        let bearer = retained_bearer.clone();
         let run_id = text(run, "id").to_owned();
         let turn = crate::waits::execution_id(run).clone();
-        Self::new(
+        let mut authorization = Self::new(
             move |db| {
                 let current = crate::project_workspaces::authorize_in(db, &bearer)?;
                 if text(&current, "id") != run_id || *crate::waits::execution_id(&current) != turn {
@@ -199,7 +225,9 @@ impl Authorization {
                 Ok(())
             },
             None,
-        )
+        );
+        authorization.workspace_bearer = Some(retained_bearer);
+        authorization
     }
 
     pub(crate) fn check(&self, db: &Db<'_>) -> Result<()> {
@@ -439,13 +467,48 @@ async fn requested_inner(
         return Err(Error::bad("Capacity wait exceeds the configured maximum."));
     }
     validate_destination(args)?;
-    let source = (!by_agent).then(crate::native::policy::origin);
+    let checkpoint = super::checkpoint(s, text(run, "id")).await?;
+    let destination = if let Some(node) = args["nodeId"].as_str() {
+        s.node_boundary(node).await?
+    } else {
+        Value::Null
+    };
+    let from = checkpoint["prepared"]["backend"].as_str();
+    let target = destination["capabilities"]["backend"].as_str();
+    let change = target.filter(|target| from.is_some_and(|from| from != *target));
+    if change == Some("firecracker") && !super::vm_disk(&checkpoint) {
+        return s
+            .convert_for_vm(run, args, authorize.clone(), by_agent)
+            .await;
+    }
+    if change == Some("native") {
+        crate::native::policy::refresh(s).await?;
+    }
+    let source = if by_agent {
+        None
+    } else {
+        Some(
+            authorize
+                .origin
+                .clone()
+                .unwrap_or_else(crate::native::policy::origin),
+        )
+    };
     let mut proposed = run.clone();
     if let Some(source) = &source {
-        let (record, source) = (run.clone(), source.clone());
+        let (record, source, crossing) = (run.clone(), source.clone(), change.is_some());
         let grant = s
             .store
-            .read(move |db| crate::native::policy::run_grant(db, &record, &source))
+            .read(move |db| {
+                if crossing {
+                    let agent = db
+                        .agent_snapshot(super::run_agent(&record))?
+                        .unwrap_or_default();
+                    crate::backend_migration::migration_grant(db, &record, &agent, &source)
+                } else {
+                    crate::native::policy::run_grant(db, &record, &source)
+                }
+            })
             .await?;
         crate::native::policy::apply(&mut proposed, &grant);
     }
@@ -454,11 +517,15 @@ async fn requested_inner(
     if run["moveRequest"].is_object() {
         return Err(Error::conflict("A movement is already pending."));
     }
-    let checkpoint = super::checkpoint(s, run_id).await?;
     let deadline = now() + wait as i64 * 1000;
     // A finished conversation with a VM session moves without being resumed.
-    let idle = run["status"] == RunStatus::Succeeded
-        && run["sessionId"].is_string()
+    let stopped_crossing = change.is_some()
+        && matches!(
+            RunStatus::of(run),
+            Some(RunStatus::Failed | RunStatus::Cancelled)
+        );
+    let idle = ((run["status"] == RunStatus::Succeeded && run["sessionId"].is_string())
+        || stopped_crossing)
         && matches!(
             checkpoint["prepared"]["backend"].as_str(),
             Some("firecracker" | "native")
@@ -467,6 +534,11 @@ async fn requested_inner(
     guard.until = Some(deadline);
     let mut selecting = run.clone();
     selecting["placementTransition"] = true.into();
+    if let Some(to) = change {
+        selecting["snapshot"]["agent"]["access"]["backend"] = to.into();
+        selecting["pinnedNodeId"] = Value::Null;
+        selecting["preferredNodeId"] = Value::Null;
+    }
     selecting["targetNodeId"] = args["nodeId"].clone();
     selecting["requiredTags"] = args
         .get("requiredTags")
@@ -484,17 +556,19 @@ async fn requested_inner(
     )
     .await?;
     let move_request = serde_json::to_value(MoveRequest {
+        backend: change,
         reservation: &reservation,
         node_id: &selected["nodeId"],
         resources: &selected["resources"],
         requested_at: Some(now()),
         automatic: false,
         idle: Some(idle),
+        idle_status: idle.then(|| RunStatus::of(run).unwrap()),
         required_tags: Some(&selecting["requiredTags"]),
         backup_id: None,
     })?;
     let expected = if idle {
-        RunStatus::Succeeded
+        RunStatus::of(run).unwrap()
     } else {
         RunStatus::Running
     };
@@ -550,9 +624,10 @@ async fn wait_for_capacity(
 ) -> Result<Value> {
     loop {
         let current = s.store.run(run_id).await?;
-        let active = current["cancelRequestedAt"].is_null()
-            && (current["status"] == RunStatus::Running
-                || (idle && current["status"] == RunStatus::Succeeded));
+        let stopped = idle && current["status"] == selecting["status"];
+        let active = (current["cancelRequestedAt"].is_null()
+            || stopped && current["status"] == RunStatus::Cancelled)
+            && (current["status"] == RunStatus::Running || stopped);
         if !active {
             set_capacity_wait(s, run_id, None).await?;
             return Err(Error::conflict("Conversation is no longer active."));
@@ -622,6 +697,7 @@ async fn record_request(
             if current["environmentState"].is_string()
                 || current["moveRequest"].is_object()
                 || !current["cancelRequestedAt"].is_null()
+                    && !(idle && expected == RunStatus::Cancelled)
                 || current["status"] != expected
                 || (expected == RunStatus::Queued && current["pinnedNodeId"].is_string())
             {
@@ -630,9 +706,25 @@ async fn record_request(
                 ));
             }
             if let Some(source) = source {
-                crate::native::policy::authorize_run_in(db, &owner, &source)?;
+                if move_request["backend"].is_string() {
+                    let agent = db
+                        .agent_snapshot(super::run_agent(&current))?
+                        .unwrap_or_default();
+                    let grant =
+                        crate::backend_migration::migration_grant(db, &current, &agent, &source)?;
+                    if let Some(mut chat) = crate::chats::chat_for_run(db, &owner)? {
+                        crate::native::policy::apply(&mut chat, &grant);
+                        db.save_conversation_boundary(&chat)?;
+                    }
+                    db.update_run_boundary(&owner, &grant)?;
+                } else {
+                    crate::native::policy::authorize_run_in(db, &owner, &source)?;
+                }
             }
-            let directed = db.run(&owner)?.unwrap_or_default();
+            let mut directed = db.run(&owner)?.unwrap_or_default();
+            if let Some(to) = move_request["backend"].as_str() {
+                directed["snapshot"]["agent"]["access"]["backend"] = to.into();
+            }
             let destination = text(&move_request, "nodeId");
             let agent = db
                 .agent_snapshot(super::run_agent(&directed))?
@@ -658,6 +750,9 @@ async fn record_request(
                 ..Default::default()
             };
             if idle || expected == RunStatus::Queued {
+                if idle {
+                    patch.cancel_requested_at = Some(None);
+                }
                 patch.status = Some(RunStatus::Queued);
                 patch.recovery_pending = Some(true);
             }
@@ -783,6 +878,7 @@ pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
         return Ok(false);
     }
     let movement = serde_json::to_value(MoveRequest {
+        backend: None,
         reservation: &reservation,
         node_id: &selected["nodeId"],
         resources: &selected["resources"],
@@ -791,6 +887,7 @@ pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
         // restoring an older published recovery point.
         automatic: false,
         idle: None,
+        idle_status: None,
         required_tags: None,
         backup_id: None,
     })?;
@@ -878,12 +975,14 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
         return Ok(Recovery::Waiting);
     };
     let movement = serde_json::to_value(MoveRequest {
+        backend: None,
         reservation: &reservation,
         node_id: &selected["nodeId"],
         resources: &selected["resources"],
         requested_at: None,
         automatic: true,
         idle: None,
+        idle_status: None,
         required_tags: None,
         backup_id: Some(&backup["id"]),
     })?;
@@ -978,6 +1077,31 @@ pub(crate) async fn advance_for_attempt(
             "Execution attempt changed during recovery.",
         ));
     }
+    if current["moveRequest"]["backend"].is_string() {
+        let owner = run_id.to_owned();
+        let expected = current["moveRequest"].clone();
+        s.store
+            .transaction(move |db| {
+                let run = db
+                    .run(&owner)?
+                    .ok_or_else(|| Error::not_found("Conversation removed."))?;
+                if run["moveRequest"] != expected {
+                    return Err(Error::conflict("Movement changed while fencing."));
+                }
+                let mut request: super::run_placement::MoveRequest =
+                    serde_json::from_value(expected)?;
+                request.source_read_ready = Some(true);
+                db.update_run_placement(
+                    &owner,
+                    super::run_placement::PlacementChanges {
+                        move_request: Some(Some(request)),
+                        ..Default::default()
+                    },
+                )
+            })
+            .await?;
+        current = s.store.run(run_id).await?;
+    }
     match transfer(s, &current).await {
         Ok(backup) => resume_at_destination(s, &current, &backup, expected_fenced.as_ref()).await?,
         Err(error) => fail_transfer(s, &current, &error).await?,
@@ -1020,7 +1144,11 @@ async fn transfer(s: &Service, current: &Value) -> Result<Value> {
     super::placement::materialize(s, text(movement, "reservation")).await?;
     let source = super::checkpoint(s, run_id).await?;
     if source["nodeId"] != movement["nodeId"] || movement["automatic"] == true {
-        super::restore::start(s, current, text(movement, "nodeId"), &backup).await?;
+        let mut destination = current.clone();
+        if let Some(to) = movement["backend"].as_str() {
+            destination["snapshot"]["agent"]["access"]["backend"] = to.into();
+        }
+        super::restore::start(s, &destination, text(movement, "nodeId"), &backup).await?;
     }
     Ok(backup)
 }
@@ -1042,7 +1170,12 @@ async fn fail_transfer(s: &Service, current: &Value, error: &Error) -> Result<()
         ..Default::default()
     };
     if idle {
-        patch.status = Some(RunStatus::Succeeded);
+        patch.status = Some(
+            current["moveRequest"]["idleStatus"]
+                .as_str()
+                .and_then(RunStatus::parse)
+                .unwrap_or(RunStatus::Succeeded),
+        );
     }
     let owner = run_id.to_owned();
     s.store
@@ -1117,11 +1250,14 @@ async fn resume_at_destination(
         movement["reservation"].clone()
     };
     let status = if idle {
-        RunStatus::Succeeded
+        movement["idleStatus"]
+            .as_str()
+            .and_then(RunStatus::parse)
+            .unwrap_or(RunStatus::Succeeded)
     } else {
         RunStatus::Queued
     };
-    let patch = crate::runs::RunChanges {
+    let mut patch = crate::runs::RunChanges {
         account_wait_reason: Some(None),
         session_id: Some(serde_json::from_value(backup["sessionId"].clone())?),
         recovery_pending: Some(!idle),
@@ -1169,6 +1305,22 @@ async fn resume_at_destination(
                 && let Some(attempt) = saved.runner_id()
             {
                 checkpoint["moveRecoveryReservation"] = attempt.into();
+            }
+            if let Some(to) = movement["backend"].as_str() {
+                let node_record = db.node_boundary(text(&movement, "nodeId"))?.unwrap_or_default();
+                let mut prospective = current.clone();
+                prospective["snapshot"]["agent"]["access"]["backend"] = to.into();
+                if crate::native::policy::node_native(&node_record) && !crate::native::policy::allows(db, &prospective, &node_record)? { return Err(Error::forbidden("Destination authority changed.")); }
+                checkpoint["prepared"]["diskFormat"] = "vm".into();
+                checkpoint["prepared"]["backend"] = to.into();
+                checkpoint["runtimeId"] = node_record["runtimeId"].clone();
+                patch.snapshot = Some(serde_json::from_value(prospective["snapshot"].clone())?);
+                let placement = patch.placement.as_mut().unwrap();
+                placement.execution_backend = Some(Some(to.to_owned()));
+                placement.pinned_node_id = Some(None);
+                placement.preferred_node_id = Some(None);
+                let boundary = patch.boundary.as_mut().unwrap();
+                boundary["requiredRuntime"] = Value::Null;
             }
             checkpoint["nodeId"] = node;
             checkpoint["process"] = Value::Null;

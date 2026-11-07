@@ -7,6 +7,7 @@ export interface NodeCapabilities {
   backend: NodeBackend
   kvm: boolean
   ublk: boolean
+  vmDisks: boolean
   nativeModeProtocol: number
   cpu: number
   memoryMiB: number

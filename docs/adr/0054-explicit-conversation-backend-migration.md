@@ -1,3 +1,5 @@
+> Update 2026-11-07: [ADR-0081](0081-move-vm-disks-between-execution-backends.md) permits explicit cross-backend node moves. VM-created disks are mounted directly by authorized native controllers; only native-created disks need physical conversion before VM execution. Automatic placement and priorities remain as defined in ADR-0073.
+
 > Statut : Le support du layout paired est abandonné ; les migrations explicites entre le disque ext4 plat des VM et le mode natif restent applicables.
 
 # Existing conversations can explicitly migrate between Linux backends

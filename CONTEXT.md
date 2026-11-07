@@ -5,7 +5,13 @@ Cairn permet de conduire des conversations avec des agents et de retrouver leur 
 ## Language
 
 **Placement automatique** :
-Le choix d’un node autorisé et disponible pour une nouvelle conversation, qu’il exécute des VM ou des processus natifs. Le type d’environnement choisi est conservé pendant la conversation, sauf migration explicite.
+Le choix d’un node autorisé et disponible pour une nouvelle conversation, qu’il exécute des VM ou des processus natifs. Le type d’environnement choisi est conservé pendant la conversation, sauf déplacement explicite vers une node de l’autre type.
+
+**Bascule d’environnement** :
+Le passage explicite d’une conversation entre VM et exécution native, en conservant ses fichiers et son historique. Elle ne change pas les priorités de placement de l’agent.
+
+**Conversion d’environnement** :
+La préparation nécessaire pour qu’un environnement créé en natif puisse reprendre dans une VM. La conversation conserve son historique et ses fichiers, avec une nouvelle session du moteur.
 
 **Priorité de nodes d’un agent** :
 L’ordre de préférence propre à un agent pour placer ses nouvelles conversations. Un node prioritaire indisponible laisse la place au suivant, puis aux autres nodes autorisés. Une préférence ne donne aucun droit d’accès.

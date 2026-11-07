@@ -338,17 +338,28 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
     val others = placement.nodes.filter { it.id != run.nodeId }
+    val nativeToVm =
+        run.executionBackend == "native" &&
+            others.find { it.id == destination }?.capabilities?.backend == "firecracker"
     if (moving)
         DetailSheet("Déplacer vers une autre node", { moving = false }) {
-            Choice("Destination", destination, others.map { it.id to it.name }) {
+            Choice(
+                "Destination",
+                destination,
+                others.map {
+                    it.id to
+                        "${it.name} · ${if (it.capabilities.backend == "native") "Natif" else "VM Firecracker"}"
+                },
+            ) {
                 if (!busy) destination = it
             }
             TextButton(
                 enabled =
                     !busy &&
                         destination.isNotEmpty() &&
-                        run.status in listOf("running", "succeeded") &&
-                        run.sessionId != null &&
+                        (run.status in listOf("running", "succeeded") ||
+                            nativeToVm && run.status in listOf("failed", "cancelled")) &&
+                        (run.sessionId != null || nativeToVm) &&
                         run.nodeState == null,
                 onClick = {
                     request(
@@ -364,7 +375,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                 Text("Déplacer maintenant")
             }
             Text(
-                "Réserve la destination, suspend la conversation, transfère son environnement puis la reprend là-bas. Les commandes en cours sont interrompues. Les ressources sont partagées par les slots de la node.",
+                "Les disques créés en VM gardent leurs fichiers et leur session entre VM et natif sans copie. Un disque créé en natif nécessite une conversion unique vers une VM : le chat attend le prochain message, une mission reprend automatiquement dans une nouvelle session avec son historique. Les commandes s’arrêtent ; les outils système dépendent de la destination.",
                 style = MaterialTheme.typography.bodySmall,
             )
             saved?.let { Text(it) }

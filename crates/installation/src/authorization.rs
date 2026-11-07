@@ -216,6 +216,31 @@ impl Authorization {
         Ok(self)
     }
 
+    /// Retain only this workspace execution's accepted conversion, never a
+    /// general installation-management grant. The proof stays revocable.
+    pub(crate) fn workspace_move<'a>(
+        s: &'a Service,
+        bearer: &'a str,
+        run: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, Result<Self>> {
+        Box::pin(async move {
+            let job = jobs::Accepted::capture_workspace_move(s, bearer, run).await?;
+            Ok(Self {
+                job: Some(job),
+                ..Self::new(s, |_| Ok(()))
+            })
+        })
+    }
+
+    pub(crate) fn bind_self_move(&self, run: &str, operation: &str) -> Result<()> {
+        self.job
+            .as_ref()
+            .ok_or_else(|| {
+                Error::forbidden("A self-conversion needs an accepted execution proof.")
+            })?
+            .bind_self_move(run, operation)
+    }
+
     pub(crate) async fn cancelled(&self) {
         match &self.job {
             Some(job) => job.cancelled().await,

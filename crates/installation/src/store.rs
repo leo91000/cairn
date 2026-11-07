@@ -36,7 +36,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 27;
+pub(crate) const DATABASE_VERSION: i64 = 28;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -223,6 +223,23 @@ impl Store {
         }
         if !fresh && version == 26 {
             crate::chats::migration::plan_requests(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 27 {
+            let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if tx.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))? == 27 {
+                let has_capability = tx
+                    .prepare("PRAGMA table_info(nodes)")?
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                    .iter()
+                    .any(|name| name == "vm_disks");
+                if !has_capability {
+                    tx.execute_batch("ALTER TABLE nodes ADD COLUMN vm_disks INTEGER NOT NULL DEFAULT 0 CHECK(vm_disks IN (0,1));")?;
+                }
+                tx.pragma_update(None, "user_version", 28)?;
+            }
+            tx.commit()?;
         }
         if fresh {
             let tx = writer.transaction()?;
@@ -1341,6 +1358,56 @@ pub fn merge(value: &mut Value, patch: &Value) {
 mod schema_tests {
     use super::*;
     use crate::agent_fixture::StoreAgentFixture;
+
+    #[tokio::test]
+    async fn layout_twenty_seven_upgrades_capabilities_without_adopting_unreported_vm_support() {
+        use crate::node_fixture::StoreNodeFixture;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        let node = crate::config::id();
+        store
+            .put_node_fixture(json!({ "id": node, "name": "Retained node" }))
+            .await
+            .unwrap();
+        drop(store);
+        let connection = Connection::open(root.path().join("manager.db")).unwrap();
+        connection
+            .execute_batch("ALTER TABLE nodes DROP COLUMN vm_disks; PRAGMA user_version=27;")
+            .unwrap();
+        drop(connection);
+        let upgraded = Store::open(root.path()).unwrap();
+        let mut retained = upgraded.node_boundary(&node).await.unwrap().unwrap();
+        assert_eq!(retained["name"], "Retained node");
+        assert_eq!(retained["capabilities"]["vmDisks"], false);
+        retained["capabilities"]["vmDisks"] = true.into();
+        upgraded.put_node_fixture(retained).await.unwrap();
+        drop(upgraded);
+        let reopened = Store::open(root.path()).unwrap();
+        assert_eq!(
+            reopened.node_boundary(&node).await.unwrap().unwrap()["capabilities"]["vmDisks"],
+            true
+        );
+        let connection = Connection::open(root.path().join("manager.db")).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            28
+        );
+        assert_eq!(
+            connection
+                .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        assert!(
+            !connection
+                .prepare("PRAGMA foreign_key_check")
+                .unwrap()
+                .exists([])
+                .unwrap()
+        );
+    }
 
     #[test]
     fn wal_contention_has_one_timeout_budget_and_can_be_retried_after_release() {

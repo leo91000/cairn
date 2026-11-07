@@ -29,6 +29,10 @@ pub struct RunPlacement {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MoveRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_read_ready: Option<bool>,
     pub reservation: String,
     pub node_id: String,
     pub resources: NodeResources,
@@ -38,6 +42,8 @@ pub struct MoveRequest {
     pub automatic: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_status: Option<cairn_contracts::RunStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required_tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
