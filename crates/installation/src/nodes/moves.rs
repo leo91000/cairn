@@ -268,6 +268,10 @@ impl Authorization {
         self.cancellation.cancel();
     }
 
+    pub(crate) fn mark_admitted(&self) {
+        self.admitted.store(true, Ordering::Release);
+    }
+
     pub(crate) fn admitted(&self) -> bool {
         self.admitted.load(Ordering::Acquire)
     }

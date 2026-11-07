@@ -30,6 +30,25 @@ pub(crate) fn pending(run: &Value) -> bool {
     run["backendMigration"]["process"] == PROCESS.as_str()
 }
 
+/// An explicit stop applies to the conversion even after its engine has exited.
+/// Internal fencing never invokes this operation.
+pub(crate) fn cancel_in(db: &Db<'_>, run_id: &str) -> Result<bool> {
+    let Some(run) = db.run(run_id)? else {
+        return Ok(false);
+    };
+    if !pending(&run) {
+        return Ok(false);
+    }
+    let mut migration = run["backendMigration"].clone();
+    migration["cancelledAt"] = now().into();
+    migration["resumeMission"] = false.into();
+    db.update_run_boundary(
+        run_id,
+        &json!({"backendMigration": migration, "resumeMissionAfterConversion": false}),
+    )?;
+    Ok(true)
+}
+
 /// Call only while holding the installation and in-process storage locks.
 fn migration_staging(data_dir: &Path) -> Result<PathBuf> {
     let root = data_dir.join("backend-migration-staging");
@@ -503,6 +522,7 @@ impl Service {
         } else {
             crate::authorization::Authorization::new(self, move |db| guard.check(db))
         };
+        let auth = auth.with_movement_admission(self, authorize.clone());
         let key = chat_id(self, text(run, "id")).await?;
         let source = if by_agent {
             Origin::Stored(run.clone())
@@ -511,6 +531,7 @@ impl Service {
         };
         let node_id = args["nodeId"].clone();
         self.migrate_backend(json!({ "chatId": key, "backend": "firecracker", "nodeId": node_id, "confirm": true, "requiredTags": args["requiredTags"], "waitSeconds": args["waitSeconds"].as_u64().unwrap_or(0) }), auth, source, by_agent).await?;
+        authorize.mark_admitted();
         Ok(json!({ "status": "migrating", "nodeId": node_id }))
     }
 
@@ -626,21 +647,30 @@ impl Service {
                 && previous["runtimeId"] == node["runtimeId"]
                 && backend(&previous["snapshot"]["agent"]) == backend(&agent);
             let reservation = previous["reservationId"].as_str().map_or_else(|| migration.clone(), str::to_owned);
+            let resume_mission = chat["mission"] == true
+                && (RunStatus::of(&run).is_some_and(RunStatus::is_active)
+                    || previous["resumeMission"] == true
+                    || run["resumeMissionAfterConversion"] == true);
+            let mission = if resume_mission {
+                Some(required(db.mission(text(&run, "taskId"))?, "The mission was removed before conversion." )?)
+            } else { None };
             let migration = json!({
+                "missionId": mission.as_ref().map(|mission| mission.id.to_string()),
+                "missionCreatedAt": mission.as_ref().map(|mission| mission.created_at),
                 "convertedBackup": if reusable { previous["convertedBackup"].clone() } else { Value::Null },
                 "id": migration,
                 "process": PROCESS.as_str(),
                 "sourceReadReady": false,
                 "selfMove": own_move,
                 "requiredTags": required_tags,
-                "resumeMission": chat["mission"] == true && (RunStatus::of(&run).is_some_and(RunStatus::is_active) || previous["resumeMission"] == true || run["resumeMissionAfterConversion"] == true),
+                "resumeMission": resume_mission,
                 "nodeId": node["id"],
                 "runtimeId": node["runtimeId"],
                 "snapshot": proposed["snapshot"],
                 "grant": migration_grant(db, &run, &agent, &who)?,
                 "reservationId": reservation,
                 "agentRevision": agent["revision"],
-                "paused": if previous.is_object() { previous["paused"].clone() } else { chat["paused"].clone() },
+                "paused": if previous.is_object() && previous["cancelledAt"].is_null() { previous["paused"].clone() } else { chat["paused"].clone() },
                 "createdAt": now(),
             });
             for mut message in db.messages(text(&chat, "id"))? {
@@ -663,6 +693,29 @@ impl Service {
                 self.worker.notify();
                 return Ok(json!({ "status": "migrated", "chatId": chat_id }));
             }
+            let (target, expected) = (text(&retained, "id").to_owned(), operation.clone());
+            let job_authorization = job_authorization.for_service(self).with_guard(move |db| {
+                let run = required(db.run(&target)?, "Conversation removed")?;
+                if run["backendMigration"]["id"] != expected
+                    || !run["backendMigration"]["cancelledAt"].is_null()
+                {
+                    return Err(Error::forbidden(
+                        "The backend conversion was explicitly cancelled.",
+                    ));
+                }
+                if let Some(mission) = run["backendMigration"]["missionId"].as_str() {
+                    let current = required(
+                        db.mission(mission)?,
+                        "The mission was removed during conversion.",
+                    )?;
+                    if json!(current.created_at) != run["backendMigration"]["missionCreatedAt"] {
+                        return Err(Error::forbidden(
+                            "The mission identity changed during conversion.",
+                        ));
+                    }
+                }
+                Ok(())
+            });
             let s = self.clone();
             let result = json!({
                 "status": "migrating",
@@ -730,22 +783,12 @@ impl Service {
         // Reclaim it before capacity checks, including retries using a saved point.
         let staging_root = migration_staging(&self.config.data_dir)?;
         let initial = self.store.run(&run_id).await?;
+        // Stopping the engine for conversion is not an explicit user stop.
+        // User cancellation records a separate marker in the admission state.
         if RunStatus::of(&initial).is_some_and(RunStatus::is_active)
-            && initial["backendMigration"]["selfMove"] == true
+            && let Some(stop) = self.worker.active.lock().await.get(&run_id)
         {
-            if let Some(stop) = self.worker.active.lock().await.get(&run_id) {
-                stop.cancel();
-            }
-        } else if RunStatus::of(&initial).is_some_and(RunStatus::is_active) {
-            match self
-                .worker
-                .cancel_live(self, &run_id, authorize.clone())
-                .await
-            {
-                Ok(()) => {}
-                Err(error) if error.is_conflict() => {}
-                Err(error) => return Err(error),
-            }
+            stop.cancel();
         }
         for _ in 0..600 {
             if !self.worker.active.lock().await.contains_key(&run_id) {
@@ -1093,6 +1136,172 @@ use crate::run_fixture::DbRunFixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn active_native_mission() -> (crate::plugin_grant_fixture::Fixture, String) {
+        use crate::agent_fixture::StoreAgentFixture;
+        let f = crate::plugin_grant_fixture::Fixture::new().await;
+        let node = id();
+        let mut profile =
+            f.s.agent_snapshot(crate::config::MAIN_AGENT_ID)
+                .await
+                .unwrap();
+        profile["access"]["backend"] = "auto".into();
+        profile["access"]["nodes"] = json!([node]);
+        f.s.store.put_agent_fixture(profile.clone()).await.unwrap();
+        let mut snapshot = f.s.store.run(&f.run).await.unwrap()["snapshot"].clone();
+        snapshot["agent"] = profile;
+        snapshot["agent"]["access"]["backend"] = "native".into();
+        f.s.store.transaction({
+            let run = f.run.clone();
+            let node = node.clone();
+            move |db| {
+                db.change_run(&run, crate::runs::RunChanges {
+                    snapshot: Some(serde_json::from_value(snapshot)?),
+                    boundary: Some(json!({"nativePrincipals": ["owner"], "nativeAuthorityNodes": [node], "nativeProvenanceUnknown": false})),
+                    ..Default::default()
+                })?;
+                db.save_checkpoint_boundary(&run, &json!({"prepared": {"backend": "native", "projectRoot": "/data/runs/test/workspace"}}))?;
+                db.put_node_fixture(&json!({"id": node, "runtimeId": "development", "capabilities": {"backend": "firecracker"}}))?;
+                db.set("native-authority", &json!({"observedAt": now(), "accounts": {}}), None)
+            }
+        }).await.unwrap();
+        (f, node)
+    }
+
+    #[tokio::test]
+    async fn public_conversion_rechecks_scope_and_cancellation_before_admission() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        for change in ["scope", "cancel"] {
+            let (f, node) = active_native_mission().await;
+            let valid = Arc::new(AtomicBool::new(true));
+            let observed = Arc::new(tokio::sync::Notify::new());
+            let (current, reached) = (valid.clone(), observed.clone());
+            let app = axum::Router::new().route(
+                "/api/relay/00000000-0000-4000-8000-000000000055/plugin-mcp-authorization",
+                axum::routing::post(move || {
+                    let authorized = current.load(Ordering::SeqCst);
+                    reached.notify_one();
+                    async move { axum::Json(authorized) }
+                }),
+            );
+            let (origin, _server) = crate::common::serve_locally(app).await;
+            let path = f.s.config.data_dir.join("installation-relay/identity.json");
+            let mut identity: Value =
+                serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+            identity["origin"] = origin.into();
+            tokio::fs::write(path, serde_json::to_vec(&identity).unwrap())
+                .await
+                .unwrap();
+            let refresh = f.s.native_authority_refresh.lock().await;
+            let storage = f.s.conversation_storage_lock.clone().lock_owned().await;
+            let proof =
+                nodes::moves::Authorization::new(|_| Ok(()), Some("fixture-public-digest".into()))
+                    .with_management_authorization(crate::authorization::Authorization::default());
+            let retained = proof.clone();
+            let service = f.s.clone();
+            let run = f.s.store.run(&f.run).await.unwrap();
+            let task = tokio::spawn(async move {
+                policy::CALLER
+                    .scope(
+                        Some("owner".into()),
+                        service.convert_for_vm(&run, &json!({"nodeId": node}), proof, false),
+                    )
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(10), observed.notified())
+                .await
+                .unwrap();
+            if change == "scope" {
+                valid.store(false, Ordering::SeqCst);
+            } else {
+                retained.cancel();
+            }
+            drop(refresh);
+            let result = task.await.unwrap();
+            assert!(
+                result.is_err(),
+                "{change} revocation admitted a conversion: {result:?}"
+            );
+            assert!(f.s.store.run(&f.run).await.unwrap()["backendMigration"].is_null());
+            drop(storage);
+            f.s.shutdown.cancel();
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_conversion_never_restarts_an_explicitly_cancelled_mission() {
+        use crate::mission_fixture::MissionFixture;
+        for change in ["running", "stopped", "deleted"] {
+            let (f, node) = active_native_mission().await;
+            let storage = f.s.conversation_storage_lock.clone().lock_owned().await;
+            let marker =
+                f.s.config
+                    .data_dir
+                    .join("backend-migration-staging/retained-source");
+            tokio::fs::create_dir_all(marker.parent().unwrap())
+                .await
+                .unwrap();
+            tokio::fs::write(&marker, b"retained").await.unwrap();
+            let run = f.s.store.run(&f.run).await.unwrap();
+            policy::CALLER
+                .scope(
+                    Some("owner".into()),
+                    f.s.convert_for_vm(
+                        &run,
+                        &json!({"nodeId": node}),
+                        nodes::moves::Authorization::default(),
+                        false,
+                    ),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                f.s.store.run(&f.run).await.unwrap()["backendMigration"]["resumeMission"],
+                true
+            );
+            if change != "running" {
+                f.s.store
+                    .change_run(
+                        &f.run,
+                        crate::runs::RunChanges {
+                            status: Some(RunStatus::Cancelled),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+            if change == "deleted" {
+                f.s.remove_mission_fixture(text(&run, "taskId"))
+                    .await
+                    .unwrap();
+            } else {
+                f.s.worker.cancel(&f.s, &f.run).await.unwrap();
+            }
+            drop(storage);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while pending(&f.s.store.run(&f.run).await.unwrap()) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(
+                marker.exists(),
+                "Explicit cancellation must stop conversion before staging effects"
+            );
+            let stopped = f.s.store.run(&f.run).await.unwrap();
+            assert_eq!(stopped["status"], RunStatus::Cancelled);
+            assert_ne!(stopped["recoveryPending"], true);
+            if change != "deleted" {
+                assert_ne!(stopped["resumeMissionAfterConversion"], true);
+            }
+            f.s.shutdown.cancel();
+        }
+    }
 
     #[tokio::test]
     async fn self_conversion_retains_stop_and_plugin_revocation_after_worker_exit() {

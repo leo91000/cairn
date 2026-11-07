@@ -36,6 +36,11 @@ impl Worker {
         s.store
             .transaction(move |db| {
                 authorize.authorize(db)?;
+                let conversion = crate::backend_migration::cancel_in(db, &run_id)?;
+                let run = required(db.run_state(&run_id)?, "Run not found")?;
+                if conversion && !run.status.is_active() {
+                    return Ok(());
+                }
                 request_cancel(db, &run_id, is_active)
             })
             .await?;
@@ -78,6 +83,7 @@ impl Worker {
                 authorize.authorize(db)?;
                 let chat = crate::chats::pause_in(db, &id, true)?;
                 if let Some(run_id) = chat["runId"].as_str() {
+                    crate::backend_migration::cancel_in(db, run_id)?;
                     crate::chats::coding_agent::cancel_in(db, run_id)?;
                     crate::chats::continuation::cancel_for_run(db, run_id)?;
                     let run = required(db.run_state(run_id)?, "Run not found")?;

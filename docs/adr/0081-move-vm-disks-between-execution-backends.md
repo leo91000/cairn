@@ -48,7 +48,12 @@ cleanup. Conversion supports missions without chat records: active missions
 continue with visible history in a fresh engine session, including after a
 failed conversion is retried; chats wait for their next message. A self-directed
 conversion retains a bounded operation proof after its engine stops, and checks
-cancellation and current grants before subsequent effects. Active conversions
+cancellation and current grants before subsequent effects. Public scope and
+capacity-wait cancellation remain checked through conversion admission. The
+accepted effect then detaches from that transport, as for ordinary node moves.
+An explicit stop cancels the target conversion even after its engine exits;
+internal fencing does not count as a user stop. A mission resumes only while
+its original definition still exists. Active conversions
 prevent agent merges; destination administrator approvals are never inherited.
 
 Web, Android, public MCP and the installation tool expose the same operation.
