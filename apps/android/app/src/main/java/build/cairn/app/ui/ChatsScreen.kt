@@ -638,10 +638,16 @@ internal fun ChatPage(
         speed = ""
     }
     val planEnabled = live.state?.planTurnsEnabled == true
+    // Editing an accepted queued Plan request preserves its existing boundary.
+    val planAllowed =
+        planEnabled ||
+            chat?.messages.orEmpty().any {
+                it.id == editing && it.plan == true && it.status == "queued"
+            }
     val planAvailable = codingAgent(chosenProvider).planTurns
     // Availability blocks submission; it never removes the requested boundary.
     val planRequested = planning
-    val planBlocked = planRequested && (!planEnabled || !planAvailable)
+    val planBlocked = planRequested && (!planAllowed || !planAvailable)
     // A plan request cannot join a turn that can already change files.
     val steerBlocked = planRequested && chat?.run?.chatExecution?.plan != true
     val skillOptions =
@@ -746,7 +752,7 @@ internal fun ChatPage(
     }
     fun send(mode: String, plan: Boolean = planRequested, planApproval: PlanApproval? = null) {
         vm.perform {
-            require(!plan || (planEnabled && planAvailable)) {
+            require(!plan || (planAllowed && planAvailable)) {
                 "Le mode Plan nécessite Codex ou Claude Code. Désactivez Plan pour une demande ordinaire."
             }
             val chatId =
@@ -1789,7 +1795,7 @@ internal fun ChatPage(
                                     }
                                     if (planBlocked)
                                         Text(
-                                            if (planEnabled)
+                                            if (planAllowed)
                                                 "Le mode Plan nécessite Codex ou Claude Code. Choisissez un assistant compatible ou désactivez Plan pour une demande ordinaire."
                                             else
                                                 "Plan est désactivé pour cette installation. Activez-le dans les paramètres ou désactivez Plan pour une demande ordinaire.",
@@ -1944,7 +1950,7 @@ internal fun ChatPage(
                                                 reasoning = r
                                             }
                                         }
-                                        if (planEnabled || planRequested)
+                                        if (planAllowed || planRequested)
                                             FilterChip(
                                                 planRequested,
                                                 { planning = !planning },

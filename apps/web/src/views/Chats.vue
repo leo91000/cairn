@@ -50,7 +50,12 @@ import {
   validateSelection,
 } from '../attachments'
 import { chatDelivery, chatWaitNotice, scheduledWakeup } from '../chat-delivery'
-import { chatListCarried, chatList as chats, publishChats } from '../chat-list'
+import {
+  chatListCarried,
+  chatPlanEnabled,
+  chatList as chats,
+  publishChats,
+} from '../chat-list'
 import { chatQuota, isQuotaMessage } from '../chat-quota'
 import { liveWakeup, waitStatus } from '../chat-wait'
 import ActivityFeed from '../components/ActivityFeed.vue'
@@ -569,11 +574,13 @@ const chosenProvider = computed({
   },
 })
 const switchingProvider = computed(() => !!detail.value?.run && chosenProvider.value !== currentProvider.value)
-const planEnabled = computed(() => live.snapshot.value?.planTurnsEnabled === true)
+const planEnabled = chatPlanEnabled
+// An accepted queued Plan request can still be edited without dropping its boundary.
+const planAllowed = computed(() => planEnabled.value || pending.value.some(message => message.id === editing.value && message.plan))
 const planAvailable = computed(() => providers[chosenProvider.value].planTurns)
 // Availability can block submission, but must not erase the requested boundary.
 const planRequested = computed(() => planning.value)
-const planBlocked = computed(() => planRequested.value && (!planEnabled.value || !planAvailable.value))
+const planBlocked = computed(() => planRequested.value && (!planAllowed.value || !planAvailable.value))
 const planUnavailableMessage = computed(() => planEnabled.value ? 'Plan requires Codex or Claude Code. Choose a compatible agent, or turn Plan off to send an ordinary request.' : 'Plan is disabled for this installation. Enable it in installation settings, or turn Plan off to send an ordinary request.')
 const canSend = computed(() => !planBlocked.value && !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
 // A plan request cannot join a turn that can already change files.
@@ -654,7 +661,7 @@ watch(agentId, () => {
 watch(live.snapshot, (value) => {
   detail.value = value?.chat ?? null
   if (value?.chats)
-    publishChats(value.chats, { saved: live.restored.value })
+    publishChats(value.chats, { saved: live.restored.value, planTurnsEnabled: value.planTurnsEnabled })
 }, { immediate: true })
 // The open conversation's finished turns are read while the page is visible.
 useReadWhileOpen(() => {
@@ -1674,14 +1681,14 @@ function key(event: KeyboardEvent) {
                       @reasoning-choice="setResumeReasoningIntent"
                     />
                     <button
-                      v-if="planEnabled || planRequested"
+                      v-if="planAllowed || planRequested"
                       type="button"
                       class="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full px-3 text-sm font-medium disabled:opacity-50"
                       :class="planRequested ? 'bg-soft text-accent' : 'text-muted hover:bg-hover'"
                       :aria-pressed="planRequested"
                       aria-label="Plan first"
-                      :title="planEnabled && planAvailable ? 'Plan first: the agent explores and proposes an approach without changing files, using the network from its shell or calling tools with external effects. Implement it afterwards in this conversation.' : planUnavailableMessage"
-                      :disabled="busy || ((!planEnabled || !planAvailable) && !planRequested)"
+                      :title="planAllowed && planAvailable ? 'Plan first: the agent explores and proposes an approach without changing files, using the network from its shell or calling tools with external effects. Implement it afterwards in this conversation.' : planUnavailableMessage"
+                      :disabled="busy || ((!planAllowed || !planAvailable) && !planRequested)"
                       data-testid="plan-toggle"
                       @click="planning = !planning"
                     >
