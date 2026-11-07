@@ -114,6 +114,30 @@ tags, dispatch `ci.yaml` with `validation-only=true`. This still runs the
 applicable backend, node, native-runtime, browser and device jobs; image build,
 publish, promotion and deployment jobs are skipped.
 
+### Bounded native dependency setup
+
+The five native test-dependency callers (`rust-check`, `backend`,
+`cli-qualification`, `backend-migration-qualification` and `node-checks`) use
+`scripts/install-native-ci-dependencies.mjs`. Its closed native profile preserves
+`libclang-dev age e2fsprogs fakeroot`; update/install have 120/360-second work
+budgets, noninteractive sudo and bounded acquisition/lock waits. Phase markers
+contain fixed status fields, and owned process groups are cleaned before returning
+failure, timeout or interruption. The ten-minute step bound and existing job
+limits remain unchanged. Setup is not retried.
+
+The helper retains a closed `android-network` profile (90/90 seconds), but the
+Android direct job uses the newer `prepare-network-tools.mjs` preflight instead;
+it must not regain broad APT installation. Other distinct package sets remain
+outside this helper.
+
+`pnpm exec vitest run scripts/tests/native-ci-dependencies.test.mjs` exercises
+success, failure, timeout, interruptions, delayed privilege entry, orphan cleanup
+and bounded diagnostic output. Repeat with `CAIRN_TEST_REAL_SUDO=1` on a disposable
+or authorized sudo-capable host to run the same cases through `/usr/bin/sudo -n`
+and assert UID 0 in the synthetic APT executable. No real packages are changed by
+these fixture tests. The short PR quality job runs both routes. Full validation
+also runs the real package setup in its selected native jobs.
+
 ### Bounded deadline diagnostics
 
 When a backend/native job reaches its deadline before preserving evidence,
