@@ -6,7 +6,11 @@
 package build.cairn.app.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -49,6 +53,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -1292,7 +1297,7 @@ internal fun Wordmark() {
 
 /** The agent's avatar with what the row asks for in its corner; finished work stays quiet. */
 @Composable
-private fun FilAvatar(item: FeedItem, size: androidx.compose.ui.unit.Dp) {
+internal fun FilAvatar(item: FeedItem, size: androidx.compose.ui.unit.Dp) {
     Box {
         AgentAvatar(item.agent, item.agentKey.ifBlank { item.agent }, size)
         if (!item.finished)
@@ -1334,10 +1339,23 @@ private fun StatusMark(item: FeedItem) {
                 CairnIcons.CirclePause to MaterialTheme.colorScheme.onSurfaceVariant
             else -> CairnIcons.Circle to MaterialTheme.colorScheme.onSurfaceVariant
         }
+    val rotation =
+        if (item.working)
+            rememberInfiniteTransition(label = "fil-working")
+                .animateFloat(
+                    0f,
+                    360f,
+                    infiniteRepeatable(tween(1000, easing = LinearEasing)),
+                    label = "rotation",
+                )
+        else null
     Icon(
         icon,
         contentDescription = item.statusLabel,
-        modifier = Modifier.size(14.dp).testTag("fil-mark"),
+        modifier =
+            Modifier.size(14.dp).testTag("fil-mark").graphicsLayer {
+                rotationZ = rotation?.value ?: 0f
+            },
         tint = tint,
     )
 }

@@ -11,4 +11,8 @@ class FilAttentionDeviceTest {
     @get:Rule val compose = createComposeRule()
 
     @Test fun navigationBadge() = FilAttentionCases(compose).navigationBadge()
+
+    @Test
+    fun avatarLoaderAnimatesOnlyWhileWorking() =
+        FilAttentionCases(compose).avatarLoaderAnimatesOnlyWhileWorking()
 }
