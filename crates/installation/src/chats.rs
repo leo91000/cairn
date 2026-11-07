@@ -870,6 +870,10 @@ pub(crate) fn send(
         require_current_proposal(db, &chat, &messages, &values, &approval)?;
     }
     require_sendable(db, &chat, &messages, &values.id)?;
+    // Questionnaire answers continue an accepted plan turn even if the feature was disabled.
+    if values.plan && answer.is_none() {
+        crate::chat_plan_settings::require_enabled(db)?;
+    }
     validate_speed(db, &chat, &values)?;
     validate_steer(db, &chat, &values)?;
     require_plan_support(db, &chat, &values)?;
@@ -979,6 +983,7 @@ pub(crate) fn edit_as(
     // message still goes to Codex.
     let kept_speed = values.get("speed").is_none();
     let kept_plan = values.get("plan").is_none();
+    let was_plan = current.plan;
     let next: cairn_contracts::ChatMessage = serde_json::from_value(values)?;
     current.text = next.text;
     current.provider = next.provider;
@@ -998,6 +1003,9 @@ pub(crate) fn edit_as(
     // Steering joins the running turn with the message as edited, including a kept speed.
     validate_steer(db, &chat, &current)?;
     validate_speed(db, &chat, &current)?;
+    if current.plan && !was_plan {
+        crate::chat_plan_settings::require_enabled(db)?;
+    }
     require_plan_support(db, &chat, &current)?;
     Ok(serde_json::to_value(db.save_message(&current)?)?)
 }

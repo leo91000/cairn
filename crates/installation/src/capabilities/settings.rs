@@ -17,6 +17,16 @@ pub(crate) struct SettingsOperation {
 
 pub(crate) const SETTINGS_OPERATIONS: &[SettingsOperation] = &[
     SettingsOperation {
+        name: "get_chat_plan_settings",
+        scope: "read",
+        description: "Read whether new chat plan requests are enabled for this installation and the current revision. Disabled by default, including existing installations.",
+    },
+    SettingsOperation {
+        name: "save_chat_plan_settings",
+        scope: "manage",
+        description: "Enable or disable new chat plan requests for this installation at the expected revision. Already accepted plan requests and questionnaire answers keep their read-only boundary.",
+    },
+    SettingsOperation {
         name: "get_task_storage_limits",
         scope: "read",
         description: "Read the installation's per-task disk growth limit and revision. Workspace and managed temporary files share the limit; existing larger allowances are preserved.",
@@ -80,6 +90,14 @@ pub(crate) fn settings_operation(name: &str) -> Option<&'static SettingsOperatio
 impl SettingsOperation {
     pub(crate) fn descriptor(&self) -> Value {
         let (input, output) = match self.name {
+            "get_chat_plan_settings" => (
+                schema_for::<GetChatPlanSettingsInput>(Contract::Deserialize),
+                schema_for::<ChatPlanSettings>(Contract::Serialize),
+            ),
+            "save_chat_plan_settings" => (
+                schema_for::<ChatPlanSettings>(Contract::Deserialize),
+                schema_for::<ChatPlanSettings>(Contract::Serialize),
+            ),
             "get_task_storage_limits" => (
                 schema_for::<GetTaskStorageLimitsInput>(Contract::Deserialize),
                 schema_for::<TaskStorageLimits>(Contract::Serialize),
@@ -141,6 +159,28 @@ impl SettingsOperation {
         input: Value,
         context: ResumeContext,
     ) -> Result<Value> {
+        if matches!(
+            self.name,
+            "get_chat_plan_settings" | "save_chat_plan_settings"
+        ) {
+            let authority =
+                super::plugin_packages::Authority::for_grants(s, context, self.scope).await?;
+            let authorize = crate::authorization::Authorization::live(s, authority);
+            let name = self.name;
+            return s
+                .store
+                .transaction(move |db| {
+                    authorize.authorize(db)?;
+                    let result = if name == "get_chat_plan_settings" {
+                        let _: GetChatPlanSettingsInput = decode(input)?;
+                        crate::chat_plan_settings::view(db)?
+                    } else {
+                        crate::chat_plan_settings::save(db, decode(input)?)?
+                    };
+                    Ok(serde_json::to_value(result)?)
+                })
+                .await;
+        }
         if matches!(
             self.name,
             "get_task_storage_limits" | "save_task_storage_limits"

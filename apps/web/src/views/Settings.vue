@@ -22,6 +22,7 @@ import {
 } from '../api'
 import { accountSettingsUrl, beaconOrigin, installationHost } from '../beacon-location'
 import AccountConfirmation from '../components/AccountConfirmation.vue'
+import ChatPlanSettings from '../components/ChatPlanSettings.vue'
 import ConversationRetentionSettings from '../components/ConversationRetentionSettings.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
@@ -288,6 +289,7 @@ async function copy(value: string) {
             </p>
           </section>
           <TaskStorageSettings />
+          <ChatPlanSettings />
           <ConversationRetentionSettings />
           <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 px-0 py-7 phone:py-5">
             <h2>Worker environment</h2>

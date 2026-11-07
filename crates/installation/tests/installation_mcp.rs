@@ -1602,6 +1602,8 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "save_storage_settings",
         "get_task_storage_limits",
         "save_task_storage_limits",
+        "get_chat_plan_settings",
+        "save_chat_plan_settings",
         "check_storage",
         "import_project",
         "list_source_projects",
@@ -9321,4 +9323,105 @@ async fn mission_deliverables_work_without_a_conversation_on_both_management_too
             assert_eq!(status, StatusCode::UNAUTHORIZED);
         }
     }
+}
+
+#[tokio::test]
+async fn chat_plan_settings_have_http_and_both_mcp_parity_with_live_authorization() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let agent_token = configuration["env"]["CAIRN_MCP_RUN_TOKEN"]
+        .as_str()
+        .unwrap();
+    let manage_token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
+    let read_token = common::relay_fixture::grant(&s, &["read"]).await;
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let owner = common::RelayContext::new(&common::relay_fixture::context(&s).await);
+    let member =
+        common::RelayContext::new(&common::relay_fixture::member_context(&s, "plan-member").await);
+    for method in ["GET", "PUT"] {
+        let denied = member
+            .authorize(common::request(method, "/api/settings/chat-plan"))
+            .body(Body::from(
+                json!({ "enabled": true, "revision": "default" }).to_string(),
+            ))
+            .unwrap();
+        assert_eq!(
+            common::send(&app, denied).await.status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    let read = owner
+        .authorize(common::request("GET", "/api/settings/chat-plan"))
+        .body(Body::empty())
+        .unwrap();
+    let response = common::send(&app, read).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut current = common::read_json(response).await;
+    assert_eq!(current, json!({ "enabled": false, "revision": "default" }));
+    for (endpoint, token, enabled) in [
+        ("/mcp", manage_token.as_str(), true),
+        ("/mcp-installation", agent_token, false),
+    ] {
+        let (_, view) =
+            node_management_call(&app, endpoint, token, "get_chat_plan_settings", json!({})).await;
+        assert_eq!(result(&view), &current);
+        let command = json!({ "enabled": enabled, "revision": current["revision"] });
+        let (_, saved) = node_management_call(
+            &app,
+            endpoint,
+            token,
+            "save_chat_plan_settings",
+            command.clone(),
+        )
+        .await;
+        current = result(&saved).clone();
+        assert_eq!(current["enabled"], enabled);
+        let (_, stale) =
+            node_management_call(&app, endpoint, token, "save_chat_plan_settings", command).await;
+        assert_eq!(stale["result"]["isError"], true);
+    }
+    let write = owner
+        .authorize(common::request("PUT", "/api/settings/chat-plan"))
+        .body(Body::from(
+            json!({ "enabled": true, "revision": current["revision"] }).to_string(),
+        ))
+        .unwrap();
+    let response = common::send(&app, write).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    current = common::read_json(response).await;
+    let (_, denied) = node_management_call(
+        &app,
+        "/mcp",
+        &read_token,
+        "save_chat_plan_settings",
+        json!({ "enabled": false, "revision": current["revision"] }),
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true);
+    let (_, unchanged) = node_management_call(
+        &app,
+        "/mcp",
+        &manage_token,
+        "get_chat_plan_settings",
+        json!({}),
+    )
+    .await;
+    assert_eq!(result(&unchanged), &current);
+    s.agent_fixture(
+        json!({ "access": { "installation": false } }),
+        Some(MAIN_AGENT_ID),
+    )
+    .await
+    .unwrap();
+    let (status, _) = node_management_call(
+        &app,
+        "/mcp-installation",
+        agent_token,
+        "get_chat_plan_settings",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
 }

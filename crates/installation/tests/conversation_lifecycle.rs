@@ -62,6 +62,20 @@ impl App {
         self.request("GET", path, Value::Null).await
     }
 
+    async fn enable_plan(&self) {
+        let (_, current) = self.get("/api/settings/chat-plan").await;
+        let (status, body) = self
+            .request(
+                "PUT",
+                "/api/settings/chat-plan",
+                json!({
+                    "enabled": true, "revision": current["revision"],
+                }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
     async fn create_chat(&self) -> Value {
         let (status, view) = self.request("POST", CHATS, json!({})).await;
         assert_eq!(status, StatusCode::OK, "{view}");
@@ -1533,6 +1547,7 @@ async fn http_edits_change_plan_explicitly_and_preserve_it_when_omitted() {
         (true, None, true),
     ] {
         let app = App::new().await;
+        app.enable_plan().await;
         common::managed_codex_home(&app.service.config.home);
         let chat = app.create_chat().await;
         let path = chat_path(&chat);
@@ -1587,6 +1602,7 @@ async fn http_edits_change_plan_explicitly_and_preserve_it_when_omitted() {
 #[tokio::test]
 async fn a_plan_request_admitted_while_idle_never_joins_a_turn_that_can_change_files() {
     let app = App::new().await;
+    app.enable_plan().await;
     common::managed_codex_home(&app.service.config.home);
     let chat = app.create_chat().await;
     let path = chat_path(&chat);
@@ -2318,6 +2334,7 @@ async fn implementation_approval_is_atomic_with_concurrent_requests_and_retries(
     let stale =
         json!({ "sourceId": format!("{run}:{event_id}"), "revision": snapshot["revision"] });
     // B is accepted after A captured the card, before A's request reaches the manager.
+    app.enable_plan().await;
     let revision = json!({ "id": id(), "text": "Revise the approach", "plan": true });
     let (status, body) = app.request("POST", &messages, revision).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -2801,4 +2818,75 @@ async fn early_codex_plan_is_approved_only_after_its_start_is_accepted() {
             }
         }
     }
+}
+
+#[tokio::test]
+async fn plan_opt_in_gates_new_requests_without_rewriting_accepted_plans() {
+    let app = App::new().await;
+    common::managed_codex_home(&app.service.config.home);
+    let chat = app.create_chat().await;
+    let path = chat_path(&chat);
+    let messages = format!("{path}/messages");
+    app.request("POST", &format!("{path}/pause"), json!({ "paused": true }))
+        .await;
+    let planned = json!({ "id": id(), "text": "Explore", "plan": true });
+    let (status, body) = app.request("POST", &messages, planned.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let ordinary = id();
+    let (status, body) = app
+        .request(
+            "POST",
+            &messages,
+            json!({ "id": ordinary, "text": "Ordinary" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = app
+        .request(
+            "PUT",
+            &format!("{messages}/{ordinary}"),
+            json!({ "text": "Plan instead", "plan": true }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    app.enable_plan().await;
+    let (status, body) = app.request("POST", &messages, planned.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, enabled) = app.get("/api/settings/chat-plan").await;
+    let (status, body) = app
+        .request(
+            "PUT",
+            "/api/settings/chat-plan",
+            json!({ "enabled": false, "revision": enabled["revision"] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // Retrying an accepted request remains idempotent, and an old editor preserves its flag.
+    let (status, body) = app.request("POST", &messages, planned.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = app
+        .request(
+            "PUT",
+            &format!("{messages}/{}", text(&planned, "id")),
+            json!({ "text": "Explore carefully" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["plan"], true);
+    let (status, body) = app
+        .request(
+            "POST",
+            &messages,
+            json!({ "id": id(), "text": "Another plan", "plan": true }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    app.request("DELETE", &format!("{messages}/{ordinary}"), Value::Null)
+        .await;
+    app.request("POST", &format!("{path}/pause"), json!({ "paused": false }))
+        .await;
+    app.tick().await;
+    let (_, detail) = app.get(&path).await;
+    assert_eq!(detail["run"]["chatExecution"]["plan"], true);
+    assert_eq!(detail["run"]["chatExecution"]["messageId"], planned["id"]);
 }

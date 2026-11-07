@@ -542,6 +542,8 @@ async fn settings_routes(
             ("save_coding_agent_configuration", input.body.clone())
         }
         ("GET", ["settings"]) => ("get_installation_settings", json!({})),
+        ("GET", ["settings", "chat-plan"]) => ("get_chat_plan_settings", json!({})),
+        ("PUT", ["settings", "chat-plan"]) => ("save_chat_plan_settings", input.body.clone()),
         ("GET", ["settings", "task-storage"]) => ("get_task_storage_limits", json!({})),
         ("PUT", ["settings", "task-storage"]) => ("save_task_storage_limits", input.body.clone()),
         ("GET", ["overview"]) => ("get_installation_overview", json!({})),

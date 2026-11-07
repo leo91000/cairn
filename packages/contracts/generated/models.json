@@ -2070,6 +2070,25 @@
       ],
       "type": "object"
     },
+    "ChatPlanSettings": {
+      "additionalProperties": false,
+      "description": "Installation opt-in for new chat plan requests. Missing policy means disabled.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "revision": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "enabled",
+        "revision"
+      ],
+      "type": "object"
+    },
     "ChatQuestion": {
       "properties": {
         "blocking": {
@@ -4519,6 +4538,10 @@
         "nextOffset",
         "hasMore"
       ],
+      "type": "object"
+    },
+    "GetChatPlanSettingsInput": {
+      "additionalProperties": false,
       "type": "object"
     },
     "GetConversationRetentionInput": {

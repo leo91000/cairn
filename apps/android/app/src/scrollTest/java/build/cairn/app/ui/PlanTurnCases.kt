@@ -16,6 +16,7 @@ import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
+import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -623,6 +624,100 @@ abstract class PlanTurnCases {
         }
     }
 
+    @Test
+    fun disabledInstallationHidesPlanAndBlocksARestoredPlanDraftUntilExplicitlyCleared() =
+        withPlanServer { server ->
+            val calls = CopyOnWriteArrayList<String>()
+            val chat = Chat(id = CHAT, agentId = MAIN_AGENT_ID, title = "Plan désactivé")
+            val vm =
+                mountPlanChat(
+                    server,
+                    chat,
+                    emptyList(),
+                    calls,
+                    savedDraft = ChatDraft(text = "Examiner sans modifier", plan = true),
+                    planEnabled = false,
+                )
+            try {
+                compose.waitUntil(20000) {
+                    compose.onAllNodesWithTag("plan-unavailable").fetchSemanticsNodes().isNotEmpty()
+                }
+                compose
+                    .onNodeWithTag("plan-unavailable")
+                    .assertTextContains("Plan est désactivé", substring = true)
+                compose.onNodeWithTag("conversation-send").assertIsNotEnabled()
+                assertTrue(calls.isEmpty())
+                compose.onNodeWithTag("plan-toggle").assertIsSelected().performClick()
+                compose.onNodeWithTag("plan-toggle").assertDoesNotExist()
+                compose.waitUntil(20_000) {
+                    compose
+                        .onAllNodes(hasTestTag("conversation-send") and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithTag("conversation-send").assertIsEnabled().performClick()
+                compose.waitUntil(20000) { calls.size == 1 }
+                assertEquals(
+                    false,
+                    wireJson
+                        .parseToJsonElement(calls[0])
+                        .jsonObject["plan"]
+                        ?.jsonPrimitive
+                        ?.boolean,
+                )
+            } finally {
+                vm.api.closeStreams()
+            }
+        }
+
+    @Test
+    fun disabledInstallationStillSavesEditsToAcceptedQueuedPlanMessages() =
+        withPlanServer { server ->
+            val calls = CopyOnWriteArrayList<String>()
+            val messageId = UUID.randomUUID().toString()
+            val chat =
+                Chat(
+                    id = CHAT,
+                    agentId = MAIN_AGENT_ID,
+                    title = "Plan accepté",
+                    paused = true,
+                    messages =
+                        listOf(
+                            ChatMessage(
+                                id = messageId,
+                                text = "Plan accepté",
+                                plan = true,
+                                status = "queued",
+                            )
+                        ),
+                )
+            val vm =
+                mountPlanChat(
+                    server,
+                    chat,
+                    emptyList(),
+                    calls,
+                    savedDraft = ChatDraft(text = "Plan précisé", plan = true, editing = messageId),
+                    planEnabled = false,
+                )
+            try {
+                compose.waitUntil(20_000) {
+                    compose
+                        .onAllNodes(hasTestTag("conversation-send") and isEnabled())
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+                compose.onNodeWithTag("plan-toggle").assertIsSelected()
+                compose.onNodeWithTag("conversation-send").performClick()
+                compose.waitUntil(20_000) { calls.size == 1 }
+                val input = wireJson.parseToJsonElement(calls[0]).jsonObject
+                assertEquals(true, input["plan"]?.jsonPrimitive?.boolean)
+                assertEquals("Plan précisé", input["text"]?.jsonPrimitive?.content)
+            } finally {
+                vm.api.closeStreams()
+            }
+        }
+
     private fun mountPlanChat(
         server: MockWebServer,
         chat: Chat,
@@ -631,6 +726,7 @@ abstract class PlanTurnCases {
         savedDraft: ChatDraft? = null,
         initialSnapshot: CountDownLatch? = null,
         rejectApproval: Boolean = false,
+        planEnabled: Boolean = true,
         streamRequests: AtomicInteger? = null,
         approvalResponse: CountDownLatch? = null,
     ): CairnViewModel {
@@ -674,7 +770,13 @@ abstract class PlanTurnCases {
         }
         val batch =
             wireJson.encodeToString(
-                LiveBatch(markers, LiveState(chat = chat), true, false, entries = cards)
+                LiveBatch(
+                    markers,
+                    LiveState(chat = chat, planTurnsEnabled = planEnabled),
+                    true,
+                    false,
+                    entries = cards,
+                )
             )
         server.dispatcher =
             object : Dispatcher() {
@@ -694,7 +796,13 @@ abstract class PlanTurnCases {
                                 TimeUnit.MILLISECONDS,
                             )
                     }
-                    if (path == "/api/installations/fixture/api/chats/$CHAT/messages") {
+                    if (
+                        path == "/api/installations/fixture/api/chats/$CHAT/messages" ||
+                            (request.method == "PUT" &&
+                                path.startsWith(
+                                    "/api/installations/fixture/api/chats/$CHAT/messages/"
+                                ))
+                    ) {
                         val sent = request.body.readUtf8()
                         calls += sent
                         check(approvalResponse?.await(20, TimeUnit.SECONDS) != false)
