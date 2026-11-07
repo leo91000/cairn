@@ -39,6 +39,8 @@ const props = withDefaults(defineProps<{
   run: Run
   /** `attention` shows the chip only while the node needs attention or is changing; routine sync stays in the menu. */
   variant?: 'chip' | 'attention'
+  /** Takes focus when the panel closes after its attention chip went away. */
+  fallbackFocus?: HTMLElement
 }>(), { variant: 'chip' })
 // Lets hosts drop the row around the chip while it renders nothing.
 const emit = defineEmits<{ relevance: [relevant: boolean] }>()
@@ -123,7 +125,8 @@ const status = computed((): { tone: 'bad' | 'warn' | 'busy' | 'ok' | 'idle', lab
     return { tone: 'bad', label: 'Sync failed' }
   if (waiting)
     return { tone: waiting === 'integrity' ? 'bad' : 'warn', label: storageShort[waiting] || waiting }
-  if (run.status === 'running' && run.suspendedByExclusive)
+  // The attention chip names the node's own cause: the header already names a suspension.
+  if (run.status === 'running' && run.suspendedByExclusive && props.variant === 'chip')
     return { tone: 'busy', label: 'Suspended for exclusive work' }
   if (run.nodeState)
     return { tone: 'busy', label: labels[run.nodeState] || run.nodeState }
@@ -256,8 +259,14 @@ function move() {
 function close(returnFocus = false) {
   panel.value?.close()
   open.value = false
-  if (returnFocus)
-    (opener.value?.isConnected && opener.value.getClientRects().length ? opener.value : chip.value)?.focus()
+  if (returnFocus) {
+    const chipStays = props.variant === 'chip' || attention.value
+    const target = opener.value?.isConnected && opener.value.getClientRects().length
+      ? opener.value
+      : chipStays ? chip.value : props.fallbackFocus
+    target?.focus()
+  }
+
   opener.value = undefined
 }
 
@@ -345,6 +354,7 @@ onUnmounted(() => {
       aria-haspopup="dialog"
       :aria-expanded="open"
       aria-label="Execution node"
+      :aria-description="variant === 'attention' ? status.label : undefined"
       @click="toggle"
     >
       <Icon :name="Server" :size="13" class="shrink-0" />

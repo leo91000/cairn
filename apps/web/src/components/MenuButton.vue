@@ -20,7 +20,7 @@ const props = withDefaults(defineProps<{
   /** Which trigger edge the menu lines up with. */
   align?: 'start' | 'end'
   width?: number
-  /** Ids of non-interactive content in the menu that screen readers announce with it. */
+  /** Ids of content (such as the header slot) that screen readers announce with the menu. */
   describedby?: string
 }>(), { placement: 'below', align: 'end', width: 224 })
 const emit = defineEmits<{ open: [], close: [] }>()
@@ -162,19 +162,26 @@ defineExpose({ show, hide, trigger })
   >
     <slot name="trigger" :open="open" />
   </button>
+  <!-- A header (what the menu is about) sits beside the menu, which may own only its items. -->
   <div
-    :id="id"
     ref="menu"
     popover="manual"
-    role="menu"
-    :aria-label="menuLabel ?? label"
-    :aria-describedby="open ? describedby : undefined"
     :style="position"
     class="fixed inset-auto m-0 rounded-xl border border-line bg-raised p-1.5 text-ink shadow-[0_9px_25px_#0003]"
     @keydown="menuKeydown"
     @click.stop
   >
-    <slot v-if="open" :select="select" :close="hide" />
+    <template v-if="open">
+      <slot name="header" />
+      <div
+        :id="id"
+        role="menu"
+        :aria-label="menuLabel ?? label"
+        :aria-describedby="describedby"
+      >
+        <slot :select="select" :close="hide" />
+      </div>
+    </template>
   </div>
 </template>
 

@@ -1070,7 +1070,7 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
   await expect(page.locator('.chat-header').getByRole('button', { name: 'Open activity fullscreen' })).toHaveCount(0)
   await details.click()
   const menu = page.getByRole('menu', { name: 'Chat details', exact: true })
-  await expect(menu.getByText('Ready', { exact: true })).toBeVisible()
+  await expect(menu.locator('..').getByText('Ready', { exact: true })).toBeVisible()
   // Screen readers hear the agent, its status and context with the menu, not only its actions.
   await expect(menu).toHaveAccessibleDescription(/Main agent.*Ready.*Context/)
   await expect(menu.getByRole('group', { name: 'Advanced', exact: true }).getByRole('menuitem', { name: 'Connection', exact: true })).toBeVisible()
@@ -2394,7 +2394,8 @@ test('compaction is unavailable while a turn runs and explains why', async ({ pa
   await expect(action('Compact context')).toBeDisabled()
   await expect(action('Compact context')).toHaveAccessibleDescription('Wait for the current turn to finish before compacting.')
   await expect(details).toContainText('Wait for the current turn to finish before compacting.')
-  await expect(details).toHaveAccessibleDescription(/Wait for the current turn to finish before compacting\.$/)
+  // The disabled action cannot take focus: the menu announces why compaction waits.
+  await expect(page.getByRole('menu', { name: 'Chat details', exact: true })).toHaveAccessibleDescription(/Wait for the current turn to finish before compacting\.$/)
   await expect(workspace.api(`/api/chats/${chat.id}/compact`, 'POST', {})).rejects.toThrow(/Wait for the current turn to finish/)
   await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
 })

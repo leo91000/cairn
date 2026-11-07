@@ -423,8 +423,10 @@ export async function expectFollowing(page: Page) {
 export async function openChatDetails(page: Page) {
   const mobile = (page.viewportSize()?.width ?? 1280) <= 640
   await page.getByRole('button', { name: 'Chat details', exact: true }).click()
-  const details = page.getByRole(mobile ? 'dialog' : 'menu', { name: 'Chat details', exact: true })
-  await expect(details).toBeVisible()
+  // On desktop the summary heads the dropdown beside its role="menu".
+  const menu = page.getByRole(mobile ? 'dialog' : 'menu', { name: 'Chat details', exact: true })
+  await expect(menu).toBeVisible()
+  const details = mobile ? menu : menu.locator('..')
   return {
     details,
     action: (name: string) => details.getByRole(mobile ? 'button' : 'menuitem', { name, exact: true }),

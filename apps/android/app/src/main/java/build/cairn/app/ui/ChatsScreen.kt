@@ -34,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
@@ -1055,11 +1056,27 @@ internal fun ChatPage(
                                     ?.let { compaction ->
                                         DropdownMenuItem(
                                             text = {
-                                                Text(
-                                                    if (compaction.running)
-                                                        "Compaction du contexte…"
-                                                    else "Compacter le contexte"
-                                                )
+                                                Column {
+                                                    Text(
+                                                        if (compaction.running)
+                                                            "Compaction du contexte…"
+                                                        else "Compacter le contexte"
+                                                    )
+                                                    // Why it waits, as web shows under the item.
+                                                    compaction.reason
+                                                        ?.takeIf { !compaction.running }
+                                                        ?.let {
+                                                            Text(
+                                                                it,
+                                                                style =
+                                                                    MaterialTheme.typography
+                                                                        .bodySmall,
+                                                                color =
+                                                                    MaterialTheme.colorScheme
+                                                                        .onSurfaceVariant,
+                                                            )
+                                                        }
+                                                }
                                             },
                                             leadingIcon = { Icon(CairnIcons.Layers, null) },
                                             enabled = compaction.available,
@@ -1130,11 +1147,12 @@ internal fun ChatPage(
                                 Text(
                                     "Avancé",
                                     Modifier.padding(
-                                        start = 16.dp,
-                                        end = 16.dp,
-                                        top = 12.dp,
-                                        bottom = 4.dp,
-                                    ),
+                                            start = 16.dp,
+                                            end = 16.dp,
+                                            top = 12.dp,
+                                            bottom = 4.dp,
+                                        )
+                                        .semantics { heading() },
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )

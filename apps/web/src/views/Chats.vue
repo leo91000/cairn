@@ -547,6 +547,8 @@ const chatStatus = computed(() => {
   return 'Ready'
 })
 const headerState = computed(() => detail.value ? headerStatus(chatStatus.value) : null)
+// A conversation not created yet already names the project it will start in.
+const headerProject = computed(() => heading.value ? heading.value.projectName : state.projects.find(project => project.id === projectId.value)?.name)
 // The avatar's ring is the header's only sign of work, on every width.
 const working = computed(() => detail.value?.run?.status === 'running' && !detail.value.paused && !suspended.value && !quota.value)
 // Phones name the installation and its route with the connection dot, not in words.
@@ -1187,7 +1189,7 @@ function key(event: KeyboardEvent) {
         :agent-name="heading?.agentName || selectedAgent?.name || 'Main agent'"
         :agent-id="heading?.agentId || selectedAgent?.id"
         :provider="heading?.provider"
-        :project-name="heading ? heading.projectName : state.projects.find(project => project.id === projectId)?.name"
+        :project-name="headerProject"
         :status="detail ? chatStatus : undefined"
         :failed="headerState?.failed"
         :context="detail?.run ? context : undefined"
@@ -1284,7 +1286,7 @@ function key(event: KeyboardEvent) {
               </span>
               <span class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11.5px] font-normal leading-tight" :class="headerState?.failed ? 'text-coral' : 'text-muted'" :title="connectionDescription || undefined">
                 <span class="size-1.5 shrink-0 rounded-full" :class="connectionTone(currentInstallation, state.transportRoute)" />
-                <span class="truncate" :role="headerState ? 'status' : undefined">{{ headerState?.label || heading?.projectName || heading?.agentName || selectedAgent?.name || 'Main agent' }}</span>
+                <span class="truncate" :role="headerState ? 'status' : undefined">{{ headerState?.label || headerProject || heading?.agentName || selectedAgent?.name || 'Main agent' }}</span>
               </span>
             </span>
           </span>
@@ -1299,13 +1301,13 @@ function key(event: KeyboardEvent) {
             :working="working"
           />
           <div class="flex min-w-0 flex-1 items-center gap-2.5 text-xs text-muted">
-            <h1 class="min-w-28 truncate text-base! font-semibold! leading-snug! tracking-tight! text-ink">
+            <h1 class="min-w-0 truncate text-base! font-semibold! leading-snug! tracking-tight! text-ink">
               {{ heading?.title || 'New conversation' }}
             </h1>
             <button
               ref="tabletHistoryButton"
               :class="iconButton"
-              class="-my-2 -ml-2 size-8! shrink-0"
+              class="-my-2 -ml-2 size-8! shrink-0 pointer-coarse:size-10!"
               aria-label="Conversations"
               aria-haspopup="dialog"
               :aria-expanded="history"
@@ -1313,7 +1315,7 @@ function key(event: KeyboardEvent) {
             >
               <Icon :name="ChevronDown" :size="16" />
             </button>
-            <span v-if="heading?.projectName" class="flex min-w-0 shrink items-center gap-1.5"><Icon :name="FolderGit2" :size="13" class="shrink-0" /><span class="truncate max-w-48">{{ heading.projectName }}</span></span>
+            <span v-if="headerProject" class="flex min-w-0 shrink items-center gap-1.5"><Icon :name="FolderGit2" :size="13" class="shrink-0" /><span class="truncate max-w-48">{{ headerProject }}</span></span>
             <RouterLink
               v-if="heading?.requester"
               :to="chatPath({ id: heading.requester.chatId })"
@@ -1353,6 +1355,7 @@ function key(event: KeyboardEvent) {
               :key="detail.run.id"
               variant="attention"
               :run="detail.run"
+              :fallback-focus="menuButton?.trigger"
             />
           </div>
         </div>
@@ -1362,6 +1365,7 @@ function key(event: KeyboardEvent) {
             :class="iconButton"
             class="w-auto! gap-1.5 px-2.5! text-xs font-semibold tabular-nums phone:hidden!"
             :aria-label="`Files: ${fileCount}`"
+            :title="`Files: ${fileCount}`"
             @click="activity?.openFiles()"
           >
             <Icon :name="Layers" :size="18" /><span aria-hidden="true">{{ fileCount }}</span>
@@ -1387,17 +1391,19 @@ function key(event: KeyboardEvent) {
             <template #trigger>
               <Icon :name="MoreHorizontal" :size="20" />
             </template>
-            <template #default="{ select }">
+            <template #header>
               <ConversationSummary
                 id="conversation-summary"
                 :agent-name="heading?.agentName || selectedAgent?.name || 'Main agent'"
                 :agent-id="heading?.agentId || selectedAgent?.id"
                 :provider="heading?.provider"
-                :project-name="heading ? heading.projectName : state.projects.find(project => project.id === projectId)?.name"
+                :project-name="headerProject"
                 :status="detail ? chatStatus : undefined"
                 :failed="headerState?.failed"
                 :context="detail?.run ? context : undefined"
               />
+            </template>
+            <template #default="{ select }">
               <div
                 v-for="group in actionGroups"
                 :key="group.id"

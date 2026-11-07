@@ -281,8 +281,7 @@ class ContextCompactionJourneyTest {
                 compose
                     .onNodeWithTag("menu-context")
                     .assertTextEquals("Contexte · 150 k / 200 k · 75 %")
-                compose.onNodeWithText("Compacter le contexte").assertIsEnabled()
-                compose.onNodeWithText("Avancé").assertExists()
+                compose.onNodeWithText("Avancé").assert(isHeading())
                 compose.onNodeWithText("Connexion").assertExists()
                 compose.onNodeWithText("Nouvelle conversation").assertDoesNotExist()
                 compose.onNodeWithText("Détails de la conversation").performClick()
@@ -290,6 +289,17 @@ class ContextCompactionJourneyTest {
                 compose.onNodeWithText("120 000 jetons lus depuis le cache").assertExists()
                 compose.onNodeWithText("Mesuré sur la dernière requête du modèle").assertExists()
                 screenshot("context-details")
+                compose
+                    .onNodeWithContentDescription("Fermer Détails de la conversation")
+                    .performClick()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Mesuré sur la dernière requête du modèle")
+                        .fetchSemanticsNodes()
+                        .isEmpty()
+                }
+                // Compaction starts from the conversation's options directly.
+                compose.onNodeWithContentDescription("Options de la conversation").performClick()
                 compose.onNodeWithText("Compacter le contexte").assertIsEnabled().performClick()
                 waitText("Compacter le contexte de l’agent ?")
                 screenshot("context-compaction-confirm", dialog = true)
