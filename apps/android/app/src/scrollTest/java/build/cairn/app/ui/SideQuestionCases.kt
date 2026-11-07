@@ -97,6 +97,7 @@ abstract class SideQuestionCases {
                             .setBody(body)
                     }
                 }
+            start()
         }
 
     private fun viewModel() =
