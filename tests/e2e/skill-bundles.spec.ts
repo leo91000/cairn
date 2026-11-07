@@ -282,7 +282,9 @@ test('builds a multi-file skill, saves one batch and round-trips it through a zi
   await editor.getByRole('button', { name: 'Download .zip' }).click()
   const archive = await download
   expect(archive.suggestedFilename()).toBe('bundle-demo.zip')
-  const zip = await readFile((await archive.path())!)
+  const archivePath = testInfo.outputPath('bundle-demo.zip')
+  await archive.saveAs(archivePath)
+  const zip = await readFile(archivePath)
   expect(zip.subarray(0, 2).toString()).toBe('PK')
   await editor.getByRole('button', { name: 'Close', exact: true }).click()
 
@@ -555,7 +557,7 @@ test('plugin skill source candidates reset when its fields or the folder change'
     },
   }))
   const requests: Record<string, unknown>[] = []
-  await page.route(/\/skills\/global\/import$/, async (route) => {
+  await page.route(/\/skills\/import$/, async (route) => {
     requests.push(route.request().postDataJSON())
     await route.fulfill({ json: { imported: null, candidates: ['skills/first', 'skills/old-repo'] } })
   })
@@ -563,6 +565,7 @@ test('plugin skill source candidates reset when its fields or the folder change'
   await authenticateWorkspace(page)
   const base = {
     source: 'plugin',
+    scope: 'global',
     pluginId: 'github',
     skillSource: 'repository',
     instance: 'work',
@@ -905,4 +908,7 @@ test('reviews a source update as a diff before replacing local files', async ({ 
   await update.getByRole('button', { name: 'Replace my edits', exact: true }).click()
   await expect.poll(() => updated?.version).toBe(latest)
   expect(updated!.base).toMatch(/\w{16,}/)
+  await expect(page.getByRole('dialog', { name: 'Edit skill' }).getByText('Skill updated from its source', { exact: true })).toBeVisible()
+  // The update refreshes the skill list; finish its route handlers before teardown disposes their responses.
+  await page.unrouteAll({ behavior: 'wait' })
 })

@@ -27,7 +27,7 @@ async fn claim(app: &Fixture, cookie: &str, session: &Value) -> (String, String)
             json!({
                 "code": code["code"],
                 "name": "Hosted installation",
-                "protocol": 4,
+                "protocol": cairn_protocol::PROTOCOL_VERSION,
             }),
         )
         .await
@@ -154,7 +154,7 @@ async fn registered_hosts_share_the_same_session_but_cannot_target_another_insta
 }
 
 #[tokio::test]
-async fn legacy_cookie_migration_keeps_the_proof_deadline_and_rejects_unknown_hosts() {
+async fn reading_the_session_keeps_the_proof_deadline_and_rejects_unknown_hosts() {
     let app = Fixture::with_subdomains().await;
     let (cookie, session) = login(&app, "cookie-owner@example.test").await;
     let (before,): (String,) = query_as(
@@ -168,17 +168,14 @@ async fn legacy_cookie_migration_keeps_the_proof_deadline_and_rejects_unknown_ho
         .send()
         .await
         .unwrap();
-    let headers = response
-        .headers()
-        .get_all(header::SET_COOKIE)
-        .iter()
-        .map(|value| value.to_str().unwrap().to_owned())
-        .collect::<Vec<_>>();
-    assert_eq!(headers.len(), 2);
-    assert!(headers[0].contains("Max-Age=0"));
-    assert!(!headers[0].contains("Domain="));
-    assert!(headers[1].contains("Domain=cairn.localhost"));
-    assert!(headers[1].starts_with(&cookie));
+    assert!(
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .next()
+            .is_none()
+    );
     let (after,): (String,) = query_as(
         "SELECT concat(digest,':',csrf,':',expires_at,':',last_proof_at) FROM web_sessions",
     )

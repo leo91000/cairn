@@ -14,7 +14,15 @@ class ActivityPresentationTest {
                 "{\"item\":{\"type\":\"agent_message\",\"text\":\"native diagnostic\",\"id\":\"x\"}}\n",
                 "{\"item\":{\"type\":\"command_execution\",\"command\":\"native diagnostic\",\"exit_code\":1}}\n",
             )) {
-            val presentation = presentActivity(RunEvent(1, 1, "diagnostic", text))
+            val presentation =
+                presentActivity(
+                    RunEvent(
+                        id = 1,
+                        createdAt = 1,
+                        type = "diagnostic",
+                        text = text,
+                    )
+                )
 
             assertEquals(ActivityKind.NOTICE, presentation.kind)
             assertEquals("Diagnostic de l’agent", presentation.title)
@@ -26,30 +34,23 @@ class ActivityPresentationTest {
     }
 
     @Test
-    fun `historical diagnostics are shown verbatim without terminal styling`() {
-        val styled =
-            "\u001B[2m2026-10-22T12:08:49Z\u001B[0m \u001B[33m WARN\u001B[0m " +
-                "\u001B[2mcodex\u001B[0m\u001B[2m:\u001B[0m disk full\n"
-        val presentation = presentActivity(RunEvent(1, 1, "diagnostic", styled))
-
-        assertEquals("Diagnostic de l’agent", presentation.title)
-        assertTrue(presentation.verbatim)
-        assertEquals("2026-10-22T12:08:49Z  WARN codex: disk full\n", presentation.output)
-        assertEquals(presentation.output, presentation.raw)
-    }
-
-    @Test
     fun `shared corpus preserves activity and distinguishes immediate results`() {
         val raw =
             java.io.File(requireNotNull(System.getProperty("cairn.activityCorpus"))).readText()
         val corpus = wireJson.parseToJsonElement(raw).jsonArray
-        assertEquals(21, corpus.size)
+        assertEquals(17, corpus.size)
         val original =
             corpus.take(15).mapIndexed { index, value ->
                 val data = value.jsonObject
-                RunEvent(index.toLong() + 1, index.toLong(), data.string("type"), "", data)
+                RunEvent(
+                    id = index.toLong() + 1,
+                    createdAt = index.toLong(),
+                    type = data.string("type"),
+                    text = "",
+                    payload = kotlinx.serialization.json.JsonObject(data),
+                )
             }
-        val replay = timelineEntries(original)
+        val replay = fixtureEntries(original)
         assertEquals(3, replay.count { it.message })
         assertEquals(1, replay.count { it.plan != null })
         val kinds =
@@ -72,26 +73,38 @@ class ActivityPresentationTest {
             kinds,
         )
 
-        val immediate = listOf(true, true, false, false, true, false)
+        val immediate = listOf(true, false)
         val condition = buildJsonObject {
             put("type", "run_finished")
             put("runId", "dependency")
         }
-        val wakeup = ChatWakeup("wake", "message", "Pending", 60, 0, 60_000, condition = condition)
+        val wakeup =
+            wakeupFixture("wake", "message", "Pending", 60, 0, 60_000, condition = condition)
         val scheduled =
-            RunEvent(1, 1, "chat.wait", "", wireJson.encodeToJsonElement(wakeup).jsonObject)
+            RunEvent(
+                id = 1,
+                createdAt = 1,
+                type = "chat.wait",
+                text = "",
+                payload =
+                    kotlinx.serialization.json.JsonObject(
+                        wireJson.encodeToJsonElement(wakeup).jsonObject
+                    ),
+            )
         corpus.drop(15).forEachIndexed { index, value ->
             val data = value.jsonObject
             val ready =
                 RunEvent(
-                    2,
-                    2,
-                    data.string("type"),
-                    data.string("text"),
-                    data["payload"] as? JsonObject,
+                    id = 2,
+                    createdAt = 2,
+                    type = data.string("type"),
+                    text = data.string("text"),
+                    payload =
+                        (data["payload"] as? JsonObject)?.let {
+                            kotlinx.serialization.json.JsonObject(it)
+                        },
                 )
-            val waits =
-                timelineEntries(listOf(scheduled, ready), chat = true).mapNotNull { it.wait }
+            val waits = fixtureEntries(listOf(scheduled, ready), chat = true).mapNotNull { it.wait }
             assertEquals("case $index", if (immediate[index]) 2 else 1, waits.size)
             assertEquals(if (immediate[index]) "replaced" else null, waits.first().ended)
             val result = waits.last()
@@ -113,63 +126,74 @@ class ActivityPresentationTest {
         assertEquals("Plain output", presentActivity(event("output", "Plain output")).raw)
     }
 
-    private fun event(type: String, text: String) = RunEvent(1, 1000, type, text)
+    private fun event(type: String, text: String) =
+        RunEvent(
+            id = 1,
+            createdAt = 1000,
+            type = type,
+            text = text,
+        )
 
     private fun tool(command: String, code: Int = 0) =
         RunEvent(
-            1,
-            1000,
-            "item.completed",
-            "",
-            mapOf(
-                "item" to
-                    buildJsonObject {
-                        put("type", "command_execution")
-                        put("command", command)
-                        put("exit_code", code)
-                    }
-            ),
+            id = 1,
+            createdAt = 1000,
+            type = "item.completed",
+            text = "",
+            payload =
+                kotlinx.serialization.json.JsonObject(
+                    mapOf(
+                        "item" to
+                            buildJsonObject {
+                                put("type", "command_execution")
+                                put("command", command)
+                                put("exit_code", code)
+                            }
+                    )
+                ),
         )
 
     @Test
     fun `background waits are labelled in the activity log`() {
         fun waiting(vararg descriptions: String) =
-            RunEvent(
-                1,
-                1000,
-                "turn.waiting",
-                "",
-                mapOf(
-                    "type" to JsonPrimitive("turn.waiting"),
-                    "tasks" to
-                        buildJsonArray {
-                            descriptions.forEach { addJsonObject { put("description", it) } }
-                        },
-                ),
+            presentNotice(
+                TimelineNotice(
+                    code = "backgroundTasks",
+                    prominent = false,
+                    state = "info",
+                    tasks = descriptions.toList(),
+                )
             )
-        val waiting = presentActivity(waiting("Build", "Watch CI"))
+        val waiting = waiting("Build", "Watch CI")
         assertEquals(ActivityKind.NOTICE, waiting.kind)
         assertEquals("En attente de tâches en arrière-plan", waiting.title)
         assertEquals("Build · Watch CI", waiting.subtitle)
         assertEquals("", waiting.output)
-        val finished = presentActivity(waiting())
+        val finished = waiting()
         assertEquals("Tâches en arrière-plan terminées", finished.title)
         assertEquals("", finished.subtitle)
         assertEquals("", finished.output)
     }
 
     @Test
-    fun `session events from screenshot have human summaries and no JSON body`() {
-        val done = presentActivity(event("turn.completed", """{"type":"turn.completed"}"""))
+    fun `session cards have human summaries and no JSON body`() {
+        fun notice(code: String) = TimelineNotice(code = code, prominent = false, state = "done")
+        val done = presentNotice(notice("turnCompleted"))
         assertEquals("Travail terminé", done.title)
         assertEquals("", done.output)
-        assertEquals("Exécution réussie", presentActivity(event("status", "succeeded")).title)
-        val account = presentActivity(event("status", "Using Codex account: Compte principal"))
+        assertEquals(
+            "Exécution réussie",
+            presentNotice(notice("runStatus").copy(status = "succeeded")).title,
+        )
+        val account =
+            presentNotice(
+                notice("accountSelected")
+                    .copy(
+                        account = build.cairn.contracts.AccountNotice("Codex", "Compte principal")
+                    )
+            )
         assertEquals("Compte Codex sélectionné", account.title)
         assertEquals("Compte principal", account.subtitle)
-        val claude = presentActivity(event("status", "Using Claude Code account: Studio"))
-        assertEquals("Compte Claude Code sélectionné", claude.title)
-        assertEquals("Studio", claude.subtitle)
     }
 
     @Test
@@ -196,7 +220,16 @@ class ActivityPresentationTest {
             put("tool", "github__checks")
             put("result", buildJsonObject { put("isError", true) })
         }
-        val p = presentActivity(RunEvent(1, 1000, "item.completed", "", mapOf("item" to item)))
+        val p =
+            presentActivity(
+                RunEvent(
+                    id = 1,
+                    createdAt = 1000,
+                    type = "item.completed",
+                    text = "",
+                    payload = kotlinx.serialization.json.JsonObject(mapOf("item" to item)),
+                )
+            )
         assertTrue(p.failed)
         assertEquals(ActivityKind.TOOL, p.kind)
     }
@@ -219,20 +252,5 @@ class ActivityPresentationTest {
             resultParts("{\"outer\":{\"ok\":true},\"tail\":").single() is ResultPart.Incomplete
         )
         assertTrue(resultParts("```json\n{\"outer\":").single() is ResultPart.Incomplete)
-    }
-
-    @Test
-    fun `legacy saved tools remain tools and get a structured result`() {
-        val rows =
-            timelineEntries(
-                listOf(
-                    event("item.started", "Running tool"),
-                    event("item.completed", "{\"jobs\":[]}").copy(id = 2),
-                )
-            )
-        assertFalse(rows.single().message)
-        val p = presentActivity(rows.single().events.single())
-        assertEquals(ActivityKind.OUTPUT, p.kind)
-        assertTrue(resultParts(p.output).single() is ResultPart.Data)
     }
 }

@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "agentId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "data": {
+      "description": "Base64 PNG, JPEG or WebP, at most 5 MiB before normalization.",
+      "maxLength": 6990508,
+      "type": "string"
+    }
+  },
+  "required": [
+    "agentId",
+    "data"
+  ],
+  "title": "SetAgentAvatarInput",
+  "type": "object"
+}

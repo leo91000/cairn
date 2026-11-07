@@ -43,7 +43,6 @@ main() {
 
   [[ -c /dev/kvm ]] || fail 'KVM is missing. Enable hardware virtualization and load the kvm module.'
   [[ -c /dev/net/tun ]] || fail 'TUN is missing. Load the tun module (sudo modprobe tun).'
-  [[ -c /dev/fuse ]] || fail 'FUSE is missing. Install fuse3 and load the fuse module.'
 
   docker info >/dev/null 2>&1 || fail 'Docker is unavailable. Start the Docker daemon.'
   docker compose version >/dev/null 2>&1 || fail 'Install the Docker Compose plugin.'

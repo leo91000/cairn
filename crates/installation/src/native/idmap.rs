@@ -1,7 +1,9 @@
 //! Idmapped ext4 mounts let a native workload use a VM disk in place. Files the
 //! VM agent owns (UID/GID 1000) appear owned by the workload account, and the
-//! workload's writes are stored as 1000 again, so a later VM boot needs no
-//! ownership rewrite. Root stays root; every other owner appears unmapped.
+//! workload's writes are stored as 1000 again. Guest root stays host root for
+//! controller file preparation; it is unmapped inside the protected enclave.
+//! The enclave supervisor uses the separate on-disk identity 65537, and its
+//! subordinate IDs map the other guest identities without rewriting any files.
 use std::{
     ffi::CString,
     io,
@@ -11,9 +13,6 @@ use std::{
     },
     path::Path,
 };
-
-/// The VM agent identity that owns user files on VM disks.
-pub(crate) const VM_AGENT: u32 = 1000;
 
 // Linux UAPI values for the mount API (linux/mount.h, linux/fcntl.h).
 const FSOPEN_CLOEXEC: libc::c_uint = 0x1;
@@ -34,15 +33,18 @@ struct MountAttr {
     userns_fd: u64,
 }
 
-/// One map line per identity: disk root stays root and the VM agent becomes
-/// `workload`. Both columns must stay disjoint, so root cannot be the workload.
-pub(crate) fn map(workload: u32) -> io::Result<String> {
-    if workload == 0 {
+/// Preserve guest root for host preparation, map the engine and subordinate
+/// owners into this conversation, and reserve 65537 for its namespace supervisor.
+pub(super) fn map(root: u32, subordinate: u32, engine: u32) -> io::Result<String> {
+    if root == 0 || engine == 0 || subordinate == 0 {
         return Err(io::Error::other(
-            "The native workload account must not be root.",
+            "Native conversation identities must not be host root.",
         ));
     }
-    Ok(format!("0 0 1\n{VM_AGENT} {workload} 1\n"))
+    Ok(format!(
+        "0 0 1\n1 {subordinate} 999\n1000 {engine} 1\n1001 {} 64536\n65537 {root} 1\n",
+        subordinate + 1000
+    ))
 }
 
 fn check(result: libc::c_long) -> io::Result<libc::c_long> {
@@ -120,8 +122,15 @@ pub(crate) fn user_namespace(uid_map: &str, gid_map: &str) -> io::Result<OwnedFd
 
 /// Mounts the ext4 filesystem on `source` at `target` without ever attaching
 /// an unmapped view. Ownership is translated for the `(uid, gid)` workload.
-pub(crate) fn mount_ext4(source: &Path, target: &Path, workload: (u32, u32)) -> io::Result<()> {
-    let namespace = user_namespace(&map(workload.0)?, &map(workload.1)?)?;
+pub(super) fn mount_ext4(
+    source: &Path,
+    target: &Path,
+    identity: &super::identity::Identity,
+) -> io::Result<()> {
+    let namespace = user_namespace(
+        &map(identity.root_uid, identity.subuid, identity.uid())?,
+        &map(identity.root_gid, identity.subgid, identity.gid())?,
+    )?;
     attach(c"ext4", Some(source), target, Some(&namespace))
 }
 
@@ -214,10 +223,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maps_keep_root_and_translate_only_the_vm_agent() {
-        assert_eq!(map(936).unwrap(), "0 0 1\n1000 936 1\n");
-        assert_eq!(map(1000).unwrap(), "0 0 1\n1000 1000 1\n");
-        assert!(map(0).is_err());
+    fn maps_follow_the_conversation_namespace_and_administrator_engine() {
+        assert_eq!(
+            map(500000000, 1000000, 1000999).unwrap(),
+            "0 0 1\n1 1000000 999\n1000 1000999 1\n1001 1001000 64536\n65537 500000000 1\n"
+        );
+        assert_eq!(
+            map(500000000, 1000000, 936).unwrap(),
+            "0 0 1\n1 1000000 999\n1000 936 1\n1001 1001000 64536\n65537 500000000 1\n"
+        );
+        assert!(map(0, 1000000, 936).is_err());
     }
 
     /// Run inside `unshare -Urm` with `--ignored`: tmpfs supports idmapped

@@ -155,6 +155,7 @@ pub(super) fn serve(
     stopped: Arc<AtomicBool>,
 ) -> io::Result<()> {
     let size = disk.size();
+    let geometry = disk.clone();
     let wake = Arc::new(EventFd::new(libc::EFD_CLOEXEC | libc::EFD_NONBLOCK)?);
     let writer_wake = wake.clone();
     let (sender, receiver) = mpsc::sync_channel(usize::from(DEPTH));
@@ -199,10 +200,12 @@ pub(super) fn serve(
                 Ok(())
             },
             move |qid, dev| {
+                let geometry = geometry.clone();
                 let sender = sender.clone();
                 let remaining = Rc::new(Cell::new(DEPTH));
                 let wakeup = Rc::new(RefCell::new(None));
                 let result = libublk::UblkRuntime::run_io_tasks(dev, qid, move |queue, tag| {
+                    let geometry = geometry.clone();
                     let sender = sender.clone();
                     let wake = wake.clone();
                     let remaining = remaining.clone();
@@ -246,8 +249,13 @@ pub(super) fn serve(
                                 let length = usize::try_from(descriptor.nr_sectors)
                                     .unwrap_or(usize::MAX)
                                     .saturating_mul(512);
-                                let command =
-                                    decode(operation, offset, length, size, buffer.as_slice());
+                                let command = decode(
+                                    operation,
+                                    offset,
+                                    length,
+                                    geometry.size(),
+                                    buffer.as_slice(),
+                                );
                                 let result = if let Some(command) = command {
                                     let (done, completion) = oneshot::channel();
                                     if sender.try_send(Request { command, done }).is_err() {

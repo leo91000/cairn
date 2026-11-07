@@ -24,8 +24,4 @@ impl Sandbox {
     pub fn is_read_only(value: &Value) -> bool {
         Self::of(value) == Some(Self::ReadOnly)
     }
-
-    pub fn is_yolo(value: &Value) -> bool {
-        Self::of(value) == Some(Self::Yolo)
-    }
 }

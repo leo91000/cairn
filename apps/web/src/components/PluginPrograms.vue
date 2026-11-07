@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import type { ProgramState } from '../plugins'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { listPluginPrograms } from '../../../../packages/contracts/generated/listPluginPrograms'
+import { preparePluginProgram } from '../../../../packages/contracts/generated/preparePluginProgram'
 import { api } from '../api'
-import { pluginOperation } from '../plugin-operations'
+import { pluginRequest } from '../plugin-operations'
 import UiAlert from './UiAlert.vue'
 import UiButton from './UiButton.vue'
 
@@ -17,7 +19,7 @@ let requested = 0
 
 async function load() {
   const request = ++requested
-  const result = await api<{ programs: ProgramState[] }>(`/plugins/${props.plugin}/programs`)
+  const result = await listPluginPrograms(api, { pluginId: props.plugin })
   if (!stopped && request === requested) {
     programs.value = result.programs
     refreshError.value = ''
@@ -44,11 +46,18 @@ onBeforeUnmount(() => {
   clearTimeout(timer)
 })
 
-async function act(program: ProgramState, action: string) {
+async function act(program: ProgramState, action: 'check' | 'install' | 'rollback') {
   busy.value = true
   error.value = ''
   try {
-    await pluginOperation(`/plugins/${props.plugin}/programs/${program.name}/${action}`, { digest: program.digest })
+    await preparePluginProgram(pluginRequest, action === 'install'
+      ? {
+          kind: action,
+          pluginId: props.plugin,
+          program: program.name,
+          digest: program.digest!,
+        }
+      : { kind: action, pluginId: props.plugin, program: program.name })
     await load()
   }
   catch (e) {

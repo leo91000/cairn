@@ -1,3 +1,8 @@
+use common::AgentFixture;
+use common::MissionFixture;
+use common::ProjectFixture;
+use common::StoreMissionFixture;
+
 mod common;
 
 use cairn_installation::{
@@ -42,7 +47,11 @@ async fn creation_replays_survive_restart_without_overwriting_later_edits() {
             // A scheduler may have advanced the commitment since the lost response.
             // Recovering the creation must not recompute its next occurrence.
             edited["nextRun"] = 1234.into();
-            service.store.put("tasks", edited.clone()).await.unwrap();
+            service
+                .store
+                .put_mission_fixture(edited.clone())
+                .await
+                .unwrap();
         }
         let restarted = Service::new(config.clone()).await.unwrap();
         let replay = save(&restarted, kind, request, None).await;
@@ -51,7 +60,20 @@ async fn creation_replays_survive_restart_without_overwriting_later_edits() {
             "{kind} replay must preserve later edits and schedule"
         );
         assert_eq!(replay["createdAt"], first["createdAt"]);
-        let records = restarted.store.list(kind).await.unwrap();
+        let records = if kind == "projects" {
+            restarted
+                .store
+                .projects()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|project| serde_json::to_value(project).unwrap())
+                .collect::<Vec<_>>()
+        } else if kind == "agents" {
+            restarted.store.agent_snapshots().await.unwrap()
+        } else {
+            restarted.store.mission_values_fixture().await.unwrap()
+        };
         assert_eq!(
             records
                 .iter()
@@ -74,13 +96,13 @@ async fn creation_identity_is_validated_and_cannot_replace_an_update_identity() 
     ] {
         assert!(
             service
-                .agent(json!({ "name": "Agent", "creationId": invalid }), None)
+                .agent_fixture(json!({ "name": "Agent", "creationId": invalid }), None)
                 .await
                 .is_err()
         );
         assert!(
             service
-                .project(
+                .project_fixture(
                     json!({ "name": "Project", "path": root.path(), "creationId": invalid }),
                     None
                 )
@@ -89,7 +111,7 @@ async fn creation_identity_is_validated_and_cannot_replace_an_update_identity() 
         );
         assert!(
             service
-                .task(
+                .task_fixture(
                     json!({
                         "name": "Task",
                         "prompt": "Work",
@@ -103,12 +125,12 @@ async fn creation_identity_is_validated_and_cannot_replace_an_update_identity() 
         );
     }
     let original = service
-        .agent(json!({ "name": "Original" }), None)
+        .agent_fixture(json!({ "name": "Original" }), None)
         .await
         .unwrap();
     let replacement_id = id();
     let updated = service
-        .agent(
+        .agent_fixture(
             json!({ "name": "Updated", "creationId": replacement_id }),
             original["id"].as_str(),
         )
@@ -118,7 +140,7 @@ async fn creation_identity_is_validated_and_cannot_replace_an_update_identity() 
     assert!(
         service
             .store
-            .get("agents", &replacement_id)
+            .agent_snapshot(&replacement_id)
             .await
             .unwrap()
             .is_none()
@@ -135,19 +157,18 @@ async fn another_member_cannot_recover_a_task_creation_as_their_own() {
         "agentId": MAIN_AGENT_ID,
         "creationId": id(),
     });
-    let mut task = service.task(request.clone(), None).await.unwrap();
-    task["authorId"] = "original-author".into();
-    service.store.put("tasks", task.clone()).await.unwrap();
+    let task = service.task_fixture(request.clone(), None).await.unwrap();
+
     let identity = InstallationIdentity::trusted(InstallationRole::Member, "another-author");
     assert!(
         service
-            .task_as(request.clone(), None, Some(&identity))
+            .task_as_fixture(request.clone(), None, Some(&identity))
             .await
             .is_err()
     );
     assert_eq!(
         service
-            .get("tasks", task["id"].as_str().unwrap())
+            .mission_snapshot_fixture(task["id"].as_str().unwrap())
             .await
             .unwrap(),
         task
@@ -160,12 +181,12 @@ async fn creation_identity_cannot_overwrite_another_resource_kind() {
     let service = Service::new(common::config(root.path())).await.unwrap();
     let creation_id = id();
     let original = service
-        .agent(json!({ "name": "Agent", "creationId": creation_id }), None)
+        .agent_fixture(json!({ "name": "Agent", "creationId": creation_id }), None)
         .await
         .unwrap();
     assert!(
         service
-            .project(
+            .project_fixture(
                 json!({ "name": "Project", "path": root.path(), "creationId": creation_id }),
                 None
             )
@@ -174,7 +195,7 @@ async fn creation_identity_cannot_overwrite_another_resource_kind() {
     );
     assert!(
         service
-            .task(
+            .task_fixture(
                 json!({
                     "name": "Task",
                     "prompt": "Work",
@@ -186,9 +207,19 @@ async fn creation_identity_cannot_overwrite_another_resource_kind() {
             .await
             .is_err()
     );
-    assert_eq!(service.get("agents", &creation_id).await.unwrap(), original);
-    assert!(service.store.list("projects").await.unwrap().is_empty());
-    assert!(service.store.list("tasks").await.unwrap().is_empty());
+    assert_eq!(
+        service.agent_snapshot(&creation_id).await.unwrap(),
+        original
+    );
+    assert!(service.store.projects().await.unwrap().is_empty());
+    assert!(
+        service
+            .store
+            .mission_values_fixture()
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 async fn save(
@@ -198,9 +229,9 @@ async fn save(
     existing: Option<&str>,
 ) -> Value {
     match kind {
-        "agents" => service.agent(input, existing).await,
-        "projects" => service.project(input, existing).await,
-        _ => service.task(input, existing).await,
+        "agents" => service.agent_fixture(input, existing).await,
+        "projects" => service.project_fixture(input, existing).await,
+        _ => service.task_fixture(input, existing).await,
     }
     .unwrap()
 }
@@ -233,27 +264,27 @@ async fn measure_creation_retries() {
                 request["creationId"] = id().into();
             }
             let start = Instant::now();
-            let saved = service.task(request.clone(), None).await.unwrap();
+            let saved = service.task_fixture(request.clone(), None).await.unwrap();
             writes.push(start.elapsed().as_micros());
             ids.push(saved["id"].as_str().unwrap().to_owned());
             let start = Instant::now();
-            service.task(request, None).await.unwrap();
+            service.task_fixture(request, None).await.unwrap();
             retries.push(start.elapsed().as_micros());
         }
         let mut cold = Vec::new();
         for id in ids.iter().take(20) {
             let store = Store::open(&config.data_dir).unwrap();
             let start = Instant::now();
-            store.get("tasks", id).await.unwrap().unwrap();
+            store.mission(id).await.unwrap().unwrap();
             cold.push(start.elapsed().as_micros());
         }
         let mut warm = Vec::new();
         for id in ids.iter().cycle().take(200) {
             let start = Instant::now();
-            service.store.get("tasks", id).await.unwrap().unwrap();
+            service.store.mission(id).await.unwrap().unwrap();
             warm.push(start.elapsed().as_micros());
         }
-        let records = service.store.list("tasks").await.unwrap();
+        let records = service.store.mission_values_fixture().await.unwrap();
         let bytes: usize = records.iter().map(|record| record.to_string().len()).sum();
         println!(
             "{} records={} encoded_record_bytes={} cpu_us={} write_us={} retry_us={} connection_cold_read_us={} warm_read_us={}",

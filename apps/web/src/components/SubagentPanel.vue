@@ -130,7 +130,7 @@ function tabKey(event: KeyboardEvent, index: number) {
             {{ agent.title }}
           </h2>
           <p class="m-0! truncate text-2xs text-muted">
-            {{ [subagent.type, subagent.background ? 'background' : '', 'started by the agent'].filter(Boolean).join(' · ') }}
+            {{ [subagent.type, subagent.background ? 'background' : '', subagent.resumed ? 'resumed' : 'started by the agent'].filter(Boolean).join(' · ') }}
           </p>
         </div>
         <span class="inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-2xs font-semibold" :class="subagentPills[state]">

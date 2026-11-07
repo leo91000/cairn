@@ -46,13 +46,13 @@ async fn authorize(s: &Service, node: &str, attempt: &str) -> Result<(Value, Val
     let plan: Value = serde_json::from_slice(&bytes)?;
     let run = s.store.run(text(&plan, "runId")).await?;
     let checkpoint = super::checkpoint(s, text(&plan, "runId")).await?;
-    let agent = s.get("agents", super::run_agent(&run)).await?;
+    let agent = s.agent_snapshot(super::run_agent(&run)).await?;
     let ownership = s
         .store
-        .get("node-attempts", attempt)
+        .attempt(attempt)
         .await?
-        .unwrap_or_default();
-    let record = s.get("nodes", node).await?;
+        .ok_or_else(|| Error::forbidden("Remote execution scope expired."))?;
+    let record = s.node_boundary(node).await?;
     let native_allowed = if crate::native::policy::node_native(&record) {
         let (run, record) = (run.clone(), record.clone());
         s.store
@@ -62,8 +62,8 @@ async fn authorize(s: &Service, node: &str, attempt: &str) -> Result<(Value, Val
         true
     };
     if !native_allowed
-        || ownership["released"] == true
-        || ownership["nodeId"] != node
+        || ownership.released
+        || ownership.node_id != node
         || checkpoint["nodeId"] != node
         || checkpoint["runnerId"] != attempt
         || run["status"] != RunStatus::Running
@@ -172,18 +172,14 @@ async fn renew_lease(s: &Service, attempt: &str) -> Result<u64> {
     s.store
         .transaction(move |db| {
             let mut record = db
-                .get("node-attempts", &id)?
+                .attempt(&id)?
                 .ok_or_else(|| Error::conflict("Attempt removed."))?;
-            if record["released"] == true {
+            if record.released {
                 return Err(Error::conflict("Attempt released."));
             }
-            record["leaseExpiresAt"] = (crate::config::now() + lease_ms as i64).into();
-            record["leaseDurationMs"] = record["leaseDurationMs"]
-                .as_u64()
-                .unwrap_or(0)
-                .max(lease_ms)
-                .into();
-            db.put("node-attempts", &record)?;
+            record.lease_expires_at = Some(crate::config::now() + lease_ms as i64);
+            record.lease_duration_ms = Some(record.lease_duration_ms.unwrap_or(0).max(lease_ms));
+            db.save_attempt(&record)?;
             Ok(())
         })
         .await?;
@@ -218,8 +214,7 @@ async fn seed_source(
     if tokio::fs::canonicalize(&source).await? != source {
         return Err(Error::bad("Workspace seed changed location."));
     }
-    // Older nodes omit `workspace` and keep receiving a complete seed. Never
-    // let a node omit bootstrap files for a fresh VM or a native environment.
+    // A node may omit projects only when its disk or verified archives supply them.
     let resumed_vm = plan["backend"] == "firecracker" && plan["resumeWorkspace"] == true;
     let skip_projects = text(selection, "kind") == "initial"
         && selection["workspace"] == false
@@ -420,6 +415,27 @@ async fn inbox_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Publish controller information into an already mounted read-only inbox.
+/// Its directory stays traversable and final bytes are readable before rename.
+pub(crate) async fn publish_native_notice(root: &Path, bytes: &[u8]) -> Result<()> {
+    inbox_directory(root).await?;
+    let (root, bytes) = (root.to_owned(), bytes.to_owned());
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new_in(&root)?;
+        file.write_all(&bytes)?;
+        file.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o444))?;
+        file.as_file().sync_all()?;
+        file.persist(root.join("disk-notice.json"))
+            .map_err(|error| error.error)?;
+        std::fs::File::open(root)?.sync_all()
+    })
+    .await
+    .map_err(Error::internal)??;
+    Ok(())
+}
+
 async fn install_native_inbox(source: &Path, target: &Path) -> Result<()> {
     prepare_native_inbox(source).await?;
     let messages = source.join("messages.json");
@@ -509,6 +525,52 @@ pub async fn auth_listener(
 mod native_inbox_tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
+
+    #[tokio::test]
+    async fn controller_notice_keeps_live_inbox_and_user_steering_readable() {
+        let root = tempfile::tempdir().unwrap();
+        let inbox = root.path().join("inbox");
+        tokio::fs::create_dir(&inbox).await.unwrap();
+        tokio::fs::write(inbox.join("messages.json"), b"[]")
+            .await
+            .unwrap();
+        prepare_native_inbox(&inbox).await.unwrap();
+        let inode = tokio::fs::metadata(&inbox).await.unwrap().ino();
+        for text in [b"first notice".as_slice(), b"updated notice".as_slice()] {
+            publish_native_notice(&inbox, text).await.unwrap();
+            assert_eq!(tokio::fs::metadata(&inbox).await.unwrap().ino(), inode);
+            assert_eq!(
+                tokio::fs::metadata(&inbox)
+                    .await
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755
+            );
+            for name in ["disk-notice.json", "messages.json"] {
+                assert_eq!(
+                    tokio::fs::metadata(inbox.join(name))
+                        .await
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o444
+                );
+            }
+            assert_eq!(
+                tokio::fs::read(inbox.join("messages.json")).await.unwrap(),
+                b"[]"
+            );
+            assert_eq!(
+                tokio::fs::read(inbox.join("disk-notice.json"))
+                    .await
+                    .unwrap(),
+                text
+            );
+        }
+    }
 
     #[tokio::test]
     async fn empty_native_inbox_refresh_waits_for_messages_without_replacing_the_mount() {

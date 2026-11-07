@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { NativeModeChange } from '../../../../packages/contracts/generated/typescript/NativeModeChange'
+import type { NativeModeChangeOutput } from '../../../../packages/contracts/generated/typescript/NativeModeChangeOutput'
 import type { ExecutionNode, NativeModePreview } from '../../../../packages/contracts/nodes'
 import { computed, ref } from 'vue'
 import { nativeModeLabel } from '../../../../packages/contracts/nodes'
@@ -31,7 +33,11 @@ async function open(mode = target.value) {
   busy.value = true
   error.value = ''
   try {
-    preview.value = await api(`/nodes/${props.node.id}/native-mode`, { method: 'POST', body: JSON.stringify({ mode }) })
+    const change: NativeModeChange = { mode, previewId: null, confirm: false }
+    const result = await api<NativeModeChangeOutput>(`/nodes/${props.node.id}/native-mode`, { method: 'POST', body: JSON.stringify(change) })
+    if (result.kind !== 'preview')
+      throw new Error('The node did not return a privilege preview.')
+    preview.value = result
   }
   catch (e) {
     error.value = (e as Error).message
@@ -47,7 +53,8 @@ async function confirm() {
   busy.value = true
   error.value = ''
   try {
-    await api(`/nodes/${props.node.id}/native-mode`, { method: 'POST', body: JSON.stringify({ mode: preview.value.preview.mode, previewId: preview.value.previewId, confirm: true }) })
+    const change: NativeModeChange = { mode: preview.value.preview.mode, previewId: preview.value.previewId, confirm: true }
+    await api(`/nodes/${props.node.id}/native-mode`, { method: 'POST', body: JSON.stringify(change) })
     preview.value = null
     emit('changed')
   }

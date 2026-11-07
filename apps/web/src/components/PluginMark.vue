@@ -5,7 +5,7 @@ import { upcoming } from '../plugins'
 import Icon from './Icon.vue'
 
 // The brand a package's manifest declares; announced plugins use theirs; otherwise a puzzle.
-const props = withDefaults(defineProps<{ plugin: string, size?: number, brand?: { color: string, path?: string } }>(), { size: 44 })
+const props = withDefaults(defineProps<{ plugin: string, size?: number, brand?: { color: string, path?: string } | null }>(), { size: 44 })
 const color = computed(() => props.brand?.color ?? upcoming[props.plugin]?.color)
 </script>
 

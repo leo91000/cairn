@@ -6,7 +6,6 @@ import {
 } from 'vitest'
 
 // C1 design experiment only. No application imports this prototype.
-// See docs/CHAT-SEND-OWNERSHIP.md for the production timing comparison.
 interface Content {
   text: string
   mode: 'queue' | 'steer'

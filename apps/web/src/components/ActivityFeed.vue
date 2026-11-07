@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import type { Provider } from '../../../../packages/contracts/accounts'
 import type { Deliverable } from '../../../../packages/contracts/artifacts'
 import type { ChatWakeup } from '../../../../packages/contracts/chats'
 import type { RunEvent, TaskOutcome } from '../../../../packages/contracts/contracts'
+import type { TimelineEntry } from '../../../../packages/contracts/live'
 import type { ActivityEntry } from '../activity'
 import type { SendingMessage } from '../chat-delivery'
 import type { ChatQuota } from '../chat-quota'
@@ -19,12 +21,18 @@ import {
   watch,
 } from 'vue'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
-import { activityEntries, ActivityGroups } from '../activity'
+import { activityEntries, ActivityGroups, proposedPlanApproval } from '../activity'
 import { currentPlan } from '../agent-plan'
-import { quotaEntries } from '../chat-quota'
 import { deliveryEntries } from '../deliverables'
-import { ArrowDown, Maximize2, Minimize2 } from '../icons'
+import {
+  ArrowDown,
+  Hammer,
+  Maximize2,
+  Minimize2,
+  NotebookPen,
+} from '../icons'
 import { MessageTimes } from '../message-times'
+import { questionAnswerText } from '../question-answer'
 import { exclusiveSuspensionLabel } from '../run-status'
 import { backgroundWait, waitingStep, workingStep } from '../signal'
 import { mentionSegments } from '../skill-mentions'
@@ -36,8 +44,9 @@ import ArtifactRail from './ArtifactRail.vue'
 import ArtifactViewer from './ArtifactViewer.vue'
 import ChatNotice from './ChatNotice.vue'
 import ChatOutcome from './ChatOutcome.vue'
-import ChatQuotaCard from './ChatQuotaCard.vue'
+import ChatQuotaRecovery from './ChatQuotaRecovery.vue'
 import ChatWaitCard from './ChatWaitCard.vue'
+import ContextCompaction from './ContextCompaction.vue'
 import Icon from './Icon.vue'
 import MessageAttachments from './MessageAttachments.vue'
 import PlanCard from './PlanCard.vue'
@@ -48,6 +57,8 @@ import WorkingIndicator from './WorkingIndicator.vue'
 
 const props = defineProps<{
   events: RunEvent[]
+  /** Timeline cards the server interpreted: messages, the run cycle, errors and retries. */
+  timeline: TimelineEntry[]
   active: boolean
   suspended?: boolean
   agent: string
@@ -71,14 +82,20 @@ const props = defineProps<{
   /** The conversation's pending wakeup, which keeps its wait card live. */
   wakeup?: LiveWait
   quota?: ChatQuota | null
+  chatId?: string
+  codingAgentSwitch?: { provider: Provider, error: string | null } | null
   canManageAccounts?: boolean
   busy?: boolean
+  /** The composer can send an implementation request now. */
+  canImplement?: boolean
 }>()
 const emit = defineEmits<{
   load: []
   position: [value: ReadingPosition, key?: string]
   pauseWait: []
   resumeQuota: []
+  implement: [sourceId: string]
+  codingAgentSwitched: [provider: Provider]
 }>()
 const skillNames = computed(() => new Set(props.skills ?? []))
 const messageTimes = new MessageTimes()
@@ -94,10 +111,9 @@ const pendingWakeup = computed<ChatWakeup | null>((previous) => {
   return previous && next?.id === previous.id && JSON.stringify(next.observation) === JSON.stringify(previous.observation) ? previous : next
 })
 const entries = computed(() => {
-  const projected = activityEntries(props.events, props.chat, activityGroups.value, pendingWakeup.value)
-  const entries = props.chat ? quotaEntries(projected, props.events) : projected
+  const entries = activityEntries(props.events, props.chat, activityGroups.value, pendingWakeup.value, props.timeline)
 
-  const acknowledged = new Set(props.events.filter(event => event.type === 'chat.user').map(event => event.payload?.messageId))
+  const acknowledged = new Set(entries.flatMap(entry => entry.kind === 'message' && entry.messageId ? [entry.messageId] : []))
   for (const { message, label } of props.sending ?? []) {
     if (!acknowledged.has(message.id)) {
       entries.push({
@@ -105,9 +121,10 @@ const entries = computed(() => {
         role: 'user',
         id: `sending:${message.id}`,
         time: message.createdAt,
-        text: message.text,
+        text: questionAnswerText(message.text, message.questionId),
         attachments: message.attachments,
         delivery: label,
+        ...(message.plan ? { plan: true } : {}),
       })
     }
   }
@@ -121,10 +138,15 @@ const plan = computed(() => currentPlan(activity.value))
 // Only the latest plan is still being followed.
 const livePlan = computed(() => props.active && !props.suspended ? activity.value.findLast(entry => entry.kind === 'plan')?.id : undefined)
 const working = computed(() => {
-  const wait = backgroundWait(props.events)
+  const wait = backgroundWait(props.timeline)
   if (wait)
-    return { ...waitingStep(wait), subagents: waitingForSubagents(props.events, subagents.value) }
+    return { ...waitingStep(wait), subagents: waitingForSubagents(wait.taskIds, subagents.value) }
   return workingStep(activity.value, props.agent, props.events[0]?.createdAt ?? null)
+})
+// Only the latest proposal, before any later request, offers to implement it.
+const implementable = computed(() => {
+  const sourceId = proposedPlanApproval(props.events, props.timeline)
+  return sourceId ? activity.value.findLast(entry => entry.kind === 'proposal' && entry.sourceId === sourceId)?.id : null
 })
 const visibleOutcome = computed(() => !props.active && !props.sending?.length && !props.loading ? props.outcome : null)
 const outcomeEntryId = computed(() => {
@@ -167,7 +189,6 @@ let prependPending = false
 let resizeObserver: ResizeObserver | undefined
 // The browser keeps the text under the reader in place while content changes above or
 // below it (scroll anchoring); following pins the end after every change of size.
-const anchoring = CSS.supports('overflow-anchor', 'auto')
 // The position the feed set itself, whose scroll event is not the reader's.
 let assigned: number | undefined
 let lastTop = 0
@@ -252,14 +273,46 @@ function loadOlder() {
 watch([() => props.events, () => props.loadingOlder], async () => {
   if (props.loadingOlder || !prependPending)
     return
-  // Anchoring keeps the reader's text in place, except at the very top, where browsers
-  // never anchor, and in engines without it. Measure just before the page renders: the
-  // reader may have kept scrolling while the response was in flight.
+  // A large prepend can suppress native scroll anchoring. Retain a visible row's
+  // actual offset, correcting only the movement the browser did not absorb.
+  // Measure just before rendering: the reader may have scrolled during the request.
   const el = scroller.value
-  const anchor = el && !follow.value && (!anchoring || el.scrollTop < 1) && { height: el.scrollHeight, top: el.scrollTop }
+  let anchor: {
+    height: number
+    top: number
+    element?: Element
+    offset: number
+  } | undefined
+  if (el && !follow.value) {
+    const children = conversation.value?.children
+    const viewportTop = el.getBoundingClientRect().top
+    let start = 0
+    let end = children?.length ?? 0
+    // Rows are in document order; avoid measuring every loaded history row.
+    while (start < end) {
+      const middle = Math.floor((start + end) / 2)
+      if (children![middle]!.getBoundingClientRect().bottom <= viewportTop)
+        start = middle + 1
+      else
+        end = middle
+    }
+
+    const element = children?.[start]
+    anchor = {
+      height: el.scrollHeight,
+      top: el.scrollTop,
+      element,
+      offset: element?.getBoundingClientRect().top ?? 0,
+    }
+  }
+
   await nextTick()
-  if (el && anchor && !props.olderError)
-    setScroll(el, anchor.top + el.scrollHeight - anchor.height)
+  if (el && anchor && !props.olderError) {
+    const top = anchor.element?.isConnected
+      ? el.scrollTop + anchor.element.getBoundingClientRect().top - anchor.offset
+      : anchor.top + el.scrollHeight - anchor.height
+    setScroll(el, top)
+  }
 
   prependPending = false
   savePosition()
@@ -423,11 +476,13 @@ defineExpose({
                       </template>
                     </p>
                     <p class="mt-1.5! mb-0! flex justify-end gap-2 text-2xs text-muted">
+                      <span v-if="entry.plan" class="inline-flex items-center gap-1 font-semibold text-accent" title="Plan turn: the agent explores and proposes without changing anything"><Icon :name="NotebookPen" :size="12" />Plan</span>
                       <span v-if="entry.delivery" role="status">{{ entry.delivery }}</span>
                       <time :datetime="messageTimes.format(entry.time).datetime" :title="messageTimes.format(entry.time).title">{{ messageTimes.format(entry.time).label }}</time>
                     </p>
                   </div>
                   <p v-else class="m-0! flex justify-end gap-2 text-2xs text-muted">
+                    <span v-if="entry.plan" class="inline-flex items-center gap-1 font-semibold text-accent" title="Plan turn: the agent explores and proposes without changing anything"><Icon :name="NotebookPen" :size="12" />Plan</span>
                     <span v-if="entry.delivery" role="status">{{ entry.delivery }}</span>
                     <time :datetime="messageTimes.format(entry.time).datetime" :title="messageTimes.format(entry.time).title">{{ messageTimes.format(entry.time).label }}</time>
                   </p>
@@ -439,10 +494,29 @@ defineExpose({
                   </p>
                   <ActivityContent :content="entry.text" />
                 </article>
+                <article v-else-if="entry.kind === 'proposal'" class="activity-proposal my-3 rounded-2xl border border-line px-4 py-3" data-testid="proposed-plan">
+                  <p class="mb-1.5! flex items-center justify-between gap-3 text-2xs text-muted">
+                    <span class="inline-flex items-center gap-1.5 font-semibold text-accent"><Icon :name="NotebookPen" :size="14" />Proposed plan</span>
+                    <time :datetime="messageTimes.format(entry.time).datetime" :title="messageTimes.format(entry.time).title">{{ messageTimes.format(entry.time).label }}</time>
+                  </p>
+                  <ActivityContent :content="entry.text" />
+                  <div v-if="entry.id === implementable" class="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
+                    <span class="text-2xs text-muted">Nothing was changed. Implementing starts a turn with the agent’s usual permissions.</span>
+                    <UiButton
+                      class="text-sm"
+                      :disabled="!canImplement"
+                      title="Queue an implementation request in this conversation"
+                      @click="entry.sourceId && emit('implement', entry.sourceId)"
+                    >
+                      <Icon :name="Hammer" :size="14" />Implement
+                    </UiButton>
+                  </div>
+                </article>
                 <ChatNotice v-else-if="entry.kind === 'notice'" :notice="entry.artifact" />
                 <SubagentTeam v-else-if="entry.kind === 'team'" :agents="entry.agents" :active="active" />
                 <PlanCard v-else-if="entry.kind === 'plan'" :plan="entry.plan" :live="entry.id === livePlan && !!plan" />
                 <PlanUpdate v-else-if="entry.kind === 'plan-update'" :change="entry.change" :progress="entry.progress" />
+                <ContextCompaction v-else-if="entry.kind === 'compaction'" :entry="entry" />
                 <ChatWaitCard
                   v-else-if="entry.kind === 'wait'"
                   :wait="entry.wait"
@@ -465,12 +539,15 @@ defineExpose({
                 </ChatOutcome>
               </template>
 
-              <ChatQuotaCard
-                v-if="chat && quota"
+              <ChatQuotaRecovery
+                v-if="chat && chatId"
+                :chat-id="chatId"
                 :quota="quota"
+                :progress="codingAgentSwitch"
                 :can-manage="!!canManageAccounts"
                 :busy="busy"
                 @resume="emit('resumeQuota')"
+                @switched="emit('codingAgentSwitched', $event)"
               />
 
               <ChatOutcome

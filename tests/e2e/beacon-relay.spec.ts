@@ -1,8 +1,87 @@
 import { Buffer } from 'node:buffer'
 import { once } from 'node:events'
+import { createServer } from 'node:http'
+import { createServer as createTcpServer } from 'node:net'
 import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import { expect, test } from '@playwright/test'
-import { beaconRelayFixture } from './beacon-relay-fixture'
+import { beaconRelayFixture, executeBeaconSql } from './beacon-relay-fixture'
+import { relayProtocolVersion } from './relay-protocol'
+
+test('Beacon startup preserves a caller deadline while Postgres is unresponsive', async () => {
+  const sockets = new Set<import('node:net').Socket>()
+  const postgres = createTcpServer((socket) => {
+    sockets.add(socket)
+    socket.on('close', () => sockets.delete(socket))
+  })
+  postgres.listen(0, '127.0.0.1')
+  await once(postgres, 'listening')
+  const port = (postgres.address() as { port: number }).port
+  const fixture = await beaconRelayFixture()
+  try {
+    const child = fixture.beacon(`postgres://fixture:fixture-only@127.0.0.1:${port}/fixture`)
+    const result = await Promise.race([
+      fixture.waitForBeacon(child, 100).then(() => 'ready', error => error.message),
+      delay(2000, 'Caller startup deadline was ignored'),
+    ])
+    expect(result).toContain('Beacon did not become ready within 100ms.')
+  }
+  finally {
+    await fixture.close()
+    for (const socket of sockets)
+      socket.destroy()
+    await new Promise<void>(resolve => postgres.close(() => resolve()))
+  }
+})
+
+test('Beacon startup rejects a health response arriving after its caller deadline', async () => {
+  const health = createServer(async (_request, response) => {
+    await delay(350)
+    response.writeHead(200).end()
+  })
+  health.listen(0, '127.0.0.1')
+  await once(health, 'listening')
+  const fixture = await beaconRelayFixture((health.address() as { port: number }).port)
+  try {
+    // Keep a real child listening while this controlled health endpoint responds late.
+    const child = fixture.beacon(undefined, { CAIRN_BEACON_LISTEN: '127.0.0.1:0' })
+    await expect.poll(() => child.diagnostics().listening).toBe(true)
+    await expect(fixture.waitForBeacon(child, 100)).rejects.toThrow('Beacon did not become ready within 100ms.')
+  }
+  finally {
+    await fixture.close()
+    health.closeAllConnections()
+    await new Promise<void>(resolve => health.close(() => resolve()))
+  }
+})
+
+for (const responseStatus of [503, 200, null]) {
+  test(`Beacon startup reports an occupied port when its listener ${responseStatus ?? 'hangs'}`, async () => {
+    const occupant = createServer((_request, response) => {
+      if (responseStatus)
+        response.writeHead(responseStatus).end()
+    })
+    occupant.listen(0, '127.0.0.1')
+    await once(occupant, 'listening')
+    const port = (occupant.address() as { port: number }).port
+    const database = new URL(process.env.CAIRN_BEACON_TEST_DATABASE_URL!)
+    const schema = `beacon_start_${crypto.randomUUID().replaceAll('-', '')}`
+    executeBeaconSql(database, `CREATE SCHEMA ${schema}`)
+    const isolated = new URL(database)
+    isolated.searchParams.set('options', `-c search_path=${schema}`)
+    const fixture = await beaconRelayFixture(port)
+    try {
+      const child = fixture.beacon(isolated.toString())
+      await expect(fixture.waitForBeacon(child)).rejects.toThrow('Could not bind CAIRN_BEACON_LISTEN')
+    }
+    finally {
+      await fixture.close()
+      occupant.closeAllConnections()
+      await new Promise<void>(resolve => occupant.close(() => resolve()))
+      executeBeaconSql(database, `DROP SCHEMA ${schema} CASCADE`)
+    }
+  })
+}
 
 test('claims an installation and sends after relay restarts and beacon session renewal', async ({ page }) => {
   test.setTimeout(120000)
@@ -129,19 +208,18 @@ test('claims an installation and sends after relay restarts and beacon session r
     seed.store.updateRun(run.id, { status: 'succeeded', summary: 'The **relayed agent reply** remains readable.', finishedAt: Date.now() })
     seed.store.event(run.id, 'item.completed', 'The **relayed agent reply** remains readable.', { item: { id: 'relayed-reply', type: 'agent_message', text: 'The **relayed agent reply** remains readable.' } })
     seed.store.put('chats', { ...chat, runId: run.id })
-    // A relay that streams opens the conversation from its stream alone: the finite
-    // compatibility read is only for installations on the first relay protocol.
-    const compatibilityReads: string[] = []
-    const collectCompatibility = (request: import('@playwright/test').Request) => {
+    // The conversation opens from its stream alone, without separate event reads.
+    const eventReads: string[] = []
+    const collectEventReads = (request: import('@playwright/test').Request) => {
       if (request.url().includes(`/runs/${run.id}/events?`))
-        compatibilityReads.push(request.url())
+        eventReads.push(request.url())
     }
 
-    page.on('request', collectCompatibility)
+    page.on('request', collectEventReads)
     await page.reload()
     await expect(page.locator('.activity-message').filter({ hasText: 'The relayed agent reply remains readable.' })).toBeVisible()
-    page.off('request', collectCompatibility)
-    expect(compatibilityReads).toEqual([])
+    page.off('request', collectEventReads)
+    expect(eventReads).toEqual([])
     // An external installation commit reaches the open browser stream without
     // navigation or the old three-second snapshot polling.
     const liveRequests: string[] = []
@@ -174,7 +252,7 @@ test('claims an installation and sends after relay restarts and beacon session r
       data: {},
     })).json()
     const identity = await (await page.request.post(`${url}/api/relay/claim`, {
-      data: { code: claim.code, name: 'Hostile fixture', protocol: 1 },
+      data: { code: claim.code, name: 'Hostile fixture', protocol: relayProtocolVersion },
     })).json()
     const incompatible = Reflect.construct(WebSocket, [
       `${url.replace('http:', 'ws:')}/api/relay/${identity.installationId}/connect`,
@@ -182,7 +260,7 @@ test('claims an installation and sends after relay restarts and beacon session r
     ]) as WebSocket
     await once(incompatible, 'open')
     const refused = once(incompatible, 'close')
-    incompatible.send(JSON.stringify({ type: 'hello', versions: [99] }))
+    incompatible.send(JSON.stringify({ type: 'hello', version: 99 }))
     await refused
     await stop(service)
     service = beacon()
@@ -231,7 +309,7 @@ test('claims an installation and sends after relay restarts and beacon session r
       })
     })
     await once(peer, 'open')
-    peer.send(JSON.stringify({ type: 'hello', versions: [1] }))
+    peer.send(JSON.stringify({ type: 'hello', version: relayProtocolVersion }))
     await welcomed
     await expect(page.getByRole('status', { name: 'Installation availability' })).toHaveText('Online')
 

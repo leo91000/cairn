@@ -1,6 +1,8 @@
 import type { BrowserContext, Page } from '@playwright/test'
 import type { RunEvent } from '../../packages/contracts/contracts'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { writeFile } from 'node:fs/promises'
+import path from 'node:path'
 import {
   signIn as authenticateWorkspace,
   expect,
@@ -12,6 +14,30 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+
+// Keep these chaining fixtures byte-limited even with a 1,000-event page cap.
+// Output stays inside collapsed tools, so the visible rows still fold tightly.
+function historyNoise(id: string) {
+  return Array.from({ length: 128 }, (_, index) => createHash('sha256').update(`${id}:${index}`).digest('hex')).join('')
+}
+
+test('large timeline answers load completely through bounded content chunks', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const run = workspace.service.store.runs().find(run => run.status === 'succeeded' && run.trigger !== 'chat')!
+  const answer = `${'bounded fragment '.repeat(18_000)}end of large answer`
+  workspace.service.store.event(run.id, 'item.completed', '', {
+    item: { id: 'large-answer', type: 'agent_message', text: answer },
+  })
+  const chunks: number[] = []
+  page.on('response', (response) => {
+    if (response.url().includes('/timeline-content'))
+      chunks.push(response.status())
+  })
+  await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
+  await authenticateWorkspace(page)
+  await expect(page.locator('.activity-message').filter({ hasText: 'end of large answer' })).toBeVisible()
+  expect(chunks.filter(status => status === 200).length).toBeGreaterThan(1)
+})
 
 test('chat groups visible calls despite diagnostics, updates and global event ID gaps', async ({ page, workspace }) => {
   const original = workspace.service.store.runs().find(run => run.status === 'succeeded')!
@@ -37,9 +63,9 @@ test('chat groups visible calls despite diagnostics, updates and global event ID
   await useRelayForHttpMocks(page)
   await page.route(`**/chats/${chat.id}/stream*`, route => route.fulfill({
     contentType: 'text/event-stream',
-    body: `event: batch\ndata: ${JSON.stringify({
+    body: `id: ${events.at(-1)!.id}\nevent: batch\ndata: ${JSON.stringify({
       events,
-      state: { run, chat },
+      state: { run, chat: workspace.service.chats.detail(chat.id), artifacts: [] },
       reset: true,
       more: false,
       history: `grouping:${run.id}`,
@@ -66,7 +92,7 @@ test('agent diagnostics preserve embedded JSON as terminal text', async ({ page,
     trigger: 'diagnostic-fixture',
   })
   const diagnostic = '2026-10-22T12:08:49Z WARN native: request failed: {"error":{"message":"disk full"}}\npartial result: {"error":\n'
-  workspace.service.store.event(run.id, 'diagnostic', `\x1B[33m${diagnostic}\x1B[0m`)
+  workspace.service.store.event(run.id, 'diagnostic', diagnostic)
   await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
   await authenticateWorkspace(page)
   await page.getByTestId('agent-actions').locator(':scope > button').click()
@@ -177,6 +203,7 @@ for (const kind of ['chat', 'task'] as const) {
           type: 'command_execution',
           command: 'cat README.md',
           exit_code: 0,
+          aggregated_output: historyNoise(`fold-${i}`),
         },
       })
     }
@@ -268,6 +295,7 @@ test('automatic history pauses on errors and resumes only after retry', async ({
         type: 'command_execution',
         command: 'cat README.md',
         exit_code: 0,
+        aggregated_output: historyNoise(`retry-${i}`),
       },
     })
   }
@@ -373,6 +401,9 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
   initializeRepository(workspace.projectPath)
   const chat = await workspace.api('/api/chats', 'POST', {})
   const contexts: BrowserContext[] = []
+  // Workspace cleanup removes this control only after stopping its provider process.
+  const streamLimit = path.join(workspace.projectPath, `fixture-stream-${randomUUID()}`)
+  const releaseThrough = (part: number) => writeFile(streamLimit, String(part))
   const signIn = async (target: Page) => {
     await useRelayForHttpMocks(target)
     await target.goto(workspacePath(workspace.url))
@@ -395,19 +426,23 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
     contexts.push(second)
     const other = await second.newPage()
     await Promise.all([signIn(page), signIn(other)])
-    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:stream' })
+    await releaseThrough(5)
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: `fixture:stream\nfixture:stream-limit:${streamLimit}` })
     await expect(message(page)).toContainText('005')
     await expect(message(other)).toContainText('005')
     // The beacon transport permits one finite read before its first live batch.
     // Once connected, deltas must arrive without recurring history/metadata reads.
     requests.length = 0
     await second.setOffline(true)
+    await releaseThrough(20)
     await expect(message(page)).toContainText('020')
     await expect(other.getByRole('region', { name: 'Chat workspace', exact: true }).getByRole('status').filter({ hasText: /Offline|Reconnecting/ })).toBeVisible()
     await second.setOffline(false)
+    await releaseThrough(25)
     await expect(message(other)).toContainText('025')
     expect(requests.some(url => /\/events\?|\/artifacts$/.test(url))).toBe(false)
     await page.reload()
+    await releaseThrough(35)
     await expect(message(page)).toContainText('035')
     requests.length = 0
     await expect(message(page)).not.toContainText('100')
@@ -415,6 +450,14 @@ test('two independent clients follow deltas, recover offline, refresh mid-answer
     await page.emulateMedia({ colorScheme: 'dark' })
     await expectSingleScroll(page)
     await page.screenshot({ path: test.info().outputPath('stream-mobile-dark.png'), animations: 'disabled' })
+    // Each delivery deadline covers a bounded batch, independent of producer cadence.
+    for (let part = 40; part <= 100; part += 5) {
+      await releaseThrough(part)
+      const checkpoint = String(part).padStart(3, '0')
+      await expect(message(page)).toContainText(checkpoint)
+      await expect(message(other)).toContainText(checkpoint)
+    }
+
     await expect(message(page)).toContainText('100')
     await expect(message(other)).toContainText('100')
     await expect(message(page)).toHaveCount(1)
@@ -493,7 +536,7 @@ test('cached history survives reload before a delayed stream, then clear on logo
     await page.reload()
     await expect(page.locator('.activity-message').filter({ hasText: 'Cache persistence proof' }).first()).toBeVisible()
     await expect.poll(() => requests.length).toBeGreaterThan(0)
-    expect(new URL(requests[0]).searchParams.get('history')).toMatch(/^v1:/)
+    expect(new URL(requests[0]).searchParams.get('history')).toMatch(/^v2:/)
     expect(Number(new URL(requests[0]).searchParams.get('after'))).toBeGreaterThan(0)
   }
   finally {
@@ -616,10 +659,14 @@ test('following the latest output resumes a long backlog on the recent window, w
   await useRelayForHttpMocks(page)
   const run = workspace.service.store.runs()[0]
   const write = (from: number, to: number) => {
-    for (let i = from; i < to; i++) {
+    // The native fixture starts a Rust helper for each call, so append each
+    // disconnected batch in one transaction instead of one process per event.
+    const events = Array.from({ length: to - from }, (_, offset) => {
+      const i = from + offset
       const text = `Resume line ${String(i).padStart(3, '0')}. A paragraph to retain a stable reading position.`
-      workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `resume-${i}`, type: 'agent_message', text } })
-    }
+      return { type: 'item.completed', text, payload: { item: { id: `resume-${i}`, type: 'agent_message', text } } }
+    })
+    workspace.service.store.seedEvents(run.id, events)
   }
 
   const line = (i: number) => page.locator('.activity-message').filter({ hasText: `Resume line ${String(i).padStart(3, '0')}.` })
@@ -692,11 +739,41 @@ test('following the latest output resumes a long backlog on the recent window, w
 
 test('recent history loads older pages without moving the reader and survives a blocked reconnect', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
-  const run = workspace.service.store.runs()[0]
-  for (let i = 0; i < 350; i++) {
+
+  // Other journeys append to the shared fixture run. Keep this history bounded.
+  const original = workspace.service.store.runs().find(run => run.status === 'succeeded')!
+  const run = workspace.service.store.addRun({
+    ...original,
+    id: randomUUID(),
+    taskId: randomUUID(),
+    trigger: 'history-fixture',
+  })
+
+  const previousEventId = workspace.service.store.events(original.id).at(-1)?.id ?? 0
+  const events = Array.from({ length: 350 }, (_, i) => {
     const text = `Paged line ${String(i).padStart(3, '0')}. A paragraph to retain a stable reading position.`
-    workspace.service.store.event(run.id, 'item.completed', text, { item: { id: `page-${i}`, type: 'agent_message', text } })
-  }
+    return { type: 'item.completed', text, payload: { item: { id: `page-${i}`, type: 'agent_message', text } } }
+  })
+  workspace.service.store.seedEvents(run.id, events)
+
+  const savedEvents = workspace.service.store.events(run.id)
+  expect(savedEvents).toHaveLength(350)
+  expect(savedEvents.map(({
+    runId,
+    type,
+    text,
+    payload,
+  }) => ({
+    runId,
+    type,
+    text,
+    payload,
+  }))).toEqual(
+    events.map(event => ({ runId: run.id, ...event })),
+  )
+  expect(savedEvents[0].id).toBeGreaterThan(previousEventId)
+  expect(new Set(savedEvents.map(event => event.id)).size).toBe(350)
+  expect(savedEvents.every((event, index) => index === 0 || event.id > savedEvents[index - 1].id)).toBe(true)
 
   await page.goto(workspacePath(`${workspace.url}/runs/${run.id}`))
   await authenticateWorkspace(page)
@@ -731,7 +808,7 @@ test('recent history loads older pages without moving the reader and survives a 
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 050' })).toBeAttached()
   await scroller.evaluate(el => el.scrollTop = 0)
   await expect(page.locator('.activity-message').filter({ hasText: 'Paged line 000' })).toBeAttached()
-  // The run also has fixture events before line 000: load that unread prefix before
+  // Wait for the complete history and pagination boundary to reach disk before
   // asserting that reopening needs no history requests at all.
   await expect.poll(async () => {
     await scroller.evaluate(el => el.scrollTop = 0)
@@ -743,7 +820,7 @@ test('recent history loads older pages without moving the reader and survives a 
         const request = tx.objectStore('entries').getAll()
         request.onsuccess = () => resolve(request.result.some((entry) => {
           const saved = JSON.parse(entry.text)
-          return saved.state.run?.id === runId && saved.events.length >= 350 && saved.hasOlder === false
+          return saved.state.run?.id === runId && saved.entries.length >= 350 && saved.hasOlder === false
         }))
         tx.oncomplete = () => db.close()
       }
@@ -758,7 +835,7 @@ test('recent history loads older pages without moving the reader and survives a 
       const db = open.result
       const tx = db.transaction('entries')
       const request = tx.objectStore('entries').getAll()
-      request.onsuccess = () => resolve(Math.max(0, ...request.result.map(e => JSON.parse(e.text).events.length)))
+      request.onsuccess = () => resolve(Math.max(0, ...request.result.map(e => JSON.parse(e.text).entries.length)))
       tx.oncomplete = () => db.close()
     }
   }))).toBeGreaterThanOrEqual(350)

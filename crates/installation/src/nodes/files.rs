@@ -242,6 +242,10 @@ async fn receive_file(
         file.write_all(&bytes).await?;
         left -= bytes.len() as u64;
     }
+
+    // Creation applies the node's umask; restore the transmitted mode on the open file.
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
+        .await?;
     file.sync_all().await?;
     Ok(())
 }

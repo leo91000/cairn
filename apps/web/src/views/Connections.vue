@@ -26,7 +26,7 @@ const detail = computed<Account | undefined>(() => accounts.accounts.value.find(
 const groups = computed(() => (Object.keys(providers) as Provider[]).map((provider) => {
   const items = accounts.accounts.value.filter(a => a.provider === provider)
   if (providers[provider].ordered)
-    items.sort((a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER) || a.createdAt - b.createdAt)
+    items.sort((a, b) => (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER) || (a.createdAt ?? 0) - (b.createdAt ?? 0))
   return {
     provider,
     items,

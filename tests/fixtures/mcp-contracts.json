@@ -1,0 +1,16 @@
+{
+  "creates": [
+    { "name": "HTTP connection", "url": "https://example.test/mcp" },
+    { "name": "Command connection", "transport": "stdio", "command": "node", "args": ["server.js", "", "line one\nline two"], "enabledTools": [], "env": { "TOKEN": "fixture" } },
+    { "name": "OAuth connection", "url": "https://example.test/mcp", "auth": "oauth", "scopes": "read write", "enabledTools": ["echo"], "clientId": "registered-client" }
+  ],
+  "invalidCreates": [
+    { "url": "https://example.test/mcp" },
+    { "name": "Unknown transport", "transport": "socket" },
+    { "name": "Unknown auth", "auth": "password" },
+    { "name": "Wrong args", "args": [1] },
+    { "name": "Wrong selection", "enabledTools": true },
+    { "name": "Wrong environment", "env": { "TOKEN": 1 } },
+    { "name": "Unknown setting", "unexpected": true }
+  ]
+}

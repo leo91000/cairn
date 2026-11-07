@@ -1,0 +1,128 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "NativeAffectedAgent": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "NativeAffectedConversation": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "status"
+      ],
+      "type": "object"
+    },
+    "NativeModeImpact": {
+      "properties": {
+        "agents": {
+          "items": {
+            "$ref": "#/definitions/NativeAffectedAgent"
+          },
+          "type": "array"
+        },
+        "conversations": {
+          "items": {
+            "$ref": "#/definitions/NativeAffectedConversation"
+          },
+          "type": "array"
+        },
+        "interruptions": {
+          "type": "string"
+        },
+        "mode": {
+          "pattern": "^(protected|administrator)$",
+          "type": "string"
+        },
+        "tasks": {
+          "items": {
+            "$ref": "#/definitions/NativeAffectedAgent"
+          },
+          "type": "array"
+        },
+        "trustedAccounts": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "trustedPeople": {
+          "items": {
+            "$ref": "#/definitions/NativeTrustedPerson"
+          },
+          "type": "array"
+        },
+        "warning": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "mode",
+        "warning",
+        "interruptions",
+        "trustedAccounts",
+        "trustedPeople",
+        "agents",
+        "conversations",
+        "tasks"
+      ],
+      "type": "object"
+    },
+    "NativeTrustedPerson": {
+      "properties": {
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "preview": {
+      "$ref": "#/definitions/NativeModeImpact"
+    },
+    "previewId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "previewId",
+    "preview"
+  ],
+  "title": "NativeModePreview",
+  "type": "object"
+}

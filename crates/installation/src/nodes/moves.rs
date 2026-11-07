@@ -1,45 +1,46 @@
 //! Durable pause/copy/resume coordination. Never changes a destination before fencing.
-use super::{
-    NodeState,
-    backend::{self, DiskFormat},
-};
+use super::NodeState;
 use crate::{
     config::{id, now},
     error::{Error, Result},
-    native::policy::Origin,
     run_status::RunStatus,
     service::Service,
     store::Db,
     validation::text,
 };
+use cairn_contracts::EventKind;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+use tokio_util::sync::CancellationToken;
 
-const MOVE_DESCRIPTION: &str = "Move this conversation to an authorized node. Call list_nodes first to see ids, backends, tags, shared budgets and free slots. Failure leaves the current conversation running. Success saves, pauses and resumes on the destination, interrupting running commands. A node of the other backend changes how this conversation runs: a native node mounts the same files directly as a host process with its GPU and installed tools, a Firecracker node runs them in a VM again; system packages installed in the other backend and running processes do not follow. An environment created on a native node needs a one-time conversion before a VM can run it: that stops the current turn. A chat waits for the next message to start a fresh engine session; a mission resumes automatically in a fresh session with its visible history. Optional waitSeconds respects the configured wait limit.";
-const LIST_NODES_DESCRIPTION: &str = "List authorized execution nodes with their backend (firecracker VM or native host process), tags, shared CPU/RAM/disk budgets, slot availability and current resource pressure. Use a returned node id with move_to_node. Resources are shared automatically; agents do not request allocations.";
+const MOVE_DESCRIPTION: &str = "Move this conversation to an authorized node. VM-created disks keep their disk and engine session across VM/native nodes without copying files. A native-born disk converts once before VM execution: chats resume on the next message; missions continue automatically in a fresh session with their history. Running commands stop and system packages do not follow. Call list_nodes first to see ids, tags, shared budgets and free slots. Failure leaves the current conversation running. Success saves, pauses and resumes on the destination, interrupting running commands. Optional waitSeconds respects the configured wait limit.";
+const LIST_NODES_DESCRIPTION: &str = "List authorized execution nodes with their tags, shared CPU/RAM/disk budgets, slot availability and current resource pressure. Use a returned node id with move_to_node. Resources are shared automatically; agents do not request allocations.";
 /// A requested move waits this long for the conversation to settle before pausing it.
 const PAUSE_DELAY_MS: i64 = 2000;
 const MAX_WAIT_SECONDS: u64 = 3600;
+pub(crate) const CANCELLED_CAPACITY_WAIT: &str = "Movement capacity wait was cancelled.";
 
 pub fn tool() -> Value {
+    let mut input = cairn_contracts::schema_for::<cairn_contracts::MoveToNodeInput>(
+        cairn_contracts::Contract::Deserialize,
+    );
+    input["properties"].as_object_mut().unwrap().remove("runId");
+    input["required"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|field| field != "runId");
     json!({
         "name": "move_to_node",
         "description": MOVE_DESCRIPTION,
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "requiredTags": {
-                    "type": "array",
-                    "maxItems": 32,
-                    "items": { "type": "string", "maxLength": 40 },
-                },
-                "nodeId": { "type": "string", "format": "uuid" },
-                "waitSeconds": { "type": "integer", "minimum": 0 },
-            },
-            "required": ["nodeId"],
-            "additionalProperties": false,
-        },
+        "inputSchema": input,
+        "outputSchema": cairn_contracts::schema_for::<cairn_contracts::MoveToNodeOutput>(cairn_contracts::Contract::Serialize)
     })
 }
 
@@ -59,9 +60,10 @@ pub fn list_tool() -> Value {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct NodeSummary<'a> {
+    backend: &'a Value,
+    vm_disks: bool,
     id: &'a Value,
     name: &'a Value,
-    backend: &'static str,
     tags: Vec<&'a Value>,
     status: &'a Value,
     accepting_work: &'a Value,
@@ -81,10 +83,11 @@ struct NodeSummary<'a> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MoveRequest<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend: Option<&'a str>,
     reservation: &'a str,
     node_id: &'a Value,
     resources: &'a Value,
-    runtime_id: &'a Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     requested_at: Option<i64>,
     /// Recovery from an unavailable node, rather than a requested move.
@@ -92,17 +95,16 @@ struct MoveRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     idle: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    idle_status: Option<RunStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     required_tags: Option<&'a Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     backup_id: Option<&'a Value>,
-    /// The backend the conversation runs on at the destination, when it changes.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    backend: Option<&'static str>,
 }
 
 async fn run_agent(s: &Service, run: &Value) -> Result<Value> {
     s.store
-        .get("agents", super::run_agent(run))
+        .agent_snapshot(super::run_agent(run))
         .await?
         .ok_or_else(|| Error::forbidden("Agent removed."))
 }
@@ -118,9 +120,10 @@ pub async fn list(s: &Service, run: &Value) -> Result<Value> {
         .filter(|node| node["revoked"] != true && crate::service::allowed(scope, text(node, "id")))
         .map(|node| {
             serde_json::to_value(NodeSummary {
+                backend: &node["capabilities"]["backend"],
+                vm_disks: node["capabilities"]["vmDisks"] == true,
                 id: &node["id"],
                 name: &node["name"],
-                backend: backend::of_node(node),
                 tags: super::node_tags(node).collect(),
                 status: &node["status"],
                 accepting_work: &node["accepting"],
@@ -147,31 +150,254 @@ pub async fn list(s: &Service, run: &Value) -> Result<Value> {
 
 /// Owner-initiated move from the web or Android conversation controls.
 pub async fn request(s: &Service, run: &Value, args: &Value) -> Result<Value> {
-    requested(s, run, args, Some(crate::native::policy::origin()), |_| {
-        Ok(())
-    })
-    .await
+    requested(s, run, args, false, Authorization::default()).await
 }
 
-/// An owner's move through the public MCP or the installation tool, rechecking
-/// management access in each transaction that records it.
-pub(crate) async fn request_authorized<F>(
+type LocalAuthorization = std::sync::Arc<dyn Fn(&Db<'_>) -> Result<()> + Send + Sync>;
+
+#[derive(Clone)]
+pub(crate) struct Authorization {
+    local: LocalAuthorization,
+    public_credential: Option<String>,
+    management_authorization: Option<crate::authorization::Authorization>,
+    cancellation: CancellationToken,
+    admitted: Arc<AtomicBool>,
+    origin: Option<crate::native::policy::Origin>,
+    workspace_bearer: Option<String>,
+}
+
+impl Default for Authorization {
+    fn default() -> Self {
+        Self::new(|_| Ok(()), None)
+    }
+}
+
+impl Authorization {
+    pub(crate) fn new(
+        local: impl Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
+        public_credential: Option<String>,
+    ) -> Self {
+        Self {
+            local: std::sync::Arc::new(local),
+            public_credential,
+            management_authorization: None,
+            cancellation: CancellationToken::new(),
+            admitted: Arc::new(AtomicBool::new(false)),
+            origin: None,
+            workspace_bearer: None,
+        }
+    }
+
+    pub(crate) fn workspace_bearer(&self) -> Option<String> {
+        self.workspace_bearer.clone()
+    }
+
+    pub(crate) fn management_authorization(&self) -> Option<crate::authorization::Authorization> {
+        self.management_authorization.clone()
+    }
+
+    pub(crate) fn with_origin(mut self, origin: crate::native::policy::Origin) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
+    pub(crate) fn with_management_authorization(
+        mut self,
+        authorization: crate::authorization::Authorization,
+    ) -> Self {
+        self.management_authorization = Some(authorization);
+        self
+    }
+
+    pub(crate) fn workspace(bearer: &str, run: &Value) -> Self {
+        let retained_bearer = bearer.to_owned();
+        let bearer = retained_bearer.clone();
+        let run_id = text(run, "id").to_owned();
+        let turn = crate::waits::execution_id(run).clone();
+        let mut authorization = Self::new(
+            move |db| {
+                let current = crate::project_workspaces::authorize_in(db, &bearer)?;
+                if text(&current, "id") != run_id || *crate::waits::execution_id(&current) != turn {
+                    return Err(Error::unauthorized(
+                        "Workspace access expired or was revoked.",
+                    ));
+                }
+                Ok(())
+            },
+            None,
+        );
+        authorization.workspace_bearer = Some(retained_bearer);
+        authorization
+    }
+
+    pub(crate) fn check(&self, db: &Db<'_>) -> Result<()> {
+        self.check_cancellation()?;
+        self.check_access(db)
+    }
+
+    pub(crate) fn check_access(&self, db: &Db<'_>) -> Result<()> {
+        if let Some(authorization) = &self.management_authorization {
+            authorization.check_local(db)?;
+        }
+        (self.local)(db)
+    }
+
+    pub(crate) async fn recheck(&self, s: &Service) -> Result<()> {
+        self.check_cancellation()?;
+        if let Some(authorization) = &self.management_authorization {
+            authorization.recheck().await?;
+        }
+        self.recheck_access(s).await
+    }
+
+    pub(crate) async fn recheck_access(&self, s: &Service) -> Result<()> {
+        if let Some(digest) = &self.public_credential {
+            crate::relay::authorize_plugin_mcp_scope(s, digest, "run").await?;
+        }
+        Ok(())
+    }
+
+    fn check_cancellation(&self) -> Result<()> {
+        if self.cancellation.is_cancelled() {
+            return Err(Error::conflict(CANCELLED_CAPACITY_WAIT));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    pub(crate) fn admitted(&self) -> bool {
+        self.admitted.load(Ordering::Acquire)
+    }
+}
+
+/// Keep one admission per conversation. Dropping an HTTP/workspace request must
+/// clear its wait and release only an unreferenced destination reservation.
+struct AdmissionGuard {
+    service: Service,
+    run: String,
+    reservation: String,
+    until: Option<i64>,
+    authorization: Authorization,
+    active: bool,
+}
+
+impl AdmissionGuard {
+    fn new(service: &Service, run: &str, authorization: &Authorization) -> Result<Self> {
+        service.node_move_operations.claim_wait(run)?;
+        Ok(Self {
+            service: service.clone(),
+            run: run.to_owned(),
+            reservation: id(),
+            until: None,
+            authorization: authorization.clone(),
+            active: true,
+        })
+    }
+
+    async fn finish(&mut self, succeeded: bool) -> Result<()> {
+        if !succeeded {
+            Self::cleanup(&self.service, &self.run, &self.reservation, self.until).await?;
+        }
+        self.service.node_move_operations.finish_wait(&self.run);
+        self.active = false;
+        Ok(())
+    }
+
+    async fn cleanup(
+        service: &Service,
+        run: &str,
+        reservation: &str,
+        until: Option<i64>,
+    ) -> Result<()> {
+        let (owner, allocation) = (run.to_owned(), reservation.to_owned());
+        // This writer queues behind any in-flight admission transaction. A
+        // committed move owns its reservation even if its reply was dropped.
+        let unclaimed = service
+            .store
+            .transaction(move |db| {
+                if let Some(state) = db.run_state(&owner)? {
+                    let placement = db.run_placement(&owner)?;
+                    if placement.move_reservation.as_deref() == Some(allocation.as_str())
+                        || placement
+                            .move_request
+                            .as_ref()
+                            .is_some_and(|request| request.reservation == allocation)
+                    {
+                        return Ok(false);
+                    }
+                    if until.is_some() && state.capacity_wait_until == until {
+                        db.change_run(
+                            &owner,
+                            crate::runs::RunChanges {
+                                capacity_wait_until: Some(None),
+                                ..Default::default()
+                            },
+                        )?;
+                    }
+                }
+                Ok(true)
+            })
+            .await?;
+        if unclaimed {
+            super::placement::release(service, reservation).await?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for AdmissionGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.authorization.cancel();
+        let (service, run, reservation, until) = (
+            self.service.clone(),
+            self.run.clone(),
+            self.reservation.clone(),
+            self.until,
+        );
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if Self::cleanup(&service, &run, &reservation, until)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        "Interrupted move cleanup failed; destination ownership retained."
+                    );
+                }
+                service.node_move_operations.finish_wait(&run);
+            });
+        }
+    }
+}
+
+pub(crate) async fn request_authorized(
     s: &Service,
     run: &Value,
     args: &Value,
-    source: Origin,
-    authorize: F,
-) -> Result<Value>
-where
-    F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
-{
-    requested(s, run, args, Some(source), authorize).await
+    authorize: Authorization,
+) -> Result<Value> {
+    requested(s, run, args, false, authorize).await
 }
 
 /// Agents choose a node; the runtime owns all resource sharing.
 pub async fn request_by_agent(s: &Service, run: &Value, args: &Value) -> Result<Value> {
+    request_by_agent_authorized(s, run, args, Authorization::default()).await
+}
+
+pub(crate) async fn request_by_agent_authorized(
+    s: &Service,
+    run: &Value,
+    args: &Value,
+    authorize: Authorization,
+) -> Result<Value> {
     crate::validation::uuid(text(args, "nodeId"))?;
-    requested(s, run, args, None, |_| Ok(())).await.map_err(|mut error| {
+    requested(s, run, args, true, authorize).await.map_err(|mut error| {
         if super::placement::is_no_capacity(&error) {
             error.message.push_str(" The current conversation keeps running. Retry move_to_node with waitSeconds or choose another node.");
         }
@@ -183,7 +409,7 @@ fn validate_destination(args: &Value) -> Result<()> {
     if let Some(node) = args["nodeId"].as_str() {
         crate::validation::uuid(node)?;
     }
-    let Some(tags) = args.get("requiredTags") else {
+    let Some(tags) = args.get("requiredTags").filter(|tags| !tags.is_null()) else {
         return Ok(());
     };
     let valid = tags
@@ -199,18 +425,32 @@ fn validate_destination(args: &Value) -> Result<()> {
     Ok(())
 }
 
-/// A move by the conversation's owner carries their origin; an agent moving
-/// itself keeps the conversation's existing provenance.
-async fn requested<F>(
+async fn requested(
     s: &Service,
     run: &Value,
     args: &Value,
-    source: Option<Origin>,
-    authorize: F,
-) -> Result<Value>
-where
-    F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
-{
+    by_agent: bool,
+    authorize: Authorization,
+) -> Result<Value> {
+    let mut guard = AdmissionGuard::new(s, text(run, "id"), &authorize)?;
+    let result = requested_inner(s, run, args, by_agent, authorize, &mut guard).await;
+    guard.finish(result.is_ok()).await?;
+    result
+}
+
+async fn requested_inner(
+    s: &Service,
+    run: &Value,
+    args: &Value,
+    by_agent: bool,
+    authorize: Authorization,
+    guard: &mut AdmissionGuard,
+) -> Result<Value> {
+    if run["environmentState"].is_string() {
+        return Err(Error::conflict(
+            "The working environment expired. Send a new message before moving it.",
+        ));
+    }
     if ["cpu", "memoryMiB", "diskMiB"]
         .iter()
         .any(|key| args.get(key).is_some())
@@ -227,29 +467,48 @@ where
         return Err(Error::bad("Capacity wait exceeds the configured maximum."));
     }
     validate_destination(args)?;
-    let by_agent = source.is_none();
     let checkpoint = super::checkpoint(s, text(run, "id")).await?;
-    let change = backend_change(s, run, &checkpoint, args).await?;
-    if let Some(BackendChange { convert: true, .. }) = change {
-        // The rare natively created disk needs a full copy before a VM boots it.
-        crate::native::policy::refresh(s).await?;
+    let destination = if let Some(node) = args["nodeId"].as_str() {
+        s.node_boundary(node).await?
+    } else {
+        Value::Null
+    };
+    let from = checkpoint["prepared"]["backend"].as_str();
+    let target = destination["capabilities"]["backend"].as_str();
+    let change = target.filter(|target| from.is_some_and(|from| from != *target));
+    if change == Some("firecracker") && !super::vm_disk(&checkpoint) {
         return s
-            .convert_for_vm(text(run, "id"), args, source, authorize)
+            .convert_for_vm(run, args, authorize.clone(), by_agent)
             .await;
     }
-    if change
-        .as_ref()
-        .is_some_and(|change| change.to == backend::NATIVE)
-    {
+    if change == Some("native") {
         crate::native::policy::refresh(s).await?;
     }
+    let source = if by_agent {
+        None
+    } else {
+        Some(
+            authorize
+                .origin
+                .clone()
+                .unwrap_or_else(crate::native::policy::origin),
+        )
+    };
     let mut proposed = run.clone();
     if let Some(source) = &source {
-        let (record, source) = (run.clone(), source.clone());
-        let adopting = change.is_some();
+        let (record, source, crossing) = (run.clone(), source.clone(), change.is_some());
         let grant = s
             .store
-            .read(move |db| grant_for_move(db, &record, &source, adopting))
+            .read(move |db| {
+                if crossing {
+                    let agent = db
+                        .agent_snapshot(super::run_agent(&record))?
+                        .unwrap_or_default();
+                    crate::backend_migration::migration_grant(db, &record, &agent, &source)
+                } else {
+                    crate::native::policy::run_grant(db, &record, &source)
+                }
+            })
             .await?;
         crate::native::policy::apply(&mut proposed, &grant);
     }
@@ -258,154 +517,97 @@ where
     if run["moveRequest"].is_object() {
         return Err(Error::conflict("A movement is already pending."));
     }
-    let deadline =
-        (now() + wait as i64 * 1000).min(checkpoint["deadline"].as_i64().unwrap_or(i64::MAX));
+    let deadline = now() + wait as i64 * 1000;
     // A finished conversation with a VM session moves without being resumed.
-    let idle = run["status"] == RunStatus::Succeeded
-        && run["sessionId"].is_string()
+    let stopped_crossing = change.is_some()
+        && matches!(
+            RunStatus::of(run),
+            Some(RunStatus::Failed | RunStatus::Cancelled)
+        );
+    let idle = ((run["status"] == RunStatus::Succeeded && run["sessionId"].is_string())
+        || stopped_crossing)
         && matches!(
             checkpoint["prepared"]["backend"].as_str(),
             Some("firecracker" | "native")
         );
-    let reservation = id();
+    let reservation = guard.reservation.clone();
+    guard.until = Some(deadline);
     let mut selecting = run.clone();
     selecting["placementTransition"] = true.into();
+    if let Some(to) = change {
+        selecting["snapshot"]["agent"]["access"]["backend"] = to.into();
+        selecting["pinnedNodeId"] = Value::Null;
+        selecting["preferredNodeId"] = Value::Null;
+    }
     selecting["targetNodeId"] = args["nodeId"].clone();
     selecting["requiredTags"] = args
         .get("requiredTags")
+        .filter(|tags| !tags.is_null())
         .unwrap_or(&run["requiredTags"])
         .clone();
-    if let Some(change) = &change {
-        selecting["targetBackend"] = change.to.into();
-        selecting["requiredRuntime"] = change.runtime.clone().map_or(Value::Null, Value::from);
-    }
-    let selected = wait_for_capacity(s, run_id, &selecting, &reservation, idle, deadline).await?;
+    let selected = wait_for_capacity(
+        s,
+        run_id,
+        &selecting,
+        &reservation,
+        idle,
+        deadline,
+        authorize.clone(),
+    )
+    .await?;
     let move_request = serde_json::to_value(MoveRequest {
+        backend: change,
         reservation: &reservation,
         node_id: &selected["nodeId"],
         resources: &selected["resources"],
-        runtime_id: &selected["runtimeId"],
         requested_at: Some(now()),
         automatic: false,
         idle: Some(idle),
+        idle_status: idle.then(|| RunStatus::of(run).unwrap()),
         required_tags: Some(&selecting["requiredTags"]),
         backup_id: None,
-        backend: change.as_ref().map(|change| change.to),
     })?;
     let expected = if idle {
-        RunStatus::Succeeded
+        RunStatus::of(run).unwrap()
     } else {
         RunStatus::Running
     };
-    let adopting = change.is_some();
-    if let Err(error) = record_request(
+    record_request(
         s,
         run_id,
         move_request,
         idle,
         expected,
         source,
-        adopting,
-        authorize,
+        authorize.clone(),
     )
-    .await
-    {
-        super::placement::release(s, &reservation).await?;
-        return Err(error);
-    }
+    .await?;
+    authorize.admitted.store(true, Ordering::Release);
     let destination = destination_name(s, selected["nodeId"].as_str()).await?;
     // The owner sees in the conversation that the agent moved itself, and what it asked for.
-    let message = match (by_agent, &change) {
-        (true, Some(change)) => format!(
-            "The agent is moving to {destination} and will run there {}. Running commands are interrupted.",
-            backend_label(change.to)
-        ),
-        (false, Some(change)) => format!(
-            "Moving the conversation to {destination}, where it runs {}. Running commands are interrupted.",
-            backend_label(change.to)
-        ),
-        (true, None) => {
-            format!("The agent is moving to {destination}. Running commands are interrupted.")
-        }
-        (false, None) => {
-            format!("Moving the conversation to {destination}. Running commands are interrupted.")
-        }
+    let message = if by_agent {
+        format!("The agent is moving to {destination}. Running commands are interrupted.")
+    } else {
+        format!("Moving the conversation to {destination}. Running commands are interrupted.")
     };
-    s.store.event(run_id, "status", &message, None).await?;
-    let mut result = json!({
+    s.store
+        .event(run_id, &EventKind::Status, &message, None)
+        .await?;
+    Ok(json!({
         "status": "moving",
         "nodeId": selected["nodeId"],
-    });
-    if let Some(change) = change {
-        result["backend"] = change.to.into();
-    }
-    Ok(result)
-}
-
-fn backend_label(backend: &str) -> &'static str {
-    if backend == backend::NATIVE {
-        "as a native host process"
-    } else {
-        "in a Firecracker VM"
-    }
-}
-
-/// A move to the other backend: its destination backend, whether the disk must
-/// be converted first, and the VM image a VM destination must boot it with.
-struct BackendChange {
-    to: &'static str,
-    convert: bool,
-    runtime: Option<String>,
-}
-
-async fn backend_change(
-    s: &Service,
-    run: &Value,
-    checkpoint: &Value,
-    args: &Value,
-) -> Result<Option<BackendChange>> {
-    let Some(current) = backend::recorded(run, checkpoint) else {
-        return Ok(None);
-    };
-    let Some(node) = args["nodeId"].as_str() else {
-        return Ok(None);
-    };
-    let to = match s.store.get("nodes", node).await? {
-        Some(record) => backend::of_node(&record),
-        None if node == super::LOCAL_NODE_ID => backend::FIRECRACKER,
-        None => return Err(Error::not_found("Destination node not found.")),
-    };
-    if to == current {
-        return Ok(None);
-    }
-    let format = DiskFormat::of(checkpoint);
-    let runtime = match (&format, to) {
-        (DiskFormat::Vm { runtime }, backend::FIRECRACKER) => runtime.clone(),
-        _ => None,
-    };
-    Ok(Some(BackendChange {
-        to,
-        convert: !format.runs_on(to),
-        runtime,
     }))
-}
-
-/// The provenance a requested move records. An owner moving a conversation to
-/// the other backend explicitly adopts its existing work, as when they start a
-/// new conversation; other moves merge the owner into the retained callers.
-fn grant_for_move(db: &Db<'_>, run: &Value, source: &Origin, adopting: bool) -> Result<Value> {
-    if adopting && matches!(source, Origin::Human(_)) {
-        let agent = db
-            .get("agents", super::run_agent(run))?
-            .unwrap_or_else(|| run["snapshot"]["agent"].clone());
-        return crate::native::policy::authorize_origin(db, &agent, source);
-    }
-    crate::native::policy::run_grant(db, run, source)
 }
 
 async fn set_capacity_wait(s: &Service, run_id: &str, until: Option<i64>) -> Result<()> {
     s.store
-        .patch_run(run_id, json!({ "capacityWaitUntil": until }))
+        .change_run(
+            run_id,
+            crate::runs::RunChanges {
+                capacity_wait_until: Some(until),
+                ..Default::default()
+            },
+        )
         .await?;
     Ok(())
 }
@@ -418,22 +620,29 @@ async fn wait_for_capacity(
     reservation: &str,
     idle: bool,
     deadline: i64,
+    authorize: Authorization,
 ) -> Result<Value> {
     loop {
         let current = s.store.run(run_id).await?;
-        let active = current["cancelRequestedAt"].is_null()
-            && (current["status"] == RunStatus::Running
-                || (idle && current["status"] == RunStatus::Succeeded));
+        let stopped = idle && current["status"] == selecting["status"];
+        let active = (current["cancelRequestedAt"].is_null()
+            || stopped && current["status"] == RunStatus::Cancelled)
+            && (current["status"] == RunStatus::Running || stopped);
         if !active {
             set_capacity_wait(s, run_id, None).await?;
             return Err(Error::conflict("Conversation is no longer active."));
         }
-        match super::placement::reserve(s, selecting, reservation).await {
+        match super::placement::reserve_authorized(s, selecting, reservation, authorize.clone())
+            .await
+        {
             Ok(value) => return Ok(value),
             Err(error) if error.is_unavailable() && now() < deadline => {
                 set_capacity_wait(s, run_id, Some(deadline)).await?;
                 let stopping = tokio::select! {
                     () = s.shutdown.cancelled() => true,
+                    () = authorize.cancellation.cancelled() => {
+                        return Err(Error::conflict(CANCELLED_CAPACITY_WAIT));
+                    },
                     () = tokio::time::sleep(Duration::from_secs(1)) => false,
                 };
                 if stopping {
@@ -450,24 +659,20 @@ async fn wait_for_capacity(
 }
 
 /// Records the move unless the conversation changed while capacity was reserved.
-#[allow(clippy::too_many_arguments)]
-async fn record_request<F>(
+async fn record_request(
     s: &Service,
     run_id: &str,
     move_request: Value,
     idle: bool,
     expected: RunStatus,
-    source: Option<Origin>,
-    adopting: bool,
-    authorize: F,
-) -> Result<()>
-where
-    F: Fn(&Db<'_>) -> Result<()> + Send + 'static,
-{
+    source: Option<crate::native::policy::Origin>,
+    authorize: Authorization,
+) -> Result<()> {
+    authorize.recheck(s).await?;
     let owner = run_id.to_owned();
     s.store
         .transaction(move |db| {
-            authorize(db)?;
+            authorize.check(db)?;
             let current = db
                 .run(&owner)?
                 .ok_or_else(|| Error::not_found("Conversation removed."))?;
@@ -489,9 +694,10 @@ where
                     "Finish the mission wait before requesting a node move.",
                 ));
             }
-            if current["moveRequest"].is_object()
-                || current["backendMigration"].is_object()
+            if current["environmentState"].is_string()
+                || current["moveRequest"].is_object()
                 || !current["cancelRequestedAt"].is_null()
+                    && !(idle && expected == RunStatus::Cancelled)
                 || current["status"] != expected
                 || (expected == RunStatus::Queued && current["pinnedNodeId"].is_string())
             {
@@ -500,42 +706,57 @@ where
                 ));
             }
             if let Some(source) = source {
-                let grant = grant_for_move(db, &current, &source, adopting)?;
-                if adopting {
-                    // The adopted provenance replaces the conversation's history.
+                if move_request["backend"].is_string() {
+                    let agent = db
+                        .agent_snapshot(super::run_agent(&current))?
+                        .unwrap_or_default();
+                    let grant =
+                        crate::backend_migration::migration_grant(db, &current, &agent, &source)?;
                     if let Some(mut chat) = crate::chats::chat_for_run(db, &owner)? {
                         crate::native::policy::apply(&mut chat, &grant);
-                        db.put("chats", &chat)?;
+                        db.save_conversation_boundary(&chat)?;
                     }
-                    db.patch_run(&owner, &grant)?;
+                    db.update_run_boundary(&owner, &grant)?;
                 } else {
                     crate::native::policy::authorize_run_in(db, &owner, &source)?;
                 }
             }
-            // Every native destination needs the conversation's current authority,
-            // whether its owner or the agent itself asked for the move.
-            let directed = db.run(&owner)?.unwrap_or_default();
-            let node = db
-                .get("nodes", text(&move_request, "nodeId"))?
+            let mut directed = db.run(&owner)?.unwrap_or_default();
+            if let Some(to) = move_request["backend"].as_str() {
+                directed["snapshot"]["agent"]["access"]["backend"] = to.into();
+            }
+            let destination = text(&move_request, "nodeId");
+            let agent = db
+                .agent_snapshot(super::run_agent(&directed))?
                 .unwrap_or_default();
-            if crate::native::policy::node_native(&node)
-                && !crate::native::policy::allows(db, &directed, &node)?
+            let node = db.node_boundary(destination)?.unwrap_or_default();
+            if !super::agent_allows(&agent, destination)
+                || node["revoked"] == true
+                || crate::native::policy::node_native(&node)
+                    && !crate::native::policy::allows(db, &directed, &node)?
             {
-                return Err(Error::forbidden(
-                    "Destination native authorization changed.",
-                ));
+                return Err(Error::forbidden("Destination authorization changed."));
             }
-            let mut patch = json!({
-                "movementError": null,
-                "capacityWaitUntil": null,
-                "moveRequest": move_request,
-                "nodeState": NodeState::Pausing,
-            });
+            let mut patch = crate::runs::RunChanges {
+                capacity_wait_until: Some(None),
+                placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                    movement_error: Some(None),
+                    move_request: Some(serde_json::from_value(serde_json::json!(move_request))?),
+                    node_state: Some(serde_json::from_value(serde_json::json!(
+                        NodeState::Pausing
+                    ))?),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            };
             if idle || expected == RunStatus::Queued {
-                patch["status"] = RunStatus::Queued.into();
-                patch["recoveryPending"] = true.into();
+                if idle {
+                    patch.cancel_requested_at = Some(None);
+                }
+                patch.status = Some(RunStatus::Queued);
+                patch.recovery_pending = Some(true);
             }
-            db.patch_run(&owner, &patch)?;
+            db.change_run(&owner, patch)?;
             Ok(())
         })
         .await
@@ -543,7 +764,7 @@ where
 
 async fn node_name(s: &Service, node: &str) -> Result<String> {
     Ok(s.store
-        .get("nodes", node)
+        .node_boundary(node)
         .await?
         .and_then(|n| n["name"].as_str().map(str::to_owned))
         .unwrap_or_else(|| "another node".into()))
@@ -609,7 +830,7 @@ fn source_mode_unconfirmed(db: &Db<'_>, run: &str) -> Result<bool> {
     let Some(source) = checkpoint["nodeId"].as_str() else {
         return Ok(false);
     };
-    let node = db.get("nodes", source)?.unwrap_or_default();
+    let node = db.node_boundary(source)?.unwrap_or_default();
     Ok(super::native_mode::unconfirmed(&node))
 }
 
@@ -657,18 +878,18 @@ pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
         return Ok(false);
     }
     let movement = serde_json::to_value(MoveRequest {
+        backend: None,
         reservation: &reservation,
         node_id: &selected["nodeId"],
         resources: &selected["resources"],
-        runtime_id: &selected["runtimeId"],
         requested_at: None,
         // Healthy source: capture all current writes after fencing, rather than
         // restoring an older published recovery point.
         automatic: false,
         idle: None,
+        idle_status: None,
         required_tags: None,
         backup_id: None,
-        backend: None,
     })?;
     if let Err(error) = record_request(
         s,
@@ -677,8 +898,7 @@ pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
         false,
         RunStatus::Queued,
         None,
-        false,
-        |_| Ok(()),
+        Authorization::default(),
     )
     .await
     {
@@ -686,8 +906,7 @@ pub async fn queue_capacity_move(s: &Service, run: &Value) -> Result<bool> {
         return Err(error);
     }
     s.store.event(
-        run_id,
-        "status",
+        run_id, &EventKind::Status,
         "The current node has no capacity. Saving the full environment before resuming on another authorized node.",
         None,
     ).await?;
@@ -705,11 +924,11 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
         // A stale local record only delays recovery until the next attempt.
         let _ = super::refresh_local(s).await;
     }
-    let node = s.get("nodes", source).await?;
+    let node = s.node_boundary(source).await?;
     if super::native_mode::unconfirmed(&node) {
         return Ok(Recovery::Waiting);
     }
-    let agent = s.get("agents", super::run_agent(current)).await?;
+    let agent = s.agent_snapshot(super::run_agent(current)).await?;
     let available = super::seen_within(&node, super::HEARTBEAT_TIMEOUT_MS)
         && node["revoked"] != true
         && node["executionReady"] == true
@@ -723,19 +942,25 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
         return Ok(Recovery::Waiting);
     }
     let Some(backup) = latest(s, run_id).await? else {
-        let patch = json!({
-            "nodeState": NodeState::WaitingForNode,
-            "accountWaitReason": "Original node unavailable; no usable recovery point exists.",
-        });
-        s.store.patch_run(run_id, patch).await?;
+        let patch = crate::runs::RunChanges {
+            account_wait_reason: Some(Some(
+                "Original node unavailable; no usable recovery point exists.".into(),
+            )),
+            placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                node_state: Some(serde_json::from_value(serde_json::json!(
+                    NodeState::WaitingForNode
+                ))?),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        s.store.change_run(run_id, patch).await?;
         let body = "The node running this conversation is unavailable and no recovery point can resume it elsewhere. It resumes when the node returns.";
         super::alerts::raise(s, run_id, "waiting", WAITING_TITLE, body).await?;
         return Ok(Recovery::Waiting);
     };
     let mut selecting = current.clone();
     selecting["placementTransition"] = true.into();
-    selecting["requiredRuntime"] =
-        super::publication::manifest(s, &backup).await?["runtime"]["runtimeId"].clone();
     let reservation = id();
     let Ok(selected) = super::placement::reserve(s, &selecting, &reservation).await else {
         let body = "The node running this conversation is unavailable and no other authorized node can resume it yet.";
@@ -750,16 +975,16 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
         return Ok(Recovery::Waiting);
     };
     let movement = serde_json::to_value(MoveRequest {
+        backend: None,
         reservation: &reservation,
         node_id: &selected["nodeId"],
         resources: &selected["resources"],
-        runtime_id: &selected["runtimeId"],
         requested_at: None,
         automatic: true,
         idle: None,
+        idle_status: None,
         required_tags: None,
         backup_id: Some(&backup["id"]),
-        backend: None,
     })?;
     Ok(Recovery::Planned(movement))
 }
@@ -767,7 +992,24 @@ async fn plan_recovery(s: &Service, current: &Value) -> Result<Recovery> {
 /// Advances a conversation's pending move, or starts recovery from an unavailable node.
 /// Returns whether the conversation may keep executing where it is.
 pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
+    let checkpoint =
+        crate::worker::checkpoint::RunCheckpoint::load(&s.store, text(run, "id")).await?;
+    advance_for_attempt(s, run, checkpoint.as_ref()).await
+}
+
+pub(crate) async fn advance_for_attempt(
+    s: &Service,
+    run: &Value,
+    expected_attempt: Option<&crate::worker::checkpoint::RunCheckpoint>,
+) -> Result<bool> {
     let run_id = text(run, "id");
+    let current_checkpoint =
+        crate::worker::checkpoint::RunCheckpoint::load(&s.store, run_id).await?;
+    if !crate::recovery::same_execution(current_checkpoint.as_ref(), expected_attempt) {
+        return Err(Error::conflict(
+            "Execution attempt changed during recovery.",
+        ));
+    }
     if !run["cancelRequestedAt"].is_null() {
         release_destination(s, run).await?;
         return Ok(true);
@@ -785,18 +1027,30 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
             Recovery::Waiting => return Ok(false),
             Recovery::Planned(movement) => {
                 let owner = run_id.to_owned();
+                let expected = expected_attempt.cloned();
                 let pending = movement.clone();
                 let accepted = s
                     .store
                     .transaction(move |db| {
-                        if source_mode_unconfirmed(db, &owner)?
+                        let checkpoint =
+                            crate::worker::checkpoint::RunCheckpoint::load_in(db, &owner)?;
+                        if !crate::recovery::same_execution(checkpoint.as_ref(), expected.as_ref())
+                            || source_mode_unconfirmed(db, &owner)?
                             || db
                                 .run(&owner)?
                                 .is_none_or(|run| run["moveRequest"].is_object())
                         {
                             return Ok(false);
                         }
-                        db.patch_run(&owner, &json!({ "moveRequest": pending }))?;
+                        db.update_run_placement(
+                            &owner,
+                            crate::nodes::run_placement::PlacementChanges {
+                                move_request: Some(serde_json::from_value(serde_json::json!(
+                                    pending
+                                ))?),
+                                ..Default::default()
+                            },
+                        )?;
                         Ok(true)
                     })
                     .await;
@@ -811,9 +1065,45 @@ pub async fn advance(s: &Service, run: &Value) -> Result<bool> {
             }
         }
     }
-    crate::recovery::fence(s, &current).await?;
+    crate::recovery::fence_attempt(s, &current, expected_attempt).await?;
+    let current_checkpoint =
+        crate::worker::checkpoint::RunCheckpoint::load(&s.store, run_id).await?;
+    let mut expected_fenced = expected_attempt.cloned();
+    if let Some(saved) = &mut expected_fenced {
+        saved.process = None;
+    }
+    if !crate::recovery::same_execution(current_checkpoint.as_ref(), expected_fenced.as_ref()) {
+        return Err(Error::conflict(
+            "Execution attempt changed during recovery.",
+        ));
+    }
+    if current["moveRequest"]["backend"].is_string() {
+        let owner = run_id.to_owned();
+        let expected = current["moveRequest"].clone();
+        s.store
+            .transaction(move |db| {
+                let run = db
+                    .run(&owner)?
+                    .ok_or_else(|| Error::not_found("Conversation removed."))?;
+                if run["moveRequest"] != expected {
+                    return Err(Error::conflict("Movement changed while fencing."));
+                }
+                let mut request: super::run_placement::MoveRequest =
+                    serde_json::from_value(expected)?;
+                request.source_read_ready = Some(true);
+                db.update_run_placement(
+                    &owner,
+                    super::run_placement::PlacementChanges {
+                        move_request: Some(Some(request)),
+                        ..Default::default()
+                    },
+                )
+            })
+            .await?;
+        current = s.store.run(run_id).await?;
+    }
     match transfer(s, &current).await {
-        Ok(backup) => resume_at_destination(s, &current, &backup).await?,
+        Ok(backup) => resume_at_destination(s, &current, &backup, expected_fenced.as_ref()).await?,
         Err(error) => fail_transfer(s, &current, &error).await?,
     }
     Ok(false)
@@ -827,18 +1117,38 @@ async fn transfer(s: &Service, current: &Value) -> Result<Value> {
         s.get("node-backups", id).await?
     } else {
         s.store
-            .patch_run(run_id, json!({ "nodeState": NodeState::Saving }))
+            .update_run_placement(
+                run_id,
+                crate::nodes::run_placement::PlacementChanges {
+                    node_state: Some(serde_json::from_value(serde_json::json!(
+                        NodeState::Saving
+                    ))?),
+                    ..Default::default()
+                },
+            )
             .await?;
         let point = super::publication::capture(s, current).await?;
         s.get("node-backups", text(&point, "id")).await?
     };
     s.store
-        .patch_run(run_id, json!({ "nodeState": NodeState::Restoring }))
+        .update_run_placement(
+            run_id,
+            crate::nodes::run_placement::PlacementChanges {
+                node_state: Some(serde_json::from_value(serde_json::json!(
+                    NodeState::Restoring
+                ))?),
+                ..Default::default()
+            },
+        )
         .await?;
     super::placement::materialize(s, text(movement, "reservation")).await?;
     let source = super::checkpoint(s, run_id).await?;
     if source["nodeId"] != movement["nodeId"] || movement["automatic"] == true {
-        super::restore::start(s, current, text(movement, "nodeId"), &backup).await?;
+        let mut destination = current.clone();
+        if let Some(to) = movement["backend"].as_str() {
+            destination["snapshot"]["agent"]["access"]["backend"] = to.into();
+        }
+        super::restore::start(s, &destination, text(movement, "nodeId"), &backup).await?;
     }
     Ok(backup)
 }
@@ -848,15 +1158,24 @@ async fn fail_transfer(s: &Service, current: &Value, error: &Error) -> Result<()
     release_destination(s, current).await?;
     let idle = current["moveRequest"]["idle"] == true;
     let node_state = (!idle).then_some(NodeState::WaitingForNode);
-    let mut patch = json!({
-        "moveRequest": null,
-        "moveReservation": null,
-        "nodeState": node_state,
-        "movementError": error.message,
-        "recoveryPending": !idle,
-    });
+    let mut patch = crate::runs::RunChanges {
+        recovery_pending: Some(!idle),
+        placement: Some(Box::new(super::run_placement::PlacementChanges {
+            move_request: Some(None),
+            move_reservation: Some(None),
+            node_state: Some(serde_json::from_value(serde_json::to_value(node_state)?)?),
+            movement_error: Some(Some(error.message.clone())),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
     if idle {
-        patch["status"] = RunStatus::Succeeded.into();
+        patch.status = Some(
+            current["moveRequest"]["idleStatus"]
+                .as_str()
+                .and_then(RunStatus::parse)
+                .unwrap_or(RunStatus::Succeeded),
+        );
     }
     let owner = run_id.to_owned();
     s.store
@@ -866,14 +1185,19 @@ async fn fail_transfer(s: &Service, current: &Value, error: &Error) -> Result<()
                 .ok_or_else(|| Error::not_found("Conversation removed."))?;
             let cancelled = !current["cancelRequestedAt"].is_null();
             if cancelled {
-                patch["status"] = RunStatus::Cancelled.into();
-                patch["recoveryPending"] = false.into();
-                patch["nodeState"] = Value::Null;
+                patch.status = Some(RunStatus::Cancelled);
+                patch.recovery_pending = Some(false);
+                patch.placement.as_mut().unwrap().node_state = Some(None);
             }
-            db.patch_run(&owner, &patch)?;
+            db.change_run(&owner, patch)?;
             // A run waiting for an automatic retry shows the stop in its conversation.
             if cancelled && current["retry"]["nextAttemptAt"].is_number() {
-                db.event(&owner, "status", RunStatus::Cancelled.as_str(), None)?;
+                db.event(
+                    &owner,
+                    &EventKind::Status,
+                    RunStatus::Cancelled.as_str(),
+                    None,
+                )?;
             }
             Ok(())
         })
@@ -881,7 +1205,7 @@ async fn fail_transfer(s: &Service, current: &Value, error: &Error) -> Result<()
     s.store
         .event(
             run_id,
-            "status",
+            &EventKind::Status,
             "Environment transfer failed. The original disk is retained.",
             None,
         )
@@ -900,7 +1224,12 @@ async fn fail_transfer(s: &Service, current: &Value, error: &Error) -> Result<()
 }
 
 /// Points the checkpoint at the destination and queues the conversation to resume there.
-async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> Result<()> {
+async fn resume_at_destination(
+    s: &Service,
+    current: &Value,
+    backup: &Value,
+    expected: Option<&crate::worker::checkpoint::RunCheckpoint>,
+) -> Result<()> {
     let run_id = text(current, "id").to_owned();
     let movement = &current["moveRequest"];
     let idle = movement["idle"] == true;
@@ -921,41 +1250,42 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
         movement["reservation"].clone()
     };
     let status = if idle {
-        RunStatus::Succeeded
+        movement["idleStatus"]
+            .as_str()
+            .and_then(RunStatus::parse)
+            .unwrap_or(RunStatus::Succeeded)
     } else {
         RunStatus::Queued
     };
-    // Publication validated this manifest before the move; an unreadable one keeps the default.
-    let manifest = super::publication::manifest(s, backup)
-        .await
-        .unwrap_or_default();
-    let changed_backend = movement["backend"].as_str().map(str::to_owned);
-    let destination_runtime = movement["runtimeId"].clone();
-    let mut patch = json!({
-        "storage": { "mode": restored_storage_mode(&manifest) },
-        "movementError": null,
-        "accountWaitReason": null,
-        "nodeId": node,
-        "nodeState": node_state,
-        "resources": movement["resources"],
-        "requiredTags": required_tags,
-        "moveRequest": null,
-        "moveReservation": reservation,
-        "sessionId": backup["sessionId"],
-        "restoredAt": captured_at,
-        "recoveryPending": !idle,
-        "status": status,
-    });
-    if let Some(changed) = &changed_backend {
-        patch["executionBackend"] = changed.as_str().into();
-        patch["requiredRuntime"] = Value::Null;
-    }
+    let mut patch = crate::runs::RunChanges {
+        account_wait_reason: Some(None),
+        session_id: Some(serde_json::from_value(backup["sessionId"].clone())?),
+        recovery_pending: Some(!idle),
+        status: Some(status),
+        placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+            movement_error: Some(None),
+            node_id: Some(serde_json::from_value(serde_json::json!(node))?),
+            node_state: Some(serde_json::from_value(serde_json::json!(node_state))?),
+            resources: Some(serde_json::from_value(serde_json::json!(
+                movement["resources"]
+            ))?),
+            required_tags: Some(serde_json::from_value(serde_json::json!(required_tags))?),
+            move_request: Some(None),
+            move_reservation: Some(serde_json::from_value(serde_json::json!(reservation))?),
+            ..Default::default()
+        })),
+        boundary: Some(
+            serde_json::json!({"storage": { "mode": super::ON_DEMAND },"restoredAt": captured_at}),
+        ),
+        ..Default::default()
+    };
     let owner = run_id.clone();
+    let expected = expected.cloned();
+    let movement = movement.clone();
     s.store
         .transaction(move |db| {
-            let key = super::checkpoint_key(&owner);
             let mut checkpoint = db
-                .kv(&key)?
+                .checkpoint_boundary(&owner)?
                 .ok_or_else(|| Error::conflict("Missing resume checkpoint."))?;
             let current = db
                 .run(&owner)?
@@ -963,42 +1293,45 @@ async fn resume_at_destination(s: &Service, current: &Value, backup: &Value) -> 
             if !current["cancelRequestedAt"].is_null() {
                 return Err(Error::conflict("Conversation cancelled during restore."));
             }
-            if let Some(changed) = &changed_backend {
-                // The same disk now runs on the other backend. Its format and VM
-                // image stay recorded so a later move back can boot it again.
-                let format = DiskFormat::of(&checkpoint);
-                if !format.runs_on(changed) {
-                    return Err(Error::conflict("This environment must be converted first."));
-                }
-                if let DiskFormat::Vm { runtime } = format {
-                    checkpoint["diskFormat"] = "vm".into();
-                    checkpoint["diskRuntimeId"] = runtime.map_or(Value::Null, Value::from);
-                }
-                checkpoint["prepared"]["backend"] = changed.as_str().into();
-                // Idle moves release the reservation. Keep its selected image
-                // for the next turn as well as for immediate resumption.
-                checkpoint["runtimeId"] = destination_runtime;
+            let saved = crate::worker::checkpoint::RunCheckpoint::load_in(db, &owner)?;
+            if !crate::recovery::same_execution(saved.as_ref(), expected.as_ref())
+                || current["moveRequest"] != movement
+            {
+                return Err(Error::conflict("Execution or movement changed during restore."));
+            }
+            if !idle
+                && let Some(saved) = saved.as_ref()
+                && saved.has_controller_recovery_reservation()
+                && let Some(attempt) = saved.runner_id()
+            {
+                checkpoint["moveRecoveryReservation"] = attempt.into();
+            }
+            if let Some(to) = movement["backend"].as_str() {
+                let node_record = db.node_boundary(text(&movement, "nodeId"))?.unwrap_or_default();
+                let mut prospective = current.clone();
+                prospective["snapshot"]["agent"]["access"]["backend"] = to.into();
+                if crate::native::policy::node_native(&node_record) && !crate::native::policy::allows(db, &prospective, &node_record)? { return Err(Error::forbidden("Destination authority changed.")); }
+                checkpoint["prepared"]["diskFormat"] = "vm".into();
+                checkpoint["prepared"]["backend"] = to.into();
+                checkpoint["runtimeId"] = node_record["runtimeId"].clone();
+                patch.snapshot = Some(serde_json::from_value(prospective["snapshot"].clone())?);
+                let placement = patch.placement.as_mut().unwrap();
+                placement.execution_backend = Some(Some(to.to_owned()));
+                placement.pinned_node_id = Some(None);
+                placement.preferred_node_id = Some(None);
+                let boundary = patch.boundary.as_mut().unwrap();
+                boundary["requiredRuntime"] = Value::Null;
             }
             checkpoint["nodeId"] = node;
             checkpoint["process"] = Value::Null;
             checkpoint["settled"] = Value::Null;
-            checkpoint["controllerRecoveries"] = 0.into();
-            db.set(&key, &checkpoint, None)?;
-            db.patch_run(&owner, &patch)?;
+            db.save_checkpoint_boundary(&owner, &checkpoint)?;
+            db.change_run(&owner, patch)?;
             db.event(
-                &owner,
-                "status",
+                &owner, &EventKind::Status,
                 "Restoring conversation from a dated recovery point; newer chat remains visible. Verify external effects before repeating actions.",
                 Some(&json!({ "capturedAt": captured_at })),
             )?;
-            if let Some(changed) = &changed_backend {
-                let message = if changed == backend::NATIVE {
-                    "Execution backend changed: the same files now run as a native host process. System packages installed in the VM and running processes were not kept."
-                } else {
-                    "Execution backend changed: the same files now run in a Firecracker VM. Tools installed on the native host and running processes were not kept."
-                };
-                db.event(&owner, "status", message, None)?;
-            }
             Ok(())
         })
         .await?;
@@ -1033,17 +1366,6 @@ pub async fn latest(s: &Service, run: &str) -> Result<Option<Value>> {
     }
 }
 
-/// The storage a restored point mounts until the next launch records its own: a
-/// legacy native file checkpoint restores a file workspace, every other point an
-/// on-demand journal disk.
-fn restored_storage_mode(manifest: &Value) -> &'static str {
-    if manifest["kind"] == "native-files-v1" {
-        "native"
-    } else {
-        super::ON_DEMAND
-    }
-}
-
 async fn release_destination(s: &Service, run: &Value) -> Result<()> {
     for reservation in [
         run["moveRequest"]["reservation"].as_str(),
@@ -1057,23 +1379,59 @@ async fn release_destination(s: &Service, run: &Value) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::restored_storage_mode;
-    use serde_json::json;
+/// A terminal recovery cannot resume the interrupted turn on a destination.
+/// Release only the pending destination reservation, retaining the source and
+/// its checkpoint until fencing and finalization have been resolved.
+pub(crate) async fn abort_terminal_recovery(
+    s: &Service,
+    run_id: &str,
+    expected_attempt: Option<&crate::worker::checkpoint::RunCheckpoint>,
+) -> Result<()> {
+    let id = run_id.to_owned();
+    let expected = expected_attempt.cloned();
+    s.store
+        .transaction(move |db| {
+            let checkpoint = crate::worker::checkpoint::RunCheckpoint::load_in(db, &id)?;
+            if !crate::recovery::same_execution(checkpoint.as_ref(), expected.as_ref()) {
+                return Err(Error::conflict(
+                    "Execution attempt changed during recovery.",
+                ));
+            }
+            release_terminal_destination_in(db, &id)
+        })
+        .await
+}
 
-    #[test]
-    fn only_legacy_native_file_checkpoints_restore_without_a_journal() {
-        assert_eq!(
-            restored_storage_mode(&json!({ "kind": "native-files-v1" })),
-            "native"
-        );
-        for manifest in [
-            json!({ "kind": "native-ext4-v1" }),
-            json!({ "layout": { "kind": "paired-ext4-v2" } }),
-            json!(null),
-        ] {
-            assert_eq!(restored_storage_mode(&manifest), "on-demand");
-        }
+/// Only unclaimed destination reservations are released; retained disks and the
+/// source execution stay owned by their existing fencing/storage lifecycle.
+pub(crate) fn release_terminal_destination_in(db: &crate::store::Db<'_>, id: &str) -> Result<()> {
+    let placement = db.run_placement(id)?;
+    if placement.move_request.is_none() && placement.move_reservation.is_none() {
+        return Ok(());
     }
+    for reservation in [
+        placement
+            .move_request
+            .as_ref()
+            .map(|movement| movement.reservation.as_str()),
+        placement.move_reservation.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        super::placement::release_in(db, reservation)?;
+    }
+    db.update_run_placement(
+        id,
+        super::run_placement::PlacementChanges {
+            move_request: Some(None),
+            move_reservation: Some(None),
+            node_state: Some(None),
+            movement_error: Some(Some(
+                "Movement stopped because the execution will not resume automatically.".into(),
+            )),
+            ..Default::default()
+        },
+    )?;
+    Ok(())
 }

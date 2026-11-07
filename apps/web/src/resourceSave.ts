@@ -25,9 +25,11 @@ export function useResourceSave(initialId: string | null = null) {
     createPath?: string
     createBody?: (creationId: string) => object
     onCreated?: (saved: T) => void
+    request?: <R>(path: string, options: RequestInit) => Promise<R>
   }): Promise<T> {
+    const request = options.request ?? api
     if (savedId.value) {
-      return api<T>(`${path}/${savedId.value}`, {
+      return request<T>(`${path}/${savedId.value}`, {
         method: 'PUT',
         body: JSON.stringify(options.body()),
       })
@@ -45,7 +47,7 @@ export function useResourceSave(initialId: string | null = null) {
 
     let saved: T
     try {
-      saved = await api<T>(pending.path, { method: 'POST', body: pending.body })
+      saved = await request<T>(pending.path, { method: 'POST', body: pending.body })
       if (typeof saved?.id !== 'string' || !saved.id)
         throw new Error('The save response did not include the resource identity.')
     }
@@ -70,7 +72,7 @@ export function useResourceSave(initialId: string | null = null) {
     options.onCreated?.(saved)
 
     if (replaying) {
-      return api<T>(`${path}/${saved.id}`, {
+      return request<T>(`${path}/${saved.id}`, {
         method: 'PUT',
         body: JSON.stringify(options.body()),
       })

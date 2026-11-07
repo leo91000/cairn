@@ -16,10 +16,11 @@ import {
 
 function record(): CachedHistory {
   return {
-    version: 1,
+    version: 2,
     cursor: 2,
-    history: 'v1:r:1',
+    history: 'v2:r:1',
     state: { run: null, chat: null, artifacts: [] },
+    entries: [],
     events: [{
       id: 2,
       runId: 'r',
@@ -100,4 +101,73 @@ it('bounds cached history by bytes and invalidates offsets only when a prefix is
   expect(saved?.events.map(e => e.id)).toEqual([3, 4])
   expect(saved).toMatchObject({ oldest: 3, hasOlder: true, cursor: 4 })
   expect(saved?.position).toBeUndefined()
+})
+
+it('retains a bounded suffix of timeline cards together with their source events', async () => {
+  const events = Array.from({ length: 4 }, (_, i) => ({ ...record().events[0], id: i + 1 }))
+  const entries = events.map(event => ({
+    id: `reply:${event.id}`,
+    runId: 'r',
+    position: event.id === 4 ? 1 : event.id,
+    source: event.id,
+    revision: event.id,
+    turn: 1,
+    attempt: 1,
+    createdAt: 1,
+    updatedAt: 1,
+    content: {
+      kind: 'agentMessage' as const,
+      itemId: `reply:${event.id}`,
+      state: 'done' as const,
+      text: 'x'.repeat(600 * 1024),
+    },
+  }))
+  await writeHistory('s', 'cards', {
+    ...record(),
+    cursor: 4,
+    events,
+    entries,
+    position: { top: 50, follow: false },
+  })
+  const saved = await readHistory('s', 'cards')
+  expect(saved?.events.map(event => event.id)).toEqual([3, 4])
+  expect(saved?.entries.map(card => card.source)).toEqual([3, 4])
+  expect(saved).toMatchObject({ oldest: 3, hasOlder: true, cursor: 4 })
+  expect(saved?.position).toBeUndefined()
+})
+
+it('retains an older active background wait when the history suffix is trimmed', async () => {
+  const events = Array.from({ length: 4 }, (_, i) => ({ ...record().events[0], id: i + 1, text: 'x'.repeat(600 * 1024) }))
+  const wait = {
+    id: 'wait:1',
+    runId: 'r',
+    position: 1,
+    source: 1,
+    revision: 1,
+    turn: 1,
+    attempt: 1,
+    createdAt: 1,
+    updatedAt: 1,
+    content: {
+      kind: 'notice' as const,
+      notice: {
+        code: 'backgroundTasks' as const,
+        state: 'info' as const,
+        prominent: false,
+        tasks: ['Build'],
+        taskIds: ['one'],
+        waitingSince: 1,
+      },
+    },
+  }
+  await writeHistory('s', 'wait', {
+    ...record(),
+    cursor: 4,
+    events,
+    entries: [wait],
+  })
+  const saved = await readHistory('s', 'wait')
+  expect(saved?.events.map(event => event.id)).toEqual([3, 4])
+  expect(saved?.entries).toEqual([wait])
+  expect(saved).toMatchObject({ oldest: 3, hasOlder: true })
 })

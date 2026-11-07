@@ -97,6 +97,7 @@ const providers = [
 const cookies = [
   { name: 'cairn_session', use: 'Keeps you signed in.', kept: '7 days' },
   { name: 'cairn_oauth, cairn_passkey, cairn_native_confirmation', use: 'Tie a sign-in in progress to your browser.', kept: '5 minutes' },
+  { name: 'cairn_performance_upload', use: 'Remembers whether this browser sends performance diagnostics, shared across Cairn installation subdomains. The same boolean preference is kept in local storage; reports are not.', kept: '1 year for the cookie; local storage until cleared' },
 ]
 </script>
 
@@ -111,7 +112,7 @@ const cookies = [
     <article class="mx-auto mt-10 max-w-3xl break-words phone:mt-8">
       <h1>Privacy Policy</h1>
       <p class="mt-2 text-sm text-muted">
-        Last updated <time datetime="2026-10-10">October 10, 2026</time>
+        Last updated <time datetime="2026-10-30">October 30, 2026</time>
       </p>
 
       <section aria-labelledby="privacy-who" class="mt-8 grid gap-3">
@@ -126,6 +127,25 @@ const cookies = [
         <p>
           Beacon is operated by Léo Coletta. For any question or request about your data, write to
           <a class="text-accent underline underline-offset-2" href="mailto:privacy@cairn.build">privacy@cairn.build</a>.
+        </p>
+      </section>
+
+      <section aria-labelledby="privacy-performance" class="mt-10 grid gap-3">
+        <h2 id="privacy-performance">
+          Performance diagnostics
+        </h2>
+        <p>
+          The web and Android apps send technical performance reports to Beacon by default while you are signed in and the app is in the foreground.
+          You can turn sending off in performance settings and inspect, copy or reset the local report.
+          Reports are linked to your Cairn account, kept for 14 days and deleted when your account is deleted.
+          Turning sending off stops future reports; it does not delete reports already received.
+        </p>
+        <p>
+          Reports contain aggregated durations and fixed screen categories, connection type and client build information.
+          Android includes phone model, Android version, Java memory and frame timings; web includes browser family,
+          API delays, failures and pending counts, JSON/Markdown timings and browser responsiveness measurements.
+          They contain no conversation content, conversation or installation identifiers, URLs, email addresses, cookies, tokens, exceptions or stack traces.
+          Only your own reports are available through your account; the operator can analyze them to investigate slow behavior.
         </p>
       </section>
 
@@ -145,6 +165,10 @@ const cookies = [
           <li>
             <strong>Relay.</strong> When a direct connection is not possible, Beacon relays the exchange between your device and your installation.
             Relayed content passes through Beacon’s memory on its way; Beacon does not store it or write it to its logs.
+          </li>
+          <li>
+            <strong>Execution nodes.</strong> A machine you add to your installation without a manager address is put in touch with it the same way and connects to it directly when the networks allow it.
+            Otherwise Beacon relays their exchanges, including conversation disks, encrypted end to end to your installation: Beacon cannot read them and does not store them.
           </li>
         </ul>
       </section>

@@ -1,0 +1,75 @@
+{
+  "marks": [
+    {
+      "items": [
+        { "target": { "kind": "chat", "chatId": "25d7ac0e-c91e-4a7e-b1e1-ab177dc6e02d" }, "finishedAt": 1761800000000 },
+        { "target": { "kind": "mission", "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" }, "finishedAt": 9007199254740991 }
+      ]
+    }
+  ],
+  "invalidMarks": [
+    { "items": [] },
+    { "items": ["chat:25d7ac0e-c91e-4a7e-b1e1-ab177dc6e02d"] },
+    { "items": [{ "target": { "kind": "agent", "agentId": "25d7ac0e-c91e-4a7e-b1e1-ab177dc6e02d" }, "finishedAt": 1 }] },
+    { "items": [{ "target": { "kind": "chat", "chatId": "not-a-uuid" }, "finishedAt": 1 }] },
+    { "items": [{ "target": { "kind": "mission", "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" } }] },
+    { "items": [{ "target": { "kind": "mission", "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" }, "finishedAt": 0 }] },
+    { "items": [{ "target": { "kind": "mission", "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578" }, "finishedAt": 9007199254740992 }] }
+  ],
+  "asides": [
+    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "dismiss", "finishedAt": 1761800000000 } },
+    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "snooze", "finishedAt": 1761800000000, "until": 1761886400000 } },
+    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "restore" } }
+  ],
+  "invalidAsides": [
+    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "dismiss" } },
+    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "snooze", "finishedAt": 1761800000000 } },
+    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "hide" } },
+    { "taskId": "task:2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "restore" } },
+    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "action": { "kind": "restore" }, "restore": true }
+  ],
+  "asideOutputs": [
+    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "dismissal": { "until": null } },
+    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "dismissal": { "until": 1761886400000 } },
+    { "taskId": "2fd1fcc6-d2d1-4c20-af8c-fecdac6c5578", "dismissal": null }
+  ],
+  "settings": [
+    {
+      "publicUrl": "https://cairn.example.test",
+      "mcpUrl": "https://cairn.example.test/mcp",
+      "workspaceRoots": ["/workspace", "/srv/projects"],
+      "home": "/home/cairn",
+      "concurrency": 4,
+      "version": "0.52.3",
+      "commit": "development",
+      "protocol": "2026-07-28"
+    }
+  ],
+  "overviews": [
+    { "runsByStatus": { "succeeded": 12, "failed": 1 }, "agents": 3, "projects": 2, "missions": 5, "concurrency": 4 },
+    { "runsByStatus": {}, "agents": 0, "projects": 0, "missions": 0, "concurrency": 1 }
+  ],
+  "audits": [
+    {
+      "entries": [
+        { "id": 9007199254740991, "createdAt": 1761800000000, "action": "conversation.retention.updated", "detail": "{\"inactivityDays\":7}" },
+        { "id": 1, "createdAt": 0, "action": "agent.saved", "detail": "{}" }
+      ]
+    },
+    { "entries": [] }
+  ],
+  "storageViews": [
+    { "configured": true, "integrated": false, "environmentManaged": false, "bucket": "cairn-disks", "endpoint": "https://s3.example.test", "region": "eu-west-3" },
+    { "configured": false, "integrated": false, "environmentManaged": true, "bucket": "", "endpoint": "", "region": "" }
+  ],
+  "storageInputs": [
+    { "bucket": "cairn-disks", "endpoint": "https://s3.example.test", "region": "eu-west-3", "accessKeyId": "fixture-only", "secretAccessKey": "fixture-secret" },
+    { "bucket": "cairn.disks", "endpoint": "https://11111111111111111111111111111111.r2.cloudflarestorage.com", "region": "auto", "accessKeyId": "fixture-only", "secretAccessKey": "fixture-secret", "privateBucketConfirmed": true }
+  ],
+  "invalidStorageInputs": [
+    { "bucket": "cairn-disks", "endpoint": "https://s3.example.test", "region": "eu-west-3", "accessKeyId": "fixture-only" },
+    { "bucket": "Cairn_Disks", "endpoint": "https://s3.example.test", "region": "eu-west-3", "accessKeyId": "fixture-only", "secretAccessKey": "fixture-secret" },
+    { "bucket": "cairn-disks", "endpoint": "http://s3.example.test", "region": "eu-west-3", "accessKeyId": "fixture-only", "secretAccessKey": "fixture-secret" },
+    { "bucket": "cairn-disks", "endpoint": "https://s3.example.test", "region": "eu-west-3", "accessKeyId": "fixture-only", "secretAccessKey": "fixture-secret", "awsBinary": "/bin/sh" }
+  ]
+}

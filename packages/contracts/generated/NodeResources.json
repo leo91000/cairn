@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "cpu": {
+      "format": "uint32",
+      "maximum": 4096,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "diskMiB": {
+      "format": "uint64",
+      "maximum": 1099511627776,
+      "minimum": 128,
+      "type": "integer"
+    },
+    "memoryMiB": {
+      "format": "uint64",
+      "maximum": 1073741824,
+      "minimum": 128,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "cpu",
+    "memoryMiB",
+    "diskMiB"
+  ],
+  "title": "NodeResources",
+  "type": "object"
+}

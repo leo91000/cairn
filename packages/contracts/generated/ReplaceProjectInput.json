@@ -1,0 +1,60 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "ProjectSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "baseBranch": {
+          "default": "main",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_/.-]*$",
+          "type": "string"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sourceMode": {
+          "default": "remote",
+          "pattern": "^(remote|local)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "projectId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "revision": {
+      "type": "string"
+    },
+    "settings": {
+      "$ref": "#/definitions/ProjectSettings"
+    }
+  },
+  "required": [
+    "projectId",
+    "revision",
+    "settings"
+  ],
+  "title": "ReplaceProjectInput",
+  "type": "object"
+}

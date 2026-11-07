@@ -18,6 +18,7 @@ import build.cairn.app.ui.installationHeader
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.*
@@ -39,6 +40,21 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class DirectTransportDeviceTest {
     @get:Rule val compose = createComposeRule()
+    private val diagnostics = DirectBenchDiagnostics()
+    private val renewalAnswersBeforeOfferAckDelivery = AtomicInteger(-1)
+    private val renewalStreamClosuresBeforeOfferAckDelivery = AtomicInteger(-1)
+
+    private suspend fun <T> duringPhase(
+        name: String,
+        timeoutMillis: Long,
+        block: suspend CoroutineScope.() -> T,
+    ): T =
+        try {
+            diagnostics.record("phase start", name)
+            withTimeout(timeoutMillis, block).also { diagnostics.record("phase completed", name) }
+        } catch (error: TimeoutCancellationException) {
+            throw AssertionError("Direct bench timed out during $name", error)
+        }
 
     @Test
     fun authorizedInstallationCarriesAnObservedDirectResponse() = runBlocking {
@@ -63,10 +79,27 @@ class DirectTransportDeviceTest {
         val initialExpiry = AtomicLong()
         val refusedPeers = ConcurrentHashMap.newKeySet<String>()
         val refusedCandidates = AtomicInteger()
+        val authorizationAttempts = AtomicInteger()
         val client =
             OkHttpClient.Builder()
                 .addInterceptor { chain ->
+                    diagnostics.primaryRequests.incrementAndGet()
+                    try {
+                        chain.proceed(chain.request()).also { response ->
+                            diagnostics.primaryResponses.incrementAndGet()
+                            if (response.request.tag(DirectChannel::class.java) != null)
+                                diagnostics.primaryDirectResponses.incrementAndGet()
+                        }
+                    } catch (error: Throwable) {
+                        diagnostics.primaryFailures.incrementAndGet()
+                        diagnostics.record("primary failure", error.javaClass.simpleName)
+                        throw error
+                    }
+                }
+                .addInterceptor { chain ->
                     val request = chain.request()
+                    if (request.url.encodedPath.endsWith("/direct/authorize"))
+                        authorizationAttempts.incrementAndGet()
                     if (scenario == "same-lan" && request.url.encodedPath.endsWith("/signal")) {
                         val body = Buffer().also { request.body!!.writeTo(it) }.readUtf8()
                         val signal = wireJson.parseToJsonElement(body).jsonObject
@@ -159,21 +192,42 @@ class DirectTransportDeviceTest {
         val started = System.nanoTime()
         lateinit var activity: Activity
         var selectedVm by mutableStateOf<CairnViewModel?>(null)
+        val expectedInstallation = configuration["installation"]!!.jsonPrimitive.content
+        fun recordWorkspace() =
+            diagnostics.workspace(
+                selectedVm,
+                expectedInstallation,
+                runCatching { activity }.getOrNull(),
+            )
+        fun headerCategory(): String {
+            val headers = compose.onAllNodes(installationHeader()).fetchSemanticsNodes()
+            if (headers.isEmpty()) return "absent"
+            for ((label, category) in
+                listOf(
+                    "En ligne · Direct" to "direct",
+                    "En ligne · Relais" to "relay",
+                    "Hors ligne" to "offline",
+                    "Mise à jour requise" to "update-required",
+                )) {
+                if (headers.any { installationHeader(state = label).matches(it) }) return category
+            }
+            return "other"
+        }
         compose.setContent {
             activity = checkNotNull(LocalActivity.current)
             selectedVm?.let { vm -> CairnTheme { CairnApp(vm = vm) } }
         }
 
-        suspend fun read() {
-            assertEquals("[]", api.request("GET", "/chats"))
-            if (api.transport.route.value == "direct") directReads++
+        suspend fun read(client: CairnApi = api) {
+            assertEquals("[]", client.request("GET", "/chats"))
+            if (client === api && client.transport.route.value == "direct") directReads++
         }
-        suspend fun awaitDirect() =
-            withTimeout(60000) {
-                do {
-                    delay(200)
-                    read()
-                } while (api.transport.route.value != "direct")
+        suspend fun awaitDirect(
+            client: CairnApi = api,
+            phase: String = "initial direct response",
+        ) =
+            duringPhase(phase, 60000) {
+                awaitDirectBenchRead(client) { read(client) }
             }
         fun shell(command: String) {
             instrumentation.uiAutomation.executeShellCommand(command).use { descriptor ->
@@ -182,7 +236,424 @@ class DirectTransportDeviceTest {
                 }
             }
         }
+        // Keep these suspend helpers non-inline. A single generated scenario coroutine exceeded
+        // ART's 16-bit instruction-handler PC; assembly checks the emitted DEX method sizes.
+        suspend fun exerciseForegroundBackoff() {
+            // A real foreground transition must retain the capacity-error deadline.
+            val capacityAttempts = AtomicInteger()
+            val rejectedAt = AtomicLong()
+            val retryAt = AtomicLong()
+            val capacityClient =
+                OkHttpClient.Builder()
+                    .addInterceptor { chain ->
+                        val request = chain.request()
+                        if (request.url.encodedPath.endsWith("/direct/authorize")) {
+                            if (capacityAttempts.incrementAndGet() == 1) {
+                                rejectedAt.set(System.nanoTime())
+                                return@addInterceptor Response.Builder()
+                                    .request(request)
+                                    .protocol(Protocol.HTTP_1_1)
+                                    .code(503)
+                                    .message("Capacity fixture")
+                                    .body("{}".toResponseBody())
+                                    .build()
+                            }
+                            retryAt.set(System.nanoTime())
+                        }
+                        chain.proceed(request)
+                    }
+                    .build()
+            val capacity = CairnApi(origin, vault, capacityClient, api.installationId)
+            capacity.csrf = api.csrf
+            try {
+                capacity.startDirect(context)
+                duringPhase("capacity initial authorization", 10000) {
+                    while (capacityAttempts.get() == 0) delay(100)
+                }
+                delay(500)
+                instrumentation.runOnMainSync { assertTrue(activity.moveTaskToBack(true)) }
+                duringPhase("background transport stop", 5000) {
+                    while (api.transport.route.value != "relay") delay(100)
+                }
+                delay(1000)
+                instrumentation.runOnMainSync {
+                    activity.startActivity(
+                        Intent(activity, activity.javaClass)
+                            .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                    )
+                }
+                delay(2000)
+                assertEquals(
+                    "Foreground must not bypass capacity backoff",
+                    1,
+                    capacityAttempts.get(),
+                )
+                duringPhase("capacity retry direct response", 25000) {
+                    awaitDirectBenchRead(capacity) {
+                        assertEquals("[]", capacity.request("GET", "/chats"))
+                    }
+                }
+                assertTrue(
+                    "Retry must retain its fifteen-second deadline",
+                    retryAt.get() - rejectedAt.get() >= 15_000_000_000L,
+                )
+                foregroundBackoff = true
+            } finally {
+                capacity.closeStreams()
+            }
+            awaitDirect()
+        }
+
+        suspend fun exerciseUnavailableRenewal() {
+            // Keep authorization/DTLS real. Shorten only the client's scheduling input
+            // so a real acknowledged renewal can return the unavailable control fixture.
+            val renewalAttempts = AtomicInteger()
+            val renewalReplies = AtomicInteger()
+            val attemptsWhenUnavailable = AtomicInteger(-1)
+            val renewalSetupRejected = AtomicBoolean()
+            val renewalTrace = ConcurrentLinkedQueue<String>()
+            val renewalSignals = DirectBenchSignals()
+            val renewalStarted = System.nanoTime()
+            fun recordRenewal(event: String) {
+                val elapsedMillis = (System.nanoTime() - renewalStarted) / 1_000_000
+                renewalTrace.add("$elapsedMillis:$event")
+            }
+            val renewalClient =
+                OkHttpClient.Builder()
+                    .addInterceptor { chain ->
+                        val request = chain.request()
+                        val path = request.url.encodedPath
+                        if (path.endsWith("/direct/authorize")) {
+                            val attempt = renewalAttempts.incrementAndGet()
+                            recordRenewal("authorize:$attempt:start")
+                            if (attempt == 1) {
+                                // A valid setup retry must not count as a retry after the
+                                // later unavailable renewal response.
+                                renewalSetupRejected.set(true)
+                                recordRenewal("authorize:$attempt:503")
+                                return@addInterceptor Response.Builder()
+                                    .request(request)
+                                    .protocol(Protocol.HTTP_1_1)
+                                    .code(503)
+                                    .message("Renewal setup capacity fixture")
+                                    .body("{}".toResponseBody())
+                                    .build()
+                            }
+                        }
+                        val response =
+                            try {
+                                chain.proceed(request)
+                            } catch (error: java.io.IOException) {
+                                if (path.contains("/direct/"))
+                                    recordRenewal(
+                                        "${path.substringAfterLast('/')}:${error.javaClass.simpleName}"
+                                    )
+                                throw error
+                            }
+                        if (
+                            path.endsWith("/signal") ||
+                                path.endsWith("/events") ||
+                                path.endsWith("/renew")
+                        )
+                            recordRenewal("${path.substringAfterLast('/')}:${response.code}")
+                        if (path.endsWith("/direct/authorize"))
+                            recordRenewal("authorize:response:${response.code}")
+                        if (path.endsWith("/events") && response.isSuccessful) {
+                            response
+                                .newBuilder()
+                                .body(renewalSignals.observe(response.body))
+                                .build()
+                        } else if (path.endsWith("/signal") && response.isSuccessful) {
+                            val body = Buffer()
+                            request.body?.writeTo(body)
+                            val kind =
+                                wireJson
+                                    .parseToJsonElement(body.readUtf8())
+                                    .jsonObject["kind"]
+                                    ?.jsonPrimitive
+                                    ?.contentOrNull
+                            if (kind == "offer") {
+                                // Controlled answer-before-ack probe on the ordinary device path.
+                                // The server may answer before this HTTP acknowledgement arrives.
+                                Thread.sleep(1000)
+                                renewalAnswersBeforeOfferAckDelivery.compareAndSet(
+                                    -1,
+                                    renewalSignals.answers.get(),
+                                )
+                                renewalStreamClosuresBeforeOfferAckDelivery.compareAndSet(
+                                    -1,
+                                    renewalSignals.closed.get(),
+                                )
+                                recordRenewal("offer-ack:${renewalSignals.summary()}")
+                            } else recordRenewal("candidate-ack")
+                            response
+                        } else if (path.endsWith("/direct/authorize") && response.isSuccessful) {
+                            // The control call permits 30 s. Exercise successful setup
+                            // beyond the former 10 s fixture precondition before testing
+                            // the unavailable renewal.
+                            Thread.sleep(12000)
+                            val grant =
+                                wireJson.parseToJsonElement(response.body.string()).jsonObject
+                            val signed = grant["grant"]!!.jsonObject
+                            val claims = signed["claims"]!!.jsonObject
+                            val scheduling =
+                                JsonObject(
+                                    grant +
+                                        ("grant" to
+                                            JsonObject(
+                                                signed +
+                                                    ("claims" to
+                                                        JsonObject(
+                                                            claims +
+                                                                ("expires_at" to
+                                                                    JsonPrimitive(
+                                                                        System.currentTimeMillis() /
+                                                                            1000 + 40
+                                                                    ))
+                                                        ))
+                                            ))
+                                )
+                            response
+                                .newBuilder()
+                                .body(
+                                    scheduling
+                                        .toString()
+                                        .toResponseBody(response.body.contentType())
+                                )
+                                .build()
+                        } else if (path.endsWith("/renew") && response.isSuccessful) {
+                            // Capture the first real response boundary, before the client
+                            // can react. A later reply must never move this baseline.
+                            attemptsWhenUnavailable.compareAndSet(-1, renewalAttempts.get())
+                            recordRenewal(
+                                "renew:unavailable:authorizations=${renewalAttempts.get()}"
+                            )
+                            response.close()
+                            renewalReplies.incrementAndGet()
+                            response
+                                .newBuilder()
+                                .body("{\"available\":false}".toResponseBody())
+                                .build()
+                        } else response
+                    }
+                    .build()
+            val renewal = CairnApi(origin, vault, renewalClient, api.installationId)
+            renewal.csrf = api.csrf
+            try {
+                renewal.startDirect(context)
+                awaitDirect(renewal, "unavailable renewal initial direct response")
+                recordRenewal("observed-direct")
+                duringPhase("unavailable renewal acknowledgement", 20000) {
+                    while (
+                        renewalReplies.get() == 0 || renewal.transport.route.value != "relay"
+                    ) delay(100)
+                }
+                assertTrue(
+                    "Setup must retry the injected capacity rejection before renewal: $renewalTrace",
+                    renewalSetupRejected.get() && attemptsWhenUnavailable.get() >= 2,
+                )
+                delay(18000)
+                assertEquals("[]", renewal.request("GET", "/chats"))
+                assertEquals("relay", renewal.transport.route.value)
+                assertEquals(
+                    "Unavailable renewal must not authorize again: $renewalTrace",
+                    attemptsWhenUnavailable.get(),
+                    renewalAttempts.get(),
+                )
+                assertEquals(
+                    "Unavailable renewal must not loop: $renewalTrace",
+                    1,
+                    renewalReplies.get(),
+                )
+                unavailableRenewal = true
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: AssertionError) {
+                throw AssertionError(
+                    "${error.message}; renewal events=$renewalTrace; " +
+                        "signals=${renewalSignals.summary()}",
+                    error,
+                )
+            } catch (error: Exception) {
+                val failure =
+                    if (error is ApiException) "HTTP ${error.status}"
+                    else error.javaClass.simpleName
+                throw AssertionError(
+                    "Renewal fixture failed ($failure); renewal events=$renewalTrace",
+                    error,
+                )
+            } finally {
+                renewal.closeStreams()
+            }
+        }
+
+        suspend fun exerciseSuspendedControl() {
+            for (status in listOf(200, 401, 403)) {
+                val attempts = AtomicInteger()
+                val unavailableClient =
+                    client
+                        .newBuilder()
+                        .addInterceptor { chain ->
+                            if (chain.request().url.encodedPath.endsWith("/direct/authorize")) {
+                                attempts.incrementAndGet()
+                                Response.Builder()
+                                    .request(chain.request())
+                                    .protocol(Protocol.HTTP_1_1)
+                                    .code(status)
+                                    .message("Control fixture")
+                                    .body("{\"available\":false}".toResponseBody())
+                                    .build()
+                            } else chain.proceed(chain.request())
+                        }
+                        .build()
+                val probe = CairnApi(origin, vault, unavailableClient, api.installationId)
+                probe.csrf = api.csrf
+                try {
+                    probe.startDirect(context)
+                    duringPhase("control rejection initial authorization: $status", 10000) {
+                        while (attempts.get() == 0) delay(100)
+                    }
+                    delay(18000)
+                    assertEquals(
+                        "Control rejection must suspend reconnects: $status",
+                        1,
+                        attempts.get(),
+                    )
+                    assertEquals("[]", probe.request("GET", "/chats"))
+                    assertEquals("relay", probe.transport.route.value)
+                } finally {
+                    probe.closeStreams()
+                }
+            }
+            suspendedControl = true
+        }
+
+        suspend fun exerciseLargeRequest() {
+            awaitDirect()
+            val authorizationsBeforeLargeRequest = authorizationAttempts.get()
+            val largeRequest =
+                try {
+                    api.request(
+                        "POST",
+                        "/chats/missing/messages",
+                        body(
+                            "id" to java.util.UUID.randomUUID().toString(),
+                            "text" to "x".repeat(1_000_000),
+                        ),
+                    )
+                    throw AssertionError("Expected the router's oversized-body rejection")
+                } catch (error: ApiException) {
+                    error
+                }
+            assertEquals(
+                "The real router retains its 150 kB JSON body limit",
+                413,
+                largeRequest.status,
+            )
+            // An ID-backed POST may safely replay on relay under write pressure.
+            // The route records that response; observe a fresh direct read before
+            // asserting recovery, rather than requiring the rejection to stay direct.
+            awaitDirect()
+            assertEquals("direct", api.transport.route.value)
+            assertEquals(
+                "The rejected message must preserve the authorized peer",
+                authorizationsBeforeLargeRequest,
+                authorizationAttempts.get(),
+            )
+        }
+
+        suspend fun exerciseSelectedInstallation() {
+            // Real selected-installation UI exercises the asynchronous startup/indicator.
+            diagnostics.record("startup", "construct ViewModel")
+            val vm =
+                withContext(Dispatchers.Main) {
+                    CairnViewModel(
+                        context.applicationContext as Application,
+                        vault,
+                        origin.toString(),
+                    )
+                }
+            withContext(Dispatchers.Main) { selectedVm = vm }
+            diagnostics.record("startup", "show ViewModel")
+            // Startup reads finish on relay before startDirect(). Peer readiness does
+            // not change the observed route: drive a real workspace read through this
+            // selected VM rather than relying on incidental live/poll traffic.
+            duringPhase("selected-installation direct UI", 30000) {
+                var refreshes = 0
+                var observedDirect = false
+                while (true) {
+                    recordWorkspace()
+                    val state = vm.state.value
+                    if (
+                        state.ready &&
+                            !state.busy &&
+                            state.session.authenticated &&
+                            state.installation?.id == expectedInstallation &&
+                            state.installation.online
+                    ) {
+                        diagnostics.record("selected VM refresh", "started ${++refreshes}")
+                        withContext(Dispatchers.Main) { vm.refresh() }
+                        diagnostics.record("selected VM refresh", "completed $refreshes")
+                        observedDirect = vm.api.transport.route.value == "direct"
+                        diagnostics.record(
+                            "selected VM response route",
+                            if (observedDirect) "direct" else "relay",
+                        )
+                    }
+                    recordWorkspace()
+                    val header = headerCategory()
+                    diagnostics.record("header", header)
+                    if (observedDirect && header == "direct") break
+                    delay(200)
+                }
+            }
+            assertEquals(expectedInstallation, vm.state.value.installation?.id)
+            assertEquals("direct", vm.api.transport.route.value)
+            compose.onNode(installationHeader(state = "En ligne · Direct")).assertIsDisplayed()
+            diagnostics.record("startup", "real Direct header displayed")
+            vm.api.closeStreams()
+            ui = true
+        }
+
+        suspend fun exerciseRenewalAndRevocation() {
+            // The delivered lease lasts 180 s: observe a real renewal before expiry.
+            duringPhase("real renewal", 180000) {
+                while (!control.contains("renew:200")) {
+                    delay(1000)
+                    read()
+                    assertEquals("direct", api.transport.route.value)
+                }
+            }
+            renewed = true
+            val renewals = control.count { it == "renew:200" }
+            delay(2000)
+            assertEquals(
+                "A capped deadline must not start a renewal loop",
+                renewals,
+                control.count { it == "renew:200" },
+            )
+            read()
+            assertEquals("direct", api.transport.route.value)
+            cappedRenewal = true
+            val streaming = CompletableDeferred<Unit>()
+            val terminal = async {
+                api.live("/chats/stream")
+                    .onEach { if (it.state?.chats != null) streaming.complete(Unit) }
+                    .first { it.httpStatus == 401 || it.httpStatus == 403 }
+            }
+            duringPhase("live stream startup", 15000) { streaming.await() }
+            assertEquals("direct", api.transport.route.value)
+            api.request("POST", "/account/logout")
+            val status = duringPhase("live revocation", 10000) { terminal.await().httpStatus }
+            assertEquals(401, status)
+            assertEquals("relay", api.transport.route.value)
+            val rejected = runCatching { api.request("GET", "/chats") }.exceptionOrNull()
+            assertTrue(rejected is ApiException && rejected.status == 401)
+            revoked = true
+        }
+
         try {
+            diagnostics.record("startup", "primary read")
             read()
             assertEquals("relay", api.transport.route.value)
             api.startDirect(context)
@@ -224,7 +695,7 @@ class DirectTransportDeviceTest {
                         val authorizations = control.count { it == "authorize:200" }
                         try {
                             shell(command)
-                            withTimeout(15000) {
+                            duringPhase("network transition", 15000) {
                                 while (
                                     manager.activeNetwork == previous ||
                                         manager
@@ -252,7 +723,7 @@ class DirectTransportDeviceTest {
                             }
                         }
                     instrumentation.runOnMainSync { assertTrue(activity.moveTaskToBack(true)) }
-                    withTimeout(5000) {
+                    duringPhase("background transport stop", 5000) {
                         while (api.transport.route.value != "relay") delay(100)
                     }
                     delay(500)
@@ -274,272 +745,17 @@ class DirectTransportDeviceTest {
                     awaitDirect()
                     assertTrue(control.count { it == "authorize:200" } > authorizations)
 
-                    // A real foreground transition must retain the capacity-error deadline.
-                    val capacityAttempts = AtomicInteger()
-                    val rejectedAt = AtomicLong()
-                    val retryAt = AtomicLong()
-                    val capacityClient =
-                        OkHttpClient.Builder()
-                            .addInterceptor { chain ->
-                                val request = chain.request()
-                                if (request.url.encodedPath.endsWith("/direct/authorize")) {
-                                    if (capacityAttempts.incrementAndGet() == 1) {
-                                        rejectedAt.set(System.nanoTime())
-                                        return@addInterceptor Response.Builder()
-                                            .request(request)
-                                            .protocol(Protocol.HTTP_1_1)
-                                            .code(503)
-                                            .message("Capacity fixture")
-                                            .body("{}".toResponseBody())
-                                            .build()
-                                    }
-                                    retryAt.set(System.nanoTime())
-                                }
-                                chain.proceed(request)
-                            }
-                            .build()
-                    val capacity = CairnApi(origin, vault, capacityClient, api.installationId)
-                    capacity.csrf = api.csrf
-                    try {
-                        capacity.startDirect(context)
-                        withTimeout(10000) { while (capacityAttempts.get() == 0) delay(100) }
-                        delay(500)
-                        instrumentation.runOnMainSync { assertTrue(activity.moveTaskToBack(true)) }
-                        withTimeout(5000) {
-                            while (api.transport.route.value != "relay") delay(100)
-                        }
-                        delay(1000)
-                        instrumentation.runOnMainSync {
-                            activity.startActivity(
-                                Intent(activity, activity.javaClass)
-                                    .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                            )
-                        }
-                        delay(2000)
-                        assertEquals(
-                            "Foreground must not bypass capacity backoff",
-                            1,
-                            capacityAttempts.get(),
-                        )
-                        withTimeout(25000) {
-                            do {
-                                delay(200)
-                                assertEquals("[]", capacity.request("GET", "/chats"))
-                            } while (capacity.transport.route.value != "direct")
-                        }
-                        assertTrue(
-                            "Retry must retain its fifteen-second deadline",
-                            retryAt.get() - rejectedAt.get() >= 15_000_000_000L,
-                        )
-                        foregroundBackoff = true
-                    } finally {
-                        capacity.closeStreams()
-                    }
-                    awaitDirect()
+                    exerciseForegroundBackoff()
 
-                    // Keep authorization/DTLS real. Shorten only the client's scheduling input
-                    // so a real acknowledged renewal can return the unavailable control fixture.
-                    val renewalAttempts = AtomicInteger()
-                    val renewalReplies = AtomicInteger()
-                    val renewalClient =
-                        OkHttpClient.Builder()
-                            .addInterceptor { chain ->
-                                val request = chain.request()
-                                val path = request.url.encodedPath
-                                if (path.endsWith("/direct/authorize"))
-                                    renewalAttempts.incrementAndGet()
-                                val response = chain.proceed(request)
-                                if (path.endsWith("/direct/authorize") && response.isSuccessful) {
-                                    val grant =
-                                        wireJson
-                                            .parseToJsonElement(response.body.string())
-                                            .jsonObject
-                                    val signed = grant["grant"]!!.jsonObject
-                                    val claims = signed["claims"]!!.jsonObject
-                                    val scheduling =
-                                        JsonObject(
-                                            grant +
-                                                ("grant" to
-                                                    JsonObject(
-                                                        signed +
-                                                            ("claims" to
-                                                                JsonObject(
-                                                                    claims +
-                                                                        ("expires_at" to
-                                                                            JsonPrimitive(
-                                                                                System
-                                                                                    .currentTimeMillis() /
-                                                                                    1000 + 40
-                                                                            ))
-                                                                ))
-                                                    ))
-                                        )
-                                    response
-                                        .newBuilder()
-                                        .body(
-                                            scheduling
-                                                .toString()
-                                                .toResponseBody(response.body.contentType())
-                                        )
-                                        .build()
-                                } else if (path.endsWith("/renew") && response.isSuccessful) {
-                                    response.close()
-                                    renewalReplies.incrementAndGet()
-                                    response
-                                        .newBuilder()
-                                        .body("{\"available\":false}".toResponseBody())
-                                        .build()
-                                } else response
-                            }
-                            .build()
-                    val renewal = CairnApi(origin, vault, renewalClient, api.installationId)
-                    renewal.csrf = api.csrf
-                    try {
-                        renewal.startDirect(context)
-                        withTimeout(10000) {
-                            do {
-                                delay(100)
-                                assertEquals("[]", renewal.request("GET", "/chats"))
-                            } while (renewal.transport.route.value != "direct")
-                        }
-                        withTimeout(20000) {
-                            while (
-                                renewalReplies.get() == 0 ||
-                                    renewal.transport.route.value != "relay"
-                            ) delay(100)
-                        }
-                        delay(18000)
-                        assertEquals(
-                            "Unavailable renewal must not authorize again",
-                            1,
-                            renewalAttempts.get(),
-                        )
-                        assertEquals(1, renewalReplies.get())
-                        assertEquals("[]", renewal.request("GET", "/chats"))
-                        assertEquals("relay", renewal.transport.route.value)
-                        unavailableRenewal = true
-                    } finally {
-                        renewal.closeStreams()
-                    }
+                    exerciseUnavailableRenewal()
 
-                    for (status in listOf(200, 401, 403)) {
-                        val attempts = AtomicInteger()
-                        val unavailableClient =
-                            client
-                                .newBuilder()
-                                .addInterceptor { chain ->
-                                    if (
-                                        chain
-                                            .request()
-                                            .url
-                                            .encodedPath
-                                            .endsWith("/direct/authorize")
-                                    ) {
-                                        attempts.incrementAndGet()
-                                        Response.Builder()
-                                            .request(chain.request())
-                                            .protocol(Protocol.HTTP_1_1)
-                                            .code(status)
-                                            .message("Control fixture")
-                                            .body("{\"available\":false}".toResponseBody())
-                                            .build()
-                                    } else chain.proceed(chain.request())
-                                }
-                                .build()
-                        val probe = CairnApi(origin, vault, unavailableClient, api.installationId)
-                        probe.csrf = api.csrf
-                        try {
-                            probe.startDirect(context)
-                            withTimeout(10000) { while (attempts.get() == 0) delay(100) }
-                            delay(18000)
-                            assertEquals(
-                                "Control rejection must suspend reconnects: $status",
-                                1,
-                                attempts.get(),
-                            )
-                            assertEquals("[]", probe.request("GET", "/chats"))
-                            assertEquals("relay", probe.transport.route.value)
-                        } finally {
-                            probe.closeStreams()
-                        }
-                    }
-                    suspendedControl = true
-                    val largeRequest = runCatching {
-                        api.request(
-                            "POST",
-                            "/chats/missing/messages",
-                            body(
-                                "id" to java.util.UUID.randomUUID().toString(),
-                                "text" to "x".repeat(1_000_000),
-                            ),
-                        )
-                    }
-                        .exceptionOrNull()
-                    assertEquals(
-                        "The real router retains its 150 kB JSON body limit",
-                        413,
-                        (largeRequest as? ApiException)?.status,
-                    )
-                    assertEquals("direct", api.transport.route.value)
-                    read()
-                    assertEquals("direct", api.transport.route.value)
+                    exerciseSuspendedControl()
 
-                    // Real selected-installation UI exercises the asynchronous startup/indicator.
-                    val vm =
-                        withContext(Dispatchers.Main) {
-                            CairnViewModel(
-                                context.applicationContext as Application,
-                                vault,
-                                origin.toString(),
-                            )
-                        }
-                    withContext(Dispatchers.Main) { selectedVm = vm }
-                    compose.waitUntil(30000) {
-                        compose
-                            .onAllNodes(installationHeader(state = "En ligne · Direct"))
-                            .fetchSemanticsNodes()
-                            .isNotEmpty()
-                    }
-                    compose
-                        .onNode(installationHeader(state = "En ligne · Direct"))
-                        .assertIsDisplayed()
-                    vm.api.closeStreams()
-                    ui = true
+                    exerciseLargeRequest()
 
-                    // The delivered lease lasts 180 s: observe a real renewal before expiry.
-                    withTimeout(180000) {
-                        while (!control.contains("renew:200")) {
-                            delay(1000)
-                            read()
-                            assertEquals("direct", api.transport.route.value)
-                        }
-                    }
-                    renewed = true
-                    val renewals = control.count { it == "renew:200" }
-                    delay(2000)
-                    assertEquals(
-                        "A capped deadline must not start a renewal loop",
-                        renewals,
-                        control.count { it == "renew:200" },
-                    )
-                    read()
-                    assertEquals("direct", api.transport.route.value)
-                    cappedRenewal = true
-                    val streaming = CompletableDeferred<Unit>()
-                    val terminal = async {
-                        api.live("/chats/stream")
-                            .onEach { if (it.state?.chats != null) streaming.complete(Unit) }
-                            .first { it.httpStatus == 401 || it.httpStatus == 403 }
-                    }
-                    withTimeout(15000) { streaming.await() }
-                    assertEquals("direct", api.transport.route.value)
-                    api.request("POST", "/account/logout")
-                    val status = withTimeout(10000) { terminal.await().httpStatus }
-                    assertEquals(401, status)
-                    assertEquals("relay", api.transport.route.value)
-                    val rejected = runCatching { api.request("GET", "/chats") }.exceptionOrNull()
-                    assertTrue(rejected is ApiException && rejected.status == 401)
-                    revoked = true
+                    exerciseSelectedInstallation()
+
+                    exerciseRenewalAndRevocation()
                 }
             }
             File(context.filesDir, "direct-evidence.json")
@@ -559,13 +775,30 @@ class DirectTransportDeviceTest {
                         put("cappedRenewal", cappedRenewal)
                         put("foregroundBackoff", foregroundBackoff)
                         put("unavailableRenewal", unavailableRenewal)
+                        put(
+                            "renewalAnswersBeforeOfferAckDelivery",
+                            renewalAnswersBeforeOfferAckDelivery.get(),
+                        )
+                        put(
+                            "renewalStreamClosuresBeforeOfferAckDelivery",
+                            renewalStreamClosuresBeforeOfferAckDelivery.get(),
+                        )
                         put("refusedCandidates", refusedCandidates.get())
+                        put("phaseEvidence", diagnostics.summary())
                         put("sdk", Build.VERSION.SDK_INT)
                         put("abi", Build.SUPPORTED_ABIS.first())
                         put("elapsedMs", (System.nanoTime() - started) / 1000000)
                     }
                         .toString()
                 )
+        } catch (error: Throwable) {
+            runCatching {
+                recordWorkspace()
+                diagnostics.record("header", headerCategory())
+            }
+                .onFailure { diagnostics.record("snapshot failure", it.javaClass.simpleName) }
+            error.addSuppressed(AssertionError(diagnostics.summary()))
+            throw error
         } finally {
             api.closeStreams()
             if (scenario == "network-change") shell("svc wifi enable")

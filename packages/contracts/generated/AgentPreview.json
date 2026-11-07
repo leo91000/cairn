@@ -1,0 +1,82 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AgentDelegationEffect": {
+      "additionalProperties": false,
+      "properties": {
+        "alreadySuspended": {
+          "type": "boolean"
+        },
+        "blocked": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "suspended": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "pluginId",
+        "name",
+        "enabled",
+        "suspended",
+        "blocked",
+        "alreadySuspended"
+      ],
+      "type": "object"
+    },
+    "AgentPreviewRuns": {
+      "additionalProperties": false,
+      "properties": {
+        "queued": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "running": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "queued",
+        "running"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "delegations": {
+      "items": {
+        "$ref": "#/definitions/AgentDelegationEffect"
+      },
+      "type": "array"
+    },
+    "runs": {
+      "$ref": "#/definitions/AgentPreviewRuns"
+    }
+  },
+  "required": [
+    "runs",
+    "delegations"
+  ],
+  "title": "AgentPreview",
+  "type": "object"
+}

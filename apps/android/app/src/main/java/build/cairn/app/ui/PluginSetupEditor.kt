@@ -74,14 +74,18 @@ internal fun InstanceEditor(
     saved: suspend () -> Unit,
 ) {
     val creating = initial.id.isBlank()
-    val fields = manifest.settings.filter { !it.hidden }
+    val fields = manifest.settingFields.filter { !it.hidden }
     // Hidden settings are the package's own (e.g. names it derives); editing keeps them.
-    val stored = manifest.settings.filter { it.type != "secret" }
+    val stored = manifest.settingFields.filter { it.type != "secret" }
     val setup = remember(entry) { entry.resolvedSetup() }
     // A package with nothing to enter still gets one step, for its name.
-    val steps = setup.steps.ifEmpty { listOf(SetupStep("details", "settings", "Details")) }
+    val steps =
+        setup.steps.ifEmpty {
+            listOf(SetupStep(id = "details", kind = "settings", title = "Details"))
+        }
     val mine = connections.filter { it.pluginId == pluginId }
-    val sources = sharedSources(steps, manifest.settings, mine, initial.id.takeIf { !creating })
+    val sources =
+        sharedSources(steps, manifest.settingFields, mine, initial.id.takeIf { !creating })
     val sharedKeys = steps.filter { it.shared }.flatMap { it.settings }
     val callbackShown = steps.any { item -> item.checklist.any { it.copy == "callbackUrl" } }
     /** The reused instance's visible shared values; another app starts empty. */
@@ -191,9 +195,9 @@ internal fun InstanceEditor(
     // permissions afterwards needs a new sign-in rather than a save the installation refuses.
     val signInBasis =
         manifest.credential?.oauth?.let { oauth ->
-            val clientId = oauth["clientIdSetting"]?.jsonPrimitive?.contentOrNull
-            val scopeKeys = (oauth["scopeSettings"] as? JsonObject)?.keys.orEmpty()
-            val clientSecret = oauth["clientSecretSetting"]?.jsonPrimitive?.contentOrNull
+            val clientId = oauth.clientIdSetting
+            val scopeKeys = oauth.scopeSettings.keys
+            val clientSecret = oauth.clientSecretSetting
             Triple(
                 reuse,
                 (listOfNotNull(clientId) + scopeKeys).map { values[it] },
@@ -291,21 +295,22 @@ internal fun InstanceEditor(
                         if (field.type == "secret") secrets[field.key] else values[field.key]
                 }
                 runCatching {
-                    val result =
-                        vm.api.pluginOperation(
-                            "/plugins/${segment(pluginId)}/form",
-                            buildJsonObject {
-                                if (!creating) put("instance", initial.id)
-                                put("settings", pluginSettings(stored, values))
-                                put("secrets", pluginSecrets(secrets))
-                                sharing()
-                                credentialInput(token, signIn)?.let { (key, value) ->
-                                    put(key, value)
-                                }
-                                changed?.let { put("changed", it) }
-                            },
-                        )
-                    wireJson.decodeFromJsonElement<PluginForm>(result)
+                    vm.api.pluginForm(
+                        pluginId,
+                        initial.id.takeUnless { creating },
+                        build.cairn.contracts.PluginFormInput(
+                            revision = initial.revision.takeUnless { creating },
+                            settings = pluginSettings(stored, values),
+                            secrets = pluginSecrets(secrets),
+                            sharedFrom = reuse.takeIf { it.isNotEmpty() },
+                            changed = changed,
+                            credentialFlow = signIn?.takeIf { it.completed }?.id,
+                            token =
+                                token.trim().takeIf {
+                                    it.isNotEmpty() && signIn?.completed != true
+                                },
+                        ),
+                    )
                 }
                     .onSuccess { form ->
                         val derived =
@@ -329,10 +334,15 @@ internal fun InstanceEditor(
                         if (error is kotlinx.coroutines.CancellationException) throw error
                         completion =
                             PluginForm(
-                                options = completion?.options.orEmpty(),
+                                options =
+                                    build.cairn.contracts.Options(completion?.options.orEmpty()),
+                                values = JsonObject(emptyMap()),
                                 errors =
-                                    mapOf(
-                                        "form" to (error.message ?: "Le plugin n’a pas répondu.")
+                                    build.cairn.contracts.Errors(
+                                        mapOf(
+                                            "form" to
+                                                (error.message ?: "Le plugin n’a pas répondu.")
+                                        )
                                     ),
                             )
                     }
@@ -405,60 +415,27 @@ internal fun InstanceEditor(
             if (saving) name.isNotBlank() && steps.all { stepProblem(it) == null }
             else stepProblem(current) == null
     fun save() = vm.perform {
-        // Grants to send back (older or unknown installation), as saved right now.
-        val keptGrants =
-            if (creating) null
-            else
-                initial.agentIdsToSend(state.agents, manifest) {
-                    wireJson
-                        .decodeFromString<PluginCatalog>(api.request("GET", "/plugins"))
-                        .connections
-                        .find { it.id == initial.id }
-                        ?.agentIds
-                }
-        api.pluginOperation(
-            "/plugins/${segment(pluginId)}/connections" +
-                if (creating) "" else "/${segment(initial.id)}",
-            buildJsonObject {
-                put("name", name.trim())
-                // The save consumes a completed sign-in.
-                credentialInput(token, signIn)?.let { (key, value) -> put(key, value) }
-                put("settings", pluginSettings(stored, values))
-                // Blank secret fields keep what is saved.
-                put("secrets", pluginSecrets(secrets))
-                if (manifest.delegates) {
-                    put("agentId", agentId)
-                    put(
-                        "projectId",
-                        // An agent with one project answers in it; a broader one outside projects.
-                        agent?.access?.projects?.singleOrNull()?.let(::JsonPrimitive) ?: JsonNull,
-                    )
-                    put("accessMode", accessMode)
-                    put("userIds", JsonArray(people.map { JsonPrimitive(it.id) }))
-                    put(
-                        "people",
-                        JsonArray(
-                            people.map { label ->
-                                buildJsonObject {
-                                    put("id", label.id)
-                                    put("name", label.name)
-                                }
-                            }
-                        ),
-                    )
-                    put("maxMessagesPerHour", perHour.toIntOrNull() ?: 20)
-                    put("maxPerPersonPerHour", perPerson.toIntOrNull() ?: 5)
-                }
-                put("enabled", enabled)
-                sharing()
-                // An older (or unknown) installation needs the granted agents back, as they are
-                // now. A new instance is granted to the agents chosen on the agents step; creation
-                // only grants, it never removes.
-                (keptGrants ?: grants.takeIf { creating && it.isNotEmpty() })?.let { ids ->
-                    put("agentIds", JsonArray(ids.map(::JsonPrimitive)))
-                }
-            },
-            method = if (creating) "POST" else "PUT",
+        api.savePlugin(
+            pluginId,
+            initial.id.takeUnless { creating },
+            build.cairn.contracts.PluginConfiguration(
+                name = name.trim(),
+                enabled = enabled,
+                revision = initial.revision.takeUnless { creating },
+                settings = pluginSettings(stored, values),
+                secrets = pluginSecrets(secrets),
+                sharedFrom = reuse.takeIf { it.isNotEmpty() },
+                credentialFlow = signIn?.takeIf { it.completed }?.id,
+                token = token.trim().takeIf { it.isNotEmpty() && signIn?.completed != true },
+                agentId = agentId.takeIf { manifest.delegates }.orEmpty(),
+                projectId = agent?.access?.projects?.singleOrNull().takeIf { manifest.delegates },
+                accessMode = accessMode,
+                userIds = people.map { it.id },
+                people = people,
+                maxMessagesPerHour = perHour.toIntOrNull() ?: 20,
+                maxPerPersonPerHour = perPerson.toIntOrNull() ?: 5,
+                agentIds = grants.takeIf { creating && it.isNotEmpty() },
+            ),
         )
         token = ""
         // Consumed by the save: nothing is left to cancel.
@@ -735,7 +712,7 @@ internal fun InstanceEditor(
                             )
                     }
 
-                val view = completion?.view ?: JsonArray(emptyList())
+                val view = JsonArray(completion?.view?.filterNotNull() ?: emptyList())
                 if (guided(current) && (view.isNotEmpty() || completing))
                     Column(
                         Modifier.testTag("plugin-form-view"),
@@ -819,9 +796,9 @@ internal fun InstanceEditor(
                             .sortedBy { risks(it).isNotEmpty() }
                             .map { agent ->
                                 PluginOption(
-                                    agent.id,
-                                    agent.name,
-                                    if (risks(agent).isEmpty()) "" else "Accès large",
+                                    value = agent.id,
+                                    label = agent.name,
+                                    description = if (risks(agent).isEmpty()) "" else "Accès large",
                                 )
                             },
                         enabled = !state.busy,

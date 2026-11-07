@@ -1,4 +1,5 @@
 use super::*;
+use crate::run_fixture::DbRunFixture;
 use crate::{
     config::{Config, MAIN_AGENT_ID},
     performance::Activity,
@@ -42,7 +43,7 @@ impl Fixture {
         .await
         .unwrap();
         let task = service
-            .task(
+            .task_fixture(
                 json!({
                     "name": "Tool activity test",
                     "prompt": "Fixture only",
@@ -74,6 +75,27 @@ impl Fixture {
         }
     }
 
+    async fn bind_progress(&self) {
+        self.service
+            .store
+            .update_run_boundary(&self.id, json!({ "missionTurnId": "progress-turn" }))
+            .await
+            .unwrap();
+        self.checkpoint
+            .update(|saved| {
+                saved.runner_id = Some(Some("progress-attempt".into()));
+                saved.progress = Some(crate::worker::progress::Progress::launched(
+                    "progress-execution".into(),
+                    Some("progress-attempt".into()),
+                    None,
+                    Some("progress-turn".into()),
+                    1,
+                ));
+            })
+            .await
+            .unwrap();
+    }
+
     async fn output(&mut self, output: Output) {
         record(
             &self.service,
@@ -96,13 +118,111 @@ impl Fixture {
         let id = self.id.clone();
         self.service
             .store
-            .read(move |db| db.events(&id, 0, 1000))
+            .read(move |db| db.events_fixture(&id, 0, 1000))
             .await
             .unwrap()
             .into_iter()
             .filter(|event| event["payload"]["item"].is_object() || event["type"] == "diagnostic")
             .collect()
     }
+}
+
+#[tokio::test]
+async fn runtime_disk_notice_preserves_publication_metadata_and_redacts_all_payloads() {
+    let mut fixture = Fixture::new().await;
+    let storage = json!({ "mode": "on-demand", "grantId": "retained-grant", "dirtyBytes": 123,
+        "published": { "generation": 7, "backupId": "retained-backup" }, "policy": { "cacheMiB": 64 } });
+    fixture
+        .service
+        .store
+        .update_run_boundary(&fixture.id, json!({ "storage": storage }))
+        .await
+        .unwrap();
+    fixture
+        .event(
+            json!({ "type": "runtime.disk_notice", "text": "Pressure sensitive-tool-credential",
+        "capacity": { "allowanceBytes": 34359738368u64, "note": "sensitive-tool-credential" } }),
+        )
+        .await;
+    let run = fixture.service.store.run(&fixture.id).await.unwrap();
+    let expected = json!({ "allowanceBytes": 34359738368u64, "note": "[redacted]" });
+    assert_eq!(run["storage"], storage);
+    assert_eq!(run["diskCapacity"], expected);
+    // Ordinary storage polling replaces its own authoritative document.
+    fixture
+        .service
+        .store
+        .update_run_boundary(
+            &fixture.id,
+            json!({ "storage": { "mode": "on-demand", "dirtyBytes": 0 } }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.service.store.run(&fixture.id).await.unwrap()["diskCapacity"],
+        expected
+    );
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events_fixture(&id, 0, 100))
+        .await
+        .unwrap();
+    assert!(events.iter().any(|event| event["type"] == "status"));
+    assert!(
+        !serde_json::to_string(&events)
+            .unwrap()
+            .contains("sensitive-tool-credential")
+    );
+}
+
+#[tokio::test]
+async fn speed_checks_before_a_turn_become_conversation_notices() {
+    let mut fixture = Fixture::new().await;
+    let standard = json!({ "requested": "priority", "applied": "standard" });
+    let fast = json!({ "requested": "priority", "confirmed": true });
+    let unconfirmed = json!({ "requested": "priority", "unconfirmed": true });
+    // Every outcome is stated once per message: a retry repeating it adds nothing, a later
+    // attempt getting the speed after all says so, and another message starts over.
+    for (message, speed) in [
+        ("first", &fast),
+        ("second", &standard),
+        ("second", &standard),
+        ("second", &fast),
+        ("third", &unconfirmed),
+    ] {
+        fixture
+            .event(json!({ "type": "turn.speed", "messageId": message, "speed": speed }))
+            .await;
+    }
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events_fixture(&id, 0, 100))
+        .await
+        .unwrap();
+    let notices = events
+        .iter()
+        .filter(|event| event["type"] == "status" && event["payload"]["speed"].is_object())
+        .map(|event| {
+            (
+                event["payload"]["messageId"].clone(),
+                event["text"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 4, "{events:#?}");
+    assert_eq!(notices[0].0, "first");
+    assert!(notices[0].1.contains("Codex lists the selected speed"));
+    assert!(notices[0].1.contains("asks for it"));
+    assert_eq!(notices[1].0, "second");
+    assert!(notices[1].1.contains("runs at Standard speed"));
+    assert_eq!(notices[2].0, "second");
+    assert!(notices[2].1.contains("now lists the selected speed"));
+    assert_eq!(notices[3].0, "third");
+    assert!(notices[3].1.contains("may run at Standard speed"));
 }
 
 #[tokio::test]
@@ -133,7 +253,7 @@ async fn partial_guest_stdout_cannot_hide_controller_failure_after_exhausted_log
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 1000))
+        .read(move |db| db.events_fixture(&id, 0, 1000))
         .await
         .unwrap();
     let failures = events
@@ -149,8 +269,45 @@ async fn partial_guest_stdout_cannot_hide_controller_failure_after_exhausted_log
 }
 
 #[tokio::test]
+async fn interrupted_output_after_completion_records_one_safe_diagnostic() {
+    let mut fixture = Fixture::new().await;
+    fixture
+        .event(json!({ "type": "turn.completed", "usage": {} }))
+        .await;
+    fixture
+        .event(
+            json!({ "type": "runner.output_interrupted", "message": "sensitive-tool-credential" }),
+        )
+        .await;
+    fixture
+        .event(json!({ "type": "runner.output_interrupted" }))
+        .await;
+    let saved = fixture.checkpoint.snapshot().await;
+    assert!(saved.completed());
+    assert_eq!(saved.output_interrupted, Some(true));
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events_fixture(&id, 0, 1000))
+        .await
+        .unwrap();
+    let notices = events
+        .iter()
+        .filter(|event| text(event, "text").contains("Execution output was interrupted"))
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 1);
+    assert!(!notices[0].to_string().contains("sensitive-tool-credential"));
+}
+
+#[tokio::test]
 async fn controller_cleanup_does_not_replace_a_provider_failure_or_its_retry() {
     let mut fixture = Fixture::new().await;
+    fixture
+        .checkpoint
+        .update(|saved| saved.prepared = Some(Some(json!({"backend":"native","isolated":true}))))
+        .await
+        .unwrap();
     fixture
         .event(json!({
             "type": "turn.failed",
@@ -163,7 +320,14 @@ async fn controller_cleanup_does_not_replace_a_provider_failure_or_its_retry() {
             "error": { "message": "Controller cleanup failed" },
         }))
         .await;
+    fixture
+        .event(json!({"type":"runner.output_interrupted"}))
+        .await;
     let saved = fixture.checkpoint.snapshot().await;
+    assert!(
+        saved.output_error().is_none(),
+        "confirmed provider failure retains its separate retry policy"
+    );
     assert_eq!(saved.last_error(), "Provider unavailable");
     assert_eq!(
         saved.retry_cause.unwrap().unwrap().kind,
@@ -196,7 +360,7 @@ async fn controller_failures_survive_exhausted_logs_without_provider_retry() {
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 1000))
+        .read(move |db| db.events_fixture(&id, 0, 1000))
         .await
         .unwrap();
     let failures = events
@@ -233,7 +397,7 @@ async fn native_retry_notices_survive_log_budget_without_claiming_the_final_fail
     let events = fixture
         .service
         .store
-        .read(move |db| db.events(&id, 0, 1000))
+        .read(move |db| db.events_fixture(&id, 0, 1000))
         .await
         .unwrap();
     let notice = events
@@ -263,6 +427,72 @@ async fn native_retry_notices_survive_log_budget_without_claiming_the_final_fail
     assert_eq!(
         saved.retry_cause.unwrap().unwrap().kind,
         crate::run_retry::FailureKind::Timeout,
+    );
+}
+
+#[tokio::test]
+async fn engine_reports_survive_log_budget_redacted_and_only_a_reported_limit_exhausts() {
+    let mut fixture = Fixture::new().await;
+    fixture.log_total = LOG_BUDGET;
+    for event in [
+        json!({ "type": "engine.retry", "attempt": 1, "maxRetries": 10, "delayMs": 500, "reason": "overloaded" }),
+        json!({ "type": "provider.limit", "status": "rejected", "window": "five_hour", "blocked": true }),
+        json!({ "type": "engine.notice", "level": "warning", "message": "Hook printed sensitive-tool-credential" }),
+        // A long notice is cut once redacted: a secret across the cut leaves no part behind.
+        json!({
+            "type": "engine.notice",
+            "level": "warning",
+            "message": format!("{}sensitive-tool-credential", "x".repeat(3_995)),
+        }),
+        // Notices the conversation does not show stay within the run log's budget.
+        json!({ "type": "engine.notice", "level": "info", "message": "Tool Bash running for 30s" }),
+    ] {
+        fixture.event(event).await;
+    }
+    // None of them fails the attempt: the engine retries, and the turn reports the limit.
+    let saved = fixture.checkpoint.snapshot().await;
+    assert!(saved.last_error().is_empty());
+    assert!(saved.retry_cause.is_none());
+
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events_fixture(&id, 0, 1000))
+        .await
+        .unwrap();
+    // The run's own queued status precedes them.
+    let events: Vec<_> = events
+        .into_iter()
+        .filter(|event| event["type"] != "status")
+        .collect();
+    let kinds: Vec<_> = events.iter().map(|event| text(event, "type")).collect();
+    assert_eq!(
+        kinds,
+        [
+            "engine.retry",
+            "provider.limit",
+            "engine.notice",
+            "engine.notice"
+        ]
+    );
+    assert_eq!(events[0]["payload"]["attempt"], 1);
+    assert!(!events[2].to_string().contains("sensitive-tool-credential"));
+    assert_eq!(events[2]["payload"]["message"], "Hook printed [redacted]");
+    let long = text(&events[3]["payload"], "message");
+    // It is cut before the marker it would split, and says it was cut.
+    assert!(long.chars().count() <= 4_000);
+    assert!(long.ends_with("x…"), "{}", &long[3_980..]);
+    assert!(!events[3].to_string().contains("sensitive"));
+
+    let limit = json!({
+        "type": "turn.failed",
+        "error": { "message": "Your allowance is used up.", "code": "usage_limit_reached" },
+    });
+    assert!(crate::run_output::exhausted(&limit));
+    assert!(
+        crate::run_retry::Cause::classify(&limit["error"]).is_none(),
+        "a usage limit waits for an account, not a retry"
     );
 }
 
@@ -414,9 +644,27 @@ async fn transport_previews_do_not_cut_secrets_before_manager_redaction() {
         )
     };
     for item in [
-        json!({ "id": "command", "type": "command_execution", "status": "completed", "command": boundary(1024), "cwd": boundary(256), "error": { "message": boundary(512) } }),
-        json!({ "id": "files", "type": "file_change", "changes": [{ "path": boundary(256), "kind": "update", "diff": "large" }] }),
-        json!({ "id": "subagent", "type": "subagent", "status": "completed", "prompt": boundary(4096), "result": boundary(4096), "activity": boundary(1024) }),
+        json!({
+            "id": "command",
+            "type": "command_execution",
+            "status": "completed",
+            "command": boundary(1024),
+            "cwd": boundary(256),
+            "error": { "message": boundary(512) },
+        }),
+        json!({
+            "id": "files",
+            "type": "file_change",
+            "changes": [{ "path": boundary(256), "kind": "update", "diff": "large" }],
+        }),
+        json!({
+            "id": "subagent",
+            "type": "subagent",
+            "status": "completed",
+            "prompt": boundary(4096),
+            "result": boundary(4096),
+            "activity": boundary(1024),
+        }),
     ] {
         let event = json!({ "type": "item.completed", "item": item });
         let transported = serde_json::from_slice(&run_output::event_line(&event)).unwrap();
@@ -431,6 +679,96 @@ async fn transport_previews_do_not_cut_secrets_before_manager_redaction() {
         );
         assert_eq!(event["payload"]["item"]["details_truncated"], true);
     }
+}
+
+#[tokio::test]
+async fn proposals_over_the_activity_limit_keep_their_redacted_text() {
+    let mut fixture = Fixture::new().await;
+    let steps: String = (0..1500)
+        .map(|step| format!("{step}. Update module {step} and its tests.\n"))
+        .collect();
+    let text = format!("{steps}Use sensitive-tool-credential for the deploy.");
+    assert!(text.len() > 2 * ITEM_DETAIL_LIMIT);
+    let event = json!({
+        "type": "item.completed",
+        "item": { "id": "plan", "type": "proposed_plan", "text": text },
+    });
+    // Through the guest transport, then the manager's own storage classification.
+    let transported: Value = serde_json::from_slice(&run_output::event_line(&event)).unwrap();
+    assert_eq!(transported, event);
+    fixture.event(transported).await;
+    let events = fixture.events().await;
+    let item = &events[0]["payload"]["item"];
+    assert_eq!(item["type"], "proposed_plan");
+    assert!(item["details_truncated"].is_null());
+    assert_eq!(
+        item["text"],
+        text.replace("sensitive-tool-credential", "[redacted]")
+    );
+    assert_eq!(fixture.log_total, 0);
+}
+
+#[tokio::test]
+async fn completed_plan_frames_above_the_line_limit_reach_storage_intact_and_redacted() {
+    let mut fixture = Fixture::new().await;
+    let plan = format!(
+        "{}sensitive-tool-credential{}",
+        "x".repeat(LINE_LIMIT + 4096),
+        "😀".repeat(100)
+    );
+    let redacted = plan.replace("sensitive-tool-credential", "[redacted]");
+    let items = [
+        json!({
+            "id": "root-plan",
+            "type": "proposed_plan",
+            "text": plan,
+            "status": "completed",
+        }),
+        json!({
+            "id": "child-plan",
+            "parent_id": "delegated-actor",
+            "type": "proposed_plan",
+            "text": plan,
+            "status": "completed",
+        }),
+        json!({
+            "id": "following",
+            "type": "agent_message",
+            "text": "After the proposals",
+        }),
+    ];
+    let (reader, mut writer) = tokio::io::duplex(8192);
+    let (sender, mut receiver) = mpsc::channel(32);
+    // The manager may learn the redaction after the pipe reader starts.
+    let reading = tokio::spawn(read_output(reader, false, sender, Vec::new()));
+    let writing = tokio::spawn(async move {
+        for item in items {
+            let event = json!({ "type": "item.completed", "item": item });
+            writer
+                .write_all(&run_output::event_line(&event))
+                .await
+                .unwrap();
+        }
+    });
+    while let Some(output) = receiver.recv().await {
+        fixture.output(output).await;
+    }
+    writing.await.unwrap();
+    reading.await.unwrap();
+
+    let events = fixture.events().await;
+    assert_eq!(events.len(), 3);
+    for (event, id) in events[..2].iter().zip(["root-plan", "child-plan"]) {
+        let item = &event["payload"]["item"];
+        assert_eq!(item["type"], "proposed_plan");
+        assert_eq!(item["id"], id);
+        assert_eq!(item["text"], redacted);
+        assert!(item["details_truncated"].is_null());
+        assert!(!event.to_string().contains("sensitive-tool-credential"));
+    }
+    assert_eq!(events[1]["payload"]["item"]["parent_id"], "delegated-actor");
+    assert_eq!(events[2]["payload"]["item"]["text"], "After the proposals");
+    assert_eq!(fixture.log_total, 0);
 }
 
 #[tokio::test]
@@ -540,7 +878,12 @@ async fn question_chat(fixture: &Fixture) -> String {
     let mut chat = fixture.service.chat_create(json!({})).await.unwrap();
     chat["runId"] = fixture.id.clone().into();
     let id = text(&chat, "id").to_owned();
-    fixture.service.store.put("chats", chat).await.unwrap();
+    fixture
+        .service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
     id
 }
 
@@ -556,7 +899,7 @@ fn question_event(id: &str, blocking: bool) -> Value {
 }
 
 #[tokio::test]
-async fn closed_questions_leave_the_pending_badge_without_becoming_answers() {
+async fn common_questions_survive_native_closures_without_becoming_answers() {
     for blocking in [false, true] {
         let mut fixture = Fixture::new().await;
         let chat = question_chat(&fixture).await;
@@ -564,18 +907,35 @@ async fn closed_questions_leave_the_pending_badge_without_becoming_answers() {
         fixture.event(question_event(&question, blocking)).await;
         assert_eq!(
             fixture.service.chat_detail(&chat).await.unwrap()["pendingQuestions"],
+            0
+        );
+        fixture
+            .service
+            .question_receive(
+                &fixture.id,
+                question_event(&question, false)["question"].clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture.service.chat_detail(&chat).await.unwrap()["pendingQuestions"],
             1
         );
         fixture
             .event(json!({ "type": "chat.question.closed", "questionId": question }))
             .await;
-        // A duplicate event must not reopen a withdrawn question.
+        // Native events cannot replace or retire a common questionnaire.
         fixture.event(question_event(&question, blocking)).await;
         let detail = fixture.service.chat_detail(&chat).await.unwrap();
-        assert_eq!(detail["pendingQuestions"], 0);
-        assert_eq!(detail["questions"][0]["status"], "cancelled");
+        assert_eq!(detail["pendingQuestions"], 1);
+        assert_eq!(detail["questions"][0]["status"], "pending");
         assert_eq!(detail["questions"][0]["blocking"], false);
         assert_eq!(detail["messages"], json!([]));
+        fixture
+            .service
+            .question_cancel(&chat, &question)
+            .await
+            .unwrap();
         assert!(
             fixture
                 .service
@@ -583,7 +943,10 @@ async fn closed_questions_leave_the_pending_badge_without_becoming_answers() {
                     &chat,
                     &question,
                     json!({
-                        "id": crate::config::id(), "answers": { "scope": ["Everything"] },
+                        "id": crate::config::id(),
+                        "answers": {
+                            "scope": { "selected": [], "comment": "Everything" },
+                        },
                     })
                 )
                 .await
@@ -605,7 +968,7 @@ async fn a_completed_outcome_retires_questions_but_input_needed_and_old_reports_
         fixture
             .service
             .store
-            .patch_run(
+            .update_run_boundary(
                 &fixture.id,
                 json!({
                     "chatExecution": { "messageId": "current" },
@@ -614,7 +977,14 @@ async fn a_completed_outcome_retires_questions_but_input_needed_and_old_reports_
             )
             .await
             .unwrap();
-        fixture.event(question_event(&"a".repeat(64), false)).await;
+        fixture
+            .service
+            .question_receive(
+                &fixture.id,
+                question_event(&"a".repeat(64), false)["question"].clone(),
+            )
+            .await
+            .unwrap();
         fixture.event(json!({ "type": "turn.completed" })).await;
         assert_eq!(
             fixture.service.chat_detail(&chat).await.unwrap()["pendingQuestions"],
@@ -624,7 +994,7 @@ async fn a_completed_outcome_retires_questions_but_input_needed_and_old_reports_
 }
 
 #[tokio::test]
-async fn releasing_a_session_preserves_answers_in_delivery() {
+async fn releasing_a_session_preserves_common_questions_and_answers_in_delivery() {
     let mut fixture = Fixture::new().await;
     let chat = question_chat(&fixture).await;
     let pending = "a".repeat(64);
@@ -634,8 +1004,16 @@ async fn releasing_a_session_preserves_answers_in_delivery() {
         .chat_send(&chat, json!({ "id": crate::config::id(), "text": "Start" }))
         .await
         .unwrap();
-    fixture.event(question_event(&pending, true)).await;
-    fixture.event(question_event(&answering, true)).await;
+    for question in [&pending, &answering] {
+        fixture
+            .service
+            .question_receive(
+                &fixture.id,
+                question_event(question, false)["question"].clone(),
+            )
+            .await
+            .unwrap();
+    }
     let answer = crate::config::id();
     fixture
         .service
@@ -643,7 +1021,10 @@ async fn releasing_a_session_preserves_answers_in_delivery() {
             &chat,
             &answering,
             json!({
-                "id": answer, "answers": { "scope": ["Keep this answer"] },
+                "id": answer,
+                "answers": {
+                    "scope": { "selected": [], "comment": "Keep this answer" },
+                },
             }),
         )
         .await
@@ -659,11 +1040,11 @@ async fn releasing_a_session_preserves_answers_in_delivery() {
         .event(json!({ "type": "chat.question.closed" }))
         .await;
     let detail = fixture.service.chat_detail(&chat).await.unwrap();
-    assert_eq!(detail["pendingQuestions"], 0);
+    assert_eq!(detail["pendingQuestions"], 1);
     let questions = detail["questions"].as_array().unwrap();
     assert_eq!(
         questions.iter().find(|q| q["id"] == pending).unwrap()["status"],
-        "cancelled"
+        "pending"
     );
     assert_eq!(
         questions.iter().find(|q| q["id"] == answering).unwrap()["status"],
@@ -813,6 +1194,58 @@ async fn performance_names_inside_diagnostics_are_retained_and_manager_logs_are_
     assert!(!logs.contains("invalid record"), "{logs}");
 }
 
+#[test]
+fn observed_reader_keeps_unknown_performance_on_the_current_redacted_path() {
+    crate::test_process::run_ignored("worker::output::tests::observed_reader_redaction_child");
+}
+
+#[tokio::test]
+#[ignore = "process-global diagnostic capture, invoked by its wrapper"]
+async fn observed_reader_redaction_child() {
+    use tracing::instrument::WithSubscriber;
+
+    let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let mut fixture = Fixture::new().await;
+    let log_path = fixture._root.path().join("manager.log");
+    let file = std::fs::File::create(&log_path).unwrap();
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(Arc::new(file))
+            .finish(),
+    );
+    let publisher = Publisher::new(&fixture.id, &crate::config::id());
+    let input = concat!(
+        "2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"thread/items/list\" request_id=1 event=\"started\" timeout_ms=20000\r\n",
+        "2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"sensitive-tool-credential\" request_id=1 event=\"started\" timeout_ms=20000\n",
+        "2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"thread/items/list\" request_id=1 event=\"started\" timeout_ms=20000 secret=sensitive-tool-credential\n",
+        "WARN native: cairn_performance: sensitive-tool-credential\r\n",
+        "2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"thread/items/list\" request_id=1 event=\"started\" timeout_ms=20000",
+    );
+    let (sender, mut events) = mpsc::channel(32);
+    read_agent_diagnostics(input.as_bytes(), sender, publisher).await;
+    let mut count = 0;
+    while let Some(output) = events.recv().await {
+        count += 1;
+        fixture
+            .output(output)
+            .with_subscriber(dispatch.clone())
+            .await;
+    }
+    assert_eq!(count, 4);
+    let logs = std::fs::read_to_string(&log_path).unwrap();
+    assert!(!logs.contains("sensitive-tool-credential"));
+    assert!(logs.contains("method=\\\"[redacted]\\\"") || logs.contains("method=\"[redacted]\""));
+    assert!(logs.contains("secret=[redacted]"));
+    let stored = fixture.events().await;
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0]["text"],
+        "WARN native: cairn_performance: [redacted]\r\n"
+    );
+}
+
 #[tokio::test]
 async fn terminal_styling_and_utf8_survive_long_diagnostic_fragments() {
     let prefix = "x".repeat(8190);
@@ -848,4 +1281,498 @@ async fn terminal_styling_and_utf8_survive_long_diagnostic_fragments() {
             .collect();
         assert_eq!(diagnostics, expected);
     }
+}
+
+#[cfg(test)]
+use crate::mission_fixture::MissionFixture;
+
+#[tokio::test]
+async fn context_usage_survives_log_budget_and_keeps_the_latest_snapshot_on_the_run() {
+    let mut fixture = Fixture::new().await;
+    fixture.log_total = LOG_BUDGET;
+    for (tokens, estimated) in [(42_202, false), (6_200, true)] {
+        fixture
+            .event(json!({
+                "type": "context.usage",
+                "usage": {
+                    "contextTokens": tokens,
+                    "contextWindow": 200_000,
+                    "cachedTokens": null,
+                    "estimated": estimated,
+                },
+            }))
+            .await;
+    }
+
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events_fixture(&id, 0, 1000))
+        .await
+        .unwrap();
+    let usage = events
+        .iter()
+        .filter(|event| event["type"] == "context.usage")
+        .map(|event| event["payload"]["usage"]["contextTokens"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(usage, [json!(42_202), json!(6_200)]);
+
+    let run = fixture.service.store.run(&fixture.id).await.unwrap();
+    assert_eq!(run["contextUsage"]["contextTokens"], 6_200);
+    assert_eq!(run["contextUsage"]["contextWindow"], 200_000);
+    assert_eq!(run["contextUsage"]["estimated"], true);
+
+    // A malformed report never replaces the last known occupancy.
+    fixture
+        .event(json!({ "type": "context.usage", "usage": { "contextTokens": "many" } }))
+        .await;
+    let run = fixture.service.store.run(&fixture.id).await.unwrap();
+    assert_eq!(run["contextUsage"]["contextTokens"], 6_200);
+}
+
+#[tokio::test]
+async fn failed_event_publication_rolls_back_the_checkpoint_and_does_not_notify() {
+    let mut fixture = Fixture::new().await;
+    let before = fixture.service.store.revision();
+    fixture.service.store.write(|db| {
+        db.0.execute_batch("CREATE TRIGGER reject_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'fixture publication failure'); END;")?;
+        Ok(())
+    }).await.unwrap();
+    let output = Output::new(
+        false,
+        json!({"type":"turn.completed","usage":{"input_tokens":42}}).to_string(),
+    );
+    let result = record(
+        &fixture.service,
+        &output,
+        &fixture.checkpoint,
+        false,
+        &[],
+        &mut fixture.log_total,
+        &mut fixture.activity,
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(fixture.service.store.revision(), before);
+    assert!(!fixture.checkpoint.snapshot().await.completed());
+    assert!(
+        RunCheckpoint::load(&fixture.service.store, &fixture.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(fixture.service.store.run(&fixture.id).await.unwrap()["usage"].is_null());
+    fixture
+        .service
+        .store
+        .write(|db| {
+            db.0.execute_batch("DROP TRIGGER reject_event")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    fixture.output(output).await;
+    assert!(fixture.checkpoint.snapshot().await.completed());
+    assert!(
+        RunCheckpoint::load(&fixture.service.store, &fixture.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .completed()
+    );
+    assert_eq!(
+        fixture.service.store.run(&fixture.id).await.unwrap()["usage"]["input_tokens"],
+        42
+    );
+}
+
+#[tokio::test]
+async fn unknown_engine_events_remain_redacted_data_without_changing_checkpoint_state() {
+    let mut fixture = Fixture::new().await;
+    fixture
+        .event(json!({"type":"engine.future","payload":{"token":"sensitive-tool-credential"}}))
+        .await;
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.event_page(&id, 0, 100))
+        .await
+        .unwrap();
+    let event = events
+        .iter()
+        .find(|event| matches!(&event.kind, EventKind::External(kind) if kind == "engine.future"))
+        .unwrap();
+    let encoded = serde_json::to_string(event).unwrap();
+    assert!(!encoded.contains("sensitive-tool-credential"));
+    assert!(encoded.contains("[redacted]"));
+    assert!(!fixture.checkpoint.snapshot().await.completed());
+}
+
+#[tokio::test]
+async fn display_redaction_cannot_change_engine_lifecycle_or_session_identity() {
+    let mut fixture = Fixture::new().await;
+    let frames = [
+        json!({"type":"thread.started","thread_id":"session-original"}),
+        json!({"type":"context.usage","usage":{"contextTokens":400,"contextWindow":200000}}),
+        json!({"type":"item.completed","item":{"id":"reply","type":"agent_message","text":"session private text"}}),
+        json!({"type":"turn.completed","usage":{"input_tokens":42}}),
+    ];
+    for frame in frames {
+        let output = Output::new(false, frame.to_string());
+        record(
+            &fixture.service,
+            &output,
+            &fixture.checkpoint,
+            false,
+            &["completed".into(), "text".into(), "session".into()],
+            &mut fixture.log_total,
+            &mut fixture.activity,
+        )
+        .await
+        .unwrap();
+    }
+    let run = fixture.service.store.run(&fixture.id).await.unwrap();
+    assert_eq!(run["sessionId"], "session-original");
+    assert_eq!(run["contextUsage"]["contextTokens"], 400);
+    assert_eq!(run["usage"]["input_tokens"], 42);
+    let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(saved.completed());
+    assert_eq!(saved.last_message(), "[redacted] private [redacted]");
+    let id = fixture.id.clone();
+    let events = fixture
+        .service
+        .store
+        .read(move |db| db.events_fixture(&id, 0, 100))
+        .await
+        .unwrap();
+    let session = events
+        .iter()
+        .find(|event| event["payload"]["thread_id"].is_string())
+        .unwrap();
+    assert_eq!(session["payload"]["thread_id"], "[redacted]-original");
+    assert!(
+        events
+            .iter()
+            .any(|event| event["payload"]["type"] == "turn.[redacted]")
+    );
+}
+
+#[tokio::test]
+async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_clock() {
+    use crate::worker::progress::{Phase, Progress};
+    let mut fixture = Fixture::new().await;
+    fixture
+        .service
+        .store
+        .update_run_boundary(&fixture.id, json!({"missionTurnId":"progress-turn"}))
+        .await
+        .unwrap();
+    fixture
+        .checkpoint
+        .update(|saved| {
+            saved.runner_id = Some(Some("progress-attempt".into()));
+            saved.progress = Some(Progress::launched(
+                "progress-execution".into(),
+                Some("progress-attempt".into()),
+                None,
+                Some("progress-turn".into()),
+                1,
+            ));
+        })
+        .await
+        .unwrap();
+    fixture
+        .output(Output::new(true, "diagnostic only".into()))
+        .await;
+    let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.progress.unwrap().advanced_at, None);
+    fixture.service.store.write(|db| {
+        db.0.execute_batch("CREATE TRIGGER reject_progress_event BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT,'fixture'); END;")?;
+        Ok(())
+    }).await.unwrap();
+    let result = record(
+        &fixture.service,
+        &Output::new(false, json!({"type":"turn.started"}).to_string()),
+        &fixture.checkpoint,
+        false,
+        &[],
+        &mut fixture.log_total,
+        &mut fixture.activity,
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(
+        fixture
+            .checkpoint
+            .snapshot()
+            .await
+            .progress
+            .unwrap()
+            .advanced_at,
+        None
+    );
+    assert_eq!(
+        RunCheckpoint::load(&fixture.service.store, &fixture.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .progress
+            .unwrap()
+            .advanced_at,
+        None
+    );
+    fixture
+        .service
+        .store
+        .write(|db| {
+            db.0.execute_batch("DROP TRIGGER reject_progress_event;")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    fixture.event(json!({"type":"turn.started"})).await;
+    let item = json!({"type":"item.updated","item":{"id":"stable","type":"mcp_tool_call","status":"completed","result":"stable-private"}});
+    fixture.event(item.clone()).await;
+    fixture
+        .checkpoint
+        .update(|saved| saved.progress.as_mut().unwrap().advanced_at = Some(2))
+        .await
+        .unwrap();
+    record(
+        &fixture.service,
+        &Output::new(false, item.to_string()),
+        &fixture.checkpoint,
+        false,
+        &["stable-private".into()],
+        &mut fixture.log_total,
+        &mut fixture.activity,
+    )
+    .await
+    .unwrap();
+    let coverage = fixture.checkpoint.snapshot().await.progress.unwrap();
+    assert!(
+        !coverage.complete,
+        "redaction-only changes cannot certify new work"
+    );
+    assert_eq!(coverage.advanced_at, Some(2));
+    fixture.event(json!({"type":"turn.completed"})).await;
+    let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let phase_at = saved.progress.as_ref().unwrap().phase_at;
+    assert_eq!(saved.progress.as_ref().unwrap().phase, Phase::Finalizing);
+    let restarted = Checkpoint::new(fixture.service.store.clone(), fixture.id.clone(), saved);
+    restarted
+        .update(|saved| saved.completed = Some(false))
+        .await
+        .unwrap();
+    record(&fixture.service, &Output::new(false, json!({"type":"item.updated","item":{"id":"late","type":"agent_message","text":"late snapshot"}}).to_string()), &restarted, false, &[], &mut fixture.log_total, &mut fixture.activity).await.unwrap();
+    restarted.persist().await.unwrap();
+    record(
+        &fixture.service,
+        &Output::new(
+            false,
+            json!({"type":"runner.finalized","attemptId":"wrong-attempt","physicalFinalized":true})
+                .to_string(),
+        ),
+        &restarted,
+        false,
+        &[],
+        &mut fixture.log_total,
+        &mut fixture.activity,
+    )
+    .await
+    .unwrap();
+    assert!(
+        restarted
+            .snapshot()
+            .await
+            .progress
+            .unwrap()
+            .finalized_at
+            .is_none()
+    );
+    record(&fixture.service, &Output::new(false, json!({"type":"runner.finalized","attemptId":"progress-attempt","physicalFinalized":true}).to_string()), &restarted, false, &[], &mut fixture.log_total, &mut fixture.activity).await.unwrap();
+    let mut saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(saved.progress.as_ref().unwrap().finalized_at.is_some());
+    assert_eq!(saved.progress.as_ref().unwrap().phase, Phase::Finalizing);
+    assert_eq!(saved.progress.as_ref().unwrap().phase_at, phase_at);
+    saved.runner_id = Some(Some("replacement".into()));
+    saved
+        .store(&fixture.service.store, &fixture.id)
+        .await
+        .unwrap();
+    let stale = record(
+        &fixture.service,
+        &Output::new(false, json!({"type":"turn.started"}).to_string()),
+        &restarted,
+        false,
+        &[],
+        &mut fixture.log_total,
+        &mut fixture.activity,
+    )
+    .await;
+    assert!(
+        stale.is_err(),
+        "old execution output must not advance replacement progress"
+    );
+}
+
+#[tokio::test]
+async fn malformed_or_truncated_stdout_retains_monitoring_gap_without_changing_control_policy() {
+    let malformed = "{malformed".to_owned();
+    let oversized = json!({
+        // Conversation frames are retained intact; this unknown technical frame
+        // still exercises the raw line budget and an incomplete JSON record.
+        "type": "unknown.diagnostic",
+        "item": {
+            "id": "message",
+            "type": "agent_message",
+            "text": "x".repeat(LINE_LIMIT),
+        },
+    })
+    .to_string();
+    for raw in [malformed, oversized] {
+        let mut fixture = Fixture::new().await;
+        fixture.bind_progress().await;
+        fixture.output(Output::new(false, " \t ".into())).await;
+        fixture
+            .output(Output::new(true, "diagnostic only".into()))
+            .await;
+        assert!(
+            fixture
+                .checkpoint
+                .snapshot()
+                .await
+                .progress
+                .as_ref()
+                .unwrap()
+                .complete
+        );
+        assert_ne!(
+            fixture.checkpoint.snapshot().await.output_interrupted,
+            Some(true)
+        );
+
+        fixture.output(Output::line(raw.as_bytes(), &[])).await;
+        assert!(
+            !fixture
+                .checkpoint
+                .snapshot()
+                .await
+                .progress
+                .as_ref()
+                .unwrap()
+                .complete
+        );
+        let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!saved.progress.as_ref().unwrap().complete);
+        assert_ne!(saved.output_interrupted, Some(true));
+
+        // Only an explicit trusted relay marker changes the existing control flag.
+        fixture
+            .event(json!({ "type": "runner.output_interrupted" }))
+            .await;
+        fixture
+            .event(json!({ "type": "runner.output_interrupted" }))
+            .await;
+        assert_eq!(
+            fixture.checkpoint.snapshot().await.output_interrupted,
+            Some(true)
+        );
+        let id = fixture.id.clone();
+        let gaps = fixture
+            .service
+            .store
+            .read(move |db| {
+                Ok(db
+                    .events_fixture(&id, 0, 100)?
+                    .iter()
+                    .filter(|event| {
+                        event["text"]
+                            == "Execution output was interrupted; some activity may be missing."
+                    })
+                    .count())
+            })
+            .await
+            .unwrap();
+        assert_eq!(gaps, 1);
+    }
+}
+
+#[tokio::test]
+async fn unsupported_json_degrades_coverage_even_after_log_budget_is_spent() {
+    for event in [
+        json!({}),
+        json!({ "type": "item.started" }),
+        json!({ "type": "item.updated", "item": null }),
+        json!({ "type": "item.completed", "item": [] }),
+        json!({ "type":"item.updated", "item":{"id":"stable","type":"agent_message","text":{"duration_ms":2}} }),
+        json!({ "type":"item.updated", "item":{"id":"stable","type":"agent_message","text":"stable","status":{"duration_ms":2}} }),
+        json!({ "type":"item.updated", "item":{"id":"stable","type":"agent_message","text":"stable","parent_id":{"duration_ms":2}} }),
+        json!({ "type":"item.updated", "item":{"id":"web","type":"web_search","action":{"type":"search","query":{"duration_ms":2}}} }),
+        json!({ "type":"item.updated", "item":{"id":"web","type":"web_search","action":{"type":"open_page","url":{"duration_ms":2}}} }),
+        json!({ "type":"item.updated", "item":{"id":"web","type":"web_search","action":{"type":"find_in_page","url":"https://example.test","pattern":{"duration_ms":2}}} }),
+        json!({ "type":"item.updated", "item":{"id":"web","type":"web_search","action":{"type":"search","query":"unchanged"},"results":[{"duration_ms":2}]} }),
+        json!({ "type": "future.provider_wait" }),
+        json!({ "type": "item.delta", "item": { "id": "future", "type": "agent_message" } }),
+    ] {
+        let mut fixture = Fixture::new().await;
+        fixture.bind_progress().await;
+        fixture.event(json!({ "type": "turn.started" })).await;
+        let advanced_at = fixture
+            .checkpoint
+            .snapshot()
+            .await
+            .progress
+            .as_ref()
+            .unwrap()
+            .advanced_at;
+        fixture.log_total = LOG_BUDGET;
+        fixture.event(event).await;
+        let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!saved.progress.as_ref().unwrap().complete);
+        assert_eq!(saved.progress.as_ref().unwrap().advanced_at, advanced_at);
+        assert_ne!(saved.output_interrupted, Some(true));
+    }
+}
+
+#[tokio::test]
+async fn normal_native_certificate_framing_does_not_report_lost_output() {
+    let mut fixture = Fixture::new().await;
+    fixture.bind_progress().await;
+    let stream = concat!(
+        "{\"type\":\"turn.completed\"}\n",
+        "\n{\"type\":\"runner.finalized\",\"attemptId\":\"progress-attempt\",\"physicalFinalized\":true}\n"
+    );
+    let (send, mut receive) = mpsc::channel(8);
+    read_output(stream.as_bytes(), false, send, Vec::new()).await;
+    while let Some(output) = receive.recv().await {
+        fixture.output(output).await;
+    }
+    let saved = RunCheckpoint::load(&fixture.service.store, &fixture.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(saved.output_interrupted, Some(true));
+    assert!(saved.progress.as_ref().unwrap().complete);
+    assert!(saved.progress.as_ref().unwrap().finalized_at.is_some());
 }

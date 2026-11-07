@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "nodeId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "releasePlacements": {
+      "default": false,
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "nodeId"
+  ],
+  "title": "RevokeNodeInput",
+  "type": "object"
+}

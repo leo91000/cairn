@@ -6,6 +6,7 @@ import {
   ref,
   watch,
 } from 'vue'
+import { previewSchedule } from '../../../../packages/contracts/generated/previewSchedule'
 import { api, date, state } from '../api'
 import {
   Archive,
@@ -85,7 +86,7 @@ watch(() => [props.task.id, props.task.cron, props.task.timezone, props.task.ena
   if (!cron || !enabled || archived)
     return
   try {
-    occurrences.value = (await api<{ occurrences: number[] }>('/schedule/preview', { method: 'POST', body: JSON.stringify({ cron, timezone }) })).occurrences.slice(0, 2)
+    occurrences.value = (await previewSchedule(api, { cron, timezone })).occurrences.slice(0, 2)
   }
   catch { /* The schedule wording remains. */ }
 }, { immediate: true })

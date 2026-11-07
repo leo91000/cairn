@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "baseBranch": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "maxLength": 200,
+      "type": "string"
+    },
+    "instance": {
+      "maxLength": 100,
+      "type": "string"
+    },
+    "name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "pluginId": {
+      "maxLength": 100,
+      "type": "string"
+    },
+    "source": {
+      "maxLength": 100,
+      "type": "string"
+    }
+  },
+  "required": [
+    "pluginId",
+    "source",
+    "instance",
+    "id"
+  ],
+  "title": "ImportProjectInput",
+  "type": "object"
+}

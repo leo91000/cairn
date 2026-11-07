@@ -1,8 +1,8 @@
 //! Adapter for the unmodified Claude Code streaming CLI.
 use crate::{
-    accounts::lenient,
     claude,
     config::Config,
+    context_usage::ContextUsage,
     error::{Error, Result},
     process::command,
     skills::atomic_write,
@@ -10,10 +10,10 @@ use crate::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::Duration,
 };
 use tokio::{
@@ -27,8 +27,23 @@ const STOPPED: &str = "Claude execution stopped.";
 const MAX_LINE: usize = 32_000_000;
 const MAX_IMAGE: usize = 10_000_000;
 
+/// Prefix of the context usage requests this adapter sends Claude Code.
+const CONTEXT_REQUEST: &str = "cairn-context-";
+
+/// How long a finished execution waits for the context report requested at a compaction
+/// boundary. Claude Code answers it locally, after the command's result.
+const CONTEXT_REPORT_WAIT: Duration = Duration::from_secs(5);
+
 const DENIED: &str =
     "This tool is outside the agent's access policy. Ask the user in your response.";
+
+const PLAN_DENIED: &str = "This is a plan turn: Cairn allows reading, searching and the plan file only. Include this step in your plan; the user starts implementation explicitly.";
+
+const PLAN_RECORDED: &str = "The plan was shown to the user. Stop here and summarize it briefly: the user starts implementation explicitly in a later turn.";
+
+const PLAN_MISSING: &str = "No plan reached the user: write your plan to the plan file named in the plan-mode instructions, then call ExitPlanMode again. The user starts implementation explicitly in a later turn.";
+
+const SANDBOX_UNAVAILABLE: &str = "Plan turns need Claude Code's sandbox, which is unavailable on this node (it requires bubblewrap and socat). Nothing was changed.";
 
 const SHELL_ENVIRONMENT_ERROR: &str = "Claude Code's session environment contains NUL bytes, so shell commands cannot start. Repair the affected .sh file in the Claude session-env directory, then resume this conversation to start a fresh process. The conversation and workspace have been preserved.";
 
@@ -98,6 +113,11 @@ async fn emit(events: &mpsc::Sender<Value>, value: Value) -> Result<()> {
         .send(value)
         .await
         .map_err(|_| Error::unavailable("Claude output stopped."))
+}
+
+/// An execution that compacts the native context instead of delivering a message.
+fn compacting(plan: &Value) -> bool {
+    plan["execution"]["operation"] == "compact"
 }
 
 fn delivered(id: &str) -> Value {
@@ -170,8 +190,16 @@ fn strings(value: &Value) -> impl Iterator<Item = &str> {
 }
 
 fn settings(plan: &Value) -> Value {
-    let mut settings = json!({ "attribution": { "commit": "" } });
-    if plan["sandbox"] == "yolo" {
+    let mut settings = plan["claudeSettings"].clone();
+    if !settings.is_object() {
+        settings = json!({});
+    }
+    if !settings["attribution"].is_object() {
+        settings["attribution"] = json!({});
+    }
+    settings["attribution"]["commit"] = "".into();
+    let planning = plan["planning"] == true;
+    if plan["sandbox"] == "yolo" && !planning {
         return settings;
     }
     let deny_write = if plan["sandbox"] == "read-only" {
@@ -179,14 +207,26 @@ fn settings(plan: &Value) -> Value {
     } else {
         json!([])
     };
+    // A plan turn's shell reaches no network: commands such as `git push` or `gh`
+    // would otherwise act on external services.
+    let domains = if planning { json!([]) } else { json!(["*"]) };
     settings["sandbox"] = json!({
         "enabled": true,
         "failIfUnavailable": true,
         "autoAllowBashIfSandboxed": true,
         "allowUnsandboxedCommands": false,
-        "network": { "allowedDomains": ["*"] },
+        "network": { "allowedDomains": domains },
         "filesystem": { "allowWrite": plan["writableRoots"], "denyWrite": deny_write },
     });
+    if planning {
+        // Claude Code 2.1.308 otherwise lets its auto-mode classifier approve plan-mode
+        // tool calls instead of asking Cairn, including a command's own `allowed_domains`,
+        // which then reach the network. Cairn's callback decides, and no command can widen
+        // the empty allowlist.
+        settings["useAutoModeDuringPlan"] = false.into();
+        settings["permissions"] = json!({ "disableAutoMode": "disable" });
+        settings["sandbox"]["network"]["strictAllowlist"] = true.into();
+    }
     settings
 }
 
@@ -225,7 +265,10 @@ pub fn args(plan: &Value, instructions: &Path) -> Vec<String> {
     if let Some(session) = plan["sessionId"].as_str() {
         args.extend(["--resume".into(), session.into()]);
     }
-    if plan["sandbox"] == "yolo" {
+    let planning = plan["planning"] == true;
+    if planning {
+        args.extend(["--permission-mode".into(), "plan".into()]);
+    } else if plan["sandbox"] == "yolo" {
         args.push("--dangerously-skip-permissions".into());
     } else {
         args.extend(["--permission-mode".into(), "default".into()]);
@@ -237,7 +280,13 @@ pub fn args(plan: &Value, instructions: &Path) -> Vec<String> {
     let mut denied = strings(&plan["claudeDeniedTools"])
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    if plan["sandbox"] == "read-only" {
+    denied.push("AskUserQuestion".into());
+    if planning {
+        // Claude Code writes its plan file under its own state directory, so the edit
+        // tools stay available; these rules deny every workspace root before any
+        // permission mode or callback applies. The callback denies other paths.
+        denied.extend(strings(&plan["writableRoots"]).map(|root| format!("Edit(/{root}/**)")));
+    } else if plan["sandbox"] == "read-only" {
         denied.extend(["Write", "Edit", "NotebookEdit"].map(str::to_owned));
     }
     if !denied.is_empty() {
@@ -246,8 +295,9 @@ pub fn args(plan: &Value, instructions: &Path) -> Vec<String> {
     args
 }
 
-/// The chat item a Claude content block shows as.
-pub fn item(block: &Value, message: &str, index: usize) -> Option<Value> {
+/// The chat item a Claude content block shows as. `planning` is a Cairn plan turn, whose
+/// boundary Cairn enforces.
+pub fn item(block: &Value, message: &str, index: usize, planning: bool) -> Option<Value> {
     let id = if block["type"] == "tool_use" {
         text(block, "id").to_owned()
     } else {
@@ -258,6 +308,22 @@ pub fn item(block: &Value, message: &str, index: usize) -> Option<Value> {
         "thinking" => json!({ "id": id, "type": "reasoning", "text": block["thinking"] }),
         "tool_use" if matches!(text(block, "name"), "Agent" | "Task") => {
             subagent(&id, &block["input"])
+        }
+        // Claude Code fills `plan` from the plan file the model wrote; without one there is
+        // no proposal to show. Only a Cairn plan turn proposes a plan nothing has acted on:
+        // in an ordinary turn Claude's own plan mode may implement right after, so the
+        // call shows as an ordinary tool call.
+        "tool_use"
+            if planning
+                && block["name"] == "ExitPlanMode"
+                && !proposed_plan(&block["input"]).is_empty() =>
+        {
+            json!({
+                "id": id,
+                "type": "proposed_plan",
+                "text": block["input"]["plan"],
+                "status": "in_progress",
+            })
         }
         "tool_use" if block["name"] == "TodoWrite" => {
             let mut plan = crate::agent_plan::todos(&id, &block["input"]);
@@ -280,6 +346,12 @@ pub fn item(block: &Value, message: &str, index: usize) -> Option<Value> {
         }),
         _ => return None,
     })
+}
+
+/// The plan an `ExitPlanMode` call proposes: Claude Code reads it from the plan file the
+/// model wrote and adds it to the call, with `planFilePath`.
+fn proposed_plan(input: &Value) -> &str {
+    text(input, "plan").trim()
 }
 
 /// A subagent the agent delegates work to, followed until it reports back.
@@ -323,55 +395,104 @@ fn subagent_report(block: &Value, outcome: &Value) -> String {
 }
 
 /// Saved before a turn completes, so a restart never repeats a finished request.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Receipt {
-    #[serde(default, deserialize_with = "lenient::optional_string")]
-    message_id: Option<String>,
-    #[serde(default, deserialize_with = "lenient::strings")]
+    message_id: String,
     delivered: Vec<String>,
-    #[serde(default, deserialize_with = "lenient::optional_string")]
-    text: Option<String>,
-    #[serde(default, deserialize_with = "lenient::optional_string")]
-    item_id: Option<String>,
+    text: String,
+    item_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    proposals: Vec<Value>,
 }
 
 impl Receipt {
     async fn read(path: &Path, message_id: &str) -> Option<Self> {
         let bytes = tokio::fs::read(path).await.ok()?;
         let receipt = serde_json::from_slice::<Self>(&bytes).ok()?;
-        // Older adapters could save an unrelated startup/background result before Claude
-        // consumed this request. Such a receipt must never complete it.
-        let completes = receipt.message_id.as_deref() == Some(message_id)
-            && receipt.delivered.iter().any(|id| id == message_id);
+        let completes =
+            receipt.message_id == message_id && receipt.delivered.iter().any(|id| id == message_id);
         completes.then_some(receipt)
     }
 
     /// Replays a completed request without starting Claude Code.
-    async fn replay(
-        self,
-        plan: &Value,
-        message_id: &str,
-        events: &mpsc::Sender<Value>,
-    ) -> Result<()> {
+    async fn replay(self, plan: &Value, events: &mpsc::Sender<Value>) -> Result<()> {
         for id in &self.delivered {
             emit(events, delivered(id)).await?;
         }
-        let body = self.text.as_deref().unwrap_or_default();
-        atomic_write(Path::new(text(plan, "output")), body.as_bytes()).await?;
-        let item_id = self
-            .item_id
-            .unwrap_or_else(|| format!("{message_id}-recovered"));
-        let item = json!({ "id": item_id, "type": "agent_message", "text": self.text });
+        atomic_write(Path::new(text(plan, "output")), self.text.as_bytes()).await?;
+        // Old single-request receipts have an unambiguous boundary. With several
+        // delivered requests, an old receipt cannot establish when each plan was authored.
+        let legacy_request = (self.delivered.len() == 1 && self.delivered[0] == self.message_id)
+            .then_some(self.message_id.as_str());
+        for mut item in self.proposals {
+            if item.get("request_id").is_none() {
+                item["request_id"] = json!(legacy_request);
+            }
+            emit(events, json!({ "type": "item.completed", "item": item })).await?;
+        }
+        let item = json!({ "id": self.item_id, "type": "agent_message", "text": self.text });
         emit(events, json!({ "type": "item.completed", "item": item })).await?;
         emit(events, json!({ "type": "turn.completed" })).await
     }
 }
 
-/// An AskUserQuestion permission request waiting for the user's answers.
-struct Question {
-    request_id: Value,
-    input: Value,
+/// The subscription usage limit Claude Code reports in a `rate_limit_event`.
+#[derive(Debug, PartialEq)]
+struct UsageLimit {
+    status: &'static str,
+    window: Option<String>,
+    /// Milliseconds since the epoch.
+    resets_at: Option<i64>,
+    extra_usage: Option<&'static str>,
+    using_extra_usage: bool,
+}
+
+impl UsageLimit {
+    fn from(info: &Value) -> Option<Self> {
+        let status = |value: &Value| match value.as_str()? {
+            "allowed" => Some("allowed"),
+            "allowed_warning" => Some("allowed_warning"),
+            "rejected" => Some("rejected"),
+            _ => None,
+        };
+        let window = text(info, "rateLimitType");
+        let window = (!window.is_empty()
+            && window.len() <= 64
+            && window
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_'))
+        .then(|| window.to_owned());
+        // Claude Code reports seconds; accept milliseconds from a future CLI too.
+        let resets_at = info["resetsAt"]
+            .as_f64()
+            .filter(|reset| reset.is_finite() && *reset > 0.0)
+            .map(|reset| if reset < 1e12 { reset * 1000.0 } else { reset } as i64);
+        Some(Self {
+            status: status(&info["status"])?,
+            window,
+            resets_at,
+            extra_usage: status(&info["overageStatus"]),
+            using_extra_usage: info["isUsingOverage"] == true || info["overageInUse"] == true,
+        })
+    }
+
+    /// Requests stop until the window resets: extra usage cannot take over.
+    fn blocks(&self) -> bool {
+        self.status == "rejected"
+            && !matches!(self.extra_usage, Some("allowed" | "allowed_warning"))
+    }
+
+    fn event(&self) -> Value {
+        json!({
+            "type": "provider.limit",
+            "status": self.status,
+            "window": self.window,
+            "resetsAt": self.resets_at,
+            "blocked": self.blocks(),
+            "usingExtraUsage": self.using_extra_usage,
+        })
+    }
 }
 
 /// One execution: the messages submitted to Claude Code and what it reported back.
@@ -381,21 +502,45 @@ struct Turn<'a> {
     stdin: ChildStdin,
     inbox: &'a Path,
     receipt: PathBuf,
+    /// Where Claude Code keeps plan files, the only writable path of a plan turn.
+    plans: PathBuf,
     /// The durable chat ID of the request.
     initial_id: &'a str,
     /// The ID Claude Code knows the request by.
     wire_id: String,
     submitted: HashSet<String>,
+    operational_notices: HashSet<String>,
     delivered: HashSet<String>,
+    /// Receipt acknowledgements must retain delivery order when manager history was lost.
+    delivery_order: Vec<String>,
+    /// Last delivered human request, copied onto each proposal when Claude authors it.
+    proposal_request: Option<String>,
     /// Submitted messages whose turn has not produced a result yet.
     pending: HashSet<String>,
     /// Submitted messages Claude Code has echoed back.
     consumed: HashSet<String>,
-    questions: HashMap<String, Question>,
     /// Running tools, by tool use ID.
     tools: HashMap<String, Value>,
     /// Subagents still working, by the ID of the tool use that started them.
     subagents: HashMap<String, Value>,
+    /// Subagents that reported back, by the same ID, until a new run resumes them.
+    settled: HashMap<String, Value>,
+    /// The ID of each subagent, by the task ID Claude Code keeps across its runs.
+    tasks: HashMap<String, String>,
+    /// The usage limit Claude Code last reported, unless requests run normally.
+    limit: Option<UsageLimit>,
+    /// Subagents by the tool use that resumed them, such as a SendMessage call: before 2.1.292,
+    /// a resumed subagent's messages may name that call rather than an agent ID.
+    resumed_by: HashMap<String, String>,
+    /// Every tool use of this execution, by tool name, including those that already returned.
+    called: HashMap<String, String>,
+    /// Whether a response streamed since the usage limit was reported: requests went through.
+    answered: bool,
+    /// The error Claude Code gave the agent's latest message: `rate_limit` when the usage limit
+    /// refused its request.
+    api_error: String,
+    /// Tool uses whose progress notice was reported: Claude Code repeats it while the tool runs.
+    tool_notices: HashSet<String>,
     /// Streamed blocks of the current message, by index.
     streams: HashMap<usize, Value>,
     /// Content blocks seen per assistant message.
@@ -403,12 +548,37 @@ struct Turn<'a> {
     stream_message: String,
     last: String,
     last_id: String,
+    /// Completed plan artifacts, including their actor scope, replayed after a restart.
+    proposals: Vec<Value>,
     /// Background tasks that keep the run open, with their descriptions.
     background: BTreeMap<String, String>,
     awaiting_background: HashSet<String>,
     background_replayed: bool,
     /// The agent finished responding and only its background tasks keep the run open.
     waiting_for_background: bool,
+    /// Context usage requests sent to Claude Code.
+    context_requests: u64,
+    /// Requests up to this number were sent before the latest measured response, so their
+    /// reports describe an older context.
+    context_measured: u64,
+    /// The report requested at a compaction boundary, until it answers or a response measures
+    /// the compacted context.
+    context_pending: Option<u64>,
+    /// The execution finished and only waits for [`Self::context_pending`], until this time.
+    finishing: Option<tokio::time::Instant>,
+    /// The model's context window, from Claude Code's latest context usage report.
+    context_window: Option<u64>,
+    /// The latest context usage shown, so unchanged reports are not repeated.
+    context: Option<ContextUsage>,
+    /// The compaction Claude Code is running, by the ID of its chat item.
+    compaction: Option<String>,
+    /// Compactions Claude Code reported during this execution.
+    compactions: usize,
+    /// Compactions Claude Code started or reported during this execution, each with its own
+    /// item: a resumed or retried compaction never reuses an earlier attempt's divider.
+    compaction_attempts: usize,
+    /// Identifies this launch's compaction items.
+    attempt: String,
 }
 
 impl Turn<'_> {
@@ -426,13 +596,25 @@ impl Turn<'_> {
     }
 
     async fn deliver(&mut self, id: &str) -> Result<()> {
+        if self.operational_notices.contains(id) {
+            return Ok(());
+        }
         if self.delivered.insert(id.to_owned()) {
+            self.delivery_order.push(id.to_owned());
+            self.proposal_request = Some(id.to_owned());
             self.emit(delivered(id)).await?;
         }
         Ok(())
     }
 
     async fn submit_initial(&mut self) -> Result<()> {
+        if compacting(self.plan) {
+            // Claude Code runs its own `/compact` command locally: it is never sent to the
+            // model as a user request, and a restarted attempt simply compacts again.
+            let command = json!({ "id": self.wire_id, "text": "/compact", "attachments": [] });
+            let command = input(&command, self.inbox).await?;
+            return send(&mut self.stdin, command).await;
+        }
         let mut message = crate::chats::execution_text(self.plan);
         if self.plan["execution"]["recovery"] == true {
             message = format!(
@@ -448,8 +630,134 @@ impl Turn<'_> {
         send(&mut self.stdin, initial).await
     }
 
+    /// Asks Claude Code how full its context is. Answering does not call the model.
+    async fn request_context(&mut self) -> Result<()> {
+        self.context_requests += 1;
+        let request = json!({
+            "type": "control_request",
+            "request_id": format!("{CONTEXT_REQUEST}{}", self.context_requests),
+            "request": { "subtype": "get_context_usage", "detail": "summary" },
+        });
+        send(&mut self.stdin, request).await
+    }
+
+    async fn show_context(&mut self, usage: Option<ContextUsage>) -> Result<()> {
+        let Some(usage) = usage else {
+            return Ok(());
+        };
+        if self.context.as_ref() == Some(&usage) {
+            return Ok(());
+        }
+        let event = usage.event();
+        self.context = Some(usage);
+        self.emit(event).await
+    }
+
+    /// Claude Code's answer to a context usage request. Answers whether the execution is now
+    /// complete.
+    async fn on_control_response(&mut self, value: &Value) -> Result<bool> {
+        let response = &value["response"];
+        let Some(number) = text(response, "request_id")
+            .strip_prefix(CONTEXT_REQUEST)
+            .and_then(|number| number.parse::<u64>().ok())
+        else {
+            return Ok(false);
+        };
+
+        if response["subtype"] == "success" {
+            let report = &response["response"];
+            if let Some(window) = report["maxTokens"].as_u64().filter(|window| *window > 0) {
+                self.context_window = Some(window);
+            }
+            // A response measured after this request was sent is more recent than its report.
+            if number > self.context_measured {
+                self.show_context(ContextUsage::claude_report(report))
+                    .await?;
+            }
+        }
+        if self.context_pending == Some(number) {
+            self.context_pending = None;
+        }
+        self.finish_after_report().await
+    }
+
+    /// Completes a finished execution once the compaction's context report answered, or once
+    /// waiting for it took too long. The run then keeps the last usage it showed.
+    async fn finish_after_report(&mut self) -> Result<bool> {
+        let Some(deadline) = self.finishing else {
+            return Ok(false);
+        };
+        if self.context_pending.is_some() && tokio::time::Instant::now() < deadline {
+            return Ok(false);
+        }
+        self.complete().await?;
+        Ok(true)
+    }
+
+    /// A new compaction item's ID, unique to this attempt.
+    fn compaction_id(&mut self) -> String {
+        self.compaction_attempts += 1;
+        format!(
+            "{}-compaction-{}-{}",
+            self.initial_id, self.attempt, self.compaction_attempts
+        )
+    }
+
+    /// `status` while Claude Code compacts, and the `compact_boundary` that ends it.
+    async fn on_compaction(&mut self, value: &Value) -> Result<()> {
+        if value["subtype"] == "status" {
+            if value["status"] == "compacting" && self.compaction.is_none() {
+                let id = self.compaction_id();
+                self.compaction = Some(id.clone());
+                let item =
+                    json!({ "id": id, "type": "context_compaction", "status": "in_progress" });
+                self.emit(json!({ "type": "item.started", "item": item }))
+                    .await?;
+            }
+            let failed = value["compact_result"]
+                .as_str()
+                .is_some_and(|result| result != "success");
+            if failed && let Some(id) = self.compaction.take() {
+                let item = json!({ "id": id, "type": "context_compaction", "status": "failed" });
+                self.emit(json!({ "type": "item.completed", "item": item }))
+                    .await?;
+            }
+            return Ok(());
+        }
+
+        self.compactions += 1;
+        let id = match self.compaction.take() {
+            Some(id) => id,
+            None => self.compaction_id(),
+        };
+        let metadata = &value["compact_metadata"];
+        let mut item = json!({
+            "id": id,
+            "type": "context_compaction",
+            "status": "completed",
+        });
+        if matches!(text(metadata, "trigger"), "manual" | "auto") {
+            item["trigger"] = metadata["trigger"].clone();
+        }
+        for (source, target) in [("pre_tokens", "pre_tokens"), ("post_tokens", "post_tokens")] {
+            if metadata[source].is_u64() {
+                item[target] = metadata[source].clone();
+            }
+        }
+        self.emit(json!({ "type": "item.completed", "item": item }))
+            .await?;
+        // The next response measures the compacted context; until then show Claude Code's estimate.
+        self.request_context().await?;
+        self.context_pending = Some(self.context_requests);
+        Ok(())
+    }
+
     /// Submits messages the user added to the inbox, or answers to pending questions.
     async fn poll_inbox(&mut self) -> Result<()> {
+        // Messages sent while compacting stay queued for the next turn.
+        if compacting(self.plan) {
+            return Ok(());
+        }
         let Some(bytes) =
             crate::chat_inbox::read(self.inbox, crate::chat_inbox::ADAPTER_LIMIT).await?
         else {
@@ -460,26 +768,14 @@ impl Turn<'_> {
         };
         for message in messages {
             let id = text(&message, "id");
-            if self.submitted.contains(id) {
+            if message["operationalNotice"] == true {
+                self.operational_notices.insert(id.to_owned());
+            }
+            if self.submitted.contains(id) || !crate::chat_inbox::joins_turn(&message, self.plan) {
                 continue;
             }
             if message["questionCancelled"] == true {
-                if let Some(question) = self.questions.remove(text(&message, "questionId")) {
-                    send(&mut self.stdin, control_response(&question.request_id, &json!({
-                        "behavior": "deny",
-                        "message": "This question was withdrawn. No answer or authorization was provided.",
-                    }))).await?;
-                    self.emit(json!({
-                        "type": "chat.question.closed",
-                        "questionId": message["questionId"],
-                    }))
-                    .await?;
-                }
                 self.submitted.insert(id.into());
-                continue;
-            }
-            if let Some(question) = self.questions.remove(text(&message, "questionId")) {
-                self.answer(question, &message).await?;
                 continue;
             }
             send(&mut self.stdin, input(&message, self.inbox).await?).await?;
@@ -488,37 +784,6 @@ impl Turn<'_> {
             self.waiting_for_background = false;
         }
         Ok(())
-    }
-
-    async fn answer(&mut self, question: Question, message: &Value) -> Result<()> {
-        let id = text(message, "id");
-        let mut updated = question.input;
-        let mut answers = Map::new();
-        for (index, asked) in updated["questions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .enumerate()
-        {
-            let answer = strings(&message["answers"][index.to_string()])
-                .collect::<Vec<_>>()
-                .join(", ");
-            answers.insert(text(asked, "question").to_owned(), answer.into());
-        }
-        updated["answers"] = answers.into();
-        let response = json!({ "behavior": "allow", "updatedInput": updated });
-        send(
-            &mut self.stdin,
-            control_response(&question.request_id, &response),
-        )
-        .await?;
-        self.submitted.insert(id.into());
-        self.deliver(id).await?;
-        self.emit(json!({
-            "type": "chat.question.closed",
-            "questionId": message["questionId"],
-        }))
-        .await
     }
 
     /// Handles one stream-json line. Answers whether the request is complete.
@@ -534,6 +799,14 @@ impl Turn<'_> {
                 self.background_tasks(value).await?;
             }
             "system"
+                if value["subtype"] == "compact_boundary"
+                    || (value["subtype"] == "status"
+                        && (value["status"] == "compacting"
+                            || value["compact_result"].is_string())) =>
+            {
+                self.on_compaction(value).await?;
+            }
+            "system"
                 if matches!(
                     text(value, "subtype"),
                     "task_started" | "task_progress" | "task_notification"
@@ -541,16 +814,106 @@ impl Turn<'_> {
             {
                 self.subagent_task(value).await?;
             }
+            "system" if value["subtype"] == "api_retry" => self.engine_retry(value).await?,
+            "system" if value["subtype"] == "informational" => self.engine_notice(value).await?,
+            // Opt-in (CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS) and not enabled: completion stays
+            // correlated with results, and Cairn answers permission requests itself.
+            "system" if value["subtype"] == "session_state_changed" => {}
+            "rate_limit_event" => self.rate_limit(&value["rate_limit_info"]).await?,
             "user" => self.on_user(value).await?,
             "assistant" => self.on_assistant(value).await?,
             "stream_event" if value["parent_tool_use_id"].is_null() => {
                 self.on_stream_event(&value["event"]).await?;
             }
             "control_request" => self.on_control_request(value).await?,
+            "control_response" => return self.on_control_response(value).await,
             "result" => return self.on_result(value).await,
             _ => {}
         }
         Ok(false)
+    }
+
+    /// Claude Code retries a failed API request itself. The turn goes on: this is not a failure,
+    /// and nothing for Cairn to retry or wait for.
+    async fn engine_retry(&self, value: &Value) -> Result<()> {
+        let delay = value["retry_delay_ms"].as_u64().unwrap_or(0);
+        let reason = text(value, "error");
+        let reason = if !reason.is_empty()
+            && reason.len() <= 64
+            && reason
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        {
+            reason
+        } else {
+            "unknown"
+        };
+        let mut retry = json!({
+            "type": "engine.retry",
+            "attempt": value["attempt"].as_u64(),
+            "maxRetries": value["max_retries"].as_u64(),
+            "delayMs": delay,
+            "retryAt": crate::config::now().saturating_add_unsigned(delay),
+            "status": value["error_status"].as_u64(),
+            "reason": reason,
+        });
+        let no_response = &value["no_response"];
+        if no_response.is_object() {
+            retry["noResponse"] = json!({
+                "waitedMs": no_response["waited_ms"].as_u64(),
+                "retryWaitMs": no_response["retry_wait_ms"].as_u64(),
+            });
+        }
+        self.emit(retry).await
+    }
+
+    /// A warning or notice Claude Code raised during the turn.
+    async fn engine_notice(&mut self, value: &Value) -> Result<()> {
+        let message = text(value, "content");
+        if message.trim().is_empty() {
+            return Ok(());
+        }
+        let level = match text(value, "level") {
+            level @ ("info" | "notice" | "suggestion" | "warning") => level,
+            _ => "notice",
+        };
+        // Informational lines naming a tool use report its progress: the first one says it is
+        // running. A warning, a suggestion or a notice that stops the turn is always reported.
+        let tool_use = text(value, "tool_use_id");
+        let progress = matches!(level, "info" | "notice") && value["prevent_continuation"] != true;
+        if progress && !tool_use.is_empty() && !self.tool_notices.insert(tool_use.to_owned()) {
+            return Ok(());
+        }
+        // The worker cuts a long notice once it is redacted.
+        let mut notice = json!({ "type": "engine.notice", "level": level, "message": message });
+        if value["prevent_continuation"] == true {
+            notice["stopsTurn"] = true.into();
+        }
+        self.emit(notice).await
+    }
+
+    /// The subscription's usage-limit state. Only changes are shown: a warning, a limit that
+    /// stops requests, or a return to normal after either.
+    async fn rate_limit(&mut self, info: &Value) -> Result<()> {
+        let Some(limit) = UsageLimit::from(info) else {
+            return Ok(());
+        };
+        if limit.status == "allowed" && self.limit.is_none() {
+            return Ok(());
+        }
+        if self.limit.as_ref() == Some(&limit) {
+            // While the limit refuses requests, Claude Code re-emits it (at most about every 30
+            // seconds per window): a refusal after an answered request. One within that time
+            // falls back to recognizing Claude's wording.
+            if limit.blocks() {
+                self.answered = false;
+            }
+            return Ok(());
+        }
+        self.emit(limit.event()).await?;
+        self.limit = (limit.status != "allowed").then_some(limit);
+        self.answered = false;
+        Ok(())
     }
 
     async fn background_tasks(&mut self, value: &Value) -> Result<()> {
@@ -622,6 +985,15 @@ impl Turn<'_> {
                 self.subagent_result(item, block, outcome).await?;
                 continue;
             }
+            if item["type"] == "proposed_plan" {
+                // Clarifications delivered before the proposal completes belong to it.
+                item["request_id"] = json!(self.proposal_request.clone());
+                item["status"] = "completed".into();
+                self.proposals.push(item.clone());
+                self.emit(json!({ "type": "item.completed", "item": item }))
+                    .await?;
+                continue;
+            }
             let environment_failed = shell_environment_failed(&item, block);
             let status = if block["is_error"] == true {
                 "failed"
@@ -669,25 +1041,61 @@ impl Turn<'_> {
         Ok(())
     }
 
+    /// The subagent a message comes from, or None for the agent's own. Claude Code names the
+    /// tool use that started it and, from 2.1.292, its agent ID (absent on the agent's own
+    /// messages): the task ID it keeps when it is resumed, so a resumed subagent's steps stay
+    /// with it.
+    fn parent(&self, value: &Value) -> Option<String> {
+        let agent = text(value, "agent_id");
+        if let Some(id) = self.tasks.get(agent) {
+            return Some(id.clone());
+        }
+        let tool_use = value["parent_tool_use_id"].as_str();
+        if let Some(id) = tool_use.and_then(|tool_use| self.resumed_by.get(tool_use)) {
+            return Some(id.clone());
+        }
+        tool_use
+            .or_else(|| (!agent.is_empty()).then_some(agent))
+            .map(str::to_owned)
+    }
+
     // Claude Code emits one assistant event per content block, all sharing the message id.
-    // Count blocks per message so ids match the streamed block index. A subagent's messages name
-    // the tool use that started it: they show as its steps, never as the agent's own reply.
+    // Count blocks per message so ids match the streamed block index. A subagent's messages
+    // show as its steps, never as the agent's own reply.
     async fn on_assistant(&mut self, value: &Value) -> Result<()> {
-        let parent = value["parent_tool_use_id"].as_str();
+        let parent = self.parent(value);
         if parent.is_none() {
             // The agent responds again, so it no longer only waits for background tasks.
             self.waiting_for_background = false;
+            self.api_error = text(value, "error").to_owned();
+            // Subagents have their own context. Local command replies are not model requests.
+            let response = &value["message"];
+            let usage = (response["model"] != "<synthetic>")
+                .then(|| ContextUsage::claude_response(&response["usage"], self.context_window))
+                .flatten();
+            if let Some(usage) = usage {
+                // Reports requested before this response describe the context it replaced.
+                self.context_measured = self.context_requests;
+                self.context_pending = None;
+                self.show_context(Some(usage)).await?;
+            }
         }
         let message = text(&value["message"], "id").to_owned();
         for block in value["message"]["content"].as_array().into_iter().flatten() {
             let next = self.blocks.entry(message.clone()).or_insert(0);
             let index = *next;
             *next += 1;
-            let Some(mut item) = item(block, &message, index) else {
+            let planning = self.plan["planning"] == true;
+            let Some(mut item) = item(block, &message, index, planning) else {
                 continue;
             };
-            if let Some(parent) = parent {
-                item["parent_id"] = parent.into();
+            if item["type"] == "proposed_plan" {
+                // Record the request known when Claude authors the proposal; completion
+                // refreshes this if a clarification arrives before ExitPlanMode returns.
+                item["request_id"] = json!(self.proposal_request.clone());
+            }
+            if let Some(parent) = &parent {
+                item["parent_id"] = parent.as_str().into();
                 if item["type"] == "agent_message" {
                     item["type"] = "subagent_message".into();
                 }
@@ -703,6 +1111,8 @@ impl Turn<'_> {
             let running = block["type"] == "tool_use";
             if running {
                 self.tools.insert(text(&item, "id").into(), item.clone());
+                self.called
+                    .insert(text(&item, "id").into(), text(block, "name").into());
             }
             // The plan counts once Claude Code accepts it, with the call's result.
             if item["type"] == "todo_list" {
@@ -723,6 +1133,25 @@ impl Turn<'_> {
     async fn subagent_result(&mut self, item: Value, block: &Value, outcome: &Value) -> Result<()> {
         let id = text(&item, "id").to_owned();
         let mut item = self.subagents.remove(&id).unwrap_or(item);
+        if let Some(agent) = outcome["agentId"]
+            .as_str()
+            .filter(|agent| !agent.is_empty())
+        {
+            self.tasks.insert(agent.to_owned(), id.clone());
+            if item["task_id"].is_null() {
+                item["task_id"] = agent.into();
+            }
+        }
+        // The call that started the subagent can return after a later run resumed it: that run
+        // reports for itself, whether it still works or already reported.
+        if item["resumed"] == true {
+            if item["status"] == "in_progress" {
+                self.subagents.insert(id, item);
+            } else {
+                self.settled.insert(id, item);
+            }
+            return Ok(());
+        }
         let launched = matches!(
             text(outcome, "status"),
             "async_launched" | "remote_launched"
@@ -751,27 +1180,87 @@ impl Turn<'_> {
         // call is complete but the subagent is still working.
         if launched && item["status"] == "in_progress" {
             self.subagents.insert(id, item.clone());
+        } else {
+            self.settled.insert(id, item.clone());
         }
         self.emit(json!({ "type": "item.completed", "item": item }))
             .await
     }
 
-    /// Progress and completion that Claude Code reports for a subagent while it works.
+    /// Progress and completion that Claude Code reports for a subagent while it works. A resumed
+    /// subagent keeps its task ID, while its frames may name another tool use, or none.
     async fn subagent_task(&mut self, value: &Value) -> Result<()> {
-        let id = text(value, "tool_use_id");
-        let Some(item) = self.subagents.get_mut(id) else {
-            return Ok(());
+        let task = text(value, "task_id");
+        let tool_use = text(value, "tool_use_id");
+        let id = if self.subagents.contains_key(tool_use) || self.settled.contains_key(tool_use) {
+            tool_use.to_owned()
+        } else if let Some(id) = self.tasks.get(task) {
+            id.clone()
+        } else {
+            return self.subagent_resumed(value).await;
         };
+        if !task.is_empty() {
+            self.tasks.insert(task.to_owned(), id.clone());
+        }
+        if !tool_use.is_empty() && tool_use != id {
+            self.resumed_by.insert(tool_use.to_owned(), id.clone());
+        }
+        let started = value["subtype"] == "task_started";
+        if !self.subagents.contains_key(&id) {
+            // Only a new run reopens a subagent that reported back: other frames, and another
+            // start of the run that reported, are late and leave it settled.
+            let run = text(value, "run_id");
+            let reopens = started
+                && self.settled.get(&id).is_some_and(|item| {
+                    let reported = text(item, "run_id");
+                    run.is_empty() || reported.is_empty() || run > reported
+                });
+            if !reopens {
+                return Ok(());
+            }
+            let item = self.settled.remove(&id).unwrap();
+            self.subagents.insert(id.clone(), item);
+        }
+        let item = self.subagents.get_mut(&id).unwrap();
+
+        // Claude Code promises that a task's run IDs sort, by plain string comparison, in the
+        // order its runs opened: a frame naming an earlier run is late.
+        let run = text(value, "run_id");
+        let current = text(item, "run_id").to_owned();
+        if !run.is_empty() && !current.is_empty() && run < current.as_str() {
+            return Ok(());
+        }
         let before = item.clone();
-        if !text(value, "task_id").is_empty() {
-            item["task_id"] = value["task_id"].clone();
+        if !task.is_empty() {
+            item["task_id"] = task.into();
+        }
+        if !run.is_empty() {
+            item["run_id"] = run.into();
         }
         let usage = &value["usage"];
         match text(value, "subtype") {
             "task_started" => {
+                // A start naming another run is a resumption, even before the earlier run's tool
+                // result; another start of the current run is not. Frames without run IDs
+                // (before 2.1.292) only start again once the subagent finished.
+                let resumed = if !current.is_empty() && !run.is_empty() {
+                    run != current
+                } else {
+                    before["status"] != "in_progress"
+                };
+                if resumed {
+                    item["status"] = "in_progress".into();
+                    item["resumed"] = true.into();
+                    // Its new run reports again; until then the earlier report stays shown.
+                    item["activity"] = Value::Null;
+                    item["result"] = Value::Null;
+                }
                 item["background"] = (value["is_backgrounded"] == true).into();
                 if item["agent_type"].is_null() {
                     item["agent_type"] = value["subagent_type"].clone();
+                }
+                if !text(value, "parent_task_id").is_empty() {
+                    item["parent_task_id"] = value["parent_task_id"].clone();
                 }
             }
             "task_progress" => {
@@ -804,10 +1293,70 @@ impl Turn<'_> {
         }
         let item = item.clone();
         // A foreground subagent's tool result follows its notification and completes it.
-        if item["status"] != "in_progress" && !self.tools.contains_key(id) {
-            self.subagents.remove(id);
+        if item["status"] != "in_progress" && !self.tools.contains_key(&id) {
+            self.subagents.remove(&id);
+            self.settled.insert(id, item.clone());
         }
         self.emit(json!({ "type": "item.updated", "item": item }))
+            .await
+    }
+
+    /// A subagent an earlier execution started, resumed in this one: by a SendMessage call, or
+    /// by Claude Code itself. It keeps its task ID, but this execution never saw the tool use that
+    /// started it, so it shows as a new row of this execution marked resumed. Its run names the
+    /// SendMessage call or, when Claude Code resumed it, the earlier execution's call that
+    /// started it. Another tool use of this execution, such as a workflow's, starts its own
+    /// agents; a start naming no call is a new agent, such as a forked slash command. A call this
+    /// execution never made only names a resumed subagent the agent itself started: a nested
+    /// agent may start from work this execution does not see.
+    async fn subagent_resumed(&mut self, value: &Value) -> Result<()> {
+        let task = text(value, "task_id");
+        let tool_use = text(value, "tool_use_id");
+        let top_level = text(value, "parent_task_id").is_empty()
+            && value["spawn_depth"].as_u64().is_none_or(|depth| depth <= 1);
+        let resumes = match self.called.get(tool_use) {
+            Some(tool) => tool == "SendMessage",
+            None => !tool_use.is_empty() && top_level,
+        };
+        // Housekeeping agents Claude Code starts itself stay out of the transcript.
+        if value["subtype"] != "task_started"
+            || value["task_type"] != "local_agent"
+            || value["skip_transcript"] == true
+            || value["ambient"] == true
+            || task.is_empty()
+            || !resumes
+        {
+            return Ok(());
+        }
+        let input = json!({
+            "description": value["description"],
+            "subagent_type": value["subagent_type"],
+            "prompt": value["prompt"],
+        });
+        // Clients key rows by run and item ID, and a run's later executions may resume the same
+        // subagent again: each row gets its own ID, named after the subagent's run when known.
+        let row = match text(value, "run_id") {
+            "" => format!("{task}:{}", crate::config::id()),
+            run => format!("{task}:{run}"),
+        };
+        let mut item = subagent(&row, &input);
+        item["resumed"] = true.into();
+        item["task_id"] = task.into();
+        item["background"] = (value["is_backgrounded"] == true).into();
+        for key in ["run_id", "parent_task_id"] {
+            if !text(value, key).is_empty() {
+                item[key] = value[key].clone();
+            }
+        }
+        if let Some(parent) = self.tasks.get(text(value, "parent_task_id")) {
+            item["parent_id"] = parent.as_str().into();
+        }
+        self.tasks.insert(task.to_owned(), row.clone());
+        if !tool_use.is_empty() {
+            self.resumed_by.insert(tool_use.to_owned(), row.clone());
+        }
+        self.subagents.insert(row, item.clone());
+        self.emit(json!({ "type": "item.started", "item": item }))
             .await
     }
 
@@ -816,11 +1365,17 @@ impl Turn<'_> {
         match text(event, "type") {
             "message_start" => {
                 self.waiting_for_background = false;
+                self.answered = true;
                 self.stream_message = text(&event["message"], "id").into();
                 self.streams.clear();
             }
             "content_block_start" => {
-                let Some(item) = item(&event["content_block"], &self.stream_message, index) else {
+                let Some(item) = item(
+                    &event["content_block"],
+                    &self.stream_message,
+                    index,
+                    self.plan["planning"] == true,
+                ) else {
                     return Ok(());
                 };
                 if !["agent_message", "reasoning"].contains(&text(&item, "type")) {
@@ -855,48 +1410,42 @@ impl Turn<'_> {
         let request_id = value["request_id"].clone();
         let can_use_tool = request["subtype"] == "can_use_tool";
         if can_use_tool && request["tool_name"] == "AskUserQuestion" {
-            return self.ask(value, request_id).await;
+            return send(
+                &mut self.stdin,
+                control_response(
+                    &request_id,
+                    &json!({
+                        "behavior": "deny",
+                        "message": crate::chats::questions::NATIVE_DENIED,
+                    }),
+                ),
+            )
+            .await;
         }
-        let allowed =
-            can_use_tool && allowed_tool(self.plan, text(request, "tool_name"), &request["input"]);
+        let name = text(request, "tool_name");
+        let planning = self.plan["planning"] == true;
+        let allowed = can_use_tool
+            && if planning {
+                plan_tool(self.plan, &self.plans, name, &request["input"])
+            } else {
+                allowed_tool(self.plan, name, &request["input"])
+            };
         let response = if allowed {
             json!({ "behavior": "allow", "updatedInput": request["input"] })
+        } else if planning && name == "ExitPlanMode" {
+            // Approving would let Claude Code implement in this same turn.
+            let message = if proposed_plan(&request["input"]).is_empty() {
+                PLAN_MISSING
+            } else {
+                PLAN_RECORDED
+            };
+            json!({ "behavior": "deny", "message": message })
+        } else if planning {
+            json!({ "behavior": "deny", "message": PLAN_DENIED })
         } else {
             json!({ "behavior": "deny", "message": DENIED })
         };
         send(&mut self.stdin, control_response(&request_id, &response)).await
-    }
-
-    async fn ask(&mut self, value: &Value, request_id: Value) -> Result<()> {
-        let input = &value["request"]["input"];
-        let id = crate::auth::hex_digest(&format!(
-            "claude:{}:{}",
-            self.initial_id,
-            text(value, "request_id")
-        ));
-        let fields = input["questions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .enumerate()
-            .map(|(index, question)| {
-                let options = question["options"].as_array().cloned().unwrap_or_default();
-                json!({ "id": index.to_string(), "title": question["question"], "options": options })
-            })
-            .collect::<Vec<_>>();
-        let fields = crate::validation::parse("questions", fields.into())?;
-        self.questions.insert(
-            id.clone(),
-            Question {
-                request_id,
-                input: input.clone(),
-            },
-        );
-        self.emit(json!({
-            "type": "chat.question",
-            "question": { "id": id, "blocking": true, "fields": fields },
-        }))
-        .await
     }
 
     /// The messages a result settles. A result belongs to a turn, not one stdin message:
@@ -924,9 +1473,40 @@ impl Turn<'_> {
             } else {
                 result
             };
+            // Claude Code said the usage limit stops requests, and refused the agent's request
+            // for it: report it as such rather than leaving its wording to be recognized. A limit
+            // it answered after (a limit on another model's window, or one a subagent hit), or
+            // whose reset passed, does not explain the failure.
+            let now = crate::config::now();
+            if let Some(limit) = self.limit.as_ref().filter(|limit| {
+                limit.blocks()
+                    && self.api_error == "rate_limit"
+                    && !self.answered
+                    && limit.resets_at.is_none_or(|reset| reset > now)
+            }) {
+                self.emit(json!({
+                    "type": "turn.failed",
+                    "error": {
+                        "message": message,
+                        "code": "usage_limit_reached",
+                        "window": limit.window,
+                        "resetsAt": limit.resets_at,
+                    },
+                }))
+                .await?;
+            }
             return Err(Error::bad_gateway(message));
         }
-        if !result.is_empty() {
+        if compacting(self.plan) && self.compactions == 0 {
+            // Claude Code answers `/compact` successfully even when it had nothing to compact.
+            let message = if self.last.is_empty() {
+                "Claude Code finished without compacting the conversation."
+            } else {
+                self.last.as_str()
+            };
+            return Err(Error::bad_gateway(message));
+        }
+        if !result.is_empty() && !compacting(self.plan) {
             self.last = result.into();
         }
         for id in self.settled(value) {
@@ -952,19 +1532,29 @@ impl Turn<'_> {
             }
             return Ok(false);
         }
+        if self.context_pending.is_some() {
+            // Claude Code answers the compaction's context request after its result: wait
+            // briefly for it so the run shows the compacted context.
+            self.finishing = Some(tokio::time::Instant::now() + CONTEXT_REPORT_WAIT);
+            return Ok(false);
+        }
         self.complete().await?;
         Ok(true)
     }
 
     async fn complete(&self) -> Result<()> {
-        let receipt = Receipt {
-            message_id: Some(self.initial_id.into()),
-            delivered: self.delivered.iter().cloned().collect(),
-            text: Some(self.last.clone()),
-            item_id: Some(self.last_id.clone()),
-        };
-        // Save the receipt before completion so restart cannot repeat a finished request.
-        atomic_write(&self.receipt, &serde_json::to_vec(&receipt)?).await?;
+        // A compaction has no reply to replay: a restart compacts again instead.
+        if !compacting(self.plan) {
+            let receipt = Receipt {
+                message_id: self.initial_id.into(),
+                delivered: self.delivery_order.clone(),
+                text: self.last.clone(),
+                item_id: self.last_id.clone(),
+                proposals: self.proposals.clone(),
+            };
+            // Save the receipt before completion so restart cannot repeat a finished request.
+            atomic_write(&self.receipt, &serde_json::to_vec(&receipt)?).await?;
+        }
         atomic_write(Path::new(text(self.plan, "output")), self.last.as_bytes()).await?;
         self.emit(json!({ "type": "chat.question.closed" })).await?;
         self.emit(json!({ "type": "turn.completed" })).await
@@ -976,6 +1566,7 @@ impl Turn<'_> {
         mut auth: Option<&mut crate::accounts::claude::Client>,
         cancel: &CancellationToken,
     ) -> Result<()> {
+        self.request_context().await?;
         self.submit_initial().await?;
         let mut buffer = Vec::new();
         let mut timer = tokio::time::interval(Duration::from_millis(250));
@@ -992,7 +1583,15 @@ impl Turn<'_> {
                         result = client.sync() => result?,
                     }
                 }
-                _ = timer.tick() => self.poll_inbox().await?,
+                _ = timer.tick() => {
+                    if self.finish_after_report().await? {
+                        return Ok(());
+                    }
+                    // A finished execution no longer takes messages.
+                    if self.finishing.is_none() {
+                        self.poll_inbox().await?;
+                    }
+                }
                 bytes = stdout.fill_buf() => {
                     let (count, complete) = take_line(bytes?, &mut buffer)?;
                     stdout.consume(count);
@@ -1043,9 +1642,14 @@ pub async fn run(
     let receipt = Path::new(text(&plan, "output")).with_extension("claude-receipt.json");
     let initial_id = text(&plan["execution"], "messageId");
     if let Some(saved) = Receipt::read(&receipt, initial_id).await {
-        return saved.replay(&plan, initial_id, &events).await;
+        return saved.replay(&plan, &events).await;
     }
 
+    if compacting(&plan) && !plan["sessionId"].is_string() {
+        return Err(Error::conflict(
+            "This conversation has no saved Claude Code session to compact.",
+        ));
+    }
     // Completed receipts above do not launch Claude and must remain replayable.
     if let Some(session) = plan["sessionId"].as_str() {
         validate_session_environment(&directory, session).await?;
@@ -1093,8 +1697,22 @@ pub async fn run(
     let stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let mut stderr = child.stderr.take().unwrap();
-    let drain = tokio::spawn(async move {
-        let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
+    // Only a fixed sandbox failure is recognized; diagnostics are never reported.
+    let mut drain = tokio::spawn(async move {
+        const NEEDLE: &[u8] = b"sandbox required but unavailable";
+        let mut chunk = [0; 8192];
+        let mut window = Vec::new();
+        let mut sandbox_unavailable = false;
+        while let Ok(count) = stderr.read(&mut chunk).await
+            && count > 0
+        {
+            window.extend_from_slice(&chunk[..count]);
+            sandbox_unavailable |= window.windows(NEEDLE.len()).any(|bytes| bytes == NEEDLE);
+            // Keep only enough bytes to match a phrase split across reads.
+            let keep = window.len().saturating_sub(NEEDLE.len());
+            window.drain(..keep);
+        }
+        sandbox_unavailable
     });
     let mut turn = Turn {
         plan: &plan,
@@ -1102,31 +1720,61 @@ pub async fn run(
         stdin,
         inbox,
         receipt,
+        plans: directory.join("plans"),
         initial_id,
         wire_id,
         submitted: HashSet::from([initial_id.to_owned()]),
+        operational_notices: HashSet::new(),
         delivered: HashSet::new(),
+        delivery_order: Vec::new(),
+        proposal_request: None,
         pending: HashSet::from([initial_id.to_owned()]),
         consumed: HashSet::new(),
-        questions: HashMap::new(),
         tools: HashMap::new(),
         subagents: HashMap::new(),
+        settled: HashMap::new(),
+        tasks: HashMap::new(),
+        limit: None,
+        resumed_by: HashMap::new(),
+        called: HashMap::new(),
+        answered: false,
+        api_error: String::new(),
+        tool_notices: HashSet::new(),
         streams: HashMap::new(),
         blocks: HashMap::new(),
         stream_message: String::new(),
         last: String::new(),
         last_id: format!("{initial_id}-result"),
+        proposals: Vec::new(),
         background: BTreeMap::new(),
         awaiting_background: HashSet::new(),
         background_replayed: false,
         waiting_for_background: false,
+        context_requests: 0,
+        context_measured: 0,
+        context_pending: None,
+        finishing: None,
+        context_window: None,
+        context: None,
+        compaction: None,
+        compactions: 0,
+        compaction_attempts: 0,
+        attempt: crate::config::id(),
     };
     let operation = turn.execute(&mut stdout, auth.as_mut(), &cancel).await;
     // Closes Claude Code's stdin.
     drop(turn);
     stop(&mut child, pid).await;
-    drain.abort();
-    let _ = drain.await;
+    let sandbox_unavailable = match tokio::time::timeout(Duration::from_secs(1), &mut drain).await {
+        Ok(result) => result.unwrap_or(false),
+        Err(_) => {
+            drain.abort();
+            false
+        }
+    };
+    if operation.is_err() && sandbox_unavailable {
+        return Err(Error::unavailable(SANDBOX_UNAVAILABLE));
+    }
     operation
 }
 
@@ -1170,6 +1818,60 @@ fn allowed_tool(plan: &Value, name: &str, input: &Value) -> bool {
         return false;
     };
     strings(&plan["writableRoots"]).any(|root| path.starts_with(root))
+}
+
+/// The callback of a plan turn: reading, searching, the sandboxed shell, MCP tools
+/// already restricted to read-only ones, and Claude Code's own plan file.
+fn plan_tool(plan: &Value, plans: &Path, name: &str, input: &Value) -> bool {
+    match name {
+        "Read" | "Glob" | "Grep" | "WebSearch" | "WebFetch" | "TodoWrite" => true,
+        // The shell runs in the read-only sandbox without network, never outside it, and
+        // a command cannot widen the network allowlist for itself.
+        "Bash" => {
+            input["dangerouslyDisableSandbox"] != true && input.get("allowed_domains").is_none()
+        }
+        "Write" | "Edit" | "NotebookEdit" => {
+            let key = if name == "NotebookEdit" {
+                "notebook_path"
+            } else {
+                "file_path"
+            };
+            let Some(plans) = plan_directory(plans) else {
+                return false;
+            };
+            resolved(Path::new(text(input, key))).is_some_and(|path| path.starts_with(plans))
+        }
+        _ if name.starts_with("mcp__") => strings(&plan["claudePlanTools"]).any(|allowed| {
+            allowed
+                .strip_suffix('*')
+                .map_or(allowed == name, |prefix| name.starts_with(prefix))
+        }),
+        _ => false,
+    }
+}
+
+/// Canonical plan storage is trusted only when every path component is a real directory,
+/// not a symlink that can redirect the native plan-file write into the workspace.
+fn plan_directory(plans: &Path) -> Option<PathBuf> {
+    let absolute = if plans.is_absolute() {
+        plans.to_owned()
+    } else {
+        std::env::current_dir().ok()?.join(plans)
+    };
+    let mut current = PathBuf::new();
+    for component in absolute.components() {
+        current.push(component.as_os_str());
+        if !matches!(component, Component::Normal(_)) {
+            continue;
+        }
+
+        let metadata = std::fs::symlink_metadata(&current).ok()?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return None;
+        }
+    }
+
+    std::fs::canonicalize(absolute).ok()
 }
 
 /// `path` with its symlinks resolved, or its parent's when the file does not exist yet.

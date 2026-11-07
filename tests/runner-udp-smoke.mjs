@@ -103,6 +103,13 @@ export async function udpSmoke({
     evidence.output = await output()
     process.stdout.write(`${JSON.stringify(evidence)}\n`)
   }
+  catch (error) {
+    // Preserve synthetic guest evidence before DELETE removes the attempt.
+    const logs = await readFile(path.join(root, 'state', `${id}.log`), 'utf8').catch(() => '')
+    const exit = await readFile(path.join(root, 'state', `${id}.exit`), 'utf8').catch(() => null)
+    console.error('UDP guest failure', { id, exit, logs: logs.slice(-32768) })
+    throw error
+  }
   finally {
     if (started) {
       await api(`/runs/${id}`, 'DELETE')

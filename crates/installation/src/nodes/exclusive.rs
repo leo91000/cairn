@@ -1,4 +1,5 @@
 //! Durable, fair reservations. The controller alone confirms physical suspension.
+use super::exclusive_state::Reservation;
 use crate::{
     config::{id, now},
     error::{Error, Result},
@@ -8,38 +9,21 @@ use crate::{
     store::Db,
     validation::{text, uuid},
 };
+use cairn_contracts::{AcquireExclusiveInput, EventKind, ExclusiveReservation, ExclusiveState};
 use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
-const KIND: &str = "node-exclusive-requests";
-const MAX_DURATION: u64 = 900;
-const MAX_WAIT: u64 = 3600;
-
-fn pending_requests(db: &Db<'_>) -> Result<Vec<Value>> {
-    db.json_rows(
-        "SELECT data FROM records WHERE kind=? AND json_extract(data,'$.state') IN ('queued','acquiring','acquired','releasing')",
-        [KIND],
-    )
+fn pending_requests(db: &Db<'_>) -> Result<Vec<Reservation>> {
+    db.pending_exclusive_reservations()
 }
 
 pub fn acquire_tool() -> Value {
     json!({
         "name": "acquire_exclusive",
-        "description": "Reserve this execution node exclusively for this run and explicitly included active dependencies. Cairn suspends other VMs without restarting their commands, blocks new work and confirms acquisition only after the controller acknowledges suspension and the requested RAM headroom. Requires the installation owner's explicit node permission. Use for CPU-intensive local work; release before remote waiting. Requests queue fairly and expire automatically; existing commands, security leases and external services retain their own semantics. Repeating the same request does not extend its duration. Memory reclamation is capability-qualified and fails explicitly when unavailable.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "durationSeconds": { "type": "integer", "minimum": 1, "maximum": MAX_DURATION },
-                "waitSeconds": { "type": "integer", "minimum": 0, "maximum": MAX_WAIT, "description": "How long this call waits for a result (default 300). Zero returns immediately; the request remains queued." },
-                "acquisitionTimeoutSeconds": { "type": "integer", "minimum": 1, "maximum": MAX_WAIT, "description": "How long the queued request remains eligible for acquisition (default 300), independently of the call's response wait." },
-                "reason": { "type": "string", "minLength": 1, "maxLength": 500 },
-                "memberRunIds": { "type": "array", "maxItems": 16, "uniqueItems": true, "items": { "type": "string", "format": "uuid" } },
-                "minimumAvailableMemoryMiB": { "type": "integer", "minimum": 0, "maximum": 1073741824 },
-            },
-            "required": ["durationSeconds", "reason"],
-            "additionalProperties": false,
-        },
+        "description": "Reserve this execution node exclusively for this run and explicitly included active dependencies. Cairn suspends other Cairn workloads without restarting their commands, blocks new work and confirms acquisition only after the controller acknowledges suspension and the requested RAM headroom. Requires the installation owner's explicit node permission. Native reservations leave external host applications and GPU allocations unchanged; administrator enforcement is cooperative. Use for CPU-intensive local work; release before remote waiting. Requests queue fairly and expire automatically; existing commands, security leases and external services retain their own semantics. Repeating the same request does not extend its duration. Memory reclamation is capability-qualified and fails explicitly when unavailable.",
+        "inputSchema": cairn_contracts::schema_for::<AcquireExclusiveInput>(cairn_contracts::Contract::Deserialize),
+        "outputSchema": cairn_contracts::schema_for::<ExclusiveReservation>(cairn_contracts::Contract::Serialize),
     })
 }
 
@@ -47,12 +31,8 @@ pub fn release_tool() -> Value {
     json!({
         "name": "release_exclusive",
         "description": "Release an exclusive reservation owned by this run. Repeated release is safe. Cairn resumes other tasks only after the controller confirms release; other suspension reasons and cancellations remain effective.",
-        "inputSchema": {
-            "type": "object",
-            "properties": { "reservationId": { "type": "string", "format": "uuid" } },
-            "required": ["reservationId"],
-            "additionalProperties": false,
-        },
+        "inputSchema": cairn_contracts::schema_for::<cairn_contracts::ReleaseExclusiveInput>(cairn_contracts::Contract::Deserialize),
+        "outputSchema": cairn_contracts::schema_for::<ExclusiveReservation>(cairn_contracts::Contract::Serialize),
     })
 }
 
@@ -60,7 +40,8 @@ pub fn status_tool() -> Value {
     json!({
         "name": "exclusive_status",
         "description": "Read this run's current and recent exclusive reservations (up to 20), including queued acquisition, confirmed suspension and release. Never treats a queued or expired request as acquired.",
-        "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+        "inputSchema": cairn_contracts::schema_for::<cairn_contracts::ListNodesInput>(cairn_contracts::Contract::Deserialize),
+        "outputSchema": cairn_contracts::schema_for::<cairn_contracts::ExclusiveStatusOutput>(cairn_contracts::Contract::Serialize),
     })
 }
 
@@ -68,51 +49,44 @@ pub fn renew_tool() -> Value {
     json!({
         "name": "renew_exclusive",
         "description": "Request an extension of this run's acquired reservation by 1 to 900 seconds from now, within a one-hour lifetime. The response keeps the previously confirmed expiry until the controller acknowledges renewal. Check exclusive_status before relying on an extension. Current permissions and execution identity are revalidated.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "reservationId": { "type": "string", "format": "uuid" },
-                "durationSeconds": { "type": "integer", "minimum": 1, "maximum": MAX_DURATION },
-            },
-            "required": ["reservationId", "durationSeconds"],
-            "additionalProperties": false,
-        },
+        "inputSchema": cairn_contracts::schema_for::<cairn_contracts::RenewExclusiveInput>(cairn_contracts::Contract::Deserialize),
+        "outputSchema": cairn_contracts::schema_for::<ExclusiveReservation>(cairn_contracts::Contract::Serialize),
     })
 }
 
 pub async fn renew(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
-    if !jsonschema::is_valid(&renew_tool()["inputSchema"], input) {
+    let input: cairn_contracts::RenewExclusiveInput = serde_json::from_value(input.clone())
+        .map_err(|_| Error::bad("Provide a reservation ID and 1 to 900 seconds."))?;
+    uuid(&input.reservation_id)?;
+    if !(1..=900).contains(&input.duration_seconds) {
         return Err(Error::bad("Provide a reservation ID and 1 to 900 seconds."));
     }
     let bearer = bearer.to_owned();
-    let input = input.clone();
     let record = s
         .store
         .transaction(move |db| {
             let run = project_workspaces::authorize_in(db, &bearer)?;
             let mut record = db
-                .get(KIND, text(&input, "reservationId"))?
+                .exclusive_reservation(&input.reservation_id)?
                 .ok_or_else(|| Error::not_found("Reservation missing."))?;
-            if record["ownerRunId"] != run["id"] || !valid_record(db, &record)? {
+            if record.owner_run_id != run["id"] || !valid_record(db, &record)? {
                 return Err(Error::forbidden("Reservation access was revoked."));
             }
-            if record["state"] != "acquired"
-                || record["expiresAt"]
-                    .as_i64()
-                    .is_none_or(|until| until <= now())
+            if record.state != ExclusiveState::Acquired
+                || record.expires_at.is_none_or(|until| until <= now())
             {
                 return Err(Error::conflict(
                     "Only a live acquired reservation can be renewed.",
                 ));
             }
-            let until = now() + input["durationSeconds"].as_f64().unwrap() as i64 * 1000;
-            if until > record["acquisitionStartedAt"].as_i64().unwrap_or(0) + 3_600_000 {
+            let until = now() + input.duration_seconds as i64 * 1000;
+            if until > record.acquisition_started_at.unwrap_or(0) + 3_600_000 {
                 return Err(Error::bad(
                     "Exclusive reservations have a maximum lifetime of one hour.",
                 ));
             }
-            record["requestedExpiresAt"] = until.max(record["expiresAt"].as_i64().unwrap()).into();
-            db.put(KIND, &record)?;
+            record.requested_expires_at = Some(until.max(record.expires_at.unwrap()));
+            db.save_exclusive_reservation(&record)?;
             Ok(public(&record))
         })
         .await?;
@@ -120,26 +94,25 @@ pub async fn renew(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
     Ok(record)
 }
 
-fn terminal(record: &Value) -> bool {
-    matches!(text(record, "state"), "released" | "failed" | "expired")
-}
-
-fn enabled(node: &Value, agent: &str) -> bool {
-    node["exclusiveAgents"]
-        .as_array()
-        .is_some_and(|agents| agents.iter().any(|id| id == agent))
+fn terminal(record: &Reservation) -> bool {
+    record.state.terminal()
 }
 
 fn authorize_run(db: &Db<'_>, run: &Value, node_id: &str) -> Result<String> {
     let denied = || Error::forbidden("Exclusive node access is unavailable or was revoked.");
-    let node = db.get("nodes", node_id)?.ok_or_else(denied)?;
+    let node = db.node_boundary(node_id)?.ok_or_else(denied)?;
     let agent_id = super::run_agent(run);
-    let agent = db.get("agents", agent_id)?.ok_or_else(denied)?;
+    let profile = db.agent(agent_id)?.ok_or_else(denied)?;
+    let agent = serde_json::to_value(&profile)?;
     if run["status"] != RunStatus::Running
         || !run["cancelRequestedAt"].is_null()
         || run["moveRequest"].is_object()
         || node["revoked"] == true
-        || !enabled(&node, agent_id)
+        || !profile
+            .settings
+            .exclusive_nodes
+            .iter()
+            .any(|node| node == node_id)
         || !super::agent_allows(&agent, node_id)
         || !crate::service::covers(&agent, &run["snapshot"]["agent"])
     {
@@ -150,10 +123,15 @@ fn authorize_run(db: &Db<'_>, run: &Value, node_id: &str) -> Result<String> {
         .as_str()
         .unwrap_or(super::LOCAL_NODE_ID)
         != node_id
-        || checkpoint["prepared"]["backend"] != "firecracker"
+        || checkpoint["prepared"]["backend"]
+            != if crate::native::policy::node_native(&node) {
+                "native"
+            } else {
+                "firecracker"
+            }
     {
         return Err(Error::conflict(
-            "Exclusivity requires an active VM on this node.",
+            "Exclusivity requires an active execution of this node's backend.",
         ));
     }
     let attempt = text(&checkpoint, "runnerId");
@@ -161,39 +139,39 @@ fn authorize_run(db: &Db<'_>, run: &Value, node_id: &str) -> Result<String> {
     Ok(attempt.into())
 }
 
-fn valid_record(db: &Db<'_>, record: &Value) -> Result<bool> {
-    let Some(run) = db.run(text(record, "ownerRunId"))? else {
+fn valid_record(db: &Db<'_>, record: &Reservation) -> Result<bool> {
+    let Some(run) = db.run(&record.owner_run_id)? else {
         return Ok(false);
     };
-    if *crate::waits::execution_id(&run) != record["messageId"] {
+    if crate::waits::execution_id(&run).as_str() != record.message_id.as_deref() {
         return Ok(false);
     }
-    let Ok(attempt) = authorize_run(db, &run, text(record, "nodeId")) else {
+    let Ok(attempt) = authorize_run(db, &run, &record.node_id) else {
         return Ok(false);
     };
-    if attempt != record["ownerAttemptId"] {
+    if attempt != record.owner_attempt_id {
         return Ok(false);
     }
-    for (run_id, expected_attempt) in record["input"]["memberRunIds"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .zip(record["memberAttemptIds"].as_array().into_iter().flatten())
+    for (run_id, expected_attempt) in record
+        .input
+        .member_run_ids
+        .iter()
+        .zip(&record.member_attempt_ids)
     {
-        let Some(member) = db.run(run_id.as_str().unwrap_or(""))? else {
+        let Some(member) = db.run(&run_id.to_string())? else {
             return Ok(false);
         };
-        let Ok(attempt) = authorize_run(db, &member, text(record, "nodeId")) else {
+        let Ok(attempt) = authorize_run(db, &member, &record.node_id) else {
             return Ok(false);
         };
         if attempt != *expected_attempt || super::run_agent(&member) != super::run_agent(&run) {
             return Ok(false);
         }
     }
-    if let Some(chat) = crate::chats::chat_for_run(db, text(&run, "id"))?
-        && (chat["paused"] == true
-            || chat["wakeup"].is_object()
-            || !crate::conversation_lifecycle::is_active(&chat)
+    if let Some(chat) = db.conversation_for_run(text(&run, "id"))?
+        && (chat.paused
+            || chat.wakeup.is_some()
+            || chat.lifecycle != cairn_contracts::ConversationLifecycle::Active
             || crate::chats::continuation::has_unhandled_input(db, &chat)?)
     {
         return Ok(false);
@@ -202,29 +180,12 @@ fn valid_record(db: &Db<'_>, record: &Value) -> Result<bool> {
 }
 
 pub async fn acquire(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
-    if !jsonschema::is_valid(&acquire_tool()["inputSchema"], input)
-        || text(input, "reason").trim().is_empty()
-    {
-        return Err(Error::bad(
-            "Provide a concrete reason and a duration of 1 to 900 seconds.",
-        ));
-    }
+    let mut input: AcquireExclusiveInput = serde_json::from_value(input.clone())
+        .map_err(|_| Error::bad("Invalid exclusive reservation request."))?;
+    input.validate().map_err(Error::bad)?;
+    input.reason = crate::run_output::redact(&input.reason, &[]);
+    input.member_run_ids.sort_by_key(ToString::to_string);
     let bearer = bearer.to_owned();
-    let mut input = crate::run_output::payload(input, &[]);
-    for (field, default) in [
-        ("durationSeconds", 1),
-        ("waitSeconds", 300),
-        ("acquisitionTimeoutSeconds", 300),
-        ("minimumAvailableMemoryMiB", 0),
-    ] {
-        input[field] = (input[field].as_f64().map_or(default, |value| value as u64)).into();
-    }
-    let mut members = input["memberRunIds"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    members.sort_by(|left, right| left.as_str().cmp(&right.as_str()));
-    input["memberRunIds"] = members.into();
     let request = s
         .store
         .transaction(move |db| {
@@ -235,14 +196,14 @@ pub async fn acquire(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
                 .unwrap_or(super::LOCAL_NODE_ID);
             let owner_attempt = authorize_run(db, &run, node_id)?;
             let node = db
-                .get("nodes", node_id)?
+                .node_boundary(node_id)?
                 .ok_or_else(|| Error::not_found("Node missing."))?;
             if node["exclusiveReservations"] != true {
                 return Err(Error::conflict(
                     "Update this node to a runtime supporting exclusive reservations.",
                 ));
             }
-            if input["minimumAvailableMemoryMiB"].as_u64().unwrap()
+            if input.minimum_available_memory_mi_b
                 > node["limits"]["memoryMiB"].as_u64().unwrap_or(0)
             {
                 return Err(Error::bad(
@@ -250,9 +211,9 @@ pub async fn acquire(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
                 ));
             }
             let mut members = Vec::new();
-            for member_id in input["memberRunIds"].as_array().unwrap() {
+            for member_id in &input.member_run_ids {
                 let member = db
-                    .run(member_id.as_str().unwrap())?
+                    .run(&member_id.to_string())?
                     .ok_or_else(|| Error::not_found("Dependency run missing."))?;
                 if super::run_agent(&member) != super::run_agent(&run) || member["id"] == run["id"]
                 {
@@ -260,14 +221,14 @@ pub async fn acquire(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
                         "Dependencies must be distinct active runs of the same authorized agent.",
                     ));
                 }
-                members.push(Value::from(authorize_run(db, &member, node_id)?));
+                members.push(authorize_run(db, &member, node_id)?);
             }
             let requests = pending_requests(db)?;
             if let Some(existing) = requests
                 .iter()
-                .find(|record| record["ownerRunId"] == run["id"] && !terminal(record))
+                .find(|record| record.owner_run_id == run["id"] && !terminal(record))
             {
-                if existing["input"] != input || existing["ownerAttemptId"] != owner_attempt {
+                if existing.input != input || existing.owner_attempt_id != owner_attempt {
                     return Err(Error::conflict(
                         "Release the current reservation before changing its scope.",
                     ));
@@ -277,7 +238,7 @@ pub async fn acquire(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
             let created = now();
             if requests
                 .iter()
-                .filter(|record| record["nodeId"] == node_id && !terminal(record))
+                .filter(|record| record.node_id == node_id && !terminal(record))
                 .count()
                 >= 64
             {
@@ -285,31 +246,33 @@ pub async fn acquire(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
                     "The exclusive reservation queue is full.",
                 ));
             }
-            let order = db
-                .kv("exclusive-request-order")?
-                .and_then(|value| value.as_u64())
-                .unwrap_or(0)
-                .checked_add(1)
-                .ok_or_else(|| Error::conflict("Exclusive queue exhausted."))?;
-            db.set("exclusive-request-order", &Value::from(order), None)?;
-            let request = json!({
-                "id": id(),
-                "nodeId": node_id,
-                "ownerRunId": run["id"],
-                "ownerAttemptId": owner_attempt,
-                "memberAttemptIds": members,
-                "messageId": crate::waits::execution_id(&run),
-                "reason": input["reason"],
-                "input": input,
-                "createdAt": created,
-                "order": order,
-                "waitUntil": created + input["acquisitionTimeoutSeconds"].as_u64().unwrap() as i64 * 1000,
-                "state": "queued",
-            });
-            db.put(KIND, &request)?;
+            let order = db.next_exclusive_order()?;
+            let request = Reservation {
+                id: id(),
+                node_id: node_id.into(),
+                owner_run_id: text(&run, "id").into(),
+                owner_attempt_id: owner_attempt,
+                member_attempt_ids: members,
+                message_id: crate::waits::execution_id(&run).as_str().map(str::to_owned),
+                reason: input.reason.clone(),
+                created_at: created,
+                order,
+                wait_until: created + input.acquisition_timeout_seconds as i64 * 1000,
+                input,
+                state: ExclusiveState::Queued,
+                epoch: None,
+                expires_at: None,
+                requested_expires_at: None,
+                acquisition_started_at: None,
+                acquired_at: None,
+                release_requested_at: None,
+                paused_run_ids: vec![],
+                error: None,
+            };
+            db.save_exclusive_reservation(&request)?;
             db.event(
                 text(&run, "id"),
-                "node.exclusive",
+                &EventKind::from_adapter("node.exclusive"),
                 "Exclusive reservation queued.",
                 Some(&public(&request)),
             )?;
@@ -317,15 +280,15 @@ pub async fn acquire(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
         })
         .await?;
     s.worker.notify();
-    let request_id = text(&request, "id");
-    let until = now() + request["input"]["waitSeconds"].as_u64().unwrap_or(300) as i64 * 1000;
+    let request_id = &request.id;
+    let until = now() + request.input.wait_seconds as i64 * 1000;
     loop {
         let current = s
             .store
-            .get(KIND, request_id)
+            .exclusive_reservation(request_id)
             .await?
             .ok_or_else(|| Error::not_found("Reservation missing."))?;
-        if current["state"] == "acquired"
+        if current.state == ExclusiveState::Acquired
             || terminal(&current)
             || now() >= until
             || s.shutdown.is_cancelled()
@@ -339,56 +302,71 @@ pub async fn acquire(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
 pub async fn status(s: &Service, bearer: &str) -> Result<Value> {
     let run = project_workspaces::authorize(s, bearer).await?;
     let run_id = text(&run, "id").to_owned();
-    s.store.read(move |db| {
-        let requests = db.json_rows(
-            "SELECT data FROM records WHERE kind=? AND json_extract(data,'$.ownerRunId')=? ORDER BY CASE WHEN json_extract(data,'$.state') IN ('queued','acquiring','acquired','releasing') THEN 0 ELSE 1 END, json_extract(data,'$.createdAt') DESC LIMIT 20",
-            [KIND, &run_id],
-        )?;
-        Ok(requests.iter().map(public).collect::<Vec<_>>().into())
-    }).await
+    s.store
+        .read(move |db| {
+            let requests = db.owned_exclusive_reservations(&run_id)?;
+            Ok(serde_json::to_value(
+                cairn_contracts::ExclusiveStatusOutput {
+                    reservations: requests.iter().map(public_view).collect(),
+                },
+            )?)
+        })
+        .await
 }
 
 pub async fn release(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
-    if !jsonschema::is_valid(&release_tool()["inputSchema"], input) {
-        return Err(Error::bad("Provide a reservation ID."));
-    }
-    let run = project_workspaces::authorize(s, bearer).await?;
-    release_owned(s, text(input, "reservationId"), Some(text(&run, "id"))).await
+    let input: cairn_contracts::ReleaseExclusiveInput = serde_json::from_value(input.clone())
+        .map_err(|_| Error::bad("Provide a reservation ID."))?;
+    let bearer = bearer.to_owned();
+    let requested = input.reservation_id.clone();
+    let read_bearer = bearer.clone();
+    let run = s
+        .store
+        .read(move |db| project_workspaces::authorize_in(db, &read_bearer))
+        .await?;
+    release_authorized(s, &requested, Some(text(&run, "id")), move |db| {
+        project_workspaces::authorize_in(db, &bearer)?;
+        Ok(())
+    })
+    .await
 }
 
 pub async fn release_owned(s: &Service, request_id: &str, owner: Option<&str>) -> Result<Value> {
+    release_authorized(s, request_id, owner, |_| Ok(())).await
+}
+
+pub(crate) async fn release_authorized(
+    s: &Service,
+    request_id: &str,
+    owner: Option<&str>,
+    authorize: impl FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
+) -> Result<Value> {
     uuid(request_id)?;
     let request_id = request_id.to_owned();
     let owner = owner.map(str::to_owned);
     let record = s
         .store
         .transaction(move |db| {
+            authorize(db)?;
             let mut record = db
-                .get(KIND, &request_id)?
+                .exclusive_reservation(&request_id)?
                 .ok_or_else(|| Error::not_found("Reservation missing."))?;
             if owner
                 .as_ref()
-                .is_some_and(|owner| record["ownerRunId"] != *owner)
+                .is_some_and(|owner| record.owner_run_id != *owner)
             {
                 return Err(Error::forbidden(
                     "Only the reservation's owner can release it.",
                 ));
             }
             if !terminal(&record) {
-                record["state"] = (if record["epoch"].is_null() {
-                    "released"
+                record.state = if record.epoch.is_none() {
+                    ExclusiveState::Released
                 } else {
-                    "releasing"
-                })
-                .into();
-                record["releaseRequestedAt"] = now().into();
-                db.put(KIND, &record)?;
-                if let Some(mut node) = db.get("nodes", text(&record, "nodeId"))?
-                    && node["exclusiveReservation"]["id"] == record["id"]
-                {
-                    node["exclusiveReservation"] = public(&record);
-                    db.put("nodes", &node)?;
-                }
+                    ExclusiveState::Releasing
+                };
+                record.release_requested_at = Some(now());
+                db.save_exclusive_reservation(&record)?;
             }
             Ok(public(&record))
         })
@@ -397,30 +375,33 @@ pub async fn release_owned(s: &Service, request_id: &str, owner: Option<&str>) -
     Ok(record)
 }
 
-pub fn public(record: &Value) -> Value {
-    let state = if record["state"] == "acquired"
-        && record["expiresAt"]
-            .as_i64()
-            .is_some_and(|until| until <= now())
-    {
-        Value::from("releasing")
-    } else {
-        record["state"].clone()
-    };
-    json!({
-        "id": record["id"],
-        "nodeId": record["nodeId"],
-        "ownerRunId": record["ownerRunId"],
-        "reason": record["reason"],
-        "state": state,
-        "createdAt": record["createdAt"],
-        "expiresAt": record["expiresAt"],
-        "renewalPending": record["requestedExpiresAt"].as_i64().is_some_and(|until| Some(until) > record["expiresAt"].as_i64()),
-        "waitUntil": record["waitUntil"],
-        "pausedRunIds": record["pausedRunIds"].as_array().cloned().unwrap_or_default(),
-        "minimumAvailableMemoryMiB": record["input"]["minimumAvailableMemoryMiB"],
-        "error": record["error"],
-    })
+pub fn public_view(record: &Reservation) -> ExclusiveReservation {
+    ExclusiveReservation {
+        id: record.id.clone(),
+        node_id: record.node_id.clone(),
+        owner_run_id: record.owner_run_id.clone(),
+        reason: record.reason.clone(),
+        state: if record.state == ExclusiveState::Acquired
+            && record.expires_at.is_some_and(|until| until <= now())
+        {
+            ExclusiveState::Releasing
+        } else {
+            record.state
+        },
+        created_at: record.created_at,
+        expires_at: record.expires_at,
+        renewal_pending: record
+            .requested_expires_at
+            .is_some_and(|until| Some(until) > record.expires_at),
+        wait_until: record.wait_until,
+        paused_run_ids: record.paused_run_ids.clone(),
+        minimum_available_memory_mi_b: record.input.minimum_available_memory_mi_b,
+        error: record.error.clone(),
+    }
+}
+
+pub fn public(record: &Reservation) -> Value {
+    serde_json::to_value(public_view(record)).expect("serializable exclusive reservation")
 }
 
 async fn controller(s: &Service, node: &str, action: &str, body: Option<&Value>) -> Result<Value> {
@@ -453,7 +434,12 @@ async fn reconcile_node(s: &Service, node_id: &str) -> Result<()> {
     let observed = controller(s, node_id, "", None).await?;
     let highest_epoch = observed["highestEpoch"].as_u64().unwrap_or(0);
     let remote = &observed["reservation"];
-    if remote.is_object() && s.store.get(KIND, text(remote, "id")).await?.is_none() {
+    if remote.is_object()
+        && s.store
+            .exclusive_reservation(text(remote, "id"))
+            .await?
+            .is_none()
+    {
         // Restoring a manager backup must not orphan a newer controller reservation.
         controller(
             s,
@@ -468,34 +454,28 @@ async fn reconcile_node(s: &Service, node_id: &str) -> Result<()> {
         .store
         .transaction(move |db| {
             let mut requests = pending_requests(db)?;
-            requests.sort_by_key(|record| record["order"].as_u64().unwrap_or(0));
-            let mut chosen: Option<Value> = None;
+            requests.sort_by_key(|record| record.order);
+            let mut chosen: Option<Reservation> = None;
             for mut record in requests
                 .into_iter()
-                .filter(|record| record["nodeId"] == node && !terminal(record))
+                .filter(|record| record.node_id == node && !terminal(record))
             {
                 let valid = valid_record(db, &record)?;
-                let queued_expired = record["state"] == "queued"
-                    && record["waitUntil"]
-                        .as_i64()
-                        .is_some_and(|until| now() > until);
-                if record["state"] == "queued" && (!valid || queued_expired) {
-                    record["state"] = "expired".into();
-                    db.put(KIND, &record)?;
+                let queued_expired =
+                    record.state == ExclusiveState::Queued && now() > record.wait_until;
+                if record.state == ExclusiveState::Queued && (!valid || queued_expired) {
+                    record.state = ExclusiveState::Expired;
+                    db.save_exclusive_reservation(&record)?;
                     continue;
                 }
-                if record["state"] != "queued" {
-                    if !valid
-                        || record["expiresAt"]
-                            .as_i64()
-                            .is_some_and(|until| now() >= until)
-                    {
-                        record["state"] = "releasing".into();
-                        db.put(KIND, &record)?;
+                if record.state != ExclusiveState::Queued {
+                    if !valid || record.expires_at.is_some_and(|until| now() >= until) {
+                        record.state = ExclusiveState::Releasing;
+                        db.save_exclusive_reservation(&record)?;
                     }
                     if chosen
                         .as_ref()
-                        .is_none_or(|chosen| chosen["state"] == "queued")
+                        .is_none_or(|chosen| chosen.state == ExclusiveState::Queued)
                     {
                         chosen = Some(record);
                     }
@@ -510,42 +490,25 @@ async fn reconcile_node(s: &Service, node_id: &str) -> Result<()> {
             let Some(mut record) = chosen else {
                 return Ok(None);
             };
-            if record["state"] == "queued" {
-                let epoch = db
-                    .kv("exclusive-epoch")?
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or(0)
-                    .max(highest_epoch)
-                    .checked_add(1)
-                    .ok_or_else(|| Error::conflict("Exclusive generation exhausted."))?;
-                db.set("exclusive-epoch", &Value::from(epoch), None)?;
-                record["epoch"] = epoch.into();
-                record["expiresAt"] =
-                    (now() + record["input"]["durationSeconds"].as_i64().unwrap() * 1000).into();
-                record["acquisitionStartedAt"] = now().into();
-                record["state"] = "acquiring".into();
-                db.put(KIND, &record)?;
-            }
-            let mut node_record = db
-                .get("nodes", &node)?
-                .ok_or_else(|| Error::not_found("Node missing."))?;
-            let summary = public(&record);
-            if node_record["exclusiveReservation"] != summary {
-                node_record["exclusiveReservation"] = summary;
-                db.put("nodes", &node_record)?;
+            if record.state == ExclusiveState::Queued {
+                record.epoch = Some(db.next_exclusive_epoch(highest_epoch)?);
+                record.expires_at = Some(now() + record.input.duration_seconds as i64 * 1000);
+                record.acquisition_started_at = Some(now());
+                record.state = ExclusiveState::Acquiring;
+                db.save_exclusive_reservation(&record)?;
             }
             Ok(Some(record))
         })
         .await?;
     let Some(record) = pending else { return Ok(()) };
-    let request_id = text(&record, "id");
-    let releasing = record["state"] == "releasing";
+    let request_id = &record.id;
+    let releasing = record.state == ExclusiveState::Releasing;
     let response = if releasing {
         controller(
             s,
             node_id,
             "/release",
-            Some(&json!({ "id": record["id"], "epoch": record["epoch"] })),
+            Some(&json!({ "id": record.id, "epoch": record.epoch })),
         )
         .await?
     } else {
@@ -554,14 +517,14 @@ async fn reconcile_node(s: &Service, node_id: &str) -> Result<()> {
             node_id,
             "/acquire",
             Some(&json!({
-                "id": record["id"],
-                "epoch": record["epoch"],
-                "ownerAttemptId": record["ownerAttemptId"],
-                "memberAttemptIds": record["memberAttemptIds"],
-                "expiresAt": record.get("requestedExpiresAt").unwrap_or(&record["expiresAt"]),
-                "remainingMs": (record.get("requestedExpiresAt").unwrap_or(&record["expiresAt"]).as_i64().unwrap_or(0) - now()).max(0),
-                "reason": record["reason"],
-                "minimumAvailableMemoryMiB": record["input"]["minimumAvailableMemoryMiB"],
+                "id": record.id,
+                "epoch": record.epoch,
+                "ownerAttemptId": record.owner_attempt_id,
+                "memberAttemptIds": record.member_attempt_ids,
+                "expiresAt": record.requested_expires_at.or(record.expires_at),
+                "remainingMs": (record.requested_expires_at.or(record.expires_at).unwrap_or(0) - now()).max(0),
+                "reason": record.reason,
+                "minimumAvailableMemoryMiB": record.input.minimum_available_memory_mi_b,
             })),
         )
         .await;
@@ -573,27 +536,23 @@ async fn reconcile_node(s: &Service, node_id: &str) -> Result<()> {
                     s,
                     node_id,
                     "/release",
-                    Some(&json!({ "id": record["id"], "epoch": record["epoch"] })),
+                    Some(&json!({ "id": record.id, "epoch": record.epoch })),
                 )
                 .await?;
                 if !released["reservation"].is_null() {
                     return Err(error);
                 }
                 let request_id = request_id.to_owned();
-                let node_id = node_id.to_owned();
                 s.store
                     .transaction(move |db| {
-                        let Some(mut current) = db.get(KIND, &request_id)? else {
+                        let Some(mut current) = db.exclusive_reservation(&request_id)? else {
                             return Ok(());
                         };
-                        current["state"] = "failed".into();
-                        current["error"] = error.message.into();
-                        db.put(KIND, &current)?;
+                        current.state = ExclusiveState::Failed;
+                        current.error = Some(error.message);
+                        db.save_exclusive_reservation(&current)?;
                         clear_suspensions(db, &current)?;
-                        if let Some(mut node) = db.get("nodes", &node_id)? {
-                            node["exclusiveReservation"] = Value::Null;
-                            db.put("nodes", &node)?;
-                        }
+
                         Ok(())
                     })
                     .await?;
@@ -602,55 +561,57 @@ async fn reconcile_node(s: &Service, node_id: &str) -> Result<()> {
         }
     };
     let request_id = request_id.to_owned();
-    let node_id = node_id.to_owned();
     s.store
         .transaction(move |db| {
-            let Some(mut current) = db.get(KIND, &request_id)? else {
+            let Some(mut current) = db.exclusive_reservation(&request_id)? else {
                 return Ok(());
             };
-            if current["epoch"] != record["epoch"] || terminal(&current) {
+            if current.epoch != record.epoch || terminal(&current) {
                 return Ok(());
             }
             let previous = current.clone();
             let confirmed = &response["reservation"];
             if releasing && confirmed.is_null() {
-                current["state"] = "released".into();
+                current.state = ExclusiveState::Released;
             } else if !releasing
-                && confirmed["id"] == current["id"]
-                && confirmed["epoch"] == current["epoch"]
+                && confirmed["id"] == current.id
+                && confirmed["epoch"].as_u64() == current.epoch
                 && confirmed["state"] == "acquired"
             {
-                current["state"] =
-                    (if valid_record(db, &current)? && current["state"] != "releasing" {
-                        "acquired"
+                current.state =
+                    if valid_record(db, &current)? && current.state != ExclusiveState::Releasing {
+                        ExclusiveState::Acquired
                     } else {
-                        "releasing"
-                    })
-                    .into();
-                if current["acquiredAt"].is_null() {
-                    current["acquiredAt"] = now().into();
+                        ExclusiveState::Releasing
+                    };
+                if current.acquired_at.is_none() {
+                    current.acquired_at = Some(now());
                 }
-                current["expiresAt"] = confirmed["expiresAt"].clone();
+                current.expires_at = confirmed["expiresAt"].as_i64();
                 let attempts: HashSet<&str> = confirmed["pausedAttemptIds"]
                     .as_array()
                     .into_iter()
                     .flatten()
                     .filter_map(Value::as_str)
                     .collect();
-                current["pausedRunIds"] = db
-                    .list("node-attempts")?
+                current.paused_run_ids = db
+                    .attempts()?
                     .iter()
-                    .filter(|attempt| attempts.contains(text(attempt, "id")))
-                    .map(|attempt| attempt["runId"].clone())
-                    .collect::<Vec<_>>()
-                    .into();
-                for run in current["pausedRunIds"].as_array().into_iter().flatten() {
-                    if let Some(run_record) = db.run(run.as_str().unwrap_or(""))?
+                    .filter(|attempt| attempts.contains(attempt.id.as_str()))
+                    .map(|attempt| attempt.run_id.clone())
+                    .collect::<Vec<_>>();
+                for run in &current.paused_run_ids {
+                    if let Some(run_record) = db.run(run.as_str())?
                         && run_record["suspendedByExclusive"] != public(&current)
                     {
-                        db.patch_run(
-                            run.as_str().unwrap(),
-                            &json!({ "suspendedByExclusive": public(&current) }),
+                        db.update_run_placement(
+                            run.as_str(),
+                            crate::nodes::run_placement::PlacementChanges {
+                                suspended_by_exclusive: Some(serde_json::from_value(
+                                    serde_json::json!(public(&current)),
+                                )?),
+                                ..Default::default()
+                            },
                         )?;
                     }
                 }
@@ -659,18 +620,7 @@ async fn reconcile_node(s: &Service, node_id: &str) -> Result<()> {
                 clear_suspensions(db, &current)?;
             }
             if current != previous {
-                db.put(KIND, &current)?;
-            }
-            if let Some(mut node) = db.get("nodes", &node_id)? {
-                let summary = if terminal(&current) {
-                    Value::Null
-                } else {
-                    public(&current)
-                };
-                if node["exclusiveReservation"] != summary {
-                    node["exclusiveReservation"] = summary;
-                    db.put("nodes", &node)?;
-                }
+                db.save_exclusive_reservation(&current)?;
             }
             Ok(())
         })
@@ -692,13 +642,13 @@ pub async fn maintain(s: Arc<Service>) {
                 let mut nodes: HashSet<String> = requests
                     .iter()
                     .filter(|record| !terminal(record))
-                    .map(|record| text(record, "nodeId").to_owned())
+                    .map(|record| record.node_id.clone())
                     .collect();
                 // A restored backup may predate every manager request while the
                 // controller still holds a reservation. Inspect reachable controllers
                 // even when the restored request queue is completely empty.
                 nodes.extend(
-                    db.list("nodes")?
+                    db.nodes_boundary()?
                         .iter()
                         .filter(|node| {
                             node["exclusiveReservations"] == true
@@ -725,17 +675,18 @@ pub async fn maintain(s: Arc<Service>) {
     }
 }
 
-fn clear_suspensions(db: &Db<'_>, record: &Value) -> Result<()> {
-    for run_id in record["pausedRunIds"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-    {
+fn clear_suspensions(db: &Db<'_>, record: &Reservation) -> Result<()> {
+    for run_id in &record.paused_run_ids {
         if let Some(run) = db.run(run_id)?
-            && run["suspendedByExclusive"]["id"] == record["id"]
+            && run["suspendedByExclusive"]["id"] == record.id
         {
-            db.patch_run(run_id, &json!({ "suspendedByExclusive": null }))?;
+            db.update_run_placement(
+                run_id,
+                crate::nodes::run_placement::PlacementChanges {
+                    suspended_by_exclusive: Some(None),
+                    ..Default::default()
+                },
+            )?;
         }
     }
     Ok(())
@@ -745,21 +696,33 @@ fn clear_suspensions(db: &Db<'_>, record: &Value) -> Result<()> {
 pub(crate) fn release_before_wait(db: &Db<'_>, run_id: &str) -> Result<()> {
     for mut record in pending_requests(db)?
         .into_iter()
-        .filter(|record| record["ownerRunId"] == run_id && !terminal(record))
+        .filter(|record| record.owner_run_id == run_id && !terminal(record))
     {
-        record["state"] = (if record["epoch"].is_null() {
-            "released"
+        record.state = if record.epoch.is_none() {
+            ExclusiveState::Released
         } else {
-            "releasing"
-        })
-        .into();
-        db.put(KIND, &record)?;
+            ExclusiveState::Releasing
+        };
+        db.save_exclusive_reservation(&record)?;
     }
     Ok(())
 }
 
 pub async fn administrative_pause_ms(s: &Service, run: &str, attempt: &str) -> Result<u64> {
     let node = super::transport::url(s, run).await?;
+    administrative_pause_at(s, &node, attempt).await
+}
+
+pub(crate) async fn administrative_pause_for_node(
+    s: &Service,
+    node: Option<&str>,
+    attempt: &str,
+) -> Result<u64> {
+    let node = super::transport::url_for_node(s, node);
+    administrative_pause_at(s, &node, attempt).await
+}
+
+async fn administrative_pause_at(s: &Service, node: &str, attempt: &str) -> Result<u64> {
     let response = s
         .http
         .get(format!("{node}/runs/{attempt}/administrative-pause"))

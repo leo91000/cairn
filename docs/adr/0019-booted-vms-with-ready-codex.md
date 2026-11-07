@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0055](0055-ublk-only-vm-storage.md) pour le maintien du transport vhost-user ; la préparation et la conservation des VM restent applicables.
+
 # VM pré-démarrées avec Codex prêt
 
 Date : 2026-10-01.

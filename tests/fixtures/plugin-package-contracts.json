@@ -1,0 +1,214 @@
+{
+  "installs": [
+    {
+      "manifest": {
+        "id": "fixture",
+        "name": "Fixture",
+        "version": "1",
+        "apiVersion": 2,
+        "capabilities": [],
+        "settings": [
+          {
+            "key": "nested",
+            "title": "Nested",
+            "type": "text",
+            "default": "hello"
+          }
+        ]
+      },
+      "source": "return {}",
+      "modules": {}
+    },
+    {
+      "manifest": "id = \"fixture\"",
+      "source": "return {}",
+      "modules": {
+        "lib/rest.luau": "return {}"
+      },
+      "manifestFormat": "toml"
+    }
+  ],
+  "invalidInstalls": [
+    {
+      "manifest": {
+        "id": "fixture",
+        "name": "Fixture",
+        "version": "1",
+        "apiVersion": 2,
+        "capabilities": [],
+        "settings": [
+          {
+            "key": "nested",
+            "title": "Nested",
+            "type": "text",
+            "default": "hello"
+          }
+        ]
+      },
+      "source": "return {}",
+      "modules": []
+    },
+    {
+      "manifest": {
+        "id": "fixture",
+        "name": "Fixture",
+        "version": "1",
+        "apiVersion": 2,
+        "capabilities": [],
+        "settings": [
+          {
+            "key": "nested",
+            "title": "Nested",
+            "type": "text",
+            "default": "hello"
+          }
+        ]
+      },
+      "source": "return {}",
+      "modules": {},
+      "manifestFormat": "yaml"
+    },
+    {
+      "manifest": {
+        "id": "fixture",
+        "name": "Fixture",
+        "version": "1",
+        "apiVersion": 2,
+        "capabilities": [],
+        "settings": [
+          {
+            "key": "nested",
+            "title": "Nested",
+            "type": "text",
+            "default": "hello"
+          }
+        ]
+      },
+      "source": "return {}",
+      "modules": {},
+      "owner": true
+    },
+    {
+      "manifest": {
+        "id": "fixture",
+        "name": "Fixture",
+        "version": "1",
+        "apiVersion": 2,
+        "capabilities": [],
+        "settings": [
+          {
+            "key": "nested",
+            "title": "Nested",
+            "type": "text",
+            "default": "hello"
+          }
+        ]
+      },
+      "modules": {}
+    },
+    {
+      "manifest": {
+        "id": "fixture",
+        "name": "Fixture",
+        "version": "1",
+        "apiVersion": 2,
+        "capabilities": [],
+        "settings": [
+          {
+            "key": "nested",
+            "title": "Nested",
+            "type": "text",
+            "default": "hello"
+          }
+        ]
+      },
+      "source": "return {}"
+    }
+  ],
+  "programs": [
+    {
+      "kind": "install",
+      "pluginId": "fixture",
+      "program": "probe",
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "kind": "check",
+      "pluginId": "fixture",
+      "program": "probe"
+    },
+    {
+      "kind": "rollback",
+      "pluginId": "fixture",
+      "program": "probe"
+    }
+  ],
+  "invalidPrograms": [
+    {
+      "kind": "delete",
+      "pluginId": "fixture",
+      "program": "probe",
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "kind": "install",
+      "pluginId": "fixture",
+      "program": "probe"
+    },
+    {
+      "kind": "install",
+      "pluginId": "fixture",
+      "program": "probe",
+      "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "owner": true
+    },
+    {
+      "action": "install",
+      "data": {
+        "kind": "install",
+        "pluginId": "fixture",
+        "program": "probe",
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  ],
+  "operations": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "state": "running",
+      "result": null,
+      "error": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "state": "completed",
+      "result": {
+        "kind": "program",
+        "program": {
+          "name": "probe",
+          "installer": "programs/probe.luau",
+          "installed": {
+            "release": {
+              "version": "1",
+              "url": "https://downloads.example.com/probe",
+              "format": "binary",
+              "executable": "probe"
+            },
+            "archiveSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "binarySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          "previous": null,
+          "candidate": null,
+          "digest": null
+        }
+      },
+      "error": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000003",
+      "state": "cancelled",
+      "result": null,
+      "error": null
+    }
+  ]
+}

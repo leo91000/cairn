@@ -4,9 +4,11 @@ use super::{metadata, private_dir, relative};
 use crate::error::{Error, Result};
 use serde_json::{Value, json};
 use std::{
+    collections::HashMap,
     io::ErrorKind,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
+    sync::{Arc, LazyLock, Mutex, Weak},
 };
 use tokio::{fs, io::AsyncWriteExt};
 
@@ -124,11 +126,11 @@ pub async fn scan(directory: &Path) -> Result<Vec<Entry>> {
 /// Every visible file of a skill with its content, read once, and the
 /// revision of exactly those contents.
 pub async fn read_all(directory: &Path) -> Result<(String, Vec<(Entry, Vec<u8>)>)> {
-    let _read = ACCESS.read().await;
+    let _read = access(skills_root(directory)).await.read_owned().await;
     read_all_locked(directory).await
 }
 
-async fn read_all_locked(directory: &Path) -> Result<(String, Vec<(Entry, Vec<u8>)>)> {
+pub(super) async fn read_all_locked(directory: &Path) -> Result<(String, Vec<(Entry, Vec<u8>)>)> {
     let entries = scan(directory).await?;
     let mut hasher = blake3::Hasher::new();
     let mut files = Vec::with_capacity(entries.len());
@@ -145,6 +147,7 @@ async fn read_all_locked(directory: &Path) -> Result<(String, Vec<(Entry, Vec<u8
 }
 
 /// A skill's files with their revision.
+#[derive(Clone)]
 pub struct Described {
     pub revision: String,
     pub files: Vec<Value>,
@@ -152,7 +155,7 @@ pub struct Described {
 }
 
 pub async fn describe(directory: &Path) -> Result<Described> {
-    let _read = ACCESS.read().await;
+    let _read = access(skills_root(directory)).await.read_owned().await;
     describe_locked(directory).await
 }
 
@@ -472,9 +475,33 @@ fn swap(staging: &Path, target: &Path, exists: bool) -> Result<()> {
     Ok(())
 }
 
-/// Reads hold one version for their entire walk; saves and removals wait for
-/// those readers before replacing a skill and serialize their revision checks.
-pub(super) static ACCESS: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+/// The lock of one skills root. Reads hold one version for their entire walk;
+/// saves and removals wait for those readers before replacing a skill and
+/// serialize their revision checks. Saves fsync every file, so other roots, such
+/// as another project's skills, keep their own lock instead of waiting for them.
+pub(super) async fn access(root: &Path) -> Arc<tokio::sync::RwLock<()>> {
+    static ROOTS: LazyLock<Mutex<HashMap<PathBuf, Weak<tokio::sync::RwLock<()>>>>> =
+        LazyLock::new(Mutex::default);
+
+    // Different spellings of one existing root must share its lock.
+    let key = fs::canonicalize(root)
+        .await
+        .unwrap_or_else(|_| root.to_path_buf());
+
+    let mut roots = ROOTS.lock().unwrap();
+    if let Some(lock) = roots.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    roots.retain(|_, lock| lock.strong_count() > 0);
+    let lock = Arc::new(tokio::sync::RwLock::new(()));
+    roots.insert(key, Arc::downgrade(&lock));
+    lock
+}
+
+/// The skills root that contains a skill directory.
+fn skills_root(directory: &Path) -> &Path {
+    directory.parent().unwrap_or(directory)
+}
 
 /// How a batch relates to the existing skill.
 pub enum Base<'a> {
@@ -496,19 +523,22 @@ pub async fn save(
     save_authorized(root, skill, base, changes, None).await
 }
 
-pub(crate) type Authorization = (
-    crate::store::Store,
-    Box<dyn FnOnce(&crate::store::Db<'_>) -> Result<()> + Send>,
-);
+type PublicationCheck = Box<dyn FnOnce(&crate::store::Db<'_>, &Described) -> Result<()> + Send>;
+
+pub(crate) struct Authorization<'a> {
+    pub store: crate::store::Store,
+    pub recheck: std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>,
+    pub authorize: PublicationCheck,
+}
 
 pub(crate) async fn save_authorized(
     root: &Path,
     skill: &str,
     base: Base<'_>,
     changes: &[Change],
-    authorization: Option<Authorization>,
+    authorization: Option<Authorization<'_>>,
 ) -> Result<Described> {
-    let _save = ACCESS.write().await;
+    let _save = access(root).await.write_owned().await;
     let directory = root.join(skill);
     let exists = match kind(&directory).await? {
         Some(metadata) if metadata.is_dir() => true,
@@ -550,10 +580,19 @@ pub(crate) async fn save_authorized(
         validate(&staging, skill, before).await?;
         let described = describe_locked(&staging).await?;
         let prepared = staging.clone();
-        if let Some((store, authorize)) = authorization {
+        let publication = described.clone();
+        if let Some(Authorization {
+            store,
+            recheck,
+            authorize,
+        }) = authorization
+        {
+            // External owner/public proofs must be fresh after the lock wait and
+            // staging. Local execution/source revisions remain transactional.
+            recheck.await?;
             store
                 .transaction(move |db| {
-                    authorize(db)?;
+                    authorize(db, &publication)?;
                     swap(&prepared, &directory, exists)
                 })
                 .await?;
@@ -569,4 +608,138 @@ pub(crate) async fn save_authorized(
         let _ = fs::remove_dir_all(&staging).await;
     }
     result
+}
+
+#[cfg(test)]
+mod publication_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    #[tokio::test]
+    async fn archive_of_nested_alias_waits_for_the_skills_root_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".agents/skills");
+        let nested = root.join("real/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("SKILL.md"), b"content").unwrap();
+        std::os::unix::fs::symlink("real/nested", root.join("alias")).unwrap();
+        let config = serde_json::from_value(json!({
+            "dataDir": temp.path().join("data"),
+            "home": temp.path(),
+            "workspaceRoots": [],
+            "publicUrl": "http://localhost",
+            "host": "127.0.0.1",
+            "port": 4310,
+            "codexBin": "codex",
+            "concurrency": 1,
+            "logger": false,
+            "workerEnabled": false,
+            "runnerUrl": ""
+        }))
+        .unwrap();
+        let skills = super::super::Skills {
+            config,
+            mutations: Arc::default(),
+        };
+        let lock = access(&root).await.write_owned().await;
+        let mut archive = Box::pin(skills.archive("alias", None, 0, None));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut archive)
+                .await
+                .is_err()
+        );
+        drop(lock);
+        archive.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn revoked_external_proof_after_lock_wait_leaves_the_bundle_and_metadata_intact() {
+        let root = tempfile::tempdir().unwrap();
+        let content = b"---\nname: review\ndescription: Review changes\n---\nBefore.";
+        let changes = [Change::Write {
+            path: "SKILL.md".into(),
+            bytes: content.to_vec(),
+            executable: None,
+        }];
+        let saved = save(root.path(), "review", Base::Create, &changes)
+            .await
+            .unwrap();
+        let store = crate::store::Store::open(&root.path().join("db")).unwrap();
+        let revoked = Arc::new(AtomicBool::new(false));
+        let lock = access(root.path()).await.write_owned().await;
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let pending = tokio::spawn({
+            let directory = root.path().to_owned();
+            let proof = revoked.clone();
+            let store = store.clone();
+            let revision = saved.revision.clone();
+            async move {
+                let staging_root = directory.clone();
+                let authorization = Authorization {
+                    store,
+                    recheck: Box::pin(async move {
+                        // The proof must be checked after staging, not merely
+                        // before waiting for the shared file lock.
+                        assert!(
+                            std::fs::read_dir(staging_root)
+                                .unwrap()
+                                .flatten()
+                                .any(|entry| entry
+                                    .file_name()
+                                    .to_string_lossy()
+                                    .starts_with(".review.staging-"))
+                        );
+                        if proof.load(Ordering::SeqCst) {
+                            return Err(Error::forbidden("External proof revoked"));
+                        }
+                        Ok(())
+                    }),
+                    authorize: Box::new(|db, _| db.set("published", &json!(true), None)),
+                };
+                started.send(()).unwrap();
+                save_authorized(
+                    &directory,
+                    "review",
+                    Base::Edit(&revision),
+                    &[Change::Write {
+                        path: "SKILL.md".into(),
+                        bytes: b"---\nname: review\ndescription: Review changes\n---\nAfter."
+                            .to_vec(),
+                        executable: None,
+                    }],
+                    Some(authorization),
+                )
+                .await
+            }
+        });
+        waiting.await.unwrap();
+        assert!(!pending.is_finished());
+        revoked.store(true, Ordering::SeqCst);
+        drop(lock);
+        assert_eq!(pending.await.unwrap().err().unwrap().status, 403);
+        assert_eq!(
+            describe(&root.path().join("review"))
+                .await
+                .unwrap()
+                .revision,
+            saved.revision
+        );
+        assert_eq!(
+            fs::read(root.path().join("review/SKILL.md")).await.unwrap(),
+            content
+        );
+        assert!(store.kv("published").await.unwrap().is_none());
+        assert!(
+            !std::fs::read_dir(root.path())
+                .unwrap()
+                .flatten()
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".review.staging-"))
+        );
+    }
 }

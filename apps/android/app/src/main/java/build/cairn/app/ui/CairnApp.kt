@@ -39,6 +39,7 @@ private fun focusedRoute(route: String) =
         route.startsWith("run/") ||
         route.startsWith("fil/run/") ||
         route.startsWith("agents/") ||
+        route.startsWith("coding-agent-configuration/") ||
         route == "search"
 
 internal fun dockSelection(route: String): String =
@@ -204,7 +205,7 @@ private fun CairnAppContent(
     // No installation row above the workspace: each screen's own header shows it, and only the
     // workspace Scaffold (or the offline page below) applies the system bar insets.
     key(installation.id, installation.role, state.session.csrf) {
-        if (!installation.online) {
+        if (!installation.online || installation.updateRequired || state.protocolError != null) {
             var connection by rememberSaveable { mutableStateOf(false) }
             Box(Modifier.fillMaxSize().systemBarsPadding()) {
                 Page {
@@ -212,8 +213,14 @@ private fun CairnAppContent(
                     InstallationHeader(state, openConnection = { connection = true })
                     ConnectionLostNotice(state.connectionLost)
                     Heading(
-                        "Installation hors ligne",
-                        "Les exécutions continuent sur votre installation. Réessayez lorsqu’elle sera connectée.",
+                        if (installation.updateRequired || state.protocolError != null)
+                            "Mise à jour requise"
+                        else "Installation hors ligne",
+                        state.protocolError
+                            ?: if (installation.updateRequired)
+                                "Mettez à jour l’installation avant de l’utiliser avec cette app."
+                            else
+                                "Les exécutions continuent sur votre installation. Réessayez lorsqu’elle sera connectée.",
                     )
                     TextButton(onClick = { vm.perform { refreshInstallations() } }) {
                         Text("Actualiser")
@@ -573,7 +580,29 @@ private fun WorkspaceApp(
                                         openAgents = { nav.navigate("agents") },
                                     )
                                 }
-                            composable("settings") { SettingsScreen(vm, state) }
+                            composable("settings") {
+                                SettingsScreen(vm, state) { nav.navigate(it) }
+                            }
+                            if (state.isOwner)
+                                composable("coding-agent-configuration/{provider}") { entry ->
+                                    CodingAgentConfigurationScreen(
+                                        vm,
+                                        entry.arguments?.getString("provider").orEmpty(),
+                                        null,
+                                    ) {
+                                        nav.popBackStack()
+                                    }
+                                }
+                            if (state.isOwner)
+                                composable("agents/{id}/configuration/{provider}") { entry ->
+                                    CodingAgentConfigurationScreen(
+                                        vm,
+                                        entry.arguments?.getString("provider").orEmpty(),
+                                        entry.arguments?.getString("id"),
+                                    ) {
+                                        nav.popBackStack()
+                                    }
+                                }
                             if (state.isOwner)
                                 composable("authorize") {
                                     AuthorizeScreen(vm, state, sharedUrl, consumedShare)

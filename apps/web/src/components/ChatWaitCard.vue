@@ -16,6 +16,8 @@ import {
   waitCountdown,
   waitDue,
   waited,
+  waitGroup,
+  waitMembers,
   waitOutcome,
   waitProgress,
   waitTarget,
@@ -27,12 +29,14 @@ import {
   CircleX,
   Clock,
   Hourglass,
+  Layers,
   Pause,
   RefreshCw,
   TriangleAlert,
   Workflow,
 } from '../icons'
 import Icon from './Icon.vue'
+import WaitMembers from './WaitMembers.vue'
 
 const props = defineProps<{
   wait: ActivityWait
@@ -69,7 +73,16 @@ const icons: Record<string, IconName> = {
   timer: Hourglass,
   condition: Workflow,
   run: Bot,
+  task: Bot,
+  group: Layers,
 }
+
+// A grouped wait lists its conditions: the final results once it ended, else Cairn's progress.
+const groupMode = computed(() => {
+  const mode = waitGroup(polled.value?.condition)?.mode ?? observation.value?.mode
+  return mode === 'any' || mode === 'all' ? mode : null
+})
+const members = computed(() => groupMode.value ? waitMembers(polled.value, finished.value ? observation.value : undefined) : [])
 
 // Why the agent waits, shown apart from the status: a long one is clamped so the card stays small.
 const reason = computed(() => wakeup.value?.reason ?? props.wait.reason ?? '')
@@ -156,6 +169,9 @@ const view = computed<{
 
 /** A finished card still names what it waited for; a timer's outcome says it already. */
 function awaited() {
+  // A group's outcome counts its results already.
+  if (groupMode.value)
+    return ''
   if (!wakeup.value)
     return observedTarget(observation.value)
   return wakeup.value.condition ? target.value!.short : ''
@@ -185,7 +201,8 @@ const chips = computed(() => !finished.value && !cancelled.value && !state.value
 const checked = computed(() => {
   const next = polled.value?.nextCheckAt
   // Cairn checks a plugin condition only once the turn has ended, and until the deadline.
-  if (!pending.value || !props.live?.settled || waitDue(polled.value!, now.value) || !polled.value?.condition || polled.value.condition.type === 'run_finished')
+  // A group times each of its conditions in its own list.
+  if (!pending.value || !props.live?.settled || waitDue(polled.value!, now.value) || !polled.value?.condition || ['run_finished', 'group'].includes(polled.value.condition.type))
     return ''
   if (polled.value.lastError)
     return ''
@@ -266,6 +283,17 @@ const tones: Record<string, string> = {
       <p v-else-if="!finished && !live && wakeup?.condition" class="m-0! shrink-0 text-2xs text-subtle">
         Deadline {{ wakeTime(wakeup.wakeAt, now) }}
       </p>
+    </div>
+    <div v-if="members.length" class="px-3.5 pb-3 pl-[3.625rem] phone:pl-3.5">
+      <WaitMembers
+        :members="members"
+        :mode="groupMode!"
+        :live="pending"
+        :finished="finished"
+        :timed-out="observation?.state === 'timed_out'"
+        :folded="finished && !current"
+        :now="now"
+      />
     </div>
     <div v-if="pausable" class="-mt-1 flex justify-end px-3 pb-2.5">
       <button

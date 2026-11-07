@@ -1,0 +1,46 @@
+# Accès direct aux blocs Cairn : capacités Cloudflare R2
+
+Recherche documentaire du 28 octobre 2026. Sources officielles Cloudflare uniquement ; aucun identifiant utilisé, aucun test réseau authentifié, aucune mutation. Les propositions ci-dessous restent à qualifier sur le SDK et le compte de test retenus.
+
+## Autorisations disponibles
+
+| Mécanisme | Faits documentés | Conséquence pour Cairn |
+| --- | --- | --- |
+| URL présignée SigV4 | Une opération sur une clé exacte ; GET, HEAD, PUT et DELETE ; durée de 1 seconde à 7 jours ; génération locale avec les credentials S3, sans appel R2 ; réutilisable jusqu'à expiration. Endpoint S3 R2, pas de domaine personnalisé. | Bon candidat pour un lot borné de PUT/GET exacts. Aucun token Cloudflare REST supplémentaire n'est nécessaire. L'URL est un secret bearer, pas un ticket à usage unique. |
+
+Source : [Presigned URLs](https://developers.cloudflare.com/r2/api/s3/presigned-urls/).
+
+Les credentials temporaires limitent l'accès à un bucket et éventuellement une liste de clés exactes ou de préfixes. Deux modes existent : scope prédéfini, ou liste d'actions S3 ; les actions explicites sont actuellement disponibles uniquement avec la signature locale. Un scope `object-read-only` inclut la liste des objets ; préférer `GetObject`/`HeadObject` explicites quand la liste n'est pas nécessaire. Les permissions ne dépassent jamais celles du parent. Source : [Temporary credentials](https://developers.cloudflare.com/r2/api/s3/temporary-credentials/).
+
+- **API Cloudflare** : `POST /accounts/{account_id}/r2/temp-access-credentials`, authentification Bearer, clé parent, bucket, permission et clés/préfixes. Le TTL documenté est plafonné à 604 800 secondes. Cette voie demande l'autorisation de l'API Cloudflare, distincte d'une simple configuration de client S3. Sources : [exemple officiel](https://developers.cloudflare.com/r2/examples/authenticate-r2-temp-credentials/), [référence API](https://developers.cloudflare.com/api/resources/r2/subresources/temporary_credentials/methods/create/).
+- **Signature locale R2** : le manager signe un JWT HS256 avec le secret S3 parent ; le JWT décrit bucket, actions ou scope, chemins et expiration. La clé d'accès parent est réutilisée, le secret temporaire dérive du SHA-256 du JWT, et le session token encode ce JWT. Pas d'appel Cloudflare REST, ni de token Bearer supplémentaire ; l'account ID et l'endpoint restent nécessaires. Le parent reste exclusivement côté manager. Source : [implémentation d'exemple officielle](https://developers.cloudflare.com/r2/examples/authenticate-r2-temp-credentials/).
+
+**Inférence de conception** : présigner reste une interface S3 relativement portable, à tester pour chaque provider. La fabrication locale des JWT est une capacité R2 spécifique ; un SDK S3 consommant des session tokens ne garantit pas qu'un autre provider acceptera ces JWT. Le token parent R2 standard peut être limité à des buckets ; ne pas confondre cela avec le scope objet/préfixe délégué. Source : [Authentication](https://developers.cloudflare.com/r2/api/tokens/).
+
+## Création immuable, taille et intégrité
+
+**Documenté** : `PutObject` accepte `If-None-Match: *`. La condition est atomique au commit : parmi des créations concurrentes d'une clé absente, au plus une réussit et les autres reçoivent `412 PreconditionFailed`. Cela empêche l'écrasement tant que la clé existe. Source : [Conditional operations](https://developers.cloudflare.com/r2/api/s3/extensions/#conditional-operations-in-putobject).
+
+Le tableau de compatibilité annonce `Content-MD5` pour PUT. Il distingue les types de checksum : SHA-256 est annoncé en `COMPOSITE`, pas en `FULL_OBJECT`. Ne pas transposer les paramètres/checksums automatiques d'AWS sans qualification. Source : [S3 API compatibility](https://developers.cloudflare.com/r2/api/s3/api/). R2 documente `BadDigest` lorsque le checksum ne correspond pas au contenu, `MissingContentLength` et `IncompleteBody` pour les problèmes de longueur. Source : [Error codes](https://developers.cloudflare.com/r2/api/error-codes/).
+
+**Proposition non testée** : retourner avec chaque URL PUT les en-têtes obligatoires signés `If-None-Match: *`, `Content-Length` exact du ciphertext et un checksum pris en charge. Vérifier effectivement `X-Amz-SignedHeaders` et les en-têtes/query signés produits par le SDK. Cloudflare démontre explicitement la signature contraignante de `Content-Type`, mais les pages consultées ne démontrent pas de bout en bout cette combinaison condition + longueur + checksum. Source : [signature des en-têtes](https://developers.cloudflare.com/r2/api/s3/presigned-urls/#best-practices). Il faut tester refus d'omission/modification de chaque contrainte, corps incorrect/tronqué, rejeu et deux PUT concurrents. `Content-Type` seul n'authentifie pas les octets ; `UNSIGNED-PAYLOAD` dans une URL n'est pas une empreinte de contenu.
+
+**Limite structurante** : les claims documentés des credentials temporaires contraignent actions et chemins, sans politique imposant checksum, taille ou `If-None-Match`. Un détenteur de `PutObject` peut choisir ses propres en-têtes. Ne pas utiliser ces credentials seuls comme barrière d'immutabilité des clés canoniques partagées. Un préfixe d'upload privé/quarantaine peut être une autre architecture. Source du modèle de claims : [Temporary credentials](https://developers.cloudflare.com/r2/api/s3/temporary-credentials/).
+
+L'ETag multipart dépend des MD5 des parties et de leur nombre ; ce n'est pas le hash du fichier en clair. Source : [ETags](https://developers.cloudflare.com/r2/objects/upload-objects/#etags). **Inférence** : même un checksum correct du ciphertext et un HEAD conforme ne prouvent ni le hash plaintext Cairn, ni le codec, ni l'identité du bloc déchiffré. Conserver une vérification authentifiée du format/chiffrement et du hash plaintext, ou expliciter la confiance accordée au producteur avant promotion en déduplication globale. `Content-MD5` n'est pas un substitut à une preuve cryptographique SHA-256 du bloc plaintext.
+
+## Expiration, révocation et collecte
+
+R2 annonce une cohérence forte globale pour lecture après écriture, suppression et listing. Cependant, un HEAD négatif ne clôt pas un PUT antérieur encore en vol : il peut réussir après ce HEAD. Les lectures S3 évitent le cache des domaines publics. Les changements IAM peuvent prendre jusqu'à une minute. Source : [Consistency model](https://developers.cloudflare.com/r2/reference/consistency/).
+
+La documentation des credentials temporaires annonce l'invalidation de tous les descendants immédiatement après révocation du parent. Elle ne décrit pas de révocation individuelle d'une session ; celle des URL ne fournit pas de mécanisme de révocation par URL. Garder la réserve sur la propagation IAM ci-dessus ; ne pas en déduire un délai de fencing mesuré. Sources : [sécurité des credentials temporaires](https://developers.cloudflare.com/r2/api/s3/temporary-credentials/#security-considerations), [URL bearer](https://developers.cloudflare.com/r2/api/s3/presigned-urls/#security-considerations).
+
+**Inférences de conception** : la retraite d'un nœud bloque immédiatement les nouvelles autorisations manager, mais ne retire pas les capacités R2 déjà délivrées. Le GC doit enregistrer les expirations, arrêter les nouveaux grants et gérer les transferts encore en vol avant suppression définitive ; aucune borne de terminaison de ceux-ci n'est établie par cette recherche. Une URL create-only encore valide peut recréer une clé après son effacement. Utiliser des clés physiques de génération distinctes, des tombstones/quarantaines et une réconciliation d'orphelins ; une simple attente du TTL suivie d'un HEAD négatif ne prouve pas l'absence de recréation future. Les GET déjà accordés doivent aussi être intégrés au contrat de révocation et de disponibilité.
+
+## Granularité proposée et qualification restante
+
+Un bloc d'environ 4 MiB convient à un PUT simple ; la recommandation officielle réserve généralement le multipart aux objets plus gros. Source : [Upload objects](https://developers.cloudflare.com/r2/objects/upload-objects/#choose-an-upload-method). R2 documente environ une écriture/seconde par clé, avec `429` au-delà ; la limite de gestion REST ne s'applique pas aux lectures/écritures S3. Source : [Limits](https://developers.cloudflare.com/r2/platform/limits/).
+
+**Point de départ à mesurer, pas limite R2** : préparer 16–32 grants par appel manager, transférer 4 blocs simultanément et renouveler avant un TTL court, par exemple 5 minutes. Cela borne mémoire, autorisations en vol et reprise ; le nombre de requêtes R2 reste un PUT par bloc. Un credential temporaire portant une liste de clés économise la taille de réponse mais élargit les choix du client. La taille maximale pratique du JWT/liste de chemins n'a pas été établie ici.
+
+Avant implémentation : qualifier signatures et checksums sur le SDK Rust et les clients HTTP effectivement utilisés par les nodes ; résoudre les réponses PUT ambiguës sans considérer `412` comme preuve du bon contenu ; tester expiration pendant transfert et révocation ; reproduire les courses PUT/GC/retraite ; mesurer réseau, CPU de chiffrement et overhead manager contre le relais actuel. Aucune mesure de performance ou garantie de production n'est fournie par cette note.

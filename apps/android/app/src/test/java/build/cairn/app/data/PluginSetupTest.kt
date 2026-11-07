@@ -18,53 +18,69 @@ class PluginSetupTest {
         wireJson.decodeFromJsonElement<PluginManifest>(element)
 
     @Test
-    fun `an older installation's manifest gives the installation's default steps`() {
-        for (element in corpus.getValue("derivation").jsonArray) {
-            val case = element.jsonObject
-            val name = case.getValue("name").jsonPrimitive.content
-            val setup = PluginEntry(manifest = manifest(case.getValue("manifest"))).resolvedSetup()
-            assertEquals(name, case.getValue("effort").jsonPrimitive.contentOrNull, setup.effort)
-            assertEquals(
-                name,
-                wireJson.decodeFromJsonElement<List<SetupStep>>(case.getValue("steps")),
-                setup.steps,
-            )
-        }
-    }
-
-    @Test
-    fun `the steps the installation resolved win, then the manifest's own`() {
+    fun `uses the setup resolved by the installation`() {
         val mail = corpus.getValue("derivation").jsonArray.first().jsonObject
-        val signIn = SetupStep("connect", "credential", "Sign in with Google")
+        val signIn = SetupStep(id = "connect", kind = "credential", title = "Sign in with Google")
         val resolved =
             PluginEntry(
                     manifest = manifest(mail.getValue("manifest")),
-                    setup = PluginSetup("app", "Create an app once.", steps = listOf(signIn)),
+                    setup =
+                        PluginSetup(
+                            effort = "app",
+                            summary = "Create an app once.",
+                            steps = listOf(signIn),
+                        ),
+                    id = "fixture",
+                    builtin = false,
+                    status = "active",
+                    active = null,
+                    versions = emptyList(),
                 )
                 .resolvedSetup()
         assertEquals("Create an app once.", resolved.summary)
         assertEquals(listOf("Sign in with Google"), resolved.steps.map { it.title })
-        assertEquals(PluginSetup(), PluginEntry().resolvedSetup())
-
-        // Without the resolved setup, the manifest's own steps still win over the default ones.
-        val declared =
-            manifest(mail.getValue("manifest"))
-                .copy(setup = PluginSetup(summary = "Once.", steps = listOf(signIn)))
-        val fromManifest = PluginEntry(manifest = declared).resolvedSetup()
-        assertEquals("app", fromManifest.effort)
-        assertEquals("Once.", fromManifest.summary)
-        assertEquals(listOf("connect"), fromManifest.steps.map { it.id })
-        val summaryOnly = declared.copy(setup = PluginSetup(summary = "Once."))
         assertEquals(
-            wireJson.decodeFromJsonElement<List<SetupStep>>(mail.getValue("steps")),
-            PluginEntry(manifest = summaryOnly).resolvedSetup().steps,
+            PluginSetup(),
+            PluginEntry(
+                    id = "fixture",
+                    builtin = false,
+                    status = "active",
+                    active = null,
+                    manifest = null,
+                    setup = null,
+                    versions = emptyList(),
+                )
+                .resolvedSetup(),
         )
+
         // The catalogue announces what connecting takes until the first instance exists.
-        val entry = PluginEntry(id = "mail", active = "1", manifest = declared)
+        val entry =
+            PluginEntry(
+                id = "mail",
+                active = "1",
+                manifest = manifest(mail.getValue("manifest")),
+                setup = PluginSetup(effort = "app", steps = listOf(signIn)),
+                builtin = false,
+                status = "active",
+                versions = emptyList(),
+            )
         assertEquals("app", entry.summary(emptyList()).effort)
         assertEquals(
             null,
-            entry.summary(listOf(PluginConnection(id = "a", pluginId = "mail"))).effort,
+            entry
+                .summary(
+                    listOf(
+                        PluginConnection(
+                            id = "a",
+                            pluginId = "mail",
+                            settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                            status = PluginStatus(),
+                            usage = PluginUsage(),
+                            enabled = true,
+                        )
+                    )
+                )
+                .effort,
         )
     }
 
@@ -131,7 +147,7 @@ class PluginSetupTest {
         assertEquals(
             emptyList<SharedSource>(),
             sharedSources(
-                listOf(SetupStep("connect", "credential", "Sign in")),
+                listOf(SetupStep(id = "connect", kind = "credential", title = "Sign in")),
                 emptyList(),
                 connections,
             ),

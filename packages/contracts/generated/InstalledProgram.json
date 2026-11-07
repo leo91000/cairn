@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "ProgramRelease": {
+      "additionalProperties": false,
+      "properties": {
+        "executable": {
+          "type": "string"
+        },
+        "format": {
+          "pattern": "^(zip|binary)$",
+          "type": "string"
+        },
+        "sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "url",
+        "format",
+        "executable"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "archiveSha256": {
+      "type": "string"
+    },
+    "binarySha256": {
+      "type": "string"
+    },
+    "release": {
+      "$ref": "#/definitions/ProgramRelease"
+    }
+  },
+  "required": [
+    "release",
+    "archiveSha256",
+    "binarySha256"
+  ],
+  "title": "InstalledProgram",
+  "type": "object"
+}

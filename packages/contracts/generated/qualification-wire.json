@@ -1,0 +1,56 @@
+[
+  {
+    "count": 9007199254740991,
+    "enabled": false,
+    "id": "123e4567-e89b-42d3-a456-426614174000",
+    "labels": [
+      "mission",
+      "resume"
+    ],
+    "names": {
+      "run": "mission"
+    },
+    "nullable": null,
+    "result": {
+      "kind": "resumed",
+      "runId": "123e4567-e89b-42d3-a456-426614174000"
+    }
+  },
+  {
+    "count": -9007199254740991,
+    "enabled": true,
+    "id": "123e4567-e89b-42d3-a456-426614174000",
+    "labels": [
+      "mission",
+      "resume"
+    ],
+    "names": {
+      "run": "mission"
+    },
+    "nullable": null,
+    "result": {
+      "kind": "rejected",
+      "response": {
+        "error": "Run already active"
+      }
+    }
+  },
+  {
+    "count": 0,
+    "enabled": false,
+    "id": "123e4567-e89b-42d3-a456-426614174000",
+    "labels": [
+      "mission",
+      "resume"
+    ],
+    "names": {
+      "run": "mission"
+    },
+    "nullable": "present",
+    "omitted": "present",
+    "result": {
+      "kind": "resumed",
+      "runId": "123e4567-e89b-42d3-a456-426614174000"
+    }
+  }
+]

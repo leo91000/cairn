@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "base": {
+      "maxLength": 64,
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "scope": {
+      "type": "string"
+    },
+    "version": {
+      "maxLength": 200,
+      "type": "string"
+    }
+  },
+  "required": [
+    "scope",
+    "name",
+    "version",
+    "base"
+  ],
+  "title": "UpdateSkillSourceInput",
+  "type": "object"
+}

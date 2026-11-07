@@ -15,7 +15,6 @@ import build.cairn.app.data.RunEvent
 import java.io.File
 import kotlinx.serialization.json.*
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Rule
 import org.junit.Test
@@ -32,40 +31,30 @@ class WorkingIndicatorTest {
 
     private fun tool(id: Long, command: String, running: Boolean = false, exit: Int = 0) =
         RunEvent(
-            id,
-            1000 + id,
-            if (running) "item.started" else "item.completed",
-            "",
-            mapOf(
-                "item" to
-                    buildJsonObject {
-                        put("type", "command_execution")
-                        put("command", command)
-                        if (running) put("status", "in_progress") else put("exit_code", exit)
-                    }
-            ),
+            id = id,
+            createdAt = 1000 + id,
+            type = if (running) "item.started" else "item.completed",
+            text = "",
+            payload =
+                kotlinx.serialization.json.JsonObject(
+                    mapOf(
+                        "item" to
+                            buildJsonObject {
+                                put("type", "command_execution")
+                                put("command", command)
+                                if (running) put("status", "in_progress")
+                                else put("exit_code", exit)
+                            }
+                    )
+                ),
         )
 
-    private fun user(id: Long, at: Long) = RunEvent(id, at, "chat.user", "Vérifie les tests")
-
-    private fun waiting(id: Long, at: Long, vararg descriptions: String) =
+    private fun user(id: Long, at: Long) =
         RunEvent(
-            id,
-            at,
-            "turn.waiting",
-            "",
-            mapOf(
-                "type" to JsonPrimitive("turn.waiting"),
-                "tasks" to
-                    buildJsonArray {
-                        descriptions.forEachIndexed { index, description ->
-                            addJsonObject {
-                                put("id", "task-$index")
-                                put("description", description)
-                            }
-                        }
-                    },
-            ),
+            id = id,
+            createdAt = at,
+            type = "chat.user",
+            text = "Vérifie les tests",
         )
 
     @Test
@@ -100,7 +89,12 @@ class WorkingIndicatorTest {
             listOf(
                 tool(1, "./gradlew build", running = true),
                 user(2, 7000),
-                RunEvent(3, 7100, "turn.started", """{"type":"turn.started"}"""),
+                RunEvent(
+                    id = 3,
+                    createdAt = 7100,
+                    type = "turn.started",
+                    text = """{"type":"turn.started"}""",
+                ),
             )
         val step = workingStep(events, "", 3000)
         assertEquals("L’agent travaille", step.title)
@@ -118,68 +112,48 @@ class WorkingIndicatorTest {
     }
 
     @Test
-    fun `an idle agent waiting for background tasks is timed from when it began waiting`() {
-        val events =
-            listOf(
-                user(1, 1000),
-                tool(2, "pnpm test > log 2>&1"),
-                waiting(3, 9000, "Rebuild and run regression test"),
+    fun `presents the server background wait and local fallback labels`() {
+        val notice =
+            build.cairn.contracts.TimelineNotice(
+                code = "backgroundTasks",
+                state = "info",
+                prominent = false,
+                tasks = listOf("Build", " "),
+                taskIds = listOf("one", "two"),
+                waitingSince = 1000,
             )
-        val wait = backgroundWait(events)
-        assertEquals(BackgroundWait(listOf("Rebuild and run regression test"), 9000), wait)
-        assertEquals(
-            WorkingStep(
-                "En attente d’une tâche en arrière-plan",
-                "Rebuild and run regression test",
-                9000,
-                waiting = listOf("Rebuild and run regression test"),
-            ),
-            waitingStep(wait!!),
-        )
-        assertEquals(
-            "En attente de 2 tâches en arrière-plan",
-            waitingStep(BackgroundWait(listOf("Build", "Watch CI"), 1)).title,
-        )
-        // A task without a description still counts.
-        assertEquals(
-            listOf("Tâche en arrière-plan", "Watch CI"),
-            backgroundWait(listOf(waiting(1, 1, " ", "Watch CI")))?.tasks,
-        )
-    }
-
-    @Test
-    fun `task list changes preserve the start of an uninterrupted background wait`() {
-        val events =
-            listOf(
-                user(1, 1000),
-                waiting(2, 2000, "Build", "Watch CI"),
-                RunEvent(3, 2500, "diagnostic", "Reconnecting"),
-                waiting(4, 3000, "Watch CI"),
+        val card =
+            build.cairn.app.data.TimelineCard(
+                id = "notice:3",
+                runId = "run",
+                position = 3,
+                revision = 3,
+                source = 3,
+                turn = 1,
+                attempt = 0,
+                createdAt = 9000,
+                updatedAt = 9000,
+                content = build.cairn.contracts.TimelineContent.C(notice),
             )
-        assertEquals(BackgroundWait(listOf("Watch CI"), 2000), backgroundWait(events))
+        val wait = backgroundWait(listOf(card))
         assertEquals(
-            BackgroundWait(listOf("Next build"), 5000),
-            backgroundWait(events + waiting(5, 4000) + waiting(6, 5000, "Next build")),
+            BackgroundWait(listOf("Build", "Tâche en arrière-plan"), 1000, listOf("one", "two")),
+            wait,
         )
-        assertEquals(
-            BackgroundWait(listOf("Next build"), 5000),
+        assertEquals("En attente de 2 tâches en arrière-plan", waitingStep(wait!!).title)
+        assertNull(
             backgroundWait(
-                events + tool(5, "cat log", running = true) + waiting(6, 5000, "Next build")
-            ),
+                listOf(
+                    card.copy(
+                        content =
+                            build.cairn.contracts.TimelineContent.C(
+                                notice.copy(waitingSince = null)
+                            )
+                    )
+                )
+            )
         )
-    }
-
-    @Test
-    fun `the wait ends once the tasks finish, the agent acts again or the user writes`() {
-        val announced = listOf(user(1, 1000), waiting(2, 2000, "Build"))
         assertNull(backgroundWait(emptyList()))
-        assertNotNull(backgroundWait(announced))
-        assertNull(backgroundWait(announced + waiting(3, 3000)))
-        assertNull(backgroundWait(announced + tool(3, "cat log", running = true)))
-        assertNull(backgroundWait(announced + user(3, 3000)))
-        assertNull(backgroundWait(announced + RunEvent(3, 3000, "turn.started", "")))
-        // Connection diagnostics do not mean the agent is working again.
-        assertNotNull(backgroundWait(announced + RunEvent(3, 3000, "diagnostic", "Reconnecting")))
     }
 
     @Test

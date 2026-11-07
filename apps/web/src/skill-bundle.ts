@@ -404,7 +404,7 @@ export function skillChanges(original: SkillFile[], draft: DraftFile[]): SkillCh
 }
 
 function writeBytes(change: Extract<SkillChange, { op: 'write' }>) {
-  if (change.content === undefined)
+  if (change.content == null)
     return 0
   return change.encoding === 'base64' ? base64Bytes(change.content) : utf8Bytes(change.content)
 }

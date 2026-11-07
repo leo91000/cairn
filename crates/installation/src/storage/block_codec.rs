@@ -1,12 +1,17 @@
 //! Authenticated S3 block representations; content identity always names decoded bytes.
 //! CPU work runs off Tokio's executor, with permits retained even if a caller cancels.
 use super::{digest, metrics::Counter};
+use crate::performance::publication::{self as diagnostic, Stage};
 use crate::{
     error::{Error, Result},
     nodes::snapshots::BLOCK,
     vault::Vault,
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
+use aes_gcm::{
+    Aes256Gcm, KeyInit, Nonce,
+    aead::{Aead, Payload},
+};
+use rand::RngCore;
 use serde_json::{Value, json};
 use std::sync::{
     Arc,
@@ -14,15 +19,14 @@ use std::sync::{
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-const V1: &[u8; 8] = b"CAIRNB\x01\0";
 const V2: &[u8; 8] = b"CAIRNB\x02\0";
+const V3: &[u8; 8] = b"CAIRNB\x03\0";
 const RAW: u8 = 0;
 const ZSTD: u8 = 1;
 const PAYLOAD_HEADER: usize = 5;
 
 /// Eight version bytes, twelve nonce bytes, sixteen tag bytes, codec and u32 length.
 pub const MAX_ENCODED_BYTES: u64 = BLOCK + 8 + 28 + PAYLOAD_HEADER as u64;
-pub(crate) const MAX_LEGACY_BYTES: u64 = BLOCK * 3 + 4096;
 const CPU_CONCURRENCY: usize = 4;
 const READ_CONCURRENCY: usize = 16;
 
@@ -36,7 +40,6 @@ struct Metrics {
     decoded_input_bytes: AtomicU64,
     raw_writes: AtomicU64,
     zstd_writes: AtomicU64,
-    legacy_reads: AtomicU64,
     raw_reads: AtomicU64,
     zstd_reads: AtomicU64,
 }
@@ -70,13 +73,13 @@ impl BlockCodec {
             "decodedInputBytes": self.metrics.decoded_input_bytes.load(Relaxed),
             "rawWrites": self.metrics.raw_writes.load(Relaxed),
             "zstdWrites": self.metrics.zstd_writes.load(Relaxed),
-            "migrationLegacyReads": self.metrics.legacy_reads.load(Relaxed),
             "rawReads": self.metrics.raw_reads.load(Relaxed),
             "zstdReads": self.metrics.zstd_reads.load(Relaxed)
         })
     }
 
     pub async fn encode(&self, vault: Vault, scope: String, bytes: Vec<u8>) -> Result<Vec<u8>> {
+        let diagnostic_admission = diagnostic::start(Stage::CodecAdmission);
         let admission = self.metrics.admission.start();
         let permit = self
             .workers
@@ -85,9 +88,10 @@ impl BlockCodec {
             .await
             .map_err(Error::internal)?;
         admission.finish(0);
+        diagnostic_admission.finish(0);
         let metrics = self.metrics.clone();
 
-        tokio::task::spawn_blocking(move || {
+        diagnostic::blocking(move || {
             let _permit = permit;
             let sample = metrics.encode.start();
             let (encoded, codec) = encode(&vault, &scope, &bytes)?;
@@ -125,6 +129,7 @@ impl BlockCodec {
     /// includes the CPU queue, so completed GETs cannot accumulate unbounded bytes.
     /// It is independent of CPU admission: a blocked GET never occupies a CPU slot.
     pub(crate) async fn read_permit(&self) -> Result<OwnedSemaphorePermit> {
+        let diagnostic_admission = diagnostic::start(Stage::RecoveryAdmission);
         let sample = self.metrics.read_admission.start();
         let permit = self
             .reads
@@ -133,6 +138,7 @@ impl BlockCodec {
             .await
             .map_err(Error::internal)?;
         sample.finish(0);
+        diagnostic_admission.finish(0);
         Ok(permit)
     }
 
@@ -145,43 +151,7 @@ impl BlockCodec {
         encoded: Vec<u8>,
         read_permit: OwnedSemaphorePermit,
     ) -> Result<Vec<u8>> {
-        self.decode_admitted(
-            vault,
-            scope,
-            hash,
-            expected_size,
-            encoded,
-            read_permit,
-            false,
-        )
-        .await
-    }
-
-    /// Old envelopes are accepted only by the blocking startup migration.
-    pub(crate) async fn decode_for_migration(
-        &self,
-        vault: Vault,
-        scope: String,
-        hash: String,
-        expected_size: Option<u64>,
-        encoded: Vec<u8>,
-    ) -> Result<Vec<u8>> {
-        let permit = self.read_permit().await?;
-        self.decode_admitted(vault, scope, hash, expected_size, encoded, permit, true)
-            .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn decode_admitted(
-        &self,
-        vault: Vault,
-        scope: String,
-        hash: String,
-        expected_size: Option<u64>,
-        encoded: Vec<u8>,
-        read_permit: OwnedSemaphorePermit,
-        migration: bool,
-    ) -> Result<Vec<u8>> {
+        let diagnostic_admission = diagnostic::start(Stage::CodecAdmission);
         let admission = self.metrics.admission.start();
         let permit = self
             .workers
@@ -190,26 +160,21 @@ impl BlockCodec {
             .await
             .map_err(Error::internal)?;
         admission.finish(0);
+        diagnostic_admission.finish(0);
         let metrics = self.metrics.clone();
 
-        tokio::task::spawn_blocking(move || {
+        diagnostic::blocking(move || {
             let _permit = permit;
             let _read_permit = read_permit;
             let sample = metrics.decode.start();
-            let result = if migration {
-                decode_for_migration(&vault, &scope, &hash, expected_size, &encoded)
-            } else {
-                decode(&vault, &scope, &hash, expected_size, &encoded)
-            };
-            let (bytes, codec) =
-                result.map_err(|_| Error::conflict("Recovery block integrity check failed."))?;
+            let (bytes, codec) = decode(&vault, &scope, &hash, expected_size, &encoded)
+                .map_err(|_| Error::conflict("Recovery block integrity check failed."))?;
             metrics
                 .decoded_input_bytes
                 .fetch_add(encoded.len() as u64, Relaxed);
             let formats = match codec {
-                Some(ZSTD) => &metrics.zstd_reads,
-                Some(RAW) => &metrics.raw_reads,
-                _ => &metrics.legacy_reads,
+                ZSTD => &metrics.zstd_reads,
+                _ => &metrics.raw_reads,
             };
             formats.fetch_add(1, Relaxed);
             sample.finish(bytes.len());
@@ -235,7 +200,9 @@ fn valid_size(size: u64) -> Result<usize> {
 
 fn encode(vault: &Vault, scope: &str, bytes: &[u8]) -> Result<(Vec<u8>, u8)> {
     valid_size(bytes.len() as u64)?;
+    let sample = diagnostic::start(Stage::Compress);
     let compressed = zstd::bulk::compress(bytes, 3)?;
+    sample.finish(bytes.len());
     let (codec, data) = if compressed.len() < bytes.len() {
         (ZSTD, compressed.as_slice())
     } else {
@@ -246,11 +213,106 @@ fn encode(vault: &Vault, scope: &str, bytes: &[u8]) -> Result<(Vec<u8>, u8)> {
     payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
     payload.extend_from_slice(data);
 
+    let sample = diagnostic::start(Stage::Encrypt);
     let encrypted = vault.encrypt_bytes(&v2_scope(scope), &payload)?;
+    sample.finish(payload.len());
     let mut encoded = Vec::with_capacity(V2.len() + encrypted.len());
     encoded.extend_from_slice(V2);
     encoded.extend_from_slice(&encrypted);
     Ok((encoded, codec))
+}
+
+/// Node-side encoding. The key is restricted to this immutable object incarnation.
+pub(crate) fn encode_direct(
+    key: &[u8; 32],
+    scope: &str,
+    hash: &str,
+    bytes: &[u8],
+) -> Result<Vec<u8>> {
+    valid_size(bytes.len() as u64)?;
+    if !digest::matches(hash, bytes) {
+        return Err(Error::bad(
+            "Direct upload plaintext failed integrity verification.",
+        ));
+    }
+    let sample = diagnostic::start(Stage::Compress);
+    let compressed = zstd::bulk::compress(bytes, 3)?;
+    sample.finish(bytes.len());
+    let (codec, data) = if compressed.len() < bytes.len() {
+        (ZSTD, compressed.as_slice())
+    } else {
+        (RAW, bytes)
+    };
+    let mut payload = vec![codec];
+    payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    payload.extend_from_slice(data);
+    let mut nonce = [0; 12];
+    rand::rng().fill_bytes(&mut nonce);
+    let aad = format!("disk-block:v3:{scope}");
+    let sample = diagnostic::start(Stage::Encrypt);
+    let encrypted = Aes256Gcm::new(key.into())
+        .encrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: &payload,
+                aad: aad.as_bytes(),
+            },
+        )
+        .map_err(|_| Error::internal("Direct storage encryption failed."))?;
+    sample.finish(payload.len());
+    let mut encoded = V3.to_vec();
+    encoded.extend_from_slice(&nonce);
+    encoded.extend_from_slice(&encrypted);
+    Ok(encoded)
+}
+
+pub(crate) fn decode_direct(
+    key: &[u8; 32],
+    scope: &str,
+    hash: &str,
+    size: u64,
+    encoded: &[u8],
+) -> Result<Vec<u8>> {
+    let size = valid_size(size)?;
+    if !encoded.starts_with(V3)
+        || encoded.len() < 8 + 12 + 16 + PAYLOAD_HEADER
+        || encoded.len() as u64 > MAX_ENCODED_BYTES
+    {
+        return Err(Error::bad("Invalid direct storage envelope."));
+    }
+    let aad = format!("disk-block:v3:{scope}");
+    let sample = diagnostic::start(Stage::Decrypt);
+    let payload = Aes256Gcm::new(key.into())
+        .decrypt(
+            Nonce::from_slice(&encoded[8..20]),
+            Payload {
+                msg: &encoded[20..],
+                aad: aad.as_bytes(),
+            },
+        )
+        .map_err(|_| Error::bad("Direct storage authentication failed."))?;
+    sample.finish(encoded.len() - 20);
+    if payload.len() < PAYLOAD_HEADER
+        || u32::from_le_bytes(payload[1..5].try_into().unwrap()) as usize != size
+    {
+        return Err(Error::bad("Direct storage plaintext size mismatch."));
+    }
+    let bytes = match payload[0] {
+        RAW if payload.len() == size + PAYLOAD_HEADER => payload[PAYLOAD_HEADER..].to_vec(),
+        ZSTD => {
+            let sample = diagnostic::start(Stage::Decompress);
+            let bytes = decompress(&payload[PAYLOAD_HEADER..], size)?;
+            sample.finish(bytes.len());
+            bytes
+        }
+        _ => return Err(Error::bad("Invalid direct storage codec.")),
+    };
+    if !digest::matches(hash, &bytes) {
+        return Err(Error::bad(
+            "Direct storage plaintext failed integrity verification.",
+        ));
+    }
+    Ok(bytes)
 }
 
 fn decode(
@@ -259,34 +321,19 @@ fn decode(
     hash: &str,
     expected_size: Option<u64>,
     encoded: &[u8],
-) -> Result<(Vec<u8>, Option<u8>)> {
-    if !encoded.starts_with(V2) || encoded.len() as u64 > MAX_ENCODED_BYTES {
-        return Err(Error::bad(
-            "Unsupported disk block envelope; startup migration required.",
-        ));
-    }
-    decode_for_migration(vault, scope, hash, expected_size, encoded)
-}
-
-fn decode_for_migration(
-    vault: &Vault,
-    scope: &str,
-    hash: &str,
-    expected_size: Option<u64>,
-    encoded: &[u8],
-) -> Result<(Vec<u8>, Option<u8>)> {
+) -> Result<(Vec<u8>, u8)> {
     if let Some(size) = expected_size {
         valid_size(size)?;
     }
-    if encoded.len() as u64 > MAX_LEGACY_BYTES || !digest::valid(hash) {
-        return Err(Error::bad("Invalid disk block envelope."));
+    if !encoded.starts_with(V2) || encoded.len() as u64 > MAX_ENCODED_BYTES || !digest::valid(hash)
+    {
+        return Err(Error::bad("Unsupported disk block envelope."));
     }
-
-    let (bytes, codec) = if let Some(ciphertext) = encoded.strip_prefix(V2) {
-        if encoded.len() as u64 > MAX_ENCODED_BYTES {
-            return Err(Error::bad("Invalid disk block envelope."));
-        }
+    let ciphertext = &encoded[V2.len()..];
+    let (bytes, codec) = {
+        let sample = diagnostic::start(Stage::Decrypt);
         let payload = vault.decrypt_bytes(&v2_scope(scope), ciphertext)?;
+        sample.finish(ciphertext.len());
         let header = payload
             .get(..PAYLOAD_HEADER)
             .ok_or_else(|| Error::bad("Invalid disk block header."))?;
@@ -297,23 +344,15 @@ fn decode_for_migration(
         let data = &payload[PAYLOAD_HEADER..];
         let bytes = match header[0] {
             RAW if data.len() == size => data.to_vec(),
-            ZSTD => decompress(data, size)?,
+            ZSTD => {
+                let sample = diagnostic::start(Stage::Decompress);
+                let bytes = decompress(data, size)?;
+                sample.finish(bytes.len());
+                bytes
+            }
             _ => return Err(Error::bad("Invalid disk block codec or length.")),
         };
-        (bytes, Some(header[0]))
-    } else if let Some(ciphertext) = encoded.strip_prefix(V1) {
-        if encoded.len() as u64 > BLOCK + 36 {
-            return Err(Error::bad("Invalid disk block envelope."));
-        }
-        (vault.decrypt_bytes(scope, ciphertext)?, None)
-    } else {
-        // Historical JSON/base64 records retain their exact scope and digest algorithm.
-        let value: Value = serde_json::from_slice(encoded)?;
-        let plaintext = vault.decrypt(scope, &value)?;
-        let bytes = STANDARD
-            .decode(plaintext.as_str().unwrap_or(""))
-            .map_err(|_| Error::bad("Invalid backup ciphertext."))?;
-        (bytes, None)
+        (bytes, header[0])
     };
 
     valid_size(bytes.len() as u64)?;
@@ -349,7 +388,6 @@ mod tests {
     use super::*;
     use crate::store::Store;
     use rand::{RngCore, SeedableRng};
-    use sha2::{Digest, Sha256};
 
     fn fixture() -> (tempfile::TempDir, Vault) {
         let root = tempfile::tempdir().unwrap();
@@ -367,11 +405,12 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_full_partial_and_tiny_blocks_with_both_digest_algorithms() {
+    fn round_trips_full_partial_and_tiny_blocks() {
         let (_root, vault) = fixture();
         for size in [1, 4096, BLOCK as usize - 13, BLOCK as usize] {
             let bytes = vec![37; size];
-            for hash in [digest::block(&bytes), hex::encode(Sha256::digest(&bytes))] {
+            {
+                let hash = digest::block(&bytes);
                 let (encoded, _) = encode(&vault, "object", &bytes).unwrap();
                 assert!(encoded.len() as u64 <= MAX_ENCODED_BYTES);
                 assert_eq!(
@@ -405,58 +444,6 @@ mod tests {
                 .0,
             random
         );
-    }
-
-    #[test]
-    fn existing_binary_and_json_records_keep_their_exact_scope_and_hash_meaning() {
-        let (_root, vault) = fixture();
-        let bytes = b"historical disk work";
-        let mut binary = V1.to_vec();
-        binary.extend(vault.encrypt_bytes("legacy", bytes).unwrap());
-        let value = vault
-            .encrypt("legacy", &json!(STANDARD.encode(bytes)))
-            .unwrap();
-        let legacy = serde_json::to_vec(&value).unwrap();
-        for encoded in [binary, legacy] {
-            for hash in [digest::block(bytes), hex::encode(Sha256::digest(bytes))] {
-                assert_eq!(
-                    decode_for_migration(&vault, "legacy", &hash, None, &encoded).unwrap(),
-                    (bytes.to_vec(), None)
-                );
-                assert!(decode(&vault, "legacy", &hash, None, &encoded).is_err());
-                assert!(decode_for_migration(&vault, "other", &hash, None, &encoded).is_err());
-            }
-        }
-    }
-
-    #[test]
-    fn reads_golden_legacy_envelopes_created_independently_of_the_current_encoder() {
-        let root = tempfile::tempdir().unwrap();
-        // Public synthetic key; the fixtures were generated with Python AESGCM.
-        std::fs::write(
-            root.path().join("mcp-encryption-key"),
-            (0u8..32).collect::<Vec<_>>(),
-        )
-        .unwrap();
-        let vault = Vault::new(Store::open(root.path()).unwrap(), root.path()).unwrap();
-        let binary = hex::decode("434149524e420100000102030405060708090a0bc56013ea9c8d6dec5e657dfbb3f2e9f42f6ba56faa97ab78ec2db7efd89a134df4b9f55f").unwrap();
-        let legacy = br#""DA0ODxAREhMUFRYXMrDIT9vylI46fQ774Su21LqfLrQFErtqTksfm/npZaU+YrWghDRzzu3Bl5PZgg==""#.to_vec();
-        let bytes = b"historical disk work";
-        for encoded in [binary, legacy] {
-            assert!(decode(&vault, "legacy", &digest::block(bytes), None, &encoded).is_err());
-            assert_eq!(
-                decode_for_migration(
-                    &vault,
-                    "legacy",
-                    &digest::block(bytes),
-                    Some(bytes.len() as u64),
-                    &encoded
-                )
-                .unwrap()
-                .0,
-                bytes
-            );
-        }
     }
 
     #[test]
@@ -510,7 +497,7 @@ mod tests {
             assert!(decode(&vault, "object", &hash, None, &corrupt).is_err());
         }
         let mut downgrade = encoded.clone();
-        downgrade[..8].copy_from_slice(V1);
+        downgrade[..8].copy_from_slice(b"CAIRNB\x01\0");
         assert!(decode(&vault, "object", &hash, None, &downgrade).is_err());
         let mut upgrade = V2.to_vec();
         upgrade.extend(vault.encrypt_bytes("object", &bytes).unwrap());
@@ -561,7 +548,7 @@ mod tests {
                 "object",
                 &hash,
                 None,
-                &vec![0; MAX_LEGACY_BYTES as usize + 1]
+                &vec![0; MAX_ENCODED_BYTES as usize + 1]
             )
             .is_err()
         );
@@ -681,7 +668,7 @@ mod tests {
         runtime.block_on(async {
             let (entered, ready) = tokio::sync::oneshot::channel();
             let (release, wait) = std::sync::mpsc::channel();
-            let occupied = tokio::task::spawn_blocking(move || {
+            let occupied = diagnostic::blocking(move || {
                 entered.send(()).unwrap();
                 wait.recv().unwrap();
             });

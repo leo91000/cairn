@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "NativeModeChange": {
+      "additionalProperties": false,
+      "properties": {
+        "confirm": {
+          "default": false,
+          "type": "boolean"
+        },
+        "mode": {
+          "pattern": "^(protected|administrator)$",
+          "type": "string"
+        },
+        "previewId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "mode"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "change": {
+      "$ref": "#/definitions/NativeModeChange"
+    },
+    "nodeId": {
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "nodeId",
+    "change"
+  ],
+  "title": "ChangeNativeNodeModeInput",
+  "type": "object"
+}

@@ -1,7 +1,7 @@
 //! Trusted host controller. Only the guest interprets its writable filesystem.
 use super::{
     plan::{CHAT_INBOX, ENTRYPOINT, HOME},
-    protocol::{ArchiveFrame, Encoding, GuestRequest, GuestStatus, Reply},
+    protocol::{Encoding, GuestRequest, GuestStatus, Reply},
     wire,
 };
 use crate::{
@@ -9,7 +9,6 @@ use crate::{
     performance::{Operation, StreamMetrics},
     skills::private_dir,
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
@@ -79,7 +78,6 @@ pub async fn assets(state: &Path) -> Result<PathBuf> {
     if !valid_runtime_name(&version) {
         return Err(Error::bad("Invalid VM image version."));
     }
-    crate::storage::fuse::cleanup_stale(state)?;
     crate::storage::transport::cleanup_stale(state).await?;
     // The exclusive controller lock is already held and its previous container's
     // PID namespace is gone. Remove stale jail hard links before old image caches.
@@ -180,33 +178,33 @@ pub(super) async fn call<T: DeserializeOwned>(socket: &Path, request: &GuestRequ
 }
 
 pub(super) async fn status(socket: &Path) -> Result<GuestStatus> {
-    call(socket, &GuestRequest::Status).await
+    let value: Value = call(socket, &GuestRequest::Status).await?;
+    let status: GuestStatus = serde_json::from_value(value).map_err(|_| {
+        Error::bad_gateway("Unsupported guest status; deploy all components at the same version.")
+    })?;
+    if status.version != 1 || status.executable_digest != super::entrypoint::digest().await? {
+        return Err(Error::bad_gateway(
+            "Guest version mismatch; redeploy all components with the same version.",
+        ));
+    }
+    Ok(status)
 }
 
-/// Older guests and pinned images with different runner bytes keep the archive path.
-pub(super) async fn prepare_entrypoint(
-    socket: &Path,
-    state: &Path,
-    status: &GuestStatus,
-) -> Result<()> {
-    if status.entrypoint_reuse
-        && let Ok(digest) = super::entrypoint::digest().await
-    {
-        let reply: Reply = call(
-            socket,
-            &GuestRequest::ReuseEntrypoint {
-                digest: digest.to_owned(),
-            },
-        )
-        .await?;
-        if reply.succeeded() {
-            tracing::info!(target: "cairn_performance", operation = "vm_entrypoint", reused = true);
-            return Ok(());
-        }
+/// Install the matching guest executable into its runtime tmpfs.
+pub(super) async fn prepare_entrypoint(socket: &Path) -> Result<()> {
+    let digest = super::entrypoint::digest().await?;
+    let reply: Reply = call(
+        socket,
+        &GuestRequest::ReuseEntrypoint {
+            digest: digest.to_owned(),
+        },
+    )
+    .await?;
+    if !reply.succeeded() {
+        return Err(Error::bad_gateway("Guest executable mismatch."));
     }
-    tracing::info!(target: "cairn_performance", operation = "vm_entrypoint", reused = false);
-    let target = Path::new(ENTRYPOINT).parent().unwrap().to_str().unwrap();
-    import(socket, &state.join("entrypoint"), target).await
+    tracing::info!(target: "cairn_performance", operation = "vm_entrypoint", reused = true);
+    Ok(())
 }
 
 pub(super) async fn read_reply(stream: &mut BufReader<UnixStream>, message: &str) -> Result<Reply> {
@@ -273,7 +271,6 @@ pub(super) async fn import(socket: &Path, source: &Path, target: &str) -> Result
     };
     let mut timing = import_timing(socket, "vm_import", import_kind);
     let status = status(socket).await?;
-    let binary = status.binary_imports;
     timing.next("connect");
     let mut stream = connect(socket).await?;
     timing.next("prepare_request");
@@ -285,7 +282,7 @@ pub(super) async fn import(socket: &Path, source: &Path, target: &str) -> Result
     let request = GuestRequest::Import {
         target: target.to_owned(),
         replace: empty && !(target == HOME && status.codex_ready),
-        encoding: Encoding::of(binary),
+        encoding: Encoding::Binary,
         trace_id: Some(timing.id().to_owned()),
     };
     timing.next("send_request");
@@ -302,13 +299,12 @@ pub async fn import_project(
 ) -> Result<Value> {
     let mut timing = import_timing(socket, "vm_project_import", "project");
     let status = status(socket).await?;
-    let binary = status.binary_imports;
     timing.next("connect");
     let mut stream = connect(socket).await?;
     let request = GuestRequest::ProjectImport {
         target: target.to_owned(),
         read_only,
-        encoding: Encoding::of(binary),
+        encoding: Encoding::Binary,
         trace_id: Some(timing.id().to_owned()),
     };
     timing.next("send_request");
@@ -365,25 +361,14 @@ async fn transfer(
             break;
         }
         let write_started = Instant::now();
-        if status.binary_imports {
-            wire::write_chunk(stream.get_mut(), &buffer[..count]).await?;
-        } else {
-            let frame = ArchiveFrame::Chunk {
-                data: STANDARD.encode(&buffer[..count]),
-            };
-            wire::write(stream.get_mut(), &frame).await?;
-        }
+        wire::write_chunk(stream.get_mut(), &buffer[..count]).await?;
         metrics.write += write_started.elapsed();
         metrics.bytes += count as u64;
         metrics.chunks += 1;
     }
     metrics.record(timing.id(), "host");
     timing.next("send_end");
-    if status.binary_imports {
-        wire::write_chunk(stream.get_mut(), &[]).await?;
-    } else {
-        wire::write(stream.get_mut(), &ArchiveFrame::End).await?;
-    }
+    wire::write_chunk(stream.get_mut(), &[]).await?;
     timing.next("wait_tar");
     let code = child.wait().await?.code();
     if !matches!(code, Some(0 | 1)) {
@@ -401,12 +386,6 @@ async fn transfer(
 /// Pause all guest CPUs before lease-loss teardown, including non-agent processes.
 pub async fn pause_attempt(state: &Path, attempt: &str) -> Result<()> {
     super::suspension::set_reason(state, attempt, &super::suspension::Reason::Revoked, true)
-        .await
-        .map(|_| ())
-}
-
-pub async fn resume_attempt(state: &Path, attempt: &str) -> Result<()> {
-    super::suspension::set_reason(state, attempt, &super::suspension::Reason::Storage, false)
         .await
         .map(|_| ())
 }
@@ -441,26 +420,6 @@ pub(super) async fn set_vm_state(socket: &Path, status: &str) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(1), request)
         .await
         .map_err(|_| Error::timeout("VM state transition is not yet confirmed."))?
-}
-
-/// Checkpoint transitions must settle before sealing/thawing. Repeat the same
-/// idempotent desired state after a lost response; cancellation still fences
-/// lease loss and shutdown. The monitor uses one bounded request per tick.
-pub async fn settle_attempt(
-    state: &Path,
-    attempt: &str,
-    paused: bool,
-    stop: &tokio_util::sync::CancellationToken,
-) -> Result<()> {
-    super::suspension::settle_reason(
-        state,
-        attempt,
-        &super::suspension::Reason::Storage,
-        paused,
-        stop,
-    )
-    .await
-    .map(|_| ())
 }
 
 #[cfg(test)]
@@ -498,6 +457,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn guest_status_requires_the_current_executable() {
+        for kind in ["missing", "different", "current"] {
+            let root = tempfile::tempdir().unwrap();
+            let socket = root.path().join("vsock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let digest = super::super::entrypoint::digest().await.unwrap();
+            let message = if kind == "missing" {
+                serde_json::json!({ "version": 1 })
+            } else {
+                serde_json::json!({ "version": 1, "executableDigest": if kind == "current" { digest } else { "other" }, "initialized": false, "codexReady": false })
+            };
+            let guest = tokio::spawn(async move {
+                let (mut stream, message_request) = request(&listener).await;
+                assert!(matches!(message_request, GuestRequest::Status));
+                wire::write(stream.get_mut(), &message).await.unwrap();
+            });
+            let result = status(&socket).await;
+            if kind == "current" {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(result.unwrap_err().status, 502);
+            }
+            guest.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn matching_guest_skips_the_archive_entirely() {
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("vsock");
@@ -513,97 +499,9 @@ mod tests {
                 .unwrap();
             // No source directory exists: attempting the archive path would fail.
         });
-        prepare_entrypoint(
-            &socket,
-            root.path(),
-            &GuestStatus {
-                entrypoint_reuse: true,
-                ..GuestStatus::default()
-            },
-        )
-        .await
-        .unwrap();
+        prepare_entrypoint(&socket).await.unwrap();
         guest.await.unwrap();
     }
-
-    #[tokio::test]
-    async fn legacy_and_mismatched_guests_receive_the_current_archive() {
-        for capable in [false, true] {
-            let root = tempfile::tempdir().unwrap();
-            let source = root.path().join("entrypoint");
-            tokio::fs::create_dir(&source).await.unwrap();
-            tokio::fs::write(source.join("cairn"), b"current-controller-runner")
-                .await
-                .unwrap();
-            let socket = root.path().join("vsock");
-            let listener = UnixListener::bind(&socket).unwrap();
-            let guest = tokio::spawn(async move {
-                if capable {
-                    let (mut stream, message) = request(&listener).await;
-                    assert!(matches!(message, GuestRequest::ReuseEntrypoint { .. }));
-                    wire::write(stream.get_mut(), &Reply::ok(false))
-                        .await
-                        .unwrap();
-                }
-                let (mut stream, message) = request(&listener).await;
-                assert!(matches!(message, GuestRequest::Status));
-                wire::write(
-                    stream.get_mut(),
-                    &GuestStatus {
-                        binary_imports: true,
-                        ..GuestStatus::default()
-                    },
-                )
-                .await
-                .unwrap();
-                let (mut stream, message) = request(&listener).await;
-                let GuestRequest::Import {
-                    target, encoding, ..
-                } = message
-                else {
-                    panic!("Expected archive fallback");
-                };
-                assert_eq!(
-                    target,
-                    Path::new(ENTRYPOINT).parent().unwrap().to_str().unwrap()
-                );
-                assert_eq!(encoding, Encoding::Binary);
-                let mut chunk = vec![0; wire::MAX_CHUNK];
-                let mut archive = Vec::new();
-                loop {
-                    let count = wire::read_chunk(&mut stream, &mut chunk).await.unwrap();
-                    if count == 0 {
-                        break;
-                    }
-                    archive.extend_from_slice(&chunk[..count]);
-                }
-                assert!(
-                    archive
-                        .windows(b"current-controller-runner".len())
-                        .any(|bytes| bytes == b"current-controller-runner")
-                );
-                wire::write(stream.get_mut(), &Reply::ok(true))
-                    .await
-                    .unwrap();
-            });
-            prepare_entrypoint(
-                &socket,
-                root.path(),
-                &GuestStatus {
-                    entrypoint_reuse: capable,
-                    ..GuestStatus::default()
-                },
-            )
-            .await
-            .unwrap();
-            guest.await.unwrap();
-        }
-    }
-}
-
-#[cfg(test)]
-mod control_tests {
-    use super::*;
 
     #[tokio::test]
     async fn control_image_replaces_readonly_partial_and_keeps_installed_bytes_immutable() {

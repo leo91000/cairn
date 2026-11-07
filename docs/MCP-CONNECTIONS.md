@@ -92,7 +92,7 @@ commands: command configuration is an owner-level execution capability.
 
 The main agent receives all enabled connections. Other agents can inherit all
 connections or select individual ones under **Agents → Access & execution**.
-Existing restricted agents receive no new MCP access during migration.
+Restricted agents receive only the connections their owner grants.
 
 **Browse tools** chooses the connection-wide tool allowlist; each agent can
 narrow it further. “All tools” includes future tools. An explicit empty list

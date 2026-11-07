@@ -6,8 +6,19 @@ import type {
   SignIn,
   UsageWindow,
 } from '../../../packages/contracts/accounts'
+import type { AccountMutationOutput } from '../../../packages/contracts/generated/typescript/AccountMutationOutput'
 import type { IconName } from './icons'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { cancelCodingAgentAccountSignIn } from '../../../packages/contracts/generated/cancelCodingAgentAccountSignIn'
+import { connectCodingAgentAccount } from '../../../packages/contracts/generated/connectCodingAgentAccount'
+import { deleteCodingAgentAccount } from '../../../packages/contracts/generated/deleteCodingAgentAccount'
+import { listCodingAgentAccounts } from '../../../packages/contracts/generated/listCodingAgentAccounts'
+import { orderCodingAgentAccounts } from '../../../packages/contracts/generated/orderCodingAgentAccounts'
+import { reconnectCodingAgentAccount } from '../../../packages/contracts/generated/reconnectCodingAgentAccount'
+import { refreshCodingAgentAccounts } from '../../../packages/contracts/generated/refreshCodingAgentAccounts'
+import { replaceCodingAgentAccount } from '../../../packages/contracts/generated/replaceCodingAgentAccount'
+import { replaceCodingAgentAccountKey } from '../../../packages/contracts/generated/replaceCodingAgentAccountKey'
+import { submitCodingAgentAccountCode } from '../../../packages/contracts/generated/submitCodingAgentAccountCode'
 import { api, notify } from './api'
 import { BrandClaude, BrandOpenAI, BrandOpenCode } from './icons'
 
@@ -88,6 +99,11 @@ export function resetsIn(seconds: number | null | undefined, now = Date.now()) {
 }
 
 /** Accounts of every coding agent and the sign-in in progress, kept current while mounted. */
+function requireCompleted(result: AccountMutationOutput) {
+  if (result.kind === 'humanRequired')
+    throw new Error(result.message)
+}
+
 export function useAccounts() {
   const accounts = ref<Account[]>([])
   const signIn = ref<SignIn | null>(null)
@@ -111,7 +127,7 @@ export function useAccounts() {
 
   async function load() {
     try {
-      apply(await api<Accounts>('/accounts'))
+      apply(await listCodingAgentAccounts(api, {}))
       error.value = ''
     }
     catch (e) {
@@ -146,7 +162,6 @@ export function useAccounts() {
     }
   }
 
-  const json = (method: string, body?: object): RequestInit => ({ method, ...(body ? { body: JSON.stringify(body) } : {}) })
   const refreshOnFocus = () => void poll()
   onMounted(() => {
     void poll()
@@ -164,24 +179,70 @@ export function useAccounts() {
     loaded,
     busy,
     error,
-    refresh: () => action(async () => apply(await api<Accounts>('/accounts/refresh', json('POST')))),
-    add: (provider: Provider, name: string) => action(() => api<SignIn>('/accounts', json('POST', { provider, name }))),
-    connectKey: (provider: Provider, name: string, modelProvider: string, apiKey: string, id?: string) => action(() => api<Account>(id ? `/accounts/${id}/api-key` : '/accounts', json('POST', {
-      provider,
-      name,
-      modelProvider,
-      apiKey,
-    }))),
-    reconnect: (id: string) => action(() => api<SignIn>(`/accounts/${id}/sign-in`, json('POST'))),
+    refresh: () => action(async () => {
+      const result = await refreshCodingAgentAccounts(api, {})
+      if (result.kind === 'humanRequired')
+        throw new Error(result.message)
+      apply(result.overview)
+    }),
+    add: (provider: Provider, name: string) => action(async () => {
+      const result = await connectCodingAgentAccount(api, {
+        provider,
+        name,
+        modelProvider: null,
+        apiKey: null,
+      })
+      if (result.kind === 'signIn')
+        return result.signIn
+      throw new Error(result.kind === 'connected' ? 'Connect this account in Connections with an owner session.' : result.message)
+    }),
+    connectKey: (provider: Provider, name: string, modelProvider: string, apiKey: string, id?: string) => action(async () => {
+      const result = id
+        ? await replaceCodingAgentAccountKey(api, { accountId: id, modelProvider, apiKey })
+        : await connectCodingAgentAccount(api, {
+            provider,
+            name,
+            modelProvider,
+            apiKey,
+          })
+      if (result.kind === 'connected')
+        return result.account
+      throw new Error(result.kind === 'signIn' ? 'Connect this account in Connections with an owner session.' : result.message)
+    }),
+    reconnect: (id: string) => action(async () => {
+      const result = await reconnectCodingAgentAccount(api, { accountId: id })
+      if (result.kind === 'signIn')
+        return result.signIn
+      throw new Error(result.kind === 'connected' ? 'Reconnect this account in Connections with an owner session.' : result.message)
+    }),
     submitCode: (code: string) => action(async () => {
-      await api('/accounts/sign-in/code', json('POST', { code }))
+      requireCompleted(await submitCodingAgentAccountCode(api, { code }))
       return true
     }),
-    cancel: () => action(() => api('/accounts/sign-in', json('DELETE'))),
-    update: (id: string, patch: Partial<Pick<Account, 'name' | 'enabled' | 'maxConcurrentRuns'>>) => action(() => api<Account>(`/accounts/${id}`, json('PATCH', patch))),
-    reorder: (provider: Provider, ids: string[]) => action(async () => apply(await api<Accounts>('/accounts/order', json('POST', { provider, ids })))),
+    cancel: () => action(async () => requireCompleted(await cancelCodingAgentAccountSignIn(api, {}))),
+    update: (id: string, patch: Partial<Pick<Account, 'name' | 'enabled' | 'maxConcurrentRuns'>>) => action(() => {
+      const account = accounts.value.find(account => account.id === id)
+      if (!account)
+        throw new Error('Reload the account and try again.')
+      return replaceCodingAgentAccount(api, {
+        accountId: id,
+        revision: account.revision,
+        settings: {
+          name: account.name,
+          enabled: account.enabled,
+          maxConcurrentRuns: account.maxConcurrentRuns,
+          ...patch,
+        },
+      })
+    }),
+    reorder: (provider: Provider, ids: string[]) => action(async () => {
+      const result = await orderCodingAgentAccounts(api, { provider, ids })
+      if (result.kind === 'unsupported')
+        throw new Error(result.message)
+      apply(result.overview)
+    }),
     remove: (id: string) => action(async () => {
-      await api(`/accounts/${id}`, json('DELETE'))
+      requireCompleted(await deleteCodingAgentAccount(api, { accountId: id }))
       return true
     }),
   }

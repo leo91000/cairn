@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ApiKeyProvider": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "kind": {
+          "const": "available",
+          "type": "string"
+        },
+        "providers": {
+          "items": {
+            "$ref": "#/definitions/ApiKeyProvider"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "providers"
+      ],
+      "type": "object"
+    },
+    {
+      "properties": {
+        "capability": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "unsupported",
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "provider",
+        "capability",
+        "message"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "AccountProvidersOutput"
+}

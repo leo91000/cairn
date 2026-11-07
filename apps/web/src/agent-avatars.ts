@@ -1,5 +1,6 @@
 import type { Agent } from '../../../packages/contracts/contracts'
 import { onBeforeUnmount, watch } from 'vue'
+import { listAgents } from '../../../packages/contracts/generated/listAgents'
 import { api, state } from './api'
 
 export function updateAgentPortrait(agent: Agent) {
@@ -22,7 +23,7 @@ export function useAgentPortraits() {
     loading = true
     const before = new Map(state.agents.map(agent => [agent.id, agent.avatar]))
     try {
-      const agents = await api<Agent[]>('/agents')
+      const agents = await (await listAgents(api, {})).agents
       if (!stopped && state.authenticated) {
         for (const agent of agents) {
           if (state.agents.find(item => item.id === agent.id)?.avatar === before.get(agent.id))

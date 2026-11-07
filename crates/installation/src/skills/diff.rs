@@ -1,5 +1,5 @@
 //! Line diffs for previewing a skill source update.
-use serde_json::{Value, json};
+use cairn_contracts::SkillDiffLine;
 
 /// Files longer than this are reported as changed without lines.
 pub const MAX_LINES: usize = 2000;
@@ -14,7 +14,7 @@ enum Kind {
 
 /// Unified line diff from `old` to `new`, keeping three lines of context
 /// around changes. Longer unchanged runs become one `gap` line.
-pub fn lines(old: &str, new: &str) -> Option<Vec<Value>> {
+pub fn lines(old: &str, new: &str) -> Option<Vec<SkillDiffLine>> {
     let old = old.lines().collect::<Vec<_>>();
     let new = new.lines().collect::<Vec<_>>();
     if old.len() > MAX_LINES || new.len() > MAX_LINES {
@@ -76,7 +76,7 @@ pub fn lines(old: &str, new: &str) -> Option<Vec<Value>> {
     Some(collapse(&edits))
 }
 
-fn collapse(edits: &[(Kind, &str)]) -> Vec<Value> {
+fn collapse(edits: &[(Kind, &str)]) -> Vec<SkillDiffLine> {
     let changed = edits
         .iter()
         .enumerate()
@@ -105,7 +105,10 @@ fn collapse(edits: &[(Kind, &str)]) -> Vec<Value> {
             Kind::Added => "added",
             Kind::Removed => "removed",
         };
-        result.push(json!({ "kind": kind, "text": text }));
+        result.push(SkillDiffLine {
+            kind: kind.to_owned(),
+            text: (*text).to_owned(),
+        });
     }
     if skipped > 0 {
         result.push(gap(skipped));
@@ -113,26 +116,29 @@ fn collapse(edits: &[(Kind, &str)]) -> Vec<Value> {
     result
 }
 
-fn gap(count: usize) -> Value {
+fn gap(count: usize) -> SkillDiffLine {
     let unit = if count == 1 { "line" } else { "lines" };
-    json!({ "kind": "gap", "text": format!("{count} unchanged {unit}") })
+    SkillDiffLine {
+        kind: "gap".to_owned(),
+        text: format!("{count} unchanged {unit}"),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn render(lines: &[Value]) -> Vec<String> {
+    fn render(lines: &[SkillDiffLine]) -> Vec<String> {
         lines
             .iter()
             .map(|line| {
-                let mark = match line["kind"].as_str().unwrap() {
+                let mark = match line.kind.as_str() {
                     "added" => "+",
                     "removed" => "-",
                     "gap" => "~",
                     _ => " ",
                 };
-                format!("{mark}{}", line["text"].as_str().unwrap())
+                format!("{mark}{}", line.text)
             })
             .collect()
     }

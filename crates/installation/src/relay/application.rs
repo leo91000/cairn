@@ -108,17 +108,27 @@ impl DirectTraffic {
                                 continue;
                             };
 
+                            // Direct clients hand stream chunks to readers verbatim, without an
+                            // HTTP decoder. A client predating this route's classification may
+                            // still ask for gzip, so streamed bodies always use identity.
+                            if stream {
+                                request
+                                    .headers
+                                    .retain(|(name, _)| !name.eq_ignore_ascii_case("accept-encoding"));
+                            }
+
                             // Only the verified lease supplies identity and capabilities.
                             request.account_id.clone_from(&lease.claims.account_id);
                             request.role = lease.claims.role;
                             request.mcp_scopes = None;
+                            request.mcp_credential_digest = None;
                             request.public_artifact = None;
 
                             let credit = Arc::new(Semaphore::new(0));
-                            let streaming = Some(StreamOutput {
+                            let streaming = StreamOutput {
                                 frames: output.clone(),
                                 credit: credit.clone(),
-                            });
+                            };
                             let router = router.clone();
                             let output = output.clone();
                             let reply_id = id.clone();

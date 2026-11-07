@@ -5,13 +5,23 @@ use std::{path::Path, sync::LazyLock};
 pub const ACTIVITY_DETAIL_LIMIT: usize = 16 * 1024;
 const NOTICE: &str = "Details shortened: arguments and output were omitted.";
 
+/// Items whose text is what the user reads in the conversation: an answer, or the
+/// approach a plan turn proposes for approval. Unlike tool activity, they are never
+/// replaced by a preview.
+pub fn conversation_item(event: &Value) -> bool {
+    matches!(
+        event["item"]["type"].as_str(),
+        Some("agent_message" | "proposed_plan")
+    )
+}
+
 /// Serialize UI activity before it crosses the guest transport. The native
 /// session retains full tool results; the manager already stores these previews.
 pub fn event_line(event: &Value) -> Vec<u8> {
     let mut bytes = event.to_string().into_bytes();
     let activity = text(event, "type").starts_with("item.")
         && event["item"].is_object()
-        && event["item"]["type"] != "agent_message";
+        && !conversation_item(event);
     if activity && bytes.len() > ACTIVITY_DETAIL_LIMIT {
         bytes = compact_activity_preview(event, None)
             .to_string()
@@ -203,6 +213,9 @@ fn compact_activity_preview(event: &Value, secrets: Option<&[String]>) -> Value 
         "name",
         "agent_type",
         "background",
+        "run_id",
+        "parent_task_id",
+        "resumed",
     ] {
         if let Some(value) = source
             .get(key)
@@ -326,6 +339,11 @@ fn activity_preview(value: &Value, limit: usize, secrets: Option<&[String]>) -> 
     format!("{}…", &text[..text.floor_char_boundary(limit)]).into()
 }
 
+/// Codex's and Claude Code's report that the account's usage limit was reached.
+pub(crate) fn exhausted_message(message: &str) -> bool {
+    EXHAUSTED.is_match(message.trim())
+}
+
 pub fn exhausted(event: &Value) -> bool {
     if event["willRetry"] == true || !["turn.failed", "error"].contains(&text(event, "type")) {
         return false;
@@ -340,10 +358,16 @@ pub fn exhausted(event: &Value) -> bool {
         || EXHAUSTED.is_match(text(error, "message"))
 }
 
-/// Compatibility entrypoint for the legacy Codex exec protocol.
-pub fn args(run: &Value, output: &str, session: Option<&str>) -> Vec<String> {
-    crate::coding_agent::codex_args(run, output, session)
-}
+/// The rule that sets chat turns apart from scheduled work.
+pub const INTERACTIVE: &str = "This is an interactive chat. Use cairn_workspace.ask_questions when \
+    clarification is useful; native question tools are disabled. Supply a stable UUID requestId for retries. Questions can use single or multiple choice, bounds and recommendations without preselection. Answers distinguish selected options from a free-text comment. The tool returns immediately; durable questions let you continue independent \
+    work while the user considers the options; a suggested answer is never user \
+    approval. Follow the latest user instructions and do not treat a question \
+    as authorization to publish changes. Use cairn_workspace.pending_questions and \
+    cairn_workspace.withdraw_question to retire a question that became unnecessary \
+    or was answered in ordinary chat. Withdrawal never supplies approval. A completed \
+    outcome retires unanswered questions at the end of the turn; report needs_input \
+    when an answer is still required.";
 
 pub fn prompt(run: &Value, chat: bool) -> String {
     // Set at launch from the plugins granting this run's agent (`agents::with_instructions`).
@@ -366,21 +390,16 @@ pub fn prompt(run: &Value, chat: bool) -> String {
             cairn_workspace.report_outcome with completed, blocked, or needs_input, a \
             concrete reason, and validation/delivery evidence. A successful process or \
             local commit is not a completed request when an authorized push, CI check, \
-            or release remains blocked. Never include credentials in evidence. Do not \
+            or release remains blocked. Use waitingOn external only for work already \
+            underway that can finish without intervention. Missing credentials, \
+            permissions or broken run access require repair by the user or requester; \
+            they are not outside checks. Never include credentials in evidence. Do not \
             present VM-local paths as downloadable links."
     } else {
         ""
     };
     let interaction = if chat {
-        "This is an interactive chat. Use native user-input questions when \
-            clarification is useful. Nonblocking questions let you continue independent \
-            work while the user considers the options; a suggested answer is never user \
-            approval. Follow the latest user instructions and do not treat a question \
-            as authorization to publish changes. Use cairn_workspace.pending_questions and \
-            cairn_workspace.withdraw_question to retire a question that became unnecessary \
-            or was answered in ordinary chat. Withdrawal never supplies approval. A completed \
-            outcome retires unanswered questions at the end of the turn; report needs_input \
-            when an answer is still required."
+        INTERACTIVE
     } else {
         "This unattended task cannot answer clarification questions; report a \
             concrete blocker if required information is missing."
@@ -391,7 +410,7 @@ pub fn prompt(run: &Value, chat: bool) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     let skills = skill_index(&run["snapshot"]["skills"]);
-    let storage = if crate::execution::runs_natively(run) {
+    let storage = if crate::native::policy::native(&run["snapshot"]["agent"]) {
         "The managed /tmp is cleared on every execution attempt. Keep SDKs and build caches \
             (including Cargo target directories) in the managed home or workspace, never in /tmp. \
             Moving a large directory across filesystems copies it before removing the source \
@@ -399,11 +418,11 @@ pub fn prompt(run: &Value, chat: bool) -> String {
     } else {
         ""
     };
-    let tooling = if crate::execution::runs_natively(run)
+    let tooling = if crate::native::policy::native(&run["snapshot"]["agent"])
         && run["nativeMode"]["mode"] == "administrator"
     {
         "Tooling: This execution uses Native administrator on the real Linux host as an ordinary user with unrestricted passwordless sudo. The owner entrusted this machine to admitted conversations. Keep the managed HOME/workspace for durable work. System changes persist on this node and may affect other work. Respect the user's scope; this mode does not grant new remote Cairn accounts or resources. Root can read credentials present on this host and alter or escape its supervisor, cooperative budgets, leases and cancellation. Do not expose credentials. Returning to protected does not clean or restore this machine."
-    } else if crate::execution::runs_natively(run) {
+    } else if crate::native::policy::native(&run["snapshot"]["agent"]) {
         "Tooling: This execution runs on a native Linux node using its installed GPU driver. \
             Cairn supplies the pinned coding engines, Node.js and GitHub CLI. Other tools and \
             project SDKs depend on this node; check availability before using them. Respect \
@@ -489,6 +508,12 @@ fn project_line(run: &Value, project: &Value) -> String {
         .map_or("", |w| text(w, "path"));
     if !path.is_empty() {
         format!("- {name} ({id}): {path}")
+    } else if run["isolated"] == true && crate::chats::planning(run) {
+        format!(
+            "- {name} ({id}): not loaded; Plan turns cannot import project files into the \
+            workspace. Include opening this project in your plan; it becomes available \
+            after the user starts implementation."
+        )
     } else if run["isolated"] == true {
         format!(
             "- {name} ({id}): not loaded; call cairn_workspace.open_project \
@@ -539,20 +564,56 @@ pub fn chat_plan(
     let mut plan = json!({
         "provider": provider,
         "execution": run["chatExecution"],
-        "instructions": prompt(&context, true),
+        "environmentExpiredAt": run["environmentExpiredAt"],
+        "instructions": prompt(&context, interactive(run)),
         "inputDirectory": input_directory,
         "output": prepared["output"],
         "cwd": prepared["cwd"],
         "model": agent["model"],
         "reasoning": agent["reasoning"],
+        "speed": agent["speed"],
         "sandbox": policy(agent)["sandbox"],
         "writableRoots": roots,
     });
     crate::store::merge(&mut plan, &provider.adapter().chat_mcp(mcp));
+    crate::coding_agent_configuration::apply(&mut plan, &run["snapshot"]["nativeConfiguration"])?;
+    // The engine sandbox of a plan turn is read-only whatever the agent's access.
+    // Adapters older than plan turns still enforce this field.
+    if crate::chats::planning(run) {
+        plan["planning"] = true.into();
+        plan["sandbox"] = "read-only".into();
+    }
+    if run["chatExecution"]["afterPlan"] == true {
+        plan["afterPlan"] = true.into();
+    }
     if let Some(session) = session {
         plan["sessionId"] = session.into();
     }
     Ok(plan)
+}
+
+/// Only chat turns can answer questions. Scheduled work also uses the chat
+/// protocol, without a conversation to deliver them to.
+fn interactive(run: &Value) -> bool {
+    run["chatExecution"].is_object()
+}
+
+/// The first turn of scheduled work sent through the chat protocol. The
+/// instructions already carry the Cairn frame, so a fresh turn sends only the
+/// task brief; a resumed turn sends its resume prompt. The brief follows a
+/// fixed lead-in: Claude Code runs a turn that starts with a command such as
+/// `/clear` as that command, and unattended work has nobody to notice.
+pub fn scheduled_turn(run: &Value, resume_prompt: Option<&str>) -> Value {
+    let turn = resume_prompt.map_or_else(
+        || format!("Task brief:\n{}", text(&run["snapshot"]["task"], "prompt")),
+        str::to_owned,
+    );
+    json!({
+        "messageId": run["missionTurnId"].as_str().unwrap_or_else(|| text(run, "id")),
+        "text": turn,
+        "recovery": resume_prompt.is_some(),
+        "attachments": [],
+    })
 }
 
 /// One line per selected skill: name, description and `SKILL.md` path. The
@@ -563,13 +624,10 @@ fn skill_index(skills: &Value) -> String {
         .into_iter()
         .flatten()
         .map(|skill| {
-            let description = match text(skill, "description") {
-                "" => crate::skills::parse(text(skill, "content"))
-                    .map(|parsed| text(&parsed, "description").to_owned())
-                    .unwrap_or_default(),
-                description => description.to_owned(),
-            };
-            let description = description.split_whitespace().collect::<Vec<_>>().join(" ");
+            let description = text(skill, "description")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
             format!(
                 "- {}: {description}\n  {}",
                 text(skill, "name"),
@@ -587,7 +645,7 @@ pub(crate) fn native_chat_privileges(chat: &mut Value, run: &Value, mode: &Value
     context["nativeMode"] = mode.clone();
     context["snapshot"]["task"]["prompt"] = "".into();
     let notice = native_privileges(mode);
-    chat["instructions"] = format!("{notice}\n\n{}", prompt(&context, true)).into();
+    chat["instructions"] = format!("{notice}\n\n{}", prompt(&context, interactive(run))).into();
     chat["execution"]["text"] = format!("{notice}\n\n{}", text(&chat["execution"], "text")).into();
 }
 
@@ -689,12 +747,97 @@ mod tests {
     fn selected_skills_list_paths_instead_of_contents() {
         let skills = json!([
             { "name": "review", "description": "Review a\n  change.", "path": "/home/node/.agents/skills/0/review/SKILL.md", "content": "body" },
-            { "name": "legacy", "path": "/skills/1/legacy/SKILL.md", "content": "---\nname: legacy\ndescription: Older snapshot\n---\nBody" },
         ]);
         assert_eq!(
             skill_index(&skills),
-            "- review: Review a change.\n  /home/node/.agents/skills/0/review/SKILL.md\n- legacy: Older snapshot\n  /skills/1/legacy/SKILL.md"
+            "- review: Review a change.\n  /home/node/.agents/skills/0/review/SKILL.md"
         );
+    }
+
+    #[test]
+    fn chat_protocol_runs_receive_one_frame_matching_their_interaction() {
+        let guest = "/home/node/.agents/skills/0/review/SKILL.md";
+        let host = "/installation/skills/review/SKILL.md";
+        for provider in ["codex", "claude", "opencode"] {
+            let mut run = json!({
+                "id": "run", "isolated": true, "missionTurnId": "turn",
+                "pluginInstructions": "Mail: never print credentials.",
+                "snapshot": {
+                    "agent": { "provider": provider, "instructions": "Agent rules." },
+                    "task": { "prompt": "Check the deployment." },
+                    "skills": [{ "name": "review", "description": "Review a change.", "path": host }],
+                },
+            });
+            let prepared = json!({
+                "isolated": true,
+                "output": "/run/output/result.md",
+                "skills": [{ "name": "review", "description": "Review a change.", "path": guest }],
+            });
+            let plan = chat_plan(&run, &prepared, Path::new("/tmp"), &json!({}), None).unwrap();
+            let instructions = text(&plan, "instructions");
+            for expected in [
+                "Agent rules.",
+                "Mail: never print credentials.",
+                guest,
+                "This unattended task",
+            ] {
+                assert!(instructions.contains(expected), "{provider}: {expected}");
+            }
+            assert!(!instructions.contains(host));
+            assert!(!instructions.contains("This is an interactive chat"));
+
+            let turn = scheduled_turn(&run, None);
+            assert_eq!(turn["messageId"], "turn");
+            assert_eq!(turn["text"], "Task brief:\nCheck the deployment.");
+            assert_eq!(turn["recovery"], false);
+            let resumed = scheduled_turn(&run, Some("Continue."));
+            assert_eq!(resumed["text"], "Continue.");
+            assert_eq!(resumed["recovery"], true);
+
+            run["chatExecution"] = json!({ "messageId": "message", "text": "Hello" });
+            let plan = chat_plan(&run, &prepared, Path::new("/tmp"), &json!({}), None).unwrap();
+            let instructions = text(&plan, "instructions");
+            assert!(instructions.contains("This is an interactive chat"));
+            assert!(instructions.contains("Mail: never print credentials."));
+            assert!(!instructions.contains("This unattended task"));
+            assert_eq!(plan["execution"]["text"], "Hello");
+        }
+    }
+
+    #[test]
+    fn native_chat_protocol_runs_keep_the_frame_of_their_interaction() {
+        for provider in ["codex", "claude", "opencode"] {
+            let mut run = json!({
+                "id": "run",
+                "isolated": true,
+                "pluginInstructions": "Mail: never print credentials.",
+                "snapshot": {
+                    "agent": { "provider": provider, "access": { "backend": "native" } },
+                    "task": { "prompt": "Check the deployment." },
+                },
+            });
+            let mode = json!({ "mode": "protected" });
+            let mut chat = json!({
+                "execution": { "text": "Task brief:\nCheck the deployment." },
+            });
+            native_chat_privileges(&mut chat, &run, &mode);
+            let instructions = text(&chat, "instructions");
+            assert!(instructions.contains("Mail: never print credentials."));
+            assert!(instructions.contains("This unattended task"), "{provider}");
+            assert!(!instructions.contains("This is an interactive chat"));
+            assert!(!instructions.contains("Check the deployment."));
+
+            run["chatExecution"] = json!({ "messageId": "message", "text": "Hello" });
+            let mut chat = json!({ "execution": { "text": "Hello" } });
+            native_chat_privileges(&mut chat, &run, &mode);
+            let instructions = text(&chat, "instructions");
+            assert!(instructions.contains("Mail: never print credentials."));
+            assert!(
+                instructions.contains("This is an interactive chat"),
+                "{provider}"
+            );
+            assert!(!instructions.contains("This unattended task"));
+        }
     }
 
     #[test]

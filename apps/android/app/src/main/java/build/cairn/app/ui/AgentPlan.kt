@@ -150,7 +150,7 @@ internal fun PlanChange.label(): String =
  * message, while some of it remains.
  */
 internal fun currentPlan(timeline: List<TimelineEntry>): AgentPlan? {
-    val start = timeline.indexOfLast { it.message && it.events.singleOrNull()?.type == "chat.user" }
+    val start = timeline.indexOfLast { it.message && it.card?.userMessage == true }
     val latest = timeline.indexOfLast { it.plan != null || it.planUpdate != null }
     if (latest < 0 || latest < start) return null
     val entry = timeline[latest]

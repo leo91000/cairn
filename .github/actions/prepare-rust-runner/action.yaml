@@ -1,0 +1,8 @@
+name: Prepare disposable Rust test runner disk
+description: Reclaim fixed unused platform SDKs and require capacity before Rust test compilation.
+runs:
+  using: composite
+  steps:
+    - name: Prepare disk on an approved GitHub-hosted Ubuntu test runner
+      shell: bash
+      run: node scripts/prepare-rust-runner.mjs

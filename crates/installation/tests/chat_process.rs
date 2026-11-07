@@ -1,6 +1,6 @@
 mod common;
 
-use cairn_installation::{chat_process, config::Config, skills::atomic_write};
+use cairn_installation::{chat_process, config::Config, skills::atomic_write, validation::text};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -38,6 +38,225 @@ fn prepare(root: &TempDir) -> PathBuf {
     let home = root.path().join("codex");
     std::fs::create_dir(&home).unwrap();
     home
+}
+
+#[tokio::test]
+async fn fine_text_deltas_do_not_exhaust_the_native_output_budget() {
+    check_text_stream_output_budget(false).await;
+}
+
+#[tokio::test]
+async fn ignored_provider_and_foreign_thread_notifications_do_not_force_text_snapshots() {
+    check_text_stream_output_budget(true).await;
+}
+
+async fn check_text_stream_output_budget(ignored_noise: bool) {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use cairn_installation::{microvm::protocol::Event, run_output};
+
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let answer = "x".repeat(24_000);
+    std::fs::write(
+        home.join("fixture-text-stream.json"),
+        json!({ "text": answer, "deltaCharacters": 4, "ignoredNoise": ignored_noise }).to_string(),
+    )
+    .unwrap();
+    let config = config(&root);
+    let turn = plan(&root, "fixture:bounded-text-stream");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, turn, tx, CancellationToken::new()).await
+    });
+    let mut encoded_bytes = 0;
+    let mut snapshots = 0;
+    let mut completed_text = None;
+    let mut completed_turn = false;
+    while let Some(event) = rx.recv().await {
+        // The real adapter and guest serializer feed the native controller's
+        // unchanged Output envelope. Per-line chunks conservatively include
+        // more frame overhead than a pipe joining neighboring short lines.
+        for chunk in run_output::event_line(&event).chunks(16_384) {
+            encoded_bytes += serde_json::to_vec(&Event::Output {
+                stderr: false,
+                data: STANDARD.encode(chunk),
+            })
+            .unwrap()
+            .len()
+                + 1;
+        }
+        if event["item"]["type"] == "agent_message"
+            && text(&event["item"], "id").starts_with("reply-")
+        {
+            snapshots += usize::from(event["type"] == "item.updated");
+            if event["type"] == "item.completed" {
+                completed_text = Some(text(&event["item"], "text").to_owned());
+            }
+        }
+        completed_turn |= event["type"] == "turn.completed";
+    }
+    task.await.unwrap().unwrap();
+    assert_eq!(completed_text.as_deref(), Some(answer.as_str()));
+    assert!(completed_turn);
+    assert!(snapshots > 1, "The answer must remain streamed.");
+    assert!(
+        encoded_bytes < 8 * 1024 * 1024,
+        "24KB answer amplified into {encoded_bytes} native log bytes ({snapshots} snapshots)."
+    );
+}
+
+#[tokio::test]
+async fn idle_text_tail_reaches_live_consumers_before_they_release_more_output() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let limit = root.path().join("stream-limit");
+    std::fs::write(&limit, "5").unwrap();
+    let config = config(&root);
+    let turn = plan(&root, &format!("fixture:stream-limit:{}", limit.display()));
+    let stop = CancellationToken::new();
+    let stopping = stop.clone();
+    let (tx, mut rx) = mpsc::channel(64);
+    let task =
+        tokio::spawn(async move { chat_process::run(&config, &home, turn, tx, stopping).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = rx.recv().await.unwrap();
+            assert_ne!(event["type"], "turn.failed");
+            if event["type"] == "item.updated" && text(&event["item"], "text").ends_with(" 005") {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("A paused stream's last20freshbytes must become visible without more provider output.");
+    // The existing live/reconnect browser fixture waits for005 before releasing
+    // more text. Stop this isolated turn after proving that same boundary.
+    stop.cancel();
+    while rx.recv().await.is_some() {}
+    assert_eq!(
+        task.await.unwrap().unwrap_err().message,
+        "Conversation stopped."
+    );
+}
+
+#[tokio::test]
+async fn partial_utf8_text_is_flushed_before_provider_failure_and_eof() {
+    for terminal in ["failed", "eof"] {
+        let root = TempDir::new().unwrap();
+        let home = prepare(&root);
+        let answer = "é🌱\n\"fin\"";
+        std::fs::write(
+            home.join("fixture-text-stream.json"),
+            json!({ "text": answer, "deltaCharacters": 1, "terminal": terminal }).to_string(),
+        )
+        .unwrap();
+        let config = config(&root);
+        let turn = plan(&root, "fixture:bounded-text-stream");
+        let (tx, mut rx) = mpsc::channel(64);
+        let task = tokio::spawn(async move {
+            chat_process::run(&config, &home, turn, tx, CancellationToken::new()).await
+        });
+        let mut partial = String::new();
+        let mut failed = false;
+        while let Some(event) = rx.recv().await {
+            if event["type"] == "item.updated" && text(&event["item"], "id").starts_with("reply-") {
+                assert!(!failed, "Pending text must precede the failure marker.");
+                partial = text(&event["item"], "text").to_owned();
+            }
+            failed |= event["type"] == "turn.failed";
+            assert_ne!(event["type"], "turn.completed");
+        }
+        assert!(task.await.unwrap().is_err());
+        assert_eq!(partial, answer, "{terminal}");
+        assert_eq!(failed, terminal == "failed");
+    }
+}
+
+#[tokio::test]
+async fn cancellation_flushes_accepted_text_that_has_not_reached_a_snapshot_boundary() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let answer = "é🌱\n\"fin\"";
+    std::fs::write(
+        home.join("fixture-text-stream.json"),
+        json!({ "text": answer, "deltaCharacters": 1, "terminal": "cancel" }).to_string(),
+    )
+    .unwrap();
+    let config = config(&root);
+    let turn = plan(&root, "fixture:bounded-text-stream");
+    let stop = CancellationToken::new();
+    let stopping = stop.clone();
+    let processed = home.join("fixture-text-stream-processed");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task =
+        tokio::spawn(async move { chat_process::run(&config, &home, turn, tx, stopping).await });
+    let first = loop {
+        let event = rx.recv().await.unwrap();
+        if event["type"] == "item.updated" && text(&event["item"], "id").starts_with("reply-") {
+            break text(&event["item"], "text").to_owned();
+        }
+    };
+    assert_eq!(first, "é");
+    common::eventually(
+        Duration::from_secs(5),
+        Duration::from_millis(10),
+        async || processed.exists().then_some(()),
+    )
+    .await;
+    stop.cancel();
+    let mut latest = first;
+    while let Some(event) = rx.recv().await {
+        if event["type"] == "item.updated" && text(&event["item"], "id").starts_with("reply-") {
+            latest = text(&event["item"], "text").to_owned();
+        }
+        assert_ne!(event["type"], "turn.completed");
+    }
+    assert!(task.await.unwrap().is_err());
+    assert_eq!(latest, answer);
+}
+
+#[tokio::test]
+async fn interleaved_message_items_keep_their_latest_text_in_order() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let updates = json!([
+        { "item": "a", "delta": "A" },
+        { "item": "a", "delta": "é" },
+        { "item": "b", "delta": "B" },
+        { "item": "b", "delta": "🌱" },
+        { "item": "a", "delta": "!" },
+    ]);
+    std::fs::write(
+        home.join("fixture-text-stream.json"),
+        json!({ "text": "Done", "updates": updates }).to_string(),
+    )
+    .unwrap();
+    let config = config(&root);
+    let turn = plan(&root, "fixture:bounded-text-stream");
+    let (tx, mut rx) = mpsc::channel(64);
+    let task = tokio::spawn(async move {
+        chat_process::run(&config, &home, turn, tx, CancellationToken::new()).await
+    });
+    let mut received = Vec::new();
+    while let Some(event) = rx.recv().await {
+        let item = &event["item"];
+        if event["type"] == "item.updated" && text(item, "id").starts_with("reply-") {
+            let suffix = text(item, "id").rsplit(':').next().unwrap().to_owned();
+            received.push((suffix, text(item, "text").to_owned()));
+        }
+    }
+    task.await.unwrap().unwrap();
+    assert_eq!(
+        received,
+        [
+            ("a", "A"),
+            ("a", "Aé"),
+            ("b", "B"),
+            ("b", "B🌱"),
+            ("a", "Aé!")
+        ]
+        .map(|(id, text)| (id.to_owned(), text.to_owned()))
+    );
 }
 
 /// Runs one turn to completion while discarding its events.
@@ -136,6 +355,56 @@ fn manager_chat_plans_keep_mcp_configuration_out_of_process_arguments() {
 }
 
 #[tokio::test]
+async fn resident_shell_commands_receive_only_the_current_runs_plugin_channel() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let service = Resident::start(config(&root), home.clone(), &root).await;
+    let run = json!({ "snapshot": { "agent": { "provider": "codex" } } });
+    let prepared = json!({
+        "output": root.path().join("result.md"),
+        "cwd": root.path(),
+    });
+
+    for (index, token) in [Some("first-lease"), Some("second-lease"), None]
+        .into_iter()
+        .enumerate()
+    {
+        let mut env = json!({ "UNRELATED_SECRET": "must-not-reach-shell" });
+        if let Some(token) = token {
+            env["CAIRN_MCP_RUN_TOKEN"] = token.into();
+        }
+        let origin = if index == 1 {
+            env["CAIRN_MCP_ORIGIN"] = "http://127.0.0.1:5523".into();
+            "http://127.0.0.1:5523"
+        } else {
+            "http://127.0.0.1:5202"
+        };
+        let mcp = json!({ "codexConfig": {}, "env": env });
+        let generated =
+            cairn_installation::run_output::chat_plan(&run, &prepared, root.path(), &mcp, None)
+                .unwrap();
+        let mut plan = plan(&root, &format!("message {index}"));
+        plan["execution"]["messageId"] = format!("message-{index}").into();
+        plan["codexConfig"] = generated["codexConfig"].clone();
+        if index > 0 {
+            plan["sessionId"] = "fixture-chat".into();
+        }
+
+        service.run(plan).await;
+        assert_eq!(
+            conversation(&home)["fixtureConfig"]["shell_environment_policy"]["set"],
+            json!({
+                "CAIRN_MCP_RUN_TOKEN": token.unwrap_or(""),
+                "CAIRN_MCP_ORIGIN": origin,
+            }),
+            "A retained process must replace the plugin channel on every attempt, including removal",
+        );
+    }
+
+    service.stop().await;
+}
+
+#[tokio::test]
 async fn native_reconnect_notices_are_scoped_to_the_active_turn_without_failing_it() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);
@@ -190,6 +459,55 @@ async fn cold_chats_refresh_and_remove_thread_mcp_configuration() {
         }
         run_quietly(&config, &home, plan).await;
         assert_eq!(conversation(&home)["fixtureConfig"]["mcp_servers"], servers);
+    }
+}
+
+#[tokio::test]
+async fn resident_starts_a_new_native_process_for_a_plan_turn_and_the_turn_after_it() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let service = Resident::start(config(&root), home.clone(), &root).await;
+    let turns = [None, Some("planning"), Some("afterPlan"), None];
+    for (index, mark) in turns.into_iter().enumerate() {
+        let mut plan = plan(&root, &format!("message {index}"));
+        plan["execution"]["messageId"] = format!("message-{index}").into();
+        plan["codexConfig"] = json!({ "mcp_servers": {} });
+        if index > 0 {
+            plan["sessionId"] = "fixture-chat".into();
+        }
+        if let Some(mark) = mark {
+            plan[mark] = true.into();
+        }
+        if mark == Some("planning") {
+            plan["sandbox"] = "read-only".into();
+        }
+        service.run(plan).await;
+    }
+    service.stop().await;
+
+    // Codex keeps a loaded sub-agent's sandbox: an earlier turn's writable sub-agent must
+    // not be loaded in the process that runs a plan turn, nor a read-only one after it.
+    let starts = lifecycle(&home)
+        .into_iter()
+        .filter(|entry| entry["method"] == "turn/start")
+        .map(|entry| entry["pid"].as_i64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(starts.len(), 4);
+    assert_ne!(
+        starts[1], starts[0],
+        "the plan turn reused a native process"
+    );
+    assert_ne!(starts[2], starts[1], "the turn after the plan reused it");
+    assert_eq!(
+        starts[3], starts[2],
+        "ordinary turns keep the resident process"
+    );
+    for pid in &starts[..2] {
+        assert_eq!(
+            unsafe { libc::kill(*pid as i32, 0) },
+            -1,
+            "a replaced native process must be reaped"
+        );
     }
 }
 
@@ -405,6 +723,7 @@ async fn oversized_inbox_fails_before_submitting_messages() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);
     let config = config(&root);
+    std::fs::write(home.join("fixture-lifecycle.jsonl"), "").unwrap();
     std::fs::write(
         root.path().join("inbox/messages.json"),
         vec![b' '; 2_000_001],
@@ -432,6 +751,48 @@ async fn oversized_inbox_fails_before_submitting_messages() {
     events.await.unwrap();
     assert_eq!(error.status, 400);
     assert_eq!(error.message, "Chat inbox is too large.");
+    assert!(
+        lifecycle(&home)
+            .iter()
+            .all(|entry| { entry["method"] != "turn/start" && entry["method"] != "turn/steer" })
+    );
+}
+
+#[tokio::test]
+async fn resident_rejects_an_oversized_inbox_before_submitting_messages() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let service = Resident::start(config(&root), home.clone(), &root).await;
+    std::fs::write(
+        root.path().join("inbox/messages.json"),
+        vec![b' '; 2_000_001],
+    )
+    .unwrap();
+    let mut plan = plan(&root, "Continue the request");
+    plan["codexConfig"] = json!({ "mcp_servers": {} });
+    let (events, mut received) = mpsc::channel::<Value>(64);
+    let output = tokio::spawn(async move {
+        while let Some(event) = received.recv().await {
+            assert_ne!(event["type"], "turn.completed");
+        }
+    });
+    let error = tokio::time::timeout(
+        Duration::from_secs(10),
+        chat_process::resident::run(&service.socket, plan, events, CancellationToken::new()),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    output.await.unwrap();
+    assert_eq!(error.status, 400);
+    assert_eq!(error.message, "Chat inbox is too large.");
+    let error = service.task.await.unwrap().unwrap_err();
+    assert_eq!(error.status, 400);
+    assert!(
+        lifecycle(&home)
+            .iter()
+            .all(|entry| { entry["method"] != "turn/start" && entry["method"] != "turn/steer" })
+    );
 }
 
 #[tokio::test]
@@ -474,55 +835,343 @@ async fn model_and_reasoning_reach_codex_and_model_changes_resolve_the_new_defau
 }
 
 #[tokio::test]
-async fn native_in_flight_question_accepts_answer_and_preserves_receipt() {
+async fn only_a_cairn_plan_turn_shows_a_codex_plan_as_a_proposed_plan() {
+    for planning in [false, true] {
+        let root = TempDir::new().unwrap();
+        let home = prepare(&root);
+        let config = config(&root);
+        let mut turn = plan(&root, "fixture:plan-item Propose an approach");
+        if planning {
+            turn["planning"] = true.into();
+            turn["sandbox"] = "read-only".into();
+        }
+        let (tx, mut rx) = mpsc::channel::<Value>(64);
+        let events = tokio::spawn(async move {
+            let mut events = Vec::new();
+            while let Some(event) = rx.recv().await {
+                events.push(event);
+            }
+            events
+        });
+        chat_process::run(&config, &home, turn, tx, CancellationToken::new())
+            .await
+            .unwrap();
+        let events = events.await.unwrap();
+        let shown = |kind: &str| {
+            events.iter().any(|event| {
+                event["item"]["type"] == kind
+                    && event["item"]["text"] == "1. Read the composer.\n2. Add the toggle."
+            })
+        };
+        // Outside a Cairn plan turn nothing guarantees the plan was not acted on.
+        assert_eq!(shown("proposed_plan"), planning, "planning {planning}");
+        assert_eq!(shown("reasoning"), !planning, "planning {planning}");
+    }
+}
+
+#[tokio::test]
+async fn plan_turns_override_the_thread_sandbox_and_the_next_turn_restores_it() {
     let root = TempDir::new().unwrap();
     let home = prepare(&root);
     let config = config(&root);
-    let plan = plan(&root, "fixture:question");
+    let roots = json!([root.path()]);
+
+    // Codex keeps a thread's first sandbox when a later resume asks for another one.
+    let mut first = plan(&root, "Start the work");
+    first["sandbox"] = "workspace-write".into();
+    first["writableRoots"] = roots.clone();
+    first["execution"]["messageId"] = "message-0".into();
+    run_quietly(&config, &home, first).await;
+
+    let mut planning = plan(&root, "Propose an approach");
+    planning["planning"] = true.into();
+    planning["sandbox"] = "read-only".into();
+    planning["writableRoots"] = roots.clone();
+    planning["sessionId"] = "fixture-chat".into();
+    planning["execution"]["messageId"] = "message-1".into();
+    let (tx, mut rx) = mpsc::channel(64);
+    let events = tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        events
+    });
+    chat_process::run(&config, &home, planning, tx, CancellationToken::new())
+        .await
+        .unwrap();
+    let events = events.await.unwrap();
+    let proposed = events
+        .iter()
+        .find(|event| event["item"]["type"] == "proposed_plan")
+        .expect("the proposed plan is shown");
+    assert_eq!(
+        proposed["item"]["text"],
+        "1. Read the composer.\n2. Add the toggle."
+    );
+
+    let mut next = plan(&root, "Implement the plan");
+    next["afterPlan"] = true.into();
+    next["sandbox"] = "workspace-write".into();
+    next["writableRoots"] = roots.clone();
+    next["sessionId"] = "fixture-chat".into();
+    next["execution"]["messageId"] = "message-2".into();
+    run_quietly(&config, &home, next).await;
+
+    let thread = conversation(&home);
+    let turns = thread["turns"].as_array().unwrap();
+    assert!(turns[0]["sandboxPolicy"].is_null());
+    assert!(turns[0]["collaborationMode"].is_null());
+
+    assert_eq!(
+        turns[1]["sandboxPolicy"],
+        json!({ "type": "readOnly", "networkAccess": false })
+    );
+    assert_eq!(
+        turns[1]["collaborationMode"],
+        json!({
+            "mode": "plan",
+            "settings": {
+                "model": "fixture-fast",
+                "reasoning_effort": "medium",
+                "developer_instructions": null,
+            },
+        })
+    );
+    assert_eq!(turns[1]["threadConfig"]["features.multi_agent"], false);
+
+    assert_eq!(
+        turns[2]["sandboxPolicy"],
+        json!({ "type": "workspaceWrite", "writableRoots": roots, "networkAccess": true })
+    );
+    assert_eq!(turns[2]["collaborationMode"]["mode"], "default");
+    assert!(turns[2]["threadConfig"]["features.multi_agent"].is_null());
+}
+
+#[tokio::test]
+async fn a_faster_tier_is_checked_against_codex_own_model_list_before_the_turn() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    // Codex's own catalog lists Fast (`priority`) for fixture-fast only; Ultrafast for none here.
+    let cases = [
+        (
+            "fixture-fast",
+            "priority",
+            false,
+            "priority",
+            Some("offered"),
+        ),
+        ("", "priority", false, "priority", Some("offered")),
+        (
+            "fixture-deep",
+            "priority",
+            false,
+            "default",
+            Some("applied"),
+        ),
+        (
+            "fixture-fast",
+            "ultrafast",
+            false,
+            "default",
+            Some("applied"),
+        ),
+        (
+            "custom-alias",
+            "priority",
+            false,
+            "priority",
+            Some("unconfirmed"),
+        ),
+        (
+            "fixture-fast",
+            "priority",
+            true,
+            "priority",
+            Some("unconfirmed"),
+        ),
+        ("fixture-deep", "default", false, "default", None),
+        // A dated version of a listed model: Codex may apply the listed model's tiers to it.
+        (
+            "fixture-fast-2026-10-01",
+            "priority",
+            false,
+            "priority",
+            Some("unconfirmed"),
+        ),
+        // Without a chosen model, Codex runs the one its configuration sets, not the catalog's
+        // default: fixture-deep lists no Fast.
+        ("", "priority", false, "default", Some("applied")),
+        // The process lists Fast, but the account's own catalog names the model without it: the
+        // process fell back to Codex's built-in list, and the account runs Standard.
+        (
+            "fixture-fast",
+            "priority",
+            false,
+            "default",
+            Some("applied"),
+        ),
+        // Without the account's recent catalog, the process list alone confirms nothing.
+        (
+            "fixture-fast",
+            "priority",
+            false,
+            "priority",
+            Some("unconfirmed"),
+        ),
+    ];
+    for (index, (model, tier, list_fails, sent, notice)) in cases.into_iter().enumerate() {
+        let configured = home.join("fixture-config-model");
+        if index == 8 {
+            std::fs::write(&configured, "fixture-deep").unwrap();
+        }
+        let failure = home.join("fixture-model-list-error");
+        if list_fails {
+            std::fs::write(&failure, "").unwrap();
+        } else {
+            let _ = std::fs::remove_file(&failure);
+        }
+        let mut plan = plan(&root, "Check the speed");
+        plan["model"] = model.into();
+        plan["serviceTier"] = tier.into();
+        // The account's recent catalog, as planning passes it: Fast for fixture-fast only.
+        plan["accountTiers"] = match index {
+            9 => json!({ "fixture-fast": [] }),
+            10 => Value::Null,
+            _ => json!({ "fixture-fast": ["priority"], "fixture-deep": [] }),
+        };
+        plan["execution"]["messageId"] = format!("speed-{index}").into();
+        if index > 0 {
+            plan["sessionId"] = "fixture-chat".into();
+        }
+        let (tx, mut rx) = mpsc::channel::<Value>(64);
+        let events = tokio::spawn(async move {
+            let mut speed = Vec::new();
+            while let Some(event) = rx.recv().await {
+                if event["type"] == "turn.speed" {
+                    speed.push(event);
+                }
+            }
+            speed
+        });
+        chat_process::run(&config, &home, plan, tx, CancellationToken::new())
+            .await
+            .unwrap();
+        let speed = events.await.unwrap();
+        let thread = conversation(&home);
+        assert_eq!(thread["turns"][index]["serviceTier"], sent, "case {index}");
+        match notice {
+            None => assert!(speed.is_empty(), "case {index}: {speed:?}"),
+            Some(kind) => {
+                assert_eq!(speed.len(), 1, "case {index}: {speed:?}");
+                assert_eq!(speed[0]["speed"]["requested"], tier);
+                assert_eq!(speed[0]["messageId"], format!("speed-{index}"));
+                match kind {
+                    "offered" => {
+                        assert_eq!(speed[0]["speed"]["confirmed"], true);
+                        assert!(speed[0]["speed"].get("applied").is_none());
+                    }
+                    "applied" => assert_eq!(speed[0]["speed"]["applied"], "standard"),
+                    _ => assert_eq!(speed[0]["speed"]["unconfirmed"], true),
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn resolved_speed_reaches_codex_and_a_plan_without_a_tier_sends_none() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    for (index, tier) in [Some("priority"), None, Some("default")]
+        .into_iter()
+        .enumerate()
+    {
+        let mut plan = plan(&root, "Check the speed setting");
+        if let Some(tier) = tier {
+            plan["serviceTier"] = tier.into();
+        }
+        plan["execution"]["messageId"] = format!("message-{index}").into();
+        if index > 0 {
+            plan["sessionId"] = "fixture-chat".into();
+        }
+        run_quietly(&config, &home, plan).await;
+        let thread = conversation(&home);
+        assert_eq!(
+            thread["turns"][index]["serviceTier"],
+            tier.map_or(Value::Null, Value::from)
+        );
+    }
+}
+
+#[tokio::test]
+async fn disk_notice_reaches_codex_without_a_user_delivery_receipt() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let next_config = config.clone();
+    let next_home = home.clone();
+    let input = plan(&root, "fixture:chat-hang");
+    std::fs::write(
+        root.path().join("inbox/disk-notice.json"),
+        json!({ "id": "disk-notice", "operationalNotice": true,
+            "text": "Runtime disk pressure" })
+        .to_string(),
+    )
+    .unwrap();
     let (tx, mut rx) = mpsc::channel(64);
     let task = tokio::spawn(async move {
-        chat_process::run(&config, &home, plan, tx, CancellationToken::new()).await
+        chat_process::run(&config, &home, input, tx, CancellationToken::new()).await
     });
-    let mut answer_receipts = 0;
-    let mut completed = false;
-    let mut question_id = String::new();
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(event) = rx.recv().await {
-            match event["type"].as_str().unwrap_or("") {
-                "chat.question" => {
-                    question_id = event["question"]["id"].as_str().unwrap().to_owned();
-                    assert_eq!(event["question"]["blocking"], false);
-                    let answer = json!([{
-                        "id": "answer-message",
-                        "questionId": question_id,
-                        "answers": { "direction": ["Gradual rollout"] },
-                        "text": "My answer",
-                    }]);
-                    deliver(&root, &answer).await;
-                }
-                "chat.delivered" if event["messageId"] == "answer-message" => answer_receipts += 1,
-                "turn.completed" => completed = true,
-                _ => {}
+            assert!(!(event["type"] == "chat.delivered" && event["messageId"] == "disk-notice"));
+            if event["type"] == "thread.started" {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                deliver(&root, &json!([{ "id": "finish", "text": "finish now" }])).await;
             }
         }
     })
     .await
     .unwrap();
     task.await.unwrap().unwrap();
-    assert_eq!(answer_receipts, 1);
+    let mut next = plan(&root, "Continue after the disk notice");
+    next["execution"]["messageId"] = "next-user-message".into();
+    next["sessionId"] = "fixture-chat".into();
+    // A newer operational notice replaces the file before the next turn.
+    std::fs::write(root.path().join("inbox/disk-notice.json"),
+        json!({ "id": "newer-disk-notice", "operationalNotice": true, "text": "Updated runtime notice" }).to_string()).unwrap();
+    let (tx, mut rx) = mpsc::channel(64);
+    let next_task = tokio::spawn(async move {
+        chat_process::run(&next_config, &next_home, next, tx, CancellationToken::new()).await
+    });
+    let mut completed = false;
+    while let Some(event) = rx.recv().await {
+        if event["type"] == "chat.delivered" {
+            let id = event["messageId"].as_str().unwrap();
+            assert!(!id.contains("disk-notice"), "{event}");
+        }
+        completed |= event["type"] == "turn.completed";
+    }
+    next_task.await.unwrap().unwrap();
     assert!(completed);
-    assert_eq!(question_id.len(), 64);
-    assert!(root.path().join("result.md").exists());
+    assert!(
+        std::fs::read_to_string(root.path().join("codex/fixture-conversation.json"))
+            .unwrap()
+            .contains("Runtime disk pressure")
+    );
 }
 
 #[tokio::test]
-async fn withdrawn_native_questions_resume_without_an_answer_or_user_receipt() {
+async fn native_question_requests_are_refused_in_favor_of_the_common_tool() {
     for blocking in [false, true] {
         let root = TempDir::new().unwrap();
         let home = prepare(&root);
         let observed = home.clone();
         let config = config(&root);
-        let plan = plan(
+        let input = plan(
             &root,
             if blocking {
                 "fixture:question blocking"
@@ -532,30 +1181,32 @@ async fn withdrawn_native_questions_resume_without_an_answer_or_user_receipt() {
         );
         let (tx, mut rx) = mpsc::channel(64);
         let task = tokio::spawn(async move {
-            chat_process::run(&config, &home, plan, tx, CancellationToken::new()).await
+            chat_process::run(&config, &home, input, tx, CancellationToken::new()).await
         });
         let mut completed = false;
         tokio::time::timeout(Duration::from_secs(10), async {
             while let Some(event) = rx.recv().await {
-                if event["type"] == "chat.question" {
-                    deliver(&root, &json!([{
-                        "id": "withdrawal", "questionId": event["question"]["id"], "questionCancelled": true,
-                    }])).await;
-                }
-                assert!(!(event["type"] == "chat.delivered" && event["messageId"] == "withdrawal"));
+                assert_ne!(event["type"], "chat.question");
                 completed |= event["type"] == "turn.completed";
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         task.await.unwrap().unwrap();
         assert!(completed);
         let thread = conversation(&observed);
-        let answer = thread["turns"][0]["items"]
+        let rejected = thread["turns"][0]["items"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|i| i["type"] == "fixtureAnswer")
+            .find(|item| item["type"] == "fixtureAnswer")
             .unwrap();
-        assert_eq!(answer["answers"], json!({}));
+        assert!(text(&rejected["error"], "message").contains("cairn_workspace.ask_questions"));
+        assert!(rejected["answers"].is_null());
+        assert_eq!(
+            thread["fixtureConfig"]["features.default_mode_request_user_input"],
+            false
+        );
     }
 }
 
@@ -928,6 +1579,212 @@ async fn replay_of_completed_turn_does_not_submit_the_instruction_again() {
 }
 
 #[tokio::test]
+async fn plan_presets_keep_the_model_codex_runs_the_thread_with() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    // No model chosen: Codex runs its configured model, not the catalog's default.
+    std::fs::write(home.join("fixture-config-model"), "fixture-deep").unwrap();
+    let mut first = plan(&root, "Start the work");
+    first["execution"]["messageId"] = "message-0".into();
+    run_quietly(&config, &home, first).await;
+    for (index, mark) in [(1, "planning"), (2, "afterPlan")] {
+        let mut turn = plan(&root, "Continue");
+        turn[mark] = true.into();
+        turn["sessionId"] = "fixture-chat".into();
+        turn["execution"]["messageId"] = format!("message-{index}").into();
+        run_quietly(&config, &home, turn).await;
+    }
+    let turns = conversation(&home)["turns"].clone();
+    assert_eq!(turns[1]["collaborationMode"]["mode"], "plan");
+    assert_eq!(turns[2]["collaborationMode"]["mode"], "default");
+    for index in [1, 2] {
+        assert_eq!(
+            turns[index]["collaborationMode"]["settings"]["model"], "fixture-deep",
+            "turn {index}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn plan_presets_omit_a_model_when_codex_does_not_report_its_configured_model() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    std::fs::write(home.join("fixture-config-model"), "fixture-deep").unwrap();
+    std::fs::write(home.join("fixture-unknown-thread-model"), "").unwrap();
+
+    let mut initial = plan(&root, "Start the work");
+    initial["execution"]["messageId"] = "message-0".into();
+    run_quietly(&config, &home, initial).await;
+
+    for (index, mark) in [(1, "planning"), (2, "afterPlan")] {
+        let mut turn = plan(&root, "Continue");
+        turn[mark] = true.into();
+        turn["sessionId"] = "fixture-chat".into();
+        turn["execution"]["messageId"] = format!("message-{index}").into();
+        run_quietly(&config, &home, turn).await;
+    }
+
+    let turns = conversation(&home)["turns"].clone();
+    for (index, mode) in [(1, "plan"), (2, "default")] {
+        assert_eq!(turns[index]["collaborationMode"]["mode"], mode);
+        assert!(
+            turns[index]["collaborationMode"]["settings"]
+                .get("model")
+                .is_none(),
+            "turn {index} must let Codex keep its configured model"
+        );
+    }
+}
+
+#[tokio::test]
+async fn recovery_replays_a_completed_plan_only_turn_without_starting_another() {
+    for steering in [false, true] {
+        let root = TempDir::new().unwrap();
+        let home = prepare(&root);
+        let config = config(&root);
+        let mut planning = plan(&root, "Propose an approach");
+        planning["planning"] = true.into();
+        planning["sandbox"] = "read-only".into();
+        run_quietly(&config, &home, planning.clone()).await;
+
+        // Codex answers a plan turn with its plan alone: the history holds the request and
+        // the plan, without an agent message.
+        let file = home.join("fixture-conversation.json");
+        let mut thread = conversation(&home);
+        let items = thread["turns"][0]["items"].as_array_mut().unwrap();
+        items.retain(|item| item["type"] == "userMessage" || item["type"] == "plan");
+        assert_eq!(items.len(), 2);
+        if steering {
+            items.push(json!({ "id": "clarification", "type": "userMessage", "clientId": "later-clarification", "content": [{ "type": "inputText", "text": "Clarify the approach" }] }));
+        }
+        if steering {
+            thread["turns"].as_array_mut().unwrap().insert(0, json!({ "id": "older-turn", "status": "completed", "items": [
+                { "id": "older-user", "type": "userMessage", "clientId": "older-request", "content": [] }
+            ] }));
+        }
+        std::fs::write(&file, thread.to_string()).unwrap();
+
+        planning["sessionId"] = "fixture-chat".into();
+        planning["execution"]["recovery"] = true.into();
+        planning["output"] = root
+            .path()
+            .join("recovered.md")
+            .to_string_lossy()
+            .into_owned()
+            .into();
+        let (tx, mut rx) = mpsc::channel::<Value>(64);
+        let events = tokio::spawn(async move {
+            let mut events = Vec::new();
+            while let Some(event) = rx.recv().await {
+                events.push(event);
+            }
+            events
+        });
+        chat_process::run(&config, &home, planning, tx, CancellationToken::new())
+            .await
+            .unwrap();
+        let events = events.await.unwrap();
+
+        let proposal = "1. Read the composer.\n2. Add the toggle.";
+        assert!(
+            events
+                .iter()
+                .any(|event| event["item"]["type"] == "proposed_plan"
+                    && event["item"]["text"] == proposal),
+            "{events:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("recovered.md")).unwrap(),
+            proposal
+        );
+        let recovered = events
+            .iter()
+            .find(|event| event["item"]["type"] == "proposed_plan")
+            .unwrap();
+        assert_eq!(
+            recovered["item"]["request_id"], "original-message",
+            "{events:?}"
+        );
+        if steering {
+            assert!(events.iter().any(|event| event["type"] == "chat.delivered"
+                && event["messageId"] == "later-clarification"));
+        }
+        let deliveries: Vec<_> = events
+            .iter()
+            .filter(|event| event["type"] == "chat.delivered")
+            .map(|event| event["messageId"].clone())
+            .collect();
+        assert_eq!(
+            deliveries,
+            if steering {
+                vec![
+                    json!("older-request"),
+                    json!("original-message"),
+                    json!("later-clarification"),
+                ]
+            } else {
+                vec![json!("original-message")]
+            }
+        );
+        assert_eq!(
+            conversation(&home)["turns"].as_array().unwrap().len(),
+            if steering { 2 } else { 1 }
+        );
+    }
+}
+
+#[tokio::test]
+async fn plan_requests_only_steer_a_plan_turn() {
+    for planning in [false, true] {
+        let root = TempDir::new().unwrap();
+        let home = prepare(&root);
+        let config = config(&root);
+        // Left in the inbox for an earlier turn, or claimed before the turn changed.
+        deliver(
+            &root,
+            &json!([
+                { "id": "plan-request", "text": "Plan it, then finish now", "plan": true },
+                { "id": "ordinary", "text": "Keep going and finish now" },
+            ]),
+        )
+        .await;
+        let mut plan = plan(&root, "fixture:chat-hang");
+        if planning {
+            plan["planning"] = true.into();
+            plan["sandbox"] = "read-only".into();
+        }
+        let (tx, mut rx) = mpsc::channel::<Value>(64);
+        let events = tokio::spawn(async move {
+            let mut delivered = Vec::new();
+            while let Some(event) = rx.recv().await {
+                if event["type"] == "chat.delivered" {
+                    delivered.push(event["messageId"].clone());
+                }
+            }
+            delivered
+        });
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            chat_process::run(&config, &home, plan, tx, CancellationToken::new()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let delivered = events.await.unwrap();
+        let steered = conversation(&home)["turns"][0]["items"].to_string();
+        // A turn that can change files never receives the plan request.
+        assert_eq!(
+            delivered.contains(&json!("plan-request")),
+            planning,
+            "{delivered:?}"
+        );
+        assert_eq!(steered.contains("Plan it"), planning, "{steered}");
+    }
+}
+
+#[tokio::test]
 async fn images_and_files_reach_start_and_steer_as_readable_inputs() {
     let root = TempDir::new().unwrap();
     let config = config(&root);
@@ -1001,5 +1858,174 @@ async fn images_and_files_reach_start_and_steer_as_readable_inputs() {
             .unwrap()
             .iter()
             .any(|i| i["path"] == "/run/cairn-chat/attachments/image-id/design.png")
+    );
+}
+
+/// Runs one execution and returns its events with its result.
+async fn collect(
+    config: &Config,
+    home: &Path,
+    plan: Value,
+) -> (Vec<Value>, cairn_installation::error::Result<()>) {
+    let (tx, mut rx) = mpsc::channel(256);
+    let output = tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        events
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(20),
+        chat_process::run(config, home, plan, tx, CancellationToken::new()),
+    )
+    .await
+    .unwrap();
+    (output.await.unwrap(), result)
+}
+
+fn compaction_plan(root: &TempDir) -> Value {
+    let mut plan = plan(root, "");
+    plan["sessionId"] = "fixture-chat".into();
+    plan["execution"] = json!({
+        "messageId": "compact:fixture",
+        "text": "",
+        "attachments": [],
+        "recovery": false,
+        "operation": "compact",
+    });
+    plan
+}
+
+#[tokio::test]
+async fn context_usage_is_the_latest_request_against_the_model_window() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let (events, result) = collect(&config(&root), &home, plan(&root, "Inspect usage")).await;
+    result.unwrap();
+
+    let usage = events
+        .iter()
+        .filter(|event| event["type"] == "context.usage")
+        .collect::<Vec<_>>();
+    assert_eq!(usage.len(), 1);
+    // The thread total (93,000 tokens) is spend, not occupancy, and is never reported.
+    assert_eq!(
+        usage[0]["usage"],
+        json!({
+            "contextTokens": 40_900,
+            "contextWindow": 258_400,
+            "cachedTokens": 36_000,
+            "estimated": false,
+        })
+    );
+}
+
+#[tokio::test]
+async fn compaction_runs_natively_without_a_user_turn_or_steering() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    run_quietly(&config, &home, plan(&root, "First request")).await;
+
+    // A message written meanwhile is not steered into the compaction.
+    deliver(
+        &root,
+        &json!([{ "id": "later", "text": "Next request", "attachments": [] }]),
+    )
+    .await;
+    let (events, result) = collect(&config, &home, compaction_plan(&root)).await;
+    result.unwrap();
+
+    let saved = conversation(&home);
+    let turns = saved["turns"].as_array().unwrap();
+    assert_eq!(turns.len(), 2);
+    assert!(
+        turns[1]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["type"] == "contextCompaction")
+    );
+    let compactions = std::fs::read_to_string(home.join("fixture-compactions.jsonl")).unwrap();
+    assert_eq!(compactions.lines().count(), 1);
+
+    let compaction = events
+        .iter()
+        .filter(|event| event["item"]["type"] == "context_compaction")
+        .map(|event| (event["type"].clone(), event["item"]["status"].clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        compaction,
+        [
+            (json!("item.started"), json!("in_progress")),
+            (json!("item.completed"), json!("completed")),
+        ]
+    );
+    let usage = events
+        .iter()
+        .rfind(|event| event["type"] == "context.usage")
+        .unwrap();
+    assert_eq!(usage["usage"]["contextTokens"], 6_200);
+    assert_eq!(usage["usage"]["estimated"], true);
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "chat.delivered" && event["messageId"] == "later")
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["item"]["type"] == "agent_message")
+    );
+    assert_eq!(events.last().unwrap()["type"], "turn.completed");
+    assert_eq!(
+        std::fs::read_to_string(root.path().join("result.md")).unwrap(),
+        ""
+    );
+}
+
+#[tokio::test]
+async fn failed_or_sessionless_compactions_fail_without_completing() {
+    let root = TempDir::new().unwrap();
+    let home = prepare(&root);
+    let config = config(&root);
+    let mut sessionless = compaction_plan(&root);
+    sessionless.as_object_mut().unwrap().remove("sessionId");
+    let (events, result) = collect(&config, &home, sessionless).await;
+    assert!(
+        result
+            .unwrap_err()
+            .message
+            .contains("no saved Codex session")
+    );
+    assert!(events.is_empty());
+
+    run_quietly(&config, &home, plan(&root, "First request")).await;
+    std::fs::write(home.join("fixture-compaction-fails"), "").unwrap();
+    let (events, result) = collect(&config, &home, compaction_plan(&root)).await;
+    assert_eq!(result.unwrap_err().message, "Fixture compaction failed");
+    assert!(!events.iter().any(|event| event["type"] == "turn.completed"));
+    assert!(events.iter().any(|event| event["type"] == "turn.failed"));
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["item"]["status"] == "completed")
+    );
+}
+
+#[test]
+fn structured_tool_payloads_redact_credentials_and_nested_output() {
+    let event = json!({
+        "arguments": { "access_token": "private-value", "query": "public query" },
+        "result": [{ "text": "Bearer private-token" }, { "nested": ["a configured-secret value"] }],
+    });
+    let redacted = cairn_installation::run_output::payload(&event, &["configured-secret".into()]);
+    assert_eq!(
+        redacted,
+        json!({
+            "arguments": { "access_token": "[redacted]", "query": "public query" },
+            "result": [{ "text": "Bearer [redacted]" }, { "nested": ["a [redacted] value"] }],
+        })
     );
 }

@@ -1,14 +1,25 @@
 package build.cairn.app.ui
 
 import android.app.Application
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.view.inputmethod.InputMethodManager
+import android.view.inspector.WindowInspector
 import androidx.compose.runtime.*
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.core.graphics.Insets
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsAnimationCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
+import build.cairn.contracts.ExecutionResources
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
 import okhttp3.mockwebserver.*
@@ -30,18 +41,59 @@ abstract class NodePlacementCases {
         var kept = false
         val previous =
             ExecutionNode(
-                id = "vm",
+                id = "9b7288b3-40e6-5ead-8948-ddf668adb25c",
                 name = "Workstation",
                 status = "online",
-                agents = listOf(NodeAgent("a", "Builder"), NodeAgent("b", "Everywhere", true)),
+                agents =
+                    listOf(
+                        NodeAgent(
+                            id = "a",
+                            name = "Builder",
+                            allNodes = false,
+                        ),
+                        NodeAgent(
+                            id = "b",
+                            name = "Everywhere",
+                            allNodes = true,
+                        ),
+                    ),
+                createdAt = 0,
+                revision = "fixture",
+                capabilities =
+                    NodeCapabilities(
+                        os = "",
+                        arch = "",
+                        cpu = 1,
+                        memoryMiB = 128,
+                        diskMiB = 128,
+                        kvm = false,
+                    ),
+                limits = NodeResources(cpu = 1, memoryMiB = 256, diskMiB = 128),
+                storage = NodeStoragePolicy(),
+                staleDisks = StaleDisks(count = 0, diskMiB = 0),
             )
         val next =
             ExecutionNode(
-                id = "native",
+                id = "beac7d45-75ca-544c-a4f6-a61c1e5787f2",
                 name = "Workstation GPU",
                 status = "online",
                 slots = 1,
-                capabilities = NodeCapabilities(backend = NATIVE_BACKEND, ublk = true),
+                capabilities =
+                    NodeCapabilities(
+                        backend = NATIVE_BACKEND,
+                        ublk = true,
+                        os = "",
+                        arch = "",
+                        cpu = 1,
+                        memoryMiB = 128,
+                        diskMiB = 128,
+                        kvm = false,
+                    ),
+                createdAt = 0,
+                revision = "fixture",
+                limits = NodeResources(cpu = 1, memoryMiB = 256, diskMiB = 128),
+                storage = NodeStoragePolicy(),
+                staleDisks = StaleDisks(count = 0, diskMiB = 0),
             )
         compose.setContent {
             CairnTheme {
@@ -84,9 +136,10 @@ abstract class NodePlacementCases {
                             when (path) {
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations" -> beaconInstallationsFixture()
-                                "/api/installations/fixture/api/overview" -> "{}"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 "/api/installations/fixture/api/nodes/native-callers" -> "[]"
-                                "/api/installations/fixture/api/nodes/desk/native-mode" -> {
+                                "/api/installations/fixture/api/nodes/aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503/native-mode" -> {
                                     val change =
                                         wireJson
                                             .parseToJsonElement(request.body.readUtf8())
@@ -96,7 +149,7 @@ abstract class NodePlacementCases {
                                         failed.set(true)
                                         "{}"
                                     } else
-                                        """{"previewId":"review","preview":{"mode":"administrator","trustedAccounts":["trusted"],"agents":[{"id":"builder","name":"Builder"}],"conversations":[{"id":"one","name":"Première conversation","status":"running"},{"id":"two","name":"Deuxième conversation","status":"running"}],"tasks":[{"id":"night","name":"Tâche nocturne"}]}}"""
+                                        """{"previewId":"review","preview":{"mode":"administrator","trustedAccounts":["trusted"],"agents":[{"id":"builder","name":"Builder"}],"conversations":[{"id":"one","name":"Première conversation","status":"running","taskId":"fixture-task"},{"id":"two","name":"Deuxième conversation","status":"running","taskId":"fixture-task"}],"tasks":[{"id":"night","name":"Tâche nocturne"}]}}"""
                                 }
                                 "/api/installations/fixture/api/nodes" -> {
                                     val status = if (failed.get()) "failed" else "applied"
@@ -104,11 +157,38 @@ abstract class NodePlacementCases {
                                         if (failed.get())
                                             ",\"nativeModeRequest\":{\"mode\":\"administrator\",\"generation\":\"g1\"},\"nativeModeStatus\":\"failed\""
                                         else ""
-                                    """[{"id":"desk","name":"Machine jetable","status":"online","accepting":true,"slots":2,"capabilities":{"backend":"native","nativeModeProtocol":1},"nativeModeObserved":{"mode":"protected","status":"$status"}$requested}]"""
+                                    // The next listing inserts a machine ahead of the open card.
+                                    val prefix =
+                                        if (failed.get())
+                                            """{"id":"00000000-0000-4000-8000-000000000001","name":"Autre machine","status":"online","accepting":true,"executionReady":true,"slots":4,"availableSlots":0,"occupiedSlots":1,"capabilities":{"kvm":true},"agents":[{"id":"builder","name":"Builder"}]},{"id":"00000000-0000-4000-8000-000000000002","name":"Machine surchargée","status":"online","accepting":true,"executionReady":true,"slots":2,"availableSlots":0,"occupiedSlots":4,"capabilities":{"kvm":true},"agents":[{"id":"builder","name":"Builder"}]},"""
+                                        else ""
+                                    """[$prefix{"id":"aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503","name":"Machine jetable","status":"online","accepting":true,"slots":2,"capabilities":{"backend":"native","nativeModeProtocol":1},"nativeModeObserved":{"mode":"protected","status":"$status"}$requested}]"""
                                 }
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(nodeWireFixture(request.path, body))
                     }
                 }
             server.start()
@@ -138,10 +218,24 @@ abstract class NodePlacementCases {
             }
             compose.waitUntil(20000) {
                 compose
-                    .onAllNodesWithText("Passer en Natif administrateur")
+                    .onAllNodesWithText("Voir les détails de Machine jetable")
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
+            compose
+                .onNodeWithText("Voir les détails de Machine jetable")
+                .performScrollTo()
+                .performClick()
+            compose.waitUntil(20000) {
+                compose
+                    .onAllNodes(hasText("Passer en Natif administrateur") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            // The page renders before connect() finishes refreshing the workspace, and
+            // vm.perform ignores actions until then. This control's own busy state does not
+            // reflect it.
+            compose.waitUntil(10000) { !vm.state.value.busy }
             compose
                 .onNodeWithText("Passer en Natif administrateur")
                 .performScrollTo()
@@ -167,6 +261,11 @@ abstract class NodePlacementCases {
                     .isNotEmpty()
             }
             compose.onNodeWithText("Natif protégé").performScrollTo().assertExists()
+            // Zero available slots does not imply every slot is occupied.
+            compose.onNodeWithText("Aucun slot disponible").performScrollTo().assertExists()
+            compose.onNodeWithText("0 slots libres sur 4 · 1 occupés").assertExists()
+            // Lowering the capacity does not erase the count of existing workloads.
+            compose.onNodeWithText("0 slots libres sur 2 · 4 occupés").assertExists()
             compose
                 .onNodeWithText("privilèges actuels non confirmés", substring = true)
                 .performScrollTo()
@@ -182,52 +281,141 @@ abstract class NodePlacementCases {
     @Test
     fun nativeNodeEditorRequiresExplicitPeopleAndSupportsSixExecutionSlots() {
         var saved: NodeConfiguration? = null
-        var keyboard: androidx.compose.ui.platform.SoftwareKeyboardController? = null
         val node =
             ExecutionNode(
-                id = "native",
+                id = "beac7d45-75ca-544c-a4f6-a61c1e5787f2",
                 name = "Desktop",
                 status = "online",
                 slots = 1,
-                capabilities = NodeCapabilities(backend = "native"),
+                capabilities =
+                    NodeCapabilities(
+                        backend = "native",
+                        os = "",
+                        arch = "",
+                        cpu = 1,
+                        memoryMiB = 128,
+                        diskMiB = 128,
+                        kvm = false,
+                    ),
+                createdAt = 0,
+                revision = "fixture",
+                limits = NodeResources(cpu = 1, memoryMiB = 256, diskMiB = 128),
+                storage = NodeStoragePolicy(),
+                staleDisks = StaleDisks(count = 0, diskMiB = 0),
             )
         compose.setContent {
-            keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
             CairnTheme {
                 NodeEditor(
                     node,
                     Workspace(),
-                    listOf(NativeCaller("trusted", "trusted@example.test")),
+                    listOf(
+                        NativeCaller(
+                            id = "trusted",
+                            email = "trusted@example.test",
+                        )
+                    ),
                     {},
                     { saved = it },
                 )
             }
         }
-        compose.onNodeWithText("Slots d’exécution").assertIsEnabled().performTextReplacement("6")
-        compose.runOnIdle { keyboard?.hide() }
-        compose.waitForIdle()
-        compose
-            .onNodeWithText("Tous les slots partagent ces budgets.", substring = true)
-            .assertExists()
-        compose.onNodeWithText("Réservation exclusive").assertDoesNotExist()
-        compose.onNodeWithText("Mettez à jour le runtime", substring = true).assertDoesNotExist()
-        compose.onNodeWithText("Personnes de confiance").performScrollTo().assertExists()
-        compose
-            .onNodeWithText("Activer l’exécution native")
-            .performScrollTo()
-            .performClick()
-            .assertIsOn()
-        compose.onNodeWithText("trusted@example.test").performScrollTo().performClick()
-        capture("native-node-trust")
-        compose.onNodeWithText("Enregistrer").performClick()
-        compose.runOnIdle {
-            assertEquals(true, saved?.nativeEnabled)
-            assertEquals(listOf("trusted"), saved?.nativeAccounts)
-            assertEquals(6, saved?.slots)
+        val imeReadiness = ImeAnimationReadiness()
+        // Observe on a zero-size sibling, leaving Compose's own animation callback intact.
+        val (editorWindow, imeObserver) =
+            compose.runOnIdle {
+                val window =
+                    WindowInspector.getGlobalWindowViews().single { root ->
+                        val attributes = root.layoutParams as? WindowManager.LayoutParams
+                        attributes?.type == WindowManager.LayoutParams.TYPE_APPLICATION
+                    }
+                val observer = View(window.context)
+                ViewCompat.setWindowInsetsAnimationCallback(observer, imeReadiness)
+                requireNotNull(window.findViewById<ViewGroup>(android.R.id.content))
+                    .addView(observer, 0, 0)
+                window to observer
+            }
+        try {
+            compose
+                .onNodeWithText("Slots d’exécution")
+                .assertIsEnabled()
+                .performTextReplacement("6")
+            // The editor's Dialog owns its focus and IME window, separate from setContent.
+            compose.runOnIdle {
+                editorWindow.findFocus()?.clearFocus()
+                val keyboard = editorWindow.context.getSystemService(InputMethodManager::class.java)
+                keyboard.hideSoftInputFromWindow(editorWindow.windowToken, 0)
+            }
+            compose.onNodeWithText("Slots d’exécution").assertIsNotFocused()
+            // Root insets describe the target before the native animation ends. Wait for
+            // both hidden insets and animation completion, then let Compose finish layout.
+            compose.waitUntil(10000) {
+                compose.runOnIdle {
+                    imeReadiness.hidden(ViewCompat.getRootWindowInsets(editorWindow))
+                }
+            }
+            compose
+                .onNodeWithText("Tous les slots partagent ces budgets.", substring = true)
+                .assertExists()
+            compose.onNodeWithText("Réservation exclusive").assertDoesNotExist()
+            compose.onNodeWithText("Mettez à jour le runtime", substring = true).assertExists()
+            compose.onNodeWithText("Personnes de confiance").performScrollTo().assertExists()
+            val nativeToggle =
+                compose
+                    .onNodeWithText("Activer l’exécution native")
+                    .performScrollTo()
+                    .assertIsDisplayed()
+            nativeToggle.performClick()
+            try {
+                nativeToggle.assertIsOn()
+            } catch (failure: AssertionError) {
+                // Preserve the failing device state before the fixture closes the editor.
+                runCatching { capture("native-node-toggle-failure") }
+                throw failure
+            }
+            compose.onNodeWithText("trusted@example.test").performScrollTo().performClick()
+            capture("native-node-trust")
+            compose.onNodeWithText("Enregistrer").performClick()
+            compose.runOnIdle {
+                assertEquals(true, saved?.nativeEnabled)
+                assertEquals(listOf("trusted"), saved?.nativeAccounts)
+                assertEquals(6, saved?.slots)
+            }
+        } finally {
+            compose.runOnIdle {
+                ViewCompat.setWindowInsetsAnimationCallback(imeObserver, null)
+                (imeObserver.parent as? ViewGroup)?.removeView(imeObserver)
+            }
         }
     }
 
-    @Test fun aNewNativeNodeIsConfiguredThenAsksWhichAgentsMayUseIt() = nativeEnrollment(true)
+    @Test
+    fun hidingTargetInsetsDoNotMeanTheImeAnimationHasFinished() {
+        val readiness = ImeAnimationReadiness()
+        val hidden =
+            WindowInsetsCompat.Builder()
+                .setInsets(WindowInsetsCompat.Type.ime(), Insets.NONE)
+                .setVisible(WindowInsetsCompat.Type.ime(), false)
+                .build()
+        val hiding = WindowInsetsAnimationCompat(WindowInsetsCompat.Type.ime(), null, 200)
+        val overlapping = WindowInsetsAnimationCompat(WindowInsetsCompat.Type.ime(), null, 200)
+        val bars = WindowInsetsAnimationCompat(WindowInsetsCompat.Type.systemBars(), null, 200)
+
+        assertTrue(readiness.hidden(hidden))
+        readiness.onPrepare(hiding)
+        // Android publishes these final insets before Compose's intermediate onProgress.
+        assertFalse(readiness.hidden(hidden))
+        readiness.onProgress(hidden, mutableListOf(hiding))
+        assertFalse(readiness.hidden(hidden))
+        readiness.onPrepare(overlapping)
+        readiness.onEnd(hiding)
+        assertFalse(readiness.hidden(hidden))
+        readiness.onEnd(overlapping)
+        readiness.onPrepare(bars)
+        assertTrue(readiness.hidden(hidden))
+        readiness.onEnd(bars)
+    }
+
+    @Test fun aNewNativeNodeIsConfiguredThenAsksWhichNativeAgentsMayUseIt() = nativeEnrollment(true)
 
     @Test
     fun dismissingTheConfigurationOfANewNativeNodeCancelsTheLastStep() = nativeEnrollment(false)
@@ -247,31 +435,61 @@ abstract class NodePlacementCases {
                         ) {
                             val body = request.body.readUtf8().ifBlank { "{}" }
                             writes += path to wireJson.parseToJsonElement(body).jsonObject
-                            if (request.method == "PUT" && path.endsWith("/nodes/desk"))
+                            if (
+                                request.method == "PUT" &&
+                                    path.endsWith("/nodes/aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503")
+                            )
                                 enrollmentConfigured.set(true)
                         }
+
+                        if (path == "/api/installations/fixture/api/mcps") {
+                            // Exercise the form while the initial workspace refresh is still busy.
+                            return MockResponse()
+                                .setBody("""{"mcps":[]}""")
+                                .setHeadersDelay(2, java.util.concurrent.TimeUnit.SECONDS)
+                        }
+
                         val body =
                             when (path) {
                                 "/api/installations/fixture/api/nodes/enrollments" -> {
                                     enrolled.set(true)
-                                    """{"code":"native-enrollment","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/native | bash","backend":"native","nodeId":"desk"}"""
+                                    """{"code":"native-enrollment","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/native | bash","backend":"native","nodeId":"aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503"}"""
                                 }
                                 "/api/installations/fixture/api/nodes/native-callers" ->
                                     """[{"id":"trusted","email":"trusted@example.test"}]"""
                                 "/api/installations/fixture/api/nodes" ->
                                     if (enrollmentConfigured.get())
-                                        """[{"id":"desk","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
+                                        """[{"id":"aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
                                     else if (enrolled.get())
-                                        """[{"id":"unrelated","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]},{"id":"desk","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
+                                        """[{"id":"9c2392e5-c83b-5811-b075-031baebd40b3","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]},{"id":"aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503","name":"Desk","status":"online","accepting":true,"slots":1,"capabilities":{"backend":"native"},"agents":[]}]"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
                                     else "[]"
                                 "/api/installations/fixture/api/agents" ->
-                                    """[{"id":"vm","name":"Agent VM","revision":"r1"},{"id":"native","name":"Agent natif","revision":"r1","access":{"backend":"native","nodes":[]}}]"""
+                                    """{"agents":[{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"65a2e5b3-c5e4-5bb1-a839-36064775dd2a","instructions":"","model":"","name":"Agent VM","plugins":[],"provider":"codex","reasoning":"high","revision":"r1","timeoutMinutes":0},{"access":{"backend":"native","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":[],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"38235acc-317f-50db-b506-53809ad1c8a0","instructions":"","model":"","name":"Agent natif","plugins":[],"provider":"codex","reasoning":"high","revision":"r1","timeoutMinutes":0}]}"""
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
-                                "/api/installations/fixture/api/overview" -> "{}"
-                                else -> if (request.method == "PUT") "{}" else "[]"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
+                                "/api/installations/fixture/api/projects" -> """{"projects":[]}"""
+                                else ->
+                                    if (request.method == "PUT") "{}"
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(nodeWireFixture(request.path, body))
                     }
                 }
             server.start()
@@ -305,6 +523,15 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Ajouter une machine").performScrollTo().performClick()
             compose.onNodeWithText("Nom de la machine").performTextInput("Desk")
             compose.onNodeWithText("Exécution native sur l’hôte").performClick()
+
+            // The page renders before connect() finishes refreshing the workspace.
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Créer un code d’inscription") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
             compose.onNodeWithText("Créer un code d’inscription").performScrollTo().performClick()
             compose.waitUntil(10000) {
                 compose.onAllNodesWithText("native-enrollment").fetchSemanticsNodes().isNotEmpty()
@@ -339,7 +566,11 @@ abstract class NodePlacementCases {
                 compose.onNodeWithText("Qui peut utiliser « Desk » ?").assertDoesNotExist()
                 compose.onNodeWithText("Activer l’exécution native").assertDoesNotExist()
                 assertTrue(
-                    writes.none { it.first.startsWith("/api/installations/fixture/api/nodes/desk") }
+                    writes.none {
+                        it.first.startsWith(
+                            "/api/installations/fixture/api/nodes/aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503"
+                        )
+                    }
                 )
                 return
             }
@@ -347,34 +578,42 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("trusted@example.test").performScrollTo().performClick()
             compose.onNodeWithText("Enregistrer").performClick()
 
-            // Then the same add-only step, offering every agent.
+            // Then the same add-only step, offering native agents only.
             compose.waitUntil(15000) {
                 compose
                     .onAllNodesWithText("Qui peut utiliser « Desk » ?")
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            compose.onNode(isOff() and hasText("Agent VM")).assertIsEnabled()
-            compose.onNodeWithText("Agent en VM : réservé aux nodes VM").assertDoesNotExist()
+            compose.onNode(isOff() and hasText("Agent VM")).assertIsNotEnabled()
+            compose.onNodeWithText("Agent en VM : réservé aux nodes VM").assertExists()
             compose.onNode(isOff() and hasText("Agent natif")).assertIsEnabled().performClick()
             compose.onNodeWithText("Terminer").performScrollTo().performClick()
             compose.waitUntil(10000) {
-                writes.any { it.first == "/api/installations/fixture/api/nodes/desk/agents" }
+                writes.any {
+                    it.first ==
+                        "/api/installations/fixture/api/nodes/aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503/agents"
+                }
             }
             val configured = writes.first {
-                it.first == "/api/installations/fixture/api/nodes/desk"
+                it.first ==
+                    "/api/installations/fixture/api/nodes/aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503"
             }
             assertEquals(JsonPrimitive(true), configured.second["nativeEnabled"])
             val grant =
                 writes
-                    .first { it.first == "/api/installations/fixture/api/nodes/desk/agents" }
+                    .first {
+                        it.first ==
+                            "/api/installations/fixture/api/nodes/aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503/agents"
+                    }
                     .second
             assertEquals(
-                listOf("native"),
+                listOf("38235acc-317f-50db-b506-53809ad1c8a0"),
                 grant["agentIds"]!!.jsonArray.map { it.jsonPrimitive.content },
             )
             assertEquals(JsonPrimitive(true), grant["add"])
             // The ublk storage policy applies to native disks; technical details name ublk.
+            compose.onNodeWithText("Voir les détails de Desk").performScrollTo().performClick()
             compose.onNodeWithText("Stockage").performScrollTo().assertExists()
             compose.onNodeWithText("Détails techniques").performScrollTo().performClick()
             compose.onNodeWithText("disque · ublk indisponible", substring = true).assertExists()
@@ -408,22 +647,23 @@ abstract class NodePlacementCases {
         MockWebServer().use { server ->
             val reservation =
                 ExclusiveReservation(
-                    "reservation",
-                    "node",
-                    "owner",
-                    "Compilation Android",
-                    "acquired",
+                    id = "00000000-0000-4000-8000-000000000094",
+                    nodeId = "b40903f9-0487-53d0-a309-c589f0cae405",
+                    ownerRunId = "owner",
+                    reason = "Compilation Android",
+                    state = "acquired",
                 )
             val run =
                 Run(
-                    "neighbor",
+                    id = "00000000-0000-4000-8000-000000000095",
                     status = "running",
                     taskName = "Exécution voisine",
                     suspendedByExclusive = reservation,
+                    taskId = "",
                 )
             val chat =
                 Chat(
-                    "chat",
+                    id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
                     title = "Conversation suspendue",
                     agentName = "Agent principal",
                     status = "running",
@@ -438,7 +678,7 @@ abstract class NodePlacementCases {
                             when (path) {
                                 "/api/installations/fixture/api/chats/stream" ->
                                     LiveState(chats = listOf(chat))
-                                "/api/installations/fixture/api/chats/chat/stream" ->
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream" ->
                                     LiveState(chat = chat)
                                 "/api/installations/fixture/api/runs/neighbor/stream" ->
                                     LiveState(run = run)
@@ -449,21 +689,65 @@ abstract class NodePlacementCases {
                                 "event: batch\nid: 0\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), live, true, false))}\n\n"
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
-                                .setBody(frame)
+                                .setBody(nodeWireFixture(request.path, frame))
                         }
                         val body =
                             when {
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
-                                path == "/api/installations/fixture/api/overview" -> "{}"
+                                path == "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
                                 path == "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
-                                        listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(
+                                                Agent(
+                                                    exclusiveNodes = emptyList(),
+                                                    plugins = emptyList(),
+                                                    revision = "",
+                                                    createdAt = 0,
+                                                    access =
+                                                        AccessPolicy(
+                                                            mcpTools =
+                                                                build.cairn.contracts.McpTools(
+                                                                    emptyMap()
+                                                                ),
+                                                            projects = null,
+                                                            skills = null,
+                                                            mcps = null,
+                                                        ),
+                                                    id = MAIN_AGENT_ID,
+                                                    name = "Agent principal",
+                                                )
+                                            )
+                                        )
                                     )
                                 path.endsWith("/models") -> """{"models":[]}"""
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(nodeWireFixture(request.path, body))
                     }
                 }
             server.start()
@@ -476,7 +760,14 @@ abstract class NodePlacementCases {
                 }
                 CairnTheme {
                     if (state.session.authenticated) {
-                        if (chatPage) ChatScreen(vm, state, "chat", openChat = {}, openRun = {})
+                        if (chatPage)
+                            ChatScreen(
+                                vm,
+                                state,
+                                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                                openChat = {},
+                                openRun = {},
+                            )
                         else RunScreen(vm, state, "neighbor", openRun = {})
                     }
                 }
@@ -511,19 +802,42 @@ abstract class NodePlacementCases {
                         val body =
                             when {
                                 path ==
-                                    "/api/installations/fixture/api/nodes/node/exclusive/reservation/release" -> {
+                                    "/api/installations/fixture/api/nodes/reservations/exclusive/00000000-0000-4000-8000-000000000094/release" -> {
                                     releases += request
                                     releasing.set(true)
-                                    "{}"
+                                    """{"id":"00000000-0000-4000-8000-000000000094","nodeId":"b40903f9-0487-53d0-a309-c589f0cae405","ownerRunId":"owner-run","reason":"Compilation Android","state":"releasing","createdAt":100,"expiresAt":4102444800000,"waitUntil":4102444800000,"pausedRunIds":["neighbor-one","neighbor-two"],"minimumAvailableMemoryMiB":4096}"""
                                 }
                                 path == "/api/installations/fixture/api/nodes" ->
-                                    """[{"id":"node","name":"Serveur réservé","status":"online","accepting":true,"executionReady":true,"capabilities":{"kvm":true},"exclusiveReservations":true,"exclusiveReservation":{"id":"reservation","nodeId":"node","ownerRunId":"owner-run","reason":"Compilation Android","state":"${if (releasing.get()) "releasing" else "acquired"}","createdAt":100,"expiresAt":4102444800000,"waitUntil":4102444800000,"pausedRunIds":["neighbor-one","neighbor-two"],"minimumAvailableMemoryMiB":4096}}]"""
+                                    """[{"id":"b40903f9-0487-53d0-a309-c589f0cae405","name":"Serveur réservé","status":"online","accepting":true,"executionReady":true,"capabilities":{"kvm":true},"exclusiveReservations":true,"exclusiveReservation":{"id":"00000000-0000-4000-8000-000000000094","nodeId":"b40903f9-0487-53d0-a309-c589f0cae405","ownerRunId":"owner-run","reason":"Compilation Android","state":"${if (releasing.get()) "releasing" else "acquired"}","createdAt":100,"expiresAt":4102444800000,"waitUntil":4102444800000,"pausedRunIds":["neighbor-one","neighbor-two"],"minimumAvailableMemoryMiB":4096}}]"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
-                                path == "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                path == "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(nodeWireFixture(request.path, body))
                     }
                 }
             server.start()
@@ -537,6 +851,16 @@ abstract class NodePlacementCases {
                 CairnTheme { if (state.session.authenticated) NodesScreen(vm, state, opened::add) }
             }
             compose.waitUntil(20000) {
+                compose
+                    .onAllNodesWithText("Voir les détails de Serveur réservé")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose
+                .onNodeWithText("Voir les détails de Serveur réservé")
+                .performScrollTo()
+                .performClick()
+            compose.waitUntil(20000) {
                 compose.onAllNodesWithText("Exclusivité acquise").fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText("Compilation Android").assertExists()
@@ -546,6 +870,12 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Ouvrir l’exécution").performScrollTo().performClick()
             assertEquals(listOf("owner-run"), opened.toList())
             capture("exclusive-reservation")
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(hasText("Libérer la réservation") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
             compose.onNodeWithText("Libérer la réservation").performScrollTo().performClick()
             compose.waitUntil(10000) {
                 releases.size == 1 &&
@@ -570,13 +900,36 @@ abstract class NodePlacementCases {
                         val body =
                             when (request.path!!.substringBefore('?')) {
                                 "/api/installations/fixture/api/nodes/placement/neighbor" ->
-                                    """{"nodes":[{"id":"node","name":"Serveur réservé","status":"online"}]}"""
+                                    """{"nodes":[{"id":"b40903f9-0487-53d0-a309-c589f0cae405","name":"Serveur réservé","status":"online"}]}"""
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
-                                "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(nodeWireFixture(request.path, body))
                     }
                 }
             server.start()
@@ -584,18 +937,19 @@ abstract class NodePlacementCases {
             val run =
                 mutableStateOf(
                     Run(
-                        id = "neighbor",
+                        id = "00000000-0000-4000-8000-000000000095",
                         status = "running",
                         nodeId = LOCAL_NODE_ID,
                         suspendedByExclusive =
                             ExclusiveReservation(
-                                id = "reservation",
-                                nodeId = "node",
+                                id = "00000000-0000-4000-8000-000000000094",
+                                nodeId = "b40903f9-0487-53d0-a309-c589f0cae405",
                                 ownerRunId = "owner-run",
                                 reason = "Compilation Android",
                                 state = "acquired",
                                 expiresAt = 4102444800000,
                             ),
+                        taskId = "",
                     )
                 )
             compose.setContent {
@@ -648,14 +1002,37 @@ abstract class NodePlacementCases {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val body =
                             when (request.path!!.substringBefore('?')) {
-                                "/api/installations/fixture/api/nodes/placement/native" ->
-                                    """{"nodes":[{"id":"desk","name":"Bureau GPU","status":"online","capabilities":{"backend":"native","ublk":true},"nativeModeStatus":"${privilegeStatus.get()}","nativeModeObserved":{"mode":"${if (privilegeStatus.get() == "applied") "administrator" else "protected"}"}}]}"""
+                                "/api/installations/fixture/api/nodes/placement/beac7d45-75ca-544c-a4f6-a61c1e5787f2" ->
+                                    """{"nodes":[{"id":"aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503","name":"Bureau GPU","status":"online","capabilities":{"backend":"native","ublk":true},"nativeModeStatus":"${privilegeStatus.get()}","nativeModeObserved":{"mode":"${if (privilegeStatus.get() == "applied") "administrator" else "protected"}"}}]}"""
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
-                                "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(nodeWireFixture(request.path, body))
                     }
                 }
             server.start()
@@ -664,12 +1041,13 @@ abstract class NodePlacementCases {
             val run =
                 mutableStateOf(
                     Run(
-                        id = "native",
+                        id = "beac7d45-75ca-544c-a4f6-a61c1e5787f2",
                         status = "running",
-                        nodeId = "desk",
+                        nodeId = "aa3fdfe2-c3db-5061-bfdc-7aeeeceb3503",
                         executionBackend = "native",
                         storage = RunStorage(mode = "native", dirtyBytes = 0),
                         backup = NodeBackup(capturedAt = System.currentTimeMillis() - 120_000),
+                        taskId = "",
                     )
                 )
             compose.setContent {
@@ -694,6 +1072,16 @@ abstract class NodePlacementCases {
             }
             compose.onNodeWithText("Travail local · sauvegardé après l’arrêt").assertDoesNotExist()
             compose.onNodeWithText("Synchronisé il y a 2 min").assertExists()
+            compose.runOnIdle {
+                run.value =
+                    run.value.copy(
+                        storage =
+                            RunStorage(mode = "on-demand", dirtyBytes = 4096, backupDegraded = true)
+                    )
+            }
+            compose
+                .onNodeWithText("Synchronisation en retard · travail conservé sur cette node")
+                .assertExists()
             compose.waitUntil(20000) {
                 compose.onAllNodesWithText("Node : Bureau GPU").fetchSemanticsNodes().isNotEmpty()
             }
@@ -754,22 +1142,47 @@ abstract class NodePlacementCases {
                         val path = request.path!!.substringBefore('?')
                         val body =
                             when {
-                                path == "/api/installations/fixture/api/nodes/placement/run" &&
+                                path ==
+                                    "/api/installations/fixture/api/nodes/placement/00000000-0000-4000-8000-000000000095" &&
                                     request.method == "PUT" -> {
                                     saved +=
                                         wireJson
                                             .parseToJsonElement(request.body.readUtf8())
                                             .jsonObject
-                                    "{}"
+                                    """{"nodes":[],"pinnedNodeId":null,"preferredNodeId":null}"""
                                 }
-                                path == "/api/installations/fixture/api/nodes/placement/run" ->
-                                    """{"nodes":[{"id":"node","name":"Mon serveur","status":"online"},{"id":"other","name":"Autre serveur","status":"online"}],"pinnedNodeId":null,"preferredNodeId":null}"""
+                                path ==
+                                    "/api/installations/fixture/api/nodes/placement/00000000-0000-4000-8000-000000000095" ->
+                                    """{"nodes":[{"id":"b40903f9-0487-53d0-a309-c589f0cae405","name":"Mon serveur","status":"online"},{"id":"824f3da3-b37b-5713-9c61-06e3f54a7ff8","name":"Autre serveur","status":"online"}],"pinnedNodeId":null,"preferredNodeId":null}"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
-                                path == "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                path == "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(nodeWireFixture(request.path, body))
                     }
                 }
             server.start()
@@ -801,10 +1214,15 @@ abstract class NodePlacementCases {
                             NodePlacement(
                                 vm,
                                 Run(
-                                    id = "run",
+                                    id = "00000000-0000-4000-8000-000000000095",
                                     status = "succeeded",
-                                    nodeId = "node",
-                                    resources = NodeResources(2, 4096, 32768),
+                                    nodeId = "b40903f9-0487-53d0-a309-c589f0cae405",
+                                    resources =
+                                        ExecutionResources(
+                                            cpu = 2,
+                                            memoryMiB = 4096,
+                                            diskMiB = 32768,
+                                        ),
                                     storage =
                                         RunStorage(
                                             mode = "on-demand",
@@ -817,6 +1235,7 @@ abstract class NodePlacementCases {
                                             capturedAt = System.currentTimeMillis() - 120000,
                                             status = "ready",
                                         ),
+                                    taskId = "",
                                 ),
                             )
                         }
@@ -836,6 +1255,9 @@ abstract class NodePlacementCases {
             capture("execution-sheet")
             compose.onNodeWithText("Enregistrer").performScrollTo().assertIsNotEnabled()
             compose.onNodeWithText("Préférer").performClick()
+            // The sheet renders before connect() finishes refreshing the workspace, and
+            // vm.perform ignores actions until then.
+            compose.waitUntil(10000) { !vm.state.value.busy }
             compose.onNodeWithText("Enregistrer").performScrollTo().performClick()
             // Receipt by the server precedes the response and its UI confirmation.
             compose.waitUntil(10000) {
@@ -845,8 +1267,11 @@ abstract class NodePlacementCases {
                         .fetchSemanticsNodes()
                         .isNotEmpty()
             }
-            assertEquals("node", saved[0]["preferredNodeId"]?.jsonPrimitive?.content)
-            assertEquals(JsonNull, saved[0]["pinnedNodeId"])
+            assertEquals(
+                "b40903f9-0487-53d0-a309-c589f0cae405",
+                saved[0]["selection"]?.jsonObject?.get("preferredNodeId")?.jsonPrimitive?.content,
+            )
+            assertEquals(JsonNull, saved[0]["selection"]?.jsonObject?.get("pinnedNodeId"))
             compose.onNodeWithText("Fixer").performScrollTo().performClick()
             compose.onNodeWithText("Enregistrer").performScrollTo().performClick()
             compose.waitUntil(10000) {
@@ -856,8 +1281,11 @@ abstract class NodePlacementCases {
                         .fetchSemanticsNodes()
                         .isNotEmpty()
             }
-            assertEquals("node", saved[1]["pinnedNodeId"]?.jsonPrimitive?.content)
-            assertEquals(JsonNull, saved[1]["preferredNodeId"])
+            assertEquals(
+                "b40903f9-0487-53d0-a309-c589f0cae405",
+                saved[1]["selection"]?.jsonObject?.get("pinnedNodeId")?.jsonPrimitive?.content,
+            )
+            assertEquals(JsonNull, saved[1]["selection"]?.jsonObject?.get("preferredNodeId"))
             compose.onNodeWithText("Dernière synchronisation", substring = true).assertExists()
             compose.onNodeWithText("Préférence enregistrée", substring = true).assertExists()
             // Without a recorded provider session there is nothing to resume elsewhere yet.
@@ -866,49 +1294,88 @@ abstract class NodePlacementCases {
         }
     }
 
-    @Test fun movingToANativeNodeExplainsTheBackendSwitchBeforeConfirming() = backendMove(false)
-
-    @Test fun aCancelledConversionCanBeRetriedWithoutAProviderSession() = backendMove(true)
+    @Test
+    fun backendMigrationRequiresConfirmationAndFollowsItsCompletion() {
+        backendMigrationCompletion(false)
+    }
 
     @Test
-    fun aFailedNativeEnvironmentCanFirstMoveToAVmWithoutAProviderSession() =
-        backendMove(true, false)
+    fun automaticMigrationCompletesBeforeOfferingExplicitReverseConversion() {
+        backendMigrationCompletion(true)
+    }
 
-    private fun backendMove(conversion: Boolean, previousError: Boolean = true) {
+    @Test
+    fun expiredBackendChangeConfirmsAnEmptyEnvironmentAndPreservesTheConversation() {
+        backendMigrationCompletion(false, expired = true)
+    }
+
+    private fun backendMigrationCompletion(automatic: Boolean, expired: Boolean = false) {
         MockWebServer().use { server ->
-            val moves = CopyOnWriteArrayList<JsonObject>()
+            val submitted = CopyOnWriteArrayList<JsonObject>()
+            val completed = AtomicBoolean(false)
+            val refreshed = AtomicInteger(0)
             server.dispatcher =
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
                         val body =
                             when {
-                                path.endsWith("/move") -> {
-                                    moves +=
+                                path.endsWith("/backend-migration") && request.method == "POST" -> {
+                                    submitted +=
                                         wireJson
                                             .parseToJsonElement(request.body.readUtf8())
                                             .jsonObject
-                                    """{"status":"moving","nodeId":"gpu","backend":"native"}"""
+                                    "{}"
                                 }
                                 path.endsWith("/backend-migration") ->
-                                    if (conversion && previousError)
-                                        """{"backend":"native","diskFormat":"native","pending":false,"error":"Previous conversion restore failed."}"""
-                                    else if (conversion)
-                                        """{"backend":"native","diskFormat":"native","pending":false}"""
-                                    else
-                                        """{"backend":"firecracker","diskFormat":"vm","pending":false}"""
-                                path.endsWith("/nodes/placement/run") ->
-                                    """{"nodes":[{"id":"vm","name":"Build VM","status":"online","capabilities":{"backend":"firecracker"}},{"id":"gpu","name":"Desktop GPU","status":"online","capabilities":{"backend":"native","ublk":true,"vmDisks":true}}]}"""
+                                    """{"required":${!automatic && !completed.get()},"optional":$automatic,"environmentExpired":$expired,"fromBackend":"${if (completed.get()) "native" else "firecracker"}","toBackend":"${if (automatic && completed.get()) "firecracker" else "native"}","pending":${submitted.isNotEmpty() && !completed.get()},"nodes":[{"id":"475328ca-1491-5a74-abfb-fb52c2e04160","name":"Desktop GPU"}]}"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
-                                path.endsWith("/overview") -> "{}"
-                                else -> "[]"
+                                path.endsWith("/overview") -> installationOverviewFixture()
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
-                        return MockResponse().setBody(body)
+                        return MockResponse().setBody(nodeWireFixture(request.path, body))
                     }
                 }
             server.start()
-            val vm = connectedViewModel()
+            val vault =
+                object : SessionVault {
+                    private val values = mutableMapOf<String, String>()
+
+                    override fun read(origin: String) = values[origin]
+
+                    override fun write(origin: String, cookie: String?) {
+                        if (cookie == null) values.remove(origin) else values[origin] = cookie
+                    }
+                }
+            val vm =
+                CairnViewModel(
+                    ApplicationProvider.getApplicationContext<Application>(),
+                    vault,
+                    beaconOrigin = "",
+                )
             compose.setContent {
                 val state by vm.state.collectAsStateWithLifecycle()
                 LaunchedEffect(Unit) {
@@ -917,126 +1384,72 @@ abstract class NodePlacementCases {
                 }
                 CairnTheme {
                     if (state.session.authenticated)
-                        Page {
-                            NodePlacement(
-                                vm,
-                                Run(
-                                    id = "run",
-                                    status =
-                                        if (!conversion) "succeeded"
-                                        else if (previousError) "cancelled" else "failed",
-                                    nodeId = if (conversion) "gpu" else "vm",
-                                    sessionId = if (conversion) null else "engine-session",
-                                    executionBackend = if (conversion) "native" else "firecracker",
-                                    storage = RunStorage(mode = "on-demand", dirtyBytes = 0),
-                                ),
-                            )
-                        }
+                        Page { BackendMigration(vm, "run") { refreshed.incrementAndGet() } }
                 }
             }
-            val sourceName = if (conversion) "Node : Desktop GPU" else "Node : Build VM"
             compose.waitUntil(20000) {
-                compose.onAllNodesWithText(sourceName).fetchSemanticsNodes().isNotEmpty()
+                compose
+                    .onAllNodesWithText("Migrer cette conversation…")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
             }
-            compose.onNodeWithText(sourceName).performClick()
-            // Pinning stays within the conversation's backend; moving switches it.
-            compose
-                .onNodeWithText("utilisez Déplacer… pour changer de backend", substring = true)
-                .assertExists()
-            compose.onNodeWithText("Déplacer…").performScrollTo().performClick()
+            compose.onNodeWithText("Migrer cette conversation…").performScrollTo().performClick()
             compose
                 .onNodeWithText(
-                    if (conversion) "Build VM · VM Firecracker" else "Desktop GPU · Processus natif"
+                    if (expired) "Le prochain message ouvre une nouvelle session"
+                    else "sans copie des fichiers",
+                    substring = true,
                 )
                 .assertExists()
-            compose.waitUntil(10000) {
+            if (expired) {
                 compose
-                    .onAllNodesWithText(
-                        if (conversion) "Ses fichiers sont copiés une fois pour une VM"
-                        else "tournera comme processus natif de l’hôte",
+                    .onNodeWithText("un nouvel environnement vide", substring = true)
+                    .assertExists()
+                compose
+                    .onNodeWithText(
+                        "Le fil, l’historique, les pièces jointes et les livrables sont conservés",
                         substring = true,
                     )
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
-            capture(
-                if (!conversion) "backend-switch-confirm"
-                else if (previousError) "backend-conversion-retry" else "backend-conversion-first"
-            )
-            assertTrue(moves.isEmpty())
-            compose
-                .onNodeWithText("Déplacer et changer de backend")
-                .performScrollTo()
-                .assertIsEnabled()
-                .performClick()
-            compose.waitUntil(10000) {
-                moves.isNotEmpty() &&
-                    compose
-                        .onAllNodesWithText("change de backend à destination", substring = true)
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
-            }
-            assertEquals(
-                if (conversion) "vm" else "gpu",
-                moves.single()["nodeId"]?.jsonPrimitive?.content,
-            )
-        }
-    }
-
-    @Test
-    fun aNativeEnvironmentConversionShowsItsProgressUntilCompletion() = conversionProgress(false)
-
-    @Test fun aNativeMissionConversionExplainsItsAutomaticContinuation() = conversionProgress(true)
-
-    private fun conversionProgress(mission: Boolean) {
-        MockWebServer().use { server ->
-            val completed = AtomicBoolean(false)
-            server.dispatcher =
-                object : Dispatcher() {
-                    override fun dispatch(request: RecordedRequest): MockResponse {
-                        val path = request.path!!.substringBefore('?')
-                        val body =
-                            when {
-                                path.endsWith("/backend-migration") ->
-                                    """{"backend":"native","diskFormat":"native","mission":$mission,"pending":${!completed.get()}}"""
-                                path == "/api/installations" -> beaconInstallationsFixture()
-                                path == "/api/account/session" -> beaconAccountFixture("fixture")
-                                path.endsWith("/overview") -> "{}"
-                                else -> "[]"
-                            }
-                        return MockResponse().setBody(body)
-                    }
-                }
-            server.start()
-            val vm = connectedViewModel()
-            compose.setContent {
-                val state by vm.state.collectAsStateWithLifecycle()
-                LaunchedEffect(Unit) {
-                    vm.state.first { it.ready }
-                    vm.connect(server.url("/").toString())
-                }
-                CairnTheme { if (state.session.authenticated) Page { BackendMigration(vm, "run") } }
-            }
-            compose.waitUntil(20000) {
+                    .assertExists()
                 compose
-                    .onAllNodesWithText("Conversion de cet environnement", substring = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
+                    .onNodeWithText("L’environnement d’origine est conservé", substring = true)
+                    .assertDoesNotExist()
             }
+            assertTrue(submitted.isEmpty())
+            capture("backend-migration-confirm")
+            // The migration renders before connect() finishes refreshing the workspace, and
+            // vm.perform ignores actions until then.
+            compose.waitUntil(10000) { !vm.state.value.busy }
+            compose.onNodeWithText("Confirmer").performClick()
+            compose.waitUntil(10000) { submitted.isNotEmpty() }
+            assertEquals("native", submitted[0]["backend"]?.jsonPrimitive?.content)
+            assertEquals(
+                "475328ca-1491-5a74-abfb-fb52c2e04160",
+                submitted[0]["nodeId"]?.jsonPrimitive?.content,
+            )
+            assertEquals(true, submitted[0]["confirm"]?.jsonPrimitive?.boolean)
             completed.set(true)
             elapse(2000)
             compose.waitUntil(10000) {
                 compose
-                    .onAllNodesWithText("Conversion terminée.", substring = true)
+                    .onAllNodesWithText("Mode d’exécution changé.", substring = true)
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            if (mission)
-                compose.onNodeWithText("La mission reprend", substring = true).assertExists()
-            else
+            if (automatic) {
+                compose.onNodeWithText("Migrer cette conversation…").assertDoesNotExist()
                 compose
-                    .onNodeWithText("Envoyez un nouveau message", substring = true)
+                    .onNodeWithText("Changer encore l’environnement")
+                    .performScrollTo()
+                    .performClick()
+                compose
+                    .onNodeWithText(
+                        "Vous pouvez choisir explicitement une VM Firecracker",
+                        substring = true,
+                    )
                     .assertExists()
+            }
+            assertEquals(1, refreshed.get())
         }
     }
 
@@ -1066,36 +1479,62 @@ abstract class NodePlacementCases {
                             when {
                                 path == "/api/installations/fixture/api/nodes/enrollments" -> {
                                     enrolled = true
-                                    """{"code":"fixture-enrollment","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/install | bash"}"""
+                                    """{"code":"fixture-enrollment","nodeId":"f65d5a2a-81d0-5580-bfa4-7ec33313e328","expiresAt":4102444800000,"installCommand":"curl https://fixture.invalid/install | bash"}"""
                                 }
-                                path == "/api/installations/fixture/api/nodes/node/revoke" -> {
+                                path ==
+                                    "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405/revoke" -> {
                                     revoked = true
-                                    "{}"
+                                    """{"releasedPlacements":0}"""
                                 }
-                                path == "/api/installations/fixture/api/nodes/node" -> {
+                                path ==
+                                    "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405" -> {
                                     configured = true
                                     "{}"
                                 }
                                 path == "/api/installations/fixture/api/nodes/settings" -> "{}"
-                                path == "/api/installations/fixture/api/nodes/fresh/agents" -> {
+                                path ==
+                                    "/api/installations/fixture/api/nodes/f65d5a2a-81d0-5580-bfa4-7ec33313e328/agents" -> {
                                     granted = true
                                     "{}"
                                 }
                                 path ==
-                                    "/api/installations/fixture/api/nodes/node/stale-disks/delete" -> {
+                                    "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405/stale-disks/delete" -> {
                                     cleaned = true
                                     """{"freedMiB":2048,"failed":0}"""
                                 }
                                 path == "/api/installations/fixture/api/nodes" ->
-                                    """[{"id":"node","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"storage":{"memoryCacheMiB":512},"agents":[],"exclusiveAgents":[],"staleDisks":{"count":${if (cleaned) 0 else 1},"diskMiB":2048}}${if (enrolled) """,{"id":"fresh","name":"Nouvelle node","status":"online","accepting":true,"agents":[{"id":"other","name":"Agent autorisé"},{"id":"main","name":"Agent global","allNodes":true}${if (grantedElsewhere) """,{"id":"late","name":"Agent tardif"}""" else ""}${if (granted) """,{"id":"agent","name":"Agent test"}""" else ""}]}""" else ""}]"""
+                                    """[{"id":"b40903f9-0487-53d0-a309-c589f0cae405","name":"Serveur test","status":"${if (revoked) "revoked" else "online"}","revoked":$revoked,"accepting":true,"limits":{"cpu":4,"memoryMiB":8192,"diskMiB":65536},"storage":{"memoryCacheMiB":512},"agents":[],"exclusiveAgents":[],"staleDisks":{"count":${if (cleaned) 0 else 1},"diskMiB":2048}}${if (enrolled) """,{"id":"f65d5a2a-81d0-5580-bfa4-7ec33313e328","name":"Nouvelle node","status":"online","accepting":true,"agents":[{"id":"ebfa691e-a987-5771-8e65-e1e51d1e4bb5","name":"Agent autorisé"},{"id":"ce26d2b8-ac9e-597f-a8ff-d2d679cbe59c","name":"Agent global","allNodes":true}${if (grantedElsewhere) """,{"id":"8d489b40-6d91-5e69-ab94-d43fa270f612","name":"Agent tardif"}""" else ""}${if (granted) """,{"id":"d3153f9f-724b-59c3-9614-ab78f231c4d3","name":"Agent test"}""" else ""}]}""" else ""}]"""
                                 path == "/api/installations/fixture/api/agents" ->
-                                    """[{"id":"agent","name":"Agent test"},{"id":"other","name":"Agent autorisé","access":{"nodes":["fresh"]}},{"id":"late","name":"Agent tardif"},{"id":"main","name":"Agent global","access":{"nodes":null}},{"id":"native","name":"Agent natif","access":{"backend":"native","nodes":[]}}]"""
+                                    """{"agents":[{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"d3153f9f-724b-59c3-9614-ab78f231c4d3","instructions":"","model":"","name":"Agent test","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["f65d5a2a-81d0-5580-bfa4-7ec33313e328"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"ebfa691e-a987-5771-8e65-e1e51d1e4bb5","instructions":"","model":"","name":"Agent autorisé","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"8d489b40-6d91-5e69-ab94-d43fa270f612","instructions":"","model":"","name":"Agent tardif","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":null,"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"ce26d2b8-ac9e-597f-a8ff-d2d679cbe59c","instructions":"","model":"","name":"Agent global","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0},{"access":{"backend":"native","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":[],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"38235acc-317f-50db-b506-53809ad1c8a0","instructions":"","model":"","name":"Agent natif","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0}]}"""
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
-                                path == "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                path == "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
-                        return MockResponse().setBody(body).apply {
+                        return MockResponse().setBody(nodeWireFixture(request.path, body)).apply {
                             // Keep the save busy while the subsequent node refresh is in flight.
                             if (path == "/api/installations/fixture/api/nodes" && configured)
                                 setBodyDelay(1, java.util.concurrent.TimeUnit.SECONDS)
@@ -1103,7 +1542,7 @@ abstract class NodePlacementCases {
                                 path == "/api/installations/fixture/api/nodes" &&
                                     writes.any {
                                         it.first ==
-                                            "/api/installations/fixture/api/nodes/node/storage"
+                                            "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405/storage"
                                     }
                             )
                                 setBodyDelay(200, java.util.concurrent.TimeUnit.MILLISECONDS)
@@ -1141,19 +1580,38 @@ abstract class NodePlacementCases {
             compose.waitUntil(20000) {
                 compose.onAllNodesWithText("Serveur test").fetchSemanticsNodes().isNotEmpty()
             }
+            // The fleet stays compact until a machine is opened.
+            compose.onNodeWithText("Stockage").assertDoesNotExist()
+            compose.onNodeWithText("Voir les détails de Serveur test").performClick()
+            compose.onNodeWithText("Stockage").assertExists()
+            compose
+                .onNodeWithText("Masquer les détails de Serveur test")
+                .performScrollTo()
+                .performClick()
+            compose.onNodeWithText("Stockage").assertDoesNotExist()
+            compose
+                .onNodeWithText("Voir les détails de Serveur test")
+                .performScrollTo()
+                .performClick()
             compose
                 .onNodeWithText(
                     "Aucun agent ne peut encore utiliser cette machine.",
                     substring = true,
                 )
                 .assertExists()
+            // The fleet summary counts connected machines and slots in use.
+            compose.onNodeWithText("1/1 connectée · ", substring = true).assertExists()
             capture("nodes")
             compose.onNodeWithText("Stockage").performScrollTo().performClick()
+            compose.onNodeWithText("Cache mémoire partagé (Mio)").performTextReplacement("1024")
             compose.onNodeWithText("Cache propre (Mio)").performTextReplacement("51200")
             capture("storage")
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) {
-                writes.any { it.first == "/api/installations/fixture/api/nodes/node/storage" } &&
+                writes.any {
+                    it.first ==
+                        "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405/storage"
+                } &&
                     compose
                         .onAllNodesWithText("Stockage · Serveur test")
                         .fetchSemanticsNodes()
@@ -1161,11 +1619,15 @@ abstract class NodePlacementCases {
             }
             val storage =
                 writes
-                    .first { it.first == "/api/installations/fixture/api/nodes/node/storage" }
+                    .first {
+                        it.first ==
+                            "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405/storage"
+                    }
                     .second
-            assertEquals(51200, storage["cacheMiB"]!!.jsonPrimitive.int)
-            // The memory cache is edited on the web; saving here keeps its value.
-            assertEquals(512, storage["memoryCacheMiB"]!!.jsonPrimitive.int)
+            assertEquals("fixture", storage["revision"]!!.jsonPrimitive.content)
+            val policy = storage["storage"]!!.jsonObject
+            assertEquals(51200, policy["cacheMiB"]!!.jsonPrimitive.int)
+            assertEquals(1024, policy["memoryCacheMiB"]!!.jsonPrimitive.int)
             // Agent access is read-only here: it is set on each agent's page.
             compose.onNodeWithText("Choisir les agents").assertDoesNotExist()
             compose.onNodeWithText("Aucun agent ne peut exécuter ici.").assertExists()
@@ -1182,7 +1644,8 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Confirmer").performClick()
             compose.waitUntil(10000) {
                 writes.any {
-                    it.first == "/api/installations/fixture/api/nodes/node/stale-disks/delete"
+                    it.first ==
+                        "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405/stale-disks/delete"
                 } &&
                     compose
                         .onAllNodesWithText("Anciens disques", substring = true)
@@ -1220,12 +1683,18 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Autoriser Agent test").assertDoesNotExist()
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) {
-                writes.any { it.first == "/api/installations/fixture/api/nodes/node" }
+                writes.any {
+                    it.first ==
+                        "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405"
+                }
             }
             assertEquals(
                 3,
                 writes
-                    .first { it.first == "/api/installations/fixture/api/nodes/node" }
+                    .first {
+                        it.first ==
+                            "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405"
+                    }
                     .second["limits"]!!
                     .jsonObject["cpu"]!!
                     .jsonPrimitive
@@ -1234,7 +1703,12 @@ abstract class NodePlacementCases {
             // Exclusive grants stay with the agents: the node never sends them.
             assertFalse(
                 "exclusiveAgents" in
-                    writes.first { it.first == "/api/installations/fixture/api/nodes/node" }.second
+                    writes
+                        .first {
+                            it.first ==
+                                "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405"
+                        }
+                        .second
             )
             compose.onNodeWithText("Révoquer", substring = false).performScrollTo().performClick()
             compose.waitUntil(10000) {
@@ -1258,7 +1732,10 @@ abstract class NodePlacementCases {
                 compose.onAllNodesWithText("Révoquée").fetchSemanticsNodes().isNotEmpty()
             }
             assertTrue(
-                writes.any { it.first == "/api/installations/fixture/api/nodes/node/revoke" }
+                writes.any {
+                    it.first ==
+                        "/api/installations/fixture/api/nodes/b40903f9-0487-53d0-a309-c589f0cae405/revoke"
+                }
             )
             compose.onNodeWithText("Ajouter une machine").performScrollTo().performClick()
             compose.onNodeWithText("Nom de la machine").performTextInput("Nouvelle node")
@@ -1301,11 +1778,11 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Déjà autorisé sur cette machine").assertExists()
             compose.onNode(isOn() and hasText("Agent autorisé")).assertIsNotEnabled()
             compose.onNodeWithText("Plus tard").assertExists()
-            // Agents have no backend of their own: any of them may run on this VM node.
-            compose.onNode(isOff() and hasText("Agent natif")).assertIsEnabled()
+            // An agent of another execution backend cannot run on this VM node.
+            compose.onNode(isOff() and hasText("Agent natif")).assertIsNotEnabled()
             compose
                 .onNodeWithText("Agent en exécution native : réservé aux nodes natives")
-                .assertDoesNotExist()
+                .assertExists()
             compose.onNodeWithText("Agent test").performScrollTo().performClick()
             // Another window grants an agent meanwhile; the next refresh brings it in.
             grantedElsewhere = true
@@ -1324,7 +1801,10 @@ abstract class NodePlacementCases {
             compose.onNode(isOn() and hasText("Agent tardif")).assertIsNotEnabled()
             compose.onNodeWithText("Terminer").performScrollTo().performClick()
             compose.waitUntil(10000) {
-                writes.any { it.first == "/api/installations/fixture/api/nodes/fresh/agents" } &&
+                writes.any {
+                    it.first ==
+                        "/api/installations/fixture/api/nodes/f65d5a2a-81d0-5580-bfa4-7ec33313e328/agents"
+                } &&
                     compose
                         .onAllNodesWithText("Qui peut utiliser « Nouvelle node » ?")
                         .fetchSemanticsNodes()
@@ -1334,13 +1814,42 @@ abstract class NodePlacementCases {
             // including the one allowed meanwhile, are never revoked.
             val grant =
                 writes
-                    .first { it.first == "/api/installations/fixture/api/nodes/fresh/agents" }
+                    .first {
+                        it.first ==
+                            "/api/installations/fixture/api/nodes/f65d5a2a-81d0-5580-bfa4-7ec33313e328/agents"
+                    }
                     .second
             assertEquals(
-                listOf("agent"),
+                listOf("d3153f9f-724b-59c3-9614-ab78f231c4d3"),
                 grant["agentIds"]!!.jsonArray.map { it.jsonPrimitive.content },
             )
             assertEquals(true, grant["add"]?.jsonPrimitive?.booleanOrNull)
         }
+    }
+}
+
+private class ImeAnimationReadiness :
+    WindowInsetsAnimationCompat.Callback(DISPATCH_MODE_CONTINUE_ON_SUBTREE) {
+    private val runningIme = mutableSetOf<WindowInsetsAnimationCompat>()
+
+    fun hidden(insets: WindowInsetsCompat?): Boolean =
+        runningIme.isEmpty() &&
+            insets != null &&
+            !insets.isVisible(WindowInsetsCompat.Type.ime()) &&
+            insets.getInsets(WindowInsetsCompat.Type.ime()).bottom == 0
+
+    override fun onPrepare(animation: WindowInsetsAnimationCompat) {
+        if (animation.typeMask and WindowInsetsCompat.Type.ime() != 0) {
+            runningIme += animation
+        }
+    }
+
+    override fun onProgress(
+        insets: WindowInsetsCompat,
+        runningAnimations: MutableList<WindowInsetsAnimationCompat>,
+    ): WindowInsetsCompat = insets
+
+    override fun onEnd(animation: WindowInsetsAnimationCompat) {
+        runningIme -= animation
     }
 }

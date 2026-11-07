@@ -62,6 +62,52 @@ pub fn router(origin: String) -> Router {
         )
 }
 
+/// Nodes added without a manager address install the node gateway first. It
+/// is built with this Beacon, which serves it with its checksum in the script.
+pub fn gateway_router(origin: &str, gateway: Option<Vec<u8>>) -> Router {
+    let Some(gateway) = gateway else {
+        let script = "#!/usr/bin/env bash\necho 'Cairn node installer: this Beacon does not provide the node gateway. Enter a direct manager address instead.' >&2\nexit 1\n";
+        return Router::new().route(
+            "/install/node.sh",
+            get(move || async move { shell_script(script.to_owned()) }),
+        );
+    };
+    let script = include_str!("../../../deploy/nodes/bootstrap.sh")
+        .replace("__CAIRN_BEACON_ORIGIN__", &shell_quote(origin))
+        .replace(
+            "__CAIRN_GATEWAY_SHA256__",
+            &hex::encode(Sha256::digest(&gateway)),
+        );
+    let gateway = axum::body::Bytes::from(gateway);
+    Router::new()
+        .route(
+            "/install/node.sh",
+            get(move || async move { shell_script(script) }),
+        )
+        .route(
+            "/install/node-gateway",
+            get(move || async move {
+                (
+                    [
+                        (header::CONTENT_TYPE, "application/octet-stream"),
+                        (header::CACHE_CONTROL, "no-store"),
+                    ],
+                    gateway,
+                )
+            }),
+        )
+}
+
+fn shell_script(script: String) -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        script,
+    )
+}
+
 /// The operator explicitly selects an immutable, tested image; never follow `latest`.
 pub fn release_router(image: Option<String>) -> Result<Router, &'static str> {
     if let Some(image) = &image {

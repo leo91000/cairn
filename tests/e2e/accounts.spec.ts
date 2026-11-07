@@ -1,7 +1,6 @@
 import { writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { limits } from '../fixtures/codex-account-fixture'
-import { codexSignInMode, seedCodexAccount } from './accounts'
+import { codexSignInMode, limits, seedCodexAccount } from './accounts'
 import {
   signIn as authenticateWorkspace,
   expect,
@@ -60,10 +59,12 @@ test('both coding agents share one account list, detail panel and sign-in', asyn
   await expect(codex.getByRole('button', { name: /^Work,/ })).toContainText('Next up')
   // A run holds a slot on the account with the most capacity, whose avatar shows the comet.
   const task = await workspace.api('/api/tasks', 'POST', {
-    name: 'Long review',
-    prompt: 'fixture:chat-hang',
-    agentId: '00000000-0000-4000-8000-000000000001',
-    worktree: false,
+    settings: {
+      name: 'Long review',
+      prompt: 'fixture:chat-hang',
+      agentId: '00000000-0000-4000-8000-000000000001',
+      worktree: false,
+    },
   })
   const run = await workspace.api(`/api/tasks/${task.id}/run`, 'POST')
   await expect(codex.getByRole('button', { name: /^Work,/ })).toContainText('1 running', { timeout: 20000 })

@@ -1,0 +1,54 @@
+{
+  "creates": [
+    {
+      "settings": {
+        "baseBranch": "main",
+        "description": "",
+        "name": "Project",
+        "path": "/workspace/project",
+        "sourceMode": "remote"
+      }
+    },
+    {
+      "creationId": "00000000-0000-4000-8000-000000000002",
+      "settings": {
+        "baseBranch": "work/branch",
+        "description": "A project",
+        "name": "Second",
+        "path": "/workspace/second",
+        "sourceMode": "local"
+      }
+    }
+  ],
+  "views": [
+    {
+      "baseBranch": "main",
+      "createdAt": 9007199254740991,
+      "description": "",
+      "id": "00000000-0000-4000-8000-000000000001",
+      "name": "Project",
+      "origin": "forge.example:team/project.git",
+      "path": "/workspace/project",
+      "revision": "00000000-0000-4000-8000-000000000004",
+      "source": null,
+      "sourceMode": "remote"
+    },
+    {
+      "baseBranch": "work/branch",
+      "createdAt": 9007199254740991,
+      "description": "A project",
+      "id": "00000000-0000-4000-8000-000000000001",
+      "name": "Second",
+      "origin": "forge.example:team/project.git",
+      "path": "/workspace/second",
+      "revision": "00000000-0000-4000-8000-000000000004",
+      "source": {
+        "id": "team/project",
+        "instance": "00000000-0000-4000-8000-000000000003",
+        "pluginId": "forge",
+        "source": "repositories"
+      },
+      "sourceMode": "local"
+    }
+  ]
+}

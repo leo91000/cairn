@@ -9,7 +9,7 @@ import {
   ref,
   watch,
 } from 'vue'
-import { ArrowLeft, ChevronRight } from '../icons'
+import { ChevronLeft, ChevronRight } from '../icons'
 import { iconButton } from '../ui'
 import Icon from './Icon.vue'
 
@@ -95,7 +95,7 @@ onBeforeUnmount(() => {
         :disabled="page <= 1 || busy"
         @click="page--"
       >
-        <Icon :name="ArrowLeft" :size="16" />
+        <Icon :name="ChevronLeft" :size="16" />
       </button>
       <span role="status">{{ pages ? `Page ${page} of ${pages}` : 'Loading PDF…' }}</span>
       <button

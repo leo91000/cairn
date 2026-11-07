@@ -1,5 +1,8 @@
 import type { Page } from '@playwright/test'
+import type { ListProjectsOutput } from '../../packages/contracts/generated/typescript/ListProjectsOutput'
 import type { Workspace } from './fixtures'
+import { once } from 'node:events'
+import { createServer } from 'node:http'
 import {
   signIn as authenticateWorkspace,
   createAgent,
@@ -12,8 +15,99 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+import { withSettledRoutes } from './route-lifecycle'
 
 const MAIN_AGENT_ID = '00000000-0000-4000-8000-000000000001'
+
+test('automatic placement saves ordered node priorities on the agent', async ({ page, workspace, browserName }) => {
+  test.setTimeout(60000)
+  await signIn(page)
+  const first = await enroll(page, workspace, 'Priority machine one', false)
+  const second = await enroll(page, workspace, 'Priority machine two', false)
+  const third = await enroll(page, workspace, 'Priority machine three', false)
+  await page.goto(workspacePath('/agents/new'))
+  await page.getByLabel('Name', { exact: true }).fill('Automatic placement')
+  const id = await createAgent(page)
+  await openAgentSection(page, 'Nodes')
+  await expect(page.getByRole('button', { name: 'Prioritize Priority machine one', exact: true })).toBeDisabled()
+  await page.getByRole('switch', { name: 'Can run its conversations on Priority machine one', exact: true }).check()
+  await page.getByRole('switch', { name: 'Can run its conversations on Priority machine two', exact: true }).check()
+  await page.getByRole('switch', { name: 'Can run its conversations on Priority machine three', exact: true }).check()
+  await page.getByRole('button', { name: 'Prioritize Priority machine one', exact: true }).click()
+  await page.getByRole('button', { name: 'Prioritize Priority machine two', exact: true }).click()
+  await page.getByRole('button', { name: 'Prioritize Priority machine three', exact: true }).click()
+  const priorities = page.getByRole('list', { name: 'Node priorities', exact: true })
+  const handle = (name: string) => priorities.getByRole('button', { name: `Drag Priority machine ${name} to reorder`, exact: true })
+  const drag = async (from: string, to: string, cancel = false) => {
+    await handle(from).scrollIntoViewIfNeeded()
+    const start = (await handle(from).boundingBox())!
+    const end = (await handle(to).boundingBox())!
+    await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2, { steps: 12 })
+    if (cancel)
+      await page.keyboard.press('Escape')
+    await page.mouse.up()
+  }
+
+  // Move across several rows in either direction. Dropping and cancelling preserve grants.
+  await drag('three', 'one')
+  await expect(priorities.getByRole('listitem').first()).toContainText('1. Priority machine three')
+  await drag('three', 'two')
+  await expect(priorities.getByRole('listitem').last()).toContainText('3. Priority machine three')
+  await drag('three', 'one', true)
+  await expect(priorities.getByRole('listitem').last()).toContainText('3. Priority machine three')
+  await page.getByRole('button', { name: 'Move Priority machine two up', exact: true }).focus()
+  await page.keyboard.press('Enter')
+  await page.screenshot({ path: 'test-results/node-priorities-desktop.png', fullPage: true })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.emulateMedia({ colorScheme: 'dark' })
+  await drag('three', 'one')
+  await expect(priorities.getByRole('listitem').nth(1)).toContainText('2. Priority machine three')
+  await expect(priorities).toBeInViewport()
+  await page.screenshot({ path: 'test-results/node-priorities-phone-dark.png', fullPage: true })
+  if (browserName === 'chromium') {
+    // Browser touch input exercises pointer capture and touch-action, rather than synthetic DOM events.
+    const session = await page.context().newCDPSession(page)
+    await session.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 })
+    const touchDrag = async (from: string, to: string, cancel = false) => {
+      const start = (await handle(from).boundingBox())!
+      const end = (await handle(to).boundingBox())!
+      const x = start.x + start.width / 2
+      const y = start.y + start.height / 2
+      await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] })
+      for (let step = 1; step <= 10; step++) {
+        await session.send('Input.dispatchTouchEvent', {
+          type: 'touchMove',
+          touchPoints: [{ x, y: y + (end.y + end.height / 2 - y) * step / 10 }],
+        })
+      }
+
+      await session.send('Input.dispatchTouchEvent', { type: cancel ? 'touchCancel' : 'touchEnd', touchPoints: [] })
+    }
+
+    await touchDrag('one', 'three')
+    await expect(priorities.getByRole('listitem').nth(1)).toContainText('2. Priority machine one')
+    await touchDrag('one', 'three')
+    await expect(priorities.getByRole('listitem').nth(1)).toContainText('2. Priority machine three')
+    await touchDrag('one', 'two', true)
+    await expect(priorities.getByRole('listitem').last()).toContainText('3. Priority machine one')
+    await session.send('Emulation.setTouchEmulationEnabled', { enabled: false })
+    await session.detach()
+  }
+
+  await saveAgent(page)
+  const saved = await workspace.api(`/api/agents/${id}`)
+  expect(saved.access.backend).toBe('auto')
+  expect(saved.nodePriorities).toEqual([second, third, first])
+  expect(saved.access.nodes).toEqual(expect.arrayContaining([first, second, third]))
+  await page.reload()
+  await openAgentSection(page, 'Nodes')
+  await expect(page.getByText('1. Priority machine two', { exact: true })).toBeVisible()
+  await expect(page.getByText('2. Priority machine three', { exact: true })).toBeVisible()
+  // This longer gesture journey must not spend the following tests' shared request budget.
+  await workspace.restart()
+})
 
 async function signIn(page: Page) {
   await page.goto(workspacePath('/'))
@@ -29,7 +123,7 @@ async function enroll(page: Page, workspace: Workspace, name: string, exclusive:
       code: invitation.code,
       name,
       protocol: 1,
-      runtimeId: 'fixture',
+      runtimeId: 'development',
       capabilities: {
         os: 'linux',
         arch: 'x86_64',
@@ -44,7 +138,7 @@ async function enroll(page: Page, workspace: Workspace, name: string, exclusive:
   const node = await response.json()
   const heartbeat = await page.request.post(`${workspace.installationUrl}/internal/nodes/heartbeat`, {
     headers: { authorization: `Bearer ${node.token}` },
-    data: { exclusiveReservations: exclusive },
+    data: { exclusiveReservations: exclusive, runtimeId: 'development', nodeProtocol: 2 },
   })
   expect(heartbeat.ok()).toBe(true)
   return node.nodeId as string
@@ -157,7 +251,8 @@ for (const kind of ['projects'] as const) {
       await expect(dialog.getByRole('alert')).toContainText(failure === 'refresh' ? 'saved, but the workspace could not be reloaded' : `Could not confirm whether the ${label} was saved`)
       await expectUncovered(dialog.getByRole('alert'))
       rejectRefresh = false
-      const first = (await workspace.api(`/api/${kind}`)).filter((item: { id: string }) => item.id === createdId)
+      const initialProjects: ListProjectsOutput = await workspace.api(`/api/${kind}`)
+      const first = initialProjects.projects.filter(item => item.id === createdId)
       expect(first).toHaveLength(1)
       const createdAt = first[0].createdAt
       await page.screenshot({ path: testInfo.outputPath(`${kind}-${failure.replaceAll(' ', '-')}-mobile.png`), animations: 'disabled' })
@@ -174,7 +269,8 @@ for (const kind of ['projects'] as const) {
       await dialog.getByRole('button', { name: `Save ${label}`, exact: true }).click()
       await expect(dialog).toHaveCount(0)
 
-      const saved = (await workspace.api(`/api/${kind}`)).filter((item: { name: string }) => item.name.startsWith(name))
+      const updatedProjects: ListProjectsOutput = await workspace.api(`/api/${kind}`)
+      const saved = updatedProjects.projects.filter(item => item.name.startsWith(name))
       expect(saved).toHaveLength(1)
       expect(saved[0]).toMatchObject({ id: createdId, name: `${name} edited`, createdAt })
       expect(updates).toBe(failure === 'refresh' ? 2 : 1)
@@ -382,8 +478,11 @@ test('exclusive reservation is granted per node from the agent page once the age
   await expect(page.getByRole('button', { name: /^Exclusive reservation gpu-box/ })).toBeVisible()
   // The node only shows who holds the grant.
   await page.goto(workspacePath('/nodes'))
-  const card = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'gpu-box' }) })
-  await expect(card).toContainText('1 can reserve it exclusively: Release engineer')
+  await page.getByRole('list', { name: 'Machines' }).getByRole('button', { name: /^gpu-box,/ }).click()
+  const card = page.getByRole('dialog', { name: /^gpu-box/ })
+  await card.getByRole('group', { name: 'Node sections' }).getByRole('button', { name: 'Access', exact: true }).click()
+  await expect(card.getByRole('region', { name: 'Agents on gpu-box' })).toContainText('Can reserve it exclusively')
+  await expect(card.getByRole('region', { name: 'Agents on gpu-box' })).toContainText('Release engineer')
   await expect(card.getByRole('link', { name: 'Manage access from the agents ›' })).toBeVisible()
 })
 
@@ -476,85 +575,87 @@ test('recovering a created agent keeps its revision, so a concurrent change is a
 })
 
 test('tool choices stay visible and editable when every MCP connection is granted', async ({ page, workspace }) => {
-  const mcp = await workspace.api('/api/mcps', 'POST', {
-    name: 'Design tools',
-    transport: 'http',
-    url: 'http://127.0.0.1:9/mcp',
-    allowPrivateNetwork: true,
+  await withSettledRoutes(page, async () => {
+    const mcp = await workspace.api('/api/mcps', 'POST', {
+      name: 'Design tools',
+      transport: 'http',
+      url: 'http://127.0.0.1:9/mcp',
+      allowPrivateNetwork: true,
+    })
+    const agent = await workspace.api('/api/agents', 'POST', { name: 'Limited MCP user', access: { mcps: null, mcpTools: { [mcp.id]: ['echo'] } } })
+    await useRelayForHttpMocks(page)
+    // The connection reports two discovered tools.
+    await page.route('**/api/mcps', async (route) => {
+      if (route.request().method() !== 'GET') {
+        await route.continue()
+        return
+      }
+
+      const response = await route.fetch()
+      const list = (await response.json()).mcps.map((item: { id: string }) => item.id === mcp.id
+        ? { ...item, tools: [{ name: 'echo', inputSchema: { type: 'object' } }, { name: 'search', inputSchema: { type: 'object' } }] }
+        : item)
+      await route.fulfill({ response, json: { mcps: list } })
+    })
+    await page.goto(workspacePath(`/agents/${agent.id}?section=mcps`))
+    await authenticateWorkspace(page)
+    const group = page.getByRole('group', { name: 'MCP connections access' })
+    await expect(group.getByRole('button', { name: 'All, including future', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    const connection = page.getByRole('listitem', { name: 'Design tools' })
+    await expect(connection).toContainText('Tools · 2 enabled on the connection · 1 chosen')
+    const bar = page.getByRole('region', { name: 'Unsaved changes' })
+    await expect(bar).toHaveCount(0)
+
+    await connection.locator('summary').click()
+    await expect(connection.getByLabel('echo', { exact: true })).toBeChecked()
+    await connection.getByLabel('search', { exact: true }).check()
+    await expect(bar).toContainText('1 unsaved change')
+    await saveAgent(page)
+    const saved = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
+    expect(saved.access.mcps).toBeNull()
+    expect(saved.access.mcpTools).toEqual({ [mcp.id]: ['echo', 'search'] })
+
+    // Choosing starts with no connection selected, as for projects and skills and on Android;
+    // switching back keeps the tool choices.
+    await group.getByRole('button', { name: 'Choose', exact: true }).click()
+    await expect(page.getByLabel('Design tools', { exact: true })).not.toBeChecked()
+    await group.getByRole('button', { name: 'All, including future', exact: true }).click()
+    await expect(connection).toContainText('2 chosen')
+    await expect(bar).toHaveCount(0)
+    // Leaving "All enabled tools" starts with no tool chosen.
+    await connection.locator('details').evaluate((element) => {
+      (element as HTMLDetailsElement).open = true
+    })
+    await connection.getByLabel('All enabled tools', { exact: true }).check()
+    await expect(connection).toContainText('all enabled tools')
+    await connection.getByLabel('All enabled tools', { exact: true }).uncheck()
+    await expect(connection).toContainText('0 chosen')
+    await expect(connection.getByLabel('echo', { exact: true })).not.toBeChecked()
+    await expect(connection.getByLabel('search', { exact: true })).not.toBeChecked()
+    await connection.getByLabel('echo', { exact: true }).check()
+    await connection.getByLabel('search', { exact: true }).check()
+    await expect(bar).toHaveCount(0)
+    await page.getByRole('link', { name: 'Overview', exact: true }).click()
+    await expect(page.getByRole('button', { name: /^MCP & tools/ })).toContainText('Tools limited on Design tools')
+
+    // Unticking a connection keeps its tool choices until saving: ticking it again restores them.
+    await openAgentSection(page, 'MCP & tools')
+    await group.getByRole('button', { name: 'Choose', exact: true }).click()
+    const restriction = page.getByText('2 enabled on the connection · 2 chosen').first()
+    await page.getByLabel('Design tools', { exact: true }).check()
+    await expect(restriction).toBeVisible()
+    await page.getByLabel('Design tools', { exact: true }).uncheck()
+    await page.getByLabel('Design tools', { exact: true }).check()
+    await expect(restriction).toBeVisible()
+    await page.getByLabel('Design tools', { exact: true }).uncheck()
+
+    // Choosing no connection saves: tool choices of connections no longer granted are not sent.
+    const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${agent.id}`))
+    await bar.getByRole('button', { name: 'Save', exact: true }).click()
+    expect((await saving).postDataJSON().settings.access).toMatchObject({ mcps: [], mcpTools: {} })
+    await expect(bar).toHaveCount(0)
+    expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access).toMatchObject({ mcps: [], mcpTools: {} })
   })
-  const agent = await workspace.api('/api/agents', 'POST', { name: 'Limited MCP user', access: { mcps: null, mcpTools: { [mcp.id]: ['echo'] } } })
-  await useRelayForHttpMocks(page)
-  // The connection reports two discovered tools.
-  await page.route('**/api/mcps', async (route) => {
-    if (route.request().method() !== 'GET') {
-      await route.continue()
-      return
-    }
-
-    const response = await route.fetch()
-    const list = (await response.json()).map((item: { id: string }) => item.id === mcp.id
-      ? { ...item, tools: [{ name: 'echo', inputSchema: { type: 'object' } }, { name: 'search', inputSchema: { type: 'object' } }] }
-      : item)
-    await route.fulfill({ response, json: list })
-  })
-  await page.goto(workspacePath(`/agents/${agent.id}?section=mcps`))
-  await authenticateWorkspace(page)
-  const group = page.getByRole('group', { name: 'MCP connections access' })
-  await expect(group.getByRole('button', { name: 'All, including future', exact: true })).toHaveAttribute('aria-pressed', 'true')
-  const connection = page.getByRole('listitem', { name: 'Design tools' })
-  await expect(connection).toContainText('Tools · 2 enabled on the connection · 1 chosen')
-  const bar = page.getByRole('region', { name: 'Unsaved changes' })
-  await expect(bar).toHaveCount(0)
-
-  await connection.locator('summary').click()
-  await expect(connection.getByLabel('echo', { exact: true })).toBeChecked()
-  await connection.getByLabel('search', { exact: true }).check()
-  await expect(bar).toContainText('1 unsaved change')
-  await saveAgent(page)
-  const saved = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
-  expect(saved.access.mcps).toBeNull()
-  expect(saved.access.mcpTools).toEqual({ [mcp.id]: ['echo', 'search'] })
-
-  // Choosing starts with no connection selected, as for projects and skills and on Android;
-  // switching back keeps the tool choices.
-  await group.getByRole('button', { name: 'Choose', exact: true }).click()
-  await expect(page.getByLabel('Design tools', { exact: true })).not.toBeChecked()
-  await group.getByRole('button', { name: 'All, including future', exact: true }).click()
-  await expect(connection).toContainText('2 chosen')
-  await expect(bar).toHaveCount(0)
-  // Leaving "All enabled tools" starts with no tool chosen.
-  await connection.locator('details').evaluate((element) => {
-    (element as HTMLDetailsElement).open = true
-  })
-  await connection.getByLabel('All enabled tools', { exact: true }).check()
-  await expect(connection).toContainText('all enabled tools')
-  await connection.getByLabel('All enabled tools', { exact: true }).uncheck()
-  await expect(connection).toContainText('0 chosen')
-  await expect(connection.getByLabel('echo', { exact: true })).not.toBeChecked()
-  await expect(connection.getByLabel('search', { exact: true })).not.toBeChecked()
-  await connection.getByLabel('echo', { exact: true }).check()
-  await connection.getByLabel('search', { exact: true }).check()
-  await expect(bar).toHaveCount(0)
-  await page.getByRole('link', { name: 'Overview', exact: true }).click()
-  await expect(page.getByRole('button', { name: /^MCP & tools/ })).toContainText('Tools limited on Design tools')
-
-  // Unticking a connection keeps its tool choices until saving: ticking it again restores them.
-  await openAgentSection(page, 'MCP & tools')
-  await group.getByRole('button', { name: 'Choose', exact: true }).click()
-  const restriction = page.getByText('2 enabled on the connection · 2 chosen').first()
-  await page.getByLabel('Design tools', { exact: true }).check()
-  await expect(restriction).toBeVisible()
-  await page.getByLabel('Design tools', { exact: true }).uncheck()
-  await page.getByLabel('Design tools', { exact: true }).check()
-  await expect(restriction).toBeVisible()
-  await page.getByLabel('Design tools', { exact: true }).uncheck()
-
-  // Choosing no connection saves: tool choices of connections no longer granted are not sent.
-  const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${agent.id}`))
-  await bar.getByRole('button', { name: 'Save', exact: true }).click()
-  expect((await saving).postDataJSON().access).toMatchObject({ mcps: [], mcpTools: {} })
-  await expect(bar).toHaveCount(0)
-  expect((await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access).toMatchObject({ mcps: [], mcpTools: {} })
 })
 
 test('a held plugin grant whose package cannot give agents access is shown, counted and removable', async ({ page, workspace }) => {
@@ -568,8 +669,8 @@ test('a held plugin grant whose package cannot give agents access is shown, coun
     }
 
     const response = await route.fetch()
-    const agents = await response.json()
-    await route.fulfill({ response, json: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) })
+    const { agents } = await response.json()
+    await route.fulfill({ response, json: { agents: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) } })
   })
   await page.route('**/api/plugins', route => route.fulfill({
     json: {
@@ -624,7 +725,7 @@ test('a held plugin grant whose package cannot give agents access is shown, coun
 
   const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${agent.id}`))
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
-  const body = (await saving).postDataJSON()
+  const body = (await saving).postDataJSON().settings
   expect(body.plugins).toEqual([])
   expect(body.access).not.toHaveProperty('plugins')
 })
@@ -693,8 +794,8 @@ test('a GitHub account is granted like any plugin instance, and the server refus
   await expect(review).toContainText('Added: GitHub “Work”')
   await review.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(review).toContainText(refusal)
-  expect(saves.at(-1)!.plugins).toEqual(['work', 'personal'])
-  expect(saves.at(-1)!.access).not.toHaveProperty('github')
+  expect(saves.at(-1)!.settings.plugins).toEqual(['work', 'personal'])
+  expect(saves.at(-1)!.settings.access).not.toHaveProperty('github')
   await review.getByRole('button', { name: 'Back to editing', exact: true }).click()
   // The refusal stays with the plugins section, where the owner removes one account.
   await expect(page.getByRole('alert').filter({ hasText: refusal }).first()).toBeVisible()
@@ -710,8 +811,8 @@ test('when plugins cannot be loaded, plugin access is read-only and no grant loo
     }
 
     const response = await route.fetch()
-    const agents = await response.json()
-    await route.fulfill({ response, json: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) })
+    const { agents } = await response.json()
+    await route.fulfill({ response, json: { agents: agents.map((item: { id: string }) => item.id === agent.id ? { ...item, plugins: ['queue'] } : item) } })
   })
   let catalogFails = true
   await page.route('**/api/plugins', route => catalogFails
@@ -773,7 +874,7 @@ test('when nodes cannot be loaded, the page stays usable and node access is read
   await expect(page.getByRole('switch', { name: 'All nodes, including future' })).toBeChecked()
 })
 
-test('an agent can run on VM and native nodes alike, each native node reviewed like a power', async ({ page, workspace }) => {
+test('the execution backend chooses which nodes an agent can be granted', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const vm = await enroll(page, workspace, 'vm-box', true)
   const invitation = await workspace.api('/api/nodes/enrollments', 'POST', { name: 'native-box', backend: 'native' })
@@ -782,7 +883,7 @@ test('an agent can run on VM and native nodes alike, each native node reviewed l
       code: invitation.code,
       name: 'native-box',
       protocol: 1,
-      runtimeId: 'fixture',
+      runtimeId: 'development',
       capabilities: {
         backend: 'native',
         os: 'linux',
@@ -791,47 +892,61 @@ test('an agent can run on VM and native nodes alike, each native node reviewed l
         memoryMiB: 16384,
         diskMiB: 65536,
         kvm: false,
-        fuse: false,
       },
     },
   })
   expect(enrolled.ok()).toBe(true)
-  const native = (await enrolled.json()).nodeId as string
+  const nativeRegistration = await enrolled.json()
+  const native = nativeRegistration.nodeId as string
+  const heartbeat = await page.request.post(`${workspace.installationUrl}/internal/nodes/heartbeat`, {
+    headers: { authorization: `Bearer ${nativeRegistration.token}` },
+    data: { exclusiveReservations: true, runtimeId: 'development', nodeProtocol: 2 },
+  })
+  expect(heartbeat.ok()).toBe(true)
   const agent = await workspace.api('/api/agents', 'POST', { name: 'GPU renderer', access: { nodes: [vm] } })
   await page.goto(workspacePath(`/agents/${agent.id}?section=nodes`))
   await authenticateWorkspace(page)
 
-  // VM and native nodes are listed together, the current runner included, with their backend.
+  // Firecracker VM agents choose among VM nodes, the current runner included, or all of them.
   const nodes = page.getByRole('list', { name: 'Nodes' })
   await expect(page.getByRole('switch', { name: 'All nodes, including future' })).toBeVisible()
-  await expect(nodes.getByRole('listitem', { name: 'vm-box' })).toContainText('Firecracker VM')
+  await expect(nodes.getByRole('listitem', { name: 'vm-box' })).toBeVisible()
   // Unreported by this installation, the current runner is still offered, without a state.
   const runner = nodes.getByRole('listitem', { name: 'Current runner' })
   await expect(runner).toBeVisible()
   await expect(runner).not.toContainText('Online')
   await expect(page.getByRole('switch', { name: 'Can run its conversations on Current runner' })).not.toBeChecked()
-  await expect(nodes.getByRole('listitem', { name: 'native-box' })).toContainText('Native process')
-  await expect(page.getByRole('combobox', { name: 'Agent execution backend' })).toHaveCount(0)
+  await expect(nodes.getByRole('listitem', { name: 'native-box' })).toHaveCount(0)
 
-  // A native node keeps the VM grant; each host still controls trusted people.
+  // Native agents may grant all nodes; each host still controls trusted people.
+  await page.getByRole('combobox', { name: 'Agent execution backend' }).click()
+  await page.getByRole('option', { name: 'Native process · trusted people only', exact: true }).click()
+  await expect(page.getByText('Uses the host GPU and OS tools with weaker isolation.')).toBeVisible()
+  await expect(page.getByRole('switch', { name: 'All nodes, including future' })).toBeVisible()
+  await expect(nodes.getByRole('listitem', { name: 'vm-box' })).toHaveCount(0)
+  await expect(nodes.getByRole('listitem', { name: 'Current runner' })).toHaveCount(0)
   const run = page.getByRole('switch', { name: 'Can run its conversations on native-box' })
   await expect(run).not.toBeChecked()
+  const exclusive = page.getByRole('switch', { name: 'Can reserve native-box exclusively' })
+  await expect(exclusive).toBeDisabled()
   await run.check()
+  await expect(exclusive).toBeEnabled()
+  await exclusive.check()
 
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
   const review = page.getByRole('dialog', { name: 'Review before saving' })
-  await expect(review).toContainText('Added: native node native-box. Conversations moved there run as host processes with its GPU and weaker isolation')
+  await expect(review).toContainText('Added: native execution. Uses the host GPU and OS tools with weaker isolation.')
   await review.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(review).toHaveCount(0)
   const saved = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
-  expect(saved.access).toMatchObject({ nodes: [vm, native] })
-  expect(saved.access).not.toHaveProperty('backend')
+  expect(saved.access).toMatchObject({ backend: 'native', nodes: [native] })
+  expect(saved.exclusiveNodes).toEqual([native])
   await page.getByRole('switch', { name: 'All nodes, including future' }).check()
   await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
   await expect(review).toHaveCount(0)
   await expect.poll(async () => (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id).access.nodes).toBeNull()
   await page.getByRole('link', { name: 'Overview', exact: true }).click()
-  await expect(page.getByRole('button', { name: /^Execution All nodes/ })).toContainText('Native nodes')
+  await expect(page.getByRole('button', { name: /^Execution Native process/ })).toContainText('Native process')
 })
 
 test('a rejected first creation says the agent was not saved', async ({ page, workspace }) => {
@@ -894,49 +1009,6 @@ test('reloading after a conflict keeps a node granted elsewhere and the owner\'s
   expect([...saved.access.nodes].sort()).toEqual([mine, theirs].sort())
 })
 
-test('on an older installation, live grants are read-only and never sent', async ({ page, workspace }) => {
-  await useRelayForHttpMocks(page)
-  const agent = await workspace.api('/api/agents', 'POST', { name: 'Older grants' })
-  // An installation before live grants on agents, e.g. after a rollback: agents keep their
-  // revision, but lack the capability marker and the grants; it has no preview.
-  await page.route('**/api/agents', async (route) => {
-    if (route.request().method() !== 'GET') {
-      await route.continue()
-      return
-    }
-
-    const response = await route.fetch()
-    const agents = await response.json()
-    await route.fulfill({
-      response,
-      json: agents.map(({
-        grantsOnAgent: _marker,
-        exclusiveNodes: _nodes,
-        plugins: _plugins,
-        ...item
-      }: Record<string, unknown>) => item),
-    })
-  })
-  await page.route(`**/api/agents/${agent.id}/preview`, route => route.fulfill({ status: 404, json: { error: 'Not found' } }))
-  await page.goto(workspacePath(`/agents/${agent.id}?section=plugins`))
-  await authenticateWorkspace(page)
-  await expect(page.getByRole('note').filter({ hasText: 'Update the installation to grant these from the agent page.' })).toBeVisible()
-  await openAgentSection(page, 'Nodes')
-  await expect(page.getByText('Exclusive reservations: Update the installation to grant these from the agent page.')).toBeVisible()
-
-  await openAgentSection(page, 'Identity & instructions')
-  await page.getByLabel('Description', { exact: true }).fill('Saved on an older installation')
-  const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${agent.id}`))
-  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
-  const sent = (await saving).postDataJSON()
-  expect(sent).not.toHaveProperty('exclusiveNodes')
-  expect(sent).not.toHaveProperty('plugins')
-  expect(sent).not.toHaveProperty('revision')
-  expect(sent).not.toHaveProperty('grantsOnAgent')
-  await expect(page.getByRole('region', { name: 'Unsaved changes' })).toHaveCount(0)
-  await page.unrouteAll({ behavior: 'ignoreErrors' })
-})
-
 test('while the workspace lists cannot load, MCP access is read-only and not reported gone', async ({ page, workspace }) => {
   await workspace.restart()
   await useRelayForHttpMocks(page)
@@ -968,72 +1040,181 @@ test('while the workspace lists cannot load, MCP access is read-only and not rep
   await expect(page.getByRole('group', { name: 'MCP connections access' })).toBeVisible()
 })
 
-test('on an older installation, grants read from resources appear once plugins load', async ({ page, workspace }) => {
-  await workspace.restart()
+test('a missing agent preview keeps edits unsaved and reports the error', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
-  const agent = await workspace.api('/api/agents', 'POST', { name: 'Older retry' })
-  await page.route('**/api/agents', async (route) => {
-    if (route.request().method() !== 'GET') {
-      await route.continue()
-      return
-    }
-
-    const response = await route.fetch()
-    const agents = await response.json()
-    await route.fulfill({
-      response,
-      json: agents.map(({
-        grantsOnAgent: _marker,
-        exclusiveNodes: _nodes,
-        plugins: _plugins,
-        ...item
-      }: Record<string, unknown>) => item),
-    })
-  })
-  let pluginsFail = true
-  await page.route('**/api/plugins', async (route) => {
-    if (pluginsFail) {
-      await route.fulfill({ status: 500, json: { error: 'Plugin host unavailable' } })
-      return
-    }
-
-    const response = await route.fetch()
-    const catalog = await response.json()
-    // The older installation records the grant on the instance.
-    await route.fulfill({
-      response,
-      json: {
-        ...catalog,
-        connections: [{
-          id: 'queue',
-          pluginId: 'onepassword',
-          name: 'Support queue',
-          enabled: true,
-          settings: {},
-          agentIds: [agent.id],
-          userIds: [],
-          people: [],
-          accessMode: 'allowlist',
-          agentId: '',
-          projectId: null,
-          maxMessagesPerHour: 0,
-          status: { state: 'ready' },
-          usage: { hour: 0 },
-          requests: [],
-          activity: [],
-        }],
-      },
-    })
-  })
-  await page.goto(workspacePath(`/agents/${agent.id}?section=plugins`))
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Required preview' })
+  await page.route(`**/api/agents/${agent.id}/preview`, route => route.fulfill({ status: 404, json: { error: 'Preview unavailable' } }))
+  await page.goto(workspacePath(`/agents/${agent.id}`))
   await authenticateWorkspace(page)
-  const failure = page.getByRole('alert').filter({ hasText: 'Plugins could not be loaded' })
-  await expect(failure).toBeVisible()
-  pluginsFail = false
-  await failure.getByRole('button', { name: 'Try again', exact: true }).click()
-  const grant = page.getByRole('switch', { name: 'Access to 1Password Support queue' })
-  await expect(grant).toBeChecked()
-  await expect(grant).toBeDisabled()
-  await expect(page.getByRole('region', { name: 'Unsaved changes' })).toHaveCount(0)
-  await page.unrouteAll({ behavior: 'ignoreErrors' })
+  await openAgentSection(page, 'Identity & instructions')
+  await page.getByLabel('Description', { exact: true }).fill('Unsaved edits')
+  const bar = page.getByRole('region', { name: 'Unsaved changes' })
+  await bar.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.getByText('Preview unavailable', { exact: true })).toBeVisible()
+  await expect(bar).toBeVisible()
+  const stored = (await workspace.api('/api/agents')).find((item: { id: string }) => item.id === agent.id)
+  expect(stored.description).not.toBe('Unsaved edits')
+})
+
+const routeLifecycleTest = test.extend<{
+  pendingResponse: { url: string, received: Promise<void>, release: () => void }
+}>({
+  // Playwright requires a destructuring pattern for fixture dependencies.
+  // eslint-disable-next-line no-empty-pattern
+  pendingResponse: async ({}, use) => {
+    const received = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const server = createServer(async (request, response) => {
+      if (request.url === '/pending') {
+        received.resolve()
+        await release.promise
+        response.writeHead(200, { 'content-type': 'application/json' }).end('{}')
+        return
+      }
+
+      response.writeHead(200, { 'content-type': 'text/html' }).end('<!doctype html><title>Route lifecycle</title>')
+    })
+    try {
+      server.listen(0, '127.0.0.1')
+      await once(server, 'listening')
+      await use({
+        url: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+        received: received.promise,
+        release: () => release.resolve(),
+      })
+    }
+    finally {
+      release.resolve()
+      server.closeAllConnections()
+      if (server.listening)
+        await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+    }
+  },
+})
+
+for (const outcome of ['success', 'assertion failure']) {
+  routeLifecycleTest(`HTTP mock scopes settle pending fetches before page teardown on ${outcome}`, async ({ page, pendingResponse }) => {
+    const bodyFinished = Promise.withResolvers<void>()
+    let fulfilled = false
+    let scopeFinished = false
+    let failure: unknown
+    const expectedFailure = new Error('Controlled UI assertion failure')
+    const scope = withSettledRoutes(page, async () => {
+      await page.route('**/pending', async (route) => {
+        const response = await route.fetch()
+        await route.fulfill({ response })
+        fulfilled = true
+      })
+      await page.goto(pendingResponse.url)
+      await page.evaluate(() => {
+        void fetch('/pending')
+      })
+      await pendingResponse.received
+      bodyFinished.resolve()
+      if (outcome === 'assertion failure')
+        throw expectedFailure
+    })
+    const completion = scope.then(
+      () => { scopeFinished = true },
+      (error) => {
+        scopeFinished = true
+        failure = error
+      },
+    )
+    try {
+      await Promise.race([bodyFinished.promise, completion])
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(scopeFinished).toBe(false)
+      pendingResponse.release()
+      await completion
+      await page.close()
+      expect(fulfilled).toBe(true)
+      expect(failure).toBe(outcome === 'assertion failure' ? expectedFailure : undefined)
+    }
+    finally {
+      pendingResponse.release()
+      await completion
+      if (!page.isClosed())
+        await page.unrouteAll({ behavior: 'wait' })
+    }
+  })
+}
+
+const contextRouteTest = test.extend<object, {
+  routeServer: {
+    url: string
+    received: Promise<void>
+    finished: number
+    release: () => void
+  }
+}>({
+  // This lifecycle regression needs only synthetic HTTP, without an installation.
+  // eslint-disable-next-line no-empty-pattern
+  baseURL: async ({}, use) => use(undefined),
+  // eslint-disable-next-line no-empty-pattern
+  routeServer: [async ({}, use) => {
+    const received = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    let requests = 0
+    const server = createServer(async (request, response) => {
+      if (request.url?.startsWith('/pending/')) {
+        if (++requests === 3)
+          received.resolve()
+        await release.promise
+        response.writeHead(200, { 'content-type': 'application/json' }).end('{}')
+        return
+      }
+
+      response.writeHead(200, { 'content-type': 'text/html' }).end('<!doctype html><title>Shared route lifetime</title>')
+    })
+    server.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    try {
+      await use({
+        url: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+        received: received.promise,
+        finished: 0,
+        release: () => release.resolve(),
+      })
+    }
+    finally {
+      release.resolve()
+      server.closeAllConnections()
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+    }
+  }, { scope: 'worker' }],
+})
+
+contextRouteTest('shared context owns pending routes on pages and the context', async ({ page, context, routeServer }) => {
+  const other = await context.newPage()
+  try {
+    for (const [owner, pathname] of [[page, 'page'], [other, 'other-page'], [context, 'context']] as const) {
+      await owner.route(`**/pending/${pathname}`, async (route) => {
+        const response = await route.fetch()
+        await route.fulfill({ response, json: await response.json() })
+        routeServer.finished++
+      })
+    }
+
+    await Promise.all([page.goto(routeServer.url), other.goto(routeServer.url)])
+    await page.evaluate(() => {
+      void fetch('/pending/page')
+      void fetch('/pending/context')
+    })
+    await other.evaluate(() => {
+      void fetch('/pending/other-page')
+    })
+    await routeServer.received
+    expect(routeServer.finished).toBe(0)
+  }
+  finally {
+    // Complete after the body returns, including assertion failures, so fixture
+    // teardown owns the active routes without leaving an intentional gate held.
+    setTimeout(routeServer.release, 25)
+  }
+})
+
+contextRouteTest('shared context finishes its routes before the next test', async ({ page, routeServer }) => {
+  expect(routeServer.finished).toBe(3)
+  await page.goto(routeServer.url)
 })

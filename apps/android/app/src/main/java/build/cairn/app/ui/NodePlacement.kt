@@ -8,19 +8,15 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.ConfigurePlacementInput
+import build.cairn.contracts.ConversationPlacement as Placement
+import build.cairn.contracts.GetPlacementInput
+import build.cairn.contracts.MoveToNodeInput
+import build.cairn.contracts.PlacementSelection
+import build.cairn.contracts.configureConversationPlacement
+import build.cairn.contracts.getConversationPlacement
+import build.cairn.contracts.moveConversationToNode
 import kotlinx.coroutines.delay
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonNull
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
-
-@Serializable
-private data class Placement(
-    val nodes: List<ExecutionNode> = emptyList(),
-    val pinnedNodeId: String? = null,
-    val preferredNodeId: String? = null,
-)
 
 private val nodeStates =
     mapOf(
@@ -40,20 +36,19 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
     var loaded by remember(run.id) { mutableStateOf(false) }
     var savedMode by remember(run.id) { mutableStateOf("automatic") }
     var savedNode by remember(run.id) { mutableStateOf("") }
-    var placement by remember(run.id) { mutableStateOf(Placement()) }
+    var placement by remember(run.id) { mutableStateOf(Placement(emptyList(), null, null)) }
     var mode by remember(run.id) { mutableStateOf("automatic") }
     var selected by remember(run.id) { mutableStateOf(run.nodeId.orEmpty()) }
     var destination by remember(run.id) { mutableStateOf("") }
     var busy by remember(run.id) { mutableStateOf(false) }
     var error by remember(run.id) { mutableStateOf<String?>(null) }
     var saved by remember(run.id) { mutableStateOf<String?>(null) }
-    var migration by remember(run.id) { mutableStateOf<BackendMigrationState?>(null) }
-    var conversions by remember(run.id) { mutableIntStateOf(0) }
     var privilegeError by remember(run.id) { mutableStateOf(false) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(run.id) {
+    var placementRevision by remember(run.id) { mutableIntStateOf(0) }
+    LaunchedEffect(run.id, placementRevision) {
         try {
-            placement = vm.api.get("/nodes/placement/${run.id}")
+            placement = vm.api.getConversationPlacement(GetPlacementInput(run.id))
             mode =
                 if (placement.pinnedNodeId != null) "fixed"
                 else if (placement.preferredNodeId != null) "preferred" else "automatic"
@@ -70,7 +65,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
         if (!expanded || run.executionBackend != "native") return@LaunchedEffect
         while (true) {
             try {
-                val current = vm.api.get<Placement>("/nodes/placement/${run.id}")
+                val current = vm.api.getConversationPlacement(GetPlacementInput(run.id))
                 // Keep unsaved placement choices while refreshing observed privileges.
                 placement = placement.copy(nodes = current.nodes)
                 privilegeError = false
@@ -127,7 +122,11 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
         run.backup?.error != null ||
             run.movementError != null ||
             run.storage?.waitingFor == "integrity"
-    val pending = dirty > 0 || run.backup?.status == "saving" || run.storage?.waitingFor != null
+    val pending =
+        dirty > 0 ||
+            run.backup?.status == "saving" ||
+            run.storage?.waitingFor != null ||
+            run.storage?.backupDegraded == true
     val sync =
         when {
             run.movementError != null -> "Déplacement en échec"
@@ -136,6 +135,8 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
             exclusive != null -> "Suspendue pour une réservation exclusive"
             run.nodeState != null -> nodeStates[run.nodeState] ?: run.nodeState
             run.capacityWaitUntil != null -> "En attente de capacité"
+            run.storage?.backupDegraded == true ->
+                "Synchronisation en retard · travail conservé sur cette node"
             run.backup?.status == "saving" -> "Synchronisation…"
             dirty > 0 -> "${formatBytes(dirty)} non synchronisés"
             // Native ublk disks synchronize while running like VM disks; only legacy file
@@ -268,7 +269,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                     "Node fixe : aucune bascule automatique ailleurs.",
                     style = MaterialTheme.typography.bodySmall,
                 )
-            BackendMigration(vm, run.id, conversions)
+            BackendMigration(vm, run.id) { placementRevision++ }
             Text("Où elle tournera la prochaine fois", style = MaterialTheme.typography.titleSmall)
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                 listOf("automatic" to "Automatique", "preferred" to "Préférer", "fixed" to "Fixer")
@@ -283,14 +284,8 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                         }
                     }
             }
-            // Once its environment exists, a conversation starts again only on nodes of its
-            // backend; switching backend is an explicit move.
-            val startable =
-                placement.nodes.filter {
-                    run.executionBackend == null || it.backend == run.executionBackend
-                }
             if (mode != "automatic")
-                Choice("Node", selected, startable.map { it.id to it.name }) {
+                Choice("Node", selected, placement.nodes.map { it.id to it.name }) {
                     if (!busy) selected = it
                 }
             Text(
@@ -300,11 +295,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                     "fixed" -> "Attend cette machine, sans bascule automatique."
                     else ->
                         "Choisit la node autorisée avec des slots libres et des ressources disponibles."
-                } +
-                    " Cela ne déplace pas la conversation maintenant." +
-                    (run.executionBackend?.let {
-                        " Seules les nodes « ${backendLabel(it)} » sont proposées ; utilisez Déplacer… pour changer de backend."
-                    } ?: ""),
+                } + " Cela ne déplace pas la conversation maintenant.",
                 style = MaterialTheme.typography.bodySmall,
             )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -324,21 +315,14 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                             {
                                 val requestedMode = mode
                                 val requestedNode = selected
-                                api.request(
-                                    "PUT",
-                                    "/nodes/placement/${run.id}",
-                                    buildJsonObject {
-                                        put(
-                                            "pinnedNodeId",
-                                            if (mode == "fixed") JsonPrimitive(selected)
-                                            else JsonNull,
-                                        )
-                                        put(
-                                            "preferredNodeId",
-                                            if (mode == "preferred") JsonPrimitive(selected)
-                                            else JsonNull,
-                                        )
-                                    },
+                                api.configureConversationPlacement(
+                                    ConfigurePlacementInput(
+                                        run.id,
+                                        PlacementSelection(
+                                            if (mode == "fixed") selected else null,
+                                            if (mode == "preferred") selected else null,
+                                        ),
+                                    )
                                 )
                                 savedMode = requestedMode
                                 savedNode = requestedNode
@@ -354,89 +338,44 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
     val others = placement.nodes.filter { it.id != run.nodeId }
-    val target = others.find { it.id == destination }
-    // A move to the other backend keeps the same files; only a natively created disk is copied.
-    val switching =
-        target != null && run.executionBackend != null && target.backend != run.executionBackend
-    val conversion =
-        switching && target?.backend == VM_BACKEND && migration?.diskFormat == NATIVE_BACKEND
-    val canMove =
-        if (conversion) migration?.pending == false
-        else
-            run.status in listOf("running", "succeeded") &&
-                run.sessionId != null &&
-                run.nodeState == null
-    LaunchedEffect(run.id, moving) {
-        if (moving)
-            migration =
-                try {
-                    vm.api.get<BackendMigrationState>(
-                        "/nodes/placement/${run.id}/backend-migration"
-                    )
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    // Without it, a natively created disk is reported by the move itself.
-                    null
-                }
-    }
+    val nativeToVm =
+        run.executionBackend == "native" &&
+            others.find { it.id == destination }?.capabilities?.backend == "firecracker"
     if (moving)
         DetailSheet("Déplacer vers une autre node", { moving = false }) {
             Choice(
                 "Destination",
                 destination,
-                others.map { it.id to "${it.name} · ${backendLabel(it.backend)}" },
+                others.map {
+                    it.id to
+                        "${it.name} · ${if (it.capabilities.backend == "native") "Natif" else "VM Firecracker"}"
+                },
             ) {
                 if (!busy) destination = it
             }
-            when {
-                conversion ->
-                    Text(
-                        "Cet environnement a été créé sur une node native. Ses fichiers sont copiés une fois pour une VM ; le tour en cours s’arrête. " +
-                            (if (migration?.mission == true)
-                                "La mission reprend automatiquement dans une nouvelle session du moteur. "
-                            else "Le prochain message ouvre une nouvelle session du moteur. ") +
-                            "L’original est conservé en cas d’échec.",
-                        color = MaterialTheme.colorScheme.tertiary,
-                    )
-                switching && target?.backend == NATIVE_BACKEND ->
-                    Text(
-                        "Cette conversation tournera comme processus natif de l’hôte sur ${target.name}, avec les mêmes fichiers montés sur place. Les commandes en cours s’arrêtent ; les paquets système installés dans la VM n’y sont pas disponibles. L’isolation est plus faible qu’une VM." +
-                            if (!target.capabilities.vmDisks)
-                                " Mettez à jour cette node pour qu’elle reçoive des conversations VM."
-                            else "",
-                        color = MaterialTheme.colorScheme.tertiary,
-                    )
-                switching ->
-                    Text(
-                        "Cette conversation tournera à nouveau dans une VM Firecracker, avec les mêmes fichiers. Les commandes en cours s’arrêtent ; les outils installés sur l’hôte natif ne sont pas conservés."
-                    )
-            }
             TextButton(
-                enabled = !busy && destination.isNotEmpty() && canMove,
+                enabled =
+                    !busy &&
+                        destination.isNotEmpty() &&
+                        (run.status in listOf("running", "succeeded") ||
+                            nativeToVm && run.status in listOf("failed", "cancelled")) &&
+                        (run.sessionId != null || nativeToVm) &&
+                        run.nodeState == null,
                 onClick = {
                     request(
                         {
-                            val response =
-                                api.request(
-                                    "POST",
-                                    "/nodes/placement/${run.id}/move",
-                                    buildJsonObject {
-                                        put("nodeId", destination)
-                                    },
-                                )
-                            if (response.contains("\"migrating\"")) conversions++
+                            api.moveConversationToNode(
+                                MoveToNodeInput(runId = run.id, nodeId = destination)
+                            )
                         },
-                        if (switching)
-                            "Déplacement demandé ; la conversation change de backend à destination."
-                        else "Déplacement demandé.",
+                        "Déplacement demandé.",
                     )
                 },
             ) {
-                Text(if (switching) "Déplacer et changer de backend" else "Déplacer maintenant")
+                Text("Déplacer maintenant")
             }
             Text(
-                "Réserve la destination, suspend la conversation, transfère son environnement puis la reprend là-bas. Les commandes en cours sont interrompues. Les ressources sont partagées par les slots de la node.",
+                "Les disques créés en VM gardent leurs fichiers et leur session entre VM et natif sans copie. Un disque créé en natif nécessite une conversion unique vers une VM : le chat attend le prochain message, une mission reprend automatiquement dans une nouvelle session avec son historique. Les commandes s’arrêtent ; les outils système dépendent de la destination.",
                 style = MaterialTheme.typography.bodySmall,
             )
             saved?.let { Text(it) }

@@ -6,7 +6,7 @@ use crate::{
     validation::text,
 };
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,7 +25,14 @@ struct Pending<'a> {
 }
 
 /// Stores a grant readable with the returned credential.
-async fn grant(s: &Service, run: &Value, node: &str, backups: Vec<&Value>) -> Result<String> {
+async fn grant(
+    s: &Service,
+    run: &Value,
+    node: &str,
+    backups: Vec<&Value>,
+    authorize: crate::authorization::Authorization,
+) -> Result<String> {
+    authorize.recheck().await?;
     let token = crate::auth::token();
     let grant = NewGrant {
         id: crate::auth::digest(&token),
@@ -33,35 +40,91 @@ async fn grant(s: &Service, run: &Value, node: &str, backups: Vec<&Value>) -> Re
         node_id: node,
         backups,
     };
+    let grant = serde_json::to_value(grant)?;
+    let run_id = text(run, "id").to_owned();
+    let requested = json!({
+        "nativeParentRunId": crate::backend_migration::lineage(run)["nativeParentRunId"],
+    });
     s.store
-        .put("node-disk-grants", serde_json::to_value(grant)?)
+        .transaction(move |db| {
+            authorize.check_local(db)?;
+            crate::native::policy::require_acyclic_parent(db, &run_id, &requested)?;
+            if let Some(current) = db.run(&run_id)? {
+                crate::backend_migration::require_lineage(db, &current)?;
+            }
+            db.put("node-disk-grants", &grant).map(|_| ())
+        })
         .await?;
     Ok(token)
 }
 
 pub async fn new_disk(s: &Service, run: &Value, node: &str) -> Result<String> {
-    grant(s, run, node, Vec::new()).await
+    grant(
+        s,
+        run,
+        node,
+        Vec::new(),
+        crate::authorization::Authorization::default(),
+    )
+    .await
 }
 
 pub async fn issue(s: &Service, run: &Value, node: &str, backup: &Value) -> Result<String> {
+    issue_authorized(
+        s,
+        run,
+        node,
+        backup,
+        crate::authorization::Authorization::default(),
+    )
+    .await
+}
+
+pub(crate) async fn issue_authorized(
+    s: &Service,
+    run: &Value,
+    node: &str,
+    backup: &Value,
+    authorize: crate::authorization::Authorization,
+) -> Result<String> {
     if !super::publication::in_s3(backup) {
         return Err(Error::conflict(
             "On-demand disks require a verified S3 recovery point.",
         ));
     }
-    grant(s, run, node, vec![&backup["id"]]).await
+    grant(s, run, node, vec![&backup["id"]], authorize).await
 }
 
 pub async fn authorize(s: &Service, credential: &str) -> Result<Option<Value>> {
-    let grant = s
-        .store
-        .read({
-            let id = crate::auth::digest(credential);
-            move |db| db.get("node-disk-grants", &id)
+    authorize_id(s, &crate::auth::digest(credential)).await
+}
+
+pub(crate) async fn authorize_id(s: &Service, grant_id: &str) -> Result<Option<Value>> {
+    // Refresh the external native-policy observation before the transactional
+    // authorization. Every actual grant/run/node/agent check uses one DB view.
+    if let Some(grant) = s.store.get("node-disk-grants", grant_id).await?
+        && s.store.run(text(&grant, "runId")).await?["backendMigration"]["sourceReadReady"] == true
+    {
+        crate::native::policy::refresh(s).await?;
+    }
+    let grant_id = grant_id.to_owned();
+    s.store
+        .read(move |db| {
+            let tx = rusqlite::Transaction::new_unchecked(
+                db.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let grant = authorize_id_db(&crate::store::Db(&tx), &grant_id)?;
+            tx.commit()?;
+            Ok(grant)
         })
-        .await?;
+        .await
+}
+
+pub(crate) fn authorize_id_db(db: &crate::store::Db<'_>, grant_id: &str) -> Result<Option<Value>> {
+    let grant = db.get("node-disk-grants", grant_id)?;
     let Some(grant) = grant else { return Ok(None) };
-    let mut run = s.store.run(text(&grant, "runId")).await?;
+    let mut run = crate::error::required(db.run(text(&grant, "runId"))?, "Conversation missing.")?;
     let node = text(&grant, "nodeId");
     if run["backendMigration"]["nodeId"] == node
         && run["backendMigration"]["convertedBackup"].is_string()
@@ -71,29 +134,28 @@ pub async fn authorize(s: &Service, credential: &str) -> Result<Option<Value>> {
     {
         run = crate::backend_migration::candidate(&run);
     }
-    let agent = s.get("agents", super::run_agent(&run)).await?;
-    let record = s.get("nodes", node).await?;
-    if run["backendMigration"]["sourceReadReady"] == true {
-        crate::native::policy::refresh(s).await?;
+    if run["moveRequest"]["nodeId"] == node && run["moveRequest"]["backend"].is_string() {
+        run["snapshot"]["agent"]["access"]["backend"] = run["moveRequest"]["backend"].clone();
     }
-    let source_allowed = {
-        let (run_id, record) = (text(&run, "id").to_owned(), record.clone());
-        s.store
-            .read(move |db| crate::backend_migration::source_read(db, &run_id, &record))
-            .await?
-    };
-    let native_allowed = if source_allowed {
-        true
-    } else if crate::native::policy::node_native(&record) {
-        let (run, record) = (run.clone(), record.clone());
-        s.store
-            .read(move |db| crate::native::policy::allows(db, &run, &record))
-            .await?
-    } else {
-        true
-    };
+    authorize_owner(db, &run, node)?;
+    Ok(Some(grant))
+}
+
+pub(crate) fn authorize_owner(db: &crate::store::Db<'_>, run: &Value, node: &str) -> Result<()> {
+    // A VM read must not outlive a now-cyclic pending destination grant merely
+    // because its backend does not need the native host-admission checks.
+    crate::backend_migration::require_lineage(db, run)?;
+    let agent = crate::error::required(
+        db.agent_snapshot(super::run_agent(run))?,
+        "Agent not found.",
+    )?;
+    let record = crate::error::required(db.node_boundary(node)?, "Node not found.")?;
+    let source_allowed = crate::backend_migration::source_read(db, text(run, "id"), &record)?;
+    let native_allowed = source_allowed
+        || !crate::native::policy::node_native(&record)
+        || crate::native::policy::allows(db, run, &record)?;
     let revoked = record["revoked"] == true;
-    let owner = super::owner_node(&run) == node
+    let owner = super::owner_node(run) == node
         || run["moveRequest"]["nodeId"] == node
         || run["backendMigration"]["nodeId"] == node;
     let cancelling = run["status"] == RunStatus::Running && !run["cancelRequestedAt"].is_null();
@@ -105,7 +167,7 @@ pub async fn authorize(s: &Service, credential: &str) -> Result<Option<Value>> {
     {
         return Err(Error::forbidden("Disk ownership or authorization changed."));
     }
-    Ok(Some(grant))
+    Ok(())
 }
 
 /// Before committing the local journal, authorize the candidate beside its old base.

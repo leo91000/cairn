@@ -1,0 +1,102 @@
+{
+  "imports": [
+    {
+      "source": "archive",
+      "scope": "global",
+      "upload": "00000000-0000-4000-8000-000000000001"
+    },
+    {
+      "source": "plugin",
+      "scope": "global",
+      "pluginId": "github",
+      "skillSource": "repository",
+      "instance": "00000000-0000-4000-8000-000000000002",
+      "location": {
+        "repository": "owner/repo"
+      },
+      "folder": null
+    }
+  ],
+  "changes": [
+    {
+      "op": "write",
+      "path": "SKILL.md",
+      "content": "text"
+    },
+    {
+      "op": "write",
+      "path": "assets/logo.png",
+      "upload": "00000000-0000-4000-8000-000000000003",
+      "executable": false
+    },
+    {
+      "op": "delete",
+      "path": "old.md"
+    },
+    {
+      "op": "move",
+      "from": "a.md",
+      "to": "b.md"
+    },
+    {
+      "op": "mode",
+      "path": "check.sh",
+      "executable": true
+    }
+  ],
+  "invalidImports": [
+    {
+      "source": "unknown",
+      "scope": "global"
+    },
+    {
+      "source": "archive",
+      "scope": "global",
+      "upload": "id",
+      "location": {}
+    },
+    {
+      "source": "plugin",
+      "scope": "global",
+      "pluginId": "github",
+      "skillSource": "repository",
+      "location": "bad"
+    }
+  ],
+  "invalidChanges": [
+    {
+      "op": "move",
+      "from": "a"
+    },
+    {
+      "op": "unknown",
+      "path": "a"
+    },
+    {
+      "op": "delete",
+      "path": "a",
+      "content": "bad"
+    }
+  ],
+  "bundle": {
+    "scope": "global",
+    "name": "review",
+    "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "files": [
+      {
+        "path": "SKILL.md",
+        "size": 35,
+        "executable": false,
+        "text": true
+      }
+    ],
+    "limits": {
+      "fileBytes": 4194304,
+      "bundleBytes": 16777216,
+      "files": 500,
+      "uploadBytes": 5242880
+    },
+    "source": null,
+    "description": "Review changes"
+  }
+}

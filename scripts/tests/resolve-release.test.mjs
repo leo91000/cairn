@@ -15,7 +15,14 @@ const config = {
   repository,
   commit: 'a'.repeat(40),
   tree,
-  tools: { codex: '0.159.0', gh: '2.101.0' },
+  tools: {
+    codex: '0.159.0',
+    gh: '2.101.0',
+    claude: '2.1.308',
+    opencode: '1.19.4',
+  },
+  // The engine releases production serves, which rollbacks were qualified against.
+  served: { claude: '2.1.280', opencode: '1.19.0' },
 }
 const beaconDigest = `sha256:${'c'.repeat(64)}`
 const digest = `sha256:${'b'.repeat(64)}`
@@ -49,6 +56,7 @@ function evidenceFor(run, commit, changes = {}) {
     digest,
     runId: run.id,
     tools: config.tools,
+    served: config.served,
     ...changes,
   }
 }
@@ -90,9 +98,28 @@ describe('release validation reuse', () => {
   it('trusts this workflow on main or on a pull request from this repository', () => {
     expect(trustedRun(mainRun, config)).toBe(true)
     expect(trustedRun(pullRequestRun, config)).toBe(true)
+    expect(trustedRun({ ...mainRun, event: 'schedule' }, config)).toBe(true)
+    expect(trustedRun({ ...mainRun, event: 'schedule', head_branch: 'other' }, config)).toBe(false)
+    expect(trustedRun({ ...mainRun, path: '.github/workflows/pr.yaml' }, config)).toBe(false)
     for (const mutation of [{ event: 'workflow_dispatch' }, { head_branch: 'other' }, { head_repository: { full_name: 'other/repo' } }, { path: '.github/workflows/other.yaml' }])
       expect(trustedRun({ ...mainRun, ...mutation }, config)).toBe(false)
     expect(trustedRun({ ...pullRequestRun, head_repository: { full_name: 'fork/cairn-installation' } }, config)).toBe(false)
+  })
+
+  it('waits for nightly qualification of the exact commit and reuses its paired images', async () => {
+    const nightly = { ...mainRun, event: 'schedule' }
+    let polls = 0
+    const finished = () => polls > 0
+    const result = await resolveRelease(config, {
+      gh: github({
+        runs: () => finished() ? [nightly] : [],
+        evidence: { [nightly.id]: evidenceFor(nightly, config.commit) },
+        mainRuns: () => [{ ...nightly, status: finished() ? 'completed' : 'in_progress' }],
+      }),
+      sleep: async () => { polls++ },
+    })
+    expect(polls).toBe(1)
+    expect(result).toMatchObject({ digest, beaconDigest, runId: nightly.id })
   })
 
   it('requires the beacon digest alongside the installation before reusing a release', () => {
@@ -149,12 +176,37 @@ describe('release validation reuse', () => {
   })
 
   it('rebuilds if the validated image has older or unrecorded tools', async () => {
-    for (const tools of [undefined, { ...config.tools, codex: '0.156.1' }, { ...config.tools, gh: '2.100.0' }]) {
+    // Evidence recorded before Claude Code and OpenCode were resolved names only
+    // Codex and GitHub CLI: it never vouches for the engines this build installs.
+    const recordedBeforeEngines = { codex: config.tools.codex, gh: config.tools.gh }
+    for (const tools of [
+      undefined,
+      recordedBeforeEngines,
+      { ...config.tools, codex: '0.156.1' },
+      { ...config.tools, gh: '2.100.0' },
+      { ...config.tools, claude: '2.1.280' },
+      { ...config.tools, opencode: '1.19.0' },
+    ]) {
       expect(await resolveRelease(config, {
         gh: github({ runs: () => [mainRun], evidence: { [mainRun.id]: evidenceFor(mainRun, config.commit, { tools }) } }),
         wait: false,
       })).toBeNull()
     }
+  })
+
+  it('reuses only validations whose rollbacks were qualified against the release served now', async () => {
+    const reuse = (current, recorded) => resolveRelease({ ...config, served: current }, {
+      gh: github({ runs: () => [mainRun], evidence: { [mainRun.id]: evidenceFor(mainRun, config.commit, { served: recorded }) } }),
+      wait: false,
+    })
+    // Validation could not find the served release, so it skipped rollback checks.
+    for (const recorded of [null, undefined])
+      expect(await reuse(config.served, recorded)).toBeNull()
+    // Production deployed another release since validation.
+    expect(await reuse({ ...config.served, claude: '2.1.308' }, config.served)).toBeNull()
+    // The served release is unknown now.
+    expect(await reuse(null, config.served)).toBeNull()
+    expect(await reuse(config.served, config.served)).toMatchObject({ runId: mainRun.id })
   })
 
   it('rejects evidence that contradicts its artifact', async () => {

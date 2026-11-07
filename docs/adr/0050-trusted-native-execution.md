@@ -1,4 +1,14 @@
+> Update 2026-11-07: [ADR-0081](0081-move-vm-disks-between-execution-backends.md) permits explicit cross-backend node moves. VM-created disks are mounted directly by authorized native controllers; only native-created disks need physical conversion before VM execution. Automatic placement and priorities remain as defined in ADR-0073.
+
 # Trusted native execution alongside Firecracker
+
+Update: [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) replaces plugin
+delegations with hook rules. A rule version records the native authority of the
+authenticated request that saved it; each action that reaches native work checks that
+record and the creator's current native authority.
+
+Update: [ADR-0073](0073-automatic-agent-placement.md) permits automatic per-agent
+placement across both backends while retaining the native authority rules below.
 
 Date: 2026-10-18.
 
@@ -11,51 +21,37 @@ provide managed ownership and cleanup, with a weaker isolation boundary than a V
 CPU/RAM are bounded; desktop responsiveness, disk quotas and per-agent VRAM are
 not hard guarantees. No GPU takeover or personal desktop access is required.
 
-Native execution extends [mandatory S3-backed disks](0009-s3-backed-disks-required-on-every-node.md)
-with stopped `native-files-v1` checkpoints. The existing encrypted block publication
-and scoped grants remain mandatory. Live files are not advertised as a coherent
-backup. Recovery validates before replacement and preserves prior local work.
-
 People and explicit node ceilings propagate from authenticated requests through
 bounded, revocable agent delegation. Shared installation membership alone never
 grants native execution. Unknown historical/plugin provenance fails closed. The
 manager requires fresh Beacon membership evidence before extending host leases.
 
-Update, 2026-10-22: the owner may grant an agent all nodes, including future ones.
-This replaces the original requirement for an explicit agent-side selection;
-node-side opt-in, trusted people, provenance, delegation ceilings and revocations
-remain mandatory. Existing environments keep their backend and require migration
-before resuming after an agent changes backend, including with an all-node grant.
-Native slots are configurable and share one
-systemd workload slice's CPU/RAM ceiling, alongside the existing shared disk
-accounting. The supervisor and lease guardians remain outside that slice so an
-exhausted workload budget cannot prevent fencing. Epoch 11 and SQLite version 10
-fence older binaries, which refuse a persisted multi-slot native budget. The
-reviewed forward transition and native supervisor procedure are recorded in
-[automatic migrations](../AUTOMATIC-MIGRATIONS.md#current-transition-epochs-310-to-11).
+Directing an existing conversation also checks the prospective native parent
+chain against the destination run before committing the directing effect. The
+check runs in the same writer transaction as the grant and message/control, so
+opposing requests cannot both create a cycle. This applies to VM conversations
+that retain native provenance too. Backend migration validates its destination
+grant at both the initial and final writer transaction; a stored pending
+migration is rechecked before source reads and destination admission. Admission
+of a prospective run includes that run's identity instead of following its old
+stored authority. Reservation claims, materialization, preparation renewal,
+disk-read credential issuance and disk-read authorization check the effective
+pending grant in their own database decision, for both backends. An explicit
+owner's pending adoption uses its new grant without rewriting retained old
+provenance before the migration commits. A cyclic directing effect is refused without
+discarding a saved revocation edge or rewriting existing authority. Delegated
+reports remain readable through `task_status`; they do not require the requester
+to acquire its child's authority as a parent. Existing malformed lineages remain
+denied and require a separate authorized recovery, rather than an automatic
+provenance rewrite.
 
-The reviewed compatibility epoch advances from 5 to 6 for persisted native backend,
-provenance, node grants and checkpoint formats. Forward migration is additive;
-legacy VM data is unchanged and the legacy tree stays fixed. Epoch transitions
-require reviewed rollout as in [production releases](../PRODUCTION-CAIRN.md#installation-data-compatibility).
-Epoch 5 already preserves F2's durable session-restart intention; its behavior is
-retained. Epoch-5 binaries cannot interpret the native records introduced here.
-Rollback to epoch 5 requires its matching prepared data backup and binary; automatic
-updates do not cross epochs or restore data. Windows/macOS and desktop-session
-access remain separate future work.
-
-Update, 2026-10-23: a native node may use the explicitly owner-confirmed
-[administrator mode](../NATIVE-ADMINISTRATOR.md). This deliberately extends the
-original no-sudo boundary for that node only, using an ordinary workload identity
-with unrestricted passwordless host sudo. Protected remains the default; VM
-semantics remain unchanged. Admission requires a node-specific owner review,
-including existing global grants; future grants never silently grant root. A
-durable generation handshake stops managed workloads before changing mode.
-Returning to protected restricts new runs but does not restore the host or defend
-against root that altered its supervisor. Epoch 13 / SQLite 12 and a strict native
-budget marker fence older readers; unknown/unconfirmed modes fail closed.
-
-Update, 2026-10-24: agents no longer select a backend; each conversation keeps the
-backend of its environment and native nodes mount VM disks in place. Node-side
-opt-in, trusted people, provenance and delegation rules are unchanged. See
-[ADR 0059](0059-per-conversation-backend-and-in-place-vm-disks.md).
+Update, 2026-10-23: protected native conversations use distinct host accounts and disjoint
+subordinate UID/GID ranges. A RootlessKit enclave separates their network, PID and
+user namespaces; its immutable supervisor starts rootless Docker on demand.
+Only the outer identity-mapping bootstrap permits the mapping helpers' privilege
+transition. The enclave sets NoNewPrivileges before starting the engine/daemon;
+the engine has an empty capability bounding set. Existing managed mounts, device
+filters, shared budgets, leases, guardians and cgroup fencing remain. Docker's
+mandatory authorization plugin preserves restricted filesystem rights. The host
+Docker daemon and desktop sockets remain unavailable. See [native Docker](../NATIVE-DOCKER.md)
+for storage, conversion, networking and compatibility limits.

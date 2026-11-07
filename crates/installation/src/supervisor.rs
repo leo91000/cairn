@@ -23,6 +23,16 @@ pub struct Supervised {
 }
 
 impl Supervised {
+    #[cfg(test)]
+    pub(crate) fn exited_fixture() -> Self {
+        let (parent, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        parent.set_nonblocking(true).unwrap();
+        Self {
+            child: tokio::process::Command::new("/bin/true").spawn().unwrap(),
+            control: UnixStream::from_std(parent).unwrap(),
+        }
+    }
+
     pub async fn spawn(
         binary: &str,
         args: &[String],

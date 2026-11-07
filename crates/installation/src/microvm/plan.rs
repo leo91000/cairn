@@ -87,8 +87,12 @@ impl Plan {
         self.0["chat"]["output"].as_str()
     }
 
-    pub fn chat_provider(&self) -> Result<Provider> {
-        Provider::of_agent(&self.0["chat"])
+    /// System command plans have no coding engine or provider credentials.
+    pub fn chat_provider(&self) -> Result<Option<Provider>> {
+        if self.0.get("chat").is_none() && self.command().is_some() {
+            return Ok(None);
+        }
+        Provider::of_agent(&self.0["chat"]).map(Some)
     }
 
     pub fn storage(&self) -> &Value {
@@ -136,6 +140,20 @@ impl Plan {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn system_commands_have_no_provider_but_chat_plans_require_one() {
+        let command = Plan::new(json!({ "command": ["sudo", "python3", "udp-policy.py"] }));
+        assert_eq!(command.chat_provider().unwrap(), None);
+        let chat = Plan::new(json!({ "chat": { "provider": "claude" } }));
+        assert_eq!(chat.chat_provider().unwrap(), Some(Provider::Claude));
+        for chat in [json!({}), json!(null), json!({ "provider": "unknown" })] {
+            let malformed =
+                Plan::new(json!({ "command": [ENTRYPOINT, "runner-entry"], "chat": chat }));
+            assert!(malformed.chat_provider().is_err());
+        }
+        assert!(Plan::new(json!({})).chat_provider().is_err());
+    }
 
     #[test]
     fn shared_limits_preserve_default_and_existing_disk_sizes() {

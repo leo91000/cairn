@@ -18,7 +18,7 @@ async fn device_claim_reclaims_a_detached_installation_and_preserves_its_data() 
     let id = old["installationId"].as_str().unwrap();
     let body = json!({
         "name": "Recovered installation",
-        "protocol": 1,
+        "protocol": cairn_protocol::PROTOCOL_VERSION,
         "identity": old,
     });
     let start = || {

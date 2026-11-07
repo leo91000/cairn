@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 
 /// A provider-independent authorization-code flow. Client settings and secrets are
 /// declared form fields; credentials and PKCE material never enter package code.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "PluginOAuth")]
+#[ts(rename = "PluginOAuth")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OAuth {
     #[serde(default)]
@@ -24,14 +26,18 @@ pub struct OAuth {
     pub scopes: Vec<String>,
     /// Additional scopes for enabled boolean settings, e.g. sending or deletion.
     #[serde(default)]
+    #[schemars(!default)]
     pub scope_settings: BTreeMap<String, Vec<String>>,
     #[serde(default)]
+    #[schemars(!default)]
     pub authorization_parameters: BTreeMap<String, String>,
 }
 
 /// OAuth 2.0 device authorization grant (RFC 8628), run by the host for the owner.
 /// The token obtained becomes the instance's credential; scripts never see it.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "PluginDeviceFlow")]
+#[ts(rename = "PluginDeviceFlow")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeviceFlow {
     /// Where the host asks for a device and user code. HTTPS on a declared host.
@@ -41,11 +47,14 @@ pub struct DeviceFlow {
     /// The public client ID of the package publisher's OAuth application.
     pub client_id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<String>>)]
     pub scopes: Vec<String>,
 }
 
 /// A file Cairn writes in the home of each run whose agent is granted an instance.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "PluginRunFile")]
+#[ts(rename = "PluginRunFile")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunFile {
     /// Relative to the run's home, e.g. `.config/tool/hosts.yml`.
@@ -55,7 +64,9 @@ pub struct RunFile {
 }
 
 /// Git credentials for one HTTPS remote prefix, kept in a store file Cairn owns.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "PluginGitCredential")]
+#[ts(rename = "PluginGitCredential")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GitCredential {
     /// `https://host` or `https://host/path`, on a declared host.
@@ -65,7 +76,9 @@ pub struct GitCredential {
 }
 
 /// The commit author of runs, when the installation has no global Git identity.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "PluginGitIdentity")]
+#[ts(rename = "PluginGitIdentity")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GitIdentity {
     pub name: String,
@@ -75,51 +88,68 @@ pub struct GitIdentity {
 /// Rendered by the host for granted agents, when their run is prepared or resumed, and
 /// for its own Git fetches of matching remotes. Removed when the run ends or the grant
 /// is withdrawn.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[derive(
+    Clone, Debug, Default, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS,
+)]
+#[schemars(rename = "PluginRunCredentials")]
+#[ts(rename = "PluginRunCredentials")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RunCredentials {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<RunFile>>)]
     pub files: Vec<RunFile>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(transform = crate::client_default::<Vec<GitCredential>>)]
     pub git: Vec<GitCredential>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_identity: Option<GitIdentity>,
 }
 
 /// Where the owner imports projects from: the `projects` handler lists and resolves them.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "PluginProjectSource")]
+#[ts(rename = "PluginProjectSource")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProjectSource {
     pub name: String,
     pub title: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schemars(transform = crate::client_default::<String>)]
     pub description: String,
 }
 
 /// A condition granted agents can wait for with `wait_for`, observed by the `condition`
 /// handler. Its type is `<plugin>_<name>`, like a tool name.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "PluginCondition")]
+#[ts(rename = "PluginCondition")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Condition {
     pub name: String,
     pub description: String,
     /// Properties besides `type` (and `projectId` with `project`).
+    #[ts(type = "any ")]
     pub input_schema: Value,
     /// Pinned to one of the run's projects: Cairn checks it is authorized and passes it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[schemars(transform = crate::client_default::<bool>)]
     pub project: bool,
 }
 
 /// Where the owner imports skills from: the `skills` handler resolves a location and
 /// lists its files, which the host downloads.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, schemars::JsonSchema, ts_rs::TS)]
+#[schemars(rename = "PluginSkillSource")]
+#[ts(rename = "PluginSkillSource")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SkillSource {
     pub name: String,
     pub title: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[schemars(transform = crate::client_default::<String>)]
     pub description: String,
     /// The location form, like instance settings: `string`, `url` or `text` fields.
+    #[ts(type = "Array<any> ")]
     pub fields: Vec<Value>,
 }
 

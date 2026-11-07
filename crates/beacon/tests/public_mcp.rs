@@ -4,12 +4,129 @@ use common::RelayedInstallation;
 use reqwest::StatusCode;
 use serde_json::{Value, json};
 
+fn code_worker_for_target(
+    target: &std::path::Path,
+    workers: Option<&std::ffi::OsStr>,
+    legacy: Option<std::ffi::OsString>,
+    allow_remap: bool,
+) -> std::path::PathBuf {
+    if let Some(workers) = workers {
+        let workers: Vec<Value> = serde_json::from_slice(workers.as_encoded_bytes()).unwrap();
+        return workers
+            .iter()
+            .find(|worker| {
+                worker["target"]
+                    .as_str()
+                    .is_some_and(|path| std::path::Path::new(path) == target)
+            })
+            .or_else(|| {
+                if !allow_remap {
+                    return None;
+                }
+                if workers.len() == 1 {
+                    return workers.first();
+                }
+                let suffix = std::path::PathBuf::from(target.parent()?.file_name()?)
+                    .join(target.file_name()?);
+                let mut matches = workers.iter().filter(|worker| {
+                    worker["target"]
+                        .as_str()
+                        .is_some_and(|path| std::path::Path::new(path).ends_with(&suffix))
+                });
+                let matching = matches.next()?;
+                matches.next().is_none().then_some(matching)
+            })
+            .and_then(|worker| worker["binary"].as_str())
+            .map(std::path::PathBuf::from)
+            .expect("launcher supplied no code worker for this target");
+    }
+    legacy.map(std::path::PathBuf::from).expect(
+        "Use pnpm test:backend to build the isolated code worker with matching Cargo features.",
+    )
+}
+
 fn code_worker() -> std::path::PathBuf {
-    std::env::var_os("CAIRN_TEST_CODE_WORKER")
-        .map(std::path::PathBuf::from)
-        .expect(
-            "Use pnpm test:backend to build the isolated code worker with matching Cargo features.",
-        )
+    let target = std::path::Path::new(env!("CARGO_BIN_EXE_cairn-beacon"))
+        .parent()
+        .unwrap();
+    let workers = std::env::var_os("CAIRN_TEST_CODE_WORKERS");
+    code_worker_for_target(
+        target,
+        workers.as_deref(),
+        std::env::var_os("CAIRN_TEST_CODE_WORKER"),
+        std::env::var_os("CAIRN_TEST_REUSED_BUILD").is_some(),
+    )
+}
+
+#[test]
+fn code_worker_uses_the_matching_compilation_target() {
+    let root = tempfile::tempdir().unwrap();
+    let first = root.path().join("first/debug");
+    let second = root.path().join("second/debug");
+    let workers = std::ffi::OsString::from(
+        serde_json::json!([
+            { "target": first, "binary": root.path().join("first-worker") },
+            { "target": second, "binary": root.path().join("second-worker") },
+        ])
+        .to_string(),
+    );
+    assert_eq!(
+        code_worker_for_target(&first, Some(&workers), None, false),
+        root.path().join("first-worker")
+    );
+    assert_eq!(
+        code_worker_for_target(&second, Some(&workers), None, false),
+        root.path().join("second-worker")
+    );
+    assert_eq!(
+        code_worker_for_target(
+            &root.path().join("remapped/first/debug"),
+            Some(&workers),
+            None,
+            true
+        ),
+        root.path().join("first-worker")
+    );
+    let single = std::ffi::OsString::from(
+        serde_json::json!([{ "target": first, "binary": root.path().join("first-worker") }])
+            .to_string(),
+    );
+    assert_eq!(
+        code_worker_for_target(&root.path().join("remapped"), Some(&single), None, true),
+        root.path().join("first-worker")
+    );
+}
+
+#[test]
+#[should_panic(expected = "launcher supplied no code worker for this target")]
+fn code_worker_rejects_a_missing_compilation_target() {
+    code_worker_for_target(
+        std::path::Path::new("missing"),
+        Some(std::ffi::OsStr::new("[]")),
+        None,
+        false,
+    );
+}
+
+#[test]
+#[should_panic(expected = "launcher supplied no code worker for this target")]
+fn code_worker_does_not_remap_an_ordinary_build() {
+    let workers = std::ffi::OsStr::new(r#"[{"target":"first","binary":"first-worker"}]"#);
+    code_worker_for_target(std::path::Path::new("second"), Some(workers), None, false);
+}
+
+#[test]
+#[should_panic(expected = "launcher supplied no code worker for this target")]
+fn code_worker_rejects_an_ambiguous_remap() {
+    let workers = std::ffi::OsStr::new(
+        r#"[{"target":"one/triple/debug","binary":"one"},{"target":"two/triple/debug","binary":"two"}]"#,
+    );
+    code_worker_for_target(
+        std::path::Path::new("other/triple/debug"),
+        Some(workers),
+        None,
+        true,
+    );
 }
 
 #[tokio::test]
@@ -60,8 +177,25 @@ async fn personal_mcp_token_enforces_scopes_and_revocation() {
 
     let result: Value = response.json().await.unwrap();
     assert!(
-        result["result"]["structuredContent"]["result"].is_array(),
+        result["result"]["structuredContent"]["result"]["agents"].is_array(),
         "{result}"
+    );
+
+    // Account actions are outside the public installation catalogue.
+    let account_denied: Value = call("list_account_methods", json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        account_denied["result"]["isError"], true,
+        "{account_denied}"
+    );
+    assert!(
+        account_denied.to_string().contains("Unknown operation"),
+        "{account_denied}"
     );
 
     let denied: Value = call(
@@ -92,6 +226,14 @@ async fn personal_mcp_token_enforces_scopes_and_revocation() {
 
     assert_eq!(
         call("list_agents", json!({}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        call("list_account_methods", json!({}))
             .send()
             .await
             .unwrap()
@@ -353,7 +495,7 @@ async fn an_external_mcp_connection_returns_through_the_beacon_installation_and_
         saved["callbackUrl"],
         format!(
             "{}/installations/{installation}/mcps/callback",
-            relay.app.url
+            relay.beacon_origin
         )
     );
 
@@ -447,7 +589,7 @@ async fn detaching_and_reclaiming_an_installation_permanently_revokes_its_mcp_gr
             "/api/relay/device-claim/start",
             json!({
                 "name": "Reclaimed machine",
-                "protocol": 1,
+                "protocol": cairn_protocol::PROTOCOL_VERSION,
                 "identity": { "installationId": id, "token": identity["token"] },
             }),
         )
@@ -688,8 +830,10 @@ async fn slow_mcp_uploads_cannot_block_owner_access_even_after_revocation() {
             "arguments": {
                 "code": "return await cairn.save_project(input);",
                 "input": {
-                    "name": "Rejected after revocation",
-                    "path": relay.root.path().to_str().unwrap(),
+                    "settings": {
+                        "name": "Rejected after revocation",
+                        "path": relay.root.path().to_str().unwrap(),
+                    },
                 },
             },
         },
@@ -724,7 +868,7 @@ async fn slow_mcp_uploads_cannot_block_owner_access_even_after_revocation() {
         .json()
         .await
         .unwrap();
-    assert_eq!(projects, json!([]));
+    assert_eq!(projects, json!({ "projects": [] }));
     relay.close().await;
 }
 
@@ -1628,24 +1772,54 @@ async fn native_mcp_callback_uses_beacon_account_authentication_instead_of_local
     use std::collections::HashMap;
 
     let relay = RelayedInstallation::new(axum::Router::new()).await;
-    let connection = "00000000-0000-4000-8000-000000000099";
     let nonce = "native-callback-test-nonce";
-    let key = format!("mcp-oauth:{}", hex_digest(nonce));
+    let key = hex_digest(nonce);
     let expires = now() + 600_000;
     let account = relay.session["account"]["id"].as_str().unwrap();
-    let pending = json!({
-        "native": true,
-        "connectionId": connection,
-        "session": hex_digest(&format!("cairn-account:{account}")),
-        "nonce": nonce,
-        "expiresAt": expires,
-    });
-    relay
+    let input = serde_json::from_value(json!({
+        "name": "Native callback fixture",
+        "url": "https://mcp.example.test",
+        "auth": "oauth"
+    }))
+    .unwrap();
+    let saved = relay
         .installation
-        .store
-        .set(&key, pending, Some(expires))
+        .mcps
+        .save(&relay.installation, input, None, None)
         .await
         .unwrap();
+    let connection = saved.server.id.as_str();
+    let pending = cairn_installation::mcps::record::PendingAuthorization {
+        connection_id: connection.to_owned(),
+        revision: saved.server.revision,
+        native: true,
+        session: hex_digest(&format!("cairn-account:{account}")),
+        nonce: nonce.to_owned(),
+        expires_at: expires,
+        callback: None,
+    };
+    let store = &relay.installation.store;
+    let vault = relay.installation.vault.clone();
+    store
+        .transaction({
+            let key = key.clone();
+            let vault = vault.clone();
+            move |db| db.save_pending_mcp_oauth(&key, &pending, &vault)
+        })
+        .await
+        .unwrap();
+    async fn read_pending(
+        s: &cairn_installation::service::Service,
+        key: &str,
+    ) -> cairn_installation::mcps::record::PendingAuthorization {
+        let key = key.to_owned();
+        let vault = s.vault.clone();
+        s.store
+            .read(move |db| db.pending_mcp_oauth(&key, &vault))
+            .await
+            .unwrap()
+            .unwrap()
+    }
     let parameters = json!({ "state": nonce, "code": "private-fixture-code" });
     let callback = format!("{}/mcps/oauth/callback", relay.base);
 
@@ -1666,14 +1840,9 @@ async fn native_mcp_callback_uses_beacon_account_authentication_instead_of_local
             .unwrap();
         assert_eq!(response.status(), expected);
         assert!(
-            relay
-                .installation
-                .store
-                .kv(&key)
+            read_pending(&relay.installation, &key)
                 .await
-                .unwrap()
-                .unwrap()
-                .get("callback")
+                .callback
                 .is_none()
         );
     }
@@ -1693,14 +1862,9 @@ async fn native_mcp_callback_uses_beacon_account_authentication_instead_of_local
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     assert!(
-        relay
-            .installation
-            .store
-            .kv(&key)
+        read_pending(&relay.installation, &key)
             .await
-            .unwrap()
-            .unwrap()
-            .get("callback")
+            .callback
             .is_none()
     );
 
@@ -1720,9 +1884,12 @@ async fn native_mcp_callback_uses_beacon_account_authentication_instead_of_local
         response.json::<Value>().await.unwrap(),
         json!({ "result": "native" })
     );
-    let captured = relay.installation.store.kv(&key).await.unwrap().unwrap();
-    assert_eq!(captured["callback"]["code"], "private-fixture-code");
-    assert_eq!(captured["expiresAt"], expires);
+    let captured = read_pending(&relay.installation, &key).await;
+    assert_eq!(
+        captured.callback.as_ref().unwrap()["code"],
+        "private-fixture-code"
+    );
+    assert_eq!(captured.expires_at, expires);
 
     let replay = json!({ "state": nonce, "code": "replacement" });
     let response = relay
@@ -1738,8 +1905,8 @@ async fn native_mcp_callback_uses_beacon_account_authentication_instead_of_local
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        relay.installation.store.kv(&key).await.unwrap().unwrap(),
-        captured
+        serde_json::to_value(read_pending(&relay.installation, &key).await).unwrap(),
+        serde_json::to_value(&captured).unwrap()
     );
 
     relay
@@ -1768,10 +1935,13 @@ async fn native_mcp_callback_uses_beacon_account_authentication_instead_of_local
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-    relay
-        .installation
-        .store
-        .set(&key, captured, Some(now() - 1))
+    let mut expired = captured;
+    expired.expires_at = now() - 1;
+    store
+        .transaction(move |db| {
+            db.delete_pending_mcp_oauth(&key)?;
+            db.save_pending_mcp_oauth(&key, &expired, &vault)
+        })
         .await
         .unwrap();
     let replacement = HashMap::from([
@@ -1786,5 +1956,203 @@ async fn native_mcp_callback_uses_beacon_account_authentication_instead_of_local
             .await
             .unwrap()
     );
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn public_plugin_upload_rechecks_its_grant_after_compilation() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+    for invalidation in ["none", "revoke", "expire"] {
+        let relay = RelayedInstallation::new(axum::Router::new()).await;
+        let worker = code_worker();
+        relay.installation.code_mode.use_worker(worker.clone());
+        let id = relay.session["installations"][0]["id"].as_str().unwrap();
+        let tokens = format!("/api/installations/{id}/tokens");
+        let response = owner_post(
+            &relay,
+            &tokens,
+            json!({"label":"Plugin uploader","scopes":["manage"]}),
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let grant: Value = response.json().await.unwrap();
+        let token = grant["token"].as_str().unwrap().to_owned();
+        let started = relay.root.path().join("public-plugin-started");
+        let resume = relay.root.path().join("public-plugin-resume");
+        let wrapper = relay.root.path().join("public-plugin-worker");
+        let quote =
+            |path: &std::path::Path| format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"));
+        std::fs::write(&wrapper,format!("#!/bin/sh\n: > {}\ni=0\nwhile [ ! -f {} ] && [ $i -lt 500 ]; do sleep 0.01; i=$((i+1)); done\nexec {} \"$@\"\n",quote(&started),quote(&resume),quote(&worker))).unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        relay.installation.plugins.use_worker(wrapper);
+        let request = relay
+            .app
+            .client
+            .post(format!("{}/mcp", relay.app.url))
+            .bearer_auth(&token)
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "execute",
+                    "arguments": {
+                        "code": "return await cairn.call('install_plugin_package', input);",
+                        "input": {
+                            "manifest": {
+                                "id": "public-upload", "name": "Public upload", "version": "1",
+                                "apiVersion": 2, "capabilities": [],
+                            },
+                            "source": "return {}",
+                            "modules": {},
+                        },
+                    },
+                },
+            }));
+        let pending = tokio::spawn(async move { request.send().await.unwrap() });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !started.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        match invalidation {
+            "revoke" => {
+                let response = relay
+                    .app
+                    .client
+                    .delete(format!(
+                        "{}{tokens}/{}",
+                        relay.app.url,
+                        grant["id"].as_str().unwrap()
+                    ))
+                    .header("cookie", &relay.cookie)
+                    .header("origin", &relay.app.url)
+                    .header("x-csrf-token", relay.session["csrf"].as_str().unwrap())
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+            "expire" => {
+                sqlx_core::query::query("UPDATE mcp_tokens SET expires_at = now() - interval '1 second' WHERE digest = $1")
+                    .bind(hex::encode(Sha256::digest(token.as_bytes()))).execute(&relay.app.pool).await.unwrap();
+            }
+            _ => {}
+        }
+        std::fs::write(&resume, "").unwrap();
+        let response = pending.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let result: Value = response.json().await.unwrap();
+        let published = relay
+            .installation
+            .store
+            .read(|db| db.plugin_package("public-upload"))
+            .await
+            .unwrap()
+            .revision
+            .is_some();
+        assert_eq!(published, invalidation == "none", "{result}");
+        if invalidation == "none" {
+            assert_ne!(result["result"]["isError"], true, "{result}");
+        } else {
+            assert_eq!(result["result"]["isError"], true, "{result}");
+            assert!(result.to_string().contains("MCP authorization"), "{result}");
+            assert!(
+                !relay
+                    .installation
+                    .config
+                    .data_dir
+                    .join("plugins/public-upload")
+                    .exists()
+            );
+        }
+        relay.close().await;
+    }
+}
+
+#[tokio::test]
+async fn pending_revalidation_distinguishes_scopes_and_rejects_revoked_tokens() {
+    use sha2::{Digest, Sha256};
+    let relay = RelayedInstallation::new(axum::Router::new()).await;
+    let app = &relay.app;
+    let installation_id = relay.session["installations"][0]["id"].as_str().unwrap();
+    let identity: Value = serde_json::from_slice(
+        &std::fs::read(
+            relay
+                .installation
+                .config
+                .data_dir
+                .join("installation-relay/identity.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let check_url = format!(
+        "{}/api/relay/{installation_id}/plugin-mcp-authorization",
+        app.url
+    );
+    for granted in ["read", "run", "manage"] {
+        let response = owner_post(
+            &relay,
+            &format!("/api/installations/{installation_id}/tokens"),
+            json!({
+                "label": "Resource discovery", "scopes": [granted],
+            }),
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let grant: Value = response.json().await.unwrap();
+        let credential_digest =
+            hex::encode(Sha256::digest(grant["token"].as_str().unwrap().as_bytes()));
+        for required in [None, Some("read"), Some("run"), Some("manage")] {
+            let mut input = json!({"credentialDigest":credential_digest});
+            if let Some(scope) = required {
+                input["scope"] = scope.into();
+            }
+            let response = app
+                .client
+                .post(&check_url)
+                .bearer_auth(identity["token"].as_str().unwrap())
+                .json(&input)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.json::<bool>().await.unwrap(),
+                required.unwrap_or("manage") == granted
+            );
+        }
+        app.client
+            .delete(format!(
+                "{}/api/installations/{installation_id}/tokens/{}",
+                app.url,
+                grant["id"].as_str().unwrap()
+            ))
+            .header("cookie", &relay.cookie)
+            .header("origin", &app.url)
+            .header("x-csrf-token", relay.session["csrf"].as_str().unwrap())
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let response = app
+            .client
+            .post(&check_url)
+            .bearer_auth(identity["token"].as_str().unwrap())
+            .json(&json!({"credentialDigest":credential_digest,"scope":granted}))
+            .send()
+            .await
+            .unwrap();
+        assert!(!response.json::<bool>().await.unwrap());
+    }
     relay.close().await;
 }

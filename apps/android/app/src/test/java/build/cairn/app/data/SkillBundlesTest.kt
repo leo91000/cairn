@@ -3,6 +3,7 @@ package build.cairn.app.data
 import java.util.Base64
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -18,16 +19,18 @@ import org.junit.Test
 class SkillBundlesTest {
     private val bundle =
         SkillBundle(
-            "global",
-            "review",
-            "rev-1",
-            listOf(
-                SkillFile("SKILL.md", 40),
-                SkillFile("scripts/check.sh", 20, executable = true),
-                SkillFile("references/guide.md", 30),
-                SkillFile("assets/logo.png", 50, text = false),
-                SkillFile("old.md", 10),
-            ),
+            scope = "global",
+            name = "review",
+            revision = "rev-1",
+            files =
+                listOf(
+                    SkillFile(path = "SKILL.md", size = 40),
+                    SkillFile(path = "scripts/check.sh", size = 20, executable = true),
+                    SkillFile(path = "references/guide.md", size = 30),
+                    SkillFile(path = "assets/logo.png", size = 50, text = false),
+                    SkillFile(path = "old.md", size = 10),
+                ),
+            limits = SkillLimits(),
         )
     private val skill = "---\nname: review\ndescription: Relire\n---\n\n# Review\n"
 
@@ -37,7 +40,7 @@ class SkillBundlesTest {
     fun invalidSkillsCanBeDecodedAndRepaired() {
         val decoded =
             wireJson.decodeFromString<SkillBundle>(
-                """{"name":"review","description":null,"files":[{"path":"SKILL.md","size":3}]}"""
+                """{"name":"review","description":null,"limits":{},"files":[{"path":"SKILL.md","size":3}]}"""
             )
         assertTrue(SkillDraft.of(decoded).edit(SKILL_FILE, skill).problems().isEmpty())
     }
@@ -57,9 +60,9 @@ class SkillBundlesTest {
                 limits = SkillLimits(fileBytes = 100, bundleBytes = 200, files = 2),
                 files =
                     listOf(
-                        SkillFile(SKILL_FILE, 50),
-                        SkillFile("large.bin", 1000),
-                        SkillFile("old", 10),
+                        SkillFile(path = SKILL_FILE, size = 50),
+                        SkillFile(path = "large.bin", size = 1000),
+                        SkillFile(path = "old", size = 10),
                     ),
             )
         val edited = SkillDraft.of(legacy).edit(SKILL_FILE, skill).delete("old")
@@ -72,10 +75,14 @@ class SkillBundlesTest {
     fun maximumLengthPathsCanBeSwappedThroughValidTemporaryNames() {
         val a = "a".repeat(240)
         val b = "b".repeat(240)
-        val saved = bundle.copy(files = listOf(SkillFile(SKILL_FILE), SkillFile(a), SkillFile(b)))
+        val saved =
+            bundle.copy(
+                files =
+                    listOf(SkillFile(path = SKILL_FILE), SkillFile(path = a), SkillFile(path = b))
+            )
         val swapped = SkillDraft.of(saved).move(a, "parking").move(b, a).move("parking", b)
         val occupied = mutableSetOf(SKILL_FILE, a, b)
-        for (move in swapped.changes().filterIsInstance<SkillChange.Move>()) {
+        for (move in swapped.changes().filterIsInstance<DraftSkillChange.Move>()) {
             assertNull(skillPathProblem(move.to))
             assertFalse(occupied.any { pathsCollide(move.to, it) })
             assertTrue(occupied.remove(move.from))
@@ -143,20 +150,20 @@ class SkillBundlesTest {
         val changes = draft.changes()
         assertEquals(
             listOf(
-                SkillChange.Delete("old.md"),
-                SkillChange.Move("references/guide.md", "docs/guide.md"),
-                SkillChange.Write("docs/guide.md", SkillBody.Text("# Guide\n"), false),
-                SkillChange.Write(
+                DraftSkillChange.Delete("old.md"),
+                DraftSkillChange.Move("references/guide.md", "docs/guide.md"),
+                DraftSkillChange.Write("docs/guide.md", SkillBody.Text("# Guide\n"), false),
+                DraftSkillChange.Write(
                     "assets/logo.png",
                     SkillBody.Binary(byteArrayOf(1, 2, 0, 3)),
                     false,
                 ),
-                SkillChange.Write(
+                DraftSkillChange.Write(
                     "scripts/new.py",
                     SkillBody.Text("#!/usr/bin/env python3\nprint(1)\n"),
                     true,
                 ),
-                SkillChange.Mode("scripts/check.sh", false),
+                DraftSkillChange.Mode("scripts/check.sh", false),
             ),
             changes,
         )
@@ -170,8 +177,8 @@ class SkillBundlesTest {
         val chained = draft().move("old.md", "older.md").move("references/guide.md", "old.md")
         assertEquals(
             listOf(
-                SkillChange.Move("old.md", "older.md"),
-                SkillChange.Move("references/guide.md", "old.md"),
+                DraftSkillChange.Move("old.md", "older.md"),
+                DraftSkillChange.Move("references/guide.md", "old.md"),
             ),
             chained.changes(),
         )
@@ -181,7 +188,7 @@ class SkillBundlesTest {
                 .move("old.md", "swap.md")
                 .move("references/guide.md", "old.md")
                 .move("swap.md", "references/guide.md")
-        val moves = swapped.changes().filterIsInstance<SkillChange.Move>()
+        val moves = swapped.changes().filterIsInstance<DraftSkillChange.Move>()
         assertEquals(3, moves.size)
         // Replaying the batch on the saved paths produces the expected final layout.
         val paths = bundle.files.map { it.path }.toMutableSet()
@@ -201,15 +208,24 @@ class SkillBundlesTest {
     fun movesWaitWhileAParentFolderOfTheTargetIsStillAFile() {
         val base =
             SkillBundle(
-                "global",
-                "review",
-                "rev-1",
+                scope = "global",
+                name = "review",
+                revision = "rev-1",
                 // alpha/x comes first, so only the parent-folder check keeps it waiting.
-                listOf(SkillFile("SKILL.md", 10), SkillFile("alpha/x", 4), SkillFile("zeta", 3)),
+                files =
+                    listOf(
+                        SkillFile(path = "SKILL.md", size = 10),
+                        SkillFile(path = "alpha/x", size = 4),
+                        SkillFile(path = "zeta", size = 3),
+                    ),
+                limits = SkillLimits(),
             )
         val draft = SkillDraft.of(base).move("zeta", "zeta.md").moveFolder("alpha", "zeta")
         assertEquals(
-            listOf(SkillChange.Move("zeta", "zeta.md"), SkillChange.Move("alpha/x", "zeta/x")),
+            listOf(
+                DraftSkillChange.Move("zeta", "zeta.md"),
+                DraftSkillChange.Move("alpha/x", "zeta/x"),
+            ),
             draft.changes(),
         )
 
@@ -219,9 +235,9 @@ class SkillBundlesTest {
                     base.copy(
                         files =
                             listOf(
-                                SkillFile("SKILL.md", 10),
-                                SkillFile("lib.md", 4),
-                                SkillFile("lib/a.sh", 3),
+                                SkillFile(path = "SKILL.md", size = 10),
+                                SkillFile(path = "lib.md", size = 4),
+                                SkillFile(path = "lib/a.sh", size = 3),
                             )
                     )
                 )
@@ -229,7 +245,10 @@ class SkillBundlesTest {
                 .move("lib/a.sh", "scripts/a.sh")
                 .move("notes.md", "lib")
         assertEquals(
-            listOf(SkillChange.Move("lib/a.sh", "scripts/a.sh"), SkillChange.Move("lib.md", "lib")),
+            listOf(
+                DraftSkillChange.Move("lib/a.sh", "scripts/a.sh"),
+                DraftSkillChange.Move("lib.md", "lib"),
+            ),
             reverse.changes(),
         )
 
@@ -238,13 +257,17 @@ class SkillBundlesTest {
             SkillDraft.of(
                     base.copy(
                         files =
-                            listOf(SkillFile("SKILL.md", 10), SkillFile("a", 1), SkillFile("b", 1))
+                            listOf(
+                                SkillFile(path = "SKILL.md", size = 10),
+                                SkillFile(path = "a", size = 1),
+                                SkillFile(path = "b", size = 1),
+                            )
                     )
                 )
                 .move("a", "c")
                 .move("b", "a/y")
                 .move("c", "b/x")
-        val moves = crossed.changes().filterIsInstance<SkillChange.Move>()
+        val moves = crossed.changes().filterIsInstance<DraftSkillChange.Move>()
         val files = mutableSetOf("SKILL.md", "a", "b")
         for (move in moves) {
             assertTrue(move.from in files)
@@ -259,12 +282,12 @@ class SkillBundlesTest {
     fun foldersMoveTheirFilesAndDeletedFilesCanBeRestored() {
         val moved = draft().moveFolder("scripts", "tools/scripts")
         assertEquals(
-            listOf(SkillChange.Move("scripts/check.sh", "tools/scripts/check.sh")),
+            listOf(DraftSkillChange.Move("scripts/check.sh", "tools/scripts/check.sh")),
             moved.changes(),
         )
         assertEquals(DraftStatus.MOVED, moved.status(moved.file("tools/scripts/check.sh")!!))
         val emptied = draft().deleteFolder("references")
-        assertEquals(listOf(SkillChange.Delete("references/guide.md")), emptied.changes())
+        assertEquals(listOf(DraftSkillChange.Delete("references/guide.md")), emptied.changes())
         assertFalse(emptied.restore("references/guide.md").dirty)
 
         val withFolder = draft().addFolder("templates")
@@ -298,7 +321,12 @@ class SkillBundlesTest {
     fun fileAncestorsAndDescendantFoldersCannotCollideInTheDraft() {
         val saved =
             bundle.copy(
-                files = listOf(SkillFile(SKILL_FILE), SkillFile("notes"), SkillFile("source/a.txt"))
+                files =
+                    listOf(
+                        SkillFile(path = SKILL_FILE),
+                        SkillFile(path = "notes"),
+                        SkillFile(path = "source/a.txt"),
+                    )
             )
         val draft = SkillDraft.of(saved)
         assertThrows { draft.put("notes/child.txt", SkillBody.Text("x")) }
@@ -311,7 +339,7 @@ class SkillBundlesTest {
 
         val nested = draft.move("notes", "notes/index.txt")
         val occupied = mutableSetOf(SKILL_FILE, "notes", "source/a.txt")
-        for (move in nested.changes().filterIsInstance<SkillChange.Move>()) {
+        for (move in nested.changes().filterIsInstance<DraftSkillChange.Move>()) {
             assertFalse(occupied.any { pathsCollide(move.to, it) })
             assertTrue(occupied.remove(move.from))
             occupied += move.to
@@ -353,50 +381,57 @@ class SkillBundlesTest {
     @Test
     fun changesSerializeToTheBatchFormat() {
         val write =
-            SkillChange.Write("a.bin", SkillBody.Binary(byteArrayOf(0, 1, 2)), executable = null)
+            DraftSkillChange.Write(
+                    "a.bin",
+                    SkillBody.Binary(byteArrayOf(0, 1, 2)),
+                    executable = null,
+                )
                 .toJson()
         assertEquals("write", write["op"]!!.jsonPrimitive.content)
         assertEquals("base64", write["encoding"]!!.jsonPrimitive.content)
         assertEquals("AAEC", write["content"]!!.jsonPrimitive.content)
         assertFalse("executable" in write)
         val staged =
-            SkillChange.Write("big.md", SkillBody.Text("x"), true, upload = "up-1").toJson()
+            DraftSkillChange.Write("big.md", SkillBody.Text("x"), true, upload = "up-1").toJson()
         assertEquals("up-1", staged["upload"]!!.jsonPrimitive.content)
         assertFalse("content" in staged)
         assertEquals("true", staged["executable"]!!.jsonPrimitive.content)
         assertEquals(
-            """{"op":"move","from":"a","to":"b"}""",
-            SkillChange.Move("a", "b").toJson().toString(),
+            wireJson.parseToJsonElement("""{"op":"move","from":"a","to":"b"}"""),
+            DraftSkillChange.Move("a", "b").toJson(),
         )
         assertEquals(
-            """{"op":"mode","path":"a","executable":true}""",
-            SkillChange.Mode("a", true).toJson().toString(),
+            wireJson.parseToJsonElement("""{"op":"mode","path":"a","executable":true}"""),
+            DraftSkillChange.Mode("a", true).toJson(),
         )
     }
 
     @Test
     fun binariesAndOverflowingTextAreStagedToKeepTheBatchSmall() {
-        val small = SkillChange.Write("small.md", SkillBody.Text("x".repeat(1000)))
-        val icon = SkillChange.Write("icon.png", SkillBody.Binary(ByteArray(10)))
+        val small = DraftSkillChange.Write("small.md", SkillBody.Text("x".repeat(1000)))
+        val icon = DraftSkillChange.Write("icon.png", SkillBody.Binary(ByteArray(10)))
         assertEquals(setOf("icon.png"), stagedWrites(listOf(small, icon)))
         val texts =
-            (1..4).map { SkillChange.Write("t$it.md", SkillBody.Text("y".repeat(40_000 + it))) }
-        val changes = listOf(SkillChange.Delete("old.md")) + texts + small
+            (1..4).map {
+                DraftSkillChange.Write("t$it.md", SkillBody.Text("y".repeat(40_000 + it)))
+            }
+        val changes = listOf(DraftSkillChange.Delete("old.md")) + texts + small
         val staged = stagedWrites(changes)
         // The largest texts go first; the small ones stay inline.
         assertEquals(setOf("t4.md", "t3.md"), staged)
         val inline =
             changes
-                .filter { it !is SkillChange.Write || it.path !in staged }
+                .filter { it !is DraftSkillChange.Write || it.path !in staged }
                 .sumOf { inlineCost(it) }
         assertTrue(inline <= SKILL_REQUEST_BUDGET)
-        val skill = SkillChange.Write("SKILL.md", SkillBody.Text("z".repeat(100_000)))
+        val skill = DraftSkillChange.Write("SKILL.md", SkillBody.Text("z".repeat(100_000)))
         assertEquals(emptySet<String>(), stagedWrites(listOf(skill)))
     }
 
     @Test
     fun textWithLongJsonEscapesIsStagedBeforeItExceedsTheRequestLimit() {
-        val controls = SkillChange.Write("controls.txt", SkillBody.Text("\u0001".repeat(30_000)))
+        val controls =
+            DraftSkillChange.Write("controls.txt", SkillBody.Text("\u0001".repeat(30_000)))
         assertEquals(setOf("controls.txt"), stagedWrites(listOf(controls)))
         assertEquals(
             controls.toJson().toString().toByteArray(Charsets.UTF_8).size.toLong(),
@@ -410,7 +445,11 @@ class SkillBundlesTest {
         assertTrue(SkillBody.of(byteArrayOf(0x68, 0)) is SkillBody.Binary)
         assertTrue(SkillBody.of(byteArrayOf(0xC3.toByte(), 0x28)) is SkillBody.Binary)
         val content =
-            SkillFileContent(Base64.getEncoder().encodeToString(byteArrayOf(9, 0)), "base64", 2)
+            SkillFileContent(
+                content = Base64.getEncoder().encodeToString(byteArrayOf(9, 0)),
+                encoding = "base64",
+                size = 2,
+            )
         assertEquals(SkillBody.Binary(byteArrayOf(9, 0)), SkillBody.of(content))
     }
 
@@ -426,12 +465,13 @@ class SkillBundlesTest {
                     requests += offset to revision
                     val end = minOf(archive.size.toLong(), offset + 4).toInt()
                     SkillArchiveChunk(
-                        "review.zip",
-                        "rev-1",
-                        archive.size.toLong(),
-                        offset,
-                        Base64.getEncoder()
-                            .encodeToString(archive.copyOfRange(offset.toInt(), end)),
+                        filename = "review.zip",
+                        revision = "rev-1",
+                        size = archive.size.toLong(),
+                        offset = offset,
+                        content =
+                            Base64.getEncoder()
+                                .encodeToString(archive.copyOfRange(offset.toInt(), end)),
                     )
                 },
                 { written.write(it) },
@@ -453,11 +493,11 @@ class SkillBundlesTest {
                 { offset, _ ->
                     calls++
                     SkillArchiveChunk(
-                        "r.zip",
-                        "rev-$calls",
-                        8,
-                        offset,
-                        Base64.getEncoder().encodeToString(ByteArray(4)),
+                        filename = "r.zip",
+                        revision = "rev-$calls",
+                        size = 8,
+                        offset = offset,
+                        content = Base64.getEncoder().encodeToString(ByteArray(4)),
                     )
                 },
                 {},
@@ -468,7 +508,15 @@ class SkillBundlesTest {
         }
         try {
             downloadSkillArchive(
-                { offset, _ -> SkillArchiveChunk("r.zip", "rev", 8, offset, "") },
+                { offset, _ ->
+                    SkillArchiveChunk(
+                        filename = "r.zip",
+                        revision = "rev",
+                        size = 8,
+                        offset = offset,
+                        content = "",
+                    )
+                },
                 {},
             )
             fail("An empty chunk before the end must stop the download.")
@@ -476,7 +524,18 @@ class SkillBundlesTest {
             assertEquals("L’archive reçue est incomplète.", e.message)
         }
         val empty =
-            downloadSkillArchive({ _, _ -> SkillArchiveChunk("e.zip", "rev", 0, 0, "") }, {})
+            downloadSkillArchive(
+                { _, _ ->
+                    SkillArchiveChunk(
+                        filename = "e.zip",
+                        revision = "rev",
+                        size = 0,
+                        offset = 0,
+                        content = "",
+                    )
+                },
+                {},
+            )
         assertEquals(0L, empty.size)
     }
 
@@ -494,7 +553,14 @@ class SkillBundlesTest {
         assertEquals("https://github.com/anthropics/skills/tree/9b1e2c4d5/skills/pdf", source.url)
         assertTrue(source.modified)
         // A source without a version or label still names something.
-        assertEquals("forge", SkillSource(pluginId = "forge").reference)
+        assertEquals(
+            "forge",
+            SkillSource(
+                    pluginId = "forge",
+                    location = kotlinx.serialization.json.JsonObject(emptyMap()),
+                )
+                .reference,
+        )
 
         val status =
             wireJson.decodeFromString<SkillSourceStatus>(
@@ -503,24 +569,29 @@ class SkillBundlesTest {
         assertEquals("bbbbbbb", shortVersion(status.latest.version))
         assertFalse(status.current)
 
-        val body =
-            pluginSkillImportBody(
-                PluginSkillImport(
-                    "github",
-                    "repository",
-                    instance = null,
-                    location = buildJsonObject { put("repository", "o/r") },
-                    folder = " /skills/pdf/ ",
-                )
+        val request =
+            build.cairn.contracts.ImportSkillInput.B(
+                pluginId = "github",
+                skillSource = "repository",
+                scope = "global",
+                location = buildJsonObject { put("repository", "o/r") },
+                folder = "skills/pdf",
             )
+        val body =
+            build.cairn.contracts.contractJson
+                .encodeToJsonElement<build.cairn.contracts.ImportSkillInput>(request)
+                .jsonObject
         assertEquals("plugin", body["source"]!!.jsonPrimitive.content)
         assertEquals("github", body["pluginId"]!!.jsonPrimitive.content)
-        assertEquals("repository", body["skillSource"]!!.jsonPrimitive.content)
+        assertEquals("global", body["scope"]!!.jsonPrimitive.content)
         assertFalse("instance" in body)
-        assertEquals("o/r", body["location"]!!.jsonObject["repository"]!!.jsonPrimitive.content)
         assertEquals("skills/pdf", body["folder"]!!.jsonPrimitive.content)
         val chosen =
-            pluginSkillImportBody(PluginSkillImport("github", "repository", instance = "acct"))
+            build.cairn.contracts.contractJson
+                .encodeToJsonElement<build.cairn.contracts.ImportSkillInput>(
+                    request.copy(instance = "acct", folder = null)
+                )
+                .jsonObject
         assertEquals("acct", chosen["instance"]!!.jsonPrimitive.content)
         assertFalse("folder" in chosen)
     }
@@ -546,7 +617,15 @@ class SkillBundlesTest {
         assertEquals(SkillFileKind.IMAGE, skillFileKind("assets/logo.PNG", false, false))
         assertEquals(SkillFileKind.BINARY, skillFileKind("assets/font.woff2", false, false))
         assertEquals(SkillFileKind.TEXT, skillFileKind("templates/a.json", true, false))
-        assertEquals("o/r@9b1e2c4", SkillSource(label = "o/r", version = "9b1e2c4d5").reference)
+        assertEquals(
+            "o/r@9b1e2c4",
+            SkillSource(
+                    label = "o/r",
+                    version = "9b1e2c4d5",
+                    location = kotlinx.serialization.json.JsonObject(emptyMap()),
+                )
+                .reference,
+        )
     }
 
     @Test
@@ -566,23 +645,25 @@ class SkillBundlesTest {
             server.enqueue(MockResponse().setBody("""{"id":"up-1","size":4}"""))
             server.enqueue(
                 MockResponse()
-                    .setBody("""{"scope":"global","name":"review","revision":"rev-2","files":[]}""")
+                    .setBody(
+                        """{"scope":"global","name":"review","revision":"rev-2","limits":{},"files":[]}"""
+                    )
             )
             server.start()
             val api = CairnApi(server.url("/"), MemoryVault(), installationId = "i")
             val bundle =
-                api.applySkillChanges(
+                api.applyDraftSkillChanges(
                     "global",
                     "review",
                     "rev-1",
                     listOf(
-                        SkillChange.Delete("old.md"),
-                        SkillChange.Write(
+                        DraftSkillChange.Delete("old.md"),
+                        DraftSkillChange.Write(
                             "assets/logo.png",
                             SkillBody.Binary(byteArrayOf(1, 2, 0, 3)),
                             false,
                         ),
-                        SkillChange.Write("notes.md", SkillBody.Text("hi"), false),
+                        DraftSkillChange.Write("notes.md", SkillBody.Text("hi"), false),
                     ),
                 )
             assertEquals("rev-2", bundle.revision)
@@ -596,8 +677,10 @@ class SkillBundlesTest {
             val json = wireJson.parseToJsonElement(batch.body.readUtf8()).jsonObject
             assertEquals("rev-1", json["base"]!!.jsonPrimitive.content)
             assertEquals(
-                """[{"op":"delete","path":"old.md"},{"op":"write","path":"assets/logo.png","upload":"up-1","executable":false},{"op":"write","path":"notes.md","content":"hi","executable":false}]""",
-                json["changes"].toString(),
+                wireJson.parseToJsonElement(
+                    """[{"op":"delete","path":"old.md"},{"op":"write","path":"assets/logo.png","upload":"up-1","executable":false},{"op":"write","path":"notes.md","content":"hi","executable":false}]"""
+                ),
+                json["changes"],
             )
         }
     }
@@ -606,11 +689,12 @@ class SkillBundlesTest {
     fun newSkillsSendANullBase() = runTest {
         MockWebServer().use { server ->
             server.enqueue(
-                MockResponse().setBody("""{"scope":"p1","name":"notes","revision":"r"}""")
+                MockResponse()
+                    .setBody("""{"scope":"p1","name":"notes","revision":"r","limits":{}}""")
             )
             server.start()
             val api = CairnApi(server.url("/"), MemoryVault(), installationId = "i")
-            api.applySkillChanges("p1", "notes", null, SkillDraft.create("notes").changes())
+            api.applyDraftSkillChanges("p1", "notes", null, SkillDraft.create("notes").changes())
             val json = wireJson.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
             assertEquals("null", json["base"].toString())
         }

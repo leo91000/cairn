@@ -1,10 +1,18 @@
 //! Keep storage CPU protection independent of slow workspace accounting/capture.
-use super::systemd;
+use super::{suspension::Suspension, systemd};
+use crate::microvm::suspension::Reason;
 use crate::{error::Result, storage::runtime::Volume};
 use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-pub async fn monitor(volume: Arc<Volume>, attempt: &str, stop: CancellationToken) -> Result<()> {
+pub async fn monitor(
+    volume: Arc<Volume>,
+    attempt: &str,
+    suspension: Arc<Suspension>,
+    stop: CancellationToken,
+) -> Result<()> {
+    systemd::wait_started(attempt, &stop).await?;
+    suspension.bind().await?;
     volume.activate_attempt(attempt)?;
     let mut confirmed = false;
     volume.set_paused(false);
@@ -19,7 +27,7 @@ pub async fn monitor(volume: Arc<Volume>, attempt: &str, stop: CancellationToken
         if blocked != confirmed {
             // The backend/controller remain runnable while every process in the
             // workload cgroup freezes. Publication can free journal headroom.
-            let transition = systemd::set_paused(attempt, blocked).await;
+            let transition = suspension.set_reason(&Reason::Storage, blocked).await;
             if stop.is_cancelled() {
                 return Ok(());
             }

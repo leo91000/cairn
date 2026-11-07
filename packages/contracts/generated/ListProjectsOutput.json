@@ -1,0 +1,111 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "Project": {
+      "properties": {
+        "baseBranch": {
+          "default": "main",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_/.-]*$",
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "description": {
+          "default": "",
+          "maxLength": 500,
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "path": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProjectSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sourceMode": {
+          "default": "remote",
+          "pattern": "^(remote|local)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "path",
+        "description",
+        "sourceMode",
+        "baseBranch",
+        "origin",
+        "source",
+        "revision",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "ProjectSource": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "instance": {
+          "type": "string"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "pluginId",
+        "source",
+        "instance",
+        "id"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "projects": {
+      "items": {
+        "$ref": "#/definitions/Project"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "projects"
+  ],
+  "title": "ListProjectsOutput",
+  "type": "object"
+}

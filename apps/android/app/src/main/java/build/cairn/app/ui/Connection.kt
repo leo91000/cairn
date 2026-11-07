@@ -33,10 +33,12 @@ internal enum class ConnectionRoute(val label: String, val summary: String) {
     DIRECT("Direct", "En ligne · Direct"),
     RELAY("Relais", "En ligne · Relais"),
     OFFLINE("Hors ligne", "Hors ligne"),
+    UPDATE_REQUIRED("Mise à jour requise", "Mise à jour requise"),
 }
 
 internal fun connectionRoute(installation: Installation?, transportRoute: String) =
     when {
+        installation?.updateRequired == true -> ConnectionRoute.UPDATE_REQUIRED
         installation?.online != true -> ConnectionRoute.OFFLINE
         transportRoute == "direct" -> ConnectionRoute.DIRECT
         else -> ConnectionRoute.RELAY
@@ -55,7 +57,8 @@ internal fun ConnectionDot(
     val color =
         when (route) {
             ConnectionRoute.DIRECT -> signal.success
-            ConnectionRoute.RELAY -> signal.warning
+            ConnectionRoute.RELAY,
+            ConnectionRoute.UPDATE_REQUIRED -> signal.warning
             ConnectionRoute.OFFLINE -> MaterialTheme.colorScheme.onSurfaceVariant
         }
     Box(
@@ -242,7 +245,9 @@ internal fun ConnectionSheet(
                                                 Text(choice.name)
                                                 Text(
                                                     "${choice.role.label} · " +
-                                                        if (choice.online) "En ligne"
+                                                        if (choice.updateRequired)
+                                                            "Mise à jour requise"
+                                                        else if (choice.online) "En ligne"
                                                         else "Hors ligne",
                                                     style = MaterialTheme.typography.labelSmall,
                                                     color =

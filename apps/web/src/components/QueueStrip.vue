@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { ChatMessage } from '../../../../packages/contracts/chats'
+import type { CodingAgentModel } from '../../../../packages/contracts/models'
 import { computed, ref } from 'vue'
 import {
   Clock,
@@ -9,6 +10,7 @@ import {
   Trash2,
   Zap,
 } from '../icons'
+import { speedNote } from '../speeds'
 import AttachmentThumb from './AttachmentThumb.vue'
 import Icon from './Icon.vue'
 import MessageAttachments from './MessageAttachments.vue'
@@ -16,12 +18,14 @@ import Modal from './Modal.vue'
 
 // Follow-ups waiting for the agent, drawn at the top of the composer as on Android. The next
 // message can be sent now; any message opens its actions (send now, edit, pause, remove).
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   pending: ChatMessage[]
   paused: boolean
   working: boolean
   busy: boolean
-}>()
+  /** Codex's catalog, to name a queued message's speed as its model runs it. */
+  models?: CodingAgentModel[]
+}>(), { models: () => [] })
 const emit = defineEmits<{
   steer: [message: ChatMessage]
   edit: [message: ChatMessage]
@@ -32,7 +36,8 @@ const expanded = ref(false)
 const selected = ref<string | null>(null)
 const headline = computed(() => props.paused ? 'Queue paused · nothing is sent' : props.working ? 'Sent when the agent finishes' : 'Waiting to send')
 const chosen = computed(() => props.pending.find(message => message.id === selected.value))
-const steerable = (message: ChatMessage) => props.working && message.status === 'queued' && !message.questionId && message.mode !== 'steer'
+// A plan request waits for its own turn: it cannot restrict a turn already running.
+const steerable = (message: ChatMessage) => props.working && message.status === 'queued' && !message.questionId && message.mode !== 'steer' && !message.plan
 const preview = (message: ChatMessage) => message.text || message.attachments?.map(file => file.name).join(', ') || 'Attachments'
 
 function note(message: ChatMessage) {
@@ -41,7 +46,9 @@ function note(message: ChatMessage) {
   if (message.mode === 'steer')
     return 'Delivered as soon as possible'
   const files = message.attachments?.length ?? 0
-  return files ? `${files} attachment${files > 1 ? 's' : ''}` : ''
+  // Each queued message keeps the speed chosen when it was written.
+  const speed = speedNote(message.speed ?? '', message.model ?? '', props.models)
+  return [message.plan ? 'Plan · no changes' : '', files ? `${files} attachment${files > 1 ? 's' : ''}` : '', speed].filter(Boolean).join(' · ')
 }
 
 // Close the sheet, then act on the message it showed.

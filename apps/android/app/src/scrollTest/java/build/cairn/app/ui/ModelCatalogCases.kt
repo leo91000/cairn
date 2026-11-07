@@ -55,8 +55,31 @@ abstract class ModelCatalogCases {
                                     otherRequests.incrementAndGet()
                                     "{}"
                                 }
-                                "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(response)
                     }

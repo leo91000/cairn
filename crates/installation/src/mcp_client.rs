@@ -15,7 +15,6 @@ use reqwest::{
     Method,
     header::{HeaderMap, HeaderValue},
 };
-use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::{collections::HashSet, time::Duration};
 
@@ -63,7 +62,11 @@ fn unsupported_version() -> Error {
     Error::bad_gateway("No supported MCP protocol version.")
 }
 
+// Management and transport effects carry the same local/live proof.
+pub(crate) use crate::authorization::Authorization;
+
 pub struct Client {
+    authorization: Option<Authorization>,
     transport: Transport,
     pub capabilities: Value,
     protocol: String,
@@ -83,17 +86,13 @@ struct HttpTransport {
 }
 
 impl Client {
-    pub async fn connect(s: &Service, item: &Value) -> Result<Self> {
-        Self::connect_server(s, &McpServer::deserialize(item)?).await
-    }
-
     /// Connects with the stored credentials, refreshing OAuth tokens that expired
     /// or that the server rejects.
     pub async fn connect_server(s: &Service, server: &McpServer) -> Result<Self> {
         Self::connect_server_authorized(s, server, |_| Ok(())).await
     }
 
-    async fn connect_server_authorized<F>(
+    pub(crate) async fn connect_server_authorized<F>(
         s: &Service,
         server: &McpServer,
         authorize: F,
@@ -101,6 +100,23 @@ impl Client {
     where
         F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
     {
+        Self::connect_authorized(s, server, Authorization::new(s, authorize)).await
+    }
+
+    pub(crate) async fn connect_server_live(
+        s: &Service,
+        server: &McpServer,
+        authority: crate::capabilities::plugin_packages::Authority,
+    ) -> Result<Self> {
+        Self::connect_authorized(s, server, Authorization::live(s, authority)).await
+    }
+
+    pub(crate) async fn connect_authorized(
+        s: &Service,
+        server: &McpServer,
+        authorize: Authorization,
+    ) -> Result<Self> {
+        let authorize = authorize.for_service(s);
         let refreshable =
             |secrets: &McpSecrets| server.uses_oauth() && !secrets.refresh_token().is_empty();
         let mut secrets = s.mcps.server_secrets(s, &server.id).await?;
@@ -111,11 +127,13 @@ impl Client {
             crate::mcp_oauth::refresh_authorized(s, server, authorize.clone()).await?;
             secrets = s.mcps.server_secrets(s, &server.id).await?;
         }
-        let first = Self::open(s, server, &secrets).await;
+        authorize.recheck().await?;
+        let first = Self::open(s, server, &secrets, authorize.clone()).await;
         if first.as_ref().is_err_and(Error::is_unauthorized) && refreshable(&secrets) {
             crate::mcp_oauth::refresh_authorized(s, server, authorize.clone()).await?;
             let secrets = s.mcps.server_secrets(s, &server.id).await?;
-            return Self::open(s, server, &secrets).await;
+            authorize.recheck().await?;
+            return Self::open(s, server, &secrets, authorize.clone()).await;
         }
         first
     }
@@ -133,14 +151,26 @@ impl Client {
     where
         F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
     {
-        let mut client = Self::connect_server_authorized(s, server, authorize).await?;
+        Self::list_tools_live(s, server, Authorization::new(s, authorize)).await
+    }
+
+    pub(crate) async fn list_tools_live(
+        s: &Service,
+        server: &McpServer,
+        authorize: Authorization,
+    ) -> Result<Vec<Value>> {
+        let authorize = authorize.for_service(s);
+        let mut client = Self::connect_authorized(s, server, authorize.clone()).await?;
+        authorize.recheck().await?;
         let tools = client.discover().await;
         client.close().await;
+        authorize.recheck().await?;
         tools
     }
 
-    fn new(transport: Transport, protocol: &str) -> Self {
+    fn new(transport: Transport, protocol: &str, authorization: Option<Authorization>) -> Self {
         Self {
+            authorization,
             transport,
             capabilities: json!({}),
             protocol: protocol.into(),
@@ -152,8 +182,18 @@ impl Client {
         matches!(self.transport, Transport::Stdio(_))
     }
 
-    async fn open(s: &Service, server: &McpServer, secrets: &McpSecrets) -> Result<Self> {
-        let mut client = Self::new(Self::transport(s, server, secrets).await?, MODERN);
+    async fn open(
+        s: &Service,
+        server: &McpServer,
+        secrets: &McpSecrets,
+        authorize: Authorization,
+    ) -> Result<Self> {
+        let authorization = Some(authorize);
+        let mut client = Self::new(
+            Self::transport(s, server, secrets, &authorization).await?,
+            MODERN,
+            authorization,
+        );
         match client.request("server/discover", json!({})).await {
             Ok(discovery) => {
                 let modern = discovery["supportedVersions"]
@@ -165,6 +205,10 @@ impl Client {
                 }
                 client.capabilities = discovery["capabilities"].clone();
                 Ok(client)
+            }
+            Err(error) if [401, 403].contains(&error.status) => {
+                client.close().await;
+                Err(error)
             }
             Err(error) if [400, 405, 501].contains(&error.status) || client.is_stdio() => {
                 client.initialize_legacy(s, server, secrets).await
@@ -184,8 +228,13 @@ impl Client {
     ) -> Result<Self> {
         // Command servers may exit on the unknown modern probe: restart them.
         let mut client = if self.is_stdio() {
+            let authorization = self.authorization.clone();
             self.close().await;
-            Self::new(Self::transport(s, server, secrets).await?, LEGACY)
+            Self::new(
+                Self::transport(s, server, secrets, &authorization).await?,
+                LEGACY,
+                authorization,
+            )
         } else {
             self
         };
@@ -208,7 +257,12 @@ impl Client {
         Ok(client)
     }
 
-    async fn transport(s: &Service, server: &McpServer, secrets: &McpSecrets) -> Result<Transport> {
+    async fn transport(
+        s: &Service,
+        server: &McpServer,
+        secrets: &McpSecrets,
+        authorization: &Option<Authorization>,
+    ) -> Result<Transport> {
         if server.is_http() {
             let bearer = match server.auth {
                 AuthKind::Bearer => secrets.token(),
@@ -232,6 +286,9 @@ impl Client {
             env.extend(secrets.clone());
         }
         let command = command(&server.command, &server.args, &env, Some(&s.config.home));
+        if let Some(authorize) = authorization {
+            authorize.recheck().await?;
+        }
         Ok(Transport::Stdio(
             Session::spawn_with_protocol(command, true).await?,
         ))
@@ -260,18 +317,28 @@ impl Client {
     }
 
     pub async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        if let Some(authorize) = &self.authorization {
+            authorize.recheck().await?;
+        }
         let params = self.with_meta(params);
-        match &mut self.transport {
+        let result = match &mut self.transport {
             Transport::Stdio(session) => session.request(method, params).await,
             Transport::Http(http) => {
                 self.sequence += 1;
                 http.request(self.sequence, &self.protocol, method, params)
                     .await
             }
+        };
+        if let Some(authorize) = &self.authorization {
+            authorize.recheck().await?;
         }
+        result
     }
 
     async fn notify(&mut self, method: &str, params: Value) -> Result<()> {
+        if let Some(authorize) = &self.authorization {
+            authorize.recheck().await?;
+        }
         match &mut self.transport {
             Transport::Stdio(session) => session.rpc.notify(method, params).await,
             Transport::Http(http) => http.notify(&self.protocol, method, params).await,
@@ -314,7 +381,16 @@ impl Client {
     pub async fn close(self) {
         match self.transport {
             Transport::Stdio(session) => session.close().await,
-            Transport::Http(http) => http.close(&self.protocol).await,
+            Transport::Http(http) => {
+                if http.session.is_some()
+                    && let Some(authorize) = self.authorization
+                    && authorize.recheck().await.is_err()
+                {
+                    // Revocation also fences best-effort remote session cleanup.
+                    return;
+                }
+                http.close(&self.protocol).await;
+            }
         }
     }
 }
@@ -475,4 +551,122 @@ pub fn sse_result(bytes: &[u8], id: &Value) -> Result<Value> {
         }
     }
     Err(Error::bad_gateway("MCP stream ended without a response."))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn stdio_fallback_revalidates_before_restarting_after_revocation() {
+        let root = TempDir::new().unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let service = Service::new(Config {
+            data_dir: root.path().join("data"),
+            home,
+            workspace_roots: vec![root.path().to_owned()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        let starts = root.path().join("starts.log");
+        let probing = root.path().join("probing");
+        let release = root.path().join("release");
+        let script = root.path().join("legacy.mjs");
+        std::fs::write(
+            &script,
+            r#"
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+import { setTimeout } from 'node:timers/promises';
+const [starts, probing, release] = process.argv.slice(2);
+appendFileSync(starts, 'started\n');
+createInterface({ input: process.stdin }).on('line', async line => {
+    const request = JSON.parse(line);
+    if (request.method === 'server/discover') {
+        writeFileSync(probing, '');
+        while (!existsSync(release)) await setTimeout(5);
+        process.exit(1);
+    }
+    if (!request.id) return;
+    const result = request.method === 'initialize'
+        ? { protocolVersion: '2025-11-25', capabilities: { tools: {} } }
+        : { tools: [] };
+    console.log(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }));
+});
+"#,
+        )
+        .unwrap();
+        let server = McpServer {
+            id: "00000000-0000-4000-8000-000000000001".into(),
+            name: "Delayed legacy command".into(),
+            transport: cairn_contracts::Transport::Stdio,
+            command: "node".into(),
+            args: [&script, &starts, &probing, &release]
+                .map(|path| path.to_string_lossy().into_owned())
+                .to_vec(),
+            ..Default::default()
+        };
+        let revoked = Arc::new(AtomicBool::new(false));
+        let authorization = {
+            let revoked = revoked.clone();
+            let starts = starts.clone();
+            move |_: &Db<'_>| {
+                if revoked.load(Ordering::SeqCst) {
+                    // A slow denial lets an incorrectly spawned child run its startup
+                    // effects before the caller drops it. A pre-spawn check cannot.
+                    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                    while std::fs::read_to_string(&starts).unwrap().lines().count() < 2
+                        && std::time::Instant::now() < deadline
+                    {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(Error::forbidden("Fixture grant revoked"))
+                } else {
+                    Ok(())
+                }
+            }
+        };
+        let authorization = Authorization::new(&service, authorization);
+        let pending = tokio::spawn(async move {
+            Client::open(&service, &server, &McpSecrets::default(), authorization).await
+        });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !tokio::fs::try_exists(&probing).await.unwrap() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        revoked.store(true, Ordering::SeqCst);
+        tokio::fs::write(&release, "").await.unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(10), pending)
+            .await
+            .unwrap()
+            .unwrap()
+            .err()
+            .expect("revoked authorization");
+        assert_eq!(error.status, 403);
+        assert_eq!(
+            tokio::fs::read_to_string(starts).await.unwrap(),
+            "started\n"
+        );
+    }
 }

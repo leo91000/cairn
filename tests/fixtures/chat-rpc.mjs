@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -7,17 +8,49 @@ import {
 } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
+import activityEvents from './activity-events.json' with { type: 'json' }
+import { askCairn, navigationQuestions } from './cairn-questions.mjs'
 
 export function chatFixture() {
   const file = path.join(process.env.CODEX_HOME, 'fixture-conversation.json')
+  // The thread's model: the requested one, else one the fixture's configuration sets.
+  const configModel = path.join(process.env.CODEX_HOME, 'fixture-config-model')
+  const unknownThreadModel = path.join(process.env.CODEX_HOME, 'fixture-unknown-thread-model')
+  let thread
+  const threadModel = params => params.model || (existsSync(configModel) ? readFileSync(configModel, 'utf8').trim() : 'fixture-fast')
+  const threadModelResult = (params) => {
+    const result = { thread }
+
+    if (!existsSync(unknownThreadModel))
+      result.model = threadModel(params)
+
+    return result
+  }
+
   const emit = value => process.stdout.write(`${JSON.stringify(value)}\n`)
   const notify = (method, params) => emit({ method, params })
-  let thread
+
   let active
   let counter = 0
   let hold = false
   let questionRequest
   let asked = false
+  let resumed = false
+  let completionText
+  // Like Codex, `last` is the latest request (the active context) and `total` the whole thread.
+  const tokenUsage = (turnId, last, total) => notify('thread/tokenUsage/updated', {
+    threadId: thread.id,
+    turnId,
+    tokenUsage: { last, total, modelContextWindow: 258400 },
+  })
+  const usage = (input, cached, output) => ({
+    inputTokens: input,
+    cachedInputTokens: cached,
+    cacheWriteInputTokens: 0,
+    outputTokens: output,
+    reasoningOutputTokens: 0,
+    totalTokens: input + output,
+  })
   const save = () => {
     mkdirSync(process.env.CODEX_HOME, { recursive: true })
     writeFileSync(file, JSON.stringify(thread))
@@ -26,18 +59,61 @@ export function chatFixture() {
   const finish = () => {
     if (!active)
       return
-    const text = `I reviewed the workspace. **The approach looks good.**\n\n${active.items.filter(item => item.type === 'userMessage').map(item => item.content[0].text).join('\n\n')}\n\nReady for the next step.`
+    const scheduledBrief = thread.fixtureInstructions.includes('This unattended task cannot answer clarification questions')
+      && active.items.some(item => item.type === 'userMessage' && item.content[0].text.startsWith('Task brief:\n'))
+    const text = completionText || (scheduledBrief
+      ? '# Complete\nThe fixture task passed.'
+      : `I reviewed the workspace. **The approach looks good.**\n\n${active.items.filter(item => item.type === 'userMessage').map(item => item.content[0].text).join('\n\n')}\n\nReady for the next step.`)
     const item = { id: `reply-${thread.fixtureGeneration || 'legacy'}-${active.id}`, type: 'agentMessage', text }
     active.items.push(item)
     active.status = 'completed'
     save()
     notify('item/completed', { threadId: thread.id, item })
+    const turns = thread.turns.length
+    tokenUsage(active.id, usage(40000 * turns, 36000 * turns, 900), usage(90000 * turns, 70000 * turns, 3000 * turns))
     notify('turn/completed', { threadId: thread.id, turn: active })
     active = null
   }
 
+  // `thread/compact/start` replaces any running turn with a compaction turn.
+  const compact = (request) => {
+    if (active) {
+      active.status = 'interrupted'
+      notify('turn/completed', { threadId: thread.id, turn: active })
+    }
+
+    const turn = { id: `turn-${++counter}`, status: 'inProgress', items: [] }
+    thread.turns.push(turn)
+    emit({ id: request.id, result: {} })
+    notify('turn/started', { threadId: thread.id, turn })
+    const item = { id: `compaction-${turn.id}`, type: 'contextCompaction' }
+    notify('item/started', { threadId: thread.id, turnId: turn.id, item })
+    setTimeout(() => {
+      turn.items.push(item)
+      turn.status = existsSync(path.join(process.env.CODEX_HOME, 'fixture-compaction-fails')) ? 'failed' : 'completed'
+      if (turn.status === 'completed') {
+        notify('item/completed', { threadId: thread.id, turnId: turn.id, item })
+        tokenUsage(turn.id, usage(0, 0, 0), usage(90000, 70000, 3000))
+        tokenUsage(turn.id, { ...usage(0, 0, 0), totalTokens: 6200 }, usage(90000, 70000, 3000))
+      }
+      else {
+        turn.error = { message: 'Fixture compaction failed' }
+      }
+
+      save()
+      notify('turn/completed', { threadId: thread.id, turn })
+    }, 200)
+  }
+
   const handle = (request) => {
     const { method, params } = request
+    if (!method && request.id === 'text-stream-barrier') {
+      if (!request.error)
+        throw new Error('The private fixture request must be rejected')
+      writeFileSync(path.join(process.env.CODEX_HOME, 'fixture-text-stream-processed'), '')
+      return true
+    }
+
     if (!method && request.id === 'auth-refresh') {
       if (!request.result?.accessToken?.endsWith('-refreshed') || request.result.chatgptAccountId !== globalThis.fixtureAccountId || request.result.refresh_token)
         throw new Error('Invalid external token refresh')
@@ -46,11 +122,40 @@ export function chatFixture() {
     }
 
     if (!method && questionRequest && request.id === questionRequest) {
-      active.items.push({ id: 'answer', type: 'fixtureAnswer', answers: request.result.answers })
+      active.items.push({
+        id: 'answer',
+        type: 'fixtureAnswer',
+        answers: request.result?.answers,
+        error: request.error,
+      })
       save()
       notify('serverRequest/resolved', { threadId: thread.id, requestId: questionRequest })
       questionRequest = undefined
       finish()
+      return true
+    }
+
+    if (method === 'collaborationMode/list') {
+      // Presets listed by Codex 0.164.0.
+      emit({
+        id: request.id,
+        result: {
+          data: [
+            {
+              name: 'Plan',
+              mode: 'plan',
+              model: null,
+              reasoning_effort: 'medium',
+            },
+            {
+              name: 'Default',
+              mode: 'default',
+              model: null,
+              reasoning_effort: null,
+            },
+          ],
+        },
+      })
       return true
     }
 
@@ -59,6 +164,12 @@ export function chatFixture() {
         throw new Error('Cannot release an active thread')
       emit({ id: request.id, result: { status: 'unsubscribed' } })
       thread = undefined
+      return true
+    }
+
+    if (method === 'thread/compact/start') {
+      appendFileSync(path.join(process.env.CODEX_HOME, 'fixture-compactions.jsonl'), `${JSON.stringify(params)}\n`)
+      compact(request)
       return true
     }
 
@@ -73,18 +184,21 @@ export function chatFixture() {
         turns: [],
         parentThreadId: null,
         fixtureConfig: params.config,
+        fixtureInstructions: params.developerInstructions || '',
       }
       save()
-      emit({ id: request.id, result: { thread } })
+      emit({ id: request.id, result: threadModelResult(params) })
     }
 
     if (method === 'thread/resume') {
+      resumed = true
       if (!existsSync(file))
         throw new Error('No conversation')
       thread = JSON.parse(readFileSync(file, 'utf8'))
       thread.fixtureConfig = params.config
+      thread.fixtureInstructions = params.developerInstructions || ''
       counter = thread.turns.length
-      emit({ id: request.id, result: { thread: { ...thread, turns: [] } } })
+      emit({ id: request.id, result: { ...threadModelResult(params), thread: { ...thread, turns: [] } } })
     }
 
     if (method === 'thread/turns/list' || method === 'thread/items/list') {
@@ -109,17 +223,50 @@ export function chatFixture() {
         return true
       }
 
-      if (method === 'turn/start') {
-        hold = params.input[0].text.includes('fixture:chat-hang') && !params.input[0].text.startsWith('Continue the interrupted')
+      if (method === 'turn/start' && !request.earlyPlanSent) {
+        hold = (params.input[0].text.includes('fixture:chat-hang') || params.input[0].text.includes('fixture:hang')) && !params.input[0].text.startsWith('Continue the interrupted')
         active = {
           id: `turn-${++counter}`,
           status: 'inProgress',
           items: [],
           model: params.model,
           effort: params.effort,
+          sandboxPolicy: params.sandboxPolicy,
+          collaborationMode: params.collaborationMode,
+          threadConfig: thread.fixtureConfig,
+          serviceTier: params.serviceTier,
         }
         thread.turns.push(active)
         notify('turn/started', { threadId: thread.id, turn: active })
+        // Codex emits a plan item in its plan mode, which `fixture:plan-item` stands for
+        // outside a Cairn plan turn.
+        if (params.collaborationMode?.mode === 'plan' || params.input[0].text.includes('fixture:plan-item')) {
+          const plan = { id: `plan-${active.id}`, type: 'plan', text: '1. Read the composer.\n2. Add the toggle.' }
+          active.items.push(plan)
+          notify('item/completed', { threadId: thread.id, item: plan })
+        }
+
+        if (params.input[0].text.includes('fixture:early-plan')) {
+          // A later notification proves the parent consumed the early item while
+          // turn/start is still awaiting acceptance; no scheduler sleeps decide it.
+          tokenUsage(active.id, usage(12345, 0, 0), usage(12345, 0, 0))
+          const release = path.join(process.env.CODEX_HOME, 'fixture-early-plan-release')
+          const timer = setInterval(() => {
+            if (!existsSync(release))
+              return
+            clearInterval(timer)
+            if (params.input[0].text.includes('fixture:early-plan-rejected')) {
+              active.status = 'failed'
+              save()
+              active = null
+              emit({ id: request.id, error: { code: -32000, message: 'Initial turn rejected' } })
+              return
+            }
+
+            handle({ ...request, earlyPlanSent: true })
+          }, 10)
+          return true
+        }
       }
 
       const item = {
@@ -151,6 +298,103 @@ export function chatFixture() {
       }
 
       const text = params.input[0].text
+
+      if (text === 'fixture:bounded-text-stream') {
+        const control = JSON.parse(readFileSync(path.join(process.env.CODEX_HOME, 'fixture-text-stream.json'), 'utf8'))
+        const id = `reply-${thread.fixtureGeneration || 'legacy'}-${active.id}`
+        notify('item/started', { threadId: thread.id, item: { id, type: 'agentMessage', text: '' } })
+        const characters = Array.from(control.text)
+        const updates = control.updates ?? []
+        for (let offset = 0; !control.updates && offset < characters.length; offset += control.deltaCharacters)
+          updates.push({ delta: characters.slice(offset, offset + control.deltaCharacters).join('') })
+        for (const update of updates) {
+          notify('item/agentMessage/delta', {
+            threadId: thread.id,
+            itemId: update.item ? `${id}:${update.item}` : id,
+            delta: update.delta,
+          })
+          if (control.ignoredNoise) {
+            notify('item/commandExecution/outputDelta', { threadId: thread.id, itemId: 'background-command', delta: 'not a supported activity event' })
+            notify('item/started', { threadId: 'foreign-thread', item: { id: 'foreign-item', type: 'agentMessage', text: 'not our conversation' } })
+          }
+        }
+
+        if (control.terminal === 'failed') {
+          active.status = 'failed'
+          active.error = { message: 'Fixture text stream failed' }
+          save()
+          notify('turn/completed', { threadId: thread.id, turn: active })
+          active = null
+          return true
+        }
+
+        if (control.terminal === 'eof') {
+          process.stdout.write('', () => process.exit(0))
+          return true
+        }
+
+        if (control.terminal === 'cancel') {
+          // Rejection proves the adapter consumed every preceding delta. This
+          // private request produces no conversation event or text flush.
+          emit({ id: 'text-stream-barrier', method: 'fixture/text-stream-barrier', params: {} })
+          return true
+        }
+
+        completionText = control.text
+        finish()
+        return true
+      }
+
+      const marker = path.join(process.env.CODEX_HOME, 'fixture-restart.json')
+      if (text.includes('fixture:restart') || (resumed && existsSync(marker))) {
+        if (resumed && existsSync(marker)) {
+          const previous = JSON.parse(readFileSync(marker, 'utf8'))
+          if (previous.cwd !== process.cwd() || readFileSync(path.join(process.cwd(), 'restart-work.txt'), 'utf8') !== 'preserved before restart')
+            throw new Error('Restart lost workspace')
+          completionText = '# Resumed\nThe saved conversation and work survived the restart.'
+        }
+        else {
+          writeFileSync(marker, JSON.stringify({ cwd: process.cwd() }))
+          writeFileSync(path.join(process.cwd(), 'restart-work.txt'), 'preserved before restart')
+          hold = true
+        }
+      }
+
+      if (text.includes('fixture:activity')) {
+        for (const event of activityEvents.filter(event => event.type.startsWith('item.'))) {
+          const { item } = event
+          if (item.type === 'todo_list') {
+            notify('turn/plan/updated', { threadId: thread.id, turnId: active.id, plan: item.items.map(step => ({ step: step.text, status: step.completed ? 'completed' : 'pending' })) })
+            continue
+          }
+
+          const types = {
+            agent_message: 'agentMessage',
+            command_execution: 'commandExecution',
+            web_search: 'webSearch',
+            file_change: 'fileChange',
+            mcp_tool_call: 'mcpToolCall',
+          }
+          const native = {
+            ...item,
+            type: types[item.type],
+            aggregatedOutput: item.aggregated_output,
+            exitCode: item.exit_code,
+          }
+          active.items.push(native)
+          notify(event.type === 'item.started' ? 'item/started' : 'item/completed', { threadId: thread.id, item: native })
+        }
+      }
+
+      if (text.includes('fixture:fail')) {
+        active.status = 'failed'
+        active.error = { message: 'The fixture task failed.' }
+        save()
+        notify('turn/completed', { threadId: thread.id, turn: active })
+        active = null
+        return true
+      }
+
       if (text.includes('fixture:codex-reconnect')) {
         for (const scope of [
           { threadId: 'another-thread', turnId: active.id, willRetry: true },
@@ -253,6 +497,18 @@ export function chatFixture() {
           throw new Error('Resume did not preserve context or switch accounts')
       }
 
+      if (text.includes('fixture:cairn-question')) {
+        hold = true
+        askCairn(thread.fixtureConfig.mcp_servers.cairn_workspace, navigationQuestions).then(() => {
+          hold = false
+          finish()
+        }).catch((error) => {
+          process.stderr.write(`${error.message}\n`)
+          process.exit(1)
+        })
+        return true
+      }
+
       if (!asked && text.includes('fixture:question')) {
         asked = true
         hold = true
@@ -301,6 +557,7 @@ export function chatFixture() {
 
       if (text.includes('fixture:stream')) {
         const streaming = active
+        const limitFile = text.match(/^fixture:stream-limit:(.+)$/m)?.[1]
         const item = { id: `stream-${active.id}`, type: 'agentMessage', text: 'Streaming proof:' }
         active.items.push(item)
         notify('item/started', { threadId: thread.id, item: { ...item, text: '' } })
@@ -311,6 +568,11 @@ export function chatFixture() {
             clearInterval(timer)
             return
           }
+
+          // Let journeys hold real provider deltas until their consumers are ready.
+          const limit = limitFile ? Number(readFileSync(limitFile, 'utf8')) : 100
+          if (part >= limit)
+            return
 
           const delta = ` ${String(++part).padStart(3, '0')}`
           item.text += delta

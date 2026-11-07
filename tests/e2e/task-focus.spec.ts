@@ -9,7 +9,7 @@ import {
 } from './fixtures'
 
 test('a completed mission becomes a chat and follows up in the same session after reload', async ({ page, workspace }) => {
-  const project = workspace.service.store.list('projects')[0]
+  const project = workspace.service.store.projects()[0]
   const task = workspace.service.task({
     name: 'Deployment review to discuss',
     agentId: workspace.service.store.list('agents')[0]!.id,
@@ -51,7 +51,7 @@ test('a completed mission becomes a chat and follows up in the same session afte
 test('reconnects after a temporary restart and resumes a cancelled conversation in place', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
   const agent = workspace.service.agent({ name: 'Recovery engineer' })
-  const project = workspace.service.store.list('projects')[0]
+  const project = workspace.service.store.projects()[0]
   const task = workspace.service.task({
     name: 'Recover a deployment review',
     agentId: agent.id,
@@ -60,7 +60,7 @@ test('reconnects after a temporary restart and resumes a cancelled conversation 
     worktree: false,
   })
   const run = await workspace.service.enqueue(task.id)
-  await expect.poll(() => workspace.service.store.run(run.id)?.sessionId).toBe('fixture-session')
+  await expect.poll(() => workspace.service.store.run(run.id)?.sessionId).toBe('fixture-chat')
   await page.goto(workspacePath('/tasks'))
   await authenticateWorkspace(page)
   await expect(page.locator('.task-focus-detail')).toBeVisible()
@@ -156,14 +156,14 @@ for (const failure of ['refresh', 'lost response'] as const) {
     await expect(dialog.getByRole('alert')).toContainText(failure === 'refresh' ? 'Mission saved, but the workspace could not be reloaded' : 'Could not confirm whether the mission was saved')
     await expectUncovered(dialog.getByRole('alert'))
     rejectRefresh = false
-    const created = (await workspace.api('/api/tasks')).find((task: { id: string }) => task.id === createdId)
+    const created = (await workspace.api('/api/tasks')).tasks.find((task: { id: string }) => task.id === createdId)
     expect(created.cron).toBe('0 9 * * 1')
     await page.screenshot({ path: testInfo.outputPath(`mission-${failure.replaceAll(' ', '-')}-mobile.png`), animations: 'disabled' })
     await dialog.getByLabel('Mission name', { exact: true }).fill(`${name} edited`)
     await dialog.getByRole('button', { name: failure === 'refresh' ? 'Save changes' : 'Create mission', exact: true }).click()
     await expect(page.getByRole('dialog', { name: /Give your agent a mission|Edit mission/ })).toHaveCount(0)
 
-    const saved = (await workspace.api('/api/tasks')).filter((task: { name: string }) => task.name.startsWith(name))
+    const saved = (await workspace.api('/api/tasks')).tasks.filter((task: { name: string }) => task.name.startsWith(name))
     expect(saved).toHaveLength(1)
     expect(saved[0]).toMatchObject({
       id: createdId,
@@ -217,15 +217,17 @@ test('keeps the selected mission across reloads and runs it from its mobile shee
 test('mission cards and sheet show the schedule, the brief and the history, as on Android', async ({ page, workspace }) => {
   await workspace.restart()
   const agent = workspace.service.store.list('agents')[0]
-  const project = workspace.service.store.list('projects')[0]
+  const project = workspace.service.store.projects()[0]
   const task = await workspace.api('/api/tasks', 'POST', {
-    name: 'Weekly Graphile Worker upstream ports',
-    agentId: agent.id,
-    projectId: project.id,
-    prompt: 'Review upstream changes and report the checks you ran. fixture:activity',
-    cron: '0 9 * * 4',
-    enabled: false,
-    worktree: false,
+    settings: {
+      name: 'Weekly Graphile Worker upstream ports',
+      agentId: agent.id,
+      projectId: project.id,
+      prompt: 'Review upstream changes and report the checks you ran. fixture:activity',
+      cron: '0 9 * * 4',
+      enabled: false,
+      worktree: false,
+    },
   })
   const run = await workspace.service.enqueue(task.id)
   await expect.poll(() => workspace.service.store.run(run.id)?.status).toBe('succeeded')

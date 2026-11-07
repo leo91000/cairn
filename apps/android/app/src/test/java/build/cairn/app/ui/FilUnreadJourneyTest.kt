@@ -37,41 +37,67 @@ class FilUnreadJourneyTest {
     @get:Rule val compose = createComposeRule()
 
     private val now = System.currentTimeMillis()
-    private val main = Agent(MAIN_AGENT_ID, "Rédacteur")
+    private val main =
+        Agent(
+            exclusiveNodes = emptyList(),
+            plugins = emptyList(),
+            revision = "",
+            createdAt = 0,
+            access =
+                AccessPolicy(
+                    mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                    projects = null,
+                    skills = null,
+                    mcps = null,
+                ),
+            id = MAIN_AGENT_ID,
+            name = "Rédacteur",
+        )
     private val notes =
-        Task("notes", "Notes de version hebdomadaires", "Résumer la semaine.", MAIN_AGENT_ID)
-    private val audit = Task("audit", "Audit de sécurité nocturne", "Auditer.", MAIN_AGENT_ID)
+        Task(
+            "348988cc-0279-5ed4-801b-ac44d6987c6e",
+            "Notes de version hebdomadaires",
+            "Résumer la semaine.",
+            MAIN_AGENT_ID,
+        )
+    private val audit =
+        Task(
+            "b7ec3b50-62dd-530b-8060-bd5700fb7eb6",
+            "Audit de sécurité nocturne",
+            "Auditer.",
+            MAIN_AGENT_ID,
+        )
     private val activity =
         listOf(
             Run(
-                "notes-run",
-                taskId = "notes",
+                id = "notes-run",
+                taskId = "348988cc-0279-5ed4-801b-ac44d6987c6e",
                 status = "succeeded",
                 trigger = "schedule",
                 startedAt = now - 30 * 60_000,
                 finishedAt = now - 20 * 60_000,
-                snapshot = Snapshot(task = notes, agent = main),
+                snapshot = Snapshot(task = notes.runTaskSnapshot(), agent = main),
                 provider = "codex",
                 unread = true,
                 preview =
                     "Trois nouveautés cette semaine : reprise à la demande, partage d’installations et notifications.",
             ),
             Run(
-                "audit-run",
-                taskId = "audit",
+                id = "audit-run",
+                taskId = "b7ec3b50-62dd-530b-8060-bd5700fb7eb6",
                 status = "failed",
                 trigger = "schedule",
                 startedAt = now - 7_200_000,
                 finishedAt = now - 7_000_000,
-                snapshot = Snapshot(task = audit, agent = main),
+                snapshot = Snapshot(task = audit.runTaskSnapshot(), agent = main),
                 provider = "opencode",
             ),
         )
     private val chats =
         listOf(
             Chat(
-                "done",
-                "Rédiger le changelog 0.53",
+                id = "a2b21257-b699-5665-82a6-6ee68c85fe62",
+                title = "Rédiger le changelog 0.53",
                 agentName = "Rédacteur",
                 status = "succeeded",
                 runId = "done-run",
@@ -83,16 +109,16 @@ class FilUnreadJourneyTest {
                     "Le changelog est prêt : 12 corrections, 3 nouveautés. J’ai ouvert la PR #184.",
             ),
             Chat(
-                "question",
-                "Choisir la pagination",
+                id = "765886cd-efa2-5d30-bdce-99340ee87a3d",
+                title = "Choisir la pagination",
                 agentName = "Rédacteur",
                 pendingQuestions = 1,
                 updatedAt = now - 60_000,
                 provider = "claude",
             ),
             Chat(
-                "old",
-                "Relecture du guide d’installation",
+                id = "7e0552ad-fde3-5785-a37c-8bc7e408e409",
+                title = "Relecture du guide d’installation",
                 agentName = "Rédacteur",
                 status = "succeeded",
                 updatedAt = now - 86_400_000,
@@ -155,21 +181,55 @@ class FilUnreadJourneyTest {
                             path == "/api/installations" -> json(beaconInstallationsFixture())
                             path == "/api/account/session" -> json(beaconAccountFixture("fixture"))
                             path == "/api/installations/fixture/api/agents" ->
-                                json(wireJson.encodeToString(listOf(main)))
+                                json(
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(listOf(main))
+                                    )
+                                )
                             path == "/api/installations/fixture/api/tasks" ->
-                                json(wireJson.encodeToString(listOf(notes, audit)))
+                                json(
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListMissionsOutput(
+                                            listOf(notes, audit)
+                                        )
+                                    )
+                                )
                             path == "/api/installations/fixture/api/tasks/activity" ->
                                 json(wireJson.encodeToString(activity))
                             path == "/api/installations/fixture/api/chats/stream" ->
                                 stream(LiveState(chats = chats))
                             path == "/api/installations/fixture/api/reads" -> {
                                 reads += request.body.readUtf8()
-                                json("{\"read\":1}")
+                                json("{\"read\":1,\"readAt\":1}")
                             }
                             path == "/api/installations/fixture/api/overview" ||
                                 path.endsWith("/models") ||
                                 path == "/api/installations/fixture/api/accounts" -> json("{}")
-                            else -> json("[]")
+                            else ->
+                                json(
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
+                                )
                         }
                     }
                 }
@@ -186,72 +246,47 @@ class FilUnreadJourneyTest {
                 CairnTheme(theme) { CairnApp(vm = vm) }
             }
             try {
-                // Conversations stream in before the missions' activity: wait for both.
                 compose.waitUntil(20000) {
-                    compose
-                        .onAllNodesWithText("2 résultats à lire", substring = true)
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
+                    compose.onAllNodesWithText("À lire 2").fetchSemanticsNodes().isNotEmpty()
                 }
-                compose.onNodeWithText("Le changelog est prêt", substring = true).assertExists()
                 compose
-                    .onNode(
-                        hasText("Rédiger le changelog 0.53") and
-                            hasContentDescription("Dernier harness : Claude Code")
-                    )
-                    .assertExists()
+                    .onNodeWithText("Le changelog est prêt", substring = true)
+                    .assertDoesNotExist()
+                compose.onNodeWithText("Trois nouveautés", substring = true).assertDoesNotExist()
                 capture("fil-unread-dark")
                 theme = "light"
                 capture("fil-unread-light")
                 theme = "dark"
                 compose
-                    .onNodeWithTag("fil")
-                    .performScrollToNode(hasText("Mission terminée", substring = true))
-                compose.onNodeWithText("Trois nouveautés", substring = true).assertExists()
-                compose
-                    .onNode(
-                        hasText(notes.name) and hasContentDescription("Dernier harness : Codex")
-                    )
-                    .assertExists()
-                capture("fil-unread-dark-scrolled")
-                compose.onNodeWithTag("fil").performScrollToIndex(0)
-
-                compose
-                    .onNodeWithContentDescription("Marquer Rédiger le changelog 0.53 comme lu")
+                    .onNodeWithContentDescription("Autres actions pour Rédiger le changelog 0.53")
                     .performClick()
+                compose.onNodeWithText("Marquer comme lu").performClick()
                 compose.waitUntil(10000) {
-                    // Reading the tree runs the main looper, where the request resumes.
                     compose.onAllNodes(isRoot()).fetchSemanticsNodes()
                     reads.isNotEmpty()
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"chat:done\",\"finishedAt\":${chats.first().finishedAt}}]}",
+                    "{\"items\":[{\"finishedAt\":${chats.first().finishedAt},\"target\":{\"kind\":\"chat\",\"chatId\":\"${chats.first().id}\"}}]}",
                     reads.first(),
                 )
-                compose.waitUntil(10000) {
-                    compose
-                        .onAllNodesWithContentDescription(
-                            "Marquer Rédiger le changelog 0.53 comme lu"
-                        )
-                        .fetchSemanticsNodes()
-                        .isEmpty()
-                }
-                compose.onNodeWithText("1 résultat à lire", substring = true).assertExists()
-
+                compose.onNodeWithText("Rédiger le changelog 0.53").assertDoesNotExist()
+                compose.onNodeWithText("À lire 1").assertExists()
+                compose.onNodeWithText("Tout").performClick()
+                compose.onNodeWithText("Rédiger le changelog 0.53").assertExists()
+                compose.onNodeWithText("En cours 1").performClick()
+                compose.onNodeWithText("Répondre").assertExists()
+                compose.onNodeWithText("À lire 1").performClick()
                 compose.onNodeWithTag("read-all").performClick()
                 compose.waitUntil(10000) {
-                    // Reading the tree runs the main looper, where the request resumes.
                     compose.onAllNodes(isRoot()).fetchSemanticsNodes()
                     reads.size == 2
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"task:notes\",\"finishedAt\":${activity.first().finishedAt}}]}",
+                    "{\"items\":[{\"finishedAt\":${activity.first().finishedAt},\"target\":{\"kind\":\"mission\",\"taskId\":\"348988cc-0279-5ed4-801b-ac44d6987c6e\"}}]}",
                     reads[1],
                 )
-                compose.waitUntil(10000) {
-                    compose.onAllNodesWithTag("read-all").fetchSemanticsNodes().isEmpty()
-                }
                 compose.onAllNodesWithTag("unread").assertCountEquals(0)
+                compose.onNodeWithText("Tout est lu.").assertExists()
                 capture("fil-read-dark")
             } finally {
                 vm.api.closeStreams()
@@ -280,10 +315,33 @@ class FilUnreadJourneyTest {
                                         return MockResponse()
                                             .setResponseCode(503)
                                             .setBody("{\"error\":\"Offline\"}")
-                                    "{\"read\":1}"
+                                    "{\"read\":1,\"readAt\":1}"
                                 }
-                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
-                                else -> "[]"
+                                path.endsWith("/overview") -> installationOverviewFixture()
+                                path.endsWith("/models") -> "{}"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -311,7 +369,11 @@ class FilUnreadJourneyTest {
                 }
             try {
                 waitFor { vm.state.value.installation != null && !vm.state.value.busy }
-                compose.runOnIdle { vm.markRead((0..200).map { "chat:$it" to (now - 1000) }) }
+                compose.runOnIdle {
+                    vm.markRead(
+                        (0..200).map { "chat:${java.util.UUID(0, it.toLong())}" to (now - 1000) }
+                    )
+                }
                 waitFor { reads.size == 2 && vm.state.value.error == "Offline" }
                 val batches = reads.map {
                     wireJson.parseToJsonElement(it).jsonObject["items"]!!.jsonArray
@@ -319,16 +381,17 @@ class FilUnreadJourneyTest {
                 assertEquals(listOf(200, 1), batches.map { it.size })
                 compose.runOnIdle {
                     assertEquals(200, vm.localReads.size)
-                    assertEquals(null, vm.localReads["chat:200"])
+                    assertEquals(null, vm.localReads["chat:${java.util.UUID(0, 200)}"])
                     vm.report(ApiException(401, "Expired"))
                     assertEquals(0, vm.localReads.size)
                 }
                 account.set("member")
                 compose.runOnIdle { vm.perform { connect(origin) } }
                 waitFor { vm.state.value.session.account?.id == "member" && !vm.state.value.busy }
-                compose.runOnIdle { vm.markRead(listOf("chat:0" to (now - 1000))) }
+                val first = "chat:${java.util.UUID(0, 0)}"
+                compose.runOnIdle { vm.markRead(listOf(first to (now - 1000))) }
                 waitFor { reads.size == 3 }
-                compose.runOnIdle { assertEquals(now - 1000, vm.localReads["chat:0"]) }
+                compose.runOnIdle { assertEquals(now - 1000, vm.localReads[first]) }
             } finally {
                 vm.api.closeStreams()
             }
@@ -345,13 +408,13 @@ class FilUnreadJourneyTest {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path.endsWith("/chats/done/stream")) {
+                        if (path.endsWith("/chats/a2b21257-b699-5665-82a6-6ee68c85fe62/stream")) {
                             started.set(true)
                             check(release.await(20, TimeUnit.SECONDS))
                             val run =
                                 Run(
-                                    "done-run",
-                                    taskId = "done",
+                                    id = "done-run",
+                                    taskId = "a2b21257-b699-5665-82a6-6ee68c85fe62",
                                     status = "succeeded",
                                     trigger = "chat",
                                     finishedAt = chats.first().finishedAt,
@@ -365,10 +428,33 @@ class FilUnreadJourneyTest {
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path.endsWith("/reads") -> {
                                     reads += request.body.readUtf8()
-                                    "{\"read\":1}"
+                                    "{\"read\":1,\"readAt\":1}"
                                 }
-                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
-                                else -> "[]"
+                                path.endsWith("/overview") -> installationOverviewFixture()
+                                path.endsWith("/models") -> "{}"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -389,7 +475,13 @@ class FilUnreadJourneyTest {
                 }
                 CairnTheme {
                     if (state.installation != null)
-                        ChatScreen(vm, state, "done", openChat = {}, openRun = {})
+                        ChatScreen(
+                            vm,
+                            state,
+                            "a2b21257-b699-5665-82a6-6ee68c85fe62",
+                            openChat = {},
+                            openRun = {},
+                        )
                 }
             }
             try {
@@ -401,7 +493,7 @@ class FilUnreadJourneyTest {
                 compose.waitUntil(10000) {
                     compose.onAllNodes(isRoot()).fetchSemanticsNodes()
                     compose
-                        .onAllNodesWithTag("chat-page:question")
+                        .onAllNodesWithTag("chat-page:765886cd-efa2-5d30-bdce-99340ee87a3d")
                         .fetchSemanticsNodes()
                         .isNotEmpty()
                 }
@@ -413,7 +505,7 @@ class FilUnreadJourneyTest {
                     reads.isNotEmpty()
                 }
                 assertEquals(
-                    "{\"items\":[{\"key\":\"chat:done\",\"finishedAt\":${chats.first().finishedAt}}]}",
+                    "{\"items\":[{\"finishedAt\":${chats.first().finishedAt},\"target\":{\"kind\":\"chat\",\"chatId\":\"${chats.first().id}\"}}]}",
                     reads.first(),
                 )
             } finally {
@@ -424,7 +516,7 @@ class FilUnreadJourneyTest {
     }
 
     @Test
-    fun `a mission finishing on files stays unread until its result is shown`() {
+    fun `an open mission is read on files without reading twice on result`() {
         val release = java.util.concurrent.CountDownLatch(1)
         val requests = java.util.concurrent.atomic.AtomicInteger()
         val reads = Collections.synchronizedList(mutableListOf<String>())
@@ -461,10 +553,33 @@ class FilUnreadJourneyTest {
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 path.endsWith("/reads") -> {
                                     reads += request.body.readUtf8()
-                                    "{\"read\":1}"
+                                    "{\"read\":1,\"readAt\":1}"
                                 }
-                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
-                                else -> "[]"
+                                path.endsWith("/overview") -> installationOverviewFixture()
+                                path.endsWith("/models") -> "{}"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -492,6 +607,8 @@ class FilUnreadJourneyTest {
                     compose.onAllNodesWithText("Fichiers").fetchSemanticsNodes().isNotEmpty()
                 }
                 compose.onNodeWithText("Fichiers").performClick()
+                compose.waitForIdle()
+                assertEquals(0, reads.size)
                 release.countDown()
                 compose.waitUntil(20000) {
                     compose
@@ -499,17 +616,19 @@ class FilUnreadJourneyTest {
                         .fetchSemanticsNodes()
                         .isNotEmpty()
                 }
-                compose.waitForIdle()
-                assertEquals(0, reads.size)
-                compose.onNodeWithText("Résultat").performClick()
                 compose.waitUntil(20000) {
                     compose.onAllNodes(isRoot()).fetchSemanticsNodes()
                     reads.isNotEmpty()
                 }
+                compose.onNodeWithText("Fichiers").assertIsSelected()
                 assertEquals(
-                    "{\"items\":[{\"key\":\"task:notes\",\"finishedAt\":${finished.finishedAt}}]}",
+                    "{\"items\":[{\"finishedAt\":${finished.finishedAt},\"target\":{\"kind\":\"mission\",\"taskId\":\"348988cc-0279-5ed4-801b-ac44d6987c6e\"}}]}",
                     reads.single(),
                 )
+                compose.onNodeWithText("Résultat").performClick()
+                compose.waitForIdle()
+                compose.onNodeWithText("Résultat").assertIsSelected()
+                assertEquals(1, reads.size)
             } finally {
                 release.countDown()
                 vm.api.closeStreams()

@@ -1,3 +1,4 @@
+use crate::mcp_client::Authorization;
 use crate::{
     auth::{digest, hex_digest, token},
     config::now,
@@ -10,7 +11,6 @@ use crate::{
     network,
     rpc::jsonrpc::{Frame, Message},
     service::Service,
-    store::Db,
     validation::text,
 };
 use base64::Engine;
@@ -18,7 +18,7 @@ use reqwest::{
     Method,
     header::{HeaderMap, HeaderValue},
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::LazyLock};
 
@@ -30,7 +30,7 @@ static RESOURCE_METADATA: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r#"resource_metadata="([^"]+)""#).unwrap());
 
 fn pending_key(state: &str) -> String {
-    format!("mcp-oauth:{}", hex_digest(state))
+    hex_digest(state)
 }
 
 fn content_type(value: &'static str) -> HeaderMap {
@@ -40,7 +40,13 @@ fn content_type(value: &'static str) -> HeaderMap {
     )])
 }
 
-async fn get(server: &McpServer, url: &str) -> Result<Value> {
+async fn get(
+    _s: &Service,
+    server: &McpServer,
+    url: &str,
+    authorize: Authorization,
+) -> Result<Value> {
+    authorize.recheck().await?;
     let response = network::fetch(
         url,
         Method::GET,
@@ -71,7 +77,13 @@ fn valid_url(server: &McpServer, value: &str) -> Result<url::Url> {
 }
 
 /// Sends an unauthenticated probe and returns the server's `WWW-Authenticate` challenge.
-async fn challenge(server: &McpServer, endpoint: &url::Url) -> Result<String> {
+async fn challenge(
+    _s: &Service,
+    server: &McpServer,
+    endpoint: &url::Url,
+    authorize: Authorization,
+) -> Result<String> {
+    authorize.recheck().await?;
     let probe = Frame::strict(Message::Request {
         id: 1,
         method: "server/discover".into(),
@@ -103,9 +115,11 @@ async fn challenge(server: &McpServer, endpoint: &url::Url) -> Result<String> {
 /// Protected resource metadata and the URL it was read from. Without an explicit
 /// challenge URL, the path-specific well-known location falls back to the root one.
 async fn protected_resource(
+    s: &Service,
     server: &McpServer,
     endpoint: &url::Url,
     challenge: &str,
+    authorize: Authorization,
 ) -> Result<(String, Value)> {
     let origin = endpoint.origin().ascii_serialization();
     let advertised = RESOURCE_METADATA
@@ -118,14 +132,16 @@ async fn protected_resource(
             endpoint.path().trim_end_matches('/')
         )
     });
-    match get(server, &metadata_url).await {
+    match get(s, server, &metadata_url, authorize.clone()).await {
         Ok(resource) => Ok((metadata_url, resource)),
         Err(error) if challenge.contains("resource_metadata=") => Err(error),
         Err(_) => {
             let root = format!("{origin}/.well-known/oauth-protected-resource");
-            let resource = get(server, &root).await.map_err(|_| {
-                Error::bad_gateway("OAuth protected resource metadata is unavailable.")
-            })?;
+            let resource = get(s, server, &root, authorize.clone())
+                .await
+                .map_err(|_| {
+                    Error::bad_gateway("OAuth protected resource metadata is unavailable.")
+                })?;
             Ok((root, resource))
         }
     }
@@ -141,14 +157,15 @@ fn resource_covers(resource: &url::Url, endpoint: &url::Url) -> bool {
             || path[resource_path.len()..].starts_with('/'))
 }
 
-async fn discover<F>(s: &Service, server: &McpServer, authorize: F) -> Result<OAuthDiscovery>
-where
-    F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
-{
+async fn discover(
+    s: &Service,
+    server: &McpServer,
+    authorize: Authorization,
+) -> Result<OAuthDiscovery> {
     let endpoint = valid_url(server, &server.url)?;
-    let challenge = challenge(server, &endpoint).await?;
+    let challenge = challenge(s, server, &endpoint, authorize.clone()).await?;
     let (resource_metadata_url, resource) =
-        protected_resource(server, &endpoint, &challenge).await?;
+        protected_resource(s, server, &endpoint, &challenge, authorize.clone()).await?;
     let resource_url = valid_url(server, text(&resource, "resource"))?;
     if !resource_covers(&resource_url, &endpoint) {
         return Err(Error::bad(
@@ -161,7 +178,8 @@ where
         .and_then(Value::as_str)
         .ok_or_else(|| Error::bad("OAuth authorization server is missing."))?
         .to_owned();
-    let metadata = authorization_metadata(server, &authorization_server).await?;
+    let metadata =
+        authorization_metadata(s, server, &authorization_server, authorize.clone()).await?;
     let discovery = OAuthDiscovery {
         authorization_server_url: authorization_server,
         resource_metadata_url,
@@ -169,8 +187,9 @@ where
         authorization_server_metadata: metadata,
     };
     let stored = discovery.clone();
+    authorize.recheck().await?;
     s.mcps
-        .update_secrets_authorized(
+        .update_secrets_live(
             s,
             &server.id,
             |secrets| secrets.discovery = Some(stored),
@@ -180,7 +199,12 @@ where
     Ok(discovery)
 }
 
-async fn authorization_metadata(server: &McpServer, issuer: &str) -> Result<Value> {
+async fn authorization_metadata(
+    s: &Service,
+    server: &McpServer,
+    issuer: &str,
+    authorize: Authorization,
+) -> Result<Value> {
     let issuer_url = valid_url(server, issuer)?;
     let suffix = issuer_url.path().trim_end_matches('/');
     let origin = issuer_url.origin().ascii_serialization();
@@ -191,7 +215,7 @@ async fn authorization_metadata(server: &McpServer, issuer: &str) -> Result<Valu
     ];
     let mut metadata = None;
     for url in urls {
-        if let Ok(value) = get(server, &url).await {
+        if let Ok(value) = get(s, server, &url, authorize.clone()).await {
             metadata = Some(value);
             break;
         }
@@ -242,7 +266,13 @@ struct ClientRegistration<'a> {
     scope: Option<&'a str>,
 }
 
-async fn register(s: &Service, server: &McpServer, endpoint: &str) -> Result<Value> {
+async fn register(
+    s: &Service,
+    server: &McpServer,
+    endpoint: &str,
+    authorize: Authorization,
+) -> Result<Value> {
+    authorize.recheck().await?;
     valid_url(server, endpoint)?;
     let registration = ClientRegistration {
         client_name: "Cairn",
@@ -252,6 +282,7 @@ async fn register(s: &Service, server: &McpServer, endpoint: &str) -> Result<Val
         token_endpoint_auth_method: "none",
         scope: Some(server.scopes.as_str()).filter(|scopes| !scopes.is_empty()),
     };
+    authorize.recheck().await?;
     let response = network::fetch(
         endpoint,
         Method::POST,
@@ -272,15 +303,12 @@ async fn register(s: &Service, server: &McpServer, endpoint: &str) -> Result<Val
     Ok(client)
 }
 
-async fn client<F>(
+async fn client(
     s: &Service,
     server: &McpServer,
     discovery: &OAuthDiscovery,
-    authorize: F,
-) -> Result<OAuthClient>
-where
-    F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
-{
+    authorize: Authorization,
+) -> Result<OAuthClient> {
     let secrets = s.mcps.server_secrets(s, &server.id).await?;
     if !server.client_id.is_empty() {
         return Ok(OAuthClient {
@@ -302,10 +330,11 @@ where
             "Enter an OAuth client ID registered with this provider.",
         ));
     }
-    let client = register(s, server, endpoint).await?;
+    let client = register(s, server, endpoint, authorize.clone()).await?;
     let registered = OAuthClient::from_registration(&client);
+    authorize.recheck().await?;
     s.mcps
-        .update_secrets_authorized(
+        .update_secrets_live(
             s,
             &server.id,
             |secrets| secrets.client = Some(client),
@@ -367,16 +396,13 @@ fn validate_tokens(tokens: &Value) -> Result<()> {
     Ok(())
 }
 
-async fn exchange<F>(
+async fn exchange(
     s: &Service,
     server: &McpServer,
     mut parameters: HashMap<String, String>,
     discovery: &OAuthDiscovery,
-    authorize: F,
-) -> Result<()>
-where
-    F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
-{
+    authorize: Authorization,
+) -> Result<()> {
     let client = client(s, server, discovery, authorize.clone()).await?;
     parameters.insert("client_id".into(), client.id.clone());
     let authorization = authenticate_client(&client, discovery, &mut parameters)?;
@@ -390,6 +416,7 @@ where
         headers.insert("authorization", value);
     }
     let body = serde_urlencoded::to_string(&parameters).map_err(Error::internal)?;
+    authorize.recheck().await?;
     let response = network::fetch(
         endpoint,
         Method::POST,
@@ -414,8 +441,9 @@ where
     let expires = tokens["expires_in"]
         .as_f64()
         .map(|seconds| now() + (seconds * 1000.) as i64);
+    authorize.recheck().await?;
     s.mcps
-        .update_secrets_authorized(
+        .update_secrets_live(
             s,
             &server.id,
             |secrets| {
@@ -427,18 +455,11 @@ where
         .await
 }
 
-pub async fn refresh(s: &Service, server: &McpServer) -> Result<()> {
-    refresh_authorized(s, server, |_| Ok(())).await
-}
-
-pub(crate) async fn refresh_authorized<F>(
+pub(crate) async fn refresh_authorized(
     s: &Service,
     server: &McpServer,
-    authorize: F,
-) -> Result<()>
-where
-    F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
-{
+    authorize: Authorization,
+) -> Result<()> {
     let secrets = s.mcps.server_secrets(s, &server.id).await?;
     let refresh = secrets.refresh_token();
     if refresh.is_empty() {
@@ -492,12 +513,7 @@ async fn authorization_url(
     Ok(url)
 }
 
-#[derive(Serialize)]
-struct NativeCallback {
-    pending: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<String>,
-}
+use cairn_contracts::McpConnectionStatus as NativeCallback;
 
 impl Mcps {
     pub async fn connect(&self, s: &Service, id: &str, session: &str) -> Result<Value> {
@@ -543,8 +559,8 @@ impl Mcps {
         session: &str,
         native: bool,
     ) -> Result<Value> {
-        let discovery = discover(s, server, |_| Ok(())).await?;
-        let client = client(s, server, &discovery, |_| Ok(())).await?;
+        let discovery = discover(s, server, Authorization::new(s, |_| Ok(()))).await?;
+        let client = client(s, server, &discovery, Authorization::new(s, |_| Ok(()))).await?;
         let verifier = token();
         let nonce = token();
         let url = authorization_url(s, server, &discovery, &client, &verifier, &nonce).await?;
@@ -553,19 +569,18 @@ impl Mcps {
         let expires = now() + PENDING_TTL_MS;
         let pending = PendingAuthorization {
             connection_id: server.id.clone(),
-            revision: Some(server.revision),
+            revision: server.revision,
             session: hex_digest(session),
             nonce: nonce.clone(),
             native,
-            expires_at: Some(expires),
+            expires_at: expires,
             callback: None,
         };
+        let vault = s.vault.clone();
         s.store
-            .set(
-                &pending_key(&nonce),
-                serde_json::to_value(pending)?,
-                Some(expires),
-            )
+            .transaction(move |db| {
+                db.save_pending_mcp_oauth(&pending_key(&nonce), &pending, &vault)
+            })
             .await?;
         Ok(json!({ "url": url.as_str() }))
     }
@@ -589,22 +604,19 @@ impl Mcps {
         if values.values().any(|v| v.len() > 10000) {
             return Err(Error::bad("Invalid OAuth callback."));
         }
+        let vault = s.vault.clone();
         s.store
             .transaction(move |db| {
-                let Some(pending) = db.kv(&key)? else {
+                let Some(mut pending) = db.pending_mcp_oauth(&key, &vault)? else {
                     return Ok(false);
                 };
-                let mut pending = PendingAuthorization::deserialize(&pending)?;
                 if !pending.native {
                     return Ok(false);
                 }
                 // First response wins; a replay cannot replace the captured code or extend its TTL.
                 if pending.callback.is_none() {
-                    let expires = pending
-                        .expires_at
-                        .ok_or_else(|| Error::bad("Authorization session expired."))?;
                     pending.callback = Some(values);
-                    db.set(&key, &serde_json::to_value(&pending)?, Some(expires))?;
+                    db.save_pending_mcp_oauth(&key, &pending, &vault)?;
                 }
                 Ok(true)
             })
@@ -618,15 +630,12 @@ impl Mcps {
         session: &str,
     ) -> Result<Value> {
         let session_digest = hex_digest(session);
+        let id = id.to_owned();
+        let vault = s.vault.clone();
         let pending = s
             .store
-            .keys("mcp-oauth:")
-            .await?
-            .into_iter()
-            .filter_map(|(_, value)| PendingAuthorization::deserialize(&value).ok())
-            .find(|pending| {
-                pending.native && pending.connection_id == id && pending.session == session_digest
-            });
+            .read(move |db| db.pending_mcp_session(&id, &session_digest, &vault))
+            .await?;
         let status = match pending {
             None => NativeCallback {
                 pending: false,
@@ -655,8 +664,17 @@ impl Mcps {
     ) -> Result<String> {
         let state = parameters.get("state").map_or("", String::as_str);
         let key = pending_key(state);
-        let pending = required(s.store.kv(&key).await?, EXPIRED)?;
-        let pending = PendingAuthorization::deserialize(&pending)?;
+        let vault = s.vault.clone();
+        let pending = required(
+            s.store
+                .read({
+                    let key = key.clone();
+                    let vault = vault.clone();
+                    move |db| db.pending_mcp_oauth(&key, &vault)
+                })
+                .await?,
+            EXPIRED,
+        )?;
         if pending.session != hex_digest(session) {
             return Err(Error::bad(EXPIRED));
         }
@@ -664,14 +682,14 @@ impl Mcps {
         let _guard = self.lock(id).await;
         s.store
             .transaction(move |db| {
-                if db.kv(&key)?.is_none() {
+                if db.pending_mcp_oauth(&key, &vault)?.is_none() {
                     return Err(Error::bad("Authorization has already been completed."));
                 }
-                db.delete(&key)
+                db.delete_pending_mcp_oauth(&key)
             })
             .await?;
         let server = self.server(s, id).await?;
-        if pending.revision != Some(server.revision) {
+        if pending.revision != server.revision {
             return Err(Error::bad(
                 "Connection settings changed. Start authorization again.",
             ));
@@ -716,7 +734,8 @@ impl Mcps {
         }
         // Re-discover the issuer metadata before exchanging the code, binding it to
         // the issuer recorded at redirect time instead of trusting callback input.
-        let metadata = authorization_metadata(server, expected).await?;
+        let metadata =
+            authorization_metadata(s, server, expected, Authorization::new(s, |_| Ok(()))).await?;
         if metadata["issuer"] != discovery.authorization_server_metadata["issuer"] {
             return Err(Error::bad(
                 "OAuth authorization server changed during sign-in.",
@@ -728,7 +747,14 @@ impl Mcps {
             ("redirect_uri".into(), callback_url(s).await?),
             ("code_verifier".into(), secrets.verifier().to_owned()),
         ]);
-        exchange(s, server, parameters, discovery, |_| Ok(())).await?;
+        exchange(
+            s,
+            server,
+            parameters,
+            discovery,
+            Authorization::new(s, |_| Ok(())),
+        )
+        .await?;
         self.update_secrets(s, &server.id, |secrets| secrets.verifier = None)
             .await?;
         Client::list_tools(s, server).await

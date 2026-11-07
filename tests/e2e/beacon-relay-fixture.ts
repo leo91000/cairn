@@ -1,3 +1,4 @@
+import type { Buffer } from 'node:buffer'
 import type { ChildProcess } from 'node:child_process'
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -7,12 +8,11 @@ import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
-import { config as loadConfig } from '../fixtures/legacy/server/config'
-import { Service as SeedService } from '../fixtures/legacy/server/service'
-import { Store } from '../fixtures/legacy/server/store'
+import { setTimeout as delay } from 'node:timers/promises'
+import { NativeFixture } from './native-fixture'
 
 // Shared by journeys-beacon-relay and the network bench: real processes, fake mail only.
-export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', directory = tmpdir()) {
+export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', directory = tmpdir(), originHost = 'localhost') {
   const messages: string[] = []
   const mail = createServer(async (request, response) => {
     let body = ''
@@ -26,17 +26,15 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
   const mailPort = (mail.address() as { port: number }).port
   const root = await mkdtemp(join(directory, 'cairn-beacon-relay-'))
   await Promise.all([mkdir(join(root, 'data')), mkdir(join(root, 'home'))])
-  const url = `http://localhost:${port}`
+  const url = `http://${originHost}:${port}`
   const children: ChildProcess[] = []
-  // As in the native browser fixtures, open the seeding module before the
-  // native process applies newer database migrations.
-  const seed = new SeedService(new Store(join(root, 'data')), loadConfig({
+  const seed = new NativeFixture({
     dataDir: join(root, 'data'),
     home: join(root, 'home'),
     workspaceRoots: [root],
     workerEnabled: false,
     logger: false,
-  }))
+  })
 
   function start(binary: string, env: NodeJS.ProcessEnv) {
     const executable = binary === 'target/debug/cairn' ? process.env.CAIRN_NETWORK_INSTALLATION_BINARY || binary : binary
@@ -46,7 +44,7 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
   }
 
   async function stop(child: ChildProcess) {
-    if (child.exitCode !== null || child.signalCode !== null)
+    if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null)
       return
     const exited = once(child, 'exit')
     child.kill('SIGTERM')
@@ -60,7 +58,7 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
   }
 
   function beacon(databaseUrl = process.env.CAIRN_BEACON_TEST_DATABASE_URL, overrides: NodeJS.ProcessEnv = {}) {
-    return start('target/debug/cairn-beacon', {
+    const env = {
       CAIRN_BEACON_DATABASE_URL: databaseUrl,
       CAIRN_BEACON_ORIGIN: url,
       CAIRN_BEACON_LISTEN: `${listen}:${port}`,
@@ -68,13 +66,63 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
       CAIRN_BEACON_EMAIL_KEY: 'fixture-only',
       CAIRN_BEACON_EMAIL_FROM: 'cairn@example.test',
       ...overrides,
-    })
+    }
+    const childEnv = { ...process.env, ...env }
+    const child = spawn('target/debug/cairn-beacon', [], { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] })
+    children.push(child)
+    let output = ''
+    let listening = false
+    const retain = (chunk: Buffer) => {
+      output = (output + chunk.toString()).slice(-16384)
+      listening ||= output.includes('Beacon listening')
+    }
+
+    child.stdout.on('data', retain)
+    child.stderr.on('data', retain)
+    let spawnError: Error | undefined
+    child.on('error', error => spawnError = error)
+    const closed = new Promise<void>(resolve => child.once('close', () => resolve()))
+    const diagnostics = () => {
+      let safeOutput = output.replaceAll(/(https?:\/\/|postgres(?:ql)?:\/\/)[^\s/@][^\s/:@]*:[^\s/@]+@/gi, '$1<REDACTED>@')
+      for (const [key, value] of Object.entries(childEnv)) {
+        if (value && value.length >= 4 && /password|secret|token|credential|api.?key/i.test(key))
+          safeOutput = safeOutput.replaceAll(value, '<REDACTED>')
+      }
+
+      return { output: safeOutput, spawnError, listening }
+    }
+
+    return Object.assign(child, { diagnostics, closed })
+  }
+
+  async function waitForBeacon(child: ReturnType<typeof beacon>, timeoutMs = 60000) {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (child.exitCode !== null || child.signalCode !== null || child.diagnostics().spawnError) {
+        await child.closed
+        const { output, spawnError } = child.diagnostics()
+        throw new Error(`Beacon exited (code ${child.exitCode}, signal ${child.signalCode}): ${spawnError?.message ?? ''}\n${output}`)
+      }
+
+      // A healthy response from a different process must not establish readiness.
+      const { listening } = child.diagnostics()
+      const remainingMs = deadline - Date.now()
+      if (remainingMs <= 0)
+        break
+      const ready = listening && await fetch(`${url}/health`, { signal: AbortSignal.timeout(Math.min(1000, remainingMs)) }).then(response => response.ok).catch(() => false)
+      if (ready && Date.now() < deadline && child.exitCode === null && child.signalCode === null && !child.diagnostics().spawnError)
+        return
+
+      const waitMs = Math.min(100, deadline - Date.now())
+      if (waitMs > 0)
+        await delay(waitMs)
+    }
+
+    throw new Error(`Beacon did not become ready within ${timeoutMs}ms.\n${child.diagnostics().output}`)
   }
 
   async function close() {
     await Promise.all(children.map(stop))
-    await seed.accounts.close()
-    seed.store.close()
     await new Promise<void>(resolve => mail.close(() => resolve()))
     await rm(root, { recursive: true, force: true })
   }
@@ -87,21 +135,30 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
     start,
     stop,
     beacon,
+    waitForBeacon,
     close,
   }
 }
 
 export function executeBeaconSql(database: URL, sql: string) {
-  execFileSync('psql', ['-v', 'ON_ERROR_STOP=1', '-c', sql], {
-    env: {
-      ...process.env,
-      PGHOST: database.hostname,
-      PGPORT: database.port || '5432',
-      PGUSER: decodeURIComponent(database.username),
-      PGPASSWORD: decodeURIComponent(database.password),
-      PGDATABASE: decodeURIComponent(database.pathname.slice(1)),
-      PGOPTIONS: database.searchParams.get('options') || '',
-    },
+  const connection = new URL(database)
+  // The previous psql helper forwarded only the URL's PGOPTIONS query field.
+  connection.search = ''
+  const options = database.searchParams.get('options')
+  if (options)
+    connection.searchParams.set('options', options)
+
+  const env: NodeJS.ProcessEnv = {}
+  // Keep runtime/TLS settings, without forwarding credential environment fields
+  // (including the parent fixture URL) alongside the private stdin request.
+  for (const key of ['PATH', 'HOME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'PGSSLMODE', 'PGSSLROOTCERT', 'PGSSLCERT', 'PGSSLKEY', 'PGAPPNAME']) {
+    if (process.env[key] !== undefined)
+      env[key] = process.env[key]
+  }
+
+  execFileSync('target/debug/examples/beacon_sql_fixture', [], {
+    input: JSON.stringify({ database_url: connection.toString(), sql }),
+    env,
     stdio: 'pipe',
   })
 }

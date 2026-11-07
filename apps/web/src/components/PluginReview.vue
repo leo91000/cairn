@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import type { Catalog, PluginEntry } from '../plugins'
 import { computed, ref } from 'vue'
+import { activatePluginPackage } from '../../../../packages/contracts/generated/activatePluginPackage'
+import { approvePluginPackage } from '../../../../packages/contracts/generated/approvePluginPackage'
 import { api, notify } from '../api'
 import {
   Check,
@@ -10,7 +12,7 @@ import {
   Trash2,
   TriangleAlert,
 } from '../icons'
-import { pluginOperation } from '../plugin-operations'
+import { pluginRequest } from '../plugin-operations'
 import { capabilityLabels } from '../plugins'
 import Icon from './Icon.vue'
 import Modal from './Modal.vue'
@@ -41,7 +43,11 @@ async function act(operation: 'approve' | 'activate') {
   busy.value = true
   error.value = ''
   try {
-    await pluginOperation(`/plugins/packages/${props.entry.id}/${operation}`, { version: selected.value, digest: version.value?.digest })
+    const input = { pluginId: props.entry.id, version: selected.value }
+    if (operation === 'approve')
+      await approvePluginPackage(pluginRequest, { ...input, digest: version.value!.digest! })
+    else
+      await activatePluginPackage(pluginRequest, input)
     notify(`${manifest.value?.name} ${selected.value} is active`)
     emit('changed')
     emit('close')

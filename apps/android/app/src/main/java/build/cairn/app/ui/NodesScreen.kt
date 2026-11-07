@@ -8,16 +8,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.ReleaseExclusiveInput
+import build.cairn.contracts.releaseNodeReservation
 import java.util.Date
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
 
+// Both runtimes share the gateway to Cairn; the last one on the machine removes it.
 private const val UNINSTALL_COMMAND =
-    "sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node"
+    "sudo systemctl disable --now cairn-node; sudo docker rm -f cairn-execution-node; sudo rm -rf /etc/systemd/system/cairn-node.service /opt/cairn-node /var/lib/cairn-node; sudo sh -c 'if [ ! -e /var/lib/cairn-native ]; then systemctl disable --now cairn-node-gateway 2>/dev/null; rm -rf /etc/systemd/system/cairn-node-gateway.service /opt/cairn-gateway /var/lib/cairn-gateway; systemctl daemon-reload; fi'"
 
 private const val NATIVE_UNINSTALL_COMMAND =
-    "sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; mounts=\$(findmnt -rno TARGET) || { echo \"findmnt could not list mounts.\" >&2; exit 1; }; printf \"%s\\n\" \"\$mounts\" | grep ^/var/lib/cairn-native/; match=\$?; if [ \"\$match\" -ne 1 ]; then echo \"Mount safety could not be confirmed. Run sudo systemctl start cairn-native-node to release owned conversation disks, then retry.\" >&2; exit 1; fi; cairn_policy() { grep -Fqx \"# Cairn native administrator; protected units retain NoNewPrivileges.\" \"\$1\" || return \$?; grep -Fqx \"cairn-workload ALL=(ALL:ALL) NOPASSWD: ALL\" \"\$1\"; }; for policy in /etc/sudoers.d/cairn-native-*; do [ -e \"\$policy\" ] || [ -L \"\$policy\" ] || continue; case \"\$policy\" in */cairn-native-*[!0-9]*|*/cairn-native-) continue ;; esac; if [ -L \"\$policy\" ] || [ ! -f \"\$policy\" ]; then echo \"Unrecognized native sudo policy: host-owner review required.\" >&2; exit 1; fi; if cairn_policy \"\$policy\"; then rm -f -- \"\$policy\" || exit; else policy_status=\$?; [ \"\$policy_status\" -eq 1 ] || exit \"\$policy_status\"; fi; done; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload'"
+    "sudo sh -c 'if [ -e /etc/systemd/system/cairn-native-node.service ]; then systemctl disable --now cairn-native-node || exit; fi; mounts=\$(findmnt -rno TARGET) || { echo \"findmnt could not list mounts.\" >&2; exit 1; }; printf \"%s\\n\" \"\$mounts\" | grep ^/var/lib/cairn-native/; match=\$?; if [ \"\$match\" -ne 1 ]; then echo \"Mount safety could not be confirmed. Run sudo systemctl start cairn-native-node to release owned conversation disks, then retry.\" >&2; exit 1; fi; cairn_policy() { grep -Fqx \"# Cairn native administrator; protected units retain NoNewPrivileges.\" \"\$1\" || return \$?; grep -Fqx \"cairn-workload ALL=(ALL:ALL) NOPASSWD: ALL\" \"\$1\"; }; for policy in /etc/sudoers.d/cairn-native-*; do [ -e \"\$policy\" ] || [ -L \"\$policy\" ] || continue; case \"\$policy\" in */cairn-native-*[!0-9]*|*/cairn-native-) continue ;; esac; if [ -L \"\$policy\" ] || [ ! -f \"\$policy\" ]; then echo \"Unrecognized native sudo policy: host-owner review required.\" >&2; exit 1; fi; if cairn_policy \"\$policy\"; then rm -f -- \"\$policy\" || exit; else policy_status=\$?; [ \"\$policy_status\" -eq 1 ] || exit \"\$policy_status\"; fi; done; rm -rf /opt/cairn-native /var/lib/cairn-native && { userdel cairn-workload || ! id cairn-workload >/dev/null 2>&1; } && rm -f /etc/systemd/system/cairn-native-node.service && systemctl daemon-reload && { if [ ! -e /var/lib/cairn-node ]; then systemctl disable --now cairn-node-gateway 2>/dev/null; rm -rf /etc/systemd/system/cairn-node-gateway.service /opt/cairn-gateway /var/lib/cairn-gateway; systemctl daemon-reload; fi; }'"
 
 private fun uninstallCommand(node: ExecutionNode) =
     if (node.capabilities.backend == NATIVE_BACKEND) NATIVE_UNINSTALL_COMMAND else UNINSTALL_COMMAND
@@ -30,15 +33,21 @@ fun NodesScreen(
     openAgents: () -> Unit = {},
 ) {
     var nodes by remember { mutableStateOf<List<ExecutionNode>>(emptyList()) }
+    // When the built-in runner's contact last changed, as seen by this device: an unchanged
+    // contact means it went stale.
+    var runner by remember { mutableStateOf<RunnerObservation?>(null) }
+    // How long each machine has stayed unready without a reported error, across listings.
+    var unready by remember { mutableStateOf<Map<String, UnreadyObservation>>(emptyMap()) }
     var adding by remember { mutableStateOf(false) }
     var storage by remember { mutableStateOf<ExecutionNode?>(null) }
     var name by remember { mutableStateOf("") }
     var backend by remember { mutableStateOf("firecracker") }
+    // Optional: without it, Beacon introduces the machine to the manager.
+    var directAddress by remember { mutableStateOf<String?>(null) }
     var nativeCallers by remember { mutableStateOf<List<NativeCaller>>(emptyList()) }
     // Never persist enrollment secrets in saved instance state.
     var enrollment by remember { mutableStateOf<NodeEnrollment?>(null) }
     // Machines known when the code was created, to recognise the newly connected one.
-    var knownBeforeEnrollment by remember { mutableStateOf(emptySet<String>()) }
     var recovery by remember { mutableStateOf<NodeSyncSettings?>(null) }
     var editing by remember { mutableStateOf<ExecutionNode?>(null) }
     var revoking by remember { mutableStateOf<ExecutionNode?>(null) }
@@ -63,20 +72,34 @@ fun NodesScreen(
     var cleaning by remember { mutableStateOf<ExecutionNode?>(null) }
     var advanced by remember { mutableStateOf(false) }
     var showRevoked by remember { mutableStateOf(false) }
+    // Polls and post-action refreshes can overlap: an answer older than one already applied is
+    // dropped; slow answers still apply when nothing newer arrived first.
+    val started = remember { java.util.concurrent.atomic.AtomicInteger() }
+    val applied = remember { java.util.concurrent.atomic.AtomicInteger() }
     suspend fun load() {
-        nodes = vm.api.get("/nodes")
+        val request = started.incrementAndGet()
+        val listed: List<ExecutionNode> = vm.api.get("/nodes")
+        if (applied.accumulateAndGet(request) { last, next -> maxOf(last, next) } != request) return
+        nodes = listed
+        runner = observeRunner(nodes, runner)
+        unready = observeUnready(nodes, unready, clock = fleetClock(nodes, runner), runner = runner)
+        // Trusted people load separately: their failure is reported without blocking enrollment
+        // detection, as on the web.
         if (nodes.any { it.capabilities.backend == "native" })
-            nativeCallers = vm.api.get("/nodes/native-callers")
+            try {
+                nativeCallers = vm.api.get("/nodes/native-callers")
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                vm.report(e)
+            }
         val invitation = enrollment ?: return
-        // A guided switch needs the identity assigned to this exact invitation.
-        if (replacing != null && invitation.nodeId == null) return
         nodes
             .firstOrNull {
                 !it.local &&
                     !it.revoked &&
                     it.capabilities.backend == invitation.backend &&
-                    (invitation.nodeId?.let { expected -> it.id == expected }
-                        ?: (it.id !in knownBeforeEnrollment))
+                    it.id == invitation.nodeId
             }
             ?.let {
                 enrollment = null
@@ -105,209 +128,272 @@ fun NodesScreen(
             "Nodes",
             "Gérez vos machines et leur capacité. L’accès des agents se règle sur leur fiche.",
         )
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                nodes.count { !it.revoked }.let { if (it == 1) "1 machine" else "$it machines" },
-                Modifier.weight(1f),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            FilledTonalButton(
-                onClick = {
-                    replacing = null
-                    adding = true
-                }
-            ) {
-                Text("Ajouter une machine")
+        val clock = fleetClock(nodes, runner)
+        val summary = fleetSummary(nodes, clock = clock, runner = runner, unready = unready)
+        Text(
+            "${summary.connected}/${summary.machines} connectée${if (summary.connected > 1) "s" else ""} · " +
+                "${summary.usedSlots}/${summary.totalSlots} slots utilisés" +
+                if (summary.attention > 0) " · ${summary.attention} à vérifier" else "",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        FilledTonalButton(
+            onClick = {
+                replacing = null
+                adding = true
             }
+        ) {
+            Text("Ajouter une machine")
         }
         nodes
             .filter { showRevoked || !it.revoked }
             .forEach { node ->
-                Panel {
-                    Text(node.name, style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        if (node.capabilities.backend == "native")
-                            "Processus natif · GPU partagé · personnes de confiance"
-                        else "VM Firecracker",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Text(
-                        when (node.status) {
-                            "online" -> "Connectée"
-                            "offline" -> "Déconnectée"
-                            "revoked" -> "Révoquée"
-                            "local" -> "Runner du master"
-                            else -> node.status
+                key(node.id) {
+                    Panel {
+                        val health =
+                            nodeHealth(node, clock = clock, runner = runner, unready = unready)
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                node.name,
+                                Modifier.weight(1f, fill = false),
+                                style = MaterialTheme.typography.titleMedium,
+                            )
+                            NodeHealthPill(health)
                         }
-                    )
-                    if (node.revoked) {
                         Text(
-                            "Cette machine n’a plus accès. Réinscrivez-la avec un nouveau code pour la reconnecter."
-                        )
-                        return@Panel
-                    }
-                    val available = node.limits
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        NodeCapacity(
-                            "CPU partagés",
-                            available.cpu.toString(),
-                            "pour tous les slots",
-                            Modifier.weight(1f),
-                        )
-                        NodeCapacity(
-                            "RAM partagée",
-                            formatMiB(available.memoryMiB),
-                            node.usage?.let { "${formatMiB(it.memoryMiB)} utilisés" }
-                                ?: "pour tous les slots",
-                            Modifier.weight(1f),
-                        )
-                        NodeCapacity(
-                            "Disque partagé",
-                            formatMiB(available.diskMiB),
-                            node.usage?.let { "${formatMiB(it.diskMiB)} utilisés" }
-                                ?: "pour tous les slots",
-                            Modifier.weight(1f),
-                        )
-                    }
-                    Text(
-                        "${node.availableSlots} slots libres sur ${node.slots} · ${node.occupiedSlots} occupés"
-                    )
-                    NodeAgents(node, state, openAgents)
-                    node.exclusiveReservation?.let { reservation ->
-                        Panel {
-                            Text(
-                                "Réservation exclusive",
-                                style = MaterialTheme.typography.titleSmall,
-                            )
-                            Text(exclusiveReservationState(reservation.state))
-                            Text(reservation.reason)
-                            Text(
-                                "${reservation.pausedRunIds.size} tâche${if (reservation.pausedRunIds.size == 1) "" else "s"} suspendue${if (reservation.pausedRunIds.size == 1) "" else "s"}"
-                            )
-                            Text(
-                                reservation.expiresAt?.let { "Expire le ${date(it)}" }
-                                    ?: "Attente jusqu’au ${date(reservation.waitUntil)}"
-                            )
-                            if (reservation.renewalPending) Text("Prolongation en attente")
-                            if (reservation.minimumAvailableMemoryMiB > 0)
-                                Text(
-                                    "RAM disponible demandée : ${formatMiB(reservation.minimumAvailableMemoryMiB)}"
-                                )
-                            reservation.error?.let {
-                                Text(it, color = MaterialTheme.colorScheme.error)
-                            }
-                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                TextButton(onClick = { openRun(reservation.ownerRunId) }) {
-                                    Text("Ouvrir l’exécution")
-                                }
-                                OutlinedButton(
-                                    enabled =
-                                        !state.busy &&
-                                            reservation.state in
-                                                listOf("queued", "acquiring", "acquired"),
-                                    onClick = {
-                                        vm.perform {
-                                            api.request(
-                                                "POST",
-                                                "/nodes/${segment(node.id)}/exclusive/${segment(reservation.id)}/release",
-                                            )
-                                            load()
-                                            notify("Libération de la réservation demandée")
-                                        }
-                                    },
-                                ) {
-                                    Text("Libérer la réservation")
-                                }
-                            }
-                        }
-                    }
-                    if (node.staleDisks.count > 0)
-                        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
-                            Text(
-                                "Anciens disques : ${formatMiB(node.staleDisks.diskMiB)} (${node.staleDisks.count} conversation${if (node.staleDisks.count > 1) "s" else ""})",
-                                Modifier.weight(1f),
-                            )
-                            TextButton(onClick = { cleaning = node }) { Text("Libérer") }
-                        }
-                    node.maintenance?.let {
-                        Text(
-                            if (it == "draining")
-                                "Mise en pause et sauvegarde des conversations pour une mise à jour"
-                            else "Prête à redémarrer pour la mise à jour"
-                        )
-                        node.maintenanceError?.let { message ->
-                            Text(message, color = MaterialTheme.colorScheme.error)
-                        }
-                    }
-                    nodeDiagnostics(node).forEach {
-                        Text("• $it", color = MaterialTheme.colorScheme.error)
-                    }
-                    if (node.tags.isNotEmpty()) Text(node.tags.joinToString(" · "))
-                    var technical by remember(node.id) { mutableStateOf(false) }
-                    TextButton(onClick = { technical = !technical }) {
-                        Text(if (technical) "Masquer les détails" else "Détails techniques")
-                    }
-                    if (technical) {
-                        Text(
-                            "Détecté : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque · ${if (node.capabilities.backend == NATIVE_BACKEND) "ublk ${if (node.capabilities.ublk) "disponible" else "indisponible"}" else "KVM ${if (node.capabilities.kvm) "disponible" else "indisponible"}"}",
+                            (if (node.local) "Runner du master · " else "") +
+                                if (node.capabilities.backend == "native")
+                                    "Processus natif · GPU partagé · personnes de confiance"
+                                else "VM Firecracker",
                             style = MaterialTheme.typography.bodySmall,
                         )
-                        node.usage?.let {
+                        if (!node.revoked)
                             Text(
-                                "Utilisé : ${formatMiB(it.memoryMiB)} RAM · ${formatMiB(it.diskMiB)} disque",
-                                style = MaterialTheme.typography.bodySmall,
+                                health.detail,
+                                color =
+                                    if (
+                                        health.state == NodeHealthState.OFFLINE ||
+                                            health.state == NodeHealthState.ATTENTION
+                                    )
+                                        signal.attention
+                                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        if (node.revoked) {
+                            Text(
+                                "Cette machine n’a plus accès. Réinscrivez-la avec un nouveau code pour la reconnecter."
+                            )
+                            return@Panel
+                        }
+                        if (
+                            health.state != NodeHealthState.READY &&
+                                (health.state != NodeHealthState.FULL ||
+                                    node.occupiedSlots != slotCapacity(node))
+                        )
+                            Text(
+                                "${freeSlots(node)} slots libres sur ${slotCapacity(node)} · ${node.occupiedSlots} occupés",
+                                style = MaterialTheme.typography.bodyMedium,
+                            )
+                        var expanded by remember(node.id) { mutableStateOf(false) }
+                        TextButton(onClick = { expanded = !expanded }) {
+                            Text(
+                                if (expanded) "Masquer les détails de ${node.name}"
+                                else "Voir les détails de ${node.name}"
                             )
                         }
-                        if (node.systemTags.isNotEmpty())
-                            Text(
-                                "Tags détectés : ${node.systemTags.joinToString(" · ")}",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        node.lastSeen?.let {
-                            Text(
-                                "Dernier contact : ${Date(it)}",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
-                        node.imageDigest?.let {
-                            Text("Version : $it", style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                    if (node.capabilities.backend == NATIVE_BACKEND)
-                        NativeNodeMode(vm, node) { load() }
-                    HorizontalDivider()
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { editing = node }) { Text("Configurer") }
-                        if (node.nativeModeRequest?.mode == "administrator")
-                            TextButton(onClick = { granting = node }) {
-                                Text("Examiner l’accès administrateur des agents")
-                            }
-                        TextButton(onClick = { storage = node }) { Text("Stockage") }
-                        if (!node.local)
-                            TextButton(
-                                onClick = {
-                                    // Another runtime enrolls as a new node, so its grants and
-                                    // checkpoints never mix with the old ones.
-                                    replacing = node
-                                    backend =
-                                        if (node.capabilities.backend == NATIVE_BACKEND)
-                                            "firecracker"
-                                        else NATIVE_BACKEND
-                                    name = node.name
-                                    enrollment = null
-                                    adding = true
-                                }
+                        if (expanded) {
+                            Text("Capacité", style = MaterialTheme.typography.titleSmall)
+                            val available = node.limits
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                Text(
-                                    if (node.capabilities.backend == NATIVE_BACKEND) "Passer en VM"
-                                    else "Passer en natif"
+                                NodeCapacity(
+                                    "CPU partagés",
+                                    available.cpu.toString(),
+                                    "pour tous les slots",
+                                    Modifier.weight(1f),
+                                )
+                                NodeCapacity(
+                                    "RAM partagée",
+                                    formatMiB(available.memoryMiB.toLong()),
+                                    node.usage?.let { "${formatMiB(it.memoryMiB)} utilisés" }
+                                        ?: "pour tous les slots",
+                                    Modifier.weight(1f),
+                                )
+                                NodeCapacity(
+                                    "Disque partagé",
+                                    formatMiB(available.diskMiB),
+                                    node.usage?.let { "${formatMiB(it.diskMiB)} utilisés" }
+                                        ?: "pour tous les slots",
+                                    Modifier.weight(1f),
                                 )
                             }
-                        if (!node.local)
-                            TextButton(onClick = { revoking = node }) { Text("Révoquer") }
+                            node.diskAccounting?.let { disk ->
+                                Text("Capacité disque", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    "${formatBytes(disk.localBytes)} stockés localement · ${formatBytes(disk.unusedGrantedBytes)} accordés mais inutilisés"
+                                )
+                                Text(
+                                    "${formatBytes(disk.hostFreeBytes)} libres sur l’hôte · ${formatBytes(disk.hostReserveBytes)} réservés à l’hôte · ${formatBytes(disk.poolReserveBytes)} de réserve du pool"
+                                )
+                                Text(
+                                    "Au moins ${formatBytes(disk.reclaimableBytes)} récupérables sur les conversations inactives synchronisées"
+                                )
+                                Text(
+                                    "${formatBytes(disk.unsynchronizedBytes)} de journal non synchronisé au dernier relevé ; conservés jusqu’à la réussite de la synchronisation."
+                                )
+                                Text(
+                                    "Ces mesures se recoupent. Sous pression, les copies inactives synchronisées sont libérées sans attendre une heure ; les conversations en attente passent avant un nouvel agrandissement.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                            }
+                            Text("Accès", style = MaterialTheme.typography.titleSmall)
+                            NodeAgents(node, state, openAgents)
+                            node.exclusiveReservation?.let { reservation ->
+                                Panel {
+                                    Text(
+                                        "Réservation exclusive",
+                                        style = MaterialTheme.typography.titleSmall,
+                                    )
+                                    Text(exclusiveReservationState(reservation.state))
+                                    Text(reservation.reason)
+                                    Text(
+                                        "${reservation.pausedRunIds.size} tâche${if (reservation.pausedRunIds.size == 1) "" else "s"} suspendue${if (reservation.pausedRunIds.size == 1) "" else "s"}"
+                                    )
+                                    Text(
+                                        reservation.expiresAt?.let { "Expire le ${date(it)}" }
+                                            ?: "Attente jusqu’au ${date(reservation.waitUntil)}"
+                                    )
+                                    if (reservation.renewalPending) Text("Prolongation en attente")
+                                    if (reservation.minimumAvailableMemoryMiB > 0)
+                                        Text(
+                                            "RAM disponible demandée : ${formatMiB(reservation.minimumAvailableMemoryMiB)}"
+                                        )
+                                    reservation.error?.let {
+                                        Text(it, color = MaterialTheme.colorScheme.error)
+                                    }
+                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        TextButton(onClick = { openRun(reservation.ownerRunId) }) {
+                                            Text("Ouvrir l’exécution")
+                                        }
+                                        OutlinedButton(
+                                            enabled =
+                                                !state.busy &&
+                                                    reservation.state in
+                                                        listOf("queued", "acquiring", "acquired"),
+                                            onClick = {
+                                                vm.perform {
+                                                    api.releaseNodeReservation(
+                                                        ReleaseExclusiveInput(reservation.id)
+                                                    )
+                                                    load()
+                                                    notify("Libération de la réservation demandée")
+                                                }
+                                            },
+                                        ) {
+                                            Text("Libérer la réservation")
+                                        }
+                                    }
+                                }
+                            }
+                            if (node.staleDisks.count > 0)
+                                Row(
+                                    verticalAlignment =
+                                        androidx.compose.ui.Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        "Anciens disques : ${formatMiB(node.staleDisks.diskMiB)} (${node.staleDisks.count} conversation${if (node.staleDisks.count > 1) "s" else ""})",
+                                        Modifier.weight(1f),
+                                    )
+                                    TextButton(onClick = { cleaning = node }) { Text("Libérer") }
+                                }
+                            node.maintenance?.let {
+                                Text(
+                                    if (it == "draining")
+                                        "Mise en pause et sauvegarde des conversations pour une mise à jour"
+                                    else "Prête à redémarrer pour la mise à jour"
+                                )
+                                node.maintenanceError?.let { message ->
+                                    Text(message, color = MaterialTheme.colorScheme.error)
+                                }
+                            }
+                            nodeDiagnostics(node, clock = clock, runner = runner).forEach {
+                                Text("• $it", color = MaterialTheme.colorScheme.error)
+                            }
+                            if (node.tags.isNotEmpty()) Text(node.tags.joinToString(" · "))
+                            var technical by remember(node.id) { mutableStateOf(false) }
+                            TextButton(onClick = { technical = !technical }) {
+                                Text(if (technical) "Masquer les détails" else "Détails techniques")
+                            }
+                            if (technical) {
+                                Text(
+                                    "Détecté : ${node.capabilities.cpu} CPU · ${formatMiB(node.capabilities.memoryMiB)} RAM · ${formatMiB(node.capabilities.diskMiB)} disque · ${if (node.capabilities.backend == NATIVE_BACKEND) "ublk ${if (node.capabilities.ublk) "disponible" else "indisponible"}" else "KVM ${if (node.capabilities.kvm) "disponible" else "indisponible"}"}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                )
+                                node.usage?.let {
+                                    Text(
+                                        "Utilisé : ${formatMiB(it.memoryMiB)} RAM · ${formatMiB(it.diskMiB)} disque",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                                if (node.systemTags.isNotEmpty())
+                                    Text(
+                                        "Tags détectés : ${node.systemTags.joinToString(" · ")}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                node.lastSeen?.let {
+                                    Text(
+                                        "Dernier contact : ${Date(it)}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                                node.imageDigest?.let {
+                                    Text(
+                                        "Version : $it",
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                            }
+                            if (node.capabilities.backend == NATIVE_BACKEND)
+                                NativeNodeMode(vm, node) { load() }
+                            HorizontalDivider()
+                            Text("Réglages", style = MaterialTheme.typography.titleSmall)
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                TextButton(onClick = { editing = node }) { Text("Configurer") }
+                                if (node.nativeModeRequest?.mode == "administrator")
+                                    TextButton(onClick = { granting = node }) {
+                                        Text("Examiner l’accès administrateur des agents")
+                                    }
+                                TextButton(onClick = { storage = node }) { Text("Stockage") }
+                                if (!node.local)
+                                    TextButton(
+                                        onClick = {
+                                            // Another runtime enrolls as a new node, so its grants
+                                            // and
+                                            // checkpoints never mix with the old ones.
+                                            replacing = node
+                                            backend =
+                                                if (node.capabilities.backend == NATIVE_BACKEND)
+                                                    "firecracker"
+                                                else NATIVE_BACKEND
+                                            name = node.name
+                                            enrollment = null
+                                            adding = true
+                                        }
+                                    ) {
+                                        Text(
+                                            if (node.capabilities.backend == NATIVE_BACKEND)
+                                                "Passer en VM"
+                                            else "Passer en natif"
+                                        )
+                                    }
+                                if (!node.local)
+                                    TextButton(onClick = { revoking = node }) { Text("Révoquer") }
+                            }
+                        }
                     }
                 }
             }
@@ -344,9 +430,13 @@ fun NodesScreen(
         ) {
             Text(
                 replacing?.let {
-                    "Installez le runtime ${if (backend == NATIVE_BACKEND) "natif" else "VM Firecracker"} sur la machine de ${it.name}. Il s’inscrit comme une nouvelle node ; une fois connectée et configurée, Cairn propose de révoquer ${it.name}. Les conversations gardent leur backend d’exécution jusqu’à ce que vous les déplaciez vers la nouvelle node depuis leurs détails d’exécution."
+                    "Installez le runtime ${if (backend == NATIVE_BACKEND) "natif" else "VM Firecracker"} sur la machine de ${it.name}. Il s’inscrit comme une nouvelle node ; une fois connectée et configurée, Cairn propose de révoquer ${it.name}. Les conversations gardent leur backend d’exécution, et celui de chaque agent se choisit sur sa fiche."
                 } ?: "Connectez une machine Linux, puis choisissez qui peut l’utiliser.",
                 style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                "Cairn met la machine en relation avec le manager : aucune adresse du manager, aucun certificat ni port ouvert n’est nécessaire. Ils se connectent directement quand les réseaux le permettent. Sinon, leurs échanges, disques des conversations compris, transitent par les serveurs de Cairn chiffrés de bout en bout : Cairn ne peut pas les lire.",
+                style = MaterialTheme.typography.bodySmall,
             )
             Field("Nom de la machine", name, { name = it })
             if (replacing == null)
@@ -357,10 +447,26 @@ fun NodesScreen(
                 Text(
                     "Linux x86-64 avec systemd et le pilote noyau ublk. Le GPU reste utilisable par le bureau, mais les travaux intensifs peuvent le ralentir. L’isolation est plus faible qu’une VM."
                 )
+            val address = directAddress
+            if (address == null)
+                TextButton(onClick = { directAddress = "" }) {
+                    Text("Se connecter directement plutôt")
+                }
+            else {
+                Field(
+                    "Adresse directe du manager",
+                    address,
+                    { directAddress = it },
+                    keyboardOptions = InputKeyboards.Uri,
+                )
+                Text(
+                    "Facultatif. Une adresse sur le réseau local ou un VPN évite que le trafic de la node passe par Cairn, même quand les réseaux empêchent une connexion directe. Utilisez HTTPS avec un certificat reconnu par la node ; HTTP n’est accepté qu’en boucle locale pour les tests. C’est l’adresse du manager, pas celle de l’application.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             Button(
                 enabled = !state.busy && name.isNotBlank(),
                 onClick = {
-                    knownBeforeEnrollment = nodes.map { it.id }.toSet()
                     vm.perform {
                         enrollment =
                             api.send(
@@ -369,6 +475,10 @@ fun NodesScreen(
                                 buildJsonObject {
                                     put("name", name)
                                     put("backend", backend)
+                                    directAddress
+                                        ?.trim()
+                                        ?.takeIf { it.isNotEmpty() }
+                                        ?.let { put("managerUrl", it) }
                                 },
                             )
                     }
@@ -377,10 +487,6 @@ fun NodesScreen(
                 Text("Créer un code d’inscription")
             }
             enrollment?.let {
-                if (replacing != null && it.nodeId == null)
-                    Text(
-                        "Mettez à jour cette installation pour suivre le remplacement et terminer la bascule guidée. L’ancienne node est conservée."
-                    )
                 val command = it.installCommand
                 if (command != null) {
                     Text(
@@ -439,7 +545,13 @@ fun NodesScreen(
                 api.request(
                     "PUT",
                     "/nodes/${node.id}/storage",
-                    wireJson.encodeToJsonElement(policy),
+                    wireJson.encodeToJsonElement(
+                        build.cairn.contracts.UpdateNodeStorageInput(
+                            nodeId = node.id,
+                            revision = node.revision,
+                            storage = policy,
+                        )
+                    ),
                 )
                 storage = null
                 load()
@@ -570,8 +682,8 @@ fun NodesScreen(
                 retiring = null
                 notify(
                     when (result.releasedPlacements) {
-                        0 -> "${previous.name} révoquée"
-                        1 ->
+                        0L -> "${previous.name} révoquée"
+                        1L ->
                             "${previous.name} révoquée ; 1 conversation revient au placement automatique"
                         else ->
                             "${previous.name} révoquée ; ${result.releasedPlacements} conversations reviennent au placement automatique"
@@ -581,6 +693,23 @@ fun NodesScreen(
             }
         }
     }
+}
+
+/** A node's health: green when it takes work, amber when it waits, coral when it needs you. */
+@Composable
+private fun NodeHealthPill(health: NodeHealth) {
+    val (container, content) =
+        when (health.state) {
+            NodeHealthState.READY -> signal.success.copy(alpha = 0.14f) to signal.success
+            NodeHealthState.OFFLINE,
+            NodeHealthState.ATTENTION -> signal.attentionSoft to signal.attention
+            NodeHealthState.PAUSED,
+            NodeHealthState.REVOKED ->
+                MaterialTheme.colorScheme.surfaceVariant to
+                    MaterialTheme.colorScheme.onSurfaceVariant
+            else -> signal.warningSoft to signal.warning
+        }
+    Pill(health.label, container, content)
 }
 
 /** The last step of a guided backend switch: revoke the previous node, or keep both for now. */
@@ -601,10 +730,10 @@ internal fun RetireNode(
         )
         if (agents.isNotEmpty())
             Text(
-                "Agents autorisés sur l’ancienne node : ${agents.joinToString(", ")}. Pour les faire tourner sur la nouvelle, autorisez-la sur leur fiche."
+                "Agents autorisés sur l’ancienne node : ${agents.joinToString(", ")}. Pour les faire tourner sur la nouvelle, passez-les en ${if (nextNative) "exécution native" else "VM Firecracker"} sur leur fiche et autorisez-la."
             )
         Text(
-            "Les conversations fixées sur l’ancienne node ou qui la préfèrent reviennent au placement automatique. Chaque conversation garde son backend d’exécution jusqu’à son déplacement : déplacez-la vers la nouvelle node depuis ses détails d’exécution pour y continuer."
+            "Les conversations fixées sur l’ancienne node ou qui la préfèrent reviennent au placement automatique. Les conversations gardent leur backend d’exécution : les existantes continuent sur d’autres nodes ${if (previousNative) "natives" else "VM"}."
         )
         if (previous.occupiedSlots > 0)
             Text(
@@ -689,30 +818,36 @@ private fun FirstAgents(
         if (node.nativeModeRequest?.mode == "administrator") Text(NATIVE_ADMIN_WARNING)
         val granted = node.grantedAgents(state.agents)
         state.agents.forEach { agent ->
-            // Any agent may use this node; host administration needs its own review.
+            // The server refuses an agent on a node of another execution backend.
+            val mismatch = !node.accepts(agent)
             val everywhere =
-                agent.access.nodes == null &&
+                !mismatch &&
+                    agent.access.nodes == null &&
                     (node.nativeModeRequest?.mode != "administrator" ||
                         agent.id in node.nativeReviewedAgents)
-            val already = !everywhere && agent.id in granted
+            val already = !mismatch && !everywhere && agent.id in granted
             val locked = everywhere || already
-            val checked = locked || agent.id in selected
+            val checked = locked || (!mismatch && agent.id in selected)
             Row(
                 Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(
                     value = checked,
-                    enabled = !locked && !state.busy,
+                    enabled = !locked && !mismatch && !state.busy,
                     role = androidx.compose.ui.semantics.Role.Checkbox,
                 ) {
                     selected = if (it) selected + agent.id else selected - agent.id
                 },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Checkbox(checked, null, enabled = !locked)
+                Checkbox(checked, null, enabled = !locked && !mismatch)
                 Spacer(Modifier.width(8.dp))
                 Column(Modifier.weight(1f)) {
                     Text(agent.name)
                     val reason =
                         when {
+                            mismatch ->
+                                if (agent.access.backend == NATIVE_BACKEND)
+                                    "Agent en exécution native : réservé aux nodes natives"
+                                else "Agent en VM : réservé aux nodes VM"
                             everywhere -> "Autorisé sur toutes les nodes"
                             already -> "Déjà autorisé sur cette machine"
                             else -> null
@@ -740,7 +875,9 @@ private fun FirstAgents(
             TextButton(onClick = later, enabled = !state.busy) { Text("Plus tard") }
             Button(
                 onClick = {
-                    finish(state.agents.filter { it.id in selected }.map { it.id })
+                    finish(
+                        state.agents.filter { it.id in selected && node.accepts(it) }.map { it.id }
+                    )
                 },
                 enabled = !state.busy,
             ) {
@@ -763,10 +900,10 @@ internal fun NodeEditor(
     var accepting by remember(node.id) { mutableStateOf(node.accepting) }
     var nativeEnabled by remember(node.id) { mutableStateOf(node.nativeEnabled) }
     var nativeAccounts by remember(node.id) { mutableStateOf(node.nativeAccounts.toSet()) }
-    var slots by remember(node.id) { mutableStateOf(node.slots.toString()) }
+    var slots by remember(node.id) { mutableStateOf((node.slots ?: 4).toString()) }
     var cpu by remember(node.id) { mutableStateOf(node.limits.cpu.toString()) }
     // Ceilings are edited in Gio and stored in Mio.
-    var memory by remember(node.id) { mutableStateOf(gib(node.limits.memoryMiB)) }
+    var memory by remember(node.id) { mutableStateOf(gib(node.limits.memoryMiB.toLong())) }
     var disk by remember(node.id) { mutableStateOf(gib(node.limits.diskMiB)) }
     val memoryMiB = mib(memory)
     val diskMiB = mib(disk)
@@ -777,18 +914,24 @@ internal fun NodeEditor(
         close = dismiss,
         valid =
             name.isNotBlank() &&
-                (cpu.toIntOrNull() ?: 0) > 0 &&
+                (cpu.toIntOrNull() ?: 0) in 1..4096 &&
                 (slots.toIntOrNull() ?: 0) in 1..4096 &&
-                (memoryMiB ?: 0) >= 128 &&
-                (diskMiB ?: 0) >= 128,
+                (memoryMiB ?: 0) in 129L..1073741824L &&
+                (diskMiB ?: 0) in 128L..1099511627776L,
         save = {
             save(
                 NodeConfiguration(
-                    name,
-                    accepting,
-                    tags.split(',').map(String::trim).filter(String::isNotEmpty),
-                    NodeResources(cpu.toInt(), memoryMiB!!, diskMiB!!),
-                    slots.toInt(),
+                    revision = node.revision,
+                    name = name,
+                    accepting = accepting,
+                    tags = tags.split(',').map(String::trim).filter(String::isNotEmpty),
+                    limits =
+                        NodeResources(
+                            cpu = cpu.toInt(),
+                            memoryMiB = memoryMiB!!.toInt(),
+                            diskMiB = diskMiB!!,
+                        ),
+                    slots = slots.toInt(),
                     confirmNativeAdministration = node.nativeModeRequest?.mode == "administrator",
                     nativeEnabled =
                         if (node.capabilities.backend == NATIVE_BACKEND) nativeEnabled else null,
@@ -850,7 +993,7 @@ internal fun NodeEditor(
                     }
                 }
             }
-        if (node.capabilities.backend != NATIVE_BACKEND && !node.exclusiveReservations)
+        if (!node.exclusiveReservations)
             Text(
                 "Mettez à jour le runtime de cette machine pour activer les réservations exclusives.",
                 style = MaterialTheme.typography.bodySmall,
@@ -972,8 +1115,9 @@ private fun NodeStorageEditor(
     dismiss: () -> Unit,
     save: (NodeStoragePolicy) -> Unit,
 ) {
-    val policy = node.storage ?: NodeStoragePolicy()
+    val policy = node.storage
     var cache by remember { mutableStateOf(policy.cacheMiB.toString()) }
+    var memoryCache by remember { mutableStateOf(policy.memoryCacheMiB.toString()) }
     var reserve by remember { mutableStateOf(policy.reserveMiB.toString()) }
     var percent by remember { mutableStateOf(policy.reservePercent.toString()) }
     var interval by remember { mutableStateOf(policy.backupSeconds.toString()) }
@@ -984,7 +1128,8 @@ private fun NodeStorageEditor(
         state.error,
         close = dismiss,
         valid =
-            cache.toLongOrNull() in 0L..16777216L &&
+            memoryCache.toLongOrNull() in 4L..4096L &&
+                cache.toLongOrNull() in 0L..16777216L &&
                 reserve.toLongOrNull() in 64L..16777216L &&
                 percent.toIntOrNull() in 1..50 &&
                 interval.toLongOrNull() in 5L..3600L &&
@@ -992,13 +1137,12 @@ private fun NodeStorageEditor(
         save = {
             save(
                 NodeStoragePolicy(
-                    cache.toLong(),
-                    reserve.toLong(),
-                    percent.toInt(),
-                    interval.toLong(),
-                    dirty.toLong(),
-                    // Edited on the web only; keep it rather than resetting it to the default.
-                    memoryCacheMiB = policy.memoryCacheMiB,
+                    cacheMiB = cache.toLong(),
+                    reserveMiB = reserve.toLong(),
+                    reservePercent = percent.toLong(),
+                    backupSeconds = interval.toLong(),
+                    maxDirtySeconds = dirty.toLong(),
+                    memoryCacheMiB = memoryCache.toLong(),
                 )
             )
         },
@@ -1008,6 +1152,13 @@ private fun NodeStorageEditor(
         )
         Panel {
             Text("Disque local", style = MaterialTheme.typography.titleSmall)
+            Field(
+                "Cache mémoire partagé (Mio)",
+                memoryCache,
+                { memoryCache = it },
+                enabled = !state.busy,
+                keyboardOptions = InputKeyboards.Number,
+            )
             Field(
                 "Cache propre (Mio)",
                 cache,
@@ -1044,14 +1195,14 @@ private fun NodeStorageEditor(
                 keyboardOptions = InputKeyboards.Number,
             )
             Field(
-                "Suspendre après (secondes)",
+                "Avertir du retard après (secondes)",
                 dirty,
                 { dirty = it },
                 enabled = !state.busy,
                 keyboardOptions = InputKeyboards.Number,
             )
             Text(
-                "Suspend les exécutions si leurs modifications restent non synchronisées trop longtemps.",
+                "Signale le retard sans suspendre le travail. Les protections d’intégrité et d’espace libre restent actives.",
                 style = MaterialTheme.typography.bodySmall,
             )
         }

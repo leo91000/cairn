@@ -149,15 +149,24 @@ run's revocable grant. This delegates management across the entire installation,
 including other agents and their work, even when the caller's direct resource
 access is restricted. It requires no external OAuth connection or personal token.
 Disabling the option, ending or cancelling the execution, or changing its chat
-turn invalidates the access. See [the installation-access decision](adr/0036-opt-in-installation-tools-for-agents.md).
+turn invalidates the access. See [the installation-access decision](adr/0064-opt-in-installation-tools-for-agents.md).
 
-An agent with **Task delegation** also finds `delegate_task`, `task_status` and
+An agent with **Task delegation** also finds `task_models`, `delegate_task`, `task_status` and
 `task_cancel` on `cairn_workspace` in conversations it did not receive as a
 delegated task. `delegate_task` takes the task text and optionally a title, an
 agent the caller covers, a project, a coding agent (`codex`, `claude`,
 `opencode`), a model, a reasoning effort and a retry `requestId`. It returns the
 delegated conversation; `task_status` with its `chatId` returns its state, outcome,
 pending questions and final report. See [delegated tasks](adr/0059-delegated-tasks.md).
+
+Before choosing a model, call `task_models` with the coding agent's `provider`.
+It returns the same catalog as public MCP and `cairn_installation`'s `list_models`,
+without granting installation management. For OpenCode, copy the entry's
+`model` (`auto/…`): Cairn chooses an available connection in the user's order.
+The `provider` argument selects the coding agent (`opencode`), not Go or Zen.
+Only use a route's `provider/model` when a specific connection is requested.
+Delegation rejects models absent from connected accounts before creating a
+conversation; a connected account with exhausted usage may still queue normally.
 
 ## Managing conversations
 
@@ -166,15 +175,24 @@ discovered with `search` and invoked through `execute` as `await cairn.<name>(ar
 `create_chat` defaults to Main for external clients and to the calling agent for
 `cairn_installation`. Its optional `projectId` must be allowed by the selected
 agent. Creating an empty chat does not start execution. `send_chat_message` accepts
-the same provider, model, reasoning, attachments and queue/steer settings as the
-apps. Supply a UUID in `message.id` and reuse it with identical content on retries.
+the same provider, model, reasoning, plan, attachments and queue/steer settings as the
+apps. `plan: true` requests a [plan turn](chats.md#plan-turns); during such a turn,
+`cairn_installation` only lists and runs `read` operations. Supply a UUID in `message.id` and reuse it with identical content on retries.
 A message starts work with the target agent's permissions.
+
+To approve a reviewed approach with the same freshness check as the apps, supply
+`message.planApproval: {sourceId: "<runId>:<completed-event-id>", revision: "<chat-revision>"}`.
+Use the latest completed root `proposed_plan` event from `get_run`/`read_run_content`,
+not a folded presentation ID, native tool ID or child proposal. The manager checks
+this identity and revision atomically with queue insertion and refuses stale
+approvals. Retried accepted message IDs keep their original result. Omit this
+precondition for freely composed ordinary messages.
 
 | Scope | Conversation operations |
 | --- | --- |
 | `read` | `list_chats`, `get_chat`, `read_chat_content`, `list_chat_questions`, `list_chat_artifacts`, `read_chat_artifact`, `list_chat_attachments`, `read_chat_attachment` |
 | `manage` | `create_chat`, `rename_chat`, `delete_chat`, `restore_chat`, `upload_chat_attachment`, `set_chat_artifact_visibility` |
-| `run` | `send_chat_message`, `edit_chat_message`, `delete_chat_message`, `set_chat_paused`, `stop_chat`, `resume_chat`, `restart_chat_session`, `answer_chat_question` |
+| `run` | `send_chat_message`, `edit_chat_message`, `delete_chat_message`, `set_chat_paused`, `stop_chat`, `resume_chat`, `restart_chat_session`, `compact_chat`, `answer_chat_question`, `cancel_chat_question` |
 
 `list_chats` supports agent/project filters and active/trash views. Lists and
 `get_chat` take `offset` and `limit` (default 50, maximum 100); follow `nextOffset`
@@ -195,11 +213,32 @@ that turn, cancels a scheduled wakeup and pauses follow-ups, retaining queued
 messages. `resume_chat` resumes a stopped/failed execution under the existing
 recovery rules; `set_chat_paused(false)` resumes queued follow-ups. A failed
 restored session can use `restart_chat_session` with `confirm: true` to keep its
-history and files but start a fresh native session. `rename_chat` sets a title;
+history and files but start a fresh native session. Chat summaries report
+`contextUsage` (latest request tokens, window, cache share, estimate flag; `null` when
+unknown) and `compaction` (`supported`, `running`, `available`, `reason`).
+`compact_chat` compacts the Codex or Claude Code context of an idle conversation as
+its own execution, without a user message or rewritten history; see
+[context compaction](CONTEXT-COMPACTION.md). `rename_chat` sets a title;
 the first message or later automatic title evaluation can update it.
 `list_chat_questions` exposes fields and status; `answer_chat_question` accepts
 an idempotent UUID in `answer.id` and one answer per field in `answer.answers`.
-Suggested options are never submitted automatically.
+Each field answer is `{ "selected": ["option-id"], "comment": "Optional precision" }`;
+an empty selection with nonempty text is accepted, and selection bounds do not
+count the comment as a choice. `cancel_chat_question` retires a pending
+questionnaire without supplying any answer or authorization. These operations
+share their contract with `cairn_installation`. Suggested options are never
+preselected or submitted automatically.
+
+Agents create questionnaires in their current conversation with
+`cairn_workspace.ask_questions({ requestId, questions })`: a stable UUID
+`requestId` makes retries safe, question and option IDs are unique, `mode` defaults
+to `single` or can be `multiple`, and optional `minChoices`/`maxChoices` constrain
+selections. Options carry a label, optional description and `recommended` flag.
+Keep each complete questionnaire within 64 KiB of encoded JSON so its reply fits
+the adapter delivery budget.
+The call returns immediately with `questionId`; answers arrive later as a user
+message. The private workspace grant is checked transactionally, independently
+of installation-management access. Native question tools are not used.
 
 `delete_chat` uses the apps' deletion lifecycle. Busy chats require `confirm: true`
 to stop execution and cancel messages/questions. Existing cleanup rules may
@@ -233,6 +272,12 @@ consent screen. Tools execute on that installation through its outbound relay.
 Its local `/mcp`, OAuth endpoints and personal tokens have been removed.
 An offline installation returns 503 without replaying a tool call.
 
+The verified owner's identity follows public MCP operations into native execution
+authorization. Creating or directing work uses that person's current native node
+grants; automatic placement applies the agent's priorities among eligible nodes.
+OAuth scopes, trusted people, node permissions and administrator reviews still
+apply. Run-scoped installation tools retain their originating run's bounded
+delegation instead.
 
 The application advertises protected-resource metadata at
 `/.well-known/oauth-protected-resource/mcp` and authorization-server metadata at
@@ -244,22 +289,28 @@ hour, and refresh tokens after 30 days. Browser sessions are separate credential
 
 | Scope | Operations |
 | --- | --- |
-| `read` | `list_agents`, `list_projects`, `list_tasks`, `list_runs`, `get_run`, `read_run_content`, `list_skills`, `read_skill`, `list_mcps` |
-| `manage` | `save_agent`, `update_agent`, `save_project`, `create_task`, `update_task`, `save_skill`, `edit_skill_files`, `create_mcp`, `update_mcp`, `test_mcp`, `disconnect_mcp`, `delete_mcp` |
+| `read` | `list_agents`, `list_models`, `list_projects`, `list_tasks`, `list_runs`, `get_run`, `read_run_content`, `list_skills`, `read_skill`, `list_mcps` |
+| `manage` | `save_agent`, `update_agent`, `save_project`, `create_task`, `replace_task`, `set_task_state`, `delete_task`, `save_skill`, `edit_skill_files`, `create_mcp`, `update_mcp`, `test_mcp`, `disconnect_mcp`, `delete_mcp` |
 | `run` | `run_task`, `cancel_run` |
 
-`save_agent` and `save_project` create new records. `update_task` replaces the
-existing task configuration; `save_skill` creates or replaces its SKILL.md;
-`edit_skill_files` applies a batch of file changes (see [skills](SKILLS.md)).
-`update_agent` preserves omitted top-level fields; an explicit access policy
-replaces the complete policy. MCP connection tools share the UI's validation,
-encrypted credential storage and run-grant enforcement. See
-[connection management](MCP-CONNECTIONS.md#managing-connections-through-mcp)
-for configuration, OAuth sign-in and agent assignments.
-`list_runs` is paginated and omits full instructions/results. `get_run` returns
-the run record and an incremental event page, bounded by serialized bytes as well
-as the 100-event maximum. Start with `after: 0`, then pass `nextAfter` while
-`hasMore` is true. A short page does **not** mean the history is exhausted.
+`list_models` returns a coding agent's catalog as the app's picker shows it, including each Codex model's `serviceTiers` (speed id, Codex's name and usage description, `limited` when some signed-in account able to run the model lacks it or cannot confirm it) and Codex's catalog `defaultServiceTier`, which Cairn does not apply. Agents (`save_agent`, `replace_agent`) and messages (`send_chat_message`, `edit_chat_message`) accept `speed`: a tier id, `standard`, or empty to inherit the agent's or conversation's speed, otherwise Standard. A message naming the coding agent of the conversation's latest turn keeps that turn's speed, as the apps show it, while an omitted model and reasoning come from the agent; an edit that omits `speed` keeps the queued one. Before each Codex turn with a faster speed, the run checks it against the model list of the Codex process running the turn; `get_run` events then include a `status` event when its outcome changes for the message: `payload.speed.applied` is `standard` when the turn runs at Standard, `payload.speed.confirmed` is `true` when both the Codex process and the account's recent catalog list the tier for the model and the turn asks for it (a request: the account's plan decides), and `payload.speed.unconfirmed` is `true` when the speed cannot be confirmed for the account and model (a model list could not be read or does not name the model exactly, or the account's catalog is unknown or older than 30 minutes), as the apps show it. Use a `serviceTiers` id from `list_models` or `standard`; Cairn sends Standard for another id, such as Codex's own `fast` alias, since Codex's list does not name it for the model, and the notice says so. A speed is rejected when the turn runs with Claude Code or OpenCode, named by the message or inherited from the queue or conversation. `replace_agent` replaces every setting: send the agent's `speed` to keep it, since an omitted or empty one runs at Standard, and a speed is rejected for a Claude Code or OpenCode agent.
+
+`create_task` accepts `{creationId?, settings}`. `replace_task` accepts
+`{taskId, revision, settings}` and replaces all mission settings. `set_task_state`
+changes only `enabled` and `archived` at that revision. Authorship and membership
+come from verified authority, never command JSON. `get_task`, `list_tasks`,
+`preview_schedule` and `list_task_activity` use the read scope; `list_tasks` returns
+`{tasks: [...]}`. These definitions are shared with HTTP and `cairn_installation`.
+
+`get_installation_settings`, `get_installation_overview`, `list_audit` and
+`get_storage_settings` use the read scope; storage views never contain credentials.
+`check_storage` uses manage. `save_storage_settings` is listed with manage but only
+the human owner can save storage credentials, in the apps: tools receive an explicit
+refusal without an OAuth challenge. `mark_read` and `set_outcome_aside` use manage and
+change the read marks and set-aside outcomes of the Cairn account that authorized the
+connection; `list_chats` and `list_task_activity` report `unread`, `preview` and
+`dismissal` for that account. Executions (`cairn_installation`) have no account
+delegation: their personal writes are refused and their listings carry none.
 
 A run or event too large for a page is returned as a preview with `truncated: true`
 and `totalBytes`. The stored content is unchanged. Use `read_run_content` with
@@ -274,8 +325,10 @@ response ceiling without discarding its payload. Use `cairn.read_run_content` wi
 Calls return text and a structured `{ result }` object for compatibility with both
 older and newer clients; the page budget allows for both copies and JSON escaping.
 Tool metadata includes OAuth scopes and
-read/write annotations; denied tool calls carry an OAuth challenge for clients
-that support relinking with additional scopes.
+read/write annotations; calls denied for a scope the grant lacks carry an OAuth
+challenge for clients that support relinking with additional scopes. Refusals that
+no scope can lift, such as saving storage credentials (owner-only in the apps),
+carry no challenge.
 
 OAuth grants and 30-day personal tokens are limited to one installation and the selected scopes. They can be revoked from that installation’s **Settings** on the beacon web app. Personal
 tokens are displayed once; put them in the client's secret storage, never its Git
@@ -351,19 +404,30 @@ Consumed code digests and bindings remain linked to their grant for detection
 beyond the initial five-minute code expiry; deleting the grant removes them.
 Wrong client or PKCE attempts cannot revoke another client's grant.
 
-Moving a conversation to the other execution backend is available on both public
-MCP and `cairn_installation`: `get_chat_backend_migration` reports a conversation's
-backend, disk format and authorized destinations of the other backend, with
-whether each needs a one-time conversion; `migrate_chat_backend` requires
-management access, exactly one of `chatId` or mission `runId`, `nodeId` and
-`confirm: true` (`backend` is optional
-and checked against the node). A VM disk moves to a native node in place, like any
-node move; a disk created natively is converted once for a VM, which returns
-`status: "migrating"` while the owned task runs. Poll the preview for `pending` and
-`error`; the preview accepts the same `chatId`/`runId` choice. A native-born
-mission resumes automatically with its visible history in a fresh engine session
-after conversion. An explicit owner adopts the conversation into their native grant;
+Conversation backend migration is available on both public MCP and
+`cairn_installation`: `get_chat_backend_migration` previews the other backend for an automatic profile or the newly configured
+backend for a fixed profile; `migrate_chat_backend` requires management access,
+exactly one of `chatId` or `runId`, plus `nodeId`, `backend` and `confirm: true`.
+VM-created disks move directly, retaining files and the engine session. Native-born
+disks convert once before VM execution; missions continue automatically with their
+history in a fresh session. `requiredTags` and bounded `waitSeconds` match
+`move_to_node`. It returns immediately while the
+owned migration task runs. Poll the preview for `pending`, `required` and `error`.
+An explicit owner may adopt the existing conversation into their native grant;
 installation agents retain their bounded parent grant. Web and Android expose the
-same confirmed operation from execution-node details, and agents can move their
-own conversation with `move_to_node`. See
-[the decision](adr/0059-per-conversation-backend-and-in-place-vm-disks.md).
+same confirmed operation from execution-node details. See
+[the movement decision](adr/0081-move-vm-disks-between-execution-backends.md).
+
+Native nodes can report `exclusiveReservations: true` after a runtime update.
+Both public management MCP and `cairn_installation` expose the same native node
+capability and agent `exclusiveNodes` grants. Only the owner can add those grants;
+installation agents retain the existing refusal for sensitive permission expansion.
+Run-scoped workspace tools (`acquire_exclusive`, `exclusive_status`,
+`renew_exclusive`, `release_exclusive`) now support matching native executions too.
+
+`exclusive_status` returns the generated object `{ "reservations": [...] }`, with
+up to 20 current/recent entries in the existing order. Its advertised output schema
+and structured result share this envelope for legacy and current MCP versions.
+
+Native reservations freeze other Cairn workload cgroups and preserve storage
+suspensions. They do not release GPU allocations or stop external host applications.

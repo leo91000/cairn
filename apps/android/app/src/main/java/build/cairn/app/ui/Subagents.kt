@@ -38,6 +38,8 @@ internal data class Subagent(
     val activity: String,
     val model: String,
     val background: Boolean,
+    /** The agent resumed it after it reported back; it keeps its identity and steps. */
+    val resumed: Boolean,
     val state: SubagentState,
     val taskId: String,
     val startedAt: Long,
@@ -84,6 +86,7 @@ private class SubagentBuilder(val id: String, val startedAt: Long) {
     var activity = ""
     var model = ""
     var background = false
+    var resumed = false
     var state = SubagentState.RUNNING
     var taskId = ""
     var durationMs: Long? = null
@@ -113,6 +116,7 @@ private class SubagentBuilder(val id: String, val startedAt: Long) {
         activity = item.string("activity")
         model = item.string("model").ifBlank { model }
         background = (item?.get("background") as? JsonPrimitive)?.booleanOrNull == true
+        resumed = resumed || (item?.get("resumed") as? JsonPrimitive)?.booleanOrNull == true
         tokens = (item?.get("tokens") as? JsonPrimitive)?.longOrNull
         toolUses = (item?.get("tool_uses") as? JsonPrimitive)?.longOrNull
         val reported = (item?.get("duration_ms") as? JsonPrimitive)?.longOrNull
@@ -149,6 +153,7 @@ private class SubagentBuilder(val id: String, val startedAt: Long) {
             activity,
             model,
             background,
+            resumed,
             state,
             taskId,
             startedAt,
@@ -237,7 +242,7 @@ internal fun subagentTimeline(events: List<RunEvent>): SubagentTimeline {
             continue
         }
 
-        if (parent != null && !event.isMessage()) {
+        if (parent != null && event.timeline != true) {
             val key = "${parent.id}:${itemId.ifBlank { "event:${event.id}" }}"
             parent.steps[key] = presentActivity(event)
             captured += event.id
@@ -274,7 +279,7 @@ internal fun Subagent.followed(chat: Chat?): Subagent {
         when {
             state == SubagentState.RUNNING && chat.pendingQuestions > 1 ->
                 "${chat.pendingQuestions} questions attendent une réponse"
-            state == SubagentState.RUNNING && chat.pendingQuestions == 1 -> "Pose une question"
+            state == SubagentState.RUNNING && chat.pendingQuestions == 1L -> "Pose une question"
             state == SubagentState.RUNNING ->
                 if (chat.status in listOf("queued", "idle")) "En attente d’un runner"
                 else if (chat.wakeup != null) "En attente" else "En cours"
@@ -409,7 +414,7 @@ internal class SubagentTeamKeys {
 
 /** Current-request agents and any earlier children still working in the same execution. */
 internal fun currentSubagents(timeline: List<TimelineEntry>): List<Subagent> {
-    val start = timeline.indexOfLast { it.message && it.events.single().type == "chat.user" }
+    val start = timeline.indexOfLast { it.message && it.card?.userMessage == true }
     val current = subagentTeams(timeline.drop(start + 1)).flatten().map { it.id }.toSet()
     // A delegated task reports through its own conversation: earlier ones stay with their request.
     return subagentTeams(timeline).flatten().filter {
@@ -418,12 +423,5 @@ internal fun currentSubagents(timeline: List<TimelineEntry>): List<Subagent> {
 }
 
 /** The bar replaces the explicit background wait only if it represents every awaited task. */
-internal fun waitingForSubagents(events: List<RunEvent>, agents: List<Subagent>): Boolean {
-    val announcement = events.lastOrNull { it.type == "turn.waiting" } ?: return false
-    val tasks = announcement.activityData()?.get("tasks").asArray().orEmpty()
-    return tasks.isNotEmpty() &&
-        tasks.all { task ->
-            val id = task.asObject().string("id")
-            id.isNotEmpty() && agents.any { it.taskId == id }
-        }
-}
+internal fun waitingForSubagents(taskIds: List<String>, agents: List<Subagent>): Boolean =
+    taskIds.isNotEmpty() && taskIds.all { id -> id.isNotEmpty() && agents.any { it.taskId == id } }

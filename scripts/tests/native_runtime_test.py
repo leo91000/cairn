@@ -9,23 +9,98 @@ import boto3
 import http.client
 import http.server
 import importlib.util
+import importlib.metadata
+import hashlib
 import json
 import os
 from pathlib import Path
 import platform
-import pwd
 import random
 import resource
 import select
+import shutil
 import stat
+import socketserver
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import urllib.error
+import urllib.request
 import uuid
 import zipfile
+
+
+def controller_result(value):
+    """Normalize a controller wait result using the runner client's contract."""
+    if type(value) is int:
+        code = value
+        finalization_failed = False
+    elif isinstance(value, dict):
+        code = value.get('StatusCode')
+        finalization_failed = value.get('FinalizationFailed') is True and code == 70
+    else:
+        raise ValueError('Invalid controller result.')
+    if type(code) is not int or not 0 <= code <= 255:
+        raise ValueError('Invalid controller exit status.')
+    return {'StatusCode': code, 'FinalizationFailed': finalization_failed}
+
+
+def read_controller_result(path):
+    try:
+        value = json.loads(path.read_text())
+    except json.JSONDecodeError as error:
+        raise ValueError('Invalid controller exit record.') from error
+    return controller_result(value)
+
+
+def match_controller_result(path, wait_result):
+    recorded = read_controller_result(path)
+    assert controller_result(wait_result) == recorded, 'Wait result differs from the saved controller result.'
+    return recorded
+
+
+def require_finalization_failure(path, wait_result):
+    proof = match_controller_result(path, wait_result)
+    assert proof == {'StatusCode': 70, 'FinalizationFailed': True}, 'Missing controller flush-failure evidence.'
+    return proof
+
+
+def fixture_garbage_inventory(root):
+    root = Path(root)
+    database = root / 'manager/manager.db'
+    if not (root / 'disposable-fixture').is_file() or not database.is_file():
+        raise RuntimeError('Garbage clock requires the private disposable manager fixture.')
+    with sqlite3.connect(f'file:{database}?mode=ro', uri=True) as db:
+        now = int(time.time() * 1000)
+        states = [dict(state=state, objects=count, unused=unused, deferred=deferred, referenced=referenced)
+                  for state, count, unused, deferred, referenced in db.execute('''
+                    SELECT state,count(*),sum(unused_at IS NOT NULL),sum(retry_at>?),
+                      sum(EXISTS(SELECT 1 FROM shared_references r WHERE r.object=o.id))
+                    FROM shared_objects o GROUP BY state''', (now,))]
+        return dict(states=states,
+                    references=db.execute('SELECT count(*) FROM shared_references').fetchone()[0],
+                    remoteDeletions=db.execute('SELECT count(*) FROM remote_deletions').fetchone()[0])
+
+
+def advance_fixture_garbage_clock(root):
+    before = fixture_garbage_inventory(root)
+    # Every fixture publisher has stopped and its disk has been deleted. Advance
+    # the isolated GC schedule as well as orphan grace and capability expiry.
+    # Keep references, states, and uncertain PUT tombstones intact: the production
+    # collector must perform the real version listing/deletion and retain safety.
+    with sqlite3.connect(Path(root) / 'manager/manager.db') as db:
+        db.execute('''UPDATE shared_objects SET unused_at=0,retry_at=0
+                      WHERE unused_at IS NOT NULL
+                      AND NOT EXISTS(SELECT 1 FROM shared_references r WHERE r.object=shared_objects.id)''')
+        db.execute('UPDATE remote_deletions SET retry_at=0')
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='direct_storage_grants'").fetchone():
+            db.execute('''UPDATE direct_storage_grants SET expires_at=0
+                          WHERE object IN (SELECT id FROM shared_objects WHERE unused_at IS NOT NULL
+                            AND NOT EXISTS(SELECT 1 FROM shared_references r WHERE r.object=shared_objects.id))''')
+    return before
 
 SPEC = importlib.util.spec_from_file_location('native_host', Path(__file__).resolve().parents[2] / 'deploy/nodes/native-host.py')
 host = importlib.util.module_from_spec(SPEC)
@@ -48,6 +123,20 @@ def eventually(check, timeout=60):
             pass
         time.sleep(0.1)
     raise AssertionError('Timed out waiting for native runtime evidence.')
+
+
+def retained_health(api, run):
+    def sample():
+        health = api('/health', method='GET')
+        if health.get('status') != 'ok':
+            return None
+        growth = health.get('diskGrowth') or {}
+        retained = growth.get('retainedBytes', {})
+        return health if retained.get(run, 0) > 0 else None
+
+    # Health is a cached observation. Busy storage deliberately grants no
+    # retained credit; wait for an idle sample and retain that exact snapshot.
+    return eventually(sample)
 
 
 # Identical workload for the direct host reference and the actual sandbox engine.
@@ -82,20 +171,64 @@ def main():
     user = 'cairn-smoke-' + identifier[:8]
     supervisor = 'cairn-native-smoke-' + identifier + '.service'
     token = 'synthetic-controller-credential'
-    attempts, runs = [], []
+    attempts, runs, reserved_users = [], [], []
+    mcp_servers = {}
     metrics = dict(host=dict(kernel=platform.release(), machine=platform.machine(), cpuCount=os.cpu_count(),
                             cpu=Path('/proc/cpuinfo').read_text().split('model name')[1].splitlines()[0],
-                            memory=Path('/proc/meminfo').read_text().splitlines()[0]),
-                   conditions='Disposable hosted Linux VM; loopback Moto S3, synthetic credentials; no WAN latency. '
+                            memory=Path('/proc/meminfo').read_text().splitlines()[0],
+                            loadAverageStart=os.getloadavg(), cpuTicksStart=Path('/proc/stat').read_text().splitlines()[0]),
+                   s3Emulator=dict(name='Moto', version=importlib.metadata.version('moto'),
+                                   keyBufferBytes=int(os.environ['MOTO_S3_DEFAULT_KEY_BUFFER_SIZE']),
+                                   openFileLimits=resource.getrlimit(resource.RLIMIT_NOFILE),
+                                   backing='SpooledTemporaryFile; larger payloads and version-list copies spill to local disk.'),
+                   conditions='Disposable hosted Linux VM; loopback Moto S3 with 64KiB per-key memory buffers, synthetic credentials; no WAN latency. '
                               'Cold file reads use advisory POSIX_FADV_DONTNEED; post-eviction controller restart clears userspace cache.',
                    workload='Seeded random42 8MiB asset +128 fsynced 4KiB text writes, per-process wall/CPU milliseconds.',
                    resources=dict(nativeCpu=1, nativeMemoryMiB=512, nativeDiskMiB=256,
                                   reference='Host root process without workload cgroup limits',
                                   native='Unprivileged systemd workload, journal-backed ext4 on ublk',
                                   build='Cargo development profile, debug info disabled'))
+
+    def progress(phase):
+        # A hosted runner may terminate before artifact upload. Keep bounded
+        # phase/resource evidence in its logs without printing plans or grants.
+        memory = dict(line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())
+        sample = dict(phase=phase, monotonicSeconds=time.monotonic(),
+                      availableMemory=memory['MemAvailable'].strip(), loadAverage=os.getloadavg(),
+                      fixtureMaxRssKiB=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
+                      freeDiskBytes=shutil.disk_usage('/var/tmp').free)
+        membership = next((line.removeprefix('0::') for line in Path('/proc/self/cgroup').read_text().splitlines() if line.startswith('0::')), None)
+        if membership is not None:
+            group = Path('/sys/fs/cgroup') / membership.lstrip('/')
+            for field in ('memory.current', 'memory.max', 'memory.events'):
+                path = group / field
+                if path.is_file():
+                    sample[field] = path.read_text().strip()
+        metrics.setdefault('progress', []).append(sample)
+        print('Native qualification: ' + json.dumps(sample), flush=True)
+
+    progress('start')
     with tempfile.TemporaryDirectory(prefix='cairn-native-smoke-', dir='/var/tmp') as temporary:
         root = Path(temporary)
         root.chmod(0o700)
+        host.require_docker_host()
+        previous_install = host.INSTALL
+        host.INSTALL = root / 'managed-tools'
+        docker_tools = host.prepare_docker_tools()
+        host.configure_docker_apparmor(docker_tools)
+        # Exercise the distribution's file-capability alternative as well as
+        # validating its ordinary installed setuid helpers above. Copies live
+        # only on this explicitly disposable host, in the fixture's managed bin.
+        for name, capability, bit in [('newuidmap', 'cap_setuid=ep', 1 << 7), ('newgidmap', 'cap_setgid=ep', 1 << 6)]:
+            source = Path(shutil.which(name))
+            target = docker_tools / 'bin' / name
+            shutil.copyfile(source, target)
+            target.chmod(0o755)
+            command('setcap', capability, str(target))
+            assert host.trusted_mapping_helper(target, bit)
+        metrics['mappingHelpers'] = 'Root-owned distribution copies with only CAP_SETUID/CAP_SETGID effective, no setuid bit; host originals unchanged.'
+        host.INSTALL = previous_install
+        progress('host-tool-setup-complete')
         (root / 'disposable-fixture').touch()
         data, state = root / 'data', root / 'state'
         tools = root / 'versions/synthetic/tools'
@@ -103,6 +236,10 @@ def main():
             directory.mkdir(parents=True, mode=0o700)
         tools.chmod(0o755)
         (tools / 'bin').chmod(0o755)
+        probe = tools / 'bin/native-docker-probe'
+        probe_source = Path(__file__).with_name('native_docker_probe.c')
+        command('cc', '-static', '-O2', '-Wall', '-Wextra', '-Werror', str(probe_source), '-o', str(probe))
+        metrics['dockerProbe'] = dict(compiler=command('cc', '--version').stdout.splitlines()[0], flags='-static -O2 -Wall -Wextra -Werror', sourceSha256=hashlib.sha256(probe_source.read_bytes()).hexdigest())
         (data / 'runner-secret').write_text(token)
         (tools / 'manifest.json').write_text('{}')
         (tools.parent / 'release.json').write_text(json.dumps({'runtimeId': 'synthetic', 'os': 'linux', 'arch': 'x86_64'}))
@@ -113,10 +250,11 @@ def main():
         reference.mkdir()
         (reference / 'asset').write_bytes(asset)
         metrics['reference'] = json.loads(command(sys.executable, '-c', MEASURE, cwd=reference).stdout)
+        metrics['dockerVolumeHostReference'] = json.loads(command(str(probe), 'io', str(reference)).stdout)
         metrics['filesystem'] = command('stat', '-f', '-c', '%T', str(root)).stdout.strip()
 
-        def api(path, body=None, method='POST', raw=False):
-            connection = host.UnixControllerConnection(state / 'controller.sock', timeout=120)
+        def api(path, body=None, method='POST', raw=False, timeout=120):
+            connection = host.UnixControllerConnection(state / 'controller.sock', timeout=timeout)
             try:
                 connection.request(method, path, body=json.dumps(body or {}).encode() if method != 'GET' else None,
                     headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
@@ -127,6 +265,13 @@ def main():
                 return payload if raw else json.loads(payload)
             finally:
                 connection.close()
+
+        policy_generation = 0
+
+        def storage_policy(policy):
+            nonlocal policy_generation
+            policy_generation += 1
+            return api('/storage-policy', dict(generation=policy_generation, policy=policy))
 
         class Bridge(http.server.BaseHTTPRequestHandler):
             def log_message(self, *_):
@@ -139,6 +284,19 @@ def main():
                     body = self.rfile.read(length) if length else None
                     connection.request(self.command, self.path, body=body, headers=dict(self.headers))
                     response = connection.getresponse()
+                    if self.path.endswith('/direct-reader') and self.command == 'POST':
+                        # This response owns the publication reader. Forward its
+                        # headers and heartbeats while bounded PUT RPCs proceed.
+                        self.send_response(response.status)
+                        for key, value in response.getheaders():
+                            if key.lower() not in ('content-length', 'transfer-encoding', 'connection'):
+                                self.send_header(key, value)
+                        self.send_header('Connection', 'close')
+                        self.end_headers()
+                        while chunk := response.read1(16384):
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                        return
                     payload = response.read()
                     self.send_response(response.status)
                     for key, value in response.getheaders():
@@ -169,13 +327,15 @@ def main():
             return response['value']
 
         contexts = {}
-        vm_layouts = {}
         started_runs = set()
+        vm_runs = set()
+        retained_disk_mib = {}
+        controller_started = False
         current_mode = dict(mode="protected", generation=None)
         host_marker = Path("/etc/cairn-native-qualification-" + identifier)
         base_projects, base_archives, base_keys = {}, {}, {}
 
-        def seed(run, legacy=False):
+        def seed(run):
             stage = data / 'runs' / run
             for directory in (stage / 'workspace', stage / 'home/.codex', stage / 'home/.claude', stage / 'home/.agents/skills/frozen', stage / 'output'):
                 directory.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -184,48 +344,68 @@ def main():
             else:
                 (stage / 'workspace/seed').write_text('initial project')
                 (stage / 'workspace/asset').write_bytes(asset)
+            local_bin = stage / 'home/.local/bin'
+            local_bin.mkdir(parents=True, exist_ok=True, mode=0o755)
+            for name in ('ip', 'iptables', 'ip6tables', 'newuidmap', 'newgidmap'):
+                shadow = local_bin / name
+                shadow.write_text('#!/bin/sh\nprintf hijacked >/tmp/native-untrusted-helper\nexit 93\n')
+                shadow.chmod(0o755)
             (stage / 'home/.codex/auth.json').write_text(SECRET)
             (stage / 'home/.agents/skills/frozen/SKILL.md').write_text('frozen fixture skill')
-            if legacy:
-                old = state / 'native' / run
-                for directory in (old / 'data/workspaces', old / 'data/home/.cache/models', old / 'data/home/.codex/sessions', old / 'data/home/.claude/plugins/user', old / 'data/output'):
-                    directory.mkdir(parents=True, mode=0o700)
-                (old / 'data/workspaces/seed').write_text('initial project')
-                (old / 'data/workspaces/asset').write_bytes(asset)
-                (old / 'data/home/.cache/models/keep').write_text('model cache')
-                (old / 'data/home/.codex/sessions/keep').write_text('session state')
-                (old / 'data/home/.claude/plugins/user/tool').write_text('legacy installed plugin')
-                (old / 'data/home/.claude/CLAUDE.md').write_text('legacy user instructions')
-                (old / 'initialized').write_text('1')
             return stage
 
-        def create(legacy=False):
+        def create():
             run = str(uuid.uuid4())
             runs.append(run)
+            progress('fixture-create-before')
             contexts[run] = manager('create', run=run)
-            seed(run, legacy)
+            # Warm local blocks can hide a missing current node acknowledgement.
+            # Exercise the real cold-read authorization before mounting any disk.
+            context = contexts[run]
+            request = urllib.request.Request(
+                context['master'].rstrip('/') + '/internal/node-restore/renew',
+                data=b'{}',
+                headers={'Authorization': 'Bearer ' + context['grant'], 'Content-Type': 'application/json'},
+                method='POST',
+            )
+            with host.HTTP.open(request, timeout=30) as response:
+                assert json.load(response)['renewed'] is True, 'Native fixture disk grant is not authorized.'
+            seed(run)
+            progress('fixture-create-complete')
             return run
 
         def managed(run):
             pid = command('systemctl', 'show', supervisor, '--property=MainPID', '--value').stdout.strip()
-            if run in vm_layouts:
-                view = json.loads((state / 'native' / run / 'view.json').read_text())
-                return Path('/proc') / pid / 'root' / view['workspace'].lstrip('/')
-            path = Path('/proc') / pid / 'root' / str(state).lstrip('/') / 'native' / run / 'data/workspaces'
+            mounted = state / 'native' / run
+            if run in vm_runs:
+                workspace = json.loads((mounted / 'view.json').read_text())['workspace'] if (mounted / 'view.json').exists() else str(mounted / 'data/upper' / str(data / 'runs' / run / 'workspace').lstrip('/'))
+                path = Path('/proc') / pid / 'root' / workspace.lstrip('/')
+            else:
+                path = Path('/proc') / pid / 'root' / str(state).lstrip('/') / 'native' / run / 'data/workspaces'
             return path / base_projects[run] if run in base_projects else path
 
         def start_controller():
+            nonlocal controller_started
             environment = dict(DATA_DIR=str(data), RUNNER_STATE_DIR=str(state), RUNNER_BIND='127.0.0.1:4311',
                 CAIRN_NATIVE_TOOLS=str(tools), CAIRN_NATIVE_USER=user, CAIRN_NODE_BACKEND='native',
+                CAIRN_NATIVE_DOCKER_TOOLS=str(docker_tools),
                 APP_RUNTIME_ID='synthetic', CAIRN_NATIVE_SUPERVISOR_UNIT=supervisor)
             command('systemd-run', '--quiet', '--collect', '--service-type=exec', '--unit=' + supervisor,
+                '--property=LimitNOFILE=1024:524288',
                 *['--setenv=' + key + '=' + value for key, value in environment.items()], str(binary), 'native-controller')
             eventually(lambda: api('/health', method='GET').get('backend') == 'native')
             assert (state / 'controller.sock').stat().st_mode & 0o777 == 0o600
             pid = command('systemctl', 'show', supervisor, '--property=MainPID', '--value').stdout.strip()
+            limits = Path('/proc/' + pid + '/limits').read_text().splitlines()
+            open_files = next(line.split() for line in limits if line.startswith('Max open files'))
+            assert int(open_files[3]) >= 65536, 'Controller inherited the unsafe systemd open-file limit.'
             assert Path('/proc/' + pid + '/ns/mnt').stat().st_ino == Path('/proc/1/ns/mnt').stat().st_ino, 'Controller mounts must be visible to the system manager.'
-            api('/node-budget', dict(limits=dict(diskMiB=4096, cpu=2, memoryMiB=1024), slots=1))
-            api('/storage-policy', contexts[runs[0]]['policy'])
+            # Restarts recover the configured budget, including capacity already
+            # granted to retained Docker disks. Never shrink it to fixture defaults.
+            if not controller_started:
+                api('/node-budget', dict(limits=dict(diskMiB=4096, cpu=2, memoryMiB=1024), slots=1))
+                controller_started = True
+            storage_policy(contexts[runs[0]]['policy'])
 
         def prepare_base(run):
             project = str(uuid.uuid4())
@@ -252,8 +432,35 @@ def main():
             cached.unlink()
             metrics['preparedBaseMetadataBytes'] = ready['metadataBytes']
 
-        def start(run, long=True, lease=90000, expected='changed', legacy=False, measure=None):
+        class PluginChannel(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_POST(self):
+                assert self.path == '/plugin-command'
+                assert self.headers.get('Authorization') == 'Bearer fixture-plugin-' + self.server.run_id
+                body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))))
+                assert body['plugin'] == 'fixture' and body['command'] == 'identity'
+                response = json.dumps(dict(output='text', value=self.server.run_id)).encode()
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(response)))
+                self.send_header('Connection', 'close')
+                self.end_headers()
+                self.wfile.write(response)
+
+        def start(run, long=True, lease=90000, expected='changed', measure=None, docker_script='', sandbox='workspace-write'):
             seed(run)
+            channel = data / 'runs' / run / 'home/cairn-mcp.sock'
+            if run in mcp_servers:
+                mcp_servers[run].shutdown()
+                mcp_servers[run].server_close()
+            channel.unlink(missing_ok=True)
+            server = socketserver.ThreadingUnixStreamServer(str(channel), PluginChannel)
+            server.daemon_threads = True
+            server.run_id = run
+            channel.chmod(0o600)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            mcp_servers[run] = server
             attempt = str(uuid.uuid4())
             attempts.append(attempt)
             workspace = data / 'runs' / run / 'workspace'
@@ -273,6 +480,8 @@ def main():
                 script += 'test ! -e ' + str(private) + '\n'
                 script += 'if sudo -n true 2>/dev/null; then exit 80; fi\n'
                 script += 'test ! -e /run/docker.sock\nif touch /usr/cairn-should-be-readonly 2>/dev/null; then exit 81; fi\n'
+            if not administrator:
+                script += 'test "$(CAIRN_MCP_RUN_TOKEN=fixture-plugin-' + run + ' cairn plugin fixture identity)" = "' + run + '"\n'
             script += "test \"$(cat /home/node/.codex/auth.json)\" = '" + SECRET + "'\n"
             script += 'if echo bad > /home/node/.codex/auth.json 2>/dev/null; then exit 82; fi\n'
             # Exercise the same atomic credential replacement as the real Claude
@@ -284,31 +493,41 @@ def main():
             script += 'test "$(cat /run/cairn-chat/attachments/native-image/image.png)" = "synthetic image bytes"\n'
             script += 'test -f /home/node/.agents/skills/frozen/SKILL.md\n'
             script += 'if touch /home/node/.agents/skills/bad 2>/dev/null; then exit 83; fi\n'
-            if run in vm_layouts:
-                script += 'mkdir -p /home/node/.local/bin\ntest "$(stat -c %u /home/node/root-owned)" = 0\nif echo bad > /home/node/root-owned 2>/dev/null; then exit 84; fi\n'
-            if legacy:
-                script += 'test "$(cat /home/node/.cache/models/keep)" = "model cache"\n'
-                script += 'test "$(cat /home/node/.claude/plugins/user/tool)" = "legacy installed plugin"\n'
-                script += 'test "$(cat /home/node/.claude/CLAUDE.md)" = "legacy user instructions"\n'
-                script += 'test "$(cat /home/node/.codex/sessions/keep)" = "session state"\n'
             script += 'if test -e persisted; then test "$(cat persisted)" = "' + expected + '"; fi\n'
-            script += 'printf changed > persisted\nprintf temporary-artifact > /tmp/native-artifact\n'
-            script += f'printf %s {attempt} > ready\n'
+            if sandbox != 'read-only':
+                script += 'printf changed > persisted\n'
+            script += 'test ! -e /tmp/native-untrusted-helper\n'
+            script += 'printf temporary-artifact > /tmp/native-artifact\n'
+            script += docker_script
+            if sandbox != 'read-only':
+                script += f'printf %s {attempt} > ready\n'
             if measure:
                 script += "while ! test -e measure-go; do sleep 0.05; done\n/usr/bin/python3 - <<'MEASURE' > measure.json\n" + MEASURE + '\nMEASURE\n'
                 script += 'printf measured > measure-ready\n'
             if long:
+                # Read the actual read-only bind as the unprivileged workload,
+                # including concurrent steering updates after a disk warning.
+                script += "/usr/bin/python3 - <<'INBOX' &\nimport json,os,time\nfrom pathlib import Path\nseen={}\nwhile True:\n    for name in ('messages.json','disk-notice.json'):\n        try: value=json.loads((Path('/run/cairn-chat')/name).read_text())\n        except FileNotFoundError: continue\n        except PermissionError:\n            Path('inbox-read-error').write_text(name); raise\n        if name=='disk-notice.json': marker,content='disk-notice-seen',value['id']\n        elif value: marker,content='steering-seen',value[0]['text']\n        else: continue\n        if seen.get(marker)==content: continue\n        with open(marker,'w') as output:\n            output.write(content); output.flush(); os.fsync(output.fileno())\n        seen[marker]=content\n    time.sleep(0.02)\nINBOX\n"
                 script += ("sudo -n " if administrator else "") + "setsid sh -c 'while :; do printf x >> descendant; sleep 0.1; done' &\nwait\n"
-            (tools / 'bin/codex').write_text(script)
+            workload = 'native-workload-' + attempt
+            (tools / 'bin' / workload).write_text(script)
+            (tools / 'bin' / workload).chmod(0o555)
+            (tools / 'bin/codex').write_text(Path(__file__).with_name('native_chat_fixture.py').read_text())
             (tools / 'bin/codex').chmod(0o555)
+            # Docker grows this conversation's retained disk. A later turn
+            # without Docker (including administrator mode) must not shrink it.
+            disk_mib = max(retained_disk_mib.get(run, 256), 2048 if docker_script else 256)
+            retained_disk_mib[run] = disk_mib
             plan = dict(id=attempt, runId=run, backend='native', runtimeId='synthetic', nodeLeaseRequired=True, nativeMode=current_mode.copy(),
-                expires=None, cwd=str(workspace / base_projects[run] if run in base_projects else workspace), projectRoot=str(workspace), sandbox='workspace-write',
-                resources=dict(cpu=1, memoryMiB=512, diskMiB=256), args=[], prompt='synthetic input', storage=contexts[run],
+                expires=None, cwd=str(workspace / base_projects[run] if run in base_projects else workspace), projectRoot=str(workspace), sandbox=sandbox,
+                resources=dict(cpu=1, memoryMiB=1024 if docker_script else 512, diskMiB=disk_mib), storage=contexts[run],
+                chat=dict(provider='codex', runId=run, attemptId=attempt,
+                    execution=dict(messageId=attempt, text='synthetic input', recovery=False),
+                    cwd=str(workspace / base_projects[run] if run in base_projects else workspace),
+                    inputDirectory='/run/cairn-chat', output=str(data / 'runs' / run / 'output/result.md'),
+                    model='fixture', reasoning='low', sandbox=sandbox, writableRoots=[str(workspace)],
+                    args=['--fixture-workload', workload]),
                 imports=[dict(source=str(workspace), target=str(workspace)), dict(source=str(data / 'runs' / run / 'home'), target='/home/node')])
-            if run in vm_layouts:
-                guest_workspace = '/data/runs/' + run + '/workspace'
-                plan.update(guestDataRoot='/data', cwd=guest_workspace, projectRoot=guest_workspace)
-                plan['imports'][0]['target'] = guest_workspace
             if run in base_archives:
                 plan.update(nativeProjectArchives=base_archives[run], nativeProjectBase=base_keys[run])
                 os.link(state / 'native-bases' / base_keys[run] / 'pin', data / 'runs' / run / ('native-base-' + attempt + '.pin'))
@@ -317,17 +536,23 @@ def main():
             image.write_text('synthetic image bytes')
             image.chmod(0o600)
             (data / 'runner-plans' / (attempt + '.json')).write_text(json.dumps(plan))
-            manager('checkpoint', run=run, attempt=attempt, vm=run in vm_layouts)
+            manager('checkpoint', run=run, attempt=attempt, vm=run in vm_runs)
             api('/runs/' + attempt + '/lease', {'remainingMs': lease})
+            progress('attempt-checkpointed')
+            startup = time.perf_counter()
+            progress('run-admission-before')
             api('/runs/' + attempt)
+            progress('run-admission-returned')
             def execution_ready():
                 if (state / (attempt + '.exit')).exists():
                     return True
                 # A preceding short execution can retain its readiness file.
                 return (managed(run) / 'ready').read_text() == attempt
 
-            eventually(execution_ready)
-            if (state / (attempt + '.exit')).exists() and int((state / (attempt + '.exit')).read_text()) != 0:
+            eventually(execution_ready, timeout=600 if docker_script else 60)
+            startup_ms = (time.perf_counter() - startup) * 1000
+            progress('attempt-ready')
+            if (state / (attempt + '.exit')).exists() and read_controller_result(state / (attempt + '.exit'))['StatusCode'] != 0:
                 for record in (state / (attempt + '.log')).read_text().splitlines():
                     event = json.loads(record)
                     if event.get('data'):
@@ -348,6 +573,16 @@ def main():
                 evidence.mkdir(parents=True, exist_ok=True)
                 (evidence / 'failure-diagnostics.txt').write_text(diagnostic_text)
                 raise AssertionError('Synthetic workload failed before readiness.')
+            startup_cpu_ms = None
+            if long:
+                namespace = command('systemctl', 'show', 'cairn-native-' + attempt + '.service', '--property=ControlGroup', '--value').stdout.strip()
+                assert namespace.startswith('/'), 'Workload cgroup unavailable for startup CPU sampling.'
+                cpu_stat = dict(line.split() for line in (Path('/sys/fs/cgroup') / namespace.lstrip('/') / 'cpu.stat').read_text().splitlines())
+                startup_cpu_ms = int(cpu_stat['usage_usec']) / 1000
+            metrics.setdefault('conversationStartupMs', []).append(dict(ms=startup_ms,
+                docker=bool(docker_script), nativeMode=current_mode['mode'], resume=run in started_runs, workloadCgroupCpuMs=startup_cpu_ms,
+                cpuScope='Whole fresh workload cgroup at readiness; short executions may already be collected.',
+                loadAverage=os.getloadavg(), readinessIncludesDockerWorkload=bool(docker_script)))
             started_runs.add(run)
             if long:
                 pid = command('systemctl', 'show', supervisor, '--property=MainPID', '--value').stdout.strip()
@@ -382,36 +617,132 @@ def main():
                 (managed(run) / 'ready').unlink()
             return attempt
 
-        def fenced(run, attempt, timeout=90):
+        def qualify_exclusive(owner, peer, peer_run):
+            # Older reference runtimes deliberately skip the new capability.
+            if not api('/health', method='GET').get('exclusiveReservations'):
+                return
+            descendant = managed(peer_run) / 'descendant'
+            epoch = api('/exclusive', method='GET')['highestEpoch'] + 1
+            reservation = dict(id=str(uuid.uuid4()), epoch=epoch, ownerAttemptId=owner,
+                               memberAttemptIds=[], expiresAt=int(time.time() * 1000) + 5000,
+                               remainingMs=5000, minimumAvailableMemoryMiB=1, reason='Native runtime qualification')
+            acquired = api('/exclusive/acquire', reservation)
+            assert acquired['reservation']['state'] == 'acquired'
+            assert peer in acquired['reservation']['pausedAttemptIds']
+            size = descendant.stat().st_size
+            time.sleep(0.3)
+            assert descendant.stat().st_size == size, 'Exclusive pause left a descendant running.'
+            assert api('/runs/' + peer + '/administrative-pause', method='GET')['administrativePausedMs'] >= 250
+            # The controller checks its gate before plan loading or slot admission.
+            try:
+                api('/runs/' + str(uuid.uuid4()))
+            except urllib.error.HTTPError as error:
+                assert error.code == 409
+            else:
+                raise AssertionError('Exclusive reservation admitted an unrelated attempt.')
+            released = api('/exclusive/release', dict(id=reservation['id'], epoch=epoch))
+            assert released['reservation'] is None
+            eventually(lambda: descendant.stat().st_size > size)
+            # Expiration uses the same physical release path without a manager.
+            reservation.update(id=str(uuid.uuid4()), epoch=epoch + 1,
+                               expiresAt=int(time.time() * 1000) + 1000, remainingMs=1000)
+            api('/exclusive/acquire', reservation)
+            eventually(lambda: api('/exclusive', method='GET')['reservation'] is None, timeout=10)
+            size = descendant.stat().st_size
+            eventually(lambda: descendant.stat().st_size > size)
+            reservation.update(id=str(uuid.uuid4()), epoch=epoch + 2,
+                               expiresAt=int(time.time() * 1000) + 5000, remainingMs=5000,
+                               minimumAvailableMemoryMiB=1_000_000)
+            try:
+                api('/exclusive/acquire', reservation)
+            except urllib.error.HTTPError as error:
+                assert error.code == 503
+            else:
+                raise AssertionError('Native reservation promised unavailable memory.')
+            assert api('/exclusive', method='GET')['reservation'] is None
+            size = descendant.stat().st_size
+            eventually(lambda: descendant.stat().st_size > size)
+            metrics.setdefault('exclusiveReservations', []).append(dict(mode=current_mode['mode'],
+                descendantFrozen=True, admissionBlocked=True, released=True, expired=True))
+
+        def workload_stopped(attempt):
+            result = subprocess.run(['systemctl', 'show', 'cairn-native-' + attempt + '.service',
+                '--property=ActiveState,MainPID,ControlGroup'], capture_output=True, text=True, timeout=5)
+            properties = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+            if properties.get('ActiveState') not in ('inactive', 'failed') or properties.get('MainPID') != '0':
+                return False
+            group = properties.get('ControlGroup', '')
+            if not group:
+                return True
+            events = Path('/sys/fs/cgroup') / group.lstrip('/') / 'cgroup.events'
+            return not events.exists() or 'populated 1' not in events.read_text().splitlines()
+
+        def fenced(run, attempt, timeout=90, expect_flush_failure=False):
             eventually(lambda: (state / (attempt + '.exit')).exists(), timeout=timeout)
+            # Completion writes the exit marker before retiring admission. Use
+            # the runner wait protocol to observe the entire ordered release.
+            result = api('/runs/' + attempt + '/wait')
+            exit_file = state / (attempt + '.exit')
+            if expect_flush_failure:
+                metrics['nativeFlushFailure'] = require_finalization_failure(exit_file, result)
+            else:
+                match_controller_result(exit_file, result)
             assert not (state / (attempt + '.active')).exists()
             active = command('systemctl', 'show', 'cairn-native-' + attempt + '.service', '--property=ActiveState', '--value').stdout.strip()
             assert active not in ('active', 'activating'), 'Descendant escaped cgroup fencing.'
             assert not (state / 'native' / run / 'data/workspaces/seed').exists(), 'Stopped conversation filesystem is still mounted.'
             snapshot = api('/disks/' + run + '/snapshot-completed')
-            if run in vm_layouts:
-                pid = command('systemctl', 'show', supervisor, '--property=MainPID', '--value').stdout.strip()
-                mounted = {line.split()[4] for line in Path('/proc', pid, 'mountinfo').read_text().splitlines()}
-                view = json.loads((state / 'native' / run / 'view.json').read_text())
-                assert not any(path in mounted for path in view['filesystems']), 'Stopped VM disk remains mounted.'
-                assert snapshot['manifest'].get('kind') is None
-                assert snapshot['manifest']['runtime']['disk'] == 'vm'
-                assert snapshot['manifest']['runtime']['vmRuntimeId'] == 'fixture-vm'
-            else:
-                assert snapshot['manifest']['kind'] == 'native-ext4-v1'
+            assert snapshot['manifest']['kind'] == 'native-ext4-v1'
             assert snapshot['manifest']['onDemand'] is True
             return snapshot
 
         command('useradd', '--system', '--no-create-home', '--shell', '/usr/sbin/nologin', user)
         try:
-            run = create(legacy=True)
+            run = create()
             other = create()
             start_controller()
-            first = start(run, lease=45000, legacy=True, measure='nativeRetained')
+            progress('fixture-controller-ready')
+            first = start(run, lease=45000, measure='nativeRetained')
             fenced(run, first)
+            # A terminal ext4 flush failure must retain a crash prefix and finish
+            # non-lazy unmount/device retirement after fencing, rather than loop
+            # forever before the unmount. Only this disposable filesystem changes.
+            readonly_run = create()
+            readonly_attempt = start(readonly_run)
+            readonly_mount = state / 'native' / readonly_run / 'data'
+            durable = managed(readonly_run) / 'readonly-durable-marker'
+            with open(durable, 'wb') as marker:
+                marker.write(b'kept across read-only close')
+                marker.flush()
+                os.fsync(marker.fileno())
+            # Attribute the disposable mount before using ext4's privileged
+            # error-injection interface. Never target the host/root filesystem.
+            device = readonly_mount.stat().st_dev
+            attachment = state / 'native-block' / readonly_run / 'root/disk.blk'
+            assert stat.S_ISBLK(attachment.stat().st_mode)
+            assert attachment.stat().st_rdev == device
+            sys_device = (Path('/sys/dev/block') / f'{os.major(device)}:{os.minor(device)}').resolve(strict=True)
+            assert sys_device.name.startswith('ublkb')
+            command('mount', '-o', 'remount,errors=remount-ro', str(readonly_mount))
+            # The resumed workload also checks its earlier Claude/session files.
+            # Flush those before the fault; a crash prefix does not promise to
+            # preserve unrelated dirty kernel pages merely because marker fsync
+            # succeeded. The descendant may continue appending after this flush.
+            command('sync', '-f', str(readonly_mount))
+            (Path('/sys/fs/ext4') / sys_device.name / 'trigger_fs_error').write_text('cairn-disposable-flush-failure\n')
+            api('/runs/' + readonly_attempt, method='DELETE')
+            readonly_snapshot = fenced(readonly_run, readonly_attempt, expect_flush_failure=True)
+            assert not (state / 'native-block' / readonly_run / 'root/disk.blk').exists()
+            assert readonly_snapshot['manifest']['kind'] == 'native-ext4-v1'
+            # Resume the same local journal and confirm the acknowledged bytes.
+            readonly_resume = start(readonly_run)
+            assert durable.read_bytes() == b'kept across read-only close'
+            api('/runs/' + readonly_resume, method='DELETE')
+            fenced(readonly_run, readonly_resume)
             assert not (state / 'native-block' / run / 'root/disk.blk').exists(), 'Retired device inode was retained.'
-            assert (state / 'native' / run / 'legacy-data').exists(), 'Migration source retired before S3 acknowledgement.'
-            assert api('/health', method='GET')['usage']['diskBytes'] > 0
+            stopped_health = retained_health(api, run)
+            assert stopped_health['usage']['diskBytes'] > 0
+            assert stopped_health['diskGrowth']['retainedBytes'][run] > 0, 'Stopped journal lost its measured admission credit.'
             point = manager('publish', run=run)
             s3 = boto3.client('s3', endpoint_url=os.environ['CAIRN_NODE_TEST_S3_ENDPOINT'])
             first_objects = [obj for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', [])]
@@ -435,7 +766,6 @@ def main():
             other_before = api('/disks/' + other + '/storage-status')
             evicted = api('/disks/' + run + '/evict', receipt)
             assert evicted['evictedBytes'] > 0, 'No real clean block cache reclaimed.'
-            assert not (state / 'native' / run / 'legacy-data').exists()
             assert api('/disks/' + other + '/storage-status')['localBytes'] == other_before['localBytes']
             metrics['evictedBytes'] = evicted['evictedBytes']
             # A stale private inode with a different rdev must not block the next
@@ -443,8 +773,54 @@ def main():
             os.mknod(state / 'native-block' / run / 'root/disk.blk', stat.S_IFBLK | 0o600, os.makedev(7, 65535))
             command('systemctl', 'stop', supervisor)
             start_controller()
-            resumed = start(run, legacy=True, measure='nativeEvicted')
+            resumed = start(run, measure='nativeEvicted')
             assert metrics['nativeEvicted']['readTriggeredRemoteRequests'] > 0, 'Payload did not use demand-paged S3 reads.'
+            # Real journal -> live ublk -> online ext4 growth. The workload
+            # process and namespace stay alive; no whole-disk materialization.
+            growth_health = api('/health', method='GET')
+            assert growth_health.get('diskGrowth', {}).get('protocol') == 1, 'Qualification host lacks live ublk resize.'
+            unit = 'cairn-native-' + resumed + '.service'
+            workload_pid = command('systemctl', 'show', unit, '--property=MainPID', '--value').stdout.strip()
+            before_capacity = os.statvfs(managed(run)).f_blocks * os.statvfs(managed(run)).f_frsize
+            # Negotiate first, then generate real combined workspace/tmp
+            # pressure without filling the workspace itself. Sparse tmp is
+            # intentionally charged by logical length, as in production.
+            api('/disk-growth', dict(protocol=1, grants=[]))
+            space = os.statvfs(managed(run))
+            used = (space.f_blocks - space.f_bfree) * space.f_frsize
+            pressure_file = state / 'native' / run / 'tmp/growth-pressure'
+            with pressure_file.open('wb') as stream:
+                stream.truncate(max(0, 256 * 1024 * 1024 * 83 // 100 - used))
+            eventually(lambda: (managed(run) / 'disk-notice-seen').exists(), timeout=20)
+            assert not (managed(run) / 'inbox-read-error').exists()
+            inbox = data / 'runs' / run / 'chat-input'
+            steering = inbox / '.fixture-steering'
+            steering.write_text(json.dumps([dict(id='synthetic-follow-up', text='Continue safely')]))
+            steering.chmod(0o444)
+            steering.replace(inbox / 'messages.json')
+            eventually(lambda: (managed(run) / 'steering-seen').read_text() == 'Continue safely', timeout=20)
+            assert not (managed(run) / 'inbox-read-error').exists()
+            before_reads = manager('metrics')['remoteRequests']
+            growth_start = time.monotonic()
+            api('/disk-growth', dict(protocol=1, grants=[dict(attemptId=resumed, allowanceMiB=384, reason='granted')]))
+            eventually(lambda: os.statvfs(managed(run)).f_blocks * os.statvfs(managed(run)).f_frsize > before_capacity)
+            metrics['onlineGrowth'] = dict(fromMiB=256, toMiB=384, wallMs=(time.monotonic()-growth_start)*1000,
+                                          remoteRequests=manager('metrics')['remoteRequests']-before_reads)
+            assert command('systemctl', 'show', unit, '--property=MainPID', '--value').stdout.strip() == workload_pid
+            pressure_file.unlink()
+            # Allocating more than the entire old disk exercises the ublk I/O
+            # bounds after resizing, including its newly appended journal tail.
+            tail = managed(run) / 'growth-tail'
+            with tail.open('wb') as stream:
+                os.posix_fallocate(stream.fileno(), 0, 260 * 1024 * 1024)
+                stream.seek(260 * 1024 * 1024 - 8)
+                stream.write(b'new-tail'); stream.flush(); os.fsync(stream.fileno())
+            with tail.open('rb') as stream:
+                stream.seek(-8, os.SEEK_END)
+                assert stream.read() == b'new-tail'
+            tail.unlink()
+            api('/disk-growth', dict(protocol=1, grants=[dict(attemptId=resumed, allowanceMiB=256, reason='granted')]))
+            assert os.statvfs(managed(run)).f_blocks * os.statvfs(managed(run)).f_frsize > before_capacity, 'Grant replay shrank filesystem.'
             for consistency in ('crash', 'filesystem'):
                 live = api('/runs/' + resumed + '/snapshot', dict(consistency=consistency))
                 assert live['manifest']['consistency'] == consistency
@@ -456,15 +832,14 @@ def main():
                 assert error.code == 409
             else:
                 raise AssertionError('Eviction removed an active writer cache.')
-            # Real cgroup backpressure must stop all descendant CPUs while the
-            # controller/backend remain able to publish and acknowledge blocks.
+            # Upload lag is visible while safe local work continues.
             policy = dict(contexts[run]['policy'], backupSeconds=5, maxDirtySeconds=5)
-            api('/storage-policy', policy)
-            eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is True, timeout=25)
+            storage_policy(policy)
+            eventually(lambda: api('/disks/' + run + '/storage-status')['backupDegraded'] is True, timeout=25)
+            assert api('/disks/' + run + '/storage-status')['paused'] is False
             descendant = managed(run) / 'descendant'
             size = descendant.stat().st_size
-            time.sleep(0.5)
-            assert descendant.stat().st_size == size, 'Storage pause left a descendant running.'
+            eventually(lambda: descendant.stat().st_size > size)
             # Acknowledgement retires the earlier point; restore the current
             # retained publication rather than requesting a collected history.
             point = manager('live-publish', run=run)
@@ -472,15 +847,46 @@ def main():
             eventually(lambda: descendant.stat().st_size > size)
             status = api('/disks/' + run + '/storage-status')
             receipt = dict(attempt=resumed, backupId=point['backupId'], generation=point['generation'], grantId=status['grantId'])
-            api('/storage-policy', contexts[run]['policy'])
+            storage_policy(contexts[run]['policy'])
+            # Real disk-reserve pressure must still stop every descendant CPU.
+            # The maximum supported reserve exceeds this disposable host's free
+            # space without allocating a pressure file or exhausting its disk.
+            pressure_policy = dict(contexts[run]['policy'], reserveMiB=16 * 1024 * 1024)
+            storage_policy(pressure_policy)
+            eventually(lambda: api('/disks/' + run + '/storage-status')['waitingFor'] == 'disk-space', timeout=25)
+            eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is True)
+            size = descendant.stat().st_size
+            time.sleep(0.5)
+            assert descendant.stat().st_size == size, 'Storage pause left a descendant running.'
+            storage_policy(contexts[run]['policy'])
+            eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is False)
+            eventually(lambda: descendant.stat().st_size > size)
             (managed(run) / 'persisted').write_text('unpublished mutation')
             # Stopping a protected workload must thaw its owned unit before
             # systemd can deliver termination signals. No manual thaw in this test.
-            api('/storage-policy', policy)
+            storage_policy(pressure_policy)
+            eventually(lambda: api('/disks/' + run + '/storage-status')['waitingFor'] == 'disk-space', timeout=25)
             eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is True, timeout=25)
-            api('/runs/' + resumed, method='DELETE')
+            stop_finished = threading.Event()
+            stop_errors = []
+            def stop_protected_workload():
+                try:
+                    api('/runs/' + resumed, method='DELETE')
+                except Exception as error:
+                    stop_errors.append(error)
+                finally:
+                    stop_finished.set()
+            threading.Thread(target=stop_protected_workload, daemon=True).start()
+            # DELETE must thaw and fence every workload process while reserve
+            # pressure remains active. Its durable checkpoint may still need I/O.
+            eventually(lambda: workload_stopped(resumed), timeout=25)
+            # Release only this fixture's artificial reserve after CPU fencing,
+            # so pending ext4 writes can flush before ownership is released.
+            storage_policy(contexts[run]['policy'])
+            assert stop_finished.wait(120), 'Protected stop did not finish after reserve pressure was released.'
+            if stop_errors:
+                raise stop_errors[0]
             fenced(run, resumed)
-            api('/storage-policy', contexts[run]['policy'])
             assert api('/disks/' + run + '/storage-status')['dirtyBytes'] > 0
             try:
                 api('/disks/' + run + '/evict', receipt)
@@ -488,8 +894,9 @@ def main():
                 assert error.code == 409
             else:
                 raise AssertionError('Eviction removed unpublished journal writes.')
+            progress('storage-growth-pressure-complete')
             manager('restore', run=run, backupId=point['backupId'])
-            restored = start(run, legacy=True)
+            restored = start(run)
             # The next start expects the retained 'changed' value. A no-op
             # second restore would leave this distinct mutation and fail it.
             (managed(run) / 'persisted').write_text('second unpublished mutation')
@@ -509,13 +916,15 @@ def main():
             fenced(run, crashed)
             final = start(run, long=False)
             fenced(run, final)
-            assert int((state / (final + '.exit')).read_text()) == 0
+            assert read_controller_result(state / (final + '.exit'))['StatusCode'] == 0
+            progress('restore-crash-recovery-complete')
             # Close the earlier disk while a later backend remains runnable.
             # CLONE_NEWNS alone copies the earlier mount into that backend,
             # causing DEL_DEV to block and retain every physical slot.
             api('/node-budget', dict(limits=dict(diskMiB=4096, cpu=2, memoryMiB=1024), slots=2))
             earlier = start(run)
             later = start(other)
+            qualify_exclusive(earlier, later, other)
             closing = time.monotonic()
             api('/runs/' + earlier, method='DELETE')
             fenced(run, earlier, timeout=15)
@@ -532,6 +941,71 @@ def main():
                 assert error.code == 409
             else:
                 raise AssertionError('Completed attempt restarted.')
+            progress('concurrent-retirement-complete')
+            # Simulated guest-written flat ext4, using the real controller,
+            # protected enclave, ublk transport, publication and remote restore.
+            # Main retired paired disks; no retired format is reintroduced.
+            vm_run = create()
+            vm_runs.add(vm_run)
+            system_tree = root / (vm_run + '-vm-tree')
+            guest_workspace = str(data / 'runs' / vm_run / 'workspace').lstrip('/')
+            workspace = system_tree / 'upper' / guest_workspace
+            workspace.mkdir(parents=True)
+            (workspace / 'seed').write_text('initial project')
+            (workspace / 'asset').write_bytes(asset)
+            home = system_tree / 'upper/home/node'
+            (home / '.codex/sessions').mkdir(parents=True)
+            (home / '.codex/sessions/keep').write_text('retained VM session')
+            for path in [system_tree, *system_tree.rglob('*')]:
+                os.chown(path, 1000, 1000)
+            root_owned = home / 'root-owned'
+            root_owned.write_text('guest root retained')
+            root_owned.chmod(0o444)
+            os.chown(root_owned, 0, 0)
+            raw = root / (vm_run + '.ext4')
+            with raw.open('wb') as output:
+                output.truncate(256 * 1024 * 1024)
+            command('mkfs.ext4', '-q', '-F', '-d', str(system_tree), str(raw))
+            manager('seed-vm', run=vm_run, context=contexts[vm_run])
+            first_vm = start(vm_run, measure='vmFlatRetained')
+            vm_identity = json.loads((state / 'native' / vm_run / 'file-owner.json').read_text())
+            engine_uid = vm_identity.get('host_engine', [vm_identity['subuid'] + 999])[0]
+            assert engine_uid != 1000, 'VM qualification requires a nonidentity engine UID.'
+            assert (managed(vm_run) / 'persisted').stat().st_uid == engine_uid
+            vm_view = json.loads((state / 'native' / vm_run / 'view.json').read_text())
+            assert (Path(vm_view['home']) / 'root-owned').stat().st_uid == 0
+            api('/runs/' + first_vm, method='DELETE')
+            fenced(vm_run, first_vm)
+            s3 = boto3.client('s3', endpoint_url=os.environ['CAIRN_NODE_TEST_S3_ENDPOINT'])
+            before_vm_objects = {obj['Key'] for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', [])}
+            point = manager('publish', run=vm_run)
+            vm_objects = [obj for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', []) if obj['Key'] not in before_vm_objects]
+            status = api('/disks/' + vm_run + '/storage-status')
+            receipt = dict(attempt=first_vm, backupId=point['backupId'], generation=point['generation'], grantId=status['grantId'])
+            assert api('/disks/' + vm_run + '/evict', receipt)['evictedBytes'] > 0
+            command('systemctl', 'stop', supervisor)
+            start_controller()
+            manager('restore', run=vm_run, backupId=point['backupId'])
+            resumed_vm = start(vm_run, measure='vmFlatRemote')
+            api('/runs/' + resumed_vm, method='DELETE')
+            fenced(vm_run, resumed_vm)
+            exported = Path(manager('export-vm', run=vm_run)['path'])
+            guest_file = '/upper/' + guest_workspace + '/persisted'
+            ownership = command('debugfs', '-R', 'stat ' + guest_file, str(exported)).stdout
+            assert 'User:  1000' in ownership and 'Group:  1000' in ownership, ownership
+            assert 'changed' in command('debugfs', '-R', 'cat ' + guest_file, str(exported)).stdout
+            root_ownership = command('debugfs', '-R', 'stat /upper/home/node/root-owned', str(exported)).stdout
+            assert 'User:     0' in root_ownership, root_ownership
+            daemon_ownership = command('debugfs', '-R', 'stat /docker', str(exported)).stdout
+            assert '65537' in daemon_ownership, daemon_ownership
+            metrics['vmDisks'] = [dict(layout='flat', mappedEngineUid=engine_uid,
+                nativeWritesStoredAsUid=1000, namespaceRuntimeStoredAsUid=65537,
+                encodedNewS3Bytes=sum(obj['Size'] for obj in vm_objects), encodedNewS3Objects=len(vm_objects),
+                retained=metrics.pop('vmFlatRetained'), remote=metrics.pop('vmFlatRemote'),
+                conditions='Guest layout simulated by mkfs; real protected native controller/ext4/idmap/ublk and loopback S3. Ownership inspected offline; no Firecracker guest boot.')]
+            manager('purge', run=vm_run)
+            api('/disks/' + vm_run + '/delete')
+
             # Real host administration and both directions of a multi-conversation
             # transition. This runs only on the disposable CI VM guarded above.
             api('/node-budget', dict(limits=dict(diskMiB=4096, cpu=2, memoryMiB=1024), slots=2))
@@ -543,6 +1017,7 @@ def main():
             fenced(run, first_protected)
             fenced(other, second_protected)
             admin_first, admin_second = start(run), start(other)
+            qualify_exclusive(admin_first, admin_second, other)
             assert stat.S_IMODE(root.stat().st_mode) == 0o700, 'Administrator changed private ancestor permissions.'
             assert host_marker.read_text() == 'administrative-change', 'sudo did not administer the actual host.'
             target = dict(mode='protected', generation=str(uuid.uuid4()))
@@ -554,7 +1029,7 @@ def main():
             assert host_marker.read_text() == 'administrative-change', 'Returning to protected must not claim to restore the host.'
             protected_again = start(run, long=False)
             fenced(run, protected_again)
-            assert int((state / (protected_again + '.exit')).read_text()) == 0
+            assert read_controller_result(state / (protected_again + '.exit'))['StatusCode'] == 0
             assert api('/native-mode', target) == applied, 'Retry of the applied generation must be idempotent.'
             assert api('/health', method='GET')['nativeMode'] == applied
             # A crash after persisting intent must never reopen admission on an
@@ -581,118 +1056,195 @@ def main():
             current_mode.update(pending_generation)
             after_crash = start(run, long=False)
             fenced(run, after_crash)
-            assert int((state / (after_crash + '.exit')).read_text()) == 0
+            assert read_controller_result(state / (after_crash + '.exit'))['StatusCode'] == 0
             metrics['nativeAdministrator'] = dict(realHostSudo=True, ordinaryUser=True,
                 concurrentConversations=2, rootDescendantsStopped=True,
                 protectedAfterAdministrator=True, filesPreserved=True, hostChangesRetained=True,
                 pendingCrashFailsClosed=True, generationRetry=True)
+            progress('native-mode-transition-complete')
             manager('publish', run=run)
+            if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
+                import socket
+                api('/node-budget', dict(limits=dict(diskMiB=8192, cpu=2, memoryMiB=2048), slots=2))
+                docker_run = create()
+                docker_other = create()
+
+                def docker_script(phase):
+                    workload = Path(__file__).with_name('native_docker_workload.py').read_text()
+                    return '/usr/bin/python3 - ' + phase + " <<'NATIVE_DOCKER'\n" + workload + '\nNATIVE_DOCKER\n'
+
+                def docker_result(current):
+                    path = state / 'native' / current / 'data/home/.docker-test-result.json'
+                    return json.loads(path.read_text())
+
+                progress('docker-fresh')
+                fresh = start(docker_run, lease=300000, docker_script=docker_script('fresh'))
+                metrics['dockerFresh'] = docker_result(docker_run)
+                namespace = command('systemctl', 'show', 'cairn-native-' + fresh + '.service', '--property=ControlGroup', '--value').stdout.strip()
+                group = Path('/sys/fs/cgroup') / namespace.lstrip('/')
+                metrics['dockerCgroup'] = dict(cpuMax=(group / 'cpu.max').read_text().strip(),
+                    memoryMax=(group / 'memory.max').read_text().strip(), cpuStat=(group / 'cpu.stat').read_text())
+                process_names = []
+                for membership in [group / 'cgroup.procs'] + list(group.rglob('cgroup.procs')):
+                    for pid in membership.read_text().split():
+                        try:
+                            process_names.append(Path('/proc', pid, 'comm').read_text().strip())
+                        except FileNotFoundError:
+                            pass
+                assert 'dockerd' in process_names and 'containerd' in process_names, process_names
+                metrics['dockerCgroup']['descendantNames'] = sorted(set(process_names))
+                assert int((group / 'memory.max').read_text()) == 1024 * 1024 * 1024
+                assert (group / 'cpu.max').read_text().split()[0] != 'max'
+                with socket.socket() as probe:
+                    assert probe.connect_ex(('127.0.0.1', 57431)) != 0, 'Docker published on the host network.'
+                progress('docker-concurrent')
+                parallel = start(docker_other, lease=300000, docker_script=docker_script('other'))
+                owner_a = json.loads((state / 'native' / docker_run / 'data/.cairn-identity.json').read_text())
+                owner_b = json.loads((state / 'native' / docker_other / 'data/.cairn-identity.json').read_text())
+                assert 500000000 <= owner_a['root_uid'] < 501048576
+                assert owner_a['root_uid'] == owner_a['root_gid']
+                assert owner_a['root_uid'] != owner_b['root_uid']
+                assert abs(owner_a['subuid'] - owner_b['subuid']) >= 65536
+                api('/runs/' + parallel, method='DELETE')
+                fenced(docker_other, parallel)
+                # Preserve real Docker state through the upstream administrator
+                # execution contract and back to isolated protected execution.
+                progress('docker-administrator-transition')
+                target = dict(mode='administrator', generation=str(uuid.uuid4()))
+                assert api('/native-mode', target)['status'] == 'applied'
+                current_mode.update(target)
+                fenced(docker_run, fresh)
+                administrator_docker = start(docker_run, lease=300000)
+                target = dict(mode='protected', generation=str(uuid.uuid4()))
+                assert api('/native-mode', target)['status'] == 'applied'
+                current_mode.update(target)
+                fenced(docker_run, administrator_docker)
+                fresh = start(docker_run, lease=300000, docker_script=docker_script('resume'))
+                metrics['dockerAfterAdministrator'] = docker_result(docker_run)
+                # Seed the durable state left after an interrupted ownership
+                # batch. A hard link keeps the old empty target inode alive
+                # across unmount, publication and restart without pinning mounts.
+                # Runtime credentials themselves must never enter this disk.
+                docker_data = state / 'native' / docker_run / 'data'
+                auth_target = docker_data / 'home/.codex/auth.json'
+                assert auth_target.read_bytes() == b''
+                pinned_target = docker_data / '.fixture-pinned-auth'
+                os.link(auth_target, pinned_target)
+                metadata = auth_target.stat()
+                recovery_mode = (metadata.st_mode & ~0o7777) | 0o640
+                entry = dict(relative=list(b'home/.codex/auth.json'), inode=metadata.st_ino,
+                    uid=metadata.st_uid, gid=metadata.st_gid, mode=recovery_mode,
+                    symlink=False, attributes=[], needs_apply=True)
+                (docker_data / '.cairn-identity.transition.json').write_text(json.dumps(dict(previous=owner_a, target=owner_a)))
+                (docker_data / '.cairn-identity.pending.json').write_text(json.dumps([entry]))
+                for name in ('.cairn-identity.transition.json', '.cairn-identity.pending.json'):
+                    (docker_data / name).chmod(0o600)
+                auth_target.chmod(0o600)
+                # Model a crash between directory creation and metadata save,
+                # alongside an individually corrupt container. Healthy saved
+                # binds, cache and volumes must survive both resume and restore.
+                # Seed while the disk is mounted: fencing below unmounts it.
+                containers = docker_data / 'docker/containers'
+                owner = containers.stat()
+                for digit in ['d', 'e']:
+                    incomplete = containers / (digit * 64)
+                    incomplete.mkdir(mode=0o700)
+                    os.chown(incomplete, owner.st_uid, owner.st_gid)
+                    if digit == 'e':
+                        host_config = incomplete / 'hostconfig.json'
+                        host_config.write_text('{')
+                        host_config.chmod(0o600)
+                        os.chown(host_config, owner.st_uid, owner.st_gid)
+                api('/runs/' + fresh, method='DELETE')
+                fenced(docker_run, fresh)
+                progress('docker-publish-resume')
+                point = manager('publish', run=docker_run)
+                resumed_docker = start(docker_run, lease=300000, docker_script=docker_script('resume'))
+                assert stat.S_IMODE(pinned_target.stat().st_mode) == 0o640, 'Pending inode metadata was not replayed before home refresh.'
+                assert auth_target.stat().st_ino != pinned_target.stat().st_ino
+                assert not (docker_data / '.cairn-identity.pending.json').exists()
+                assert not (docker_data / '.cairn-identity.transition.json').exists()
+                pinned_target.unlink()
+                metrics['pendingHomeMetadataRecovered'] = True
+                metrics['dockerResume'] = docker_result(docker_run)
+                metrics['dockerPartialMetadataRecovered'] = True
+                api('/runs/' + resumed_docker, method='DELETE')
+                fenced(docker_run, resumed_docker)
+                progress('docker-restore-remap')
+                manager('restore', run=docker_run, backupId=point['backupId'])
+                # Emulate a destination with unavailable source IDs on this
+                # disposable host. No controller/workload is using this account.
+                command('userdel', owner_a['user'])
+                blocker = 'cairn-test-' + identifier[:8]
+                command('useradd', '--system', '--user-group', '--no-create-home', '--no-log-init', '--uid', str(owner_a['root_uid']), blocker)
+                reserved_users.append(blocker)
+                command('usermod', '--add-subuids', str(owner_a['subuid']) + '-' + str(owner_a['subuid'] + 65535), '--add-subgids', str(owner_a['subgid']) + '-' + str(owner_a['subgid'] + 65535), blocker)
+                restored_docker = start(docker_run, lease=300000, docker_script=docker_script('resume'))
+                metrics['dockerRestored'] = docker_result(docker_run)
+                destination = json.loads((state / 'native' / docker_run / 'data/.cairn-identity.json').read_text())
+                assert destination['root_uid'] != owner_a['root_uid']
+                assert destination['subuid'] != owner_a['subuid']
+                metrics['dockerIdentityMove'] = dict(source=owner_a, destination=destination, conditions='Different host IDs emulated on the same disposable host; same kernel/tools, loopback S3, not a physical two-node/WAN measurement.')
+                progress('docker-controller-fencing')
+                command('systemctl', 'kill', '--signal=SIGKILL', '--kill-who=main', supervisor)
+                eventually(lambda: command('systemctl', 'show', supervisor, '--property=LoadState', '--value').stdout.strip() == 'not-found')
+                start_controller()
+                fenced(docker_run, restored_docker)
+                api('/node-budget', dict(limits=dict(diskMiB=8192, cpu=2, memoryMiB=2048), slots=2))
+                guardian_docker = start(docker_run, lease=300000, docker_script=docker_script('resume'))
+                command('systemctl', 'kill', '--signal=SIGKILL', '--kill-who=main', 'cairn-native-guardian-' + guardian_docker + '.service')
+                fenced(docker_run, guardian_docker)
+                lease_docker = start(docker_run, lease=300000, docker_script=docker_script('resume'))
+                api('/runs/' + lease_docker + '/lease', {'remainingMs': 1000})
+                fenced(docker_run, lease_docker)
+                progress('docker-memory-ceiling')
+                oom_docker = start(docker_run, lease=300000, docker_script=docker_script('oom'))
+                fenced(docker_run, oom_docker)
+                assert read_controller_result(state / (oom_docker + '.exit'))['StatusCode'] != 0, 'Over-budget container survived or exited normally.'
+                metrics['dockerMemoryCeilingFenced'] = True
+                progress('docker-readonly')
+                readonly_docker = start(docker_run, long=False, lease=300000, sandbox='read-only', docker_script=docker_script('readonly'))
+                fenced(docker_run, readonly_docker)
+                manager('publish', run=docker_run)
             # Publication checks every decoded S3 block for generated secrets.
             s3 = boto3.client('s3', endpoint_url=os.environ['CAIRN_NODE_TEST_S3_ENDPOINT'])
             objects = [obj for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', [])]
             metrics['encodedS3Bytes'] = sum(obj['Size'] for obj in objects)
             metrics['encodedS3Objects'] = len(objects)
-            for current in runs:
+            progress('purge-start')
+            for index, current in enumerate(runs):
+                progress('purge-' + str(index + 1) + '-of-' + str(len(runs)))
                 manager('purge', run=current)
-            # Real VM-layout ext4 on ublk, with nonidentity ownership in both
-            # directions; repeat through remote restore for flat and paired disks.
-            workload_uid = pwd.getpwnam(user).pw_uid
-            assert workload_uid != 1000, 'Qualification needs a nonidentity workload UID.'
-            metrics['vmWorkloadUid'] = workload_uid
-            metrics['vmDisks'] = []
-            for paired in (False, True):
-                vm_run = create()
-                vm_layouts[vm_run] = paired
-                system_tree = root / (vm_run + '-system')
-                workspace_tree = root / (vm_run + '-workspace')
-                home = system_tree / 'upper/home/node'
-                workspace_tree.mkdir()
-                guest_workspace = Path('data/runs') / vm_run / 'workspace'
-                workspace = workspace_tree / Path('runs') / vm_run / 'workspace' if paired else system_tree / 'upper' / guest_workspace
-                workspace.mkdir(parents=True)
-                (workspace / 'seed').write_text('initial project')
-                (workspace / 'asset').write_bytes(asset)
-                for name, content in {
-                    '.codex/sessions/keep': 'session state',
-                    '.claude/plugins/user/tool': 'legacy installed plugin',
-                    '.claude/CLAUDE.md': 'legacy user instructions',
-                }.items():
-                    target = home / name
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(content)
-                if paired:
-                    for name in ('home-cache', 'home-share', 'android'):
-                        (workspace_tree / '.cairn-system' / name).mkdir(parents=True)
-                    cache = workspace_tree / '.cairn-system/home-cache/models/keep'
-                else:
-                    cache = home / '.cache/models/keep'
-                cache.parent.mkdir(parents=True, exist_ok=True)
-                cache.write_text('model cache')
-                for tree in (system_tree, workspace_tree):
-                    for path in [tree, *tree.rglob('*')]:
-                        os.chown(path, 1000, 1000)
-                root_owned = home / 'root-owned'
-                root_owned.write_text('root stays root')
-                root_owned.chmod(0o444)
-                os.chown(root_owned, 0, 0)
-                raw = root / (vm_run + '.ext4')
-                with raw.open('wb') as image:
-                    image.truncate(256 * 1024 * 1024)
-                if paired:
-                    system_image, workspace_image = root / (vm_run + '-system.ext4'), root / (vm_run + '-workspace.ext4')
-                    for image, size, tree in ((system_image, 64, system_tree), (workspace_image, 192, workspace_tree)):
-                        with image.open('wb') as output:
-                            output.truncate(size * 1024 * 1024)
-                        command('mkfs.ext4', '-q', '-F', '-d', str(tree), str(image))
-                    with raw.open('r+b') as output:
-                        for image in (system_image, workspace_image):
-                            with image.open('rb') as source:
-                                while block := source.read(4 * 1024 * 1024):
-                                    output.write(block)
-                else:
-                    command('mkfs.ext4', '-q', '-F', '-d', str(system_tree), str(raw))
-                manager('seed-vm', run=vm_run, paired=paired, context=contexts[vm_run])
-                retained_key = 'vmPairedRetained' if paired else 'vmFlatRetained'
-                resumed_key = 'vmPairedRemote' if paired else 'vmFlatRemote'
-                first = start(vm_run, legacy=True, measure=retained_key)
-                view = json.loads((state / 'native' / vm_run / 'view.json').read_text())
-                assert (managed(vm_run) / 'persisted').stat().st_uid == workload_uid
-                assert len(view['filesystems']) == (2 if paired else 1)
-                api('/runs/' + first, method='DELETE')
-                fenced(vm_run, first)
-                before_objects = {obj['Key'] for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', [])}
-                point = manager('publish', run=vm_run)
-                encoded = [obj for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', []) if obj['Key'] not in before_objects]
-                status = api('/disks/' + vm_run + '/storage-status')
-                receipt = dict(attempt=first, backupId=point['backupId'], generation=point['generation'], grantId=status['grantId'])
-                assert api('/disks/' + vm_run + '/evict', receipt)['evictedBytes'] > 0
-                command('systemctl', 'stop', supervisor)
-                start_controller()
-                manager('restore', run=vm_run, backupId=point['backupId'])
-                resumed = start(vm_run, legacy=True, measure=resumed_key)
-                api('/runs/' + resumed, method='DELETE')
-                fenced(vm_run, resumed)
-                exported = Path(manager('export-vm', run=vm_run)['path'])
-                filesystem = exported
-                path = '/' + str(Path('runs') / vm_run / 'workspace/persisted') if paired else '/upper/' + str(guest_workspace / 'persisted')
-                if paired:
-                    filesystem = root / (vm_run + '-export-workspace.ext4')
-                    command('dd', 'if=' + str(exported), 'of=' + str(filesystem), 'bs=1048576', 'skip=64', 'status=none')
-                ownership = command('debugfs', '-R', 'stat ' + path, str(filesystem)).stdout
-                assert 'User:  1000' in ownership and 'Group:  1000' in ownership, ownership
-                assert 'changed' in command('debugfs', '-R', 'cat ' + path, str(filesystem)).stdout
-                metrics['vmDisks'].append(dict(layout='paired' if paired else 'flat',
-                    encodedNewS3Bytes=sum(obj['Size'] for obj in encoded), encodedNewS3Objects=len(encoded),
-                    nativeWritesStoredAsUid=1000, retained=metrics.pop(retained_key), remote=metrics.pop(resumed_key)))
-                manager('purge', run=vm_run)
+                api('/disks/' + current + '/delete')
+                if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
+                    # Backup purge and permanent local disk deletion are
+                    # separate operations; exercise both before checking state.
+                    docker_runtime_path = state / 'native' / current / 'docker-runtime'
+                    assert not docker_runtime_path.exists() and not docker_runtime_path.is_symlink(), 'Permanent deletion retained Docker runtime state.'
+            if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
+                metrics['dockerRuntimeCleanupVerified'] = True
+            metrics['garbageBeforeFinalSweep'] = advance_fixture_garbage_clock(root)
+            manager('purge', run=runs[-1])
+            metrics['garbageAfterFinalSweep'] = fixture_garbage_inventory(root)
+            metrics['s3ObjectsAfterPurge'] = s3.list_objects_v2(Bucket='cairn-node-test').get('KeyCount', 0)
+            progress('purge-completed')
             metrics['harnessCpuSeconds'] = resource.getrusage(resource.RUSAGE_SELF).ru_utime
+            metrics['host']['loadAverageEnd'] = os.getloadavg()
+            metrics['host']['cpuTicksEnd'] = Path('/proc/stat').read_text().splitlines()[0]
             evidence = Path(os.environ.get('NATIVE_STORAGE_EVIDENCE_DIR', str(root / 'evidence')))
             evidence.mkdir(parents=True, exist_ok=True)
             (evidence / 'native-storage.json').write_text(json.dumps(metrics, indent=2) + '\n')
-            print('PASS: real ublk/ext4, unprivileged runner-entry, read-only runtime secrets/skills, legacy cache/session migration, '
+            print('PASS: real ublk/ext4, unprivileged runner-entry, read-only runtime secrets/skills, '
                   'S3 publish/ack, conditional clean eviction, unrelated conversation retained, lazy remote resume, repeated restore, '
                   'lease/descendant/guardian/controller fencing, crash recovery, concurrent disk retirement, final checkpoint, retry tombstone.')
         finally:
+            # An impossible test reserve must not keep kernel writeback blocked
+            # while fixture cleanup waits for the controller to stop.
+            try:
+                policy_generation += 1
+                api('/storage-policy', dict(generation=policy_generation, policy=contexts[runs[0]]['policy']), timeout=5)
+            except Exception:
+                pass
             helper.stdin.close()
             try:
                 helper.wait(timeout=10)
@@ -700,8 +1252,15 @@ def main():
                 helper.kill()
                 helper.wait()
             bridge.shutdown()
+            for server in mcp_servers.values():
+                server.shutdown()
+                server.server_close()
             for unit in [supervisor] + ['cairn-native-' + attempt + '.service' for attempt in attempts] + ['cairn-native-guardian-' + attempt + '.service' for attempt in attempts]:
                 subprocess.run(['systemctl', 'stop', unit], capture_output=True, timeout=30)
+            for current in runs:
+                subprocess.run(['userdel', 'cairn-c-' + current.replace('-', '')[:24]], capture_output=True, timeout=30)
+            for reserved in reserved_users:
+                subprocess.run(['userdel', reserved], check=True, capture_output=True)
             Path('/etc/sudoers.d/cairn-native-' + str(__import__('pwd').getpwnam(user).pw_uid)).unlink(missing_ok=True)
             host_marker.unlink(missing_ok=True)
             subprocess.run(['userdel', user], check=True, capture_output=True)

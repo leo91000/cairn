@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "provider": {
+      "default": "codex",
+      "pattern": "^(codex|claude|opencode)$",
+      "type": "string"
+    }
+  },
+  "title": "ListModelsInput",
+  "type": "object"
+}

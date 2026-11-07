@@ -9,38 +9,59 @@ import build.cairn.app.data.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
-/**
- * A conversation's backend and, for an environment created natively, its one-time conversion before
- * a VM can run it.
- */
+@Serializable private data class MigrationNode(val id: String, val name: String)
+
 @Serializable
-data class BackendMigrationState(
-    val backend: String = VM_BACKEND,
-    val diskFormat: String = "vm",
-    val pending: Boolean = false,
+private data class BackendMigrationState(
+    val required: Boolean = false,
+    val optional: Boolean = false,
+    val fromBackend: String = "firecracker",
+    val toBackend: String = "firecracker",
+    val nodes: List<MigrationNode> = emptyList(),
+    val conversion: Boolean = false,
     val mission: Boolean = false,
+    val pending: Boolean = false,
+    val environmentExpired: Boolean = false,
+    val reason: String? = null,
     val error: String? = null,
 )
 
-/** Progress of a natively created environment converted for a VM. [refresh] restarts it. */
 @Composable
-fun BackendMigration(vm: CairnViewModel, runId: String, refresh: Int = 0) {
+fun BackendMigration(vm: CairnViewModel, runId: String, onCompleted: () -> Unit = {}) {
     var state by remember(runId) { mutableStateOf<BackendMigrationState?>(null) }
+    var destination by remember(runId) { mutableStateOf("") }
+    var confirm by remember(runId) { mutableStateOf(false) }
+    var busy by remember(runId) { mutableStateOf(false) }
     var completed by remember(runId) { mutableStateOf(false) }
+    var error by remember(runId) { mutableStateOf<String?>(null) }
     suspend fun load() {
         try {
             val value: BackendMigrationState =
                 vm.api.get("/nodes/placement/$runId/backend-migration")
-            if (state?.pending == true && !value.pending && value.error == null) completed = true
+            if (
+                state?.pending == true &&
+                    !value.pending &&
+                    value.fromBackend == state?.toBackend &&
+                    value.fromBackend != state?.fromBackend
+            ) {
+                completed = true
+                onCompleted()
+            }
             state = value
+            if (value.nodes.none { it.id == destination })
+                destination = value.nodes.firstOrNull()?.id.orEmpty()
+            error = null
         } catch (e: CancellationException) {
             throw e
-        } catch (_: Exception) {
-            // Old installations and non-owner views have no conversion progress to show.
+        } catch (e: Exception) {
+            // Old installations and non-owner views do not expose these controls.
+            if (state != null) error = e.message
         }
     }
-    LaunchedEffect(runId, refresh) { load() }
+    LaunchedEffect(runId) { load() }
     LaunchedEffect(runId, state?.pending) {
         while (state?.pending == true) {
             delay(1500)
@@ -48,28 +69,91 @@ fun BackendMigration(vm: CairnViewModel, runId: String, refresh: Int = 0) {
         }
     }
     val value = state ?: return
-    if (!value.pending && value.error == null && !completed) return
+    if (!value.required && !value.optional && !value.pending && !completed) return
+    val target = if (value.toBackend == "native") "l’exécution native" else "une VM Firecracker"
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         HorizontalDivider()
-        Text("Passage en VM", style = MaterialTheme.typography.titleSmall)
+        Text("Changer le mode d’exécution", style = MaterialTheme.typography.titleSmall)
         when {
-            completed ->
-                Text(
-                    if (value.mission)
-                        "Conversion terminée. La mission reprend dans une nouvelle session du moteur."
-                    else
-                        "Conversion terminée. Envoyez un nouveau message pour continuer dans le même fil."
-                )
+            completed -> Text("Mode d’exécution changé. Vous pouvez continuer dans ce fil.")
             value.pending ->
                 Text(
-                    "Conversion de cet environnement créé en natif pour une VM. L’exécution est arrêtée pendant la copie et la restauration de ses fichiers. Vous pouvez quitter cet écran."
+                    if (value.environmentExpired)
+                        "Migration vers $target. Le prochain message crée un environnement vide. L’historique et les livrables restent disponibles."
+                    else
+                        "Migration vers $target. L’exécution est arrêtée pendant la sauvegarde et le transfert. Vous pouvez quitter cet écran."
                 )
+            else -> {
+                Text(
+                    if (value.environmentExpired)
+                        "L’environnement précédent a expiré. Confirmez $target pour continuer dans le même fil avec un environnement vide. L’historique, les pièces jointes et les livrables sont conservés."
+                    else if (value.optional)
+                        "Vous pouvez choisir explicitement $target pour cette conversation. Son environnement actuel est conservé jusqu’à votre confirmation."
+                    else
+                        "L’agent utilise maintenant $target. Migrez cette conversation pour garder son historique et ses fichiers."
+                )
+                if (value.reason != null) Text(value.reason)
+                else if (value.nodes.isEmpty())
+                    Text(
+                        "Autorisez une node de destination sur la page de l’agent avant de migrer."
+                    )
+                else {
+                    Choice(
+                        "Destination de migration",
+                        destination,
+                        value.nodes.map { it.id to it.name },
+                    ) {
+                        destination = it
+                    }
+                    OutlinedButton(
+                        enabled = !busy && destination.isNotEmpty(),
+                        onClick = { confirm = true },
+                    ) {
+                        Text("Migrer cette conversation…")
+                    }
+                }
+            }
         }
-        value.error?.let {
-            Text(
-                "$it Déplacez à nouveau la conversation pour réessayer.",
-                color = MaterialTheme.colorScheme.error,
-            )
-        }
+        if (completed && value.optional)
+            OutlinedButton(onClick = { completed = false }) {
+                Text("Changer encore l’environnement")
+            }
+        (error ?: value.error)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
     }
+    if (confirm)
+        Confirm(
+            title = "Migrer cette conversation ?",
+            description =
+                if (value.environmentExpired)
+                    "Les anciens fichiers de travail ont été supprimés après inactivité. Confirmez $target pour un nouvel environnement vide. Le fil, l’historique, les pièces jointes et les livrables sont conservés. Le prochain message ouvre une nouvelle session du moteur avec le contexte de la conversation. Les outils et dépendances devront être réinstallés. Le node choisi est épinglé pour le nouvel environnement. Vous pouvez modifier ce choix dans les préférences du fil."
+                else if (value.conversion)
+                    "Un disque créé en natif nécessite une conversion unique vers $target. Le chat attend le prochain message ; une mission reprend automatiquement avec son historique dans une nouvelle session. L’original est conservé en cas d’échec. Les outils système dépendent de la destination."
+                else
+                    "Le même disque et la même session du moteur sont réutilisés vers $target sans copie des fichiers. Les commandes s’arrêtent ; les outils système dépendent de la destination. L’original est conservé en cas d’échec.",
+            busy = busy,
+            error = error,
+            dismiss = { confirm = false },
+        ) {
+            busy = true
+            vm.perform {
+                try {
+                    api.request(
+                        "POST",
+                        "/nodes/placement/$runId/backend-migration",
+                        buildJsonObject {
+                            put("nodeId", destination)
+                            put("backend", value.toBackend)
+                            put("confirm", true)
+                        },
+                    )
+                    state = value.copy(pending = true)
+                    confirm = false
+                    load()
+                } catch (e: Exception) {
+                    error = e.message
+                } finally {
+                    busy = false
+                }
+            }
+        }
 }

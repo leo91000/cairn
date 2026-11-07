@@ -3,38 +3,57 @@
 use crate::{
     error::{Error, Result, required},
     mcp_server::empty_listing,
-    mcps::{grant_key, record::RunGrant},
+    mcps::grant_key,
     run_status::RunStatus,
     service::{Service, allowed, covers, policy},
     store::Db,
     validation::{parse, text},
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub(crate) async fn authorize(s: &Service, bearer: &str) -> Result<Value> {
-    let bearer = bearer.to_owned();
-    s.store.read(move |db| authorize_in(db, &bearer)).await
+    authorize_with_authority(s, bearer)
+        .await
+        .map(|(run, _)| run)
+}
+
+/// Retain both the execution token and semantic delegation proof across effects.
+pub(crate) async fn authorize_with_authority(
+    s: &Service,
+    bearer: &str,
+) -> Result<(Value, crate::capabilities::plugin_packages::Authority)> {
+    let caller = bearer.to_owned();
+    let token = caller.clone();
+    let read_token = caller.clone();
+    let run = s
+        .store
+        .read(move |db| authorize_in(db, &read_token))
+        .await?;
+    let authority = crate::capabilities::plugin_packages::Authority::for_execution(&run)
+        .with_guard(move |db| authorize_in(db, &token).map(|_| ()));
+    let mut authority = crate::delegation::authorize_async_with(s, &run, authority).await?;
+    authority.bearer = Some(caller);
+    Ok((run, authority))
 }
 
 pub(crate) fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {
     let denied = || Error::unauthorized("Installation access expired or was revoked.");
-    let grant = db.kv(&grant_key(bearer))?.ok_or_else(denied)?;
-    let grant = RunGrant::deserialize(&grant)?;
+    let grant = db.mcp_run_grant(&grant_key(bearer))?.ok_or_else(denied)?;
     let run = db.run(&grant.run_id)?.ok_or_else(denied)?;
     if !grant.installation
-        || grant.message_id != *crate::waits::execution_id(&run)
+        || grant.message_id.as_deref() != crate::waits::execution_id(&run).as_str()
         || run["status"] != RunStatus::Running
         || !run["cancelRequestedAt"].is_null()
     {
         return Err(denied());
     }
     let agent = &run["snapshot"]["agent"];
-    let current = db.get("agents", text(agent, "id"))?.ok_or_else(denied)?;
+    let current = db.agent_snapshot(text(agent, "id"))?.ok_or_else(denied)?;
     if policy(agent)["installation"] != true || !agent_allowed(&current, agent) {
         return Err(Error::forbidden("Agent permissions were reduced."));
     }
+    crate::delegation::authorize_run(db, &run)?;
     Ok(run)
 }
 
@@ -55,15 +74,16 @@ pub(crate) fn agent_allowed(caller: &Value, target: &Value) -> bool {
 }
 
 /// Authorization for management effects after asynchronous preparation.
-pub(crate) fn management_authorization(
+pub(crate) async fn management_authorization(
+    s: &Service,
     bearer: Option<&str>,
-) -> impl Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static {
-    let bearer = bearer.map(str::to_owned);
-    move |db| {
-        if let Some(bearer) = &bearer {
-            authorize_in(db, bearer)?;
+) -> Result<crate::authorization::Authorization> {
+    match bearer {
+        Some(bearer) => {
+            let (_, authority) = authorize_with_authority(s, bearer).await?;
+            Ok(crate::authorization::Authorization::installation_management(s, authority, bearer))
         }
-        Ok(())
+        None => Ok(crate::authorization::Authorization::default()),
     }
 }
 
@@ -78,10 +98,10 @@ pub(crate) fn authorize_task_in(
     let caller = authorize_in(db, bearer)?;
 
     if let Some(id) = existing {
-        required(db.get("tasks", id)?, "Task not found")?;
+        required(db.mission(id)?, "Task not found")?;
     }
 
-    required(db.get("agents", text(task, "agentId"))?, "Agent not found")?;
+    required(db.agent_snapshot(text(task, "agentId"))?, "Agent not found")?;
 
     Ok(caller)
 }
@@ -123,16 +143,42 @@ pub(crate) async fn rpc(
     }
 }
 
+/// A plan turn exposes only operations whose delegated MCP scope is `read`.
+fn has_read_scope(operation: &Value) -> bool {
+    operation["_meta"]["securitySchemes"]
+        .as_array()
+        .is_some_and(|schemes| {
+            schemes.iter().any(|scheme| {
+                let scopes = scheme["scopes"].as_array();
+                scheme["type"] == "oauth2"
+                    && scopes.is_some_and(|scopes| {
+                        scopes.len() == 1 && scopes[0].as_str() == Some("read")
+                    })
+            })
+        })
+}
+
+fn allowed_in_turn(run: &Value, operation: &Value) -> bool {
+    !crate::chats::planning(run) || has_read_scope(operation)
+}
+
 pub(crate) async fn operations(s: &Service, bearer: &str) -> Result<Vec<Value>> {
     let run = authorize(s, bearer).await?;
     let agent_id = &run["snapshot"]["agent"]["id"];
     let tools = crate::mcp_server::operations()
         .into_iter()
+        .filter(|tool| allowed_in_turn(&run, tool))
         .map(|mut tool| {
             tool.as_object_mut().unwrap().remove("_meta");
+            if tool["name"] == "create_task" {
+                let settings = &mut tool["inputSchema"]["definitions"]["MissionSettings"];
+                settings["properties"]["agentId"]["default"] = agent_id.clone();
+                if let Some(required) = settings["required"].as_array_mut() {
+                    required.retain(|field| field != "agentId");
+                }
+            }
             let properties = match text(&tool, "name") {
-                "create_task" | "create_chat" => Some(&mut tool["inputSchema"]["properties"]),
-                "update_task" => Some(&mut tool["inputSchema"]["properties"]["task"]["properties"]),
+                "create_chat" => Some(&mut tool["inputSchema"]["properties"]),
                 _ => None,
             };
             if let Some(properties) = properties {
@@ -151,15 +197,178 @@ pub(crate) async fn operation(
     mut args: Value,
 ) -> Result<Value> {
     let run = authorize(s, bearer).await?;
-    let known = crate::mcp_server::operations()
-        .iter()
-        .any(|tool| text(tool, "name") == name);
-    if !known {
+    let operations = crate::mcp_server::operations();
+    let Some(operation) = operations.iter().find(|tool| text(tool, "name") == name) else {
         return Err(Error::not_found("Unknown operation"));
+    };
+    if !allowed_in_turn(&run, operation) {
+        return Err(Error::forbidden(
+            "Only read-scoped installation operations are available during a plan turn.",
+        ));
+    }
+    if let Some(op) = crate::capabilities::artifact_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
+    if let Some(operation) = crate::capabilities::plugin_package_operation(name) {
+        return operation
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
+    if name == "manage_plugin" {
+        return crate::capabilities::MANAGE_PLUGIN
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::mission_operation(name) {
+        if name == "create_task"
+            && let Some(settings) = args.get_mut("settings").and_then(Value::as_object_mut)
+        {
+            settings
+                .entry("agentId")
+                .or_insert_with(|| run["snapshot"]["agent"]["id"].clone());
+        }
+        let origin = crate::validation::text(&run, "id").to_owned();
+        return crate::native::policy::PARENT
+            .scope(
+                origin,
+                op.invoke(
+                    s,
+                    args,
+                    crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+                ),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::mcp_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+                None,
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::agent_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::account_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::personal_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::settings_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
+    if name == "create_chat"
+        && let Some(input) = args.as_object_mut()
+    {
+        input
+            .entry("agentId")
+            .or_insert_with(|| run["snapshot"]["agent"]["id"].clone());
+    }
+    if let Some(op) = crate::capabilities::chat_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::node_operation(name) {
+        // Bound the shared RPC frame while placement can await nested node work.
+        return crate::native::policy::PARENT
+            .scope(
+                crate::validation::text(&run, "id").to_owned(),
+                Box::pin(op.invoke(
+                    s,
+                    args,
+                    crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+                )),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::resource_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::project_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::run_operation(name) {
+        let origin = crate::validation::text(&run, "id").to_owned();
+        return crate::native::policy::PARENT
+            .scope(
+                origin,
+                op.invoke(
+                    s,
+                    args,
+                    crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+                ),
+            )
+            .await;
+    }
+    if name == cairn_contracts::RESUME_RUN_ID {
+        let input = crate::capabilities::RESUME_RUN.decode(args)?;
+        let context = crate::capabilities::ResumeContext::Installation(bearer.to_owned());
+        let output = crate::capabilities::RESUME_RUN
+            .invoke(s, input, context)
+            .await?;
+        return Ok(serde_json::to_value(output)?);
     }
     let input = match name {
-        "create_task" | "create_chat" => Some(&mut args),
-        "update_task" => args.get_mut("task"),
+        "create_chat" => Some(&mut args),
         _ => None,
     };
     if let Some(input) = input.and_then(Value::as_object_mut) {
@@ -182,64 +391,5 @@ async fn invoke(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -> Resu
 }
 
 async fn invoke_inner(s: &Arc<Service>, bearer: &str, name: &str, args: Value) -> Result<Value> {
-    let token = bearer.to_owned();
-    let operation = name.to_owned();
-    let input = args.clone();
-    let listing = s
-        .store
-        .read(move |db| {
-            // Authorize database reads in the same snapshot as the returned data.
-            let transaction = rusqlite::Transaction::new_unchecked(
-                db.0,
-                rusqlite::TransactionBehavior::Deferred,
-            )?;
-            let db = &Db(&transaction);
-            authorize_in(db, &token)?;
-
-            let result = match operation.as_str() {
-                "list_agents" => Some(db.list("agents")?.into()),
-                "list_projects" => Some(db.list("projects")?.into()),
-                "list_tasks" => Some(db.list("tasks")?.into()),
-                "list_runs" => Some(
-                    db.runs(
-                        input["status"].as_str(),
-                        None,
-                        input["limit"].as_i64().unwrap(),
-                        input["offset"].as_i64().unwrap(),
-                        false,
-                    )?
-                    .into(),
-                ),
-                "get_run" => Some(crate::mcp_server::run_history(
-                    db,
-                    text(&input, "runId"),
-                    input["after"].as_i64().unwrap(),
-                )?),
-                "read_run_content" => Some(crate::mcp_server::read_run_content(db, &input)?),
-                _ => None,
-            };
-
-            transaction.commit()?;
-            Ok(result)
-        })
-        .await?;
-    if let Some(listing) = listing {
-        return Ok(listing);
-    }
-
-    match name {
-        "create_task" => s.task_from_run(args, None, bearer).await,
-        "update_task" => {
-            s.task_from_run(args["task"].clone(), Some(text(&args, "id")), bearer)
-                .await
-        }
-        "run_task" => s.enqueue_from_run(text(&args, "taskId"), bearer).await,
-        "cancel_run" => {
-            s.worker
-                .cancel_from_run(s, text(&args, "runId"), bearer)
-                .await?;
-            Ok(json!({ "cancelled": true }))
-        }
-        _ => crate::mcp_server::invoke(s, name, args, Some(bearer)).await,
-    }
+    crate::mcp_server::invoke(s, name, args, Some(bearer)).await
 }

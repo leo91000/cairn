@@ -102,13 +102,6 @@ impl InstallationHosts {
         Some(candidate)
     }
 
-    pub(crate) fn has_cookie_domain(&self) -> bool {
-        self.root
-            .as_ref()
-            .and_then(Url::domain)
-            .is_some_and(|host| host.contains('.'))
-    }
-
     pub(crate) fn central(&self, headers: &HeaderMap) -> bool {
         !self.enabled
             || self
@@ -175,27 +168,6 @@ impl InstallationHosts {
 
     pub(crate) fn session_cookies(&self, token: &str, max_age: i64) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        if self.enabled {
-            // Remove the old host-only cookie before issuing a domain cookie with the same name.
-            // Keeping the name preserves the native Android session-vault contract.
-            headers.append(
-                header::SET_COOKIE,
-                HeaderValue::from_str(&self.cookie("", 0, false)).expect("validated cookie"),
-            );
-        }
-        if !self.enabled
-            && self
-                .root
-                .as_ref()
-                .and_then(Url::domain)
-                .is_some_and(|host| host.contains('.'))
-        {
-            // A rollback removes the domain cookie before restoring the host-only session.
-            headers.append(
-                header::SET_COOKIE,
-                HeaderValue::from_str(&self.cookie("", 0, true)).expect("validated cookie"),
-            );
-        }
         headers.append(
             header::SET_COOKIE,
             HeaderValue::from_str(&self.cookie(token, max_age, self.enabled))
@@ -372,7 +344,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shared_cookie_and_rollback_preserve_the_native_cookie_contract() {
+    fn shared_cookie_preserves_the_native_cookie_contract() {
         let shared = InstallationHosts::new("https://cairn.build", true).unwrap();
         let headers = shared.session_cookies("session-token", 123);
         let cookies: Vec<_> = headers
@@ -380,10 +352,8 @@ mod tests {
             .iter()
             .map(|value| value.to_str().unwrap())
             .collect();
-        assert_eq!(cookies.len(), 2);
-        assert!(cookies[0].contains("Max-Age=0"));
-        assert!(!cookies[0].contains("Domain="));
-        assert!(cookies[1].starts_with("cairn_session=session-token;"));
+        assert_eq!(cookies.len(), 1);
+        assert!(cookies[0].starts_with("cairn_session=session-token;"));
         for attribute in [
             "HttpOnly",
             "Secure",
@@ -391,21 +361,7 @@ mod tests {
             "Max-Age=123",
             "Domain=cairn.build",
         ] {
-            assert!(cookies[1].contains(attribute));
+            assert!(cookies[0].contains(attribute));
         }
-
-        let rollback = InstallationHosts::new("https://cairn.build", false).unwrap();
-        let headers = rollback.session_cookies("session-token", 123);
-        let cookies: Vec<_> = headers
-            .get_all(header::SET_COOKIE)
-            .iter()
-            .map(|value| value.to_str().unwrap())
-            .collect();
-        assert_eq!(cookies.len(), 2);
-        assert!(cookies[0].contains("Domain=cairn.build"));
-        assert!(cookies[0].contains("Max-Age=0"));
-        assert!(cookies[1].starts_with("cairn_session=session-token;"));
-        assert!(cookies[1].contains("Max-Age=123"));
-        assert!(!cookies[1].contains("Domain="));
     }
 }

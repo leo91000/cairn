@@ -24,6 +24,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.ListPluginPackagesInput
+import build.cairn.contracts.listPluginPackages
 import kotlinx.coroutines.CancellationException
 
 /** What the Atelier shows about coding-agent accounts. */
@@ -94,7 +96,7 @@ fun AtelierScreen(vm: CairnViewModel, state: Workspace, navigate: (String) -> Un
     var signingOut by remember { mutableStateOf(false) }
     Poll("atelier", 30_000) {
         accounts = optional(vm) { vm.api.get<AccountsView>("/accounts") }
-        plugins = optional(vm) { vm.api.get<PluginCatalog>("/plugins") }
+        plugins = optional(vm) { vm.api.listPluginPackages(ListPluginPackagesInput()) }
         loaded = true
     }
     val pending = if (loaded) "Indisponible" else "…"

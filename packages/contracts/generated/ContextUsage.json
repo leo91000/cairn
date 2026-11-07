@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "cachedTokens": {
+      "default": null,
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "contextTokens": {
+      "default": 0,
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "contextWindow": {
+      "default": null,
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "estimated": {
+      "default": false,
+      "type": "boolean"
+    }
+  },
+  "title": "ContextUsage",
+  "type": "object"
+}

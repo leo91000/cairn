@@ -9,6 +9,7 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+import { mockPluginCommand } from './mock-plugin-command'
 
 const token = `synthetic_browser_discord_token_${'x'.repeat(48)}`
 
@@ -86,9 +87,9 @@ test('Discord bots are set up through the package’s own form and keep the toke
   })
   await workspace.api('/api/agents', 'POST', { name: 'Release helper' })
   await useRelayForHttpMocks(page)
-  await page.route('**/plugins/discord/form', discordForm)
+  await mockPluginCommand(page, '**/plugins/discord/form', discordForm)
   // Keep the journey offline: the saved bot starts paused instead of opening a Gateway session.
-  await page.route('**/plugins/discord/connections', async (route) => {
+  await mockPluginCommand(page, '**/plugins/discord/connections', async (route) => {
     if (route.request().method() !== 'POST')
       return route.continue()
     await route.continue({ postData: JSON.stringify({ ...route.request().postDataJSON(), enabled: false }) })
@@ -201,7 +202,7 @@ test('Discord bots are set up through the package’s own form and keep the toke
   await expect(review.getByRole('checkbox', { name: /Reapprove the new access for #support on Acme/ })).toBeChecked()
   const saving = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await review.getByRole('button', { name: 'Save', exact: true }).click()
-  expect((await saving).postDataJSON().reapproveDelegations).toEqual([botId])
+  expect((await saving).postDataJSON().review.reapproveDelegations).toEqual([botId])
   await expect(review).toHaveCount(0)
 
   // An earlier change elsewhere already suspended the bot: a later edit never reapproves it by default.
@@ -216,7 +217,7 @@ test('Discord bots are set up through the package’s own form and keep the toke
   // Alone, a delegation already suspended does not open the review, and is not reapproved.
   const direct = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await describe('Answers support questions')
-  expect((await direct).postDataJSON()).not.toHaveProperty('reapproveDelegations')
+  expect((await direct).postDataJSON().review.reapproveDelegations).toEqual([])
   await expect(page.getByRole('region', { name: 'Unsaved changes' })).toHaveCount(0)
   await expect(review).toHaveCount(0)
 
@@ -232,14 +233,14 @@ test('Discord bots are set up through the package’s own form and keep the toke
   await expect(review).toContainText('Already suspended by an earlier change. Reapprove only after checking its current access.')
   const unchecked = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await review.getByRole('button', { name: 'Save', exact: true }).click()
-  expect((await unchecked).postDataJSON()).not.toHaveProperty('reapproveDelegations')
+  expect((await unchecked).postDataJSON().review.reapproveDelegations).toEqual([])
   await expect(review).toHaveCount(0)
   // Checked deliberately, it is reapproved.
   await describe('Answers support questions in Acme')
   await earlier.check()
   const checked = page.waitForRequest(request => request.method() === 'PUT' && new URL(request.url()).pathname.endsWith(`/agents/${helper.id}`))
   await review.getByRole('button', { name: 'Save', exact: true }).click()
-  expect((await checked).postDataJSON().reapproveDelegations).toEqual([botId])
+  expect((await checked).postDataJSON().review.reapproveDelegations).toEqual([botId])
   await expect(review).toHaveCount(0)
   await page.goto(workspacePath('/plugins/discord'))
 
@@ -342,8 +343,8 @@ values = { more = true, extra = true }
   await expect(form.getByText('Enter a team', { exact: true })).toHaveCount(0)
   const refreshed: string[] = []
   page.on('request', (request) => {
-    if (request.method() === 'POST' && request.url().endsWith('/plugins/notes/form')) {
-      const changed = request.postDataJSON().changed
+    if (request.method() === 'POST' && request.url().endsWith('/plugins/manage') && request.postDataJSON().kind === 'form') {
+      const changed = request.postDataJSON().data.changed
       if (changed)
         refreshed.push(changed)
     }
@@ -435,10 +436,22 @@ test('program releases can be checked, installed and restored independently of p
   const actions: string[] = []
   let polls = 0
   await page.route('**/api/plugins/packages/operations/program-job', route => route.fulfill({
-    json: ++polls % 2 ? { state: 'running' } : { state: 'completed', result: program },
+    json: ++polls % 2
+      ? {
+          id: 'program-job',
+          state: 'running',
+          result: null,
+          error: null,
+        }
+      : {
+          id: 'program-job',
+          state: 'completed',
+          result: { kind: 'program', program },
+          error: null,
+        },
   }))
-  await page.route('**/api/plugins/onepassword/programs**', async (route) => {
-    const action = new URL(route.request().url()).pathname.split('/').at(-1)
+  await page.route(/\/api\/plugins\/(onepassword\/programs|programs\/prepare)(\/.*)?$/, async (route) => {
+    const action = route.request().method() === 'POST' ? route.request().postDataJSON().kind : undefined
     if (route.request().method() === 'POST') {
       actions.push(action!)
       if (action === 'check') {
@@ -446,7 +459,12 @@ test('program releases can be checked, installed and restored independently of p
         program.digest = 'reviewed-release'
       }
       else if (action === 'install') {
-        expect(route.request().postDataJSON()).toEqual({ digest: 'reviewed-release' })
+        expect(route.request().postDataJSON()).toEqual({
+          kind: 'install',
+          pluginId: 'onepassword',
+          program: 'op',
+          digest: 'reviewed-release',
+        })
         program.previous = program.installed
         program.installed = installed('2.41.0')
         program.candidate = null
@@ -488,6 +506,15 @@ test('required choices and Unicode text keep the shared form whitespace contract
     json: {
       packages: [{
         id: 'forms',
+        setup: {
+          effort: 'token',
+          steps: [{
+            id: 'settings',
+            kind: 'settings',
+            title: 'Settings',
+            settings: ['region', 'team', 'password'],
+          }],
+        },
         builtin: false,
         status: 'active',
         active: '1.0.0',
@@ -527,7 +554,7 @@ test('required choices and Unicode text keep the shared form whitespace contract
     },
   }))
   const saves: Record<string, any>[] = []
-  await page.route('**/api/plugins/forms/connections', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/forms/connections', async (route) => {
     saves.push(route.request().postDataJSON())
     await route.fulfill({ json: {} })
   })
@@ -627,6 +654,14 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
     json: {
       packages: [{
         id: 'forms',
+        setup: {
+          steps: [{
+            id: 'settings',
+            kind: 'settings',
+            title: 'Settings',
+            settings: fields.filter(field => !field.hidden).map(field => field.key),
+          }],
+        },
         builtin: false,
         status: 'active',
         active: '1.0.0',
@@ -638,11 +673,11 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
     },
   }))
   const initialPanelValues = { password: 'synthetic_never_prefill', unknown: 'drop' }
-  await page.route('**/api/plugins/forms/connections/example/view', route => route.fulfill({
+  await mockPluginCommand(page, '**/api/plugins/forms/connections/example/view', route => route.fulfill({
     json: { view: [panelNode(initialPanelValues)] },
   }))
   const actions: Record<string, any>[] = []
-  await page.route('**/api/plugins/forms/connections/example/actions', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/forms/connections/example/actions', async (route) => {
     actions.push(route.request().postDataJSON().values)
     const result = actions.length === 2
       ? { view: [panelNode(initialPanelValues)] }
@@ -652,7 +687,7 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
     await route.fulfill({ json: result })
   })
   const completions: Record<string, any>[] = []
-  await page.route('**/api/plugins/forms/form', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/forms/form', async (route) => {
     completions.push(route.request().postDataJSON())
     await route.fulfill({
       json: {
@@ -664,7 +699,7 @@ test('instance and panel forms share defaults, clearing, hidden values and secre
     })
   })
   const saves: Record<string, any>[] = []
-  await page.route('**/api/plugins/forms/connections/example', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/forms/connections/example', async (route) => {
     saves.push(route.request().postDataJSON())
     await route.fulfill({ json: {} })
   })
@@ -780,7 +815,9 @@ test('bot warnings include the current instance and new draft plugin grants', as
     people: [],
     requests: [],
     enabled: false,
-    status: { state: 'paused' },
+    status: { state: 'disconnected', message: null },
+    revision: 'fixture',
+    secretKeys: [],
     usage: { hour: 0 },
     activity: [],
     maxMessagesPerHour: 20,
@@ -790,6 +827,7 @@ test('bot warnings include the current instance and new draft plugin grants', as
     json: {
       packages: [{
         id: 'hybrid',
+        setup: { steps: [{ id: 'people', kind: 'people', title: 'Who can talk to it' }, { id: 'agents', kind: 'agents', title: 'Agents' }] },
         builtin: false,
         status: 'active',
         active: '1.0.0',
@@ -851,6 +889,7 @@ test('a package with device sign-in saves an account without the token reaching 
     json: {
       packages: [{
         id: 'codehost',
+        setup: { effort: 'signin', steps: [{ id: 'credential', kind: 'credential', title: 'Sign in with Code host' }] },
         builtin: true,
         status: 'active',
         active: '1.0.0',
@@ -889,7 +928,7 @@ test('a package with device sign-in saves an account without the token reaching 
     await route.fulfill({ json: flow(id, id === 'second' && polls > 1 ? 'completed' : 'pending') })
   })
   const completions: Record<string, any>[] = []
-  await page.route('**/api/plugins/codehost/form', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/codehost/form', async (route) => {
     const body = route.request().postDataJSON()
     completions.push(body)
     const signedIn = body.credentialFlow === 'second'
@@ -903,7 +942,7 @@ test('a package with device sign-in saves an account without the token reaching 
     })
   })
   const saves: Record<string, any>[] = []
-  await page.route('**/api/plugins/codehost/connections', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/codehost/connections', async (route) => {
     saves.push(route.request().postDataJSON())
     await route.fulfill({ json: {} })
   })

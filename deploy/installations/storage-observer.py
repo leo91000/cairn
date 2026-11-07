@@ -38,7 +38,6 @@ CODEC_FIELDS = {
     "decodedInputBytes",
     "rawWrites",
     "zstdWrites",
-    "migrationLegacyReads",
     "rawReads",
     "zstdReads",
 }

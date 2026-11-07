@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "agentId": {
+      "default": "00000000-0000-4000-8000-000000000001",
+      "format": "uuid",
+      "type": "string"
+    },
+    "projectId": {
+      "default": null,
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "CreateChatInput",
+  "type": "object"
+}

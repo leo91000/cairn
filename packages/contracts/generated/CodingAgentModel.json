@@ -1,0 +1,140 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ModelRoute": {
+      "properties": {
+        "billing": {
+          "default": "key",
+          "pattern": "^(subscription|credits|key)$",
+          "type": "string"
+        },
+        "hidden": {
+          "default": false,
+          "type": "boolean"
+        },
+        "model": {
+          "default": "",
+          "type": "string"
+        },
+        "provider": {
+          "default": "",
+          "type": "string"
+        },
+        "providerName": {
+          "default": "",
+          "type": "string"
+        },
+        "supportedReasoningEfforts": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/ReasoningOption"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "ReasoningOption": {
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "reasoningEffort": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "ServiceTier": {
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "limited": {
+          "default": false,
+          "type": "boolean"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "properties": {
+    "defaultReasoningEffort": {
+      "default": "",
+      "type": "string"
+    },
+    "defaultServiceTier": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "description": {
+      "default": "",
+      "type": "string"
+    },
+    "displayName": {
+      "default": "",
+      "type": "string"
+    },
+    "hidden": {
+      "default": false,
+      "type": "boolean"
+    },
+    "isDefault": {
+      "default": false,
+      "type": "boolean"
+    },
+    "model": {
+      "default": "",
+      "type": "string"
+    },
+    "resolvedModel": {
+      "default": null,
+      "description": "Claude's resolved model behind a subscription alias.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "routes": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/ModelRoute"
+      },
+      "type": "array"
+    },
+    "serviceTiers": {
+      "default": null,
+      "description": "None means unknown, distinct from a known empty speed list.",
+      "items": {
+        "$ref": "#/definitions/ServiceTier"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "supportedReasoningEfforts": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/ReasoningOption"
+      },
+      "type": "array"
+    }
+  },
+  "title": "CodingAgentModel",
+  "type": "object"
+}

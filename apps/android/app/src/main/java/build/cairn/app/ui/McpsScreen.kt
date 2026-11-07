@@ -13,6 +13,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.core.net.toUri
 import build.cairn.app.data.*
+import build.cairn.contracts.*
 import kotlinx.serialization.json.*
 
 internal fun browse(context: Context, url: String) {
@@ -36,18 +37,18 @@ fun McpsScreen(vm: CairnViewModel, state: Workspace) {
     Poll("mcps", 3000) {
         try {
             oauth?.let { id ->
-                val result = vm.api.send<JsonObject>("POST", "/mcps/${segment(id)}/callback")
-                if (result["pending"]?.jsonPrimitive?.booleanOrNull == false) {
+                val result = vm.api.mcpConnectionStatus(McpIdInput(id))
+                if (result.pending == false) {
                     oauth = null
                     oauthNotice =
-                        when (result["result"]?.jsonPrimitive?.contentOrNull) {
+                        when (result.result) {
                             "connected" -> "Connexion OAuth terminée."
                             "denied" -> "Autorisation annulée."
                             else -> "Autorisation expirée ou échouée. Réessayez la connexion."
                         }
                 }
             }
-            items = vm.api.get("/mcps")
+            items = vm.api.listMcps(ListMcpsInput()).mcps
         } catch (e: Exception) {
             vm.report(e)
         }
@@ -57,7 +58,7 @@ fun McpsScreen(vm: CairnViewModel, state: Workspace) {
         Button(
             onClick = {
                 vm.clearMessage()
-                editing = Mcp()
+                editing = Mcp(checkedAt = null, enabledTools = null, enabled = true)
             }
         ) {
             Text("Ajouter un MCP")
@@ -66,7 +67,16 @@ fun McpsScreen(vm: CairnViewModel, state: Workspace) {
         if (oauthNotice.isNotBlank()) Text(oauthNotice)
         if (oauth != null) {
             Text("Terminez l’autorisation dans le navigateur, puis revenez dans Cairn.")
-            TextButton(onClick = { oauth = null }) { Text("Annuler cette connexion") }
+            TextButton(
+                onClick = {
+                    vm.perform {
+                        oauth?.let { api.cancelMcpConnection(McpIdInput(it)) }
+                        oauth = null
+                    }
+                }
+            ) {
+                Text("Annuler cette connexion")
+            }
         }
         items
             .filter { "${it.name} ${it.url} ${it.command}".contains(query, true) }
@@ -97,8 +107,8 @@ fun McpsScreen(vm: CairnViewModel, state: Workspace) {
                             Icons.Default.Refresh,
                             onClick = {
                                 vm.perform {
-                                    api.request("POST", "/mcps/${segment(mcp.id)}/test")
-                                    items = api.get("/mcps")
+                                    api.testMcp(McpIdInput(mcp.id))
+                                    items = api.listMcps(ListMcpsInput()).mcps
                                 }
                             },
                             enabled = !state.busy,
@@ -124,31 +134,13 @@ fun McpsScreen(vm: CairnViewModel, state: Workspace) {
                         Button(
                             onClick = {
                                 vm.perform {
-                                    val settings = api.get<Settings>("/settings")
-                                    if (settings.nativeMcpOauth) {
-                                        val result =
-                                            api.send<UrlResult>(
-                                                "POST",
-                                                "/mcps/${segment(mcp.id)}/connect",
-                                                buildJsonObject { put("native", true) },
-                                            )
-                                        oauth = mcp.id
-                                        oauthNotice = ""
-                                        browse(context, result.url)
-                                    } else {
-                                        oauthNotice =
-                                            "Sur cette version du serveur, terminez la connexion MCP dans l’interface web."
-                                        browse(
-                                            context,
-                                            api.origin
-                                                .newBuilder()
-                                                .encodedPath(
-                                                    "/installations/${segment(checkNotNull(api.installationId))}/mcps"
-                                                )
-                                                .build()
-                                                .toString(),
+                                    val result =
+                                        api.beginMcpConnection(
+                                            BeginMcpInput(id = mcp.id, native = true)
                                         )
-                                    }
+                                    oauth = mcp.id
+                                    oauthNotice = ""
+                                    browse(context, result.url)
                                 }
                             },
                             enabled = !state.busy && oauth == null,
@@ -191,10 +183,8 @@ fun McpsScreen(vm: CairnViewModel, state: Workspace) {
             { removing = null },
         ) {
             vm.perform {
-                api.request(
-                    if (disconnecting) "POST" else "DELETE",
-                    "/mcps/${segment(mcp.id)}" + if (disconnecting) "/disconnect" else "",
-                )
+                if (disconnecting) api.disconnectMcp(McpIdInput(mcp.id))
+                else api.deleteMcp(McpIdInput(mcp.id))
                 removing = null
                 refresh()
             }
@@ -231,30 +221,26 @@ internal fun McpEditor(vm: CairnViewModel, state: Workspace, initial: Mcp, close
                         auth = if (form.transport == "stdio") "none" else form.auth,
                     )
                 val payload =
-                    JsonObject(
-                        wireJson.encodeToJsonElement(value).jsonObject +
-                            buildJsonObject {
-                                if (token.isNotBlank()) put("token", token)
-                                if (secret.isNotBlank()) put("clientSecret", secret)
-                                put(
-                                    "env",
-                                    wireJson.encodeToJsonElement(
-                                        entries
-                                            .filter { !it.saved || it.value.isNotEmpty() }
-                                            .associate { it.key.trim() to it.value }
-                                    ),
-                                )
-                                put(
-                                    "removeEnv",
-                                    wireJson.encodeToJsonElement(
-                                        initial.envKeys.filter { key ->
-                                            entries.none { it.key.trim() == key }
-                                        }
-                                    ),
-                                )
-                            }
+                    value.settings(
+                        token = token.takeIf { it.isNotBlank() },
+                        clientSecret = secret.takeIf { it.isNotBlank() },
+                        env =
+                            entries
+                                .filter { !it.saved || it.value.isNotEmpty() }
+                                .associate { it.key.trim() to it.value },
+                        removeEnv =
+                            initial.envKeys.filter { key -> entries.none { it.key.trim() == key } },
                     )
-                save("mcps", initial.id, payload)
+                if (initial.id.isBlank()) api.createMcp(payload)
+                else
+                    api.updateMcp(
+                        UpdateMcpInput(
+                            id = initial.id,
+                            revision = initial.revision,
+                            connection = payload.replacement(),
+                        )
+                    )
+                refresh()
                 token = ""
                 secret = ""
                 env = emptyList()
@@ -401,13 +387,18 @@ private fun McpToolsEditor(vm: CairnViewModel, state: Workspace, initial: Mcp, c
         close,
         save = {
             vm.perform {
-                save(
-                    "mcps",
-                    initial.id,
-                    wireJson.encodeToJsonElement(
-                        initial.copy(enabledTools = if (all) null else selected)
-                    ),
+                api.updateMcp(
+                    UpdateMcpInput(
+                        id = initial.id,
+                        revision = initial.revision,
+                        connection =
+                            initial
+                                .copy(enabledTools = if (all) null else selected)
+                                .settings()
+                                .replacement(),
+                    )
                 )
+                refresh()
                 close()
             }
         },

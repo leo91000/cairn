@@ -61,30 +61,142 @@ impl Scope {
     }
 }
 
-/// The conversation list of each account at the store revision it was read for. Every
-/// commit wakes every stream: the streams carrying the list share one rebuild per commit.
+struct CachedList {
+    revision: u64,
+    built_at: Instant,
+    chats: Arc<Vec<Value>>,
+}
+
+struct ListMetrics {
+    since: Instant,
+    rebuilds: u64,
+    cache_hits: u64,
+    coalesced: u64,
+    rebuild_us: u64,
+    max_rebuild_us: u64,
+    pages: u64,
+    queue_us: u64,
+    read_us: u64,
+    max_queue_us: u64,
+    max_read_us: u64,
+}
+
+impl Default for ListMetrics {
+    fn default() -> Self {
+        Self {
+            since: Instant::now(),
+            rebuilds: 0,
+            cache_hits: 0,
+            coalesced: 0,
+            rebuild_us: 0,
+            max_rebuild_us: 0,
+            pages: 0,
+            queue_us: 0,
+            read_us: 0,
+            max_queue_us: 0,
+            max_read_us: 0,
+        }
+    }
+}
+
+impl ListMetrics {
+    fn report(&mut self) {
+        let elapsed = self.since.elapsed();
+        if elapsed < Duration::from_secs(30) {
+            return;
+        }
+        tracing::info!(target: "cairn_performance", operation = "conversation_reads",
+            interval_ms = elapsed.as_millis() as u64, pages = self.pages,
+            list_rebuilds = self.rebuilds, list_cache_hits = self.cache_hits,
+            list_coalesced = self.coalesced, list_build_us = self.rebuild_us,
+            max_list_build_us = self.max_rebuild_us, queue_us = self.queue_us,
+            read_us = self.read_us, max_queue_us = self.max_queue_us,
+            max_read_us = self.max_read_us);
+        *self = Self::default();
+    }
+}
+
+/// Account-scoped lists are shared across tabs. The async gate is taken before
+/// enqueueing a SQLite job: concurrent rebuilds never occupy all reader actors
+/// waiting on one synchronous lock. Chat events still bypass list pacing.
 #[derive(Default)]
-pub struct ConversationLists(std::sync::Mutex<HashMap<String, (u64, Vec<Value>)>>);
+pub struct ConversationLists {
+    cache: std::sync::Mutex<HashMap<String, CachedList>>,
+    gates: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    metrics: std::sync::Mutex<ListMetrics>,
+}
 
 impl ConversationLists {
     fn invalidate(&self, account: &str) {
-        self.0.lock().unwrap().remove(account);
+        self.cache.lock().unwrap().remove(account);
     }
 
-    /// A read at `revision` sees at least that commit, so a list built for the same
-    /// revision is never older than the reader's own snapshot.
-    fn get(&self, db: &Db<'_>, scope: &Scope, revision: u64) -> Result<Vec<Value>> {
-        if let Some((built, chats)) = self.0.lock().unwrap().get(&scope.account)
-            && *built == revision
-        {
-            return Ok(chats.clone());
-        }
-        let chats = conversations(db, scope)?;
-        self.0
+    fn gate(&self, account: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.gates
             .lock()
             .unwrap()
-            .insert(scope.account.clone(), (revision, chats.clone()));
-        Ok(chats)
+            .entry(account.to_owned())
+            .or_default()
+            .clone()
+    }
+
+    /// A newer revision may reuse the list for a quarter second, independently
+    /// of chat-event delivery. Its deadline schedules a refresh even if no more
+    /// writes arrive. Same-revision lists need no periodic rebuild.
+    fn get(
+        &self,
+        db: &Db<'_>,
+        scope: &Scope,
+        revision: u64,
+    ) -> Result<(Arc<Vec<Value>>, Option<Instant>)> {
+        self.get_with_clock(db, scope, revision, Instant::now)
+    }
+
+    fn get_with_clock(
+        &self,
+        db: &Db<'_>,
+        scope: &Scope,
+        revision: u64,
+        clock: impl Fn() -> Instant,
+    ) -> Result<(Arc<Vec<Value>>, Option<Instant>)> {
+        if let Some(cached) = self.cache.lock().unwrap().get(&scope.account) {
+            let refresh_at = cached.built_at + LIST_INTERVAL;
+            let same_revision = cached.revision == revision;
+            if same_revision || clock() < refresh_at {
+                let mut metrics = self.metrics.lock().unwrap();
+                metrics.cache_hits += 1;
+                metrics.coalesced += u64::from(!same_revision);
+                return Ok((cached.chats.clone(), (!same_revision).then_some(refresh_at)));
+            }
+        }
+        let started = Instant::now();
+        let chats = Arc::new(conversations(db, scope)?);
+        let micros = started.elapsed().as_micros() as u64;
+        self.cache.lock().unwrap().insert(
+            scope.account.clone(),
+            CachedList {
+                revision,
+                built_at: clock(),
+                chats: chats.clone(),
+            },
+        );
+        let mut metrics = self.metrics.lock().unwrap();
+        metrics.rebuilds += 1;
+        metrics.rebuild_us += micros;
+        metrics.max_rebuild_us = metrics.max_rebuild_us.max(micros);
+        Ok((chats, None))
+    }
+
+    fn record_page(&self, queue: Duration, read: Duration) {
+        let mut metrics = self.metrics.lock().unwrap();
+        let queue = queue.as_micros() as u64;
+        let read = read.as_micros() as u64;
+        metrics.pages += 1;
+        metrics.queue_us += queue;
+        metrics.read_us += read;
+        metrics.max_queue_us = metrics.max_queue_us.max(queue);
+        metrics.max_read_us = metrics.max_read_us.max(read);
+        metrics.report();
     }
 }
 
@@ -96,25 +208,109 @@ struct State {
     chat: Value,
     artifacts: Vec<Value>,
     cache_revision: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    chats: Option<Vec<Value>>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_chats"
+    )]
+    chats: Option<Arc<Vec<Value>>>,
+}
+
+fn serialize_chats<S: serde::Serializer>(
+    chats: &Option<Arc<Vec<Value>>>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    chats.as_deref().serialize(serializer)
 }
 
 struct Page {
     state: State,
     events: Vec<crate::store::Event>,
+    /// Timeline cards: the window's snapshot, or the cards its events changed.
+    entries: Vec<TimelineEntry>,
+    cards: Option<CardRange>,
+    draining_cards: bool,
     reset: bool,
     more: bool,
     history: String,
     oldest: Option<i64>,
     has_older: bool,
+    list_refresh_at: Option<Instant>,
+}
+
+#[derive(Clone)]
+struct CardRange {
+    run: String,
+    from: i64,
+    upto: i64,
+    window: bool,
+    earlier: bool,
+    active_wait_pending: bool,
+    position: i64,
+    id: String,
+}
+
+impl CardRange {
+    fn read(&mut self, db: &Db<'_>) -> Result<(Vec<TimelineEntry>, bool)> {
+        if std::mem::take(&mut self.active_wait_pending)
+            && let Some(card) = crate::timeline::active_wait(db, &self.run)?
+            && card.position < self.from
+            && card.revision < self.from
+            && card.revision <= self.upto
+        {
+            // The normal window does not include an unchanged, older wait.
+            return Ok((vec![card], true));
+        }
+        loop {
+            let (entries, more) = if self.window {
+                crate::timeline::window_chunk(
+                    db,
+                    &self.run,
+                    self.from,
+                    self.upto,
+                    self.position,
+                    &self.id,
+                    self.earlier,
+                )?
+            } else {
+                crate::timeline::changed_chunk(
+                    db,
+                    &self.run,
+                    self.from,
+                    self.upto,
+                    self.position,
+                    &self.id,
+                )?
+            };
+            if let Some(last) = entries.last() {
+                self.position = if self.window && !self.earlier {
+                    last.position
+                } else {
+                    last.revision
+                };
+                self.id.clone_from(&last.id);
+            }
+            if self.window && self.earlier && !more {
+                self.earlier = false;
+                self.position = 0;
+                self.id.clear();
+                if entries.is_empty() {
+                    continue;
+                }
+                return Ok((entries, true));
+            }
+            return Ok((entries, more));
+        }
+    }
 }
 
 /// One SSE `batch` event.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Batch {
-    events: Vec<Value>,
+    events: Vec<crate::store::Event>,
+    entries: Vec<TimelineChange>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    large_entries: Vec<LargeTimelineReference>,
     reset: bool,
     more: bool,
     history: String,
@@ -126,14 +322,13 @@ struct Batch {
     state: Option<State>,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HistoryPage {
-    events: Vec<crate::store::Event>,
-    history: String,
-    oldest: i64,
-    has_older: bool,
-}
+use cairn_contracts::{
+    HistoryPage, LargeTimelineReference, TimelineChange, TimelineContent, TimelineEntry,
+    TimelineState,
+};
+
+#[cfg(test)]
+mod read_tests;
 
 struct Request {
     after: i64,
@@ -146,7 +341,7 @@ struct Request {
 }
 
 /// Oldest and newest retained event IDs of a run, 0 when it has none.
-fn event_bounds(db: &Db<'_>, run: &str) -> Result<(i64, i64)> {
+pub(crate) fn event_bounds(db: &Db<'_>, run: &str) -> Result<(i64, i64)> {
     Ok(db.0.query_row(
         "SELECT COALESCE((SELECT id FROM events WHERE run_id=?1 ORDER BY id LIMIT 1),0),
                 COALESCE((SELECT id FROM events WHERE run_id=?1 ORDER BY id DESC LIMIT 1),0)",
@@ -159,13 +354,10 @@ fn artifacts(db: &Db<'_>, run: &str) -> Result<Vec<Value>> {
     if run.is_empty() {
         return Ok(Vec::new());
     }
-    let mut artifacts: Vec<_> = db
-        .keys(&format!("artifact:{run}:"))?
+    db.artifacts(Some(run))?
         .into_iter()
-        .map(|(_, v)| v)
-        .collect();
-    artifacts.sort_by_key(|v| v["createdAt"].as_i64().unwrap_or(0));
-    Ok(artifacts)
+        .map(|item| Ok(serde_json::to_value(item)?))
+        .collect()
 }
 
 fn scoped_run(db: &Db<'_>, scope: &Scope, chat: &Value) -> Result<Value> {
@@ -184,6 +376,7 @@ fn read_page(
     request: Request,
     lists: &ConversationLists,
     revision: u64,
+    list_permit: Option<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<Page> {
     let Request {
         after,
@@ -192,8 +385,17 @@ fn read_page(
         recent,
         resume,
     } = request;
+    let (chats, list_refresh_at) = if scope.carries_list() {
+        let (chats, refresh_at) = lists.get(db, scope, revision)?;
+        (Some(chats), refresh_at)
+    } else {
+        (None, None)
+    };
+    // Only list construction is shared. A slow message, run or event read in
+    // this conversation must not hold up another tab's durable event delivery.
+    drop(list_permit);
     let chat = if scope.single_chat() {
-        crate::chats::detail(db, &scope.id)?
+        crate::chats::public_stream_detail(db, &scope.id, window)?
     } else {
         Value::Null
     };
@@ -202,7 +404,8 @@ fn read_page(
     let (first, max) = event_bounds(db, run_id)?;
     // Events are append-only and IDs are AUTOINCREMENT. The retained first
     // ID changes on pruning; a new run has a new UUID. No full-history hash.
-    let history = format!("v1:{run_id}:{first}");
+    // v2 histories carry timeline cards: a v1 reader resets to receive them.
+    let history = format!("v2:{run_id}:{first}");
     let mut reset = after > max
         || (after > 0 && after < first)
         || expected.as_ref().is_some_and(|value| *value != history);
@@ -211,7 +414,7 @@ fn read_page(
     let start = if reset { 0 } else { after };
     let mut tail = window && (after == 0 || reset);
     let (mut events, mut has_older) = if tail {
-        db.events_before(run_id, i64::MAX)?
+        db.live_events_between(run_id, 0, i64::MAX)?
     } else {
         (
             db.event_batch(run_id, start, PAGE_EVENTS, PAGE_BYTES)?,
@@ -224,47 +427,64 @@ fn read_page(
     // catch-up: the reader keeps its history and only receives what it lacks.
     let long_backlog = !tail && events.last().is_some_and(|event| event.id < max);
     if window && resume && long_backlog {
-        let (missing, gap) = db.events_between(run_id, start, i64::MAX)?;
+        let (missing, gap) = db.live_events_between(run_id, start, i64::MAX)?;
         if !gap {
             events = missing;
         } else if recent {
             // A viewer at the latest output skips the rest: it reopens on the recent
             // window, and older messages load from the window's boundary.
-            (events, has_older) = db.events_before(run_id, i64::MAX)?;
+            (events, has_older) = db.live_events_between(run_id, 0, i64::MAX)?;
             reset = true;
             tail = true;
         }
     }
     let oldest = tail.then(|| events.first().map_or(0, |e| e.id));
     let cursor = events.last().map_or(start, |e| e.id);
-    let mut state = State {
+    // A window carries a snapshot of its cards; a continuation carries the cards its
+    // events changed. The change cursor is the same event sequence as the stream's.
+    let mut range = CardRange {
+        run: run_id.to_owned(),
+        from: if tail && has_older {
+            oldest.unwrap_or(0)
+        } else if tail {
+            0
+        } else {
+            start
+        },
+        upto: cursor,
+        window: tail,
+        earlier: tail,
+        active_wait_pending: tail,
+        position: 0,
+        id: String::new(),
+    };
+    let (entries, more_cards) = range.read(db)?;
+    let separate_cards = more_cards
+        || (!entries.is_empty()
+            && crate::validation::encoded_size(&entries)?
+                + crate::validation::encoded_size(&events)?
+                > PAGE_BYTES);
+    let state = State {
         artifacts: artifacts(db, run_id)?,
         run,
         chat,
         cache_revision: db
             .kv("conversation-cache-revision")?
             .unwrap_or_else(|| "initial".into()),
-        chats: scope
-            .carries_list()
-            .then(|| lists.get(db, scope, revision))
-            .transpose()?,
+        chats,
     };
-    // Delivered messages already live in the event history. Do not resend
-    // the entire conversation as metadata on every paginated stream update.
-    if window
-        && scope.single_chat()
-        && let Some(messages) = state.chat["messages"].as_array_mut()
-    {
-        messages.retain(|m| m["status"] != crate::chats::MessageStatus::Delivered);
-    }
     Ok(Page {
         state,
         events,
+        entries,
+        cards: more_cards.then_some(range),
+        draining_cards: separate_cards,
         reset,
         more: cursor < max,
         history,
         oldest,
         has_older,
+        list_refresh_at,
     })
 }
 
@@ -275,17 +495,27 @@ fn conversations(db: &Db<'_>, scope: &Scope) -> Result<Vec<Value>> {
 }
 
 async fn page(s: &Service, scope: Scope, request: Request) -> Result<Page> {
+    let started = Instant::now();
+    let lists = s.conversation_lists.clone();
+    let gate = scope.carries_list().then(|| lists.gate(&scope.account));
+    let permit = match gate {
+        Some(gate) => Some(gate.lock_owned().await),
+        None => None,
+    };
     // Read before the snapshot starts, so the snapshot includes this revision.
     let revision = s.store.revision();
-    let lists = s.conversation_lists.clone();
     s.store
         .read(move |db| {
+            let queue = started.elapsed();
+            let read = Instant::now();
             // A single SQLite snapshot covers metadata and the event boundary.
             let tx = rusqlite::Transaction::new_unchecked(
                 db.0,
                 rusqlite::TransactionBehavior::Deferred,
             )?;
-            read_page(&Db(&tx), &scope, request, &lists, revision)
+            let result = read_page(&Db(&tx), &scope, request, &lists, revision, permit);
+            lists.record_page(queue, read.elapsed());
+            result
         })
         .await
 }
@@ -346,8 +576,9 @@ pub async fn http(s: Arc<Service>, kind: &str, id: &str, input: Input) -> Result
         pending: Some(first),
         previous: None,
         history: None,
-        deltas: crate::live_text::TextDeltas::default(),
+        replies: Replies::default(),
         read_at: Instant::now(),
+        list_refresh_at: None,
     };
     let stream = futures_util::stream::try_unfold(subscription, |mut subscription| async move {
         let event = subscription.next().await?;
@@ -373,9 +604,10 @@ struct Subscription {
     pending: Option<Page>,
     previous: Option<State>,
     history: Option<String>,
-    deltas: crate::live_text::TextDeltas,
+    replies: Replies,
     /// When the last page was read, to pace rebuilding the conversation list.
     read_at: Instant,
+    list_refresh_at: Option<Instant>,
 }
 
 impl Subscription {
@@ -403,7 +635,9 @@ impl Subscription {
                 }
             }
             // Mark observed changes before reading the next durable page.
-            self.changes.borrow_and_update();
+            if self.pending.is_none() {
+                self.changes.borrow_and_update();
+            }
             let opening = self.pending.is_some();
             if let Some((event, has_backlog)) = self.poll().await? {
                 // Coalesce live updates without delaying the opening page or
@@ -418,8 +652,8 @@ impl Subscription {
                 result = self.changes.changed() => if result.is_err() { return Ok(None); },
                 // Recover writes by an external maintenance process; normal
                 // delivery is notification driven. Transport owns revocation.
-                () = tokio::time::sleep(Duration::from_secs(15)) => {
-                    if self.scope.carries_list() {
+                () = tokio::time::sleep_until(self.list_refresh_at.unwrap_or_else(|| Instant::now() + Duration::from_secs(15)).into()) => {
+                    if self.list_refresh_at.is_none() && self.scope.carries_list() {
                         self.s.conversation_lists.invalidate(&self.scope.account);
                     }
                 },
@@ -440,16 +674,93 @@ impl Subscription {
         if run_changed {
             current = self.read(0, None).await?;
         }
+        if current.draining_cards
+            && current.entries.is_empty()
+            && let Some(range) = current.cards.take()
+        {
+            let expected = current.history.clone();
+            let mut next = range.clone();
+            let scope = self.scope.clone();
+            let window = self.window;
+            let continuation = self
+                .s
+                .store
+                .read(move |db| {
+                    let tx = rusqlite::Transaction::new_unchecked(
+                        db.0,
+                        rusqlite::TransactionBehavior::Deferred,
+                    )?;
+                    let db = Db(&tx);
+                    let chat = if scope.single_chat() {
+                        crate::chats::public_stream_detail(&db, &scope.id, window)?
+                    } else {
+                        Value::Null
+                    };
+                    let current_run = scoped_run(&db, &scope, &chat)?;
+                    if text(&current_run, "id") != next.run {
+                        return Ok(None);
+                    }
+                    let (first, _) = event_bounds(&db, &next.run)?;
+                    if expected != format!("v2:{}:{first}", next.run) {
+                        return Err(Error::conflict(
+                            "History changed while reading timeline cards.",
+                        ));
+                    }
+                    let (entries, more) = next.read(&db)?;
+                    Ok(Some((entries, more, next)))
+                })
+                .await?;
+            if let Some((entries, more, next)) = continuation {
+                current.entries = entries;
+                if more {
+                    current.cards = Some(next);
+                }
+            } else {
+                current = self.read(0, None).await?;
+                current.reset = true;
+            }
+        }
+        self.list_refresh_at = current.list_refresh_at;
         let reset = current.reset || run_changed;
         if reset {
             self.cursor = 0;
         }
         self.history = Some(current.history.clone());
         let changed = self.previous.as_ref() != Some(&current.state);
-        let has_events = !current.events.is_empty();
+        if current.draining_cards && !current.entries.is_empty() {
+            let (entries, large_entries) = split_large(std::mem::take(&mut current.entries))?;
+            self.replies.forget(&large_entries);
+            let batch = Batch {
+                events: Vec::new(),
+                entries: self.replies.encode(entries, reset),
+                large_entries,
+                reset,
+                more: true,
+                history: current.history.clone(),
+                oldest: current.oldest,
+                has_older: current.oldest.map(|_| current.has_older),
+                state: changed.then(|| current.state.clone()),
+            };
+            current.reset = false;
+            current.oldest = None;
+            current.draining_cards = current.cards.is_some();
+            self.previous = Some(current.state.clone());
+            self.pending = Some(current);
+            let event = Event::default()
+                .event("batch")
+                .id(self.cursor.to_string())
+                .json_data(batch)
+                .map_err(Error::internal)?;
+            return Ok(Some((event, true)));
+        }
+        let has_events = !current.events.is_empty() || !current.entries.is_empty();
         self.cursor = current.events.last().map_or(self.cursor, |e| e.id);
+        let (entries, large_entries) = split_large(current.entries)?;
+        self.replies.forget(&large_entries);
         let batch = Batch {
-            events: self.deltas.encode(current.events, reset)?,
+            events: ui_events(current.events),
+            entries: self.replies.encode(entries, reset),
+            large_entries,
             reset,
             more: current.more,
             history: current.history,
@@ -497,21 +808,301 @@ pub async fn history(s: &Service, kind: &str, id: &str, input: &Input) -> Result
             } else {
                 text(&scoped_run(&db, &scope, &Value::Null)?, "id").to_owned()
             };
-            let (first, _) = event_bounds(&db, &run)?;
-            let history = format!("v1:{run}:{first}");
-            if expected.is_some_and(|value| value != history) {
-                return Err(Error::conflict(
-                    "History changed. Reconnect before loading older messages.",
-                ));
+            let mut page = history_page(&db, &run, before, expected.as_deref().unwrap())?;
+            let from = if page.has_older { page.oldest } else { 0 };
+            let (entries, limited) = crate::timeline::between_bounded(&db, &run, from, before)?;
+            if limited {
+                page.oldest = entries
+                    .first()
+                    .expect("a bounded history page must advance")
+                    .position;
+                page.has_older = true;
+                page.events.retain(|event| event.id >= page.oldest);
             }
-            let (events, has_older) = db.events_before(&run, before)?;
-            Ok(HistoryPage {
-                oldest: events.first().map_or(before, |e| e.id),
-                events,
-                history,
-                has_older,
-            })
+            (page.entries, page.large_entries) = split_large(entries)?;
+            page.events = ui_events(std::mem::take(&mut page.events));
+            Ok(page)
         })
         .await?;
     Ok(serde_json::to_value(page)?)
+}
+
+/// Fetch a referenced oversized card in bounded, checksum-verified chunks.
+pub async fn content(s: &Service, kind: &str, id: &str, input: &Input) -> Result<Value> {
+    uuid(id)?;
+    let input: cairn_contracts::ReadLargeTimelineInput =
+        serde_json::from_value(input.body.clone())?;
+    if input.snapshot.id.is_empty()
+        || input.snapshot.id.chars().count() > 1024
+        || !(0..=9_007_199_254_740_991).contains(&input.offset)
+        || crate::validation::encoded_size(&input.snapshot)? > PAGE_BYTES
+    {
+        return Err(Error::bad("Invalid timeline entry."));
+    }
+    if input.sha256.as_ref().is_some_and(|value| {
+        value.len() != 64
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }) {
+        return Err(Error::bad("Invalid content checksum."));
+    }
+    let scope = Scope::new(kind, id, "");
+    s.store
+        .read(move |db| {
+            let tx = rusqlite::Transaction::new_unchecked(
+                db.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let db = Db(&tx);
+            let run = if scope.chat {
+                crate::chats::history_run(&db, &scope.id)?
+            } else {
+                text(&scoped_run(&db, &scope, &Value::Null)?, "id").to_owned()
+            };
+            let args: cairn_contracts::ReadRunContentInput =
+                serde_json::from_value(serde_json::json!({
+                    "runId": run,
+                    "entryId": input.snapshot.id,
+                    "offset": input.offset,
+                    "sha256": input.sha256,
+                }))?;
+            let snapshot = crate::timeline::snapshot_from_source(&db, &run, input.snapshot)?;
+            crate::mcp_server::chunk_run_content(&serde_json::to_string(&snapshot)?, &args)
+        })
+        .await
+}
+
+/// Read a source event through the same bounded content chunks used by public tools.
+/// A chat changing its run invalidates the reference rather than reading another run.
+pub async fn event_content(s: &Service, kind: &str, id: &str, input: &Input) -> Result<Value> {
+    uuid(id)?;
+    let args: cairn_contracts::ReadRunContentInput = serde_json::from_value(input.body.clone())?;
+    if args
+        .event_id
+        .is_none_or(|id| !(1..=9_007_199_254_740_991).contains(&id))
+        || args.entry_id.is_some()
+        || args.timeline_snapshot.is_some()
+        || !(0..=9_007_199_254_740_991).contains(&args.offset)
+        || args.sha256.as_ref().is_some_and(|sha| {
+            sha.len() != 64
+                || !sha
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+    {
+        return Err(Error::bad("Invalid event content reference."));
+    }
+    let scope = Scope::new(kind, id, "");
+    s.store
+        .read(move |db| {
+            let tx = rusqlite::Transaction::new_unchecked(
+                db.0,
+                rusqlite::TransactionBehavior::Deferred,
+            )?;
+            let db = Db(&tx);
+            let run = if scope.chat {
+                crate::chats::history_run(&db, &scope.id)?
+            } else {
+                text(&scoped_run(&db, &scope, &Value::Null)?, "id").to_owned()
+            };
+            if run != args.run_id.to_string() {
+                return Err(Error::conflict(
+                    "Conversation history changed. Reconnect before reading content.",
+                ));
+            }
+            crate::conversation_lifecycle::require_active_run(&db, &run)?;
+            crate::mcp_server::read_run_content(&db, &args)
+        })
+        .await
+}
+
+/// The UI receives a reply through its timeline card, never as raw snapshots;
+/// other events the timeline presents remain boundaries of unconverted families.
+pub fn ui_events(events: Vec<crate::store::Event>) -> Vec<crate::store::Event> {
+    events
+        .into_iter()
+        .filter_map(|mut event| {
+            let (reply, covered) = crate::timeline::presentation(&event);
+            event.timeline = covered;
+            if !reply
+                && crate::validation::encoded_size(&event)
+                    .is_ok_and(|size| size > PAGE_BYTES - 1024)
+                && event.payload.as_ref().is_some_and(|payload| {
+                    serde_json::from_str::<Value>(payload.get())
+                        .ok()
+                        .is_some_and(|payload| {
+                            payload.pointer("/item/type").and_then(Value::as_str)
+                                == Some("proposed_plan")
+                        })
+                })
+            {
+                event.text.clear();
+                event.payload = Some(
+                    serde_json::value::to_raw_value(
+                        &serde_json::json!({"_cairnEventContent": true}),
+                    )
+                    .expect("static event reference"),
+                );
+            }
+            (!reply).then_some(event)
+        })
+        .collect()
+}
+
+/// A large card is fetched separately; the reference contains no partial content.
+fn split_large(
+    entries: Vec<TimelineEntry>,
+) -> Result<(Vec<TimelineEntry>, Vec<LargeTimelineReference>)> {
+    let mut complete = Vec::new();
+    let mut large = Vec::new();
+    for entry in entries {
+        if crate::validation::encoded_size(&entry)? <= PAGE_BYTES - 1024 {
+            complete.push(entry);
+            continue;
+        }
+        large.push(large_reference(entry));
+    }
+    Ok((complete, large))
+}
+
+/// Remove source-owned fields while retaining the exact card revision metadata.
+pub(crate) fn large_reference(mut entry: TimelineEntry) -> LargeTimelineReference {
+    match &mut entry.content {
+        TimelineContent::UserMessage {
+            text,
+            message_id,
+            question_id,
+            sent_at,
+            attachments,
+            plan,
+        } => {
+            text.clear();
+            *plan = false;
+            *message_id = None;
+            *question_id = None;
+            *sent_at = 0;
+            attachments.clear();
+        }
+        TimelineContent::AgentMessage { item_id, text, .. } => {
+            item_id.clear();
+            text.clear();
+        }
+        TimelineContent::Notice { notice } => {
+            if let Some(detail) = &mut notice.detail {
+                detail.clear();
+            }
+            if let Some(status) = &mut notice.status {
+                status.clear();
+            }
+            if let Some(quota) = &mut notice.quota {
+                quota.message.clear();
+            }
+            if let Some(retry) = &mut notice.engine_retry
+                && let Some(reason) = &mut retry.reason
+            {
+                reason.clear();
+            }
+            if let Some(limit) = &mut notice.usage_limit {
+                limit.status.clear();
+                if let Some(window) = &mut limit.window {
+                    window.clear();
+                }
+            }
+            if let Some(level) = &mut notice.level {
+                level.clear();
+            }
+            if let Some(account) = &mut notice.account {
+                account.agent.clear();
+                account.name.clear();
+            }
+            notice.tasks.clear();
+            notice.task_ids.clear();
+        }
+    }
+    LargeTimelineReference { snapshot: entry }
+}
+
+/// Wire-only compression of streaming replies. Persisted cards and history pages
+/// keep complete text; a new connection or reset always receives whole cards.
+#[derive(Default)]
+struct Replies(HashMap<String, (String, Option<String>, bool)>);
+
+impl Replies {
+    fn forget(&mut self, entries: &[LargeTimelineReference]) {
+        for entry in entries {
+            self.0.remove(&entry.snapshot.id);
+        }
+    }
+
+    fn encode(&mut self, entries: Vec<TimelineEntry>, reset: bool) -> Vec<TimelineChange> {
+        if reset {
+            self.0.clear();
+        }
+        entries
+            .into_iter()
+            .map(|entry| {
+                let TimelineContent::AgentMessage {
+                    text,
+                    state,
+                    via,
+                    echo,
+                    ..
+                } = &entry.content
+                else {
+                    return TimelineChange::Upsert {
+                        entry: Box::new(entry),
+                    };
+                };
+                let previous = self.0.remove(&entry.id);
+                let suffix = previous.as_ref().and_then(|(sent, sent_via, sent_echo)| {
+                    (*state == TimelineState::Running && sent_via == via && sent_echo == echo)
+                        .then(|| text.strip_prefix(sent.as_str()))
+                        .flatten()
+                });
+                let change = match suffix {
+                    Some(suffix) => TimelineChange::Append {
+                        id: entry.id.clone(),
+                        revision: entry.revision,
+                        source: entry.source,
+                        updated_at: entry.updated_at,
+                        text: suffix.to_owned(),
+                    },
+                    None => TimelineChange::Upsert {
+                        entry: Box::new(entry.clone()),
+                    },
+                };
+                // Only a reply still streaming can grow; a finished one is sent whole.
+                if *state == TimelineState::Running {
+                    self.0.insert(entry.id, (text.clone(), via.clone(), *echo));
+                }
+                change
+            })
+            .collect()
+    }
+}
+
+/// Both the UI's backwards pages and the agent capability read the same snapshot.
+pub(crate) fn history_page(
+    db: &Db<'_>,
+    run: &str,
+    before: i64,
+    expected: &str,
+) -> Result<HistoryPage> {
+    let (first, _) = event_bounds(db, run)?;
+    let history = format!("v2:{run}:{first}");
+    if expected != history {
+        return Err(Error::conflict(
+            "History changed. Reconnect before loading older messages.",
+        ));
+    }
+    let (events, has_older) = db.events_before(run, before)?;
+    Ok(HistoryPage {
+        oldest: events.first().map_or(before, |event| event.id),
+        events,
+        entries: Vec::new(),
+        large_entries: Vec::new(),
+        history,
+        has_older,
+    })
 }

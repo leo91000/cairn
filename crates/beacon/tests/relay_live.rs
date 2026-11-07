@@ -1,3 +1,5 @@
+use common::MissionFixture;
+
 mod common;
 
 use common::RelayedInstallation;
@@ -92,7 +94,7 @@ async fn relay_disconnect_replays_activity_and_does_not_stop_the_run() {
     let mut relay = RelayedInstallation::new(axum::Router::new()).await;
     let task = relay
         .installation
-        .task(
+        .task_fixture(
             json!({
                 "name": "Relay recovery",
                 "prompt": "Continue independently",
@@ -113,8 +115,19 @@ async fn relay_disconnect_replays_activity_and_does_not_stop_the_run() {
         .installation
         .store
         .transaction(move |db| {
-            db.patch_run(&active, &json!({ "status": "running" }))?;
-            db.event(&active, "output", "before disconnect", None)?;
+            db.change_run(
+                &active,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_installation::run_status::RunStatus::Running),
+                    ..Default::default()
+                },
+            )?;
+            db.event(
+                &active,
+                &cairn_contracts::EventKind::Output,
+                "before disconnect",
+                None,
+            )?;
             Ok(())
         })
         .await
@@ -141,7 +154,12 @@ async fn relay_disconnect_replays_activity_and_does_not_stop_the_run() {
         .installation
         .store
         .transaction(move |db| {
-            db.event(&active, "output", "during disconnect", None)?;
+            db.event(
+                &active,
+                &cairn_contracts::EventKind::Output,
+                "during disconnect",
+                None,
+            )?;
             Ok(())
         })
         .await

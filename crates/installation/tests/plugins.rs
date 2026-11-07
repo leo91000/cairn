@@ -1,3 +1,12 @@
+use cairn_contracts::EventKind;
+use common::run_fixture::*;
+#[allow(unused_imports)]
+use common::{PluginServiceFixture as _, PluginStoreFixture as _};
+
+use common::AgentFixture;
+use common::MissionFixture;
+use common::ProjectFixture;
+
 mod common;
 
 use axum::{
@@ -38,7 +47,7 @@ fn worker() -> PathBuf {
 #[tokio::test]
 async fn shared_setup_keeps_an_absent_optional_secret_absent() {
     let (_root, s, _agent) = service().await;
-    let installed = registry::install(
+    let installed = common::package_install(
         &s,
         &json!({
             "manifest": {
@@ -58,10 +67,10 @@ async fn shared_setup_keeps_an_absent_optional_secret_absent() {
     )
     .await
     .unwrap();
-    registry::approve(&s, "shared-app", "1", text(&installed, "digest"))
+    common::package_approve(&s, "shared-app", "1", text(&installed, "digest"))
         .await
         .unwrap();
-    let original = connections::save(
+    let original = common::save_plugin(
         &s,
         "shared-app",
         &json!({
@@ -71,7 +80,7 @@ async fn shared_setup_keeps_an_absent_optional_secret_absent() {
     )
     .await
     .unwrap();
-    let copy = connections::save(
+    let copy = common::save_plugin(
         &s,
         "shared-app",
         &json!({
@@ -103,10 +112,10 @@ async fn service() -> (TempDir, Arc<Service>, Value) {
     common::relay_fixture::claimed(&s).await.unwrap();
     s.plugins.use_worker(worker());
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Discord agent",
-                "access": { "projects": [], "skills": [], "mcps": [], "github": false, "installation": false },
+                "access": { "projects": [], "skills": [], "mcps": [], "installation": false },
             }),
             None,
         )
@@ -117,7 +126,7 @@ async fn service() -> (TempDir, Arc<Service>, Value) {
 
 async fn fixture() -> (TempDir, Arc<Service>, Connection) {
     let (root, s, agent) = service().await;
-    let connection = connections::save(
+    let connection = common::save_plugin(
         &s,
         "discord",
         &json!({
@@ -135,85 +144,6 @@ async fn fixture() -> (TempDir, Arc<Service>, Connection) {
     .await
     .unwrap();
     (root, s, serde_json::from_value(connection).unwrap())
-}
-
-#[tokio::test]
-async fn legacy_bot_approvals_keep_default_off_delegation_without_approving_new_powers() {
-    let (_root, s, connection) = fixture().await;
-    let agent_id = &connection.agent_id;
-    let mut legacy = s
-        .store
-        .get(connections::KIND, &connection.id)
-        .await
-        .unwrap()
-        .unwrap();
-    legacy["grantedAccess"]
-        .as_object_mut()
-        .unwrap()
-        .remove("delegation");
-    s.store.put(connections::KIND, legacy).await.unwrap();
-    let mut agent = s.get("agents", agent_id).await.unwrap();
-    agent["access"]
-        .as_object_mut()
-        .unwrap()
-        .remove("delegation");
-    s.store.put("agents", agent.clone()).await.unwrap();
-
-    let preview = s.agent_preview(agent.clone(), agent_id).await.unwrap();
-    assert_eq!(preview["delegations"][0]["suspended"], false);
-    assert_eq!(preview["delegations"][0]["alreadySuspended"], false);
-    assert!(
-        accept(
-            &s,
-            &connection,
-            message("600", "300", "Hello before upgrading permissions")
-        )
-        .await
-        .unwrap()
-    );
-
-    agent["access"]["delegation"] = true.into();
-    let preview = s.agent_preview(agent.clone(), agent_id).await.unwrap();
-    assert_eq!(preview["delegations"][0]["suspended"], true);
-    assert_eq!(preview["delegations"][0]["alreadySuspended"], false);
-    agent = s.agent(agent.clone(), Some(agent_id)).await.unwrap();
-    assert_eq!(
-        accept(
-            &s,
-            &connection,
-            message("601", "300", "New permission needs approval")
-        )
-        .await
-        .unwrap_err()
-        .status,
-        403
-    );
-
-    agent["reapproveDelegations"] = json!([connection.id]);
-    agent = s.agent(agent.clone(), Some(agent_id)).await.unwrap();
-    let current: Connection = serde_json::from_value(
-        s.store
-            .get(connections::KIND, &connection.id)
-            .await
-            .unwrap()
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(current.granted_access["delegation"], true);
-    assert!(
-        accept(&s, &current, message("602", "300", "Hello after approval"))
-            .await
-            .unwrap()
-    );
-
-    agent
-        .as_object_mut()
-        .unwrap()
-        .remove("reapproveDelegations");
-    agent["access"]["delegation"] = false.into();
-    let preview = s.agent_preview(agent, agent_id).await.unwrap();
-    assert_eq!(preview["delegations"][0]["suspended"], true);
-    assert_eq!(preview["delegations"][0]["alreadySuspended"], false);
 }
 
 fn message(id: &str, author: &str, content: &str) -> Value {
@@ -254,7 +184,7 @@ async fn gateway(
     let result = async {
         socket::deliver(s, connection, &mut session, &link, start).await?;
         let personal = || async {
-            let events = s.store.list(work::EVENTS).await?;
+            let events = common::plugin_events(&s.store).await?;
             cairn_installation::error::Result::Ok(
                 events
                     .iter()
@@ -309,6 +239,7 @@ fn context(connection: &Connection, event: &Value) -> capabilities::Context {
         management: None,
         connection: connection.clone(),
         manifest: registry::builtin("discord").unwrap().manifest,
+        package_digest: None,
         event: event.clone(),
         link: None,
         draft: None,
@@ -711,11 +642,13 @@ async fn handler_presentations_preserve_rejection_and_host_refusal_policies() {
 
 /// Moves the delivery's next attempt and progress throttle to now.
 async fn due(s: &Service) {
-    for mut delivery in s.store.list(work::DELIVERIES).await.unwrap() {
+    for mut delivery in common::plugin_deliveries(&s.store).await.unwrap() {
         delivery["nextAttemptAt"] = json!(now());
         delivery["progressAt"] = json!(0);
         delivery["questionRetryAt"] = json!({});
-        s.store.put(work::DELIVERIES, delivery).await.unwrap();
+        common::put_plugin_delivery(&s.store, delivery)
+            .await
+            .unwrap();
     }
 }
 
@@ -758,7 +691,7 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
         thread,
         vec![json!({ "name": "Fix the flaky deploy", "auto_archive_duration": 1440 })]
     );
-    let deliveries = s.store.list(work::DELIVERIES).await.unwrap();
+    let deliveries = common::plugin_deliveries(&s.store).await.unwrap();
     assert_eq!(deliveries.len(), 1, "the empty mention starts nothing");
     let delivery = deliveries[0].clone();
     assert_eq!(
@@ -766,31 +699,35 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
         json!({ "channel": "500", "source": "200", "message": "500", "threaded": true })
     );
     let chat = text(&delivery, "chatId").to_owned();
-    let prefix = format!("chat-attachment:{chat}:");
-    let stored = s.store.read(move |db| db.keys(&prefix)).await.unwrap();
+    let attachment_chat = chat.clone();
+    let stored = s
+        .store
+        .read(move |db| db.attachments(&attachment_chat))
+        .await
+        .unwrap();
     assert_eq!(
         stored.len(),
         1,
         "the screenshot is attached to the conversation"
     );
-    assert_eq!(stored[0].1["mediaType"], "image/png");
+    assert_eq!(stored[0].media_type, "image/png");
 
     // While the agent works: typing, a status message with Stop, then the question.
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let run_id = text(&s.get("chats", &chat).await.unwrap(), "runId").to_owned();
+    let run_id = text(&s.conversation_boundary(&chat).await.unwrap(), "runId").to_owned();
     s.store
         .event(
             &run_id,
-            "chat.user",
+            &EventKind::ChatUser,
             "",
             Some(json!({ "messageId": delivery["id"] })),
         )
         .await
         .unwrap();
     s.store
-        .event(&run_id, "item.started", "", Some(json!({ "item": { "type": "command_execution", "command": "pnpm   test --filter deploy" } })))
+        .event(&run_id, &EventKind::ItemStarted, "", Some(json!({ "item": { "type": "command_execution", "command": "pnpm   test --filter deploy" } })))
         .await
         .unwrap();
     let question = "a".repeat(64);
@@ -800,7 +737,7 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
             "id": question,
             "blocking": true,
             "fields": [{ "id": "0", "title": "Retry the deploy?", "secret": false, "options": [
-                { "label": "Yes", "description": "" }, { "label": "No", "description": "Leave it" }
+                { "id": "Yes", "label": "Yes", "description": "" }, { "id": "No", "label": "No", "description": "Leave it" }
             ] }],
         }),
     )
@@ -847,13 +784,15 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
         1
     );
     runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let question_chat = chat.clone();
+    let question_id = question.clone();
     let pending = s
         .store
-        .kv(&format!("chat-question:{chat}:{question}"))
+        .read(move |db| db.question(&question_chat, &question_id))
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(pending["status"], "answering");
+    assert_eq!(pending.status.as_str(), "answering");
     assert!(
         mock.called("PATCH", "/api/v10/channels/500/messages/")
             .await
@@ -869,36 +808,41 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
     )
     .unwrap();
     s.store
-        .event(&run_id, "artifact", "Report", Some(json!({ "id": artifact, "name": "report.md", "mediaType": "text/markdown", "size": 11 })))
+        .event(&run_id, &EventKind::Artifact, "Report", Some(json!({ "id": artifact, "name": "report.md", "mediaType": "text/markdown", "size": 11 })))
         .await
         .unwrap();
     let answer = format!("{}{}", "é".repeat(1900), "done");
     s.store
         .event(
             &run_id,
-            "item.completed",
+            &EventKind::ItemCompleted,
             &answer,
             Some(json!({ "item": { "type": "agent_message", "text": answer } })),
         )
         .await
         .unwrap();
     s.store
-        .event(&run_id, "turn.completed", "", None)
+        .event(&run_id, &EventKind::TurnCompleted, "", None)
         .await
         .unwrap();
     mock.statuses.lock().await.push(429);
     due(&s).await;
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     assert_eq!(
-        s.store.list(work::DELIVERIES).await.unwrap().len(),
+        common::plugin_deliveries(&s.store).await.unwrap().len(),
         1,
         "rate limited, retried later"
     );
     due(&s).await;
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    assert!(s.store.list(work::DELIVERIES).await.unwrap().is_empty());
+    assert!(
+        common::plugin_deliveries(&s.store)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
-        s.store.list("plugin-activity").await.unwrap()[0]["status"],
+        common::plugin_activity(&s.store).await.unwrap()[0]["status"],
         "replied"
     );
 
@@ -968,7 +912,7 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
     );
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     assert_eq!(
-        s.store.list(work::DELIVERIES).await.unwrap()[0]["chatId"],
+        common::plugin_deliveries(&s.store).await.unwrap()[0]["chatId"],
         chat,
         "same thread, same conversation"
     );
@@ -978,7 +922,10 @@ async fn discord_script_runs_a_conversation_in_a_thread_end_to_end() {
         .await
         .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    assert_eq!(s.get("chats", &chat).await.unwrap()["paused"], true);
+    assert_eq!(
+        s.conversation_boundary(&chat).await.unwrap()["paused"],
+        true
+    );
     assert_eq!(
         mock.called(
             "PUT",
@@ -996,12 +943,15 @@ async fn finish_turn(s: &Service, delivery: &Value, answer: &str) {
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(delivery, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(delivery, "chatId"))
+        .await
+        .unwrap();
     let run_id = text(&chat, "runId").to_owned();
     s.store
         .event(
             &run_id,
-            "chat.user",
+            &EventKind::ChatUser,
             "",
             Some(json!({ "messageId": delivery["id"] })),
         )
@@ -1010,14 +960,14 @@ async fn finish_turn(s: &Service, delivery: &Value, answer: &str) {
     s.store
         .event(
             &run_id,
-            "item.completed",
+            &EventKind::ItemCompleted,
             answer,
             Some(json!({ "item": { "type": "agent_message", "text": answer } })),
         )
         .await
         .unwrap();
     s.store
-        .event(&run_id, "turn.completed", "", None)
+        .event(&run_id, &EventKind::TurnCompleted, "", None)
         .await
         .unwrap();
 }
@@ -1027,10 +977,10 @@ async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is
     let (_root, s, connection) = fixture().await;
     let (mock, server) = mock(&s).await;
     let support = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Support",
-                "access": { "projects": [], "skills": [], "mcps": [], "github": false, "installation": false, "sandbox": "read-only" },
+                "access": { "projects": [], "skills": [], "mcps": [], "installation": false, "sandbox": "read-only" },
             }),
             None,
         )
@@ -1051,8 +1001,8 @@ async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is
     };
     let channel = json!({ "guildId": "100", "channelId": "200", "messageContent": true, "everyMessage": true });
     // The owner chooses the agent, even one that can run commands for anyone in a channel.
-    let broad = s.get("agents", &connection.agent_id).await.unwrap();
-    connections::save(
+    let broad = s.agent_snapshot(&connection.agent_id).await.unwrap();
+    common::save_plugin(
         &s,
         "discord",
         &input(&broad, channel.clone()),
@@ -1062,7 +1012,7 @@ async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is
     .unwrap();
     // Answering every message needs Message Content: the package turns it on.
     let missing = json!({ "guildId": "100", "channelId": "200", "everyMessage": true });
-    let saved = connections::save(
+    let saved = common::save_plugin(
         &s,
         "discord",
         &input(&support, missing),
@@ -1071,7 +1021,7 @@ async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is
     .await
     .unwrap();
     assert_eq!(saved["settings"]["messageContent"], true);
-    let saved = connections::save(
+    let saved = common::save_plugin(
         &s,
         "discord",
         &input(&support, channel),
@@ -1099,14 +1049,19 @@ async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is
     );
     due(&s).await;
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     assert_eq!(delivery["reply"]["deferred"], true);
-    let activity = s.store.list("plugin-activity").await.unwrap();
+    let activity = common::plugin_activity(&s.store).await.unwrap();
     assert!(text(&activity[0], "preview").starts_with("(Message from Sarah"));
     finish_turn(&s, &delivery, "NO_REPLY").await;
     due(&s).await;
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    assert!(s.store.list(work::DELIVERIES).await.unwrap().is_empty());
+    assert!(
+        common::plugin_deliveries(&s.store)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(
         mock.requests
             .lock()
@@ -1127,7 +1082,7 @@ async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is
         .unwrap()
     );
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     finish_turn(&s, &delivery, "Use the reset link on the sign-in page.").await;
     due(&s).await;
     runtime::pump(&s, &connection, &mut session).await.unwrap();
@@ -1156,7 +1111,12 @@ async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is
             .unwrap()
     );
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    assert!(s.store.list(work::DELIVERIES).await.unwrap().is_empty());
+    assert!(
+        common::plugin_deliveries(&s.store)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(
         mock.posts("/api/v10/channels/200/messages")
             .await
@@ -1170,7 +1130,7 @@ async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is
         value["channel_id"] = json!("601");
         value
     };
-    let binding = s.store.list(connections::KIND).await.unwrap();
+    let binding = s.store.instances_fixture().await.unwrap();
     assert_eq!(binding[0]["accessMode"], "everyone");
     for (id, author) in [("603", "302"), ("604", "301")] {
         accept_in(&s, &connection, &threads, stop(id, author))
@@ -1196,7 +1156,7 @@ async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is
     );
 
     // Granting the agent a plugin such as 1Password later keeps the public connection.
-    connections::save(
+    common::save_plugin(
         &s,
         "onepassword",
         &json!({
@@ -1218,7 +1178,7 @@ async fn public_support_channels_accept_any_agent_and_stay_quiet_when_nothing_is
 async fn access_requests_wait_for_approval_without_storing_content() {
     let (_root, s, connection) = fixture().await;
     let (mock, server) = mock(&s).await;
-    let saved = connections::save(
+    let saved = common::save_plugin(
         &s,
         "discord",
         &json!({
@@ -1258,25 +1218,23 @@ async fn access_requests_wait_for_approval_without_storing_content() {
         .unwrap()
     );
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let requests = s.store.list("plugin-requests").await.unwrap();
+    let requests = common::plugin_requests(&s.store).await.unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0]["name"], "Sarah");
     assert_eq!(requests[0]["mentions"], 3);
     // The script answered once, and nothing the person wrote was kept anywhere.
     assert_eq!(mock.requests.lock().await.len(), 1);
     assert!(text(&mock.requests.lock().await[0].body, "content").contains("approve"));
-    for kind in [
-        "plugin-requests",
-        "plugin-events",
-        "plugin-storage",
-        "plugin-activity",
-    ] {
-        let stored = serde_json::to_string(&s.store.list(kind).await.unwrap()).unwrap();
-        assert!(!stored.contains("private question"), "{kind}");
-    }
+    let stored = serde_json::to_string(&json!({
+        "requests": common::plugin_requests(&s.store).await.unwrap(),
+        "events": common::plugin_events(&s.store).await.unwrap(),
+        "activity": common::plugin_activity(&s.store).await.unwrap(),
+    }))
+    .unwrap();
+    assert!(!stored.contains("private question"));
 
     // Approval applies to the running worker without a new revision.
-    connections::people(&s, "discord", &connection.id, "301", "approve")
+    common::plugin_people(&s, "discord", &connection.id, "301", "approve")
         .await
         .unwrap();
     assert!(
@@ -1285,14 +1243,14 @@ async fn access_requests_wait_for_approval_without_storing_content() {
             .unwrap()
     );
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    assert_eq!(s.store.list(work::DELIVERIES).await.unwrap().len(), 1);
+    assert_eq!(common::plugin_deliveries(&s.store).await.unwrap().len(), 1);
 
     assert!(
         !accept(&s, &connection, message("610", "302", "<@400> hi"))
             .await
             .unwrap()
     );
-    connections::people(&s, "discord", &connection.id, "302", "deny")
+    common::plugin_people(&s, "discord", &connection.id, "302", "deny")
         .await
         .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
@@ -1309,7 +1267,7 @@ async fn access_requests_wait_for_approval_without_storing_content() {
         "denied people stay silent"
     );
 
-    let overview = connections::overview(&s).await.unwrap();
+    let overview = serde_json::to_value(connections::overview(&s).await.unwrap()).unwrap();
     assert_eq!(overview[0]["userIds"], json!(["301"]));
     assert_eq!(
         overview[0]["people"],
@@ -1319,10 +1277,10 @@ async fn access_requests_wait_for_approval_without_storing_content() {
     assert_eq!(overview[0]["usage"]["hour"], 1);
     assert_eq!(overview[0]["activity"][0]["name"], "Sarah");
 
-    connections::people(&s, "discord", &connection.id, "301", "remove")
+    common::plugin_people(&s, "discord", &connection.id, "301", "remove")
         .await
         .unwrap();
-    connections::set_enabled(&s, "discord", &connection.id, &json!({ "enabled": false }))
+    common::enable_plugin(&s, "discord", &connection.id, &json!({ "enabled": false }))
         .await
         .unwrap();
     assert_eq!(
@@ -1335,9 +1293,27 @@ async fn access_requests_wait_for_approval_without_storing_content() {
     connections::remove(&s, "discord", &connection.id)
         .await
         .unwrap();
-    for kind in connections::OWNED {
-        assert!(s.store.list(kind).await.unwrap().is_empty(), "{kind}");
-    }
+    s.store
+        .read(|db| {
+            for table in [
+                "plugin_events",
+                "plugin_deliveries",
+                "plugin_requests",
+                "plugin_activity",
+                "plugin_storage",
+                "plugin_http_receipts",
+                "plugin_timers",
+            ] {
+                let count: i64 =
+                    db.0.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })?;
+                assert_eq!(count, 0, "{table}");
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
     session.stop().await;
     server.abort();
 }
@@ -1397,9 +1373,11 @@ async fn rate_limits_and_changed_agent_access_stop_admission() {
         403
     );
 
-    let mut agent = s.get("agents", &connection.agent_id).await.unwrap();
+    let mut agent = s.agent_snapshot(&connection.agent_id).await.unwrap();
     agent["access"]["projects"] = Value::Null;
-    s.agent(agent, Some(&connection.agent_id)).await.unwrap();
+    s.agent_fixture(agent, Some(&connection.agent_id))
+        .await
+        .unwrap();
     assert_eq!(
         accept(&s, &connection, message("505", "300", "<@400> hi"))
             .await
@@ -1408,7 +1386,7 @@ async fn rate_limits_and_changed_agent_access_stop_admission() {
         403
     );
     // Listed people may reach the main agent, with every project and installation access.
-    connections::save(
+    common::save_plugin(
         &s,
         "discord",
         &json!({
@@ -1425,17 +1403,17 @@ async fn rate_limits_and_changed_agent_access_stop_admission() {
     .unwrap();
     // The agent still has to reach the delegation's project.
     let project = s
-        .project(json!({ "name": "Elsewhere", "path": root.path() }), None)
+        .project_fixture(json!({ "name": "Elsewhere", "path": root.path() }), None)
         .await
         .unwrap();
     let elsewhere = s
-        .agent(
+        .agent_fixture(
             json!({ "name": "Elsewhere", "access": { "projects": [], "installation": false } }),
             None,
         )
         .await
         .unwrap();
-    let unreachable = connections::save(
+    let unreachable = common::save_plugin(
         &s,
         "discord",
         &json!({
@@ -1460,10 +1438,17 @@ async fn rate_limits_and_changed_agent_access_stop_admission() {
         json!({ "guildId": "100", "channelId": "x" }),
         json!({ "guildId": "100", "channelId": "200", "extra": 1 }),
     ] {
-        let result = connections::save(
+        let result = common::save_plugin(
             &s,
             "discord",
-            &json!({ "name": "Bad", "settings": settings, "userIds": ["300"], "agentId": connection.agent_id, "enabled": false, "token": "t" }),
+            &json!({
+                "name": "Bad",
+                "settings": settings,
+                "userIds": ["300"],
+                "agentId": connection.agent_id,
+                "enabled": false,
+                "token": "t",
+            }),
             None,
         )
         .await;
@@ -1490,25 +1475,28 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(&receipt, "chatId"))
+        .await
+        .unwrap();
     let run_id = text(&chat, "runId");
     let agent = |text: &str| Some(json!({ "item": { "type": "agent_message", "text": text } }));
     s.store
         .event(
             run_id,
-            "item.completed",
+            &EventKind::ItemCompleted,
             "unrelated answer",
             agent("unrelated answer"),
         )
         .await
         .unwrap();
     s.store
-        .event(run_id, "turn.completed", "", None)
+        .event(run_id, &EventKind::TurnCompleted, "", None)
         .await
         .unwrap();
-    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     assert!(
-        work::reply(&s, &connection, &delivery)
+        common::plugin_reply(&s, &connection, &delivery)
             .await
             .unwrap()
             .is_none()
@@ -1516,7 +1504,7 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
     s.store
         .event(
             run_id,
-            "chat.user",
+            &EventKind::ChatUser,
             "hello",
             Some(json!({ "messageId": receipt["messageId"] })),
         )
@@ -1524,28 +1512,32 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
         .unwrap();
     s.store
         .event(
-            run_id,
-            "item.completed",
+            run_id, &EventKind::ItemCompleted,
             "synthetic_secret",
             Some(json!({ "item": { "type": "command_execution", "aggregated_output": "synthetic_secret" } })),
         )
         .await
         .unwrap();
     s.store
-        .event(run_id, "item.completed", "hello back", agent("hello back"))
+        .event(
+            run_id,
+            &EventKind::ItemCompleted,
+            "hello back",
+            agent("hello back"),
+        )
         .await
         .unwrap();
     assert!(
-        work::reply(&s, &connection, &delivery)
+        common::plugin_reply(&s, &connection, &delivery)
             .await
             .unwrap()
             .is_none()
     );
     s.store
-        .event(run_id, "turn.completed", "", None)
+        .event(run_id, &EventKind::TurnCompleted, "", None)
         .await
         .unwrap();
-    let reply = work::reply(&s, &connection, &delivery)
+    let reply = common::plugin_reply(&s, &connection, &delivery)
         .await
         .unwrap()
         .unwrap();
@@ -1557,14 +1549,23 @@ async fn replies_export_only_the_correlated_completed_turn_and_revoke_immediatel
         .await
         .unwrap();
     assert_eq!(
-        work::reply(&s, &connection, &delivery)
+        common::plugin_reply(&s, &connection, &delivery)
             .await
             .unwrap_err()
             .status,
         403
     );
-    assert!(s.store.list(work::DELIVERIES).await.unwrap().is_empty());
-    assert!(s.get("chats", text(&receipt, "chatId")).await.is_ok());
+    assert!(
+        common::plugin_deliveries(&s.store)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        s.conversation_boundary(text(&receipt, "chatId"))
+            .await
+            .is_ok()
+    );
 }
 
 /// Dates the run's last event back, as if it was recorded `ms` ago.
@@ -1597,13 +1598,21 @@ async fn replies_answer_a_retried_turn_with_its_last_attempt() {
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(&receipt, "chatId"))
+        .await
+        .unwrap();
     let run_id = text(&chat, "runId");
-    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
         let store = s.store.clone();
         let run_id = run_id.to_owned();
-        async move { store.event(&run_id, kind, text, payload).await.unwrap() }
+        async move {
+            store
+                .event(&run_id, &EventKind::from_adapter(kind), text, payload)
+                .await
+                .unwrap();
+        }
     };
 
     event(
@@ -1627,7 +1636,7 @@ async fn replies_answer_a_retried_turn_with_its_last_attempt() {
     event("turn.started", "", None).await;
     event("turn.completed", "", None).await;
 
-    let reply = work::reply(&s, &connection, &delivery)
+    let reply = common::plugin_reply(&s, &connection, &delivery)
         .await
         .unwrap()
         .unwrap();
@@ -1654,13 +1663,21 @@ async fn replies_answer_a_retried_turn_stopped_by_cairn_with_its_last_attempt() 
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(&receipt, "chatId"))
+        .await
+        .unwrap();
     let run_id = text(&chat, "runId");
-    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
         let store = s.store.clone();
         let run_id = run_id.to_owned();
-        async move { store.event(&run_id, kind, text, payload).await.unwrap() }
+        async move {
+            store
+                .event(&run_id, &EventKind::from_adapter(kind), text, payload)
+                .await
+                .unwrap();
+        }
     };
 
     event(
@@ -1687,11 +1704,17 @@ async fn replies_answer_a_retried_turn_stopped_by_cairn_with_its_last_attempt() 
     // Cairn stops the retried attempt at its time limit: no turn end, only the status.
     event("status", "failed", None).await;
     s.store
-        .patch_run(run_id, json!({ "status": "failed" }))
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Failed),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
 
-    let reply = work::reply(&s, &connection, &delivery)
+    let reply = common::plugin_reply(&s, &connection, &delivery)
         .await
         .unwrap()
         .unwrap();
@@ -1720,17 +1743,24 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(&receipt, "chatId"))
+        .await
+        .unwrap();
     let run_id = text(&chat, "runId");
     let run = s.store.run(run_id).await.unwrap();
     assert_eq!(run["chatExecution"]["messageId"], receipt["messageId"]);
-    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
-    let reply = async || work::reply(&s, &connection, &delivery).await.unwrap();
+    let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
+    let reply = async || {
+        common::plugin_reply(&s, &connection, &delivery)
+            .await
+            .unwrap()
+    };
 
     s.store
         .event(
             run_id,
-            "chat.user",
+            &EventKind::ChatUser,
             "hello",
             Some(json!({ "messageId": receipt["messageId"] })),
         )
@@ -1739,15 +1769,20 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     let capacity = "Selected model is at capacity. Please try a different model.";
     let failure = json!({ "error": { "message": capacity, "codexErrorInfo": "serverOverloaded" } });
     s.store
-        .event(run_id, "turn.failed", capacity, Some(failure))
+        .event(run_id, &EventKind::TurnFailed, capacity, Some(failure))
         .await
         .unwrap();
     assert!(reply().await.is_none(), "The attempt has not settled yet");
     // An account wait that just started continues the message.
     s.store
-        .patch_run(
+        .change_run(
             run_id,
-            json!({ "accountWaitReason": "Usage exhausted. Waiting for an available Codex account to resume." }),
+            cairn_installation::runs::RunChanges {
+                account_wait_reason: Some(Some(
+                    "Usage exhausted. Waiting for an available Codex account to resume.".into(),
+                )),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -1756,7 +1791,7 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     s.store
         .event(
             run_id,
-            "status",
+            &EventKind::Status,
             "Usage exhausted. Saving this session and restoring capacity or switching accounts.",
             None,
         )
@@ -1768,7 +1803,7 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     s.store
         .event(
             run_id,
-            "status",
+            &EventKind::Status,
             "Usage exhausted. Saving this session and restoring capacity or switching accounts.",
             None,
         )
@@ -1777,21 +1812,36 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     assert!(reply().await.is_none());
     // Recovering the controller continues the message.
     s.store
-        .patch_run(
+        .change_run(
             run_id,
-            json!({ "accountWaitReason": "Recovering after worker restart." }),
+            cairn_installation::runs::RunChanges {
+                account_wait_reason: Some(Some("Recovering after worker restart.".into())),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
     assert!(reply().await.is_none());
     s.store
-        .patch_run(run_id, json!({ "accountWaitReason": null }))
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                account_wait_reason: Some(None),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert!(reply().await.is_none());
 
     s.store
-        .patch_run(run_id, json!({ "status": "failed" }))
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Failed),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let failed = reply().await.unwrap();
@@ -1799,14 +1849,20 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
 
     // Cairn retries the same message: the failure was not the final answer.
     s.store
-        .patch_run(run_id, json!({ "status": "queued" }))
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Queued),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     let retry = json!({ "retry": { "attempt": 1, "limit": 3 } });
     s.store
         .event(
             run_id,
-            "retry.scheduled",
+            &EventKind::RetryScheduled,
             "Temporary agent error.",
             Some(retry),
         )
@@ -1816,29 +1872,49 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
     // The retry then waits for an account: once it lasts, the failure answers meanwhile.
     let wait = "Waiting for a Codex account with available usage.";
     s.store
-        .patch_run(run_id, json!({ "accountWaitReason": wait }))
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                account_wait_reason: Some(Some((wait).to_owned())),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
-    s.store.event(run_id, "status", wait, None).await.unwrap();
+    s.store
+        .event(run_id, &EventKind::Status, wait, None)
+        .await
+        .unwrap();
     assert!(reply().await.is_none());
     age_last_event(&s, run_id, 3 * 60_000).await;
     assert_eq!(reply().await.unwrap().status, "failed");
     s.store
-        .patch_run(run_id, json!({ "accountWaitReason": null }))
+        .change_run(
+            run_id,
+            cairn_installation::runs::RunChanges {
+                account_wait_reason: Some(None),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert!(reply().await.is_none());
     s.store
-        .event(run_id, "turn.started", "", None)
+        .event(run_id, &EventKind::TurnStarted, "", None)
         .await
         .unwrap();
     let answer = json!({ "item": { "type": "agent_message", "text": "hello back" } });
     s.store
-        .event(run_id, "item.completed", "hello back", Some(answer))
+        .event(
+            run_id,
+            &EventKind::ItemCompleted,
+            "hello back",
+            Some(answer),
+        )
         .await
         .unwrap();
     s.store
-        .event(run_id, "turn.completed", "", None)
+        .event(run_id, &EventKind::TurnCompleted, "", None)
         .await
         .unwrap();
     let completed = reply().await.unwrap();
@@ -1849,9 +1925,13 @@ async fn replies_wait_for_the_turn_cairn_retries_after_a_failure() {
 
     // The run moves on to the next message before the reply is sent: the retry still answered.
     s.store
-        .patch_run(
+        .change_run(
             run_id,
-            json!({ "status": "running", "chatExecution": { "messageId": "next" } }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                boundary: Some(serde_json::json!({"chatExecution": { "messageId": "next" }})),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
@@ -1881,13 +1961,21 @@ async fn replies_do_not_follow_a_retry_stopped_before_it_ran() {
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(&receipt, "chatId"))
+        .await
+        .unwrap();
     let run_id = text(&chat, "runId");
-    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
         let store = s.store.clone();
         let run_id = run_id.to_owned();
-        async move { store.event(&run_id, kind, text, payload).await.unwrap() }
+        async move {
+            store
+                .event(&run_id, &EventKind::from_adapter(kind), text, payload)
+                .await
+                .unwrap();
+        }
     };
 
     event(
@@ -1914,14 +2002,18 @@ async fn replies_do_not_follow_a_retry_stopped_before_it_ran() {
     event("item.completed", "the other answer", Some(answer)).await;
     event("turn.completed", "", None).await;
     s.store
-        .patch_run(
+        .change_run(
             run_id,
-            json!({ "status": "succeeded", "chatExecution": { "messageId": "next" } }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Succeeded),
+                boundary: Some(serde_json::json!({"chatExecution": { "messageId": "next" }})),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
 
-    let reply = work::reply(&s, &connection, &delivery)
+    let reply = common::plugin_reply(&s, &connection, &delivery)
         .await
         .unwrap()
         .unwrap();
@@ -1949,13 +2041,21 @@ async fn replies_to_a_stopped_turn_do_not_carry_the_next_answer() {
         s.chat_tick(&std::collections::HashSet::new())
             .await
             .unwrap();
-        let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
+        let chat = s
+            .conversation_boundary(text(&receipt, "chatId"))
+            .await
+            .unwrap();
         let run_id = text(&chat, "runId");
-        let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+        let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
         let event = |kind: &'static str, text: &'static str, payload: Option<Value>| {
             let store = s.store.clone();
             let run_id = run_id.to_owned();
-            async move { store.event(&run_id, kind, text, payload).await.unwrap() }
+            async move {
+                store
+                    .event(&run_id, &EventKind::from_adapter(kind), text, payload)
+                    .await
+                    .unwrap();
+            }
         };
 
         event(
@@ -1981,14 +2081,18 @@ async fn replies_to_a_stopped_turn_do_not_carry_the_next_answer() {
         event("item.completed", "the other answer", Some(answer)).await;
         event("turn.completed", "", None).await;
         s.store
-            .patch_run(
+            .change_run(
                 run_id,
-                json!({ "status": "succeeded", "chatExecution": { "messageId": "next" } }),
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Succeeded),
+                    boundary: Some(serde_json::json!({"chatExecution": { "messageId": "next" }})),
+                    ..Default::default()
+                },
             )
             .await
             .unwrap();
 
-        let reply = work::reply(&s, &connection, &delivery)
+        let reply = common::plugin_reply(&s, &connection, &delivery)
             .await
             .unwrap()
             .unwrap();
@@ -2004,11 +2108,12 @@ async fn replies_to_a_stopped_turn_do_not_carry_the_next_answer() {
 async fn revoked_and_deleted_deliveries_do_not_stop_other_people() {
     let (_root, s, connection) = fixture().await;
     let (mock, server) = mock(&s).await;
-    let mut saved = serde_json::to_value(&connection).unwrap();
+    let mut saved = common::instance_configuration(&connection);
+    saved.as_object_mut().unwrap().remove("agentIds");
     saved["userIds"] = json!(["300", "301"]);
     saved["maxMessagesPerHour"] = json!(10);
     let connection: Connection = serde_json::from_value(
-        connections::save(&s, "discord", &saved, Some(&connection.id))
+        common::save_plugin(&s, "discord", &saved, Some(&connection.id))
             .await
             .unwrap(),
     )
@@ -2020,14 +2125,14 @@ async fn revoked_and_deleted_deliveries_do_not_stop_other_people() {
             .unwrap();
     }
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let deliveries = s.store.list(work::DELIVERIES).await.unwrap();
+    let deliveries = common::plugin_deliveries(&s.store).await.unwrap();
     let removed = deliveries.iter().find(|d| d["thread"] == "511").unwrap();
     let chat_id = text(removed, "chatId").to_owned();
     s.store
-        .transaction(move |db| db.remove("chats", &chat_id))
+        .transaction(move |db| db.remove_conversation(&chat_id))
         .await
         .unwrap();
-    connections::people(&s, "discord", &connection.id, "300", "remove")
+    common::plugin_people(&s, "discord", &connection.id, "300", "remove")
         .await
         .unwrap();
     let remaining = deliveries.iter().find(|d| d["thread"] == "512").unwrap();
@@ -2035,7 +2140,12 @@ async fn revoked_and_deleted_deliveries_do_not_stop_other_people() {
     due(&s).await;
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     assert!(session.alive());
-    assert!(s.store.list(work::DELIVERIES).await.unwrap().is_empty());
+    assert!(
+        common::plugin_deliveries(&s.store)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         mock.posts("/api/v10/channels/512/messages")
             .await
@@ -2055,15 +2165,16 @@ async fn revoked_and_deleted_deliveries_do_not_stop_other_people() {
 #[tokio::test]
 async fn public_question_partial_answers_require_the_starters_authority() {
     let (_root, s, connection) = fixture().await;
-    let agent = s.agent(json!({
+    let agent = s.agent_fixture(json!({
         "name": "Support",
-        "access": { "projects": [], "skills": [], "mcps": [], "github": false, "installation": false, "sandbox": "read-only" },
+        "access": { "projects": [], "skills": [], "mcps": [], "installation": false, "sandbox": "read-only" },
     }), None).await.unwrap();
-    let mut saved = serde_json::to_value(&connection).unwrap();
+    let mut saved = common::instance_configuration(&connection);
+    saved.as_object_mut().unwrap().remove("agentIds");
     saved["agentId"] = agent["id"].clone();
     saved["accessMode"] = json!("everyone");
     let connection: Connection = serde_json::from_value(
-        connections::save(&s, "discord", &saved, Some(&connection.id))
+        common::save_plugin(&s, "discord", &saved, Some(&connection.id))
             .await
             .unwrap(),
     )
@@ -2074,16 +2185,19 @@ async fn public_question_partial_answers_require_the_starters_authority() {
         .await
         .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(&delivery, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(&delivery, "chatId"))
+        .await
+        .unwrap();
     let run = text(&chat, "runId");
     s.store
         .event(
             run,
-            "chat.user",
+            &EventKind::ChatUser,
             "",
             Some(json!({ "messageId": delivery["id"] })),
         )
@@ -2094,17 +2208,13 @@ async fn public_question_partial_answers_require_the_starters_authority() {
         "id": question,
         "blocking": true,
         "fields": [
-            { "id": "first", "title": "First?", "secret": false, "options": [{ "label": "Safe", "description": "" }, { "label": "Attacker", "description": "" }] },
+            { "id": "first", "title": "First?", "secret": false, "options": [{ "id": "Safe", "label": "Safe", "description": "" }, { "id": "Attacker", "label": "Attacker", "description": "" }] },
             { "id": "second", "title": "Second?", "secret": false, "options": [] },
         ],
     })).await.unwrap();
     due(&s).await;
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let key = format!(
-        "storage:{}:{}",
-        connection.id,
-        cairn_installation::auth::hex_digest(&format!("question:520:{question}"))
-    );
+    let key = format!("question:520:{question}");
     let threads = ["520"];
     // A stranger's button cannot poison the first field.
     let click = json!({
@@ -2118,7 +2228,13 @@ async fn public_question_partial_answers_require_the_starters_authority() {
         .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     assert_eq!(
-        s.store.get("plugin-storage", &key).await.unwrap().unwrap()["value"]["answers"],
+        {
+            let instance = connection.id.clone();
+            s.store
+                .read(move |db| Ok(db.plugin_storage(&instance, &key)?.unwrap()))
+                .await
+                .unwrap()
+        }["answers"],
         json!({})
     );
     // A stranger's free text cannot poison it either; the starter can answer both.
@@ -2146,7 +2262,7 @@ async fn public_question_partial_answers_require_the_starters_authority() {
         queued
             .iter()
             .any(|message| message["answers"]
-                == json!({ "first": ["Safe"], "second": ["Continue"] }))
+                == json!({ "first": { "selected": [], "comment": "Safe" }, "second": { "selected": [], "comment": "Continue" } }))
     );
     session.stop().await;
     server.abort();
@@ -2164,14 +2280,24 @@ async fn failures_before_acknowledgement_finish_and_followups_resume_stopped_run
         s.chat_tick(&std::collections::HashSet::new())
             .await
             .unwrap();
-        let chat = s.get("chats", text(&receipt, "chatId")).await.unwrap();
-        let run = text(&chat, "runId");
-        s.store
-            .patch_run(run, json!({ "status": status, "recoveryPending": false }))
+        let chat = s
+            .conversation_boundary(text(&receipt, "chatId"))
             .await
             .unwrap();
-        let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
-        let reply = work::reply(&s, &connection, &delivery)
+        let run = text(&chat, "runId");
+        s.store
+            .change_run(
+                run,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::parse(status).unwrap()),
+                    recovery_pending: Some(false),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
+        let reply = common::plugin_reply(&s, &connection, &delivery)
             .await
             .unwrap()
             .unwrap();
@@ -2188,7 +2314,7 @@ async fn failures_before_acknowledgement_finish_and_followups_resume_stopped_run
                 .await
                 .unwrap();
             assert_eq!(
-                s.get("chats", text(&chat, "id")).await.unwrap()["paused"],
+                s.conversation_boundary(text(&chat, "id")).await.unwrap()["paused"],
                 true
             );
             let mut follow = event.clone();
@@ -2201,7 +2327,7 @@ async fn failures_before_acknowledgement_finish_and_followups_resume_stopped_run
                 .unwrap();
             assert_eq!(s.store.run(run).await.unwrap()["status"], "queued");
             assert_eq!(
-                s.get("chats", text(&chat, "id")).await.unwrap()["paused"],
+                s.conversation_boundary(text(&chat, "id")).await.unwrap()["paused"],
                 false
             );
         }
@@ -2218,17 +2344,20 @@ async fn channel_fallback_questions_retry_and_controls_route_to_the_right_conver
         .await
         .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let delivery = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let delivery = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     assert_eq!(delivery["reply"]["threaded"], false);
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(&delivery, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(&delivery, "chatId"))
+        .await
+        .unwrap();
     let run = text(&chat, "runId");
     s.store
         .event(
             run,
-            "chat.user",
+            &EventKind::ChatUser,
             "",
             Some(json!({ "messageId": delivery["id"] })),
         )
@@ -2237,7 +2366,7 @@ async fn channel_fallback_questions_retry_and_controls_route_to_the_right_conver
     let question = "c".repeat(64);
     s.question_receive(run, json!({
         "id": question, "blocking": true,
-        "fields": [{ "id": "x".repeat(101), "title": "Choose?", "secret": false, "options": [{ "label": format!("a{}", "é".repeat(40)), "description": "" }] }],
+        "fields": [{ "id": "x".repeat(101), "title": "Choose?", "secret": false, "options": [{ "id": "choice", "label": format!("a{}", "é".repeat(40)), "description": "" }] }],
     })).await.unwrap();
     // Another queued message in this conversation must not republish its question.
     let mut second = message("541", "300", "<@400> also this");
@@ -2245,16 +2374,18 @@ async fn channel_fallback_questions_retry_and_controls_route_to_the_right_conver
     accept(&s, &connection, second).await.unwrap();
     mock.statuses.lock().await.push(429);
     due(&s).await;
-    for mut delivery in s.store.list(work::DELIVERIES).await.unwrap() {
+    for mut delivery in common::plugin_deliveries(&s.store).await.unwrap() {
         delivery["progressAt"] = json!(now());
-        s.store.put(work::DELIVERIES, delivery).await.unwrap();
+        common::put_plugin_delivery(&s.store, delivery)
+            .await
+            .unwrap();
     }
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let first = s
-        .store
-        .get(work::DELIVERIES, text(&delivery, "id"))
+    let first = common::plugin_deliveries(&s.store)
         .await
         .unwrap()
+        .into_iter()
+        .find(|value| value["id"] == delivery["id"])
         .unwrap();
     assert_eq!(first["asked"], json!([]));
     due(&s).await;
@@ -2282,13 +2413,15 @@ async fn channel_fallback_questions_retry_and_controls_route_to_the_right_conver
     .await
     .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let question_chat = text(&chat, "id").to_owned();
+    let question_id = question.clone();
     let pending = s
         .store
-        .kv(&format!("chat-question:{}:{question}", text(&chat, "id")))
+        .read(move |db| db.question(&question_chat, &question_id))
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(pending["status"], "answering");
+    assert_eq!(pending.status.as_str(), "answering");
     // Stop buttons include the explicit conversation even without a shared thread.
     interact(&s, &connection, &[], json!({
         "id": "802", "token": "synthetic_interaction", "type": 3, "guild_id": "100", "channel_id": "200",
@@ -2298,7 +2431,7 @@ async fn channel_fallback_questions_retry_and_controls_route_to_the_right_conver
     })).await.unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     assert_eq!(
-        s.get("chats", text(&chat, "id")).await.unwrap()["paused"],
+        s.conversation_boundary(text(&chat, "id")).await.unwrap()["paused"],
         true
     );
     session.stop().await;
@@ -2311,10 +2444,7 @@ async fn every_host_capability_rejects_a_changed_owner() {
     // The persisted connection keeps valid agent grants but belongs to another owner.
     connection.owner_access_id = Some("previous-owner".into());
     s.store
-        .put(
-            connections::KIND,
-            serde_json::to_value(&connection).unwrap(),
-        )
+        .put_instance_fixture(serde_json::to_value(&connection).unwrap())
         .await
         .unwrap();
     let ctx = context(
@@ -2335,8 +2465,17 @@ async fn every_host_capability_rejects_a_changed_owner() {
             .unwrap();
         assert_eq!(denied.0, "forbidden");
     }
-    assert!(s.store.list("plugin-storage").await.unwrap().is_empty());
-    assert!(s.store.list("plugin-timers").await.unwrap().is_empty());
+    assert!(
+        s.store
+            .read(|db| Ok(db
+                .0
+                .query_row("SELECT count(*) FROM plugin_storage", [], |row| row
+                    .get::<_, i64>(0))?))
+            .await
+            .unwrap()
+            == 0
+    );
+    assert!(common::plugin_timers(&s.store).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -2348,43 +2487,57 @@ async fn optional_questions_are_not_republished_on_later_turns() {
         .await
         .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    let first = s.store.list(work::DELIVERIES).await.unwrap().remove(0);
+    let first = common::plugin_deliveries(&s.store).await.unwrap().remove(0);
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(&first, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(&first, "chatId"))
+        .await
+        .unwrap();
     let run = text(&chat, "runId");
     s.store
         .event(
             run,
-            "chat.user",
+            &EventKind::ChatUser,
             "",
             Some(json!({ "messageId": first["id"] })),
         )
         .await
         .unwrap();
     let question = "d".repeat(64);
-    s.question_receive(run, json!({ "id": question, "blocking": false, "fields": [{ "id": "0", "title": "Optional?", "secret": false, "options": [] }] })).await.unwrap();
+    s.question_receive(
+        run,
+        json!({
+            "id": question,
+            "blocking": false,
+            "fields": [{ "id": "0", "title": "Optional?", "secret": false, "options": [] }],
+        }),
+    )
+    .await
+    .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
-    s.question_release(run, Some(&question)).await.unwrap();
+    s.question_cancel(text(&chat, "id"), &question)
+        .await
+        .unwrap();
     s.store
         .event(
             run,
-            "item.completed",
+            &EventKind::ItemCompleted,
             "Done",
             Some(json!({ "item": { "type": "agent_message", "text": "Done" } })),
         )
         .await
         .unwrap();
     s.store
-        .event(run, "turn.completed", "", None)
+        .event(run, &EventKind::TurnCompleted, "", None)
         .await
         .unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     let event = json!({ "name": "message", "revision": connection.revision, "authorId": "300", "payload": { "id": "551" } });
     let receipt = work::submit(&s, &context(&connection, &event), &json!({ "text": "Another thing", "thread": "550", "shared": true, "reply": first["reply"] })).await.unwrap();
     s.store
-        .patch_run(
+        .update_run_boundary_fixture(
             run,
             json!({ "chatExecution": { "messageId": receipt["messageId"] } }),
         )
@@ -2393,7 +2546,7 @@ async fn optional_questions_are_not_republished_on_later_turns() {
     s.store
         .event(
             run,
-            "chat.user",
+            &EventKind::ChatUser,
             "",
             Some(json!({ "messageId": receipt["messageId"] })),
         )
@@ -2423,17 +2576,16 @@ async fn reviewed_reduced_agent_grants_start_a_fresh_conversation() {
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let mut agent = s.get("agents", &connection.agent_id).await.unwrap();
+    let mut agent = s.agent_snapshot(&connection.agent_id).await.unwrap();
     agent["access"]["sandbox"] = json!("read-only");
-    s.agent(agent, Some(&connection.agent_id)).await.unwrap();
-    let saved = connections::save(
-        &s,
-        "discord",
-        &serde_json::to_value(&connection).unwrap(),
-        Some(&connection.id),
-    )
-    .await
-    .unwrap();
+    s.agent_fixture(agent, Some(&connection.agent_id))
+        .await
+        .unwrap();
+    let mut settings = common::instance_configuration(&connection);
+    settings.as_object_mut().unwrap().remove("agentIds");
+    let saved = common::save_plugin(&s, "discord", &settings, Some(&connection.id))
+        .await
+        .unwrap();
     let new_connection: Connection = serde_json::from_value(saved).unwrap();
     let mut next = event("561");
     next["revision"] = json!(new_connection.revision);
@@ -2444,7 +2596,10 @@ async fn reviewed_reduced_agent_grants_start_a_fresh_conversation() {
     s.chat_tick(&std::collections::HashSet::new())
         .await
         .unwrap();
-    let chat = s.get("chats", text(&second, "chatId")).await.unwrap();
+    let chat = s
+        .conversation_boundary(text(&second, "chatId"))
+        .await
+        .unwrap();
     let run = s.store.run(text(&chat, "runId")).await.unwrap();
     assert_eq!(run["snapshot"]["agent"]["access"]["sandbox"], "read-only");
 }
@@ -2457,15 +2612,22 @@ async fn concurrent_plugin_uploads_share_the_chat_attachment_quota() {
         .await
         .unwrap();
     let chat_id = text(&chat, "id");
-    let seed = cairn_installation::config::id();
-    s.store
-        .set(
-            &format!("chat-attachment:{chat_id}:{seed}"),
-            json!({ "id": seed, "size": 200 * 1024 * 1024 - 3 }),
-            None,
+    let bytes = vec![b'x'; cairn_installation::attachments::MAX_FILE];
+    for n in 0..20 {
+        let count = if n == 19 {
+            bytes.len() - 3
+        } else {
+            bytes.len()
+        };
+        s.store_attachment(
+            chat_id,
+            &cairn_installation::config::id(),
+            "seed.txt",
+            &bytes[..count],
         )
         .await
         .unwrap();
+    }
     let first = cairn_installation::config::id();
     let second = cairn_installation::config::id();
     let (left, right) = tokio::join!(
@@ -2510,14 +2672,20 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     let (mock, server) = mock(&s).await;
     for invalid in [
         json!({ "manifest": pinger("1.0.0", &["onepassword.read"])["manifest"], "source": "return {}" }),
-        json!({ "manifest": { "id": "discord", "name": "Fake", "version": "1", "apiVersion": 2, "capabilities": [] }, "source": "return {}" }),
-        json!({ "manifest": { "id": "broken", "name": "Broken", "version": "1", "apiVersion": 2, "capabilities": [] }, "source": "return function() end" }),
+        json!({
+            "manifest": { "id": "discord", "name": "Fake", "version": "1", "apiVersion": 2, "capabilities": [] },
+            "source": "return {}",
+        }),
+        json!({
+            "manifest": { "id": "broken", "name": "Broken", "version": "1", "apiVersion": 2, "capabilities": [] },
+            "source": "return function() end",
+        }),
     ] {
-        assert!(registry::install(&s, &invalid).await.is_err());
+        assert!(common::package_install(&s, &invalid).await.is_err());
     }
     let package = pinger("1.0.0", &["timers", "storage", "http"]);
-    registry::install(&s, &package).await.unwrap();
-    let catalog = registry::catalog(&s).await.unwrap();
+    common::package_install(&s, &package).await.unwrap();
+    let catalog = common::package_catalog(&s).await.unwrap();
     let entry = catalog["packages"]
         .as_array()
         .unwrap()
@@ -2526,9 +2694,14 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
         .unwrap()
         .clone();
     assert_eq!(entry["status"], "needs_approval");
-    let input = json!({ "name": "Core status", "settings": { "team": "configured-team" }, "token": "secret-key", "enabled": true });
+    let input = json!({
+        "name": "Core status",
+        "settings": { "team": "configured-team" },
+        "token": "secret-key",
+        "enabled": true,
+    });
     assert_eq!(
-        connections::save(&s, "pinger", &input, None)
+        common::save_plugin(&s, "pinger", &input, None)
             .await
             .unwrap_err()
             .status,
@@ -2543,7 +2716,7 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     )
     .unwrap();
     assert_eq!(
-        registry::approve(&s, "pinger", "1.0.0", text(&entry["versions"][0], "digest"))
+        common::package_approve(&s, "pinger", "1.0.0", text(&entry["versions"][0], "digest"))
             .await
             .unwrap_err()
             .status,
@@ -2551,17 +2724,24 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     );
     assert!(registry::active(&s, "pinger").await.is_err());
     std::fs::write(&source_path, original_source).unwrap();
-    registry::approve(&s, "pinger", "1.0.0", text(&entry["versions"][0], "digest"))
+    common::package_approve(&s, "pinger", "1.0.0", text(&entry["versions"][0], "digest"))
         .await
         .unwrap();
     for bad in [json!({ "team": "core", "other": 1 }), json!({})] {
         let mut input = input.clone();
         input["settings"] = bad;
-        assert!(connections::save(&s, "pinger", &input, None).await.is_err());
+        assert!(
+            common::save_plugin(&s, "pinger", &input, None)
+                .await
+                .is_err()
+        );
     }
-    let connection: Connection =
-        serde_json::from_value(connections::save(&s, "pinger", &input, None).await.unwrap())
-            .unwrap();
+    let connection: Connection = serde_json::from_value(
+        common::save_plugin(&s, "pinger", &input, None)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert!(
         connection.agent_id.is_empty(),
         "plugins without conversations get no agent"
@@ -2569,10 +2749,10 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
 
     let mut session = session(&s, "pinger").await;
     runtime::begin(&s, &connection, &mut session).await.unwrap();
-    let mut timer = s.store.list("plugin-timers").await.unwrap().remove(0);
+    let mut timer = common::plugin_timers(&s.store).await.unwrap().remove(0);
     assert!(timer["at"].as_i64().unwrap() > now() + 50_000);
     timer["at"] = json!(now());
-    s.store.put("plugin-timers", timer).await.unwrap();
+    common::put_plugin_timer(&s.store, timer).await.unwrap();
     runtime::pump(&s, &connection, &mut session).await.unwrap();
     let requests = mock.requests.lock().await;
     assert_eq!(requests.len(), 2, "the undeclared host was never contacted");
@@ -2581,7 +2761,19 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     assert_eq!(requests[0].body, json!({ "team": "configured-team" }));
     assert!(requests[1].headers.get("x-api-key").is_none());
     drop(requests);
-    let stored = s.store.list("plugin-storage").await.unwrap();
+    let instance_id = connection.id.clone();
+    let stored = s
+        .store
+        .read(move |db| {
+            let keys = db.plugin_storage_keys(&instance_id)?;
+            keys.into_iter()
+                .map(|key| {
+                    Ok(json!({ "key": key, "value": db.plugin_storage(&instance_id,&key)? }))
+                })
+                .collect::<cairn_installation::error::Result<Vec<_>>>()
+        })
+        .await
+        .unwrap();
     let value = |key: &str| stored.iter().find(|item| item["key"] == key).unwrap()["value"].clone();
     assert_eq!(value("status"), 200);
     assert!(value("blocked").as_str().unwrap().contains("forbidden"));
@@ -2604,7 +2796,7 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     assert!(registry::active(&s, "pinger").await.is_ok());
 
     // A new version waits for approval; the owner can roll back afterwards.
-    registry::install(
+    common::package_install(
         &s,
         &pinger(
             "1.1.0",
@@ -2613,7 +2805,7 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     )
     .await
     .unwrap();
-    let catalog = registry::catalog(&s).await.unwrap();
+    let catalog = common::package_catalog(&s).await.unwrap();
     let entry = catalog["packages"]
         .as_array()
         .unwrap()
@@ -2624,7 +2816,7 @@ async fn installed_packages_need_approval_and_reach_only_declared_hosts() {
     assert_eq!(entry["status"], "update");
     assert_eq!(entry["active"], "1.0.0");
     assert!(registry::activate(&s, "pinger", "1.1.0").await.is_err());
-    registry::approve(
+    common::package_approve(
         &s,
         "pinger",
         "1.1.0",
@@ -2688,21 +2880,25 @@ async fn plugin_management_is_owner_only_and_mcp_never_returns_secret_reads() {
     .await;
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let task = s
-        .task(
+        .task_fixture(
             json!({ "name": "Inspect", "agentId": MAIN_AGENT_ID, "prompt": "Inspect" }),
             None,
         )
         .await
         .unwrap();
     let run = s.enqueue(text(&task, "id"), "manual", None).await.unwrap();
-    let run = s
-        .store
-        .patch_run(
+    s.store
+        .change_run(
             text(&run, "id"),
-            json!({ "status": "running", "isolated": true }),
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Running),
+                boundary: Some(serde_json::json!({"isolated": true})),
+                ..Default::default()
+            },
         )
         .await
         .unwrap();
+    let run = s.store.run(text(&run, "id")).await.unwrap();
     let config = s.mcps.run_configuration(&s, &run).await.unwrap();
     let token = text(&config["env"], "CAIRN_MCP_RUN_TOKEN");
     let response = common::send(
@@ -2739,7 +2935,7 @@ async fn plugin_management_is_owner_only_and_mcp_never_returns_secret_reads() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    let catalog = s.store.list(connections::KIND).await.unwrap();
+    let catalog = s.store.instances_fixture().await.unwrap();
     assert!(
         !serde_json::to_string(&catalog)
             .unwrap()
@@ -2768,7 +2964,7 @@ async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_
         json!({ "lib/greet.luau": "return require('./missing')" }),
     ] {
         assert!(
-            registry::install(&s, &package(invalid.clone()))
+            common::package_install(&s, &package(invalid.clone()))
                 .await
                 .is_err(),
             "{invalid}"
@@ -2778,7 +2974,9 @@ async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_
         "lib/greet.luau": "local text = require('./text')\nreturn { hello = function(name) return text.upper('hello ') .. name end }",
         "lib/text.luau": "return { upper = string.upper }",
     });
-    let installed = registry::install(&s, &package(modules)).await.unwrap();
+    let installed = common::package_install(&s, &package(modules))
+        .await
+        .unwrap();
     assert_eq!(
         installed["files"],
         json!([
@@ -2789,7 +2987,7 @@ async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_
     );
     let directory = root.path().join("data/plugins/splitter/1.0.0");
     assert!(directory.join("lib/greet.luau").is_file());
-    registry::approve(&s, "splitter", "1.0.0", text(&installed, "digest"))
+    common::package_approve(&s, "splitter", "1.0.0", text(&installed, "digest"))
         .await
         .unwrap();
     let active = registry::active(&s, "splitter").await.unwrap();
@@ -2809,7 +3007,7 @@ async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_
         .unwrap();
     assert_eq!(result, "HELLO Ada");
 
-    let connection = connections::save(
+    let connection = common::save_plugin(
         &s,
         "splitter",
         &json!({
@@ -2831,7 +3029,7 @@ async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_
         registry::active(&s, "splitter").await.err().unwrap().status,
         403
     );
-    let paused = connections::set_enabled(
+    let paused = common::enable_plugin(
         &s,
         "splitter",
         text(&connection, "id"),
@@ -2858,4 +3056,394 @@ async fn installed_packages_can_be_split_into_modules_and_any_file_change_needs_
     assert!(registry::active(&s, "splitter").await.is_err());
     std::fs::remove_file(directory.join("link.luau")).unwrap();
     registry::active(&s, "splitter").await.unwrap();
+}
+
+#[tokio::test]
+async fn deleting_a_shared_source_during_setup_does_not_commit_its_draft_or_secrets() {
+    use axum::routing::get;
+    use tokio::sync::Notify;
+
+    let (_root, s, _agent) = service().await;
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let app = Router::new().route(
+        "/check",
+        get({
+            let started = started.clone();
+            let release = release.clone();
+            move || {
+                let started = started.clone();
+                let release = release.clone();
+                async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Json(json!({}))
+                }
+            }
+        }),
+    );
+    let (origin, server) = common::serve_locally(app).await;
+    s.plugins.route_http_to(Some(origin));
+    let installed = common::package_install(&s,&json!({
+        "manifest": {
+            "id": "shared-fenced", "name": "Shared fenced", "version": "1", "apiVersion": 2,
+            "capabilities": ["http"], "hosts": ["api.example.test"], "instanceForm": true,
+            "settings": [
+                { "key": "clientId", "title": "Client ID", "type": "string", "required": true },
+                { "key": "clientSecret", "title": "Client secret", "type": "secret", "required": true },
+                { "key": "check", "title": "Check", "type": "boolean", "default": false }
+            ],
+            "setup": { "steps": [
+                { "id": "app", "kind": "settings", "title": "App", "shared": true, "settings": ["clientId","clientSecret"] },
+                { "id": "instance", "kind": "settings", "title": "Instance", "settings": ["check"] }
+            ] }
+        },
+        "source": "return { form = function(input) if input.values.check then cairn.http.request({ url = 'https://api.example.test/check' }) end return {} end }"
+    })).await.unwrap();
+    common::package_approve(&s, "shared-fenced", "1", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let source = common::save_plugin(
+        &s,
+        "shared-fenced",
+        &json!({
+            "name": "Source",
+            "enabled": false,
+            "settings": { "clientId": "app" },
+            "secrets": { "clientSecret": "synthetic-secret" },
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let source_id = text(&source, "id");
+    let input = json!({ "name": "Stale draft", "enabled": false, "settings": { "check": true }, "sharedFrom": source_id });
+    let remove = async {
+        started.notified().await;
+        connections::remove(&s, "shared-fenced", source_id)
+            .await
+            .unwrap();
+        release.notify_one();
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(
+            common::save_plugin(&s, "shared-fenced", &input, None),
+            remove
+        )
+    })
+    .await
+    .unwrap();
+    assert!(result.is_err());
+    assert!(s.store.plugin_instances().await.unwrap().is_empty());
+    assert!(
+        s.vault
+            .get(&connections::secrets_key(source_id))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    server.abort();
+}
+
+async fn hooks_fixture() -> (TempDir, Arc<Service>, Connection, registry::Package) {
+    let (root, s, _agent) = service().await;
+    let installed = common::package_install(&s, &json!({
+        "manifest": {
+            "id": "hook-probe", "name": "Hooks", "version": "1", "apiVersion": 2,
+            "capabilities": ["hooks", "timers"], "agentAccess": {},
+            "resources": [
+                { "name": "server", "description": "Server" },
+                { "name": "channel", "description": "Channel", "parentType": "server" }
+            ],
+            "hooks": [{ "name": "message", "description": "Message", "payloadSchema": {
+                "type": "object", "required": ["channel"], "additionalProperties": false,
+                "properties": { "channel": { "type": "string" } }
+            }, "resourceFields": [{ "path": "/channel", "resourceType": "channel" }] }]
+        },
+        "source": r#"
+return {
+    socket = function(input) return cairn.hooks.emit(input) end,
+    timer = function(input) return cairn.hooks.emit(input.payload) end,
+    resources = function(input)
+        if input.op == "list" then
+            if input.query == "invalid" then return { items = cairn.array({ { resourceType = input.resourceType, id = "x", name = "X" } }) } end
+            if input.query == "bad-page" then return { items = cairn.array({}), nextPage = input.page } end
+            return { items = cairn.array({ { resourceType = "channel", id = "c", name = input.query, parent = { resourceType = "server", id = "s" } } }), nextPage = input.page + 1 }
+        end
+        if input.id == "wrong" then return { resourceType = input.resourceType, id = "different", name = "Wrong" } end
+        if input.id == "missing-parent" then return { resourceType = "channel", id = input.id, name = "Lost" } end
+        if input.id == "unknown-parent" then return { resourceType = "channel", id = input.id, name = "Lost", parent = { resourceType = "server", id = "wrong" } } end
+        return { resourceType = input.resourceType, id = input.id, name = input.id,
+            parent = if input.resourceType == "channel" then { resourceType = "server", id = "s" } else nil }
+    end,
+}
+"#
+    })).await.unwrap();
+    common::package_approve(&s, "hook-probe", "1", text(&installed, "digest"))
+        .await
+        .unwrap();
+    let saved = common::save_plugin(
+        &s,
+        "hook-probe",
+        &json!({"name":"Hook instance", "enabled":true}),
+        None,
+    )
+    .await
+    .unwrap();
+    let connection = connections::get(&s, "hook-probe", text(&saved, "id"))
+        .await
+        .unwrap();
+    let package = registry::active(&s, "hook-probe").await.unwrap();
+    (root, s, connection, package)
+}
+
+#[tokio::test]
+async fn declared_hooks_emit_from_transport_and_timers_but_not_one_shot_handlers() {
+    let (_root, s, connection, package) = hooks_fixture().await;
+    let mut session = s
+        .plugins
+        .host
+        .start(&worker(), &package.manifest, &package.source)
+        .await
+        .unwrap();
+    let (link, _commands) = socket::Link::channel();
+    let emission = json!({ "name": "message", "id": "transport", "payload": { "channel": "c" } });
+    assert_eq!(
+        socket::deliver(&s, &connection, &mut session, &link, emission.clone())
+            .await
+            .unwrap(),
+        true
+    );
+    assert_eq!(
+        socket::deliver(&s, &connection, &mut session, &link, emission.clone())
+            .await
+            .unwrap(),
+        false
+    );
+    for invalid in [
+        json!({ "name": "unknown", "id": "x", "payload": { "channel": "c" } }),
+        json!({ "name": "message", "id": "x", "payload": { "channel": 1 } }),
+        json!({ "name": "message", "id": "x", "payload": {} }),
+        json!({ "name": "message", "id": "bad\n", "payload": { "channel": "c" } }),
+        json!({ "name": "message", "id": "x", "payload": { "channel": "x".repeat(262_144) } }),
+    ] {
+        assert!(
+            socket::deliver(&s, &connection, &mut session, &link, invalid)
+                .await
+                .is_err()
+        );
+    }
+    let expected = connection.clone();
+    s.store
+        .transaction(move |db| {
+            db.save_plugin_timer(&cairn_installation::plugins::state::Timer {
+                id: cairn_installation::config::id(),
+                instance_id: expected.id.clone(),
+                revision: expected.revision.clone(),
+                name: "poll".into(),
+                payload: json!({"name":"message","id":"timer","payload":{"channel":"c"}}),
+                at: now() - 1,
+            })
+        })
+        .await
+        .unwrap();
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    // A subsequent pump cannot consume or redispatch hooks.
+    runtime::pump(&s, &connection, &mut session).await.unwrap();
+    let expected = connection.clone();
+    let digest = package.digest.clone();
+    let events = s
+        .store
+        .read(move |db| db.plugin_hooks(&expected.id, &expected.revision, &digest, now()))
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(events.iter().any(|event| event.external_id == "timer"));
+    assert!(
+        scope::invoke(
+            &s,
+            &package,
+            "socket",
+            emission,
+            &scope::Scope::Instance(Box::new(connection.clone()))
+        )
+        .await
+        .is_err()
+    );
+    let context = capabilities::Context {
+        management: None,
+        connection: connection.clone(),
+        manifest: package.manifest.clone(),
+        package_digest: None,
+        event: json!({"name":"message"}),
+        link: None,
+        draft: None,
+    };
+    assert!(
+        capabilities::checked(
+            &s,
+            &context,
+            "hooks.emit",
+            json!({"name":"message","id":"ordinary","payload":{"channel":"c"}})
+        )
+        .await
+        .is_err()
+    );
+    common::enable_plugin(&s, "hook-probe", &connection.id, &json!({"enabled":false}))
+        .await
+        .unwrap();
+    assert!(
+        socket::deliver(
+            &s,
+            &connection,
+            &mut session,
+            &link,
+            json!({"name":"message","id":"revoked","payload":{"channel":"c"}})
+        )
+        .await
+        .is_err()
+    );
+    session.stop().await;
+}
+
+#[tokio::test]
+async fn resource_listing_and_ancestry_reject_malformed_results_and_cross_instance_access() {
+    use cairn_installation::plugins::resources;
+    let (_root, s, connection, _package) = hooks_fixture().await;
+    let list = |query: &str| {
+        serde_json::from_value(json!({
+        "pluginId":"hook-probe", "instanceId":connection.id, "resourceType":"channel", "page":2, "query":query,
+    })).unwrap()
+    };
+    let page = resources::list(&s, list("Support"), None).await.unwrap();
+    assert_eq!(page.items[0].name, "Support");
+    assert_eq!(page.next_page, Some(3));
+    for query in ["invalid", "bad-page"] {
+        assert!(resources::list(&s, list(query), None).await.is_err());
+    }
+    assert!(
+        resources::list(&s, list("Support"), Some(MAIN_AGENT_ID))
+            .await
+            .is_err()
+    );
+    let resolve = |id: &str| {
+        serde_json::from_value(json!({
+            "pluginId":"hook-probe", "instanceId":connection.id, "resourceType":"channel", "id":id,
+        }))
+        .unwrap()
+    };
+    let resolved = resources::resolve(&s, resolve("c"), None).await.unwrap();
+    assert_eq!(resolved.resource.id, "c");
+    assert_eq!(resolved.ancestors.len(), 1);
+    assert_eq!(resolved.ancestors[0].id, "s");
+    for id in ["wrong", "missing-parent", "unknown-parent"] {
+        assert!(
+            resources::resolve(&s, resolve(id), None).await.is_err(),
+            "{id}"
+        );
+    }
+    let other = common::save_plugin(
+        &s,
+        "hook-probe",
+        &json!({"name":"Other", "enabled":true}),
+        None,
+    )
+    .await
+    .unwrap();
+    let cross = serde_json::from_value(
+        json!({"pluginId":"github", "instanceId":other["id"], "resourceType":"channel", "id":"c"}),
+    )
+    .unwrap();
+    assert!(resources::resolve(&s, cross, None).await.is_err());
+}
+
+#[tokio::test]
+async fn hook_registry_compiles_schemas_and_binds_new_declarations_to_approval() {
+    let (_root, s, _connection, package) = hooks_fixture().await;
+    let mut manifest = serde_json::to_value(&package.manifest).unwrap();
+    manifest["version"] = "2".into();
+    let original = common::package_install(
+        &s,
+        &json!({"manifest":manifest, "source":package.source.main}),
+    )
+    .await
+    .unwrap();
+    let mut changed = manifest.clone();
+    changed["version"] = "3".into();
+    changed["hooks"][0]["description"] = "Changed".into();
+    let altered = common::package_install(
+        &s,
+        &json!({"manifest":changed, "source":package.source.main}),
+    )
+    .await
+    .unwrap();
+    assert_ne!(original["digest"], altered["digest"]);
+    assert!(
+        common::package_approve(&s, "hook-probe", "3", text(&original, "digest"))
+            .await
+            .is_err()
+    );
+    manifest["version"] = "4".into();
+    manifest["hooks"][0]["payloadSchema"]["properties"]["channel"]["minLength"] = "invalid".into();
+    assert!(
+        common::package_install(
+            &s,
+            &json!({"manifest":manifest,"source":package.source.main})
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn reapproving_changed_code_fences_loaded_workers_and_invalidates_old_hooks() {
+    let (root, s, connection, package) = hooks_fixture().await;
+    let mut session = s
+        .plugins
+        .host
+        .start(&worker(), &package.manifest, &package.source)
+        .await
+        .unwrap();
+    let (link, _commands) = socket::Link::channel();
+    let emission = json!({"name":"message","id":"first","payload":{"channel":"c"}});
+    assert_eq!(
+        socket::deliver(&s, &connection, &mut session, &link, emission)
+            .await
+            .unwrap(),
+        true
+    );
+    let mut source = package.source.clone();
+    source
+        .main
+        .push_str("\n-- Reapproved code with the same manifest\n");
+    std::fs::write(
+        root.path().join("data/plugins/hook-probe/1/main.luau"),
+        &source.main,
+    )
+    .unwrap();
+    let digest = source.digest(&package.manifest).unwrap();
+    common::package_approve(&s, "hook-probe", "1", &digest)
+        .await
+        .unwrap();
+    let old = connection.clone();
+    let old_digest = package.digest.clone();
+    assert!(
+        s.store
+            .read(move |db| db.plugin_hooks(&old.id, &old.revision, &old_digest, now()))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        socket::deliver(
+            &s,
+            &connection,
+            &mut session,
+            &link,
+            json!({"name":"message","id":"stale","payload":{"channel":"c"}})
+        )
+        .await
+        .is_err()
+    );
+    session.stop().await;
 }

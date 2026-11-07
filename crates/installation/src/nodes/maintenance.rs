@@ -11,9 +11,17 @@ use axum::{
     extract::{Request, State},
     response::Response,
 };
+use cairn_contracts::EventKind;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::time::Duration;
+
+mod diagnostic;
+
+use diagnostic::{Drain, Outcome, Phase};
+
+#[cfg(test)]
+mod diagnostic_tests;
 
 /// Maintenance progress of a node, persisted in `node.maintenance`.
 #[derive(Clone, Copy, Serialize)]
@@ -107,67 +115,17 @@ pub async fn downloads(State(app): State<App>, request: Request) -> Result<Respo
         .map_err(Error::internal)
 }
 
-/// The release document, after recording its image as the one for this runtime.
+/// The current release and configured shutdown deadline.
 async fn advertise(s: &Service) -> Result<String> {
     let mut release = release()?;
-    let runtime = std::env::var("APP_RUNTIME_ID").unwrap_or_else(|_| "development".into());
-    if super::valid_runtime(&runtime) {
-        advertise_runtime(&s.store, &runtime, &release.image, crate::config::now()).await?;
-    }
     release.shutdown_timeout_seconds =
         super::publication::settings(s).await?["shutdownTimeoutSeconds"].clone();
     Ok(serde_json::to_value(release)?.to_string())
 }
 
-const RUNTIME_ADVERTISEMENT_MS: i64 = 24 * 60 * 60 * 1000;
-
-async fn advertise_runtime(
-    store: &crate::store::Store,
-    runtime: &str,
-    image: &str,
-    now: i64,
-) -> Result<()> {
-    let key = format!("node-runtime:{runtime}");
-    let runtime = runtime.to_owned();
-    let image = image.to_owned();
-    let deadline = now.saturating_add(RUNTIME_ADVERTISEMENT_MS);
-    store
-        .transaction(move |db| {
-            // Migrate permanent records once. Refreshing the current runtime must
-            // not keep extending every obsolete runtime's grace period.
-            for (old_key, mut value) in db.keys("node-runtime:")? {
-                if old_key != key && value["advertisedUntil"].as_i64().is_none() {
-                    value["advertisedUntil"] = deadline.into();
-                    db.set(&old_key, &value, Some(deadline))?;
-                }
-            }
-
-            db.set(
-                &key,
-                &json!({
-                    "runtimeId": runtime,
-                    "image": image,
-                    "advertisedUntil": deadline,
-                }),
-                Some(deadline),
-            )
-        })
-        .await
-}
-
 pub async fn request(s: &Service, node: &str, input: &Value) -> Result<Value> {
     match text(input, "action") {
-        "status" => s.get("nodes", node).await,
-        "runtimes" => {
-            let runtimes = s
-                .store
-                .keys("node-runtime:")
-                .await?
-                .into_iter()
-                .map(|(_, value)| value)
-                .collect::<Vec<_>>();
-            Ok(json!({ "runtimes": runtimes }))
-        }
+        "status" => s.node_boundary(node).await,
         "complete" => complete(s, node, input).await,
         "drain" => start_drain(s, node).await,
         _ => Err(Error::bad("Invalid maintenance action.")),
@@ -183,14 +141,13 @@ async fn complete(s: &Service, node: &str, input: &Value) -> Result<Value> {
     s.store
         .transaction(move |db| {
             let mut record = db
-                .get("nodes", &node)?
+                .node_boundary(&node)?
                 .ok_or_else(|| Error::not_found("Node removed."))?;
             record["maintenance"] = Value::Null;
             record["maintenanceGeneration"] = Value::Null;
             record["imageDigest"] = image.into();
             record["updateError"] = error.into();
-            record["updatedAt"] = crate::config::now().into();
-            db.put("nodes", &record)?;
+            db.save_node_boundary(&record)?;
             Ok(record)
         })
         .await
@@ -200,7 +157,7 @@ async fn complete(s: &Service, node: &str, input: &Value) -> Result<Value> {
 async fn start_drain(s: &Service, node: &str) -> Result<Value> {
     let node = node.to_owned();
     if !s.node_maintenance_tasks.lock().await.insert(node.clone()) {
-        return s.get("nodes", &node).await;
+        return s.node_boundary(&node).await;
     }
     let timeout = super::publication::settings(s).await?["shutdownTimeoutSeconds"]
         .as_u64()
@@ -213,12 +170,12 @@ async fn start_drain(s: &Service, node: &str) -> Result<Value> {
         s.store
             .transaction(move |db| {
                 let mut record = db
-                    .get("nodes", &id)?
+                    .node_boundary(&id)?
                     .ok_or_else(|| Error::not_found("Node removed."))?;
                 record["maintenance"] = serde_json::to_value(Maintenance::Draining)?;
                 record["maintenanceGeneration"] = generation.into();
                 record["maintenanceStartedAt"] = crate::config::now().into();
-                db.put("nodes", &record)?;
+                db.save_node_boundary(&record)?;
                 Ok(())
             })
             .await
@@ -229,16 +186,7 @@ async fn start_drain(s: &Service, node: &str) -> Result<Value> {
     }
     let service = s.clone();
     tokio::spawn(async move {
-        let result =
-            tokio::time::timeout(Duration::from_secs(timeout), drain(&service, &node)).await;
-        let error = match result {
-            Ok(Ok(())) => Value::Null,
-            Ok(Err(error)) => error.message.into(),
-            Err(_) => {
-                "Preparation deadline reached; the node must stop its controller before updating."
-                    .into()
-            }
-        };
+        let error = prepare(&service, &node, Duration::from_secs(timeout)).await;
         if let Err(error) = finish_drain(&service, &node, generation, error).await {
             tracing::warn!(error = %error, "failed to record node maintenance readiness");
         }
@@ -247,85 +195,116 @@ async fn start_drain(s: &Service, node: &str) -> Result<Value> {
     Ok(json!({ "maintenance": Maintenance::Draining }))
 }
 
+/// Runs the existing bounded drain before readiness is persisted. Keeping this
+/// future separate also makes cancellation observable when its owner drops it.
+async fn prepare(s: &Service, node: &str, timeout: Duration) -> Value {
+    let mut diagnostic = Drain::new();
+    let result = tokio::time::timeout(timeout, drain(s, node, &mut diagnostic)).await;
+    let (outcome, error) = match result {
+        Ok(Ok(())) => (Outcome::Completed, Value::Null),
+        Ok(Err(error)) => (Outcome::Error, error.message.into()),
+        Err(_) => (
+            Outcome::Deadline,
+            "Preparation deadline reached; the node must stop its controller before updating."
+                .into(),
+        ),
+    };
+    diagnostic.finish(outcome);
+    error
+}
+
 /// Reports readiness only for the drain that is still current.
 async fn finish_drain(s: &Service, node: &str, generation: String, error: Value) -> Result<()> {
     let node = node.to_owned();
     s.store
         .transaction(move |db| {
-            if let Some(mut record) = db.get("nodes", &node)?
+            if let Some(mut record) = db.node_boundary(&node)?
                 && record["maintenanceGeneration"] == generation
             {
                 record["maintenance"] = serde_json::to_value(Maintenance::ReadyToUpdate)?;
                 record["maintenanceError"] = error;
-                db.put("nodes", &record)?;
+                db.save_node_boundary(&record)?;
             }
             Ok(())
         })
         .await
 }
 
-async fn drain(s: &Service, node: &str) -> Result<()> {
+async fn drain(s: &Service, node: &str, diagnostic: &mut Drain) -> Result<()> {
     let mut failure = None;
-    for attempt in s
-        .store
-        .list("node-attempts")
-        .await?
-        .into_iter()
-        .filter(|a| {
-            a["nodeId"] == node
-                && super::is_active_attempt(a)
-                && a["role"] == super::placement::AttemptRole::Execution.as_str()
-        })
-    {
-        let run = s.store.run(text(&attempt, "runId")).await?;
+    for attempt in s.store.attempts().await?.into_iter().filter(|a| {
+        a.node_id == node
+            && super::is_active_attempt(a)
+            && a.role == super::placement::AttemptRole::Execution
+    }) {
+        diagnostic.counters.attempts += 1;
+        diagnostic.next(Phase::Preparation);
+        let run = s.store.run(&attempt.run_id).await?;
+        let native = crate::native::policy::native(&run["snapshot"]["agent"]);
         let run_id = text(&run, "id");
         let checkpoint = super::checkpoint(s, run_id).await?;
-        let native = checkpoint["prepared"]["backend"] == super::backend::NATIVE;
-        if checkpoint["nodeId"] != node || checkpoint["runnerId"] != attempt["id"] {
+        if checkpoint["nodeId"] != node || checkpoint["runnerId"] != attempt.id {
+            diagnostic.counters.stale_attempts += 1;
             continue;
         }
         s.store
-            .patch_run(run_id, json!({ "nodeState": NodeState::Updating }))
+            .update_run_placement(
+                run_id,
+                crate::nodes::run_placement::PlacementChanges {
+                    node_state: Some(serde_json::from_value(serde_json::json!(
+                        NodeState::Updating
+                    ))?),
+                    ..Default::default()
+                },
+            )
             .await?;
         s.store
             .event(
                 run_id,
-                "status",
+                &EventKind::Status,
                 "Node maintenance: pausing and saving the environment before restart.",
                 None,
             )
             .await?;
+        diagnostic.next(Phase::PauseRequest);
+        diagnostic.counters.pause_requests += 1;
         let stopped = s
             .http
             .delete(format!(
                 "{}/internal/execution/{node}/runs/{}",
                 s.config.public_url.trim_end_matches('/'),
-                text(&attempt, "id")
+                attempt.id
             ))
             .bearer_auth(super::runner_secret(s).await?)
             .timeout(Duration::from_secs(if native { 300 } else { 20 }))
             .send()
             .await;
         if !stopped.is_ok_and(|r| r.status().is_success()) {
+            diagnostic.counters.pause_failures += 1;
             failure = Some(Error::unavailable(
                 "Node did not confirm maintenance pause.",
             ));
             continue;
         }
         if !native {
-            super::placement::release(s, text(&attempt, "id")).await?;
+            release_placement(s, &attempt.id, diagnostic).await?;
         }
         let mut synchronized = true;
         if run["sessionId"].is_string() {
             loop {
-                match super::publication::capture(s, &run).await {
+                diagnostic.next(Phase::Capture);
+                diagnostic.counters.capture_calls += 1;
+                match super::publication::capture_for_update(s, &run, node).await {
                     Ok(_) => break,
                     Err(error) if native && error.status == 425 => {
                         // The enclosing drain deadline bounds this wait. Keep
                         // placement until the node's stopped archive is ready.
+                        diagnostic.counters.capture_waits += 1;
+                        diagnostic.next(Phase::CaptureWait);
                         tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                     Err(error) => {
+                        diagnostic.counters.capture_failures += 1;
                         failure = Some(error);
                         synchronized = false;
                         break;
@@ -334,39 +313,18 @@ async fn drain(s: &Service, node: &str) -> Result<()> {
             }
         }
         if native && synchronized {
-            super::placement::release(s, text(&attempt, "id")).await?;
+            release_placement(s, &attempt.id, diagnostic).await?;
         }
     }
     failure.map_or(Ok(()), Err)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn runtime_announcements_expire_without_refresh_and_migrate_permanent_entries() {
-        let root = tempfile::tempdir().unwrap();
-        let store = crate::store::Store::open(root.path()).unwrap();
-        store
-            .set(
-                "node-runtime:legacy",
-                json!({ "runtimeId": "legacy", "image": "legacy-image" }),
-                None,
-            )
-            .await
-            .unwrap();
-
-        let previous = crate::config::now() - 86_400_001;
-        advertise_runtime(&store, "previous", "previous-image", previous)
-            .await
-            .unwrap();
-        advertise_runtime(&store, "current", "current-image", crate::config::now())
-            .await
-            .unwrap();
-
-        let entries = store.keys("node-runtime:").await.unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].1["runtimeId"], "current");
+async fn release_placement(s: &Service, attempt: &str, diagnostic: &mut Drain) -> Result<()> {
+    diagnostic.next(Phase::PlacementRelease);
+    diagnostic.counters.placement_releases += 1;
+    let result = super::placement::release(s, attempt).await;
+    if result.is_err() {
+        diagnostic.counters.placement_failures += 1;
     }
+    result
 }

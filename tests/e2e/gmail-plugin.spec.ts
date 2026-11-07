@@ -6,13 +6,15 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+import { mockPluginCommand } from './mock-plugin-command'
 
 test('Gmail connects two explicit mailboxes with OAuth and saves no browser token', async ({ page, workspace }, testInfo) => {
   const capture = (name: string, target: { screenshot: (options: { path: string, animations: 'disabled' }) => Promise<unknown> } = page) =>
     target.screenshot({ path: testInfo.outputPath(`gmail-${name}.png`), animations: 'disabled' })
   await useRelayForHttpMocks(page)
   const catalog = await workspace.api('/api/plugins')
-  const gmail = catalog.packages.find((item: { id: string }) => item.id === 'gmail').manifest
+  const gmailEntry = catalog.packages.find((item: { id: string }) => item.id === 'gmail')
+  const gmail = gmailEntry.manifest
   expect(gmail.brand?.color).toBe('#EA4335')
   expect(gmail.brand?.path).toBeTruthy()
   const connections: Record<string, unknown>[] = []
@@ -27,6 +29,7 @@ test('Gmail connects two explicit mailboxes with OAuth and saves no browser toke
         status: 'active',
         active: '1.0.0',
         manifest: { ...gmail, instanceView: false },
+        setup: gmailEntry.setup,
         versions: [],
       }],
       capabilities: [],
@@ -58,7 +61,7 @@ test('Gmail connects two explicit mailboxes with OAuth and saves no browser toke
       expiresAt: Date.now() + 600000,
     },
   }))
-  await page.route('**/api/plugins/gmail/form', async (route: Route) => {
+  await mockPluginCommand(page, '**/api/plugins/gmail/form', async (route: Route) => {
     const input = route.request().postDataJSON()
     const email = input.credentialFlow === 'flow-1' ? 'alice@example.test' : 'bob@example.test'
     await route.fulfill({
@@ -70,7 +73,7 @@ test('Gmail connects two explicit mailboxes with OAuth and saves no browser toke
       },
     })
   })
-  await page.route('**/api/plugins/gmail/connections', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/gmail/connections', async (route) => {
     const input = route.request().postDataJSON()
     saves.push(input)
     connections.push({
@@ -190,7 +193,7 @@ test('Gmail connects two explicit mailboxes with OAuth and saves no browser toke
   await expect(page.getByRole('heading', { name: 'bob@example.test', exact: true })).toBeVisible()
 
   const revocationWarning = 'Disconnected locally. Google did not confirm revocation; remove this app from your Google account manually.'
-  await page.route('**/api/plugins/gmail/connections/*/disconnect', async (route) => {
+  await mockPluginCommand(page, '**/api/plugins/gmail/connections/*/disconnect', async (route) => {
     expect(route.request().method()).toBe('POST')
     connections[0]!.enabled = false
     await route.fulfill({ json: { revoked: false, message: revocationWarning } })

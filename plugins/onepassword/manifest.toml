@@ -1,6 +1,6 @@
 id = "onepassword"
 name = "1Password"
-version = "1.0.0"
+version = "1.2.0"
 description = "Agents pipe secrets straight into commands. Values never appear in the conversation."
 apiVersion = 2
 capabilities = [
@@ -9,7 +9,7 @@ capabilities = [
 ]
 instanceTest = true
 instanceView = true
-instructions = "1Password: Discover authorized accounts and field references using cairn_workspace.onepassword or cairn plugin onepassword. Read secrets only with cairn plugin onepassword read --account ACCOUNT_ID op://vault/item/field and pipe stdout directly into the consuming command, or capture it inside a script without printing it. Never run a bare read that exposes stdout to the conversation. The server holds service account tokens; do not expect an authenticated op CLI in this VM. Never print credentials, use shell tracing around them, put them in command arguments, or include them in messages or artifacts. This integration cannot use passkeys. If a website requires a passkey, stop that sign-in and ask the user to configure TOTP in the matching 1Password item if supported; wait for confirmation. Never request passwords, TOTP seeds or recovery codes in chat."
+instructions = "1Password: Discover authorized accounts and field references using cairn_workspace.onepassword or cairn plugin onepassword. Read secrets only with cairn plugin onepassword read --account ACCOUNT_ID op://vault/item/field and pipe stdout directly into the consuming command, or capture it inside a script without printing it. For multiple fields of the same item, use cairn plugin onepassword read-fields --account ACCOUNT_ID --vault VAULT --item ITEM --fields '[\"username\",\"credential\"]': it returns a secret JSON object in one item read. Reuse those values in memory for the bounded script instead of reading them for every API request; never persist them or share them between runs. Check quotas with cairn plugin onepassword limits --account ACCOUNT_ID. If rate limited, stop retrying until the reported reset; the daily quota is shared by all service accounts of the 1Password account, so reconnecting or rotating tokens does not reset it. Never run a bare read or read-fields that exposes stdout to the conversation. The server holds service account tokens; do not expect an authenticated op CLI in this VM. Never print credentials, use shell tracing around them, put them in command arguments, or include them in messages or artifacts. This integration cannot use passkeys. If a website requires a passkey, stop that sign-in and ask the user to configure TOTP in the matching 1Password item if supported; wait for confirmation. Never request passwords, TOTP seeds or recovery codes in chat."
 hosts = [
   "app-updates.agilebits.com",
   "cache.agilebits.com",
@@ -17,8 +17,13 @@ hosts = [
 
 [[programs]]
 name = "op"
-description = "The 1Password CLI, signed in with each service account's token for one command at a time."
+description = "The 1Password CLI with an isolated encrypted in-memory cache per connection, shared by its authorized agents and cleared after ten idle minutes."
 installer = "programs/op.luau"
+cache = { daemonArgs = [
+  "daemon",
+  "--timeout",
+  "0"
+], socketEnv = "OP_SOCK" }
 
 [instances]
 singular = "Service account"
@@ -65,6 +70,11 @@ name = "accounts"
 description = "List the 1Password accounts this agent may use."
 
 [[commands]]
+name = "limits"
+description = "Show hourly and daily quota usage and seconds until reset, without reading secrets."
+arguments = [ { name = "account", flag = "--account", required = true, maxLength = 100 }, ]
+
+[[commands]]
 name = "vaults"
 description = "List the vaults of an account."
 arguments = [ { name = "account", flag = "--account", required = true, maxLength = 100 }, ]
@@ -84,6 +94,17 @@ arguments = [
   { name = "account", flag = "--account", required = true, maxLength = 100 },
   { name = "vault", flag = "--vault", required = true, maxLength = 200 },
   { name = "item", flag = "--item", required = true, maxLength = 200 },
+]
+
+[[commands]]
+name = "read-fields"
+description = "Write selected fields of one item as secret JSON for a pipe, with one item read and no plaintext cache. TOTP fields require read."
+output = "secret"
+arguments = [
+  { name = "account", flag = "--account", required = true, maxLength = 100 },
+  { name = "vault", flag = "--vault", required = true, maxLength = 200 },
+  { name = "item", flag = "--item", required = true, maxLength = 200 },
+  { name = "fields", flag = "--fields", required = true, maxLength = 8000, description = "JSON array of 1 to 32 distinct field IDs or labels. Output keys match this selection." },
 ]
 
 [[commands]]
@@ -118,6 +139,7 @@ additionalProperties = false
 type = "string"
 enum = [
   "accounts",
+  "limits",
   "vaults",
   "items",
   "fields",

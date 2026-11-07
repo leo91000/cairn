@@ -396,6 +396,186 @@ def main():
                 args.output.write_text(json.dumps({**saved, "lossCounters": counts}) + "\n")
 
 
+def android_crash_summary(logcat, exit_info, native_log=""):
+    """Keep crash categories and stack metadata, never exception/abort messages."""
+    groups = {}
+    # The crash buffer was cleared before this test. Keep the beginning of its
+    # dump: native tombstones put attribution and frames before memory maps.
+    for line in logcat[:65536].splitlines():
+        record = re.fullmatch(r"[A-Z]/[^\r\n(]+\(\s*(\d+)\):\s?(.*)", line)
+        if record:
+            groups.setdefault(record[1], []).append(record[2])
+    lines = []
+    target_pids = set()
+    selected = set()
+    for logger_pid, group in groups.items():
+        if any(re.search(r"(?:Process:|Cmdline:) build\.cairn\.app(?:,|$)|>>> build\.cairn\.app <<<", line) for line in group):
+            lines.extend(group)
+            selected.add(logger_pid)
+            for line in group:
+                pid = re.match(r"\s*(?:Process: build\.cairn\.app, PID:|pid:)\s*(\d+)(?:,|$)", line)
+                if pid:
+                    target_pids.add(pid[1])
+    for logger_pid, group in groups.items():
+        if logger_pid in target_pids and logger_pid not in selected:
+            lines.extend(group)
+    result = {"targetProcessObserved": bool(lines), "exceptions": [], "signals": [],
+              "javaFrames": [], "nativeFrames": [], "nativeAssertions": [],
+              "abortCategories": [], "unexpectedOpcodes": [], "runtimeAssertions": [], "exitReasons": []}
+    exception_types = {
+        "java.lang.OutOfMemoryError", "java.lang.IllegalStateException", "java.lang.IllegalArgumentException",
+        "java.lang.NullPointerException", "java.lang.AssertionError", "java.lang.RuntimeException",
+        "java.lang.ExceptionInInitializerError", "java.lang.NoClassDefFoundError", "java.lang.Throwable",
+        "java.io.IOException", "java.net.SocketTimeoutException", "java.util.concurrent.CancellationException",
+        "kotlinx.coroutines.TimeoutCancellationException", "kotlinx.coroutines.JobCancellationException",
+        "build.cairn.app.data.DirectLost", "build.cairn.app.data.DirectNotSent",
+        "build.cairn.app.data.DirectRequestTimeout", "build.cairn.app.data.DirectStreamLost",
+    }
+    java_sources = {"NativeDirect.kt", "DirectTransport.kt", "CairnApi.kt", "CairnViewModel.kt",
+                    "DirectIceGrace.kt", "DirectRetry.kt", "DirectTransportDeviceTest.kt",
+                    "PeerConnection.java", "PeerConnectionFactory.java", "DataChannel.java", "Thread.java"}
+    native_modules = {"libc.so", "libart.so", "libandroid_runtime.so", "libjingle_peerconnection_so.so",
+                      "base.apk", "libc++_shared.so", "liblog.so", "libbase.so"}
+    native_sources = {"thread.cc", "checks.cc", "jni_helpers.cc", "jni_common.cc", "jvm.cc",
+                      "java_types.cc", "peer_connection.cc", "peer_connection_factory.cc",
+                      "peer_connection_factory_jni.cc", "data_channel.cc", "sctp_data_channel.cc",
+                      "data_channel_controller.cc"}
+    runtime_sources = {"thread.cc", "thread_list.cc", "runtime.cc", "art_method.cc",
+                       "interpreter_common.cc", "jni_internal.cc", "jni_env_ext.cc",
+                       "indirect_reference_table.cc", "heap.cc", "verifier.cc"}
+    signals = {"SIGABRT", "SIGSEGV", "SIGBUS", "SIGILL", "SIGFPE", "SIGTRAP", "SIGKILL", "SIGTERM"}
+
+    def retain(key, value, limit=32):
+        if value not in result[key] and len(result[key]) < limit:
+            result[key].append(value)
+
+    def abort_details(line):
+        if "Unexpected instruction:" in line:
+            retain("abortCategories", "ART_UNEXPECTED_INSTRUCTION", 4)
+            opcode = re.search(r"Unexpected instruction:\s+unused-([0-9a-fA-F]{2})\b", line)
+            if opcode:
+                retain("unexpectedOpcodes", int(opcode[1], 16), 8)
+        if "JNI DETECTED ERROR IN APPLICATION:" in line:
+            retain("abortCategories", "JNI_ERROR", 4)
+
+    root_type = False
+    for line in lines:
+        abort_details(line)
+        value = line.strip()
+        if re.match(r"Process: build\.cairn\.app(?:,|$)", value):
+            root_type = True
+            continue
+        if not value:
+            continue
+        cause = re.match(r"(?:Caused by:|Suppressed:) (.*)", value)
+        if root_type or cause:
+            exception = re.match(r"((?:[A-Za-z_$][\w$]*\.)+[A-Za-z_$][\w$]*)(?::|$)", cause[1] if cause else value)
+            if exception:
+                retain("exceptions", exception[1] if exception[1] in exception_types else "other")
+            root_type = False
+        signal_name = re.search(r"\bsignal \d+ \((SIG[A-Z0-9]+)\)", line)
+        if signal_name:
+            retain("signals", signal_name[1] if signal_name[1] in signals else "other")
+        frame = re.fullmatch(r"\s*at [\w.$<>]+\(([\w.$]+\.(?:java|kt)):(\d{1,10})\)", line)
+        if frame:
+            retain("javaFrames", {"source": frame[1] if frame[1] in java_sources else "other", "line": int(frame[2])})
+        native = re.match(r"\s*#\d+\s+pc\s+([0-9a-f]{1,16})\s+(?:\S*/)?([\w.!-]+)(?=\s|$)", line)
+        if native:
+            frame = {"pc": int(native[1], 16), "library": native[2] if native[2] in native_modules else "other"}
+            build_id = re.search(r"\(BuildId: ([0-9a-fA-F]{16,64})\)(?:\s|$)", line)
+            if build_id and native[2] in native_modules:
+                frame["buildId"] = build_id[1].lower()
+            retain("nativeFrames", frame)
+    # WebRTC's FatalLog writes source/line to main's rtc tag before abort().
+    # Its free-form check text and arguments must never reach the artifact.
+    for line in native_log[:65536].splitlines():
+        record = re.fullmatch(r"([EF])/([^\r\n(]+)\(\s*(\d+)\):\s?(.*)", line)
+        if not record or record[3] not in target_pids:
+            continue
+        if record[1] == "F":
+            abort_details(record[4])
+            # ART fatal lines carry source coordinates before the assertion text.
+            # Keep only approved basenames and line numbers, never paths/messages.
+            source = re.match(r"(?:[A-Za-z0-9_./-]{1,512}/)?([A-Za-z0-9_]+\.(?:cc|h)):(\d{1,10})\] ", record[4])
+            if source and source[1] in runtime_sources:
+                retain("runtimeAssertions", {"source": source[1], "line": int(source[2])}, 8)
+        if record[1] != "E" or record[2].strip() != "rtc":
+            continue
+        fatal = re.search(r"# Fatal error in: (?:[^,\r\n]{0,1024}/)?([^/,\r\n]{1,128}), line (\d{1,10})(?!\d)", record[4])
+        if fatal:
+            retain("nativeAssertions", {"source": fatal[1] if fatal[1] in native_sources else "other", "line": int(fatal[2])}, 8)
+    # ApplicationExitInfo labels and line layout vary by Android version. Its
+    # numeric reason/status fields are stable; never retain free-form labels.
+    reasons = ["UNKNOWN", "EXIT_SELF", "SIGNALED", "LOW_MEMORY", "CRASH", "CRASH_NATIVE",
+               "ANR", "INITIALIZATION_FAILURE", "PERMISSION_CHANGE", "EXCESSIVE_RESOURCE_USAGE",
+               "USER_REQUESTED", "USER_STOPPED", "DEPENDENCY_DIED", "OTHER", "FREEZER",
+               "PACKAGE_STATE_CHANGE", "PACKAGE_UPDATED"]
+    # This scoped OS history can include earlier exits, not just this test.
+    for record in re.split(r"\bApplicationExitInfo\b", exit_info[:16384]):
+        reason = re.search(r"(?:^|\s)reason=(\d{1,3})\b", record)
+        status = re.search(r"(?:^|\s)status=(-?\d{1,10})\b", record)
+        if reason and status:
+            code = int(reason[1])
+            category = reasons[code] if code < len(reasons) else "UNRECOGNIZED"
+            retain("exitReasons", {"reason": code, "category": category, "status": int(status[1])}, 8)
+    return result
+
+
+def android_failure_evidence(adb, output):
+    values = {}
+    errors = []
+    for category, arguments in [
+            ("crash-log", ("logcat", "-b", "crash", "-d", "-m", "256", "-v", "brief")),
+            ("native-log", ("logcat", "-b", "main", "-d", "-m", "256", "-v", "brief", "rtc:E", "*:F")),
+            ("exit-info", ("shell", "dumpsys", "activity", "exit-info", "build.cairn.app"))]:
+        try:
+            values[category] = adb(*arguments, text=True, errors="replace", timeout=5).stdout
+        except (OSError, subprocess.SubprocessError, UnicodeError):
+            values[category] = ""
+            errors.append(category + "-unavailable")
+    evidence = android_crash_summary(values["crash-log"], values["exit-info"], values["native-log"])
+    evidence["collectionErrors"] = errors
+    try:
+        output.with_suffix(".crash.json").write_text(json.dumps(evidence) + "\n")
+    except OSError:
+        # An unavailable artifact directory must not replace the test's failure.
+        return
+
+
+def android_instrumentation(adb, scenario, output):
+    try:
+        # This dedicated test emulator must not attribute a previous run's crash.
+        adb("logcat", "-b", "crash", "-b", "main", "-c", timeout=5)
+        result = adb("shell", "am", "instrument", "-w", "-e", "class", "build.cairn.app.data.DirectTransportDeviceTest",
+                     "-e", "cairnDirectScenario", scenario, "build.cairn.app.test/androidx.test.runner.AndroidJUnitRunner", text=True, timeout=360)
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        android_failure_evidence(adb, output)
+        raise
+    passed = "OK (1 test)" in result.stdout
+    try:
+        output.with_suffix(".instrumentation.txt").write_text(result.stdout)
+    except OSError:
+        if passed:
+            raise
+    if not passed:
+        android_failure_evidence(adb, output)
+        raise RuntimeError("Native Android transport scenario failed; see instrumentation result")
+
+
+def android_cleanup(adb, failed):
+    first_error = None
+    for command in [("shell", "am", "force-stop", "build.cairn.app"),
+                    ("shell", "run-as", "build.cairn.app", "rm", "-f", "files/direct-fixture.json"),
+                    ("reverse", "--remove", "tcp:4398")]:
+        try:
+            adb(*command, timeout=5)
+        except (OSError, subprocess.SubprocessError) as error:
+            if first_error is None:
+                first_error = error
+    if first_error is not None and not failed:
+        raise first_error
+
+
 def android(network, directory, args, report):
     if not os.environ.get("CAIRN_BEACON_TEST_DATABASE_URL"):
         raise RuntimeError("Set CAIRN_BEACON_TEST_DATABASE_URL to a disposable Postgres database")
@@ -445,23 +625,19 @@ def android(network, directory, args, report):
                  "apps/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"]:
         adb("install", "-r", "-t", path)
     adb("shell", "run-as", "build.cairn.app", "mkdir", "-p", "files")
+    completed = False
     try:
         adb("shell", "run-as", "build.cairn.app", "sh", "-c", "'cat > files/direct-fixture.json'", input=private.read_bytes())
-        result = adb("shell", "am", "instrument", "-w", "-e", "class", "build.cairn.app.data.DirectTransportDeviceTest",
-                     "-e", "cairnDirectScenario", args.scenario, "build.cairn.app.test/androidx.test.runner.AndroidJUnitRunner", text=True, timeout=360)
-        args.output.with_suffix(".instrumentation.txt").write_text(result.stdout)
-        if "OK (1 test)" not in result.stdout:
-            raise RuntimeError("Native Android transport scenario failed; see instrumentation result")
+        android_instrumentation(adb, args.scenario, args.output)
         evidence = json.loads(adb("exec-out", "run-as", "build.cairn.app", "cat", "files/direct-evidence.json", text=True).stdout)
         expected = "relay" if args.scenario == "udp-blocked" else "direct"
         if evidence["route"] != expected:
             raise RuntimeError("Android's observed application response used the wrong route")
         report["android"] = evidence
         args.output.write_text(json.dumps(report) + "\n")
+        completed = True
     finally:
-        adb("shell", "am", "force-stop", "build.cairn.app")
-        adb("shell", "run-as", "build.cairn.app", "rm", "-f", "files/direct-fixture.json")
-        adb("reverse", "--remove", "tcp:4398")
+        android_cleanup(adb, failed=not completed)
 
 
 def browser(network, binary, directory, args, report):

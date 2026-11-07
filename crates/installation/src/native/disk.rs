@@ -4,6 +4,7 @@ use crate::error::{Error, Result};
 use std::{path::Path, time::Duration};
 
 pub(crate) const MIB: u64 = 1_048_576;
+
 const METADATA_RESERVE: u64 = MIB;
 
 pub(crate) fn available(limit: u64, used: u64) -> u64 {
@@ -24,7 +25,7 @@ pub(crate) async fn used(data: &Path, state: &Path) -> Result<u64> {
         .map_err(Error::internal)?
 }
 
-/// Count file-backed legacy work conservatively, but charge journal/cache blocks
+/// Count file-backed staging conservatively, but charge journal/cache blocks
 /// by allocated bytes. Mounted views refer to those same blocks and add no charge.
 pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
     fn size(
@@ -73,9 +74,7 @@ pub(crate) fn usage_sync(data: &Path, state: &Path) -> Result<u64> {
                 if block {
                     for file in std::fs::read_dir(&root)? {
                         let file = file?;
-                        // Both flat and paired VM views refer to the same
-                        // journal/cache bytes counted under disks/environments.
-                        if !matches!(file.file_name().to_str(), Some("data" | "conversation")) {
+                        if file.file_name() != "data" {
                             used = used.saturating_add(size(&file.path(), false, &mut seen)?);
                         }
                     }
@@ -161,29 +160,67 @@ pub(crate) async fn lock(state: &Path) -> Result<StorageGuard> {
 /// Called with the storage lock held, before receiving a temporary seed. A
 /// missing or incompatible controller cannot authorize unbounded staging.
 pub(crate) async fn staging_budget() -> Result<u64> {
-    let response = crate::nodes::local_client()?
-        .get("http://localhost/health")
+    staging_budget_from(&crate::nodes::local_client()?, "http://localhost").await
+}
+
+pub(super) async fn staging_budget_from(client: &reqwest::Client, origin: &str) -> Result<u64> {
+    let started = std::time::Instant::now();
+    let response = client
+        .get(format!("{origin}/staging-budget"))
         .timeout(Duration::from_secs(30))
         .send()
         .await
-        .map_err(Error::internal)?;
+        .map_err(|error| {
+            tracing::warn!(
+                target: "cairn_performance",
+                operation = "native_staging_budget",
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                timeout = error.is_timeout(),
+                connect = error.is_connect(),
+                "Native staging budget request failed"
+            );
+            Error::internal(error)
+        })?;
     if !response.status().is_success() {
+        tracing::warn!(
+            target: "cairn_performance",
+            operation = "native_staging_budget",
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            status = response.status().as_u16(),
+            "Native staging budget request rejected"
+        );
         return Err(Error::unavailable("Native disk budget is unavailable."));
     }
-    let health: serde_json::Value = response.json().await.map_err(Error::internal)?;
-    let limit = health["budget"]["limits"]["diskMiB"]
+    let budget: serde_json::Value = response.json().await.map_err(Error::internal)?;
+    budget["availableBytes"]
         .as_u64()
-        .ok_or_else(|| Error::unavailable("Native disk budget is unavailable."))?
-        .saturating_mul(MIB);
-    let used = health["usage"]["diskBytes"]
-        .as_u64()
-        .ok_or_else(|| Error::unavailable("Native disk usage is unavailable."))?;
-    Ok(available(limit, used))
+        .ok_or_else(|| Error::unavailable("Native disk budget is unavailable."))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_temporary_holes_never_reduce_future_host_space_promises() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("sparse");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(16 * MIB).unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(
+            super::super::workspace::credit_bytes(root.path()).unwrap(),
+            0
+        );
+        std::fs::write(&path, vec![1; MIB as usize]).unwrap();
+        std::fs::File::open(&path).unwrap().sync_all().unwrap();
+        assert!(super::super::workspace::credit_bytes(root.path()).unwrap() > 0);
+        std::fs::hard_link(&path, root.path().join("shared")).unwrap();
+        assert_eq!(
+            super::super::workspace::credit_bytes(root.path()).unwrap(),
+            0
+        );
+    }
 
     #[test]
     fn archive_cache_and_conversation_pins_are_charged_once_per_inode() {
@@ -229,19 +266,14 @@ mod tests {
             tokio::fs::write(root.join("block-initialized"), b"1")
                 .await
                 .unwrap();
-            for filesystem in ["data", "conversation"] {
-                crate::skills::private_dir(&root.join(filesystem))
-                    .await
-                    .unwrap();
-                let view = root.join(filesystem).join("virtual-model");
-                tokio::fs::File::create(&view)
-                    .await
-                    .unwrap()
-                    .set_len(20 * 1024 * MIB)
-                    .await
-                    .unwrap();
-                assert_eq!(std::fs::metadata(view).unwrap().blocks(), 0);
-            }
+            let view = root.join("data/virtual-model");
+            tokio::fs::File::create(&view)
+                .await
+                .unwrap()
+                .set_len(20 * 1024 * MIB)
+                .await
+                .unwrap();
+            assert_eq!(std::fs::metadata(view).unwrap().blocks(), 0);
         }
         let retained = used(&data, &state).await.unwrap();
         assert!((40 * MIB..41 * MIB).contains(&retained));

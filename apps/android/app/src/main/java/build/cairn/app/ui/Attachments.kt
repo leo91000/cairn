@@ -467,7 +467,7 @@ internal fun ComposerAttachments(
             TrayItem(item.name, { dismiss(item.id) }) {
                 FileCard(
                     vm,
-                    ChatAttachment(item.id, name = item.name, mediaType = item.mediaType),
+                    ChatAttachment(id = item.id, name = item.name, mediaType = item.mediaType),
                     Modifier.size(width = 176.dp, height = 64.dp).semantics {
                         contentDescription = "${item.name} refusé : ${item.reason}"
                     },
@@ -680,7 +680,7 @@ private fun DocumentCard(vm: CairnViewModel, attachment: ChatAttachment, modifie
             Column(Modifier.padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 8.dp)) {
                 AttachmentName(attachment.name, MaterialTheme.typography.labelMedium)
                 Text(
-                    attachmentDetail(attachment, summary) ?: fileSize(attachment.size),
+                    attachmentDetail(attachment, summary) ?: fileSize(attachment.size.toLong()),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
@@ -708,17 +708,12 @@ private suspend fun fetchOriginal(files: Files, api: CairnApi, attachment: ChatA
     // FileProvider derives its MIME from the physical filename, including for the clipboard.
     // Keep a typed cache name even for renamed images; actions expose the original display name.
     val cacheName = imageExtension?.let { "${attachment.name}.$it" } ?: attachment.name
-    return try {
-        files.fetch(
-            api,
-            "${attachmentPath(attachment)}/stream",
-            cacheName,
-            MAX_ATTACHMENT_BYTES,
-        )
-    } catch (e: ApiException) {
-        if (e.status != 404 && e.status != 501) throw e
-        files.fetch(api, attachmentPath(attachment), cacheName, MAX_ATTACHMENT_BYTES)
-    }
+    return files.fetch(
+        api,
+        "${attachmentPath(attachment)}/stream",
+        cacheName,
+        MAX_ATTACHMENT_BYTES,
+    )
 }
 
 private fun shareFile(context: Context, file: File, attachment: ChatAttachment) {

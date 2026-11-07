@@ -4,46 +4,86 @@ use crate::{
     error::{Error, Result, required},
     service::{Service, covers, policy},
     store::Db,
-    validation::{parse, text},
+    validation::text,
 };
 use serde_json::{Value, json};
 
 impl Service {
-    pub async fn merge_agents(&self, input: Value) -> Result<Value> {
-        self.merge_agents_authorized(input, |_| Ok(())).await
+    pub async fn merge_agents(
+        &self,
+        input: cairn_contracts::MergeAgentsInput,
+    ) -> Result<cairn_contracts::MergeAgentsOutput> {
+        self.merge_agents_authorized(input, |_| Ok(()), None).await
     }
 
     pub(crate) async fn merge_agents_authorized<F>(
         &self,
-        input: Value,
+        input: cairn_contracts::MergeAgentsInput,
         authorize: F,
-    ) -> Result<Value>
+        resource_authority: Option<crate::capabilities::plugin_packages::Authority>,
+    ) -> Result<cairn_contracts::MergeAgentsOutput>
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
-        let input = parse("mcp:merge_agents", input)?;
-        // A scheduled occurrence must finish admission before its profile can be
-        // removed. Otherwise a prepared snapshot could fail and skip that occurrence.
-        let _authors = self.task_author_lock.lock().await;
-        // A terminal DB status can precede the worker's final writes. Serialize with
-        // admission, cancellation and resume until the transfer is committed.
-        let active = self.worker.active.lock().await;
-        let executing = active.keys().cloned().collect::<Vec<_>>();
-        let result = self
-            .store
-            .transaction(move |db| {
-                authorize(db)?;
-                merge(db, &input, &executing)
-            })
-            .await?;
-        self.worker.notify();
-        Ok(result)
+        self.merge_agents_live(
+            input,
+            crate::authorization::Authorization::once(authorize),
+            resource_authority,
+        )
+        .await
+    }
+
+    pub(crate) async fn merge_agents_live(
+        &self,
+        input: cairn_contracts::MergeAgentsInput,
+        authorize: crate::authorization::Authorization,
+        resource_authority: Option<crate::capabilities::plugin_packages::Authority>,
+    ) -> Result<cairn_contracts::MergeAgentsOutput> {
+        authorize.recheck().await?;
+        let (target, source) = (input.target_id.to_string(), input.source_id.to_string());
+        let coverage = crate::plugins::grants::check_coverage_authorized(
+            self,
+            &target,
+            &source,
+            resource_authority.clone(),
+        )
+        .await;
+        let coverage = match coverage {
+            Ok(coverage) => coverage,
+            Err(error) if error.status == 403 => {
+                if let Some(authority) = &resource_authority {
+                    authority.recheck(self).await?;
+                }
+                return Err(Error::conflict(error.message));
+            }
+            Err(error) => return Err(error),
+        };
+        let held_resource_authority = resource_authority.clone();
+        self.missions
+            .merge_agents_live(
+                self,
+                input,
+                authorize.with_guard(move |db| {
+                    if let Some(authority) = &held_resource_authority {
+                        authority.authorize(db)?;
+                    }
+                    coverage.authorize(db)
+                }),
+                resource_authority.clone(),
+            )
+            .await
     }
 }
 
-fn merge(db: &Db<'_>, input: &Value, executing: &[String]) -> Result<Value> {
-    let source_id = text(input, "sourceId");
-    let target_id = text(input, "targetId");
+pub(crate) fn merge(
+    db: &Db<'_>,
+    input: &cairn_contracts::MergeAgentsInput,
+    executing: &[String],
+) -> Result<cairn_contracts::MergeAgentsOutput> {
+    let source_string = input.source_id.to_string();
+    let target_string = input.target_id.to_string();
+    let source_id = source_string.as_str();
+    let target_id = target_string.as_str();
     if source_id == target_id {
         return Err(Error::bad("Choose two different agents."));
     }
@@ -52,20 +92,26 @@ fn merge(db: &Db<'_>, input: &Value, executing: &[String]) -> Result<Value> {
             "The main agent must be the merge destination.",
         ));
     }
-    let source = required(db.get("agents", source_id)?, "Source agent not found")?;
-    let target = required(db.get("agents", target_id)?, "Destination agent not found")?;
-    if !covers(&target, &source) || !nodes_covered(&target, &source) {
+    let source = required(db.agent(source_id)?, "Source agent not found")?;
+    let target = required(db.agent(target_id)?, "Destination agent not found")?;
+    let source_snapshot = serde_json::to_value(&source)?;
+    let target_snapshot = serde_json::to_value(&target)?;
+    if !covers(&target_snapshot, &source_snapshot)
+        || !nodes_covered(&target_snapshot, &source_snapshot)
+    {
         return Err(Error::conflict(
             "The destination must already cover all source access, including nodes.",
         ));
     }
-    for node in db.list("nodes")? {
-        let source_reviewed = node["revoked"] != true
-            && crate::nodes::agent_allows(&source, text(&node, "id"))
-            && crate::nodes::native_mode::reviewed(&node, &source);
-        if source_reviewed && !crate::nodes::native_mode::reviewed(&node, &target) {
+    for node in db.nodes_boundary()? {
+        if crate::native::policy::supports(&source_snapshot, "native")
+            && node["revoked"] != true
+            && crate::native::policy::node_native(&node)
+            && crate::nodes::agent_allows(&source_snapshot, text(&node, "id"))
+            && !crate::nodes::native_mode::reviewed(&node, &target_snapshot)
+        {
             return Err(Error::conflict(
-                "Confirm the destination's administrative host access before merging.",
+                "The destination needs its own administrator approval before merging.",
             ));
         }
     }
@@ -73,8 +119,8 @@ fn merge(db: &Db<'_>, input: &Value, executing: &[String]) -> Result<Value> {
         crate::agent_grants::plugins,
         crate::agent_grants::exclusive_nodes,
     ] {
-        let target_grants = grants(&target);
-        if grants(&source)
+        let target_grants = grants(&target_snapshot);
+        if grants(&source_snapshot)
             .iter()
             .any(|grant| !target_grants.contains(grant))
         {
@@ -84,26 +130,20 @@ fn merge(db: &Db<'_>, input: &Value, executing: &[String]) -> Result<Value> {
         }
     }
 
-    for instance in db.list(crate::plugins::connections::KIND)? {
-        if instance["agentId"] == source_id {
+    if !crate::plugins::grants::contribution_ceiling_in(db, target_id, source_id)? {
+        return Err(Error::conflict(
+            "The destination must cover all source plugin contributions and resource restrictions.",
+        ));
+    }
+    for instance in db.plugin_instances()? {
+        if instance.agent_id == source_id {
             return Err(Error::conflict(
                 "Reassign the source's plugin delegations before merging.",
             ));
         }
-        let granted = instance["agentIds"]
-            .as_array()
-            .is_some_and(|ids| ids.iter().any(|id| id == source_id));
-        let target_granted = instance["agentIds"]
-            .as_array()
-            .is_some_and(|ids| ids.iter().any(|id| id == target_id));
-        if granted && !target_granted {
-            return Err(Error::conflict(
-                "Grant the source's plugin access to the destination before merging.",
-            ));
-        }
     }
     let runs = db.json_rows(
-        "SELECT data FROM runs WHERE json_extract(data,'$.snapshot.agent.id')=?",
+        "SELECT data FROM run_views AS runs WHERE json_extract(snapshot,'$.agent.id')=?",
         [source_id],
     )?;
     if runs.iter().any(|run| {
@@ -119,36 +159,59 @@ fn merge(db: &Db<'_>, input: &Value, executing: &[String]) -> Result<Value> {
 
     let mut tasks = 0;
     let mut chats = 0;
-    for (kind, count) in [("tasks", &mut tasks), ("chats", &mut chats)] {
-        for mut record in db.list(kind)? {
-            if record["agentId"] != source_id {
-                continue;
-            }
-            record["agentId"] = target_id.into();
-            if kind == "chats" {
-                record["agentName"] = target["name"].clone();
-            }
-            db.put(kind, &record)?;
-            *count += 1;
+    for mut mission in db.missions()? {
+        if mission.settings.agent_id == source.id {
+            mission.settings.agent_id = target.id;
+            mission.revision = crate::config::id();
+            db.save_mission(&mission)?;
+            tasks += 1;
         }
+    }
+    for mut record in db.conversations_boundary()? {
+        if record["agentId"] != source_id {
+            continue;
+        }
+        record["agentId"] = target_id.into();
+        record["agentName"] = target.settings.name.clone().into();
+        db.save_conversation_boundary(&record)?;
+        chats += 1;
     }
     // Keep each run's provider, model, instructions and access snapshot. Only its
     // profile identity changes so recovery and live authorization find the target.
     for run in &runs {
-        let mut snapshot = run["snapshot"].clone();
-        // Legacy restricted snapshots derive their MCP denial from the profile ID.
-        // Make that policy explicit before assigning Main's identity.
-        if snapshot["agent"]["access"].get("mcps").is_none() {
-            snapshot["agent"]["access"] = policy(&snapshot["agent"]);
+        let mut snapshot = required(db.run_snapshot(text(run, "id"))?, "Run snapshot not found")?;
+        if snapshot.native_configuration.is_none() {
+            // An empty native document preserves legacy retry behavior. Its old
+            // owner identifies this transfer before the first new-message snapshot.
+            snapshot.native_configuration = Some(cairn_contracts::NativeConfigurationSnapshot {
+                agent_id: Some(source.id),
+                provider: snapshot.agent.settings.provider,
+                document: if snapshot.agent.settings.provider
+                    == cairn_contracts::AgentProvider::Codex
+                {
+                    ""
+                } else {
+                    "{}\n"
+                }
+                .into(),
+                revision: "legacy-transfer".into(),
+                configured_paths: vec![],
+            });
         }
-        snapshot["agent"]["id"] = target_id.into();
-        if snapshot["task"]["agentId"] == source_id {
-            snapshot["task"]["agentId"] = target_id.into();
+        snapshot.agent.id = target.id;
+        if snapshot.task.settings.agent_id == source.id {
+            snapshot.task.settings.agent_id = target.id;
         }
-        db.patch_run(text(run, "id"), &json!({ "snapshot": snapshot }))?;
+        db.change_run(
+            text(run, "id"),
+            crate::runs::RunChanges {
+                snapshot: Some(snapshot),
+                ..Default::default()
+            },
+        )?;
     }
     crate::service::forget_agent(db, source_id)?;
-    db.remove("agents", source_id)?;
+    db.remove_agent(source_id)?;
     let result = json!({
         "sourceId": source_id,
         "targetId": target_id,
@@ -156,7 +219,7 @@ fn merge(db: &Db<'_>, input: &Value, executing: &[String]) -> Result<Value> {
         "deleted": true,
     });
     db.audit("agent.merged", &result)?;
-    Ok(result)
+    Ok(serde_json::from_value(result)?)
 }
 
 fn nodes_covered(target: &Value, source: &Value) -> bool {
@@ -173,6 +236,66 @@ fn nodes_covered(target: &Value, source: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_fixture::AgentFixture;
+
+    #[tokio::test]
+    async fn merge_reresolves_coverage_after_the_worker_admission_lock() {
+        use crate::plugin_grant_fixture::{Fixture, contribution, support};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let f = Fixture::new().await;
+        f.marker("live-parent").await;
+        let source =
+            f.s.agent_fixture(json!({ "name": "Source" }), None)
+                .await
+                .unwrap();
+        let source_id = text(&source, "id").to_owned();
+        f.set(json!([contribution("tool", "grant_probe_post", support())]))
+            .await;
+        f.set_for(
+            &source_id,
+            json!([contribution(
+                "tool",
+                "grant_probe_post",
+                json!([{ "resourceType": "thread", "id": "support-thread" }])
+            )]),
+        )
+        .await;
+        let reached = Arc::new(tokio::sync::Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let signal = reached.clone();
+        let authorize = crate::authorization::Authorization::new(&f.s, move |_| {
+            // Both entry checks completed, including the initial coverage proof;
+            // the merge now waits for the worker admission lock.
+            if calls.fetch_add(1, Ordering::SeqCst) == 3 {
+                signal.notify_one();
+            }
+            Ok(())
+        });
+        let lock = f.s.worker.active.lock().await;
+        let service = f.s.clone();
+        let source_id_for_merge = source_id.clone();
+        let merge = tokio::spawn(async move {
+            let input = serde_json::from_value(json!({
+                "sourceId": source_id_for_merge,
+                "targetId": MAIN_AGENT_ID,
+                "confirm": true,
+            }))
+            .unwrap();
+            service.merge_agents_live(input, authorize, None).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), reached.notified())
+            .await
+            .unwrap();
+        f.moved_parent.store(true, Ordering::SeqCst);
+        drop(lock);
+        let error = merge.await.unwrap().unwrap_err();
+        assert_eq!(error.status, 409);
+        assert!(f.s.store.agent(&source_id).await.unwrap().is_some());
+        f.s.shutdown.cancel();
+    }
 
     #[tokio::test]
     async fn a_prepared_edit_cannot_recreate_an_agent_removed_before_its_commit() {
@@ -195,24 +318,32 @@ mod tests {
         })
         .await
         .unwrap();
-        let source = s.agent(json!({ "name": "Source" }), None).await.unwrap();
+        let source = s
+            .agent_fixture(json!({ "name": "Source" }), None)
+            .await
+            .unwrap();
         let source_id = text(&source, "id").to_owned();
         let removed = source_id.clone();
         // The authorization hook runs after draft preparation and inside the
         // publication transaction: reproduce deletion at that exact boundary.
+        let current = s.store.agent(&source_id).await.unwrap().unwrap();
         let result = s
-            .agent_authorized(
-                json!({ "name": "Stale edit" }),
-                Some(&source_id),
+            .save_profile(
+                crate::agents::SaveProfile::Replace(cairn_contracts::ReplaceAgentInput {
+                    agent_id: current.id,
+                    revision: current.revision,
+                    settings: current.settings,
+                    review: cairn_contracts::AgentReview::default(),
+                }),
                 crate::service::AgentEditor::Owner,
                 move |db| {
-                    db.remove("agents", &removed)?;
+                    db.remove_agent(&removed)?;
                     Ok(())
                 },
             )
             .await;
         assert!(result.is_err());
         // The failed transaction rolls back the injected deletion as well.
-        assert_eq!(s.get("agents", &source_id).await.unwrap(), source);
+        assert_eq!(s.agent_snapshot(&source_id).await.unwrap(), source);
     }
 }

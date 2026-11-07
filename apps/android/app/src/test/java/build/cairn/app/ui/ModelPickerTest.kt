@@ -9,6 +9,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.*
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -23,6 +24,115 @@ class ModelPickerTest : ModelPickerCases() {
 
     override fun captureDefaultModel() = capture("claude-default")
 
+    @Test
+    fun resumeSelectionUsesTheDisplayedDefaultModelId() {
+        val catalog =
+            ModelCatalog(
+                models =
+                    listOf(
+                        CodingAgentModel(model = "gpt-6-sol", isDefault = true),
+                        CodingAgentModel(model = "gpt-6-luna"),
+                    )
+            )
+        val selected = selectedModel(catalog, "", "")
+
+        assertEquals("gpt-6-sol", resumeSelectionModelId(selected, "", ""))
+    }
+
+    @Test
+    fun resumeSelectionUsesModelDefaultAfterChangeAndKeepsSavedEffortWhenUnchanged() {
+        val catalog =
+            ModelCatalog(
+                models =
+                    listOf(
+                        CodingAgentModel(
+                            model = "gpt-6-sol",
+                            isDefault = true,
+                            defaultReasoningEffort = "medium",
+                        ),
+                        CodingAgentModel(
+                            model = "gpt-6-luna",
+                            defaultReasoningEffort = "low",
+                        ),
+                    )
+            )
+        val changedModel = selectedModel(catalog, "gpt-6-luna", "gpt-6-sol")
+        val unchangedModel = selectedModel(catalog, "", "gpt-6-sol")
+
+        assertEquals("low", pickerAppliedReasoning(changedModel, "", ""))
+        assertEquals("high", pickerAppliedReasoning(unchangedModel, "", "high"))
+    }
+
+    @Test
+    fun resumeSelectionKeepsUntouchedAndExplicitReasoningIntentsDistinct() {
+        assertEquals(
+            "",
+            resumeSelectionReasoning(ResumeReasoningIntent.Untouched, "", "", false, "low"),
+        )
+        assertEquals(
+            "high",
+            resumeSelectionReasoning(ResumeReasoningIntent.Untouched, "", "high", false, "low"),
+        )
+        assertEquals(
+            "low",
+            resumeSelectionReasoning(ResumeReasoningIntent.Untouched, "", "high", true, "low"),
+        )
+        assertEquals(
+            "low",
+            resumeSelectionReasoning(ResumeReasoningIntent.ModelDefault, "", "high", false, "low"),
+        )
+        assertEquals(
+            "xhigh",
+            resumeSelectionReasoning(
+                ResumeReasoningIntent.Effort("xhigh"),
+                "",
+                "high",
+                true,
+                "low",
+            ),
+        )
+        assertEquals(
+            "medium",
+            resumeSelectionReasoning(
+                ResumeReasoningIntent.Untouched,
+                "medium",
+                "high",
+                true,
+                "low",
+            ),
+        )
+    }
+
+    @Test
+    fun resumeSelectionPreservesExplicitGroupedRouteIds() {
+        val catalog =
+            ModelCatalog(
+                models =
+                    listOf(
+                        CodingAgentModel(
+                            model = "auto/sonnet",
+                            isDefault = true,
+                            routes =
+                                listOf(
+                                    ModelRoute(model = "opencode/sonnet"),
+                                    ModelRoute(model = "opencode-go/sonnet"),
+                                ),
+                        )
+                    )
+            )
+        val selected = selectedModel(catalog, "opencode/sonnet", "auto/sonnet")
+
+        assertEquals(
+            "opencode/sonnet",
+            resumeSelectionModelId(selected, "opencode/sonnet", "auto/sonnet"),
+        )
+        assertEquals(
+            "opencode/sonnet",
+            resumeSelectionModelId(selected, "", "opencode/sonnet"),
+        )
+        assertEquals("auto/sonnet", resumeSelectionModelId(selected, "", ""))
+    }
+
     private fun capture(name: String, tag: String = "model-settings-sheet") {
         val file = java.io.File("build/reports/model-picker/$name.png")
         file.parentFile!!.mkdirs()
@@ -35,53 +145,56 @@ class ModelPickerTest : ModelPickerCases() {
 
     @Test
     fun unifiedSheetGroupsAgentModelAndReasoning() {
-        val efforts = listOf("low", "medium", "high", "xhigh").map { ReasoningOption(it) }
+        val efforts =
+            listOf("low", "medium", "high", "xhigh").map { ReasoningOption(reasoningEffort = it) }
         val codex =
             ModelCatalog(
-                listOf(
-                    CodingAgentModel(
-                        "gpt-6-sol",
-                        "GPT-6 Sol",
-                        "Le plus capable pour le code complexe.",
-                        isDefault = true,
-                        defaultReasoningEffort = "medium",
-                        supportedReasoningEfforts = efforts,
-                    ),
-                    CodingAgentModel(
-                        "gpt-6-luna",
-                        "GPT-6 Luna",
-                        "Rapide et économique pour les tâches courantes.",
-                        defaultReasoningEffort = "low",
-                        supportedReasoningEfforts = efforts,
-                    ),
-                )
+                models =
+                    listOf(
+                        CodingAgentModel(
+                            model = "gpt-6-sol",
+                            displayName = "GPT-6 Sol",
+                            description = "Le plus capable pour le code complexe.",
+                            isDefault = true,
+                            defaultReasoningEffort = "medium",
+                            supportedReasoningEfforts = efforts,
+                        ),
+                        CodingAgentModel(
+                            model = "gpt-6-luna",
+                            displayName = "GPT-6 Luna",
+                            description = "Rapide et économique pour les tâches courantes.",
+                            defaultReasoningEffort = "low",
+                            supportedReasoningEfforts = efforts,
+                        ),
+                    )
             )
         val claude =
             ModelCatalog(
-                listOf(
-                    CodingAgentModel(
-                        "default",
-                        "Par défaut",
-                        "Modèle recommandé pour votre abonnement.",
-                        isDefault = true,
-                        defaultReasoningEffort = "high",
-                        supportedReasoningEfforts = efforts,
-                    ),
-                    CodingAgentModel(
-                        "opus",
-                        "Opus",
-                        "Pour les travaux les plus exigeants.",
-                        defaultReasoningEffort = "high",
-                        supportedReasoningEfforts = efforts,
-                    ),
-                    CodingAgentModel(
-                        "sonnet",
-                        "Sonnet",
-                        "Équilibre entre vitesse et qualité.",
-                        defaultReasoningEffort = "medium",
-                        supportedReasoningEfforts = efforts,
-                    ),
-                )
+                models =
+                    listOf(
+                        CodingAgentModel(
+                            model = "default",
+                            displayName = "Par défaut",
+                            description = "Modèle recommandé pour votre abonnement.",
+                            isDefault = true,
+                            defaultReasoningEffort = "high",
+                            supportedReasoningEfforts = efforts,
+                        ),
+                        CodingAgentModel(
+                            model = "opus",
+                            displayName = "Opus",
+                            description = "Pour les travaux les plus exigeants.",
+                            defaultReasoningEffort = "high",
+                            supportedReasoningEfforts = efforts,
+                        ),
+                        CodingAgentModel(
+                            model = "sonnet",
+                            displayName = "Sonnet",
+                            description = "Équilibre entre vitesse et qualité.",
+                            defaultReasoningEffort = "medium",
+                            supportedReasoningEfforts = efforts,
+                        ),
+                    )
             )
         var theme by mutableStateOf("light")
         compose.setContent {
@@ -129,35 +242,37 @@ class ModelPickerTest : ModelPickerCases() {
 
     @Test
     fun oneModelOfferedByTwoConnectionsRunsAutoOrOnAPinnedOne() {
-        val shared = listOf("medium", "high").map { ReasoningOption(it) }
+        val shared = listOf("medium", "high").map { ReasoningOption(reasoningEffort = it) }
         val catalog =
             ModelCatalog(
-                listOf(
-                    CodingAgentModel(
-                        "auto/claude-sonnet-4-5",
-                        routes =
-                            listOf(
-                                ModelRoute(
-                                    "opencode-go/claude-sonnet-4.5",
-                                    "opencode-go",
-                                    "OpenCode Go",
-                                    "subscription",
-                                    supportedReasoningEfforts = shared,
+                models =
+                    listOf(
+                        CodingAgentModel(
+                            model = "auto/claude-sonnet-4-5",
+                            routes =
+                                listOf(
+                                    ModelRoute(
+                                        model = "opencode-go/claude-sonnet-4.5",
+                                        provider = "opencode-go",
+                                        providerName = "OpenCode Go",
+                                        billing = "subscription",
+                                        supportedReasoningEfforts = shared,
+                                    ),
+                                    ModelRoute(
+                                        model = "opencode/claude-sonnet-4-5",
+                                        provider = "opencode",
+                                        providerName = "OpenCode Zen",
+                                        billing = "credits",
+                                        supportedReasoningEfforts =
+                                            shared + ReasoningOption(reasoningEffort = "max"),
+                                    ),
                                 ),
-                                ModelRoute(
-                                    "opencode/claude-sonnet-4-5",
-                                    "opencode",
-                                    "OpenCode Zen",
-                                    "credits",
-                                    supportedReasoningEfforts = shared + ReasoningOption("max"),
-                                ),
-                            ),
-                        displayName = "Claude Sonnet 4.5",
-                        description = "Via OpenCode Go, then OpenCode Zen",
-                        isDefault = true,
-                        supportedReasoningEfforts = shared,
+                            displayName = "Claude Sonnet 4.5",
+                            description = "Via OpenCode Go, then OpenCode Zen",
+                            isDefault = true,
+                            supportedReasoningEfforts = shared,
+                        )
                     )
-                )
             )
         var chosen = "auto/claude-sonnet-4-5" to "high"
         compose.setContent {
@@ -187,5 +302,95 @@ class ModelPickerTest : ModelPickerCases() {
         compose.onNodeWithText("Auto").performClick()
         compose.waitForIdle()
         assert(chosen.first == "auto/claude-sonnet-4-5") { chosen.toString() }
+    }
+
+    @Test
+    fun speedIsKeptAcrossModelsAndOnlyClaimedWhereCodexOffersIt() {
+        val fast =
+            ServiceTier(id = "priority", name = "Fast", description = "2x speed, increased usage")
+        val ultrafast =
+            ServiceTier(
+                id = "ultrafast",
+                name = "Ultrafast",
+                description = "Fastest speed, highest usage",
+                limited = true,
+            )
+        val catalog =
+            ModelCatalog(
+                models =
+                    listOf(
+                        CodingAgentModel(
+                            model = "gpt-6-astra",
+                            displayName = "GPT-6 Astra",
+                            isDefault = true,
+                            defaultReasoningEffort = "medium",
+                            supportedReasoningEfforts =
+                                listOf(ReasoningOption(reasoningEffort = "medium")),
+                            serviceTiers = listOf(fast, ultrafast),
+                        ),
+                        CodingAgentModel(
+                            model = "gpt-6-luna",
+                            displayName = "GPT-6 Luna",
+                            defaultReasoningEffort = "low",
+                            supportedReasoningEfforts =
+                                listOf(ReasoningOption(reasoningEffort = "low")),
+                            serviceTiers = emptyList(),
+                        ),
+                    )
+            )
+        var chosen = Triple("", "", "")
+        compose.setContent {
+            var model by remember { mutableStateOf("") }
+            var reasoning by remember { mutableStateOf("") }
+            var speed by remember { mutableStateOf("") }
+            CairnTheme("light") {
+                Surface(Modifier.fillMaxSize()) {
+                    ModelPicker(
+                        catalog,
+                        model,
+                        reasoning,
+                        "gpt-6-astra",
+                        inherit = true,
+                        speed = speed,
+                        defaultSpeed = "priority",
+                        changeSpeed = {
+                            speed = it
+                            chosen = Triple(model, reasoning, it)
+                        },
+                    ) { m, r ->
+                        model = m
+                        reasoning = r
+                        chosen = Triple(m, r, speed)
+                    }
+                }
+            }
+        }
+        // The agent's Fast speed is inherited and named with Codex's words.
+        compose.onNodeWithContentDescription("vitesse Fast", substring = true).assertExists()
+        compose.onNodeWithTag("model-picker").performClick()
+        compose.onNodeWithTag("speed-default").assertIsSelected()
+        compose.onNodeWithText("Défaut Agent · Fast").assertExists()
+        compose.onNodeWithText("Ultrafast").performClick()
+        compose.waitForIdle()
+        assert(chosen.third == "ultrafast") { chosen.toString() }
+        compose.onNodeWithText("Tous vos comptes Codex", substring = true).assertExists()
+        capture("speed-ultrafast")
+
+        // A model change resets the reasoning level, not the speed, and never claims a speed
+        // the new model lacks.
+        compose.onNodeWithText("GPT-6 Luna").performClick()
+        compose.waitForIdle()
+        assert(chosen == Triple("gpt-6-luna", "", "ultrafast")) { chosen.toString() }
+        compose.onNodeWithText("ne liste pas la vitesse Ultrafast", substring = true).assertExists()
+        capture("speed-unavailable")
+        compose
+            .onNode(hasText("Standard") and hasAnyAncestor(hasTestTag("speed-options")))
+            .performClick()
+        compose.waitForIdle()
+        assert(chosen.third == STANDARD_SPEED) { chosen.toString() }
+        compose.onNodeWithText("Terminé").performClick()
+        compose
+            .onNodeWithContentDescription("vitesse Ultrafast", substring = true)
+            .assertDoesNotExist()
     }
 }

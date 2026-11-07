@@ -1,10 +1,16 @@
 import type { ChatDetail, ChatMessage } from '../../../packages/contracts/chats'
-import type { Run, RunEvent } from '../../../packages/contracts/contracts'
+import type { Run } from '../../../packages/contracts/contracts'
+import type { TimelineEntry } from '../../../packages/contracts/live'
 import { describe, expect, it } from 'vitest'
 import { chatDelivery, chatWaitNotice, scheduledWakeup } from '../src/chat-delivery'
 
 function message(id: string, overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
+    revision: '',
+    provider: '',
+    reasoning: '',
+    speed: '',
+    attachments: [],
     id,
     chatId: 'chat',
     text: id,
@@ -18,6 +24,13 @@ function message(id: string, overrides: Partial<ChatMessage> = {}): ChatMessage 
 
 function chat(messages: ChatMessage[], run: Partial<Run> | null = null, paused = false): ChatDetail {
   return {
+    slug: '',
+    revision: '',
+    lifecycle: 'active',
+    sessionRestartRequested: false,
+    canRequestNewSession: false,
+    unread: false,
+
     id: 'chat',
     title: 'Chat',
     agentId: 'agent',
@@ -36,7 +49,16 @@ function chat(messages: ChatMessage[], run: Partial<Run> | null = null, paused =
   }
 }
 
-const running = { id: 'run', status: 'running' as const, chatExecution: { messageId: 'first', text: 'first', recovery: false } }
+const running = {
+  id: 'run',
+  status: 'running' as const,
+  chatExecution: {
+    attachments: [],
+    messageId: 'first',
+    text: 'first',
+    recovery: false,
+  },
+}
 
 describe('chat delivery presentation', () => {
   it('shows the durable wakeup only while the completed conversation waits', () => {
@@ -117,16 +139,26 @@ describe('chat delivery presentation', () => {
     const outgoing = message('first')
     expect(chatDelivery(null, [], outgoing).sending).toHaveLength(1)
     expect(chatDelivery(chat([message('first', { status: 'sending' })], running), [], outgoing).sending).toHaveLength(1)
-    const events: RunEvent[] = [{
-      id: 1,
+    const cards: TimelineEntry[] = [{
+      id: 'user:1',
       runId: 'run',
-      type: 'chat.user',
-      text: 'first',
+      position: 1,
+      revision: 1,
+      source: 1,
+      turn: 0,
+      attempt: 0,
       createdAt: 1,
-      payload: { messageId: 'first' },
+      updatedAt: 1,
+      content: {
+        kind: 'userMessage',
+        text: 'first',
+        messageId: 'first',
+        sentAt: 1,
+        attachments: [],
+      },
     }]
-    // Either arrival order (event or metadata first) keeps a single visible message.
-    expect(chatDelivery(chat([message('first', { status: 'sending' })], running), events, outgoing).sending).toEqual([])
+    // Either arrival order (card or metadata first) keeps a single visible message.
+    expect(chatDelivery(chat([message('first', { status: 'sending' })], running), cards, outgoing).sending).toEqual([])
     expect(chatDelivery(chat([message('first', { status: 'delivered' })], running), [], outgoing).sending).toHaveLength(1)
   })
   it('respects a server-side queue decision if another client started a reply first', () => {

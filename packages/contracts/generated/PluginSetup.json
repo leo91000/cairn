@@ -1,0 +1,167 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "SetupPreset": {
+      "additionalProperties": false,
+      "description": "A named combination of the step's boolean settings, e.g. \"Read only\".",
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "risk": {
+          "pattern": "^(low|medium|high)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "values": {
+          "additionalProperties": {
+            "type": "boolean"
+          },
+          "description": "Settings turned on. The step's other boolean settings are turned off.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "title"
+      ],
+      "type": "object"
+    },
+    "SetupStep": {
+      "additionalProperties": false,
+      "properties": {
+        "checklist": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/SetupTask"
+          },
+          "type": "array"
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "default": "settings",
+          "pattern": "^(settings|credential|people|agents)$",
+          "type": "string"
+        },
+        "presets": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/SetupPreset"
+          },
+          "type": "array"
+        },
+        "settings": {
+          "default": [],
+          "description": "Keys of the settings this step shows, in order.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "shared": {
+          "default": false,
+          "description": "The same values serve every instance, e.g. one OAuth client for every mailbox.\nA new instance can reuse them from another one (`sharedFrom`): the host copies\nthem, secrets included, without sending secrets to the client.",
+          "type": "boolean"
+        },
+        "title": {
+          "type": "string"
+        },
+        "warning": {
+          "default": "",
+          "description": "A consequence to know before going on, e.g. a provider's token expiry.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "title"
+      ],
+      "type": "object"
+    },
+    "SetupTask": {
+      "additionalProperties": false,
+      "description": "Something the owner does on the service's site, ticked off in the assistant.",
+      "properties": {
+        "copy": {
+          "pattern": "^callbackUrl$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "link": {
+          "description": "The link's label, e.g. \"Open API Library\".",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "default": "",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "url": {
+          "description": "The service's page for this task. HTTPS.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "title"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "effort": {
+      "pattern": "^(signin|token|app)$",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "nameFrom": {
+      "description": "A string setting naming a new instance once known, e.g. the verified mailbox.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "steps": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/SetupStep"
+      },
+      "type": "array"
+    },
+    "summary": {
+      "default": "",
+      "description": "What the owner needs before connecting, in one or two sentences.",
+      "type": "string"
+    }
+  },
+  "title": "PluginSetup",
+  "type": "object"
+}

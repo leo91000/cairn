@@ -31,6 +31,7 @@ async function main() {
   const socket = path.join(root, 'service/codex.sock')
   const modelRequests = []
   const mcpRequests = []
+  const pluginRequests = []
   const live = new Set()
   let current
   let service
@@ -44,6 +45,16 @@ async function main() {
     for await (const chunk of request)
       body += chunk
     const input = body ? JSON.parse(body) : {}
+    if (request.url === '/plugin-command') {
+      const bearer = request.headers.authorization
+      assert.equal(bearer, current.bearer, 'Shell CLI uses only the current attempt token')
+      assert.equal(input.plugin, 'fixture')
+      assert.equal(input.command, 'identity')
+      pluginRequests.push({ label: current.label, bearer })
+      response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ output: 'json', value: { identity: bearer } }))
+      return
+    }
+
     if (request.url === '/mcp') {
       if (request.method !== 'POST') {
         response.writeHead(405).end()
@@ -81,13 +92,42 @@ async function main() {
       input: JSON.stringify(input.input),
       keys: Object.keys(input),
     })
-    const item = {
-      id: `msg_${randomUUID()}`,
-      type: 'message',
-      role: 'assistant',
-      status: 'completed',
-      content: [{ type: 'output_text', text: 'READY_ADAPTER_OK', annotations: [] }],
-    }
+    const marker = `PLUGIN_SHELL_OK_${current.label}`
+    const shellCompleted = input.input.some(item => item.type === 'function_call_output' && JSON.stringify(item.output).includes(marker))
+    const tools = input.tools.flatMap(tool => tool.type === 'namespace' ? tool.tools : [tool])
+    const shell = tools.find(tool => tool.name === 'exec_command')
+    assert.ok(shell, `Shell tool must be available: ${tools.map(tool => tool.name).join(', ')}`)
+    const check = `
+      const assert = require('node:assert/strict');
+      const { spawnSync } = require('node:child_process');
+      const result = spawnSync(${JSON.stringify(cairn)}, ['plugin', 'fixture', 'identity'], { encoding: 'utf8' });
+      assert.ifError(result.error);
+      ${current.bearer
+        ? `assert.equal(result.status, 0, result.stderr); assert.equal(JSON.parse(result.stdout).identity, ${JSON.stringify(current.bearer)});`
+        : `assert.equal(result.status, 1); assert.equal(result.stdout, ''); assert.match(result.stderr, /Run this command inside an active Cairn conversation/);`}
+      require('node:fs').writeFileSync(${JSON.stringify(path.join(workspace, `${current.label}.plugin-ok`))}, 'ok');
+      console.log(${JSON.stringify(marker)});
+    `
+    const quote = value => `'${value.replaceAll('\'', '\'\\\'\'')}'`
+    const command = `${quote(process.execPath)} -e ${quote(check)}`
+    const namespace = input.tools.find(tool => tool.type === 'namespace' && tool.tools.includes(shell))?.name
+    const item = shellCompleted
+      ? {
+          id: `msg_${randomUUID()}`,
+          type: 'message',
+          role: 'assistant',
+          status: 'completed',
+          content: [{ type: 'output_text', text: 'READY_ADAPTER_OK', annotations: [] }],
+        }
+      : {
+          id: `fc_${randomUUID()}`,
+          type: 'function_call',
+          call_id: `call_${randomUUID()}`,
+          name: shell.name,
+          ...(namespace ? { namespace } : {}),
+          arguments: JSON.stringify({ cmd: command, max_output_tokens: 1000 }),
+          status: 'completed',
+        }
     const result = {
       id: `resp_${randomUUID()}`,
       object: 'response',
@@ -105,13 +145,15 @@ async function main() {
     for (const event of [
       { type: 'response.created', response: { ...result, status: 'in_progress', output: [] } },
       { type: 'response.output_item.added', output_index: 0, item: { ...item, status: 'in_progress', content: [] } },
-      {
-        type: 'response.output_text.delta',
-        item_id: item.id,
-        output_index: 0,
-        content_index: 0,
-        delta: 'READY_ADAPTER_OK',
-      },
+      ...(shellCompleted
+        ? [{
+            type: 'response.output_text.delta',
+            item_id: item.id,
+            output_index: 0,
+            content_index: 0,
+            delta: 'READY_ADAPTER_OK',
+          }]
+        : []),
       { type: 'response.output_item.done', output_index: 0, item },
       { type: 'response.completed', response: result },
     ])
@@ -190,7 +232,7 @@ async function main() {
     let thread
 
     async function turn(label, bearer, resident, resume) {
-      current = { label, started: performance.now() }
+      current = { label, bearer, started: performance.now() }
       const mcp = bearer ? { fixture: { url: `${endpoint}/mcp`, http_headers: { Authorization: bearer } } } : {}
       const plan = {
         runId,
@@ -216,6 +258,9 @@ async function main() {
             },
           },
           mcp_servers: mcp,
+          shell_environment_policy: {
+            set: { CAIRN_MCP_RUN_TOKEN: bearer?.replace('Bearer ', '') ?? '', CAIRN_MCP_ORIGIN: endpoint },
+          },
         },
         args: resident || !bearer ? [] : ['-c', `mcp_servers.fixture={url="${endpoint}/mcp",http_headers={Authorization="${bearer}"}}`],
         ...(resume ? { sessionId: thread } : {}),
@@ -232,6 +277,8 @@ async function main() {
         assert.equal(opened, thread)
       thread = opened
       assert.match(await readFile(plan.output, 'utf8'), /READY_ADAPTER_OK/)
+      assert.equal(await readFile(path.join(workspace, `${label}.plugin-ok`), 'utf8'), 'ok', 'A real shell command verified the plugin channel')
+      assert.equal(pluginRequests.filter(request => request.label === label).length, bearer ? 1 : 0, 'Removed access cannot reuse an old plugin token')
       const model = modelRequests.find(value => value.label === label && value.tools)
       assert.ok(model, `No tool-bearing model request: ${JSON.stringify({ requests: modelRequests.filter(value => value.label === label).map(value => ({ keys: value.keys, hasPrompt: value.input.includes(label) })), mcp: mcpRequests.filter(value => value.label === label) })}`)
       if (resident)
@@ -353,6 +400,8 @@ async function main() {
       nativeReapedOnShutdown: true,
       nativeRequestTimingsObserved: true,
       syntheticAccountLeases: credentialsIssued,
+      pluginShellLeasesRenewed: true,
+      removedPluginTokenAbsent: true,
     }, null, 2)}\n`)
   }
   finally {

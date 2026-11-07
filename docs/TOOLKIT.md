@@ -23,7 +23,7 @@ command, including after changing directories in a noninteractive shell.
 `deploy/toolkit/tools.json` defines the global update channels. Its sibling
 `versions.json` pins the initial build. The installer generates the global mise
 config from those exact versions and installs shared tools into the image.
-Codex and gh use their dedicated, versioned image installers.
+Codex, Claude Code, OpenCode and gh use their dedicated, versioned image installers.
 OS utilities come from Debian's supported package repositories.
 
 ## Project versions
@@ -53,9 +53,10 @@ must be reported instead of bypassing that policy.
 
 ## Image updates
 
-Tools are installed when building a new application image. CI resolves stable
-Codex and GitHub CLI versions with `scripts/cli-updates.mjs build-versions` and
-passes those exact versions to their dedicated installers. The global toolkit
+Tools are installed when building a new application image. CI resolves Codex,
+Claude Code, OpenCode and GitHub CLI versions with
+`scripts/cli-updates.mjs build-versions` and passes those exact versions to their
+dedicated installers. The global toolkit
 uses the reviewed `deploy/toolkit/tools.json` catalogue and `versions.json` pins;
 changing those pins requires rebuilding and validating an application image.
 OS utilities come from the image build's Debian packages. No daily standalone
@@ -71,8 +72,7 @@ exact toolkit manifest and build time.
 Installations follow the approved paired release through their host updater,
 which retains the deployment lease, runtime verification and rollback. Tools
 never update themselves inside a running agent process. See
-[tool versions and retired standalone updates](CLI-UPDATES.md) for the retained
-CI command and operator instructions for old dispatch timers, and the
+[tool versions](CLI-UPDATES.md) for the CI command, and the
 [production runbook](PRODUCTION-CAIRN.md) for the supported release path.
 
 References: [mise system installs](https://mise.jdx.dev/mise-cookbook/docker.html),

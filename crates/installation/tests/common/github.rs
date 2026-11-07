@@ -9,7 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use cairn_installation::{plugins::connections, service::Service, validation::text};
+use cairn_installation::{service::Service, validation::text};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -49,8 +49,14 @@ impl Github {
     /// Routes a service's plugin HTTP here and runs its workers from the built binary.
     pub fn attach(&self, s: &Service) {
         s.plugins.route_http_to(Some(self.origin.clone()));
-        s.plugins
-            .use_worker(PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+        s.plugins.use_worker(
+            option_env!("CARGO_BIN_EXE_cairn")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("CAIRN_TEST_CODE_WORKER").map(PathBuf::from))
+                .unwrap_or_else(|| {
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/cairn")
+                }),
+        );
     }
 
     pub fn calls(&self) -> Vec<Value> {
@@ -69,6 +75,14 @@ impl Github {
         std::fs::write(self.root.join("github-state.json"), value.to_string()).unwrap();
     }
 
+    pub fn blob_size(&self, id: &str) -> usize {
+        let name = format!("repos_fixture_skills_git_blobs_{id}");
+        let response: Value =
+            serde_json::from_slice(&std::fs::read(self.root.join("github").join(name)).unwrap())
+                .unwrap();
+        STANDARD.decode(text(&response, "content")).unwrap().len()
+    }
+
     /// Answers `endpoint` (as `repos/x/y?recursive=1`) with `value`.
     pub fn respond(&self, endpoint: &str, value: &Value) {
         let name = endpoint.replace(['/', '?', '=', '%'], "_");
@@ -78,7 +92,7 @@ impl Github {
 
 /// A GitHub instance saved through the package's own form, granted to `agents`.
 pub async fn instance(s: &Service, name: &str, token: &str, agents: &[&str]) -> String {
-    let saved = connections::save(
+    let saved = super::save_plugin(
         s,
         "github",
         &json!({ "name": name, "enabled": true, "token": token, "agentIds": agents }),
@@ -138,6 +152,11 @@ async fn answer(root: &Path, calls: &Mutex<Vec<Value>>, request: Request<Body>) 
         "userAgent": headers.get("user-agent").and_then(|value| value.to_str().ok()),
     }));
     let state = state(root);
+    if full.contains("/git/blobs/")
+        && let Some(delay) = state["blobDelay"].as_u64()
+    {
+        tokio::time::sleep(Duration::from_millis(delay)).await;
+    }
 
     if let Some(gate) = state.get("gate")
         && gate["path"] == full.as_str()

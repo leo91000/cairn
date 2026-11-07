@@ -8,7 +8,6 @@ use super::{
 use crate::{
     error::{Error, Result},
     service::Service,
-    validation::text,
 };
 use cairn_plugin_api::{validate_action_result, validate_view};
 use serde_json::{Value, json};
@@ -59,7 +58,7 @@ pub async fn action(
     s: &Service,
     plugin_id: &str,
     connection_id: &str,
-    input: &Value,
+    input: &cairn_contracts::PluginActionInput,
 ) -> Result<Value> {
     action_managed(s, plugin_id, connection_id, input, None).await
 }
@@ -68,17 +67,17 @@ pub(crate) async fn action_managed(
     s: &Service,
     plugin_id: &str,
     connection_id: &str,
-    input: &Value,
+    input: &cairn_contracts::PluginActionInput,
     management: Option<super::management::Authority>,
 ) -> Result<Value> {
     let connection = connections::get(s, plugin_id, connection_id).await?;
     let package = registry::active(s, plugin_id).await?;
-    let name = text(input, "action");
+    let name = input.action.as_str();
     if !package.manifest.instance_view || !action_name(name) {
         return Err(Error::bad("Unknown plugin action."));
     }
-    let payload = input.get("payload").cloned().unwrap_or(Value::Null);
-    let values = input.get("values").cloned().unwrap_or(json!({}));
+    let payload = input.payload.clone().unwrap_or(Value::Null);
+    let values = serde_json::to_value(&input.values)?;
     if !fits(&payload, 4096) || !values.is_object() || !fits(&values, 16_384) {
         return Err(Error::bad("The action input is too large or invalid."));
     }
@@ -99,7 +98,7 @@ pub(crate) async fn action_managed(
 }
 
 /// `{ ok, message }` from the package's `test` handler.
-pub async fn test(s: &Service, plugin_id: &str, connection_id: &str) -> Result<Value> {
+pub async fn test(s: &Service, plugin_id: &str, connection_id: &str) -> Result<String> {
     test_managed(s, plugin_id, connection_id, None).await
 }
 
@@ -108,7 +107,7 @@ pub(crate) async fn test_managed(
     plugin_id: &str,
     connection_id: &str,
     management: Option<super::management::Authority>,
-) -> Result<Value> {
+) -> Result<String> {
     let connection = connections::get(s, plugin_id, connection_id).await?;
     let package = registry::active(s, plugin_id).await?;
     if !package.manifest.instance_test {
@@ -132,5 +131,5 @@ pub(crate) async fn test_managed(
             message
         }));
     }
-    Ok(json!({ "ok": true, "message": message }))
+    Ok(message)
 }

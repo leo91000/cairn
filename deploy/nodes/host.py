@@ -20,6 +20,9 @@ NAME = 'cairn-execution-node'
 STOP = False
 STOP_AT = None
 IMAGE = re.compile(r'^[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}$')
+# Nodes added without a manager address reach it through this local gateway to Beacon.
+GATEWAY = 'http://127.0.0.1:4319'
+GATEWAY_SOCKETS = Path('/var/lib/cairn-gateway/socket')
 HEALTH_CHECK = "fetch('http://127.0.0.1:4311/health').then(r=>{if(!r.ok)throw Error();return r.json()}).then(v=>{if(v.status!=='ok'||v.nodeProtocol!==2||!(v.pool?.capacity>0))process.exit(1)}).catch(()=>process.exit(1))"
 
 
@@ -127,10 +130,16 @@ def refresh_supervisor():
     os.execv(sys.executable, [sys.executable, str(current), 'run'])
 
 
-def block_device_arguments(transport='ublk'):
-    # Upgrade the former persisted selection; no legacy backend is launched.
-    if transport not in ('ublk', 'vhost-user'):
-        raise ValueError('Unsupported block transport')
+def gateway_arguments(master):
+    # The container has its own loopback. The node daemon bridges the gateway
+    # origin there to the host gateway's socket, mounted at the same path.
+    if master != GATEWAY:
+        return []
+    return ['-v', f'{GATEWAY_SOCKETS}:{GATEWAY_SOCKETS}',
+            '-e', f'CAIRN_NODE_GATEWAY_SOCKET={GATEWAY_SOCKETS}/gateway.sock']
+
+
+def block_device_arguments():
     # Package upgrades can remove the running kernel's module files while the
     # driver is still loaded. Its live devices remain usable until reboot.
     if not Path('/sys/module/ublk_drv').is_dir():
@@ -157,35 +166,20 @@ def block_device_arguments(transport='ublk'):
     # Dynamic ublk minors require their detected classes, never all host devices.
     return ['--cap-add=SYS_RESOURCE', '--device=/dev/ublk-control',
             f'--device-cgroup-rule=c {character}:* rwm',
-            f'--device-cgroup-rule=b {block}:* rwm',
-            '-e', 'CAIRN_BLOCK_TRANSPORT=ublk']
+            f'--device-cgroup-rule=b {block}:* rwm']
 
 
 def vm_arguments(config):
-    if not isinstance(config.get('cacheApprovedRuntimes', True), bool):
-        raise ValueError('cacheApprovedRuntimes must be a boolean')
     if not isinstance(config.get('readyVmPool', True), bool):
         raise ValueError('readyVmPool must be a boolean')
     pool_size = config.get('readyVmPoolSize')
     if pool_size is not None and (type(pool_size) is not int or not 1 <= pool_size <= 4):
         raise ValueError('readyVmPoolSize must be an integer between 1 and 4')
-    snapshots = config.get('vmSnapshots', False)
-    if not isinstance(snapshots, bool):
-        raise ValueError('vmSnapshots must be a boolean')
-    layout = config.get('diskLayout', 'paired-ext4-v1' if snapshots else None)
-    if layout not in (None, 'flat-ext4-v1', 'paired-ext4-v1'):
-        raise ValueError('Unsupported disk layout')
-    if snapshots and layout != 'paired-ext4-v1':
-        raise ValueError('Snapshots require paired disks')
     arguments = []
     if 'readyVmPool' in config:
         arguments += ['-e', 'CAIRN_READY_VM_POOL=' + ('true' if config['readyVmPool'] else 'false')]
     if pool_size is not None:
         arguments += ['-e', 'CAIRN_READY_VM_POOL_SIZE=' + str(pool_size)]
-    if layout is not None:
-        arguments += ['-e', 'CAIRN_DISK_LAYOUT=' + layout]
-    if 'vmSnapshots' in config:
-        arguments += ['-e', 'CAIRN_VM_SNAPSHOTS=' + ('true' if snapshots else 'false')]
     return arguments
 
 
@@ -195,19 +189,19 @@ def launch(image):
     config_path = ROOT / 'config.json'
     config = json.loads(config_path.read_text()) if config_path.exists() else {}
     vm_options = vm_arguments(config)
-    devices = block_device_arguments(config.get('blockTransport', 'ublk'))
+    devices = block_device_arguments()
     remove()
     command(['docker', 'run', '-d', '--name', NAME, '--init', '--user', '0:0', '--read-only',
              '--health-cmd', '/usr/local/bin/node -e ' + shlex.quote(HEALTH_CHECK),
              '--restart=unless-stopped', '--label', 'dev.cairn.node.owner=' + json.loads((ROOT / 'data/node/identity.json').read_text())['nodeId'], '--cap-drop=ALL', *['--cap-add=' + cap for cap in ('SYS_ADMIN', 'SYS_PTRACE', 'SYS_NICE', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE')],
              '--security-opt=apparmor:unconfined', '--security-opt=seccomp:unconfined',
-             '--device=/dev/kvm', '--device=/dev/net/tun', *(['--device=/dev/fuse'] if Path('/dev/fuse').exists() else []), *devices, *vm_options, '--sysctl=net.ipv4.ip_forward=1',
+             '--device=/dev/kvm', '--device=/dev/net/tun', *devices, *vm_options, '--sysctl=net.ipv4.ip_forward=1',
              '--sysctl=net.ipv6.conf.all.disable_ipv6=1', '--tmpfs=/run', '--tmpfs=/tmp',
              '-v', f'{ROOT}/data:/data', '-v', f'{ROOT}/state:/runner-state',
              '-e', 'DATA_DIR=/data', '-e', 'RUNNER_STATE_DIR=/runner-state',
              '-e', 'RUNNER_BIND=127.0.0.1:4311', '-e', 'RUNNER_URL=http://127.0.0.1:4311',
-             '-e', 'CAIRN_NODE_IMAGE=' + image, '--entrypoint=/usr/local/bin/cairn', image,
-             'node-daemon', '/data/node'])
+             '-e', 'CAIRN_NODE_IMAGE=' + image, *gateway_arguments(config.get('master')),
+             '--entrypoint=/usr/local/bin/cairn', image, 'node-daemon', '/data/node'])
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline and not STOP:
         try:
@@ -243,7 +237,7 @@ def complete(master, image, error=None):
 
 
 def update_image(previous, image, pull, prepare, launch_image):
-    """Both host supervisors pull before draining and verify rollback before committing."""
+    """Pull before draining and verify node rollback before committing."""
     pull(image)
     if not prepare():
         return None
@@ -280,25 +274,6 @@ def update(config, release):
     reconcile(config)
 
 
-def cache_runtimes(master):
-    value = request(master, '/internal/nodes/maintenance', {'action': 'runtimes'})
-    for runtime in value.get('runtimes', []):
-        identifier, image = runtime.get('runtimeId', ''), runtime.get('image', '')
-        if not re.fullmatch(r'[a-zA-Z0-9-]{1,100}', identifier) or not IMAGE.fullmatch(image):
-            raise RuntimeError('Invalid approved runtime package')
-        cache = ROOT / 'state/images' / identifier
-        if (cache / 'root.ext4').is_file() and (cache / 'vmlinux').is_file():
-            continue
-        (ROOT / 'state/images').mkdir(parents=True, exist_ok=True, mode=0o700)
-        command(['docker', 'pull', image], timeout=1200)
-        # Extract from the approved digest, with no network or host Docker access.
-        # Publish atomically; repair missing files without replacing an existing image.
-        script = 'test "$APP_RUNTIME_ID" = "$CAIRN_EXPECTED_RUNTIME"; staging="/cache/$APP_RUNTIME_ID.partial"; mkdir -p "$staging"; zstd -d -f /opt/cairn-vm/root.ext4.zst -o "$staging/root.ext4"; cp /opt/cairn-vm/vmlinux "$staging/vmlinux"; chmod 444 "$staging/root.ext4" "$staging/vmlinux"; sync; if test ! -d "/cache/$APP_RUNTIME_ID"; then mv "$staging" "/cache/$APP_RUNTIME_ID"; else for file in root.ext4 vmlinux; do test -s "/cache/$APP_RUNTIME_ID/$file" || mv "$staging/$file" "/cache/$APP_RUNTIME_ID/$file"; done; rm -rf "$staging"; fi; sync'
-        command(['docker', 'run', '--rm', '--network=none', '--read-only', '--cap-drop=ALL', '--user=0:0',
-                 '-v', str(ROOT / 'state/images') + ':/cache', '-e', 'CAIRN_EXPECTED_RUNTIME=' + identifier,
-                 '--entrypoint=/bin/sh', image, '-ec', script], timeout=1200)
-
-
 def reconcile(config):
     # Persist acknowledgements independently of the image selection: a lost HTTP
     # response must not trigger another restart or strand the node in maintenance.
@@ -319,7 +294,9 @@ def install(master):
     release = target(master)
     command(['docker', 'pull', release['image']], timeout=1200)
     code = getpass.getpass('Single-use enrollment code: ').encode()
-    command(['docker', 'run', '--rm', '-i', '--user=0:0', '--device=/dev/kvm',
+    # Enrollment is short-lived and starts no VM; host networking lets it use the gateway.
+    network = ['--network=host'] if master == GATEWAY else []
+    command(['docker', 'run', '--rm', '-i', '--user=0:0', '--device=/dev/kvm', *network,
              '-v', f'{ROOT}/data:/data', '--entrypoint=/usr/local/bin/cairn', release['image'],
              'node-enroll', master, '/data/node'], data=code)
     atomic(ROOT / 'config.json', {'master': master, 'image': release['image']})
@@ -345,8 +322,6 @@ def run():
                     atomic(ROOT / 'config.json', config)
                 if release['image'] not in (config['image'], config.get('failedImage')):
                     update(config, release)
-                if not STOP and config.get('cacheApprovedRuntimes', True):
-                    cache_runtimes(config['master'])
             except (OSError, ValueError, RuntimeError):
                 print('Node update check failed; retaining current image and data', flush=True)
             for _ in range(1 if config.get('pendingCompletion') or config.get('pendingSupervisor') else 30):

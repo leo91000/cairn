@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """One-machine installation. The manager owns claiming; containers have no Docker socket."""
 import argparse
-from contextlib import closing
 import fcntl
 import importlib.util
 import json
@@ -10,7 +9,6 @@ from pathlib import Path
 import re
 import secrets
 import stat
-import sqlite3
 import uuid
 import shlex
 import subprocess
@@ -23,6 +21,42 @@ import urllib.request
 ROOT = Path(os.environ.get('CAIRN_INSTALLATION_ROOT', '/var/lib/cairn-installation'))
 GARAGE_IMAGE = 'dxflrs/garage@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690'
 IMAGE = re.compile(r'^ghcr\.io/leo91000/cairn@sha256:[a-f0-9]{64}$')
+COMPOSE_WAIT_TIMEOUT = 240
+COMPOSE_COMMAND_TIMEOUT = 300
+UPDATE_PHASES = frozenset(('startup', 'configuration', 'release_lookup', 'image_pull', 'image_inspection',
+                          'lease_acquire', 'lease_release', 'lease_ack_write', 'candidate_inspection',
+                          'manager_health', 'runner_health', 'configure_runner', 'stop_manager',
+                          'stop_runner', 'compose_write', 'compose_up', 'commit_candidate',
+                          'clear_owner', 'complete'))
+UPDATE_PHASE = 'startup'
+
+
+class LeaseRejected(RuntimeError):
+    """An explicit manager response must never authorize unavailable-manager recovery."""
+
+
+def update_phase(value):
+    global UPDATE_PHASE
+    if value not in UPDATE_PHASES:
+        raise ValueError('Invalid update phase')
+    UPDATE_PHASE = value
+    print(json.dumps({'event': 'installation_update_phase', 'phase': value}), file=sys.stderr, flush=True)
+
+
+def update_failure(error):
+    if isinstance(error, subprocess.TimeoutExpired):
+        category = 'TimeoutExpired'
+    elif isinstance(error, OSError):
+        category = 'OSError'
+    elif isinstance(error, ValueError):
+        category = 'ValueError'
+    elif isinstance(error, LeaseRejected):
+        category = 'LeaseRejected'
+    else:
+        category = 'RuntimeError'
+    phase = UPDATE_PHASE if UPDATE_PHASE in UPDATE_PHASES else 'startup'
+    print(json.dumps({'event': 'installation_update_failed', 'phase': phase, 'exception': category}),
+          file=sys.stderr, flush=True)
 
 
 def atomic(path, data):
@@ -44,25 +78,6 @@ def atomic(path, data):
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
-
-
-class StorageMigrationError(Exception):
-    """The previous binary cannot safely reopen a database advanced by the candidate."""
-
-
-def storage_state():
-    database = ROOT / 'data/manager.db'
-    if not database.exists():
-        return 0, False
-    try:
-        with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True, timeout=5)) as db:
-            version = db.execute('PRAGMA user_version').fetchone()[0]
-            pending = version >= 7 and db.execute(
-                "SELECT 1 FROM kv WHERE key='migration:disk-blocks-v2'"
-            ).fetchone() is None
-            return version, pending
-    except (OSError, sqlite3.Error):
-        raise StorageMigrationError('Cannot verify the storage migration state. Candidate retained; inspect manager logs before retrying.') from None
 
 
 def run(args, timeout=120):
@@ -129,7 +144,6 @@ def configure_ublk(runner):
     if control not in devices:
         devices.append(control)
     runner['device_cgroup_rules'] = rules
-    environment['CAIRN_BLOCK_TRANSPORT'] = 'ublk'
 
 
 def compose(image, origin):
@@ -178,7 +192,7 @@ def compose(image, origin):
                 'cap_drop': ['ALL'],
                 'cap_add': ['SYS_ADMIN', 'SYS_PTRACE', 'SYS_NICE', 'NET_ADMIN', 'SYS_CHROOT', 'SETUID', 'SETGID', 'MKNOD', 'CHOWN', 'FOWNER', 'KILL', 'DAC_OVERRIDE'],
                 'security_opt': ['apparmor:unconfined', 'seccomp:unconfined'],
-                'devices': ['/dev/kvm:/dev/kvm', '/dev/net/tun:/dev/net/tun', '/dev/fuse:/dev/fuse'],
+                'devices': ['/dev/kvm:/dev/kvm', '/dev/net/tun:/dev/net/tun'],
                 'sysctls': {'net.ipv4.ip_forward': '1', 'net.ipv6.conf.all.disable_ipv6': '1'},
                 'tmpfs': ['/run', '/tmp'],
                 'volumes': ['./data:/data', './runner-state:/runner-state'],
@@ -290,8 +304,6 @@ api_bind_addr = "0.0.0.0:3900"
                 run(docker + ['exec', '-T', 'manager', 'node', '-e', health], timeout=10)
                 break
             except RuntimeError:
-                if storage_state()[1]:
-                    deadline = time.monotonic() + 120
                 if time.monotonic() >= deadline:
                     raise RuntimeError('The manager did not become healthy. Inspect docker compose logs; existing data is retained.')
                 time.sleep(1)
@@ -335,6 +347,7 @@ def docker_output(args):
 
 
 def update(origin):
+    update_phase('configuration')
     origin = beacon_origin(origin)
     config_file = ROOT / 'installation.json'
     config = json.loads(config_file.read_text())
@@ -343,6 +356,7 @@ def update(origin):
     docker = ['docker', 'compose', '--project-directory', str(ROOT), '-f', str(ROOT / 'compose.json')]
 
     def lease(owner, release=False):
+        update_phase('lease_release' if release else 'lease_acquire')
         # Read the credential inside the manager, never in argv or diagnostics.
         method = json.dumps('DELETE' if release else 'POST')
         lease_owner = json.dumps(owner)
@@ -353,13 +367,25 @@ fetch('http://127.0.0.1:4310/internal/deployment-lease', {{
     method: {method},
     headers: {{ 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }},
     body: JSON.stringify({{ owner: {lease_owner} }}),
-}}).then(response => {{
-    if (!response.ok) process.exit(1);
+}}).then(async response => {{
+    let paused = null;
+    try {{
+        const value = await response.json();
+        if (typeof value?.paused === 'boolean') paused = value.paused;
+    }} catch {{}}
+    console.log(JSON.stringify({{ status: response.status, paused }}));
 }}).catch(() => process.exit(1));
 """
-        run(docker + ['exec', '-T', 'manager', 'node', '-e', script], timeout=10)
+        verdict = docker_output(docker[1:] + ['exec', '-T', 'manager', 'node', '-e', script])
+        status = verdict.get('status') if isinstance(verdict, dict) else None
+        if status == 200 and verdict.get('paused') is (not release):
+            return
+        if status == 409:
+            raise LeaseRejected('Another deployment owns the installation lease. Existing image and data are retained.')
+        raise LeaseRejected('The manager refused the deployment lease. Existing image and data are retained.')
 
     def inspect(image):
+        update_phase('image_inspection')
         metadata = docker_output(['image', 'inspect', image])[0]
         if image not in metadata.get('RepoDigests', []):
             raise RuntimeError('Downloaded image digest does not match the approved release.')
@@ -369,206 +395,159 @@ fetch('http://127.0.0.1:4310/internal/deployment-lease', {{
             raise RuntimeError('Approved image lacks runtime identity.')
         return runtime
 
-    def manager_health(runtime=None):
+    def manager_health(runtime=None, service='manager'):
+        update_phase('manager_health' if service == 'manager' else 'runner_health')
         expected_runtime = json.dumps(runtime)
+        port = 4310 if service == 'manager' else 4311
+        require_execution = json.dumps(service == 'manager')
         script = f"""
-fetch('http://127.0.0.1:4310/health', {{ signal: AbortSignal.timeout(5000) }}).then(response => {{
+fetch('http://127.0.0.1:{port}/health', {{ signal: AbortSignal.timeout(5000) }}).then(response => {{
     if (!response.ok) throw Error();
     return response.json();
 }}).then(value => {{
     const expected = {expected_runtime};
-    console.log(JSON.stringify({{ healthy: value.status === 'ok' && (expected === null || value.runtimeId === expected) }}));
+    console.log(JSON.stringify({{ healthy: value.status === 'ok' && (expected === null || value.runtimeId === expected)
+        && (!{require_execution} || value.execution?.ready === true) }}));
 }}).catch(() => console.log(JSON.stringify({{ healthy: false }})));
 """
-        result = docker_output(docker[1:] + ['exec', '-T', 'manager', 'node', '-e', script])
+        result = docker_output(docker[1:] + ['exec', '-T', service, 'node', '-e', script])
         if not isinstance(result, dict) or not isinstance(result.get('healthy'), bool):
             raise RuntimeError('Manager health probe did not return a verdict.')
         return result['healthy']
 
-    def failed_candidate_container(image, services=('manager', 'runner')):
-        # A Docker command error alone does not prove an image unhealthy. Only
-        # inspect the exact candidate's containers, including the dependency that
-        # can keep the manager from starting at all.
-        for service in services:
-            try:
-                containers = docker_output(docker[1:] + ['ps', '--all', '--format', 'json', service])
-                container = containers[0] if isinstance(containers, list) and containers else containers
-                if container and container.get('Image') == image:
-                    if container.get('State') in ('exited', 'dead', 'restarting') or container.get('Health') == 'unhealthy':
-                        return True
-            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
-                continue
-        return False
+    def candidate_state(image):
+        update_phase('candidate_inspection')
+        deployment = json.loads((ROOT / 'compose.json').read_text())
+        if not isinstance(deployment, dict):
+            return None
+        services = deployment.get('services', {})
+        if not isinstance(services, dict):
+            return None
+        for role in ('manager', 'runner'):
+            if not isinstance(services.get(role), dict) or services[role].get('image') != image:
+                return None
+        environment = services['manager'].get('environment', {})
+        if not isinstance(environment, dict) or environment.get('CAIRN_NODE_IMAGE') != image:
+            return None
+        identities = {}
+        for role in ('manager', 'runner'):
+            rows = docker_output(docker[1:] + ['ps', '--all', '--format', 'json', role])
+            container = rows[0] if isinstance(rows, list) and len(rows) == 1 else rows
+            if not isinstance(container, dict) or not isinstance(container.get('ID'), str) or not container['ID']:
+                return None
+            if container.get('Image') != image or container.get('State') != 'running' or container.get('Health') != 'healthy':
+                return None
+            identities[role] = container['ID']
+        return identities
 
-    def pending_candidate_unavailable():
-        # A crash-looping candidate manager is briefly running between restarts,
-        # and Docker exec then fails before the probe starts. Observe it again
-        # until the probe or its own container state settles it.
-        for attempt in range(5):
-            if attempt:
-                time.sleep(1)
-            try:
-                return not manager_health()
-            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
-                if failed_candidate_container(config['pendingImage'], ('manager',)):
-                    return True
-        # No verdict: the candidate may be healthy and another
-        # deployment may hold the lease. Its lease still wins.
-        return False
-
-    def storage_advanced():
-        version, pending = storage_state()
-        return pending or version > config.get('pendingDatabaseVersion', 6)
-
-    def wait_for_migration(image, runtime):
-        deadline = time.monotonic() + 120
-        print('Waiting for blocking storage migration; the candidate image is retained…', flush=True)
-        while True:
-            try:
-                if manager_health(runtime):
-                    return
-            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
-                pass
-            containers = docker_output(docker[1:] + ['ps', '--all', '--format', 'json', 'manager'])
-            container = containers[0] if isinstance(containers, list) and containers else containers
-            if not container or container.get('Image') != image:
-                raise StorageMigrationError('Migration candidate is missing or changed externally. Automatic rollback refused; inspect the deployment.')
-            if container.get('State') in ('exited', 'dead', 'restarting'):
-                raise StorageMigrationError('Storage migration stopped before readiness. Candidate retained; inspect manager logs and retry the same image.')
-            if storage_state()[1]:
-                deadline = time.monotonic() + 120
-            if time.monotonic() >= deadline:
-                raise StorageMigrationError('The upgraded manager did not become ready. Candidate retained because the previous binary cannot reopen its database.')
-            time.sleep(1)
-
-    health_failed = False
+    def healthy_candidate(image):
+        runtime = inspect(image)
+        before = candidate_state(image)
+        if not before:
+            return False
+        if not manager_health(runtime) or not manager_health(runtime, 'runner'):
+            return False
+        return candidate_state(image) == before
 
     def launch(image):
-        nonlocal health_failed
-        # Ordinary startup and rollback fit in the lease. Blocking migration can
-        # outlast it while the manager is offline; the schema fence then requires
-        # retaining this candidate until conversion and readiness complete.
-        if image != config.get('pendingImage') and storage_advanced():
-            raise StorageMigrationError('Storage migration advanced the database. Automatic rollback refused; resume the candidate or restore a consistent pre-upgrade snapshot.')
         runtime = inspect(image)
         deployment = json.loads((ROOT / 'compose.json').read_text())
         deployment['services']['manager']['image'] = image
         deployment['services']['manager']['environment']['CAIRN_NODE_IMAGE'] = image
         deployment['services']['runner']['image'] = image
+        update_phase('configure_runner')
         configure_ublk(deployment['services']['runner'])
 
         # The manager saves checkpoints before the runner is stopped. Persistent
         # volumes and Garage are never recreated or removed by this supervisor.
+        update_phase('stop_manager')
         run(docker + ['stop', '--timeout', '300', 'manager'], timeout=310)
+        update_phase('stop_runner')
         run(docker + ['stop', '--timeout', '60', 'runner'], timeout=70)
+        update_phase('compose_write')
         atomic(ROOT / 'compose.json', json.dumps(deployment, indent=2))
-        try:
-            run(docker + ['up', '-d', '--wait', '--wait-timeout', '120', '--pull', 'never', '--no-deps', 'runner', 'manager'], timeout=150)
-        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
-            if image == config.get('pendingImage') and storage_advanced():
-                wait_for_migration(image, runtime)
-                return
-            if image == config.get('pendingImage'):
-                health_failed = failed_candidate_container(image)
-            raise
+        # Compose starts the runner before the manager. Allow up to a minute of
+        # startup overhead in addition to the bounded health-wait budget.
+        update_phase('compose_up')
+        run(docker + ['up', '-d', '--wait', '--wait-timeout', str(COMPOSE_WAIT_TIMEOUT), '--pull', 'never', '--no-deps', 'runner', 'manager'], timeout=COMPOSE_COMMAND_TIMEOUT)
 
         # A JSON verdict proves the probe ran. Docker exec failures before the
         # probe starts remain transient, rather than blacklisting an untested image.
-        if image == config.get('pendingImage') and storage_advanced():
-            wait_for_migration(image, runtime)
-            return
         if not manager_health(runtime):
-            if image == config.get('pendingImage'):
-                health_failed = True
             raise RuntimeError('Installation runtime health check failed.')
 
-    def finish(updated):
-        pending = config.pop('pendingImage')
+    def finish():
+        update_phase('commit_candidate')
+        config['image'] = config.pop('pendingImage')
         config.pop('leaseAcquired', None)
-        config.pop('pendingDatabaseVersion', None)
-        if updated:
-            config.update(previousImage=config['image'], image=pending, failedImage=None)
-        elif updated is False:
-            config['failedImage'] = pending
         # Keep the lease acknowledgement durable, including a lost DELETE reply.
         atomic(config_file, json.dumps(config))
 
-    if config.get('pendingImage') and storage_advanced():
-        # Once the candidate changes storage, restore that same compatible image,
-        # rather than opening the new database with the previous executable.
-        managers = docker_output(docker[1:] + ['ps', '--all', '--format', 'json', 'manager'])
-        manager = managers[0] if isinstance(managers, list) and managers else managers
-        if manager and manager.get('Image') not in (config['image'], config['pendingImage']):
-            raise StorageMigrationError('Installation image changed externally during migration; refusing to replace it.')
-        if not config.get('leaseAcquired'):
-            lease(config['leaseOwner'])
-            config['leaseAcquired'] = True
-            atomic(config_file, json.dumps(config))
-        launch(config['pendingImage'])
-        finish(True)
-
     if config.get('pendingImage'):
-        # A stopped supervisor never guesses whether the candidate was healthy.
-        # Recover the last committed approved image before accepting another.
-        managers = docker_output(docker[1:] + ['ps', '--all', '--format', 'json', 'manager'])
-        manager = managers[0] if isinstance(managers, list) and managers else managers
-        manager_state = manager.get('State') if manager else None
-        pending_unavailable = False
-        if manager and manager.get('Image') == config['pendingImage']:
-            pending_unavailable = manager_state in ('created', 'restarting')
-            if manager_state == 'running' and config.get('leaseAcquired'):
-                # Docker's running state does not imply HTTP readiness after a
-                # reboot. Probe only our journaled candidate, never a foreign image.
-                pending_unavailable = pending_candidate_unavailable()
-        manager_active = manager_state not in (None, 'exited', 'dead') and not pending_unavailable
-        if not config.get('leaseAcquired') or manager_active:
-            # A persisted acknowledgement may outlive the twenty-minute lease.
-            # Reacquire before stopping a running manager; another owner wins.
-            # If our replacement removed/stopped it or its exact candidate is
-            # not started or unhealthy, the acknowledgement and host lock permit restoring
-            # only the last committed approved image without its HTTP endpoint.
+        lease_confirmed = False
+        try:
             lease(config['leaseOwner'])
-        launch(config['image'])
-        finish(None)
+        except LeaseRejected:
+            raise
+        except RuntimeError:
+            containers = docker_output(docker[1:] + ['ps', '--all', '--format', 'json', 'manager'])
+            manager = containers[0] if isinstance(containers, list) and containers else containers
+            owned_image = manager and manager.get('Image') in (config['image'], config['pendingImage'])
+            stopped = not manager or (owned_image and manager.get('State') in ('exited', 'dead', 'created', 'restarting'))
+            unavailable_candidate = (owned_image and manager.get('Image') == config['pendingImage']
+                                     and manager.get('State') == 'running'
+                                     and not manager_health(inspect(config['pendingImage'])))
+            if not config.get('leaseAcquired') or not (stopped or unavailable_candidate):
+                raise
+        else:
+            lease_confirmed = True
+            config['leaseAcquired'] = True
+            update_phase('lease_ack_write')
+            atomic(config_file, json.dumps(config))
+        # An acknowledged, already-ready candidate only needs its durable commit
+        # and lease release. Re-launching it repeats potentially slow restoration.
+        if not (lease_confirmed and healthy_candidate(config['pendingImage'])):
+            launch(config['pendingImage'])
+        finish()
 
     if config.get('leaseOwner'):
         lease(config['leaseOwner'], release=True)
         config.pop('leaseOwner')
+        update_phase('clear_owner')
         atomic(config_file, json.dumps(config))
         return
 
+    update_phase('release_lookup')
     image = release(origin)
-    if image in (config['image'], config.get('failedImage')):
+    if image == config['image']:
         return
 
     def pull(image):
+        update_phase('image_pull')
         run(['docker', 'pull', image], timeout=1200)
         inspect(image)
 
     def prepare():
         owner = str(uuid.uuid4())
         # Record before requesting the lease: its response can be lost.
-        config.update(pendingImage=image, leaseOwner=owner, pendingDatabaseVersion=storage_state()[0])
+        config.update(pendingImage=image, leaseOwner=owner)
         atomic(config_file, json.dumps(config))
 
         lease(owner)
 
         config['leaseAcquired'] = True
+        update_phase('lease_ack_write')
         atomic(config_file, json.dumps(config))
         return True
 
-    supervisor = node_supervisor()
-
-    updated = supervisor.update_image(config['image'], image, pull, prepare, launch)
-    # Restoring the previous image alone does not prove the candidate failed.
-    # None preserves eligibility after a transient Docker failure.
-    if updated is False and not health_failed:
-        updated = None
-
-    finish(updated)
+    pull(image)
+    prepare()
+    launch(image)
+    finish()
 
     lease(config['leaseOwner'], release=True)
     config.pop('leaseOwner')
+    update_phase('clear_owner')
     atomic(config_file, json.dumps(config))
 
 
@@ -587,11 +566,16 @@ if __name__ == '__main__':
                 raise RuntimeError('Another Cairn installer is running. Wait for it to finish and retry.') from None
             if args.update:
                 update(args.origin)
+                update_phase('complete')
             else:
                 install(args.origin, args.claim_code)
-    except (RuntimeError, StorageMigrationError) as error:
+    except RuntimeError as error:
+        if args.update:
+            update_failure(error)
         print(str(error), file=sys.stderr)
         sys.exit(1)
-    except (OSError, ValueError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        if args.update:
+            update_failure(error)
         print('Cairn installation failed. Check prerequisites, outbound connectivity and Docker. Existing identity and storage are retained.', file=sys.stderr)
         sys.exit(1)

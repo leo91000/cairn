@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "occurrences": {
+      "items": {
+        "format": "int64",
+        "maximum": 9007199254740991,
+        "minimum": 0,
+        "type": "integer"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "occurrences"
+  ],
+  "title": "SchedulePreviewOutput",
+  "type": "object"
+}

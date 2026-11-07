@@ -2,8 +2,7 @@
 //! account, usage from the CLI's `get_usage` control request, and OAuth rotation by the
 //! manager only. Runs receive access-only credential snapshots.
 use super::{
-    Account, AccountState, Driver, Lease, Login, Phase, broker, lenient, remove_directory,
-    remove_file, save,
+    Account, Driver, Lease, Login, Phase, broker, lenient, remove_directory, remove_file, save,
     usage::{self, Usage},
 };
 use crate::{
@@ -12,21 +11,23 @@ use crate::{
     config::{Config, now},
     error::{Error, Result},
     process::{bounded_output, command, read_bounded},
-    provider::Provider,
     service::Service,
     skills::{atomic_write, private_dir},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
+    borrow::Cow,
     path::{Path, PathBuf},
     time::Duration,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
-// Official Claude Code 2.1.280 default; a per-login clientId takes precedence.
-const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+/// Token rotation uses the endpoint and official client the installed Claude Code
+/// ships; CI checks both in every resolved release. A per-login clientId takes
+/// precedence.
+pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const LIMIT: usize = 128_000;
 const USAGE_TTL: i64 = 300_000;
 /// The CLI files that follow an account into a run's home. Credentials never do.
@@ -196,13 +197,39 @@ fn apply(credentials: &mut Value, rotated: RefreshResponse) {
     }
 }
 
+#[cfg(test)]
+pub(crate) struct RotationProbe {
+    pub(crate) endpoint: String,
+    pub(crate) before_persist: tokio_util::sync::CancellationToken,
+    pub(crate) resume: tokio_util::sync::CancellationToken,
+}
+
 /// Rotates the login when it is about to expire. The caller holds the account lock through
 /// persistence, so concurrent runs share one rotation.
 async fn access_at(home: &Path, endpoint: &str) -> Result<Value> {
+    access_at_inner(
+        home,
+        endpoint,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+async fn access_at_inner(
+    home: &Path,
+    endpoint: &str,
+    #[cfg(test)] probe: Option<&RotationProbe>,
+) -> Result<Value> {
     let mut value = credentials(home).await?;
     let oauth = OAuth::of(&value);
     if oauth.expires_within(300_000) && !oauth.refresh_token.is_empty() {
         apply(&mut value, rotate(&oauth, endpoint).await?);
+        #[cfg(test)]
+        if let Some(probe) = probe {
+            probe.before_persist.cancel();
+            probe.resume.cancelled().await;
+        }
         atomic_write(&home.join(CREDENTIALS), &serde_json::to_vec(&value)?).await?;
         tokio::fs::File::open(home).await?.sync_all().await?;
     }
@@ -413,6 +440,27 @@ fn scope(windows: &mut [usage::Window], catalog: &Catalog) {
     }
 }
 
+/// The family a saved model runs, as model-scoped windows name it, so a model that a newer
+/// catalog no longer lists stays limited by its family: an alias without its context
+/// variant ("opus[1m]" is "opus"), or the family of a model ID ("claude-opus-4-6[1m]" is
+/// "opus"). Any other name, such as "default" or "opusplan", is matched as saved.
+fn family(model: &str) -> Cow<'_, str> {
+    let lower = model.to_ascii_lowercase();
+    let base = match lower
+        .strip_suffix(']')
+        .and_then(|rest| rest.rsplit_once('['))
+    {
+        Some((base, variant)) if !base.is_empty() && !variant.is_empty() => base,
+        _ => lower.as_str(),
+    };
+    let named = |name: &str| !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase());
+    let family = match base.strip_prefix("claude-") {
+        Some(id) => id.split('-').find(|part| named(part)),
+        None => Some(base).filter(|alias| named(alias) && *alias != model),
+    };
+    family.map_or(Cow::Borrowed(model), |family| Cow::Owned(family.into()))
+}
+
 /// Reads usage at most every five minutes. A failure keeps the last known windows.
 async fn read_usage(s: &Service, id: &str, previous: Option<Usage>) -> Usage {
     let mut current = previous.unwrap_or_default();
@@ -466,100 +514,6 @@ fn login_url(output: &str) -> Option<String> {
 async fn copy_private(source: &Path, target: &Path) -> Result<()> {
     if let Some(bytes) = read_private(source).await? {
         atomic_write(target, &bytes).await?;
-    }
-    Ok(())
-}
-
-/// Earlier versions connected one Claude account in `DATA_DIR/claude`, shared as the CLI home
-/// of local runs. It becomes an ordinary account, and local runs keep their sessions.
-async fn migrate(s: &Service) -> Result<()> {
-    let legacy = s.config.data_dir.join("claude");
-    if !legacy.exists() {
-        return Ok(());
-    }
-    migrate_sessions(s, &legacy).await?;
-    if legacy.join(CREDENTIALS).exists() && s.accounts.of(s, Provider::Claude).await?.is_empty() {
-        import_legacy(s, &legacy).await?;
-    } else {
-        remove_directory(&legacy).await?;
-    }
-    for key in ["claude-status", "claude-usage", "claude-concurrency"] {
-        s.store.delete(key).await?;
-    }
-    Ok(())
-}
-
-async fn import_legacy(s: &Service, legacy: &Path) -> Result<()> {
-    // A guest may have rotated the refresh token during the old serialized transfer.
-    let interrupted = legacy.join("sync-required").exists();
-    let saved = s.store.kv("claude-status").await?.unwrap_or(Value::Null);
-    let limit = s
-        .store
-        .kv("claude-concurrency")
-        .await?
-        .and_then(|v| v.as_u64())
-        .unwrap_or(4);
-    let state = if interrupted {
-        AccountState::Error
-    } else {
-        AccountState::Ready
-    };
-    let mut account = Account::new(Provider::Claude, "Claude", state);
-    let email = saved["email"].as_str();
-    account.email = email.map(str::to_owned);
-    account.plan = saved["subscriptionType"].as_str().map(str::to_owned);
-    account.identity = email.map(identity);
-    account.max_concurrent_runs = Some(limit);
-    if interrupted {
-        account.error = "Reconnect this account after an interrupted credential transfer.".into();
-    }
-    let home = account_home(&s.config, &account.id);
-    private_dir(&s.config.data_dir.join("claude-accounts")).await?;
-    tokio::fs::rename(legacy, &home).await?;
-    remove_file(&home.join("sync-required")).await?;
-    save(s, &account).await?;
-    s.store
-        .audit(
-            "account.imported",
-            json!({ "id": account.id, "provider": "claude" }),
-        )
-        .await
-}
-
-/// Local runs used the shared home, so their session transcripts move into each run.
-async fn migrate_sessions(s: &Service, legacy: &Path) -> Result<()> {
-    let runs = s
-        .store
-        .read(|db| {
-            db.json_rows(
-                "SELECT data FROM runs WHERE json_extract(data,'$.snapshot.agent.provider')='claude' AND json_extract(data,'$.sessionId') IS NOT NULL AND COALESCE(json_extract(data,'$.isolated'),0)!=1",
-                [],
-            )
-        })
-        .await?;
-    let Ok(mut projects) = tokio::fs::read_dir(legacy.join("projects")).await else {
-        return Ok(());
-    };
-    let mut directories = Vec::new();
-    while let Some(entry) = projects.next_entry().await? {
-        directories.push(entry.file_name());
-    }
-    for run in runs {
-        let session = format!("{}.jsonl", crate::validation::text(&run, "sessionId"));
-        let target = s
-            .config
-            .data_dir
-            .join("runs")
-            .join(crate::validation::text(&run, "id"))
-            .join("home/.claude/projects");
-        for directory in &directories {
-            let source = legacy.join("projects").join(directory).join(&session);
-            let destination = target.join(directory).join(&session);
-            if source.exists() && !destination.exists() {
-                private_dir(&target.join(directory)).await?;
-                copy_private(&source, &destination).await?;
-            }
-        }
     }
     Ok(())
 }
@@ -624,8 +578,8 @@ pub struct Claude;
 
 #[async_trait::async_trait]
 impl Driver for Claude {
-    async fn initialize(&self, s: &Service) -> Result<()> {
-        migrate(s).await
+    async fn initialize(&self, _s: &Service) -> Result<()> {
+        Ok(())
     }
 
     async fn managed(&self, _s: &Service) -> Result<bool> {
@@ -711,7 +665,16 @@ impl Driver for Claude {
         false
     }
 
-    async fn supports(&self, _s: &Service, _id: &str, _model: &str) -> Result<bool> {
+    /// A model a window names, such as a catalog alias, keeps its own windows.
+    fn usage_model<'a>(&self, usage: &Usage, model: &'a str) -> Cow<'a, str> {
+        if usage.names(model) {
+            Cow::Borrowed(model)
+        } else {
+            family(model)
+        }
+    }
+
+    async fn supports(&self, _s: &Service, _id: &str, _model: &str, _speed: &str) -> Result<bool> {
         Ok(true)
     }
 
@@ -744,6 +707,24 @@ impl Driver for Claude {
         _request: &broker::Request,
     ) -> Result<Value> {
         let _rotation = s.accounts.lock(&lease.account_id).await;
+        #[cfg(test)]
+        let probe = {
+            s.accounts
+                .claude_rotation_probes
+                .lock()
+                .unwrap()
+                .get(&lease.account_id)
+                .cloned()
+        };
+        #[cfg(test)]
+        if let Some(probe) = probe {
+            return access_at_inner(
+                &account_home(&s.config, &lease.account_id),
+                &probe.endpoint,
+                Some(&probe),
+            )
+            .await;
+        }
         access_at(&account_home(&s.config, &lease.account_id), TOKEN_URL).await
     }
 
@@ -828,6 +809,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::Provider;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -852,6 +834,57 @@ mod tests {
         scope(&mut windows, &catalog);
         assert!(windows[0].models.is_empty());
         assert_eq!(windows[1].models, ["opus", "opus[1m]", "default"]);
+    }
+
+    #[test]
+    fn saved_models_are_limited_by_the_family_they_run() {
+        for (saved, runs) in [
+            ("opus[1m]", "opus"),
+            ("Sonnet[1M]", "sonnet"),
+            ("Opus", "opus"),
+            ("claude-opus-4-6", "opus"),
+            ("claude-opus-4-6[1m]", "opus"),
+            ("claude-haiku-4-5-20251001", "haiku"),
+            ("claude-3-5-sonnet-20241022", "sonnet"),
+        ] {
+            assert_eq!(family(saved), runs, "{saved}");
+        }
+        // Names without a precise family stay as saved: their catalog rows scope them.
+        for saved in [
+            "opus",
+            "default",
+            "opusplan",
+            "",
+            "opus[]",
+            "claude-",
+            "my-opus-proxy",
+            "us.anthropic.claude-opus-4-6-v1",
+        ] {
+            assert!(
+                matches!(family(saved), Cow::Borrowed(name) if name == saved),
+                "{saved}"
+            );
+        }
+        // A name a window already lists keeps it, even when its family differs.
+        let catalog = Catalog::read(Some(json!({
+            "models": [{ "model": "opusplan[1m]", "resolvedModel": "claude-opus-fixture" }],
+        })));
+        let mut windows = vec![window(&["opus"])];
+        scope(&mut windows, &catalog);
+        let usage = Usage {
+            windows,
+            ..Usage::default()
+        };
+        let driver = Provider::Claude.driver();
+        assert_eq!(driver.usage_model(&usage, "opusplan[1m]"), "opusplan[1m]");
+        assert_eq!(driver.usage_model(&usage, "opus[1m]"), "opus");
+        // Other engines match their usage windows by the exact saved model.
+        for provider in [Provider::Codex, Provider::Opencode] {
+            for saved in ["opus[1m]", "gpt-5.5[1m]", "opencode-go/claude-opus-4-6"] {
+                let model = provider.driver().usage_model(&usage, saved);
+                assert_eq!(model, saved, "{provider:?}");
+            }
+        }
     }
 
     fn stored() -> Value {

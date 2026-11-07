@@ -26,55 +26,76 @@ class HistoryPagingCostTest {
         val events = mutableListOf<RunEvent>()
         events +=
             RunEvent(
-                next(),
-                first,
-                "chat.user",
-                "Question $first",
-                mapOf("text" to JsonPrimitive("Question $first")),
+                id = next(),
+                createdAt = first,
+                type = "chat.user",
+                text = "Question $first",
+                payload =
+                    kotlinx.serialization.json.JsonObject(
+                        mapOf("text" to JsonPrimitive("Question $first"))
+                    ),
             )
-        events += RunEvent(next(), first, "turn.started", "")
+        events +=
+            RunEvent(
+                id = next(),
+                createdAt = first,
+                type = "turn.started",
+                text = "",
+            )
         repeat(8) { tool ->
             for (status in listOf("in_progress", "completed")) {
                 val event = next()
                 events +=
                     RunEvent(
-                        event,
-                        event,
-                        if (status == "completed") "item.completed" else "item.started",
-                        "",
-                        mapOf(
-                            "item" to
-                                buildJsonObject {
-                                    put("id", "tool-$first-$tool")
-                                    put("type", "command_execution")
-                                    put("command", "pnpm test --filter $tool")
-                                    put("status", status)
-                                    if (status == "completed") {
-                                        put("aggregated_output", output)
-                                        put("exit_code", 0)
-                                    }
-                                }
-                        ),
+                        id = event,
+                        createdAt = event,
+                        type = if (status == "completed") "item.completed" else "item.started",
+                        text = "",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf(
+                                    "item" to
+                                        buildJsonObject {
+                                            put("id", "tool-$first-$tool")
+                                            put("type", "command_execution")
+                                            put("command", "pnpm test --filter $tool")
+                                            put("status", status)
+                                            if (status == "completed") {
+                                                put("aggregated_output", output)
+                                                put("exit_code", 0)
+                                            }
+                                        }
+                                )
+                            ),
                     )
             }
         }
         val answer = next()
         events +=
             RunEvent(
-                answer,
-                answer,
-                "item.completed",
-                reply,
-                mapOf(
-                    "item" to
-                        buildJsonObject {
-                            put("id", "answer-$first")
-                            put("type", "agent_message")
-                            put("text", reply)
-                        }
-                ),
+                id = answer,
+                createdAt = answer,
+                type = "item.completed",
+                text = reply,
+                payload =
+                    kotlinx.serialization.json.JsonObject(
+                        mapOf(
+                            "item" to
+                                buildJsonObject {
+                                    put("id", "answer-$first")
+                                    put("type", "agent_message")
+                                    put("text", reply)
+                                }
+                        )
+                    ),
             )
-        events += RunEvent(next(), answer, "status", "succeeded")
+        events +=
+            RunEvent(
+                id = next(),
+                createdAt = answer,
+                type = "status",
+                text = "succeeded",
+            )
         return events
     }
 
@@ -93,7 +114,7 @@ class HistoryPagingCostTest {
         var live =
             LiveSnapshot(
                 events = recent,
-                history = "v1:fixture:1",
+                history = "v2:fixture:1",
                 cursor = recent.last().id,
                 oldest = recent.first().id,
                 hasOlder = true,
@@ -108,7 +129,7 @@ class HistoryPagingCostTest {
         fun derive(events: List<RunEvent>): List<TimelineEntry> {
             val timeline =
                 deliveryTimeline(
-                    keys.stabilize(live.history, timelineEntries(events, chat = true)),
+                    keys.stabilize(live.history, fixtureEntries(events, chat = true)),
                     emptyList(),
                 )
             subagentTeams(timeline)
@@ -119,7 +140,14 @@ class HistoryPagingCostTest {
 
         for (loaded in 1..pageCount) {
             val events = pages[pages.size - 1 - loaded]
-            val page = HistoryPage(events, "v1:fixture:1", events.first().id, loaded < pageCount)
+            // Event paging cost: the page keeps its raw rows; cards are derived below.
+            val page =
+                HistoryPage(
+                    events = events,
+                    history = "v2:fixture:1",
+                    oldest = events.first().id,
+                    hasOlder = loaded < pageCount,
+                )
 
             // Applying the page and deriving the rows happen on the main thread before the
             // next frame can be drawn.
@@ -131,7 +159,7 @@ class HistoryPagingCostTest {
             val timeline = derive(displayed.events)
             val deriveMs = ms(start)
             start = System.nanoTime()
-            val entries = timelineEntries(displayed.events, chat = true)
+            val entries = fixtureEntries(displayed.events, chat = true)
             val entriesMs = ms(start)
             start = System.nanoTime()
             subagentTimeline(displayed.events)
@@ -151,9 +179,9 @@ class HistoryPagingCostTest {
 
             start = System.nanoTime()
             recentHistory(
-                CachedHistory(
+                timelineCache(
                     displayed.cursor,
-                    "v1:fixture:1",
+                    "v2:fixture:1",
                     LiveState(),
                     displayed.events,
                     oldest = displayed.oldest,

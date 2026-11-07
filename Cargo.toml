@@ -1,7 +1,9 @@
 [workspace]
 members = [
+  "crates/contracts",
   "crates/installation",
   "crates/beacon",
+  "crates/node-gateway",
   "crates/protocol",
   "crates/plugin-api",
   "crates/plugin-host",
@@ -10,10 +12,19 @@ members = [
 resolver = "3"
 exclude = [
   "vendor/rtc-dtls",
-  "vendor/ext4-view"
+  "vendor/ext4-view",
+  "vendor/rtc-sctp",
+  "vendor/rtc",
+  "vendor/webrtc"
 ]
 
 [patch.crates-io]
+# Register local channel event receivers before the driver can announce them.
+webrtc = { path = "vendor/webrtc" }
+# Reserve a closing channel until SCTP actually releases its wire stream.
+rtc = { path = "vendor/rtc" }
+# Keep stream resets from closing replacement channels on the pinned stack.
+rtc-sctp = { path = "vendor/rtc-sctp" }
 # Correct circular journal replay and revocations without changing the reader version.
 ext4-view = { path = "vendor/ext4-view" }
 # Preserve the pinned 0.21.0 stack; fix only DTLS retransmission under loss.
@@ -23,26 +34,6 @@ rtc-dtls = { path = "vendor/rtc-dtls" }
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
-
-# Keep third-party crates on the existing release profile. The measured four-unit
-# profile applies only to Cairn's workspace packages.
-[profile.release.package.cairn-installation]
-codegen-units = 4
-
-[profile.release.package.cairn-beacon]
-codegen-units = 4
-
-[profile.release.package.cairn-protocol]
-codegen-units = 4
-
-[profile.release.package.cairn-plugin-api]
-codegen-units = 4
-
-[profile.release.package.cairn-plugin-host]
-codegen-units = 4
-
-[profile.release.package.cairn-plugin-runtime]
-codegen-units = 4
 
 [profile.bench]
 lto = "thin"

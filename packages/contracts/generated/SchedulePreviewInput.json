@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "cron": {
+      "maxLength": 100,
+      "minLength": 1,
+      "type": "string"
+    },
+    "timezone": {
+      "maxLength": 100,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "cron",
+    "timezone"
+  ],
+  "title": "SchedulePreviewInput",
+  "type": "object"
+}

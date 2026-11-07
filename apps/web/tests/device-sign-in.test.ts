@@ -28,6 +28,8 @@ const pending: DeviceFlow = {
   userCode: 'ABCD-1234',
   verificationUri: 'https://github.com/login/device',
   expiresAt: 900_000,
+  verificationUriComplete: null,
+  message: null,
 }
 
 beforeEach(() => {
@@ -45,7 +47,7 @@ it('sends a completed sign-in instead of a pasted token, and nothing to keep the
   expect(verificationLink({ ...pending, verificationUriComplete: 'https://github.com/login/device?code=ABCD' })).toBe('https://github.com/login/device?code=ABCD')
   expect(signInProblem(pending)).toBe('')
   expect(signInProblem({ state: 'failed', message: 'Access denied' })).toBe('Access denied')
-  expect(signInProblem({ state: 'expired' })).toBe('This sign-in expired. Sign in again.')
+  expect(signInProblem({ state: 'expired', message: null })).toBe('This sign-in expired. Sign in again.')
 })
 
 it('polls every 2 s until the sign-in completes, then hands it over once', async () => {

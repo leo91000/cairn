@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "archived": {
+      "type": "boolean"
+    },
+    "enabled": {
+      "type": "boolean"
+    },
+    "revision": {
+      "type": "string"
+    },
+    "taskId": {
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "taskId",
+    "revision",
+    "enabled",
+    "archived"
+  ],
+  "title": "MissionStateInput",
+  "type": "object"
+}

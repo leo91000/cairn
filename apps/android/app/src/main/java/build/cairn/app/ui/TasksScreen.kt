@@ -7,8 +7,17 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import build.cairn.app.data.*
+import build.cairn.contracts.CreateMissionInput
+import build.cairn.contracts.MissionSettings
+import build.cairn.contracts.ReplaceMissionInput
+import build.cairn.contracts.SchedulePreviewInput
+import build.cairn.contracts.createMission
+import build.cairn.contracts.previewSchedule
+import build.cairn.contracts.replaceMission
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 internal fun taskGroup(task: Task, run: Run?): String =
     when {
@@ -24,20 +33,40 @@ internal fun taskGroup(task: Task, run: Run?): String =
 internal fun TaskEditor(
     vm: CairnViewModel,
     state: Workspace,
-    initial: Task,
+    initial: Task?,
+    draft: MissionSettings? = null,
     onSaved: (Task) -> Unit = {},
     close: () -> Unit,
 ) {
-    var form by rememberForm(initial)
-    val saving = rememberResourceSave(initial.id)
+    var form by
+        rememberForm(
+            initial?.settings()
+                ?: draft
+                ?: MissionSettings(
+                    name = "",
+                    prompt = "",
+                    agentId = MAIN_AGENT_ID,
+                    skills = null,
+                    timezone = java.time.ZoneId.systemDefault().id,
+                )
+        )
+    var revision by rememberSaveable { mutableStateOf(initial?.revision.orEmpty()) }
+    val saving = rememberResourceSave(initial?.id.orEmpty())
     var saveError by rememberSaveable { mutableStateOf<String?>(null) }
     var cadence by rememberSaveable {
-        mutableStateOf(if (initial.cron == null) "once" else "custom")
+        mutableStateOf(if (initial?.cron == null) "once" else "custom")
     }
-    var tags by rememberSaveable { mutableStateOf(initial.tags.joinToString(", ")) }
+    var tags by rememberSaveable { mutableStateOf(initial?.tags.orEmpty().joinToString(", ")) }
     var occurrences by remember { mutableStateOf<List<Long>>(emptyList()) }
     LaunchedEffect(form.cron, form.timezone) { occurrences = emptyList() }
-    val access = state.agents.find { it.id == form.agentId }?.access ?: AccessPolicy()
+    val access =
+        state.agents.find { it.id == form.agentId }?.access
+            ?: AccessPolicy(
+                mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                projects = null,
+                skills = null,
+                mcps = null,
+            )
     val projects = state.projects.filter { access.projects == null || it.id in access.projects }
     val available =
         state.skills.filter {
@@ -76,9 +105,46 @@ internal fun TaskEditor(
                                     )
                                 )
                             },
+                            request = { method, _, payload ->
+                                val saved =
+                                    if (method == "PUT") {
+                                        api.replaceMission(
+                                            ReplaceMissionInput(
+                                                taskId = saving.id,
+                                                revision = revision,
+                                                settings =
+                                                    form.copy(
+                                                        tags =
+                                                            tags
+                                                                .split(',')
+                                                                .map { it.trim() }
+                                                                .filter { it.isNotEmpty() }
+                                                    ),
+                                            )
+                                        )
+                                    } else {
+                                        val settings =
+                                            wireJson.decodeFromJsonElement<MissionSettings>(
+                                                kotlinx.serialization.json.JsonObject(
+                                                    payload.jsonObject - "creationId"
+                                                )
+                                            )
+                                        api.createMission(
+                                            CreateMissionInput(
+                                                settings = settings,
+                                                creationId =
+                                                    payload.jsonObject["creationId"]
+                                                        ?.jsonPrimitive
+                                                        ?.content,
+                                            )
+                                        )
+                                    }
+                                revision = saved.revision
+                                wireJson.encodeToJsonElement(saved)
+                            },
                         )
                     } catch (error: Exception) {
-                        if (saving.id.isNotBlank() && saving.id != initial.id)
+                        if (saving.id.isNotBlank() && saving.id != initial?.id)
                             saveError =
                                 "Mission enregistrée, mais les dernières modifications n’ont pas été enregistrées. Réessayez."
                         throw error
@@ -105,7 +171,14 @@ internal fun TaskEditor(
         Field("Nom", form.name, { form = form.copy(name = it) })
         Field("Mission et critères de réussite", form.prompt, { form = form.copy(prompt = it) }, 6)
         Choice("Agent", form.agentId, state.agents.map { it.id to it.name }) {
-            val nextAccess = state.agents.find { agent -> agent.id == it }?.access ?: AccessPolicy()
+            val nextAccess =
+                state.agents.find { agent -> agent.id == it }?.access
+                    ?: AccessPolicy(
+                        mcpTools = build.cairn.contracts.McpTools(emptyMap()),
+                        projects = null,
+                        skills = null,
+                        mcps = null,
+                    )
             form =
                 form.copy(
                     agentId = it,
@@ -177,13 +250,11 @@ internal fun TaskEditor(
                 onClick = {
                     vm.perform {
                         occurrences =
-                            api.send<Occurrences>(
-                                    "POST",
-                                    "/schedule/preview",
-                                    body(
-                                        "cron" to form.cron.orEmpty(),
-                                        "timezone" to form.timezone,
-                                    ),
+                            api.previewSchedule(
+                                    SchedulePreviewInput(
+                                        cron = form.cron.orEmpty(),
+                                        timezone = form.timezone,
+                                    )
                                 )
                                 .occurrences
                     }

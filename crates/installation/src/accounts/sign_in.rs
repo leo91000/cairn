@@ -7,27 +7,12 @@ use crate::{
     service::Service,
 };
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{path::PathBuf, sync::Arc};
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SignInState {
-    Pending,
-    Complete,
-    Failed,
-    Cancelled,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Phase {
-    Starting,
-    Authorizing,
-    Verifying,
-}
+pub use cairn_contracts::{SignInPhase as Phase, SignInState};
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,15 +86,6 @@ impl Login {
     }
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct View<'a> {
-    account_id: &'a str,
-    provider: Provider,
-    #[serde(flatten)]
-    progress: Progress,
-}
-
 pub(super) struct SignIn {
     pub account_id: String,
     pub provider: Provider,
@@ -125,13 +101,19 @@ impl SignIn {
         !*self.complete.borrow()
     }
 
-    pub fn view(&self) -> Value {
-        let view = View {
-            account_id: &self.account_id,
-            provider: self.provider,
-            progress: self.login.view.borrow().clone(),
-        };
-        serde_json::to_value(view).unwrap_or(Value::Null)
+    pub fn view(&self) -> cairn_contracts::AccountSignIn {
+        let p = self.login.view.borrow();
+        cairn_contracts::AccountSignIn {
+            account_id: self.account_id.clone(),
+            provider: self.provider.into(),
+            state: p.state,
+            phase: p.phase,
+            url: p.url.clone(),
+            code: p.code.clone(),
+            accepts_code: p.accepts_code,
+            expires_at: p.expires_at,
+            error: p.error.clone(),
+        }
     }
 
     pub fn waits_for_code(&self) -> bool {

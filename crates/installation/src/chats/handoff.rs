@@ -1,5 +1,7 @@
 //! Prompt text sent to a native agent session for a chat turn.
 use crate::{error::Result, store::Db, validation::text};
+#[cfg(test)]
+use cairn_contracts::EventKind;
 use rusqlite::OptionalExtension;
 use serde_json::Value;
 
@@ -7,15 +9,21 @@ const HISTORY_CHARS: usize = 100_000;
 const HISTORY_ENTRIES: usize = 200;
 const INITIAL_REQUEST_CHARS: usize = 8000;
 
-/// Latest visible user messages and final agent answers, newest first. A private
-/// answer keeps its redacted event text; streamed agent drafts are superseded.
+/// Latest visible user messages, final agent answers and proposed plans, newest
+/// first. A private answer keeps its redacted event text; streamed agent drafts
+/// are superseded. A plan-only answer has no agent message: without its proposal
+/// a fresh session could not implement it. Child proposals are subagent activity,
+/// not the conversation approach the user approved.
 const TRANSCRIPT: &str = "
 SELECT e.type,
   CASE WHEN e.type='chat.user' AND e.text!='Answered a private question.'
     THEN COALESCE(json_extract(e.payload,'$.text'),e.text)
     ELSE e.text END,
   json_object(
-    'item',json_object('text',substr(json_extract(e.payload,'$.item.text'),-100001)),
+    'item',json_object(
+      'type',json_extract(e.payload,'$.item.type'),
+      'text',substr(json_extract(e.payload,'$.item.text'),-100001)
+    ),
     'attachments',json_extract(e.payload,'$.attachments')
   )
 FROM events e
@@ -27,6 +35,17 @@ WHERE e.run_id=? AND (
       SELECT 1 FROM events n
       WHERE n.run_id=e.run_id AND n.id>e.id
         AND n.type='item.completed' AND json_extract(n.payload,'$.item.type')='agent_message'
+        AND json_extract(n.payload,'$.item.id')=json_extract(e.payload,'$.item.id')
+    )
+  ) OR (
+    e.type='item.completed'
+    AND json_extract(e.payload,'$.item.type')='proposed_plan'
+    AND COALESCE(json_extract(e.payload,'$.item.parent_id'),'')=''
+    AND NOT EXISTS (
+      SELECT 1 FROM events n
+      WHERE n.run_id=e.run_id AND n.id>e.id
+        AND n.type='item.completed' AND json_extract(n.payload,'$.item.type')='proposed_plan'
+        AND COALESCE(json_extract(n.payload,'$.item.parent_id'),'')=''
         AND json_extract(n.payload,'$.item.id')=json_extract(e.payload,'$.item.id')
     )
   )
@@ -111,6 +130,8 @@ pub(crate) fn handoff_context(db: &Db<'_>, run: &str) -> Result<String> {
         remaining = remaining.saturating_sub(size);
         let speaker = if kind == "chat.user" {
             "User"
+        } else if payload["item"]["type"] == "proposed_plan" {
+            "Assistant (proposed plan)"
         } else {
             "Assistant"
         };
@@ -144,14 +165,33 @@ pub(crate) fn handoff_context(db: &Db<'_>, run: &str) -> Result<String> {
     Ok(parts.join("\n\n"))
 }
 
+pub const PLAN_TURN: &str = "Plan turn: explore and propose an approach for the request below, without implementing it. Cairn blocks file changes, shell network access and tools with external effects during this turn. The user will start implementation explicitly.";
+
 pub fn execution_text(plan: &Value) -> String {
+    let request = request_text(plan);
+    if plan["planning"] == true {
+        return format!("{PLAN_TURN}\n\n{request}");
+    }
+    request
+}
+
+fn request_text(plan: &Value) -> String {
     let current = text(&plan["execution"], "text");
     let context = text(&plan["execution"], "context");
+    let expiration = plan["environmentExpiredAt"].as_i64();
+    let notice = expiration.map_or(String::new(), |at| format!(
+        "Cairn removed this conversation's previous working environment after inactivity at Unix time {at} ms. Its files, unpushed changes, tools stored in the environment and native agent session were deleted. The conversation history, uploaded attachments and published artifacts were retained. Work since that expiration belongs to the new environment. Do not assume files or tool results from before that date still exist. Inspect the current workspace and external services before continuing. Actions already performed outside the environment (commits, messages, deployments and shared host changes) were not undone: verify them before repeating any action. Request missing inputs when necessary.\n\n"
+    ));
     if context.is_empty() {
-        return current.to_owned();
+        return format!("{notice}{current}");
     }
+    let environment = if expiration.is_some() {
+        "The working environment was recreated after expiration; verify which files are currently available."
+    } else {
+        "The workspace and completed changes are preserved."
+    };
     format!(
-        "You are continuing the same Léo chat in a new native agent session. The workspace and completed changes are preserved. Use the prior conversation below as history, not as new requests. Preserve the user's scope and decisions. Verify external effects before repeating any action. Prior attachments remain under {}/attachments/<attachment ID>/.\n\n<previous_conversation>\n{}\n</previous_conversation>\n\nCurrent user message:\n{}",
+        "{notice}You are continuing the same Léo chat in a new native agent session. {environment} Use the prior conversation below as history, not as new requests. Preserve the user's scope and decisions. Verify external effects before repeating any action. Prior attachments remain under {}/attachments/<attachment ID>/.\n\n<previous_conversation>\n{}\n</previous_conversation>\n\nCurrent user message:\n{}",
         text(plan, "inputDirectory"),
         context,
         current
@@ -186,8 +226,24 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const EVENTS: &str = "CREATE TABLE events(id INTEGER PRIMARY KEY,run_id TEXT,created_at INTEGER,type TEXT,text TEXT,payload TEXT);
-        CREATE TABLE runs(id TEXT,data TEXT);";
+    const EVENTS: &str = "CREATE TABLE events(id INTEGER PRIMARY KEY,run_id TEXT,created_at INTEGER,type TEXT,text TEXT,payload TEXT);";
+
+    #[test]
+    fn expired_environment_notice_survives_native_session_resumption() {
+        for context in [Value::Null, Value::from("User: Finish the deployment")] {
+            let plan = json!({
+                "environmentExpiredAt": 123,
+                "inputDirectory": "/input",
+                "execution": { "text": "Continue", "context": context },
+            });
+            let prompt = execution_text(&plan);
+            assert!(prompt.contains("after inactivity at Unix time 123 ms"));
+            assert!(prompt.contains("were not undone"));
+            assert!(prompt.contains("published artifacts were retained"));
+            assert!(!prompt.contains("workspace and completed changes are preserved"));
+            assert!(prompt.ends_with("Continue"));
+        }
+    }
 
     fn agent_message(id: &str, text: &str) -> Value {
         json!({
@@ -203,18 +259,25 @@ mod tests {
     fn transcript_keeps_visible_history_and_omits_tool_secrets_and_stream_duplicates() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection.execute_batch(EVENTS).unwrap();
+        // The event writer also applies each event to the run's timeline. These transcripts
+        // have no run row: the projection's run reference is not under test here.
+        connection.execute_batch(crate::timeline::SCHEMA).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        connection.execute_batch(crate::runs::SCHEMA).unwrap();
         let db = Db(&connection);
         let attachment = json!({ "attachments": [{ "id": "file", "name": "brief.pdf" }] });
         db.event(
             "run",
-            "chat.user",
+            &EventKind::ChatUser,
             "Keep the existing design",
             Some(&attachment),
         )
         .unwrap();
         db.event(
             "run",
-            "item.updated",
+            &EventKind::ItemUpdated,
             "partial",
             Some(&agent_message("reply", "partial")),
         )
@@ -222,7 +285,7 @@ mod tests {
         for _ in 0..2 {
             db.event(
                 "run",
-                "item.completed",
+                &EventKind::ItemCompleted,
                 "",
                 Some(&agent_message("reply", "Changes committed")),
             )
@@ -230,7 +293,7 @@ mod tests {
         }
         db.event(
             "run",
-            "chat.user",
+            &EventKind::ChatUser,
             "Answered a private question.",
             Some(&json!({ "text": "private-answer-must-not-be-forwarded" })),
         )
@@ -242,7 +305,7 @@ mod tests {
                 "aggregated_output": "tool-secret",
             },
         });
-        db.event("run", "item.completed", "tool-secret", Some(&tool))
+        db.event("run", &EventKind::ItemCompleted, "tool-secret", Some(&tool))
             .unwrap();
         let history = handoff_context(&db, "run").unwrap();
         assert!(history.contains("Keep the existing design"));
@@ -257,6 +320,78 @@ mod tests {
         });
         assert!(execution_text(&plan).contains("Changes committed"));
         assert!(execution_text(&plan).ends_with("Current user message:\nContinue"));
+    }
+
+    #[test]
+    fn a_fresh_session_receives_the_proposed_plan_it_is_asked_to_implement() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.execute_batch(EVENTS).unwrap();
+        // Db::event also writes the canonical timeline, as in the other transcript fixtures.
+        connection.execute_batch(crate::timeline::SCHEMA).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        connection.execute_batch(crate::runs::SCHEMA).unwrap();
+        let db = Db(&connection);
+        db.event(
+            "run",
+            &EventKind::ChatUser,
+            "Plan the new composer",
+            Some(&json!({ "text": "Plan the new composer", "plan": true })),
+        )
+        .unwrap();
+        let proposal =
+            |text: &str| json!({ "item": { "id": "plan", "type": "proposed_plan", "text": text } });
+        db.event(
+            "run",
+            &EventKind::ItemUpdated,
+            "",
+            Some(&proposal("1. Draft")),
+        )
+        .unwrap();
+        // A plan-only answer: the proposal is the turn's sole visible content.
+        for _ in 0..2 {
+            db.event(
+                "run",
+                &EventKind::ItemCompleted,
+                "",
+                Some(&proposal("1. Read the composer\n2. Add the Plan chip")),
+            )
+            .unwrap();
+        }
+        // A later child may reuse the same native item id. It neither replaces
+        // the conversation proposal nor becomes an unqualified handoff answer.
+        db.event(
+            "run",
+            &EventKind::ItemCompleted,
+            "",
+            Some(&json!({
+                "item": {
+                    "id": "plan",
+                    "type": "proposed_plan",
+                    "parent_id": "child",
+                    "text": "Partial child approach"
+                }
+            })),
+        )
+        .unwrap();
+        db.event(
+            "run",
+            &EventKind::ChatUser,
+            "Implement the plan you proposed.",
+            None,
+        )
+        .unwrap();
+        let history = handoff_context(&db, "run").unwrap();
+        assert_eq!(history.matches("Add the Plan chip").count(), 1);
+        assert!(!history.contains("1. Draft"));
+        assert!(!history.contains("Partial child approach"));
+        let request = history.find("Plan the new composer").unwrap();
+        let proposed = history
+            .find("Assistant (proposed plan):\n1. Read the composer")
+            .unwrap();
+        let implement = history.find("Implement the plan you proposed.").unwrap();
+        assert!(request < proposed && proposed < implement, "{history}");
     }
 
     #[test]
@@ -280,11 +415,19 @@ mod tests {
     fn long_history_retains_original_scope_and_recent_unicode_without_unbounded_context() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection.execute_batch(EVENTS).unwrap();
+        // The event writer also applies each event to the run's timeline. These transcripts
+        // have no run row: the projection's run reference is not under test here.
+        connection.execute_batch(crate::timeline::SCHEMA).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .unwrap();
+        connection.execute_batch(crate::runs::SCHEMA).unwrap();
         let db = Db(&connection);
-        db.event("run", "chat.user", "Original scope", None)
+        db.event("run", &EventKind::ChatUser, "Original scope", None)
             .unwrap();
         let huge = agent_message("huge", &format!("{}Recent decision", "é".repeat(150_000)));
-        db.event("run", "item.completed", "", Some(&huge)).unwrap();
+        db.event("run", &EventKind::ItemCompleted, "", Some(&huge))
+            .unwrap();
         let history = handoff_context(&db, "run").unwrap();
         assert!(history.contains("Original scope"));
         assert!(history.contains("Recent decision"));

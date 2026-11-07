@@ -4,7 +4,10 @@ use super::{
     output,
 };
 use crate::{
-    accounts::{Lease, broker},
+    accounts::{
+        Lease, broker,
+        output_redactions::{History, Observation},
+    },
     config::now,
     error::{Error, Result},
     execution,
@@ -17,10 +20,10 @@ use crate::{
     service::{Service, covers, policy},
     skills::{atomic_write, private_dir},
     storage::policy::Policy,
-    store::merge,
     supervisor::Supervised,
     validation::text,
 };
+use cairn_contracts::EventKind;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
@@ -29,7 +32,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::Instrument;
 
 /// Exit code reported for processes the worker had to stop.
@@ -37,6 +40,10 @@ const STOPPED: i32 = 143;
 const SUMMARY_LIMIT: usize = 100_000;
 const HISTORY_LIMIT: usize = 16_000;
 const RESUME_PROMPT: &str = "Continue the same task from the saved conversation and current workspace. Execution was interrupted. Resume the original task from its last completed step. Preserve completed work and verify external effects before repeating any action.";
+
+#[cfg(test)]
+#[path = "launch_stream_tests.rs"]
+mod stream_tests;
 
 /// Runs `run` until it finishes, retrying on another account when usage runs out.
 pub(super) async fn execute(
@@ -46,7 +53,7 @@ pub(super) async fn execute(
     cancel: &CancellationToken,
     checkpoint: &Checkpoint,
     existing: bool,
-    sensitive: &mut Vec<String>,
+    sensitive: &History,
 ) -> Result<()> {
     let span = tracing::info_span!(target: "cairn_performance", "agent_execution", run_id = text(run, "id"));
     execute_inner(s, run, admission, cancel, checkpoint, existing, sensitive)
@@ -61,7 +68,7 @@ async fn execute_inner(
     cancel: &CancellationToken,
     checkpoint: &Checkpoint,
     existing: bool,
-    sensitive: &mut Vec<String>,
+    sensitive: &History,
 ) -> Result<()> {
     let id = text(run, "id").to_owned();
     let mut timing = Operation::new("agent_prepare", &id, "mark_running");
@@ -76,11 +83,16 @@ async fn execute_inner(
         cancel,
         checkpoint,
         sensitive,
+        observation: None,
         attempt_id: String::new(),
+        reservation: None,
+        #[cfg(test)]
+        output_probe: None,
     };
     execution.mark_running().await?;
     timing.next("access");
     execution.refresh_access().await?;
+    execution.resolve_backend().await?;
     timing.next("workspace");
     let mut workspace = execution.prepare(existing).await?;
     timing.next("session_lookup");
@@ -111,7 +123,7 @@ async fn saved_session(
         Ok(session) => Ok(Some(session)),
         Err(error)
             if error.status == 409
-                && crate::execution::runs_natively(run)
+                && crate::native::policy::native(&run["snapshot"]["agent"])
                 && run["nativeModeInterruption"].is_string()
                 && text(run, "sessionId").is_empty() =>
         {
@@ -129,10 +141,14 @@ struct Execution<'a> {
     preparation: Option<tokio::sync::OwnedMutexGuard<()>>,
     cancel: &'a CancellationToken,
     checkpoint: &'a Checkpoint,
-    sensitive: &'a mut Vec<String>,
+    sensitive: &'a History,
+    observation: Option<Observation>,
     provider: Provider,
     directory: PathBuf,
     attempt_id: String,
+    reservation: Option<(String, Value)>,
+    #[cfg(test)]
+    output_probe: Option<stream_tests::OutputProbe>,
 }
 
 /// The prepared execution environment shared by every launch attempt.
@@ -141,6 +157,7 @@ struct Workspace {
     state_home: PathBuf,
     env: Environment,
     mcp: Value,
+    authorization: crate::plugins::run_credentials::Authorization,
 }
 
 impl Workspace {
@@ -196,8 +213,7 @@ struct RunnerPlan<'a> {
     backend: &'a Value,
     runtime_id: &'a Value,
     storage: RunnerStorage<'a>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    chat: Option<Value>,
+    chat: Value,
 }
 
 #[derive(Serialize)]
@@ -208,45 +224,94 @@ struct RunnerStorage<'a> {
 }
 
 impl Execution<'_> {
+    /// Reserve before preparing paths: VM and native environments differ. Binding
+    /// the concrete backend shares the atomic admission transaction, so retries
+    /// cannot turn an already-created environment into another execution kind.
+    async fn resolve_backend(&mut self) -> Result<()> {
+        if policy(&self.run["snapshot"]["agent"])["backend"] != "auto" {
+            return Ok(());
+        }
+        let runner = crate::config::id();
+        let placement = placement::reserve(self.s, self.run, &runner).await?;
+        *self.run = self.s.store.run(&self.id).await?;
+        if !execution::uses_vm(self.run, &self.s.config) {
+            // Development's shared process has no controller or retained node disk.
+            // Keep the selected backend, but never give recovery a node to contact.
+            placement::release(self.s, &runner).await?;
+            return Ok(());
+        }
+        let saved_runner = runner.clone();
+        let state = self.s.store.run_state(&self.id).await?;
+        let node = placement["nodeId"].as_str().map(str::to_owned);
+        let runtime = placement["runtimeId"].clone();
+        self.checkpoint
+            .update(|checkpoint| {
+                checkpoint.bind_paid_admission(&saved_runner, &state);
+                checkpoint.turn_pending = None;
+                checkpoint.recovery_deadline_ms = None;
+                checkpoint.terminal_code = None;
+                checkpoint.provider_failed = None;
+                checkpoint.node_id = Some(node);
+                checkpoint.runtime_id = Some(Some(runtime));
+            })
+            .await?;
+        self.reservation = Some((runner, placement));
+        Ok(())
+    }
+
     fn stopping(&self) -> bool {
         self.cancel.is_cancelled() || self.s.shutdown.is_cancelled()
     }
 
     async fn mark_running(&mut self) -> Result<()> {
         let s = self.s;
-        self.checkpoint
-            .update(|state| state.capacity_retry_at = None)
-            .await?;
         let account_name = match self.account.as_ref() {
-            Some(account) => s.accounts.get(s, &account.account_id).await?["name"].clone(),
+            Some(account) => {
+                serde_json::to_value(s.accounts.account(s, &account.account_id).await?.name)?
+            }
             None => Value::Null,
         };
-        let mut patch = json!({
-            "status": RunStatus::Running,
-            "startedAt": self.run["startedAt"].as_i64().unwrap_or_else(now),
-            "finishedAt": null,
-            "accountWaitReason": null,
-            "accountRequired": null,
-            "accountId": self.account.as_ref().map(|account| &account.account_id),
-            "accountName": account_name,
-        });
-        if self.run["retry"].is_object() {
-            let mut retry = self.run["retry"].clone();
-            retry["nextAttemptAt"] = Value::Null;
-            patch["retry"] = retry;
+        let mut patch = crate::runs::RunChanges {
+            status: Some(RunStatus::Running),
+            started_at: Some(Some(self.run["startedAt"].as_i64().unwrap_or_else(now))),
+            finished_at: Some(None),
+            account_wait_reason: Some(None),
+            account_required: Some(None),
+            account_id: Some(
+                self.account
+                    .as_ref()
+                    .map(|account| account.account_id.clone()),
+            ),
+            account_name: Some(account_name.as_str().map(str::to_owned)),
+            ..Default::default()
+        };
+        if let Some(mut retry) = s.store.run_state(&self.id).await?.retry {
+            retry.next_attempt_at = None;
+            patch.retry = Some(Some(retry));
         }
-        s.store.patch_run(&self.id, patch).await?;
-        if let Some(name) = account_name.as_str() {
-            let message = format!("Using {} account: {name}", self.provider.label());
-            s.store.event(&self.id, "status", &message, None).await?;
-        }
-        // Marks where an attempt begins, for labels that last one attempt.
-        s.store
-            .event(
-                &self.id,
-                "status",
-                "Preparing workspace",
-                Some(json!({ "attempt": true })),
+        let id = self.id.clone();
+        let account_message = account_name
+            .as_str()
+            .map(|name| format!("Using {} account: {name}", self.provider.label()));
+        self.checkpoint
+            .update_and_publish(
+                |state| {
+                    state.capacity_retry_at = None;
+                    state.provider_failed = None;
+                },
+                move |db| {
+                    db.change_run(&id, patch)?;
+                    if let Some(message) = account_message {
+                        db.event(&id, &EventKind::Status, &message, None)?;
+                    }
+                    // Marks where an attempt begins, for labels that last one attempt.
+                    db.event(
+                        &id,
+                        &EventKind::Status,
+                        "Preparing workspace",
+                        Some(&json!({ "attempt": true })),
+                    )
+                },
             )
             .await?;
         private_dir(&self.directory).await
@@ -258,7 +323,7 @@ impl Execution<'_> {
     async fn refresh_access(&mut self) -> Result<()> {
         let s = self.s;
         let current = s
-            .get("agents", text(&self.run["snapshot"]["agent"], "id"))
+            .agent_snapshot(text(&self.run["snapshot"]["agent"], "id"))
             .await?;
         nodes::require_node(&current)?;
         if !covers(&current, &self.run["snapshot"]["agent"]) {
@@ -266,33 +331,46 @@ impl Execution<'_> {
                 "Agent access was reduced after this run was queued. Run the task again with the current policy.",
             ));
         }
+        crate::delegation::authorize_async(s, self.run).await?;
         let current_policy = policy(&current);
         self.run["snapshot"]["agent"]["access"]["nodes"] = current_policy["nodes"].clone();
-        let patch = json!({ "snapshot": self.run["snapshot"] });
-        s.store.patch_run(&self.id, patch).await?;
+        let snapshot = serde_json::from_value(self.run["snapshot"].clone())?;
+        s.store
+            .change_run(
+                &self.id,
+                crate::runs::RunChanges {
+                    snapshot: Some(snapshot),
+                    ..Default::default()
+                },
+            )
+            .await?;
         Ok(())
     }
 
     async fn prepare(&mut self, existing: bool) -> Result<Workspace> {
         let s = self.s;
         let mut timing = Operation::new("workspace_prepare", &self.id, "execution");
-        let (prepared, credentials) = self.prepare_execution(existing).await?;
+        let (prepared, credentials, authorization) = self.prepare_execution(existing).await?;
         // Plugin credentials written into the run are masked wherever they appear.
-        for secret in &credentials.secrets {
-            if !self.sensitive.contains(secret) {
-                self.sensitive.push(secret.clone());
-            }
-        }
+        self.sensitive.extend(credentials.secrets.iter().cloned());
         timing.next("account_home");
+        authorization.recheck().await?;
         let state_home = self.prepare_state_home(&prepared).await?;
-        let patch = json!({
-            "workspace": prepared["cwd"],
-            "workspaces": prepared["workspaces"],
-            "isolated": prepared["isolated"],
-            "executionBackend": prepared["backend"],
-        });
-        merge(self.run, &patch);
-        s.store.patch_run(&self.id, patch).await?;
+        let patch = crate::runs::RunChanges {
+            workspace: Some(serde_json::from_value(prepared["cwd"].clone())?),
+            placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                execution_backend: Some(serde_json::from_value(serde_json::json!(
+                    prepared["backend"]
+                ))?),
+                ..Default::default()
+            })),
+            boundary: Some(
+                serde_json::json!({"workspaces": prepared["workspaces"],"isolated": prepared["isolated"]}),
+            ),
+            ..Default::default()
+        };
+        s.store.change_run(&self.id, patch).await?;
+        *self.run = s.store.run(&self.id).await?;
         timing.next("environment");
         let mut env = self
             .environment(prepared["isolated"] == true, &state_home)
@@ -314,20 +392,28 @@ impl Execution<'_> {
         for (key, value) in mcp["env"].as_object().unwrap() {
             env.insert(key.clone(), value.as_str().unwrap_or("").into());
         }
+        crate::delegation::authorize_async(s, self.run).await?;
+        credentials.authorize(s).await?;
+        authorization.recheck().await?;
         timing.finish();
         Ok(Workspace {
             prepared,
             state_home,
             env,
             mcp,
+            authorization,
         })
     }
 
     /// Prepares the workspace, or restores the one saved before a restart.
     async fn prepare_execution(
-        &mut self,
+        &self,
         existing: bool,
-    ) -> Result<(Value, crate::plugins::run_credentials::RunCredentials)> {
+    ) -> Result<(
+        Value,
+        crate::plugins::run_credentials::RunCredentials,
+        crate::plugins::run_credentials::Authorization,
+    )> {
         let s = self.s;
         if existing && self.checkpoint.read(|c| c.prepared().is_none()).await {
             // A fresh generation keeps a half-prepared workspace from being reused.
@@ -337,42 +423,52 @@ impl Execution<'_> {
                 .await?;
         }
         let saved = self.checkpoint.snapshot().await;
-        let agent_id = text(&self.run["snapshot"]["agent"], "id");
         let projects = crate::project_workspaces::catalog(self.run);
-        let credentials = crate::plugins::run_credentials::for_run(s, agent_id, &projects).await?;
+        let authority =
+            crate::capabilities::plugin_packages::Authority::for_run(s, self.run).await?;
+        let credentials = crate::plugins::run_credentials::for_execution_authorized(
+            s,
+            self.run,
+            &projects,
+            authority.clone(),
+        )
+        .await?;
+        let authorization =
+            crate::plugins::run_credentials::Authorization::new(s, authority, &credentials);
         let prepared = match saved.prepared() {
             Some(prepared) => {
-                // The saved environment, not the agent profile, keeps the backend.
-                if let Some(backend) = prepared["backend"].as_str() {
-                    self.run["executionBackend"] = backend.into();
-                }
-                execution::restore(self.run, prepared.clone(), &s.config, &credentials).await?
+                execution::restore_authorized(
+                    self.run,
+                    prepared.clone(),
+                    &s.config,
+                    &credentials,
+                    &authorization,
+                )
+                .await?
             }
             None => {
-                // A new environment fixes its backend from an explicit target or
-                // the agent's nodes. Later changes need an explicit move.
-                let run = self.run.clone();
-                let backend = s
-                    .store
-                    .read(move |db| nodes::backend::of_run_in(db, &run))
-                    .await?;
-                self.run["executionBackend"] = backend.into();
                 let account_home = self.account.as_ref().map(|a| a.home.as_path());
-                execution::prepare(
+                execution::prepare_authorized(
                     self.run,
                     &s.config,
                     &credentials,
                     account_home,
                     saved.generation.as_deref(),
+                    &authorization,
                 )
                 .await?
             }
         };
         let saved_prepared = prepared.clone();
+        let publication = authorization.clone();
         self.checkpoint
-            .update(|c| c.prepared = Some(Some(saved_prepared)))
+            .update_and_publish(
+                |c| c.prepared = Some(Some(saved_prepared)),
+                move |db| publication.authorize_in(db),
+            )
             .await?;
-        Ok((prepared, credentials))
+        authorization.recheck().await?;
+        Ok((prepared, credentials, authorization))
     }
 
     async fn prepare_state_home(&mut self, prepared: &Value) -> Result<PathBuf> {
@@ -409,30 +505,74 @@ impl Execution<'_> {
         if !self.checkpoint.read(RunCheckpoint::launched).await {
             return Ok(None);
         }
-        let Some(session) =
-            saved_session(s, self.run, &workspace.state_home, workspace.cwd()).await?
-        else {
+        let pending_startup = self
+            .checkpoint
+            .read(|saved| {
+                saved
+                    .retry_cause
+                    .as_ref()
+                    .and_then(Option::as_ref)
+                    .is_some_and(|cause| cause.startup)
+            })
+            .await;
+        if !self.run["sessionId"].is_string() && pending_startup {
+            // The adapter confirmed no new turn was submitted; preserve the same
+            // prepared workspace and retry its initial authentication safely.
+            return Ok(None);
+        }
+        let session = match saved_session(s, self.run, &workspace.state_home, workspace.cwd()).await
+        {
+            Ok(session) => session,
+            Err(error) => {
+                // Local session discovery happens before any new turn is submitted.
+                // Preserve its specific transient failure instead of the previous cause.
+                if let Some(failure) = crate::run_retry::startup_failure(&error) {
+                    let cause = crate::run_retry::Cause::classify(&failure["error"]);
+                    let id = self.id.clone();
+                    let message = error.message.clone();
+                    self.checkpoint
+                        .update_and_publish(
+                            |saved| {
+                                saved.completed = Some(false);
+                                saved.provider_failed = Some(true);
+                                saved.terminal_code = Some(None);
+                                saved.last_error = Some(Some(error.message.clone()));
+                                saved.retry_cause = Some(cause);
+                            },
+                            move |db| {
+                                db.event(&id, &EventKind::TurnFailed, &message, Some(&failure))
+                            },
+                        )
+                        .await?;
+                }
+                return Err(error);
+            }
+        };
+        let Some(session) = session else {
             s.store.event(
-                &self.id,
-                "status",
+                &self.id, &EventKind::Status,
                 "Restarting with preserved files after the node mode change; no resumable engine session was recorded.",
                 None,
             ).await?;
             return Ok(None);
         };
-        let patch = json!({
-            "sessionId": session,
-            "resumeCount": self.run["resumeCount"].as_u64().unwrap_or(0) + 1,
-            "resumeAvailable": true,
-        });
-        s.store.patch_run(&self.id, patch).await?;
+        let patch = crate::runs::RunChanges {
+            session_id: Some(Some((session).to_owned())),
+            resume_count: Some((self.run["resumeCount"].as_u64().unwrap_or(0) + 1) as u32),
+            resume_available: Some(true),
+            ..Default::default()
+        };
+        let id = self.id.clone();
         s.store
-            .event(
-                &self.id,
-                "status",
-                "Resuming saved conversation and workspace",
-                None,
-            )
+            .transaction(move |db| {
+                db.change_run(&id, patch)?;
+                db.event(
+                    &id,
+                    &EventKind::Status,
+                    "Resuming saved conversation and workspace",
+                    None,
+                )
+            })
             .await?;
         Ok(Some(session))
     }
@@ -451,6 +591,7 @@ impl Execution<'_> {
         if self.checkpoint.expired() {
             return Err(Error::conflict("Run exceeded its time limit."));
         }
+        workspace.authorization.recheck().await?;
         let output = workspace.output().to_owned();
         match tokio::fs::remove_file(&output).await {
             Ok(()) => {}
@@ -471,34 +612,94 @@ impl Execution<'_> {
         );
         let mut launch = Launch {
             binary: adapter.binary(&s.config).to_owned(),
-            args: adapter.legacy_args(self.run, &workspace.mcp, &output, resume),
+            args: Vec::new(),
             prompt: self.prompt(resume).await?,
         };
-        let auth_broker = match self.account.as_ref() {
-            Some(account) => Some(broker::serve(s, account).await?),
+        self.observation = match self.account.as_ref() {
+            Some(account) => {
+                s.accounts
+                    .observe_output_credentials(
+                        s,
+                        account,
+                        &self.attempt_id,
+                        self.sensitive.clone(),
+                    )
+                    .await?
+            }
             None => None,
         };
-        // A VM reaches its run-scoped MCP only through this channel.
-        let granted = workspace.mcp["env"]
-            .get(crate::mcps::RUN_TOKEN_ENV)
-            .is_some();
-        let mcp_channel = if workspace.isolated() && granted {
-            let home = self.directory.join("home");
-            Some(crate::mcps::channel::serve(s, &home, &self.id).await?)
-        } else {
-            None
+        let broker_result = match self.account.as_ref() {
+            Some(account) => match &self.observation {
+                Some(observation) => broker::serve_observed(s, account, observation.handle())
+                    .await
+                    .map(Some),
+                None => broker::serve(s, account).await.map(Some),
+            },
+            None => Ok(None),
         };
-        let chat = self.chat_plan(workspace, resume, &mut launch).await?;
-        if workspace.isolated() {
-            self.prepare_runner(workspace, resume, chat, &mut launch)
+        let auth_broker = match broker_result {
+            Ok(broker) => broker,
+            Err(error) => {
+                self.observation.take();
+                return Err(error);
+            }
+        };
+        // Capture every result, including preparation/wait/reconcile failures,
+        // before completing the account-scope and broker cleanup barrier.
+        let result = async {
+            // A VM reaches its run-scoped MCP only through this channel.
+            let granted = workspace.mcp["env"]
+                .get(crate::mcps::RUN_TOKEN_ENV)
+                .is_some();
+            let mcp_channel = if workspace.isolated() && granted {
+                let home = self.directory.join("home");
+                Some(crate::mcps::channel::serve(s, &home, &self.id).await?)
+            } else {
+                None
+            };
+            let chat = self.chat_plan(workspace, resume, &mut launch).await?;
+            workspace.authorization.recheck().await?;
+            if workspace.isolated() {
+                self.prepare_runner(workspace, resume, chat, &mut launch)
+                    .await?;
+            }
+            let mut exit = self.supervise(workspace, launch, log_total).await?;
+            self.checkpoint
+                .update(|c| {
+                    c.process = Some(None);
+                    // The runner client can return zero only after parsing a healthy
+                    // controller result. Nonzero process statuses are ambiguous: local
+                    // errors, panics, signals and worker stops share the same channel.
+                    // Only a read of this attempt can establish their provenance.
+                    c.terminal_code = (exit.code == Some(0)).then_some(Some(0));
+                })
                 .await?;
+            if exit.code != Some(0) && !exit.timed_out {
+                super::execution::reconcile(s, self.checkpoint, self.cancel).await?;
+                if let Some(code) = self.checkpoint.snapshot().await.terminal_code() {
+                    exit.code = Some(if code == STOPPED && !self.cancel.is_cancelled() {
+                        crate::runner::CONTROLLER_INTERRUPTED
+                    } else {
+                        code
+                    });
+                }
+            }
+            drop(mcp_channel);
+            Ok::<_, Error>(exit)
         }
-        let exit = self.supervise(workspace, launch, log_total).await?;
-        drop(auth_broker);
-        drop(mcp_channel);
-        self.checkpoint.update(|c| c.process = Some(None)).await?;
+        .await;
+        self.close_account_output(auth_broker).await;
+        let exit = result?;
         let saved = self.checkpoint.snapshot().await;
-        if s.shutdown.is_cancelled() && !self.cancel.is_cancelled() && !saved.completed() {
+        let observation_pending = saved.managed() && saved.terminal_code.is_none();
+        if s.shutdown.is_cancelled()
+            && !self.cancel.is_cancelled()
+            && !exit.timed_out
+            && (!saved.completed() || observation_pending)
+        {
+            // Shutdown may stop the local client before /wait responds. Keep
+            // that same attempt readable after restart rather than settling
+            // incomplete transport observations as failed finalization.
             return Err(Error::conflict("Worker is restarting"));
         }
         let session = s.store.run(&self.id).await?["sessionId"]
@@ -518,8 +719,18 @@ impl Execution<'_> {
                 "Native node mode changed. Managed executions stopped; saved files and conversation history are retained for restart.",
             ));
         }
+        if saved.output_error().is_some()
+            || saved.finalization_error().is_some()
+            || (managed && saved.completed() && saved.terminal_code() != Some(0))
+        {
+            // A provider completion cannot repair EIO/EROFS or an unknown flush.
+            // Existing execution cleanup fences it before releasing its resources.
+            self.finish(workspace, &exit, &saved, session.is_some())
+                .await?;
+            return Ok(Attempt::Finished);
+        }
         let interrupted = exit.code == Some(crate::runner::CONTROLLER_INTERRUPTED);
-        if managed && stopped_by_controller && interrupted {
+        if managed && stopped_by_controller && interrupted && !saved.provider_failed() {
             if saved.start_rejected == Some(true) {
                 return Err(Error::unavailable(format!(
                     "{} Working files were preserved; retry when the controller is available.",
@@ -551,15 +762,12 @@ impl Execution<'_> {
             )));
         }
 
-        // Preserve the controller's outcome before cleanup can fail. Failed
-        // attempts are fenced by execution::execute before release or recovery.
-        if workspace.isolated() {
-            recovery::fence(s, &s.store.run(&self.id).await?).await?;
-        }
-
         if let Some(session) = session.as_ref()
             && self.may_switch_account(&exit)
         {
+            if workspace.isolated() {
+                recovery::fence(s, &s.store.run(&self.id).await?).await?;
+            }
             self.switch_account(workspace).await?;
             return Ok(Attempt::Resume(session.clone()));
         }
@@ -608,41 +816,50 @@ impl Execution<'_> {
             .collect())
     }
 
-    /// Chats, Claude runs and account-backed runs go through the `chat` protocol.
+    /// Every execution uses the coding agent’s chat protocol.
     async fn chat_plan(
         &self,
         workspace: &Workspace,
         resume: Option<&str>,
         launch: &mut Launch,
-    ) -> Result<Option<Value>> {
+    ) -> Result<Value> {
         let s = self.s;
         let adapter = self.provider.adapter();
         let chat_execution = self.run["chatExecution"].is_object();
-        if !adapter.uses_chat(chat_execution, self.account.is_some()) {
-            return Ok(None);
-        }
         private_dir(&self.directory.join("chat-input")).await?;
+        if self.run["environmentExpiredAt"].is_number() {
+            let run_id = self.id.clone();
+            let attachments = s
+                .store
+                .read(move |db| {
+                    let Some(chat) = crate::chats::chat_for_run(db, &run_id)? else {
+                        return Ok(Vec::new());
+                    };
+                    db.attachments(text(&chat, "id"))?
+                        .into_iter()
+                        .map(|a| serde_json::to_value(a).map_err(Into::into))
+                        .collect::<crate::error::Result<Vec<_>>>()
+                })
+                .await?;
+            s.prepare_chat_files(&self.id, &attachments.into()).await?;
+        }
         s.prepare_chat_files(&self.id, &self.run["chatExecution"]["attachments"])
             .await?;
+        let run = crate::plugins::agents::with_instructions(s, self.run).await;
         let mut chat = run_output::chat_plan(
-            self.run,
+            &run,
             &workspace.prepared,
             &self.directory,
             &workspace.mcp,
             resume,
         )?;
-        // Optional fields: retained older adapters can ignore them.
         chat["runId"] = self.id.clone().into();
         chat["attemptId"] = self.attempt_id.clone().into();
         if !chat_execution {
             // Scheduled work uses the same authenticated protocol as
             // chats, while retaining its own task brief and session.
-            chat["execution"] = json!({
-                "messageId": self.run["missionTurnId"].as_str().unwrap_or(&self.id),
-                "text": launch.prompt,
-                "recovery": resume.is_some(),
-                "attachments": [],
-            });
+            let resume_prompt = resume.map(|_| launch.prompt.as_str());
+            chat["execution"] = run_output::scheduled_turn(self.run, resume_prompt);
         }
         adapter
             .configure_plan(s, &mut chat, self.account.as_ref())
@@ -650,7 +867,7 @@ impl Execution<'_> {
         launch.binary = current_exe()?;
         launch.args = vec!["chat".into(), adapter.binary(&s.config).to_owned()];
         launch.prompt = chat.to_string();
-        Ok(Some(chat))
+        Ok(chat)
     }
 
     /// Places the run on a node and routes the launch through its isolated runner.
@@ -658,24 +875,41 @@ impl Execution<'_> {
         &mut self,
         workspace: &mut Workspace,
         resume: Option<&str>,
-        chat: Option<Value>,
+        chat: Value,
         launch: &mut Launch,
     ) -> Result<()> {
         let s = self.s;
         crate::object_storage::Storage::configured(s)?;
         let mut timing = Operation::new("runner_prepare", &self.id, "placement");
-        let runner = crate::config::id();
-        let placement = placement::reserve(s, &s.store.run(&self.id).await?, &runner).await?;
+        let (runner, placement) = match self.reservation.take() {
+            Some(reservation) => reservation,
+            None => {
+                let runner = crate::config::id();
+                let placement =
+                    placement::reserve(s, &s.store.run(&self.id).await?, &runner).await?;
+                (runner, placement)
+            }
+        };
         timing.next("materialize");
+        workspace.authorization.recheck().await?;
         placement::materialize(s, &runner).await?;
         let node_id = placement["nodeId"].as_str().map(str::to_owned);
         let runtime_id = placement["runtimeId"].clone();
+        let state = s.store.run_state(&self.id).await?;
+        let publication = workspace.authorization.clone();
         self.checkpoint
-            .update(|c| {
-                c.runner_id = Some(Some(runner.clone()));
-                c.node_id = Some(node_id);
-                c.runtime_id = Some(Some(runtime_id));
-            })
+            .update_and_publish(
+                |c| {
+                    c.bind_paid_admission(&runner, &state);
+                    c.turn_pending = None;
+                    c.recovery_deadline_ms = None;
+                    c.terminal_code = None;
+                    c.provider_failed = None;
+                    c.node_id = Some(node_id);
+                    c.runtime_id = Some(Some(runtime_id));
+                },
+                move |db| publication.authorize_in(db),
+            )
             .await?;
         drop(self.preparation.take());
         s.worker.notify();
@@ -685,17 +919,31 @@ impl Execution<'_> {
         timing.next("remote_prepare");
         let runner_url = nodes::transport::url(s, &self.id).await?;
         if placement["nodeId"] != nodes::LOCAL_NODE_ID {
-            self.prepare_remote(&runner_url, &runner, text(&placement, "nodeId"))
-                .await?;
+            self.prepare_remote(
+                &runner_url,
+                &runner,
+                text(&placement, "nodeId"),
+                &workspace.authorization,
+            )
+            .await?;
         }
+        workspace.authorization.recheck().await?;
         timing.next("placement_commit");
-        let patch = json!({
-            "nodeId": placement["nodeId"],
-            "resources": placement["resources"],
-            "nodeState": null,
-            "movementError": null,
-        });
-        s.store.patch_run(&self.id, patch).await?;
+        let publication = workspace.authorization.clone();
+        let run_id = self.id.clone();
+        let changes = crate::nodes::run_placement::PlacementChanges {
+            node_id: Some(serde_json::from_value(placement["nodeId"].clone())?),
+            resources: Some(serde_json::from_value(placement["resources"].clone())?),
+            node_state: Some(None),
+            movement_error: Some(None),
+            ..Default::default()
+        };
+        s.store
+            .transaction(move |db| {
+                publication.authorize_in(db)?;
+                db.update_run_placement(&run_id, changes)
+            })
+            .await?;
         let runner_token = execution::secret(&s.config.data_dir, "runner-secret").await?;
         workspace.env.insert("RUNNER_URL".into(), runner_url);
         workspace.env.insert("RUNNER_TOKEN".into(), runner_token);
@@ -711,7 +959,7 @@ impl Execution<'_> {
         runner: &str,
         placement: &Value,
         resume: Option<&str>,
-        mut chat: Option<Value>,
+        mut chat: Value,
         launch: &Launch,
     ) -> Result<()> {
         let s = self.s;
@@ -719,20 +967,16 @@ impl Execution<'_> {
         let plans = s.config.data_dir.join("runner-plans");
         private_dir(&plans).await?;
         let mut imports = prepared["mounts"].as_array().unwrap().clone();
-        if chat.is_some() {
-            imports.push(json!({
-                "source": self.directory.join("chat-input"),
-                "target": "/run/cairn-chat",
-                "readOnly": true,
-            }));
-        }
+        imports.push(json!({
+            "source": self.directory.join("chat-input"),
+            "target": "/run/cairn-chat",
+            "readOnly": true,
+        }));
         let mut context = crate::plugins::agents::with_instructions(s, self.run).await;
         context["snapshot"]["skills"] = prepared["skills"].clone();
         context["nativeMode"] = placement["nativeMode"].clone();
-        if prepared["backend"] == "native"
-            && let Some(chat) = &mut chat
-        {
-            run_output::native_chat_privileges(chat, &context, &placement["nativeMode"]);
+        if prepared["backend"] == "native" {
+            run_output::native_chat_privileges(&mut chat, &context, &placement["nativeMode"]);
         }
         let prompt = if resume.is_some() {
             launch.prompt.clone()
@@ -757,15 +1001,15 @@ impl Execution<'_> {
                 .await?
         } else {
             s.store
-                .get("nodes", storage_node)
+                .node_boundary(storage_node)
                 .await?
                 .unwrap_or_default()["storage"]
                 .clone()
         };
-        let storage_policy = Policy::for_node(&node_storage)?;
+        let storage_policy = crate::storage::policy::for_node(&node_storage)?;
         let grant = nodes::disk_grants::new_disk(s, self.run, storage_node).await?;
         s.store
-            .patch_run(&self.id, json!({ "storage": { "mode": "on-demand" } }))
+            .update_run_boundary(&self.id, json!({ "storage": { "mode": "on-demand" } }))
             .await?;
         placement::renew_local(s, &self.id).await?;
         let resume_workspace = resume.is_some()
@@ -797,6 +1041,7 @@ impl Execution<'_> {
             },
             chat,
         };
+        workspace.authorization.recheck().await?;
         atomic_write(
             &plans.join(format!("{runner}.json")),
             &serde_json::to_vec(&plan)?,
@@ -804,16 +1049,25 @@ impl Execution<'_> {
         .await
     }
 
-    async fn prepare_remote(&self, runner_url: &str, runner: &str, node_id: &str) -> Result<()> {
+    async fn prepare_remote(
+        &self,
+        runner_url: &str,
+        runner: &str,
+        node_id: &str,
+        authorization: &crate::plugins::run_credentials::Authorization,
+    ) -> Result<()> {
         let s = self.s;
+        let secret = execution::secret(&s.config.data_dir, "runner-secret").await?;
+        authorization.recheck().await?;
         let response = s
             .http
             .post(format!("{runner_url}/prepare/{runner}"))
-            .bearer_auth(execution::secret(&s.config.data_dir, "runner-secret").await?)
+            .bearer_auth(secret)
             .timeout(Duration::from_secs(300))
             .send()
             .await
             .map_err(|_| Error::unavailable("Remote workspace preparation interrupted."))?;
+        authorization.recheck().await?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
             if status == 504 {
@@ -829,7 +1083,9 @@ impl Execution<'_> {
             ));
         }
         let message = format!("Executing on node {node_id}");
-        s.store.event(&self.id, "status", &message, None).await
+        s.store
+            .event(&self.id, &EventKind::Status, &message, None)
+            .await
     }
 
     /// Launches the supervised process and records its output until it exits.
@@ -841,6 +1097,7 @@ impl Execution<'_> {
     ) -> Result<Exit> {
         let s = self.s;
         let previously_launched = self.checkpoint.read(RunCheckpoint::launched).await;
+        workspace.authorization.recheck().await?;
         let mut child = Supervised::spawn(
             &launch.binary,
             &launch.args,
@@ -852,15 +1109,30 @@ impl Execution<'_> {
         if self.run["chatExecution"].is_object() {
             self.run["chatExecution"]["recovery"] = true.into();
             let patch = json!({ "chatExecution": self.run["chatExecution"] });
-            s.store.patch_run(&self.id, patch).await?;
+            s.store.update_run_boundary(&self.id, patch).await?;
         }
         self.checkpoint
             .update(|c| {
+                c.progress = Some(super::progress::Progress::launched(
+                    self.attempt_id.clone(),
+                    c.runner_id().map(str::to_owned),
+                    identity.clone(),
+                    crate::waits::execution_id(self.run)
+                        .as_str()
+                        .map(str::to_owned),
+                    now(),
+                ));
                 c.process = Some(identity);
+                c.turn_pending = None;
+                c.recovery_deadline_ms = None;
                 c.launched = Some(true);
                 c.start_rejected = Some(false);
+                c.output_interrupted = None;
+                c.provider_failure_attempt = None;
+                c.finalization_failure_attempt = None;
                 c.retry_cause = Some(None);
                 c.completed = Some(false);
+                c.terminal_code = None;
                 c.last_error = Some(None);
             })
             .await?;
@@ -868,30 +1140,65 @@ impl Execution<'_> {
             child.stop().await;
             return Err(Error::conflict("Execution stopped before launch."));
         }
+        if let Err(error) = workspace.authorization.recheck().await {
+            child.stop().await;
+            return Err(error);
+        }
         let stdout = child.child.stdout.take().unwrap();
         let stderr = child.child.stderr.take().unwrap();
+        let (telemetry, reports) = output::Publisher::channel(&self.id, &self.attempt_id);
         let (tx, mut events) = mpsc::channel(32);
-        let out = tokio::spawn(output::read_output(
+        let out = AbortOnDropHandle::new(tokio::spawn(output::read_output(
             stdout,
             false,
             tx.clone(),
-            self.sensitive.to_vec(),
-        ));
-        let err = tokio::spawn(output::read_output(stderr, true, tx, Vec::new()));
+            self.sensitive.snapshot().as_ref().clone(),
+        )));
+        let observed = self.observation.as_ref().is_some_and(Observation::active);
+        let err = AbortOnDropHandle::new(tokio::spawn(async move {
+            if observed {
+                output::read_agent_diagnostics(stderr, tx, telemetry).await;
+            } else {
+                output::read_output(stderr, true, tx, Vec::new()).await;
+            }
+        }));
         if let Err(error) = child.start(launch.prompt).await {
+            self.revoke_output_scope();
             child.stop().await;
-            out.abort();
-            err.abort();
+            close_output_readers(out, err, true).await;
             return Err(error);
         }
         let span = tracing::info_span!(target: "cairn_performance", "agent_attempt", run_id = self.id, attempt_id = self.attempt_id);
-        let exit = self
-            .wait(&mut child, &mut events, log_total, previously_launched)
+        let result = self
+            .wait(
+                &mut child,
+                &mut events,
+                log_total,
+                previously_launched,
+                observed.then_some(reports),
+            )
             .instrument(span)
-            .await?;
-        let _ = out.await;
-        let _ = err.await;
-        Ok(exit)
+            .await;
+        if result.is_err() {
+            self.revoke_output_scope();
+            child.stop().await;
+        }
+        close_output_readers(out, err, result.is_err()).await;
+        result
+    }
+
+    async fn close_account_output(&mut self, broker: Option<broker::Broker>) {
+        self.revoke_output_scope();
+        if let Some(broker) = broker {
+            broker.close().await;
+        }
+        self.observation.take();
+    }
+
+    fn revoke_output_scope(&self) {
+        if let Some(observation) = &self.observation {
+            observation.revoke();
+        }
     }
 
     async fn wait(
@@ -900,6 +1207,7 @@ impl Execution<'_> {
         events: &mut mpsc::Receiver<output::Output>,
         log_total: &mut usize,
         previously_launched: bool,
+        mut reports: Option<output::Reports>,
     ) -> Result<Exit> {
         let s = self.s;
         let cancel = self.cancel;
@@ -909,22 +1217,28 @@ impl Execution<'_> {
         let mut heartbeat = crate::performance::heartbeat();
         let mut timeout = tokio::time::interval(Duration::from_millis(250));
         timeout.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        while exit.code.is_none() || open {
+        while exit.code.is_none() || open || reports.is_some() {
             let running = exit.code.is_none();
             tokio::select! {
                 () = cancel.cancelled(), if running => {
+                    self.revoke_output_scope();
                     child.stop().await;
                     exit.code = Some(STOPPED);
                 }
                 () = s.shutdown.cancelled(), if running => {
+                    self.revoke_output_scope();
                     child.stop().await;
                     exit.code = Some(STOPPED);
                 }
-                _ = timeout.tick(), if running && self.checkpoint.expired() => {
+                _ = timeout.tick(), if running => {
                     // The controller owns confirmed suspension timing. An unavailable
                     // observation must not turn an administratively paused VM into a timeout.
-                    if self.checkpoint.refresh_pause(s).await.is_ok() && self.checkpoint.expired() {
+                    if self.checkpoint.expired()
+                        && self.checkpoint.refresh_pause(s).await.is_ok()
+                        && self.checkpoint.expired()
+                    {
                         exit.timed_out = true;
+                        self.revoke_output_scope();
                         child.stop().await;
                         exit.code = Some(STOPPED);
                     }
@@ -933,6 +1247,14 @@ impl Execution<'_> {
                     exit.code = Some(code?.code().unwrap_or(STOPPED));
                 }
                 _ = heartbeat.tick() => activity.heartbeat("receive_output"),
+                changed = async { reports.as_mut().unwrap().changed().await }, if reports.is_some() => {
+                    if changed {
+                        // Credential generations already join the shared history
+                        // synchronously before persistence/delivery. There is no
+                        // per-metric Store lookup, output slot or detached reporter.
+                        reports.as_mut().unwrap().publish_latest();
+                    } else { reports = None; }
+                }
                 event = events.recv(), if open => match event {
                     Some(output) => {
                         let queue_ms = output.received.elapsed().as_millis() as u64;
@@ -941,17 +1263,29 @@ impl Execution<'_> {
                         }
                         if output.kind == output::OutputKind::Stdout {
                             activity.output();
+                            #[cfg(test)]
+                            if let Some(probe) = &self.output_probe {
+                                probe.canonical();
+                            }
                         }
                         crate::performance::wait("refresh_redactions", self.refresh_redactions()).await?;
+                        #[cfg(test)]
+                        if let Some(probe) = &self.output_probe {
+                            probe.before_record(&output)?;
+                        }
                         exit.exhausted |= crate::performance::wait("persist_output", output::record(
                             s,
                             &output,
                             self.checkpoint,
                             previously_launched,
-                            self.sensitive,
+                            &self.sensitive.snapshot(),
                             log_total,
                             &mut activity,
                         )).await?;
+                        #[cfg(test)]
+                        if let Some(probe) = &self.output_probe {
+                            probe.recorded(&output);
+                        }
                     }
                     None => open = false,
                 },
@@ -963,14 +1297,18 @@ impl Execution<'_> {
 
     /// Account credentials may rotate while the process runs.
     async fn refresh_redactions(&mut self) -> Result<()> {
+        #[cfg(test)]
+        if let Some(probe) = &self.output_probe {
+            probe.refresh().await;
+            if probe.supplies_flood_marker() {
+                self.sensitive.extend(["rotated-test-secret".into()]);
+            }
+        }
         let Some(account) = self.account.as_ref() else {
             return Ok(());
         };
-        for secret in self.s.accounts.redactions(self.s, account).await? {
-            if !self.sensitive.contains(&secret) {
-                self.sensitive.push(secret);
-            }
-        }
+        self.sensitive
+            .extend(self.s.accounts.redactions(self.s, account).await?);
         Ok(())
     }
 
@@ -991,21 +1329,21 @@ impl Execution<'_> {
         s.accounts
             .exhausted(s, &previous.account_id, &model)
             .await?;
-        s.accounts.release(&previous).await?;
-        let patch = json!({
-            "accountWaitReason": format!("Usage exhausted. Waiting for an available {label} account to resume."),
-            "accountId": null,
-            "accountName": null,
-        });
-        s.store.patch_run(&self.id, patch).await?;
-        s.store
-            .event(
-                &self.id,
-                "status",
-                "Usage exhausted. Saving this session and restoring capacity or switching accounts.",
-                None,
-            )
-            .await?;
+        s.accounts.release(s, &previous).await?;
+        let patch = crate::runs::RunChanges {
+            account_wait_reason: Some(Some(
+                (format!("Usage exhausted. Waiting for an available {label} account to resume."))
+                    .to_owned(),
+            )),
+            account_id: Some(None),
+            account_name: Some(None),
+            ..Default::default()
+        };
+        let id = self.id.clone();
+        s.store.transaction(move |db| {
+            db.change_run(&id, patch)?;
+            db.event(&id, &EventKind::Status, "Usage exhausted. Saving this session and restoring capacity or switching accounts.", None)
+        }).await?;
         s.accounts.refresh(s, &previous.account_id).await?;
         self.wait_for_account(&model).await?;
         let Some(account) = self.account.as_mut() else {
@@ -1017,24 +1355,35 @@ impl Execution<'_> {
             .await?;
         self.sensitive
             .extend(s.accounts.redactions(s, account).await?);
-        let name = s.accounts.get(s, &account.account_id).await?["name"].clone();
-        let patch = json!({
-            "accountWaitReason": null,
-            "accountId": account.account_id,
-            "accountName": name,
-        });
-        s.store.patch_run(&self.id, patch).await?;
+        let name = serde_json::to_value(s.accounts.account(s, &account.account_id).await?.name)?;
+        let patch = crate::runs::RunChanges {
+            account_wait_reason: Some(None),
+            account_id: Some(Some((account.account_id).to_owned())),
+            account_name: Some(name.as_str().map(str::to_owned)),
+            ..Default::default()
+        };
         let message = format!(
             "Resuming saved session with {label} account: {}",
             name.as_str().unwrap_or("")
         );
-        s.store.event(&self.id, "status", &message, None).await
+        let id = self.id.clone();
+        s.store
+            .transaction(move |db| {
+                db.change_run(&id, patch)?;
+                db.event(&id, &EventKind::Status, &message, None)
+            })
+            .await
     }
 
     async fn wait_for_account(&mut self, model: &str) -> Result<()> {
         let s = self.s;
         while self.account.is_none() && !self.stopping() && !self.checkpoint.expired() {
-            match s.accounts.acquire(s, &self.id, self.provider, model).await {
+            let speed = text(&self.run["snapshot"]["agent"], "speed");
+            match s
+                .accounts
+                .acquire_for(s, &self.id, self.provider, model, speed)
+                .await
+            {
                 Ok(account) => *self.account = account,
                 Err(error) if error.is_conflict() => {
                     tokio::select! {
@@ -1062,18 +1411,28 @@ impl Execution<'_> {
             .unwrap_or_default();
         let status = if self.cancel.is_cancelled() {
             RunStatus::Cancelled
-        } else if exit.timed_out {
+        } else if exit.timed_out
+            || self.checkpoint.expired()
+            || saved.output_error().is_some()
+            || saved.provider_failed()
+        {
             RunStatus::Failed
-        } else if exit.code == Some(0) || (s.shutdown.is_cancelled() && saved.completed()) {
+        } else if exit.code == Some(0)
+            || (s.shutdown.is_cancelled() && saved.completed() && !saved.managed())
+        {
             RunStatus::Succeeded
         } else {
             RunStatus::Failed
         };
         if status == RunStatus::Failed
             && !exit.timed_out
+            && !self.checkpoint.expired()
+            && saved.output_error().is_none()
+            && saved.finalization_error().is_none()
             && !self.stopping()
-            && has_session
+            && !saved.completed()
             && let Some(cause) = saved.retry_cause.as_ref().and_then(Option::as_ref)
+            && (has_session || cause.startup)
         {
             // The provider confirmed this turn failed. Recovery is scheduled by
             // the worker after the previous execution is fenced, not replayed here.
@@ -1087,65 +1446,86 @@ impl Execution<'_> {
         } else {
             saved.last_message()
         };
-        let summary = run_output::redact(summary, self.sensitive)
+        let summary = run_output::redact(summary, &self.sensitive.snapshot())
             .chars()
             .take(SUMMARY_LIMIT)
             .collect::<String>();
         let resume_available = (status != RunStatus::Succeeded
             || self.run["chatExecution"].is_object())
             && has_session;
-        let error = (!error.is_empty()).then(|| run_output::redact(&error, self.sensitive));
+        let error =
+            (!error.is_empty()).then(|| run_output::redact(&error, &self.sensitive.snapshot()));
         // A failed run's final status says why it ended when no earlier event did.
         let details = error
             .as_ref()
             .map(|message| json!({ "error": { "message": message } }));
-        let mut patch = json!({
-            "status": status,
-            "finishedAt": now(),
-            "resumeAvailable": resume_available,
-            "summary": summary,
-            "error": error,
-        });
+        let mut patch = crate::runs::RunChanges {
+            status: Some(status),
+            finished_at: Some(Some(now())),
+            resume_available: Some(resume_available),
+            summary: Some((summary).to_owned()),
+            error: Some(error.clone()),
+            boundary: Some(serde_json::json!({})),
+            ..Default::default()
+        };
         if status == RunStatus::Succeeded {
-            patch["retry"] = Value::Null;
+            patch.retry = Some(None);
         }
         let id = self.id.clone();
-        let status = s.store.transaction(move |db| {
+        let deadline = self.checkpoint.deadline();
+        s.store.transaction(move |db| {
             let current = db.run(&id)?.ok_or_else(|| Error::not_found("Run not found"))?;
+            let expired = deadline.is_some_and(|deadline| now() >= deadline);
             let status = if !current["cancelRequestedAt"].is_null() {
                 RunStatus::Cancelled
+            } else if expired {
+                let message = "Run exceeded its time limit.";
+                patch.error = Some(Some(message.into()));
+                patch.summary = Some(message.into());
+                patch.wakeup = Some(None);
+                RunStatus::Failed
             } else if status == RunStatus::Succeeded && current["trigger"] != "chat" && current["wakeup"].is_object() {
                 if !has_session {
                     return Err(Error::conflict("Cannot wait without a saved agent session. Working files were preserved."));
                 }
                 RunStatus::Waiting
             } else { status };
-            patch["status"] = status.into();
-            if status == RunStatus::Waiting {
-                patch["finishedAt"] = Value::Null;
-                patch["resumeAvailable"] = true.into();
-                patch["outcome"] = Value::Null;
-            } else if current["trigger"] != "chat" {
-                patch["wakeup"] = Value::Null;
+            patch.status = Some(status);
+            if status == RunStatus::Succeeded {
+                crate::chats::keep_reply_after_compaction(&current, &mut patch)?;
             }
-            db.patch_run(&id, &patch)?;
-            Ok(status)
-        }).await?;
-        let details = details.filter(|_| status == RunStatus::Failed);
-        s.store
-            .event(&self.id, "status", status.as_str(), details)
-            .await
+            if status == RunStatus::Waiting {
+                patch.finished_at = Some(None);
+                patch.resume_available = Some(true);
+                patch.boundary.as_mut().unwrap()["outcome"] = Value::Null;
+            } else if current["trigger"] != "chat" {
+                patch.wakeup = Some(None);
+            }
+            db.change_run(&id, patch)?;
+            let details = if status == RunStatus::Failed && expired {
+                Some(json!({ "error": { "message": "Run exceeded its time limit." } }))
+            } else {
+                details.filter(|_| status == RunStatus::Failed)
+            };
+            db.event(&id, &EventKind::Status, status.as_str(), details.as_ref())
+        }).await
     }
 
     fn failure_message(&self, status: RunStatus, exit: &Exit, saved: &RunCheckpoint) -> String {
         if self.cancel.is_cancelled() {
             return "Run stopped. You can resume this conversation.".into();
         }
-        if exit.timed_out {
+        if exit.timed_out || self.checkpoint.expired() {
             return "Run exceeded its time limit.".into();
+        }
+        if let Some(error) = saved.output_error() {
+            return error.to_owned();
         }
         if status == RunStatus::Succeeded {
             return String::new();
+        }
+        if let Some(error) = saved.finalization_error() {
+            return error.to_owned();
         }
         if !saved.last_error().is_empty() {
             return saved.last_error().to_owned();
@@ -1165,8 +1545,19 @@ impl Execution<'_> {
     }
 }
 
+/// Join on ordinary EOF; abort AND join on failure. Abort-on-drop ownership also
+/// covers cancellation of this cleanup future itself, unlike bare JoinHandles.
+async fn close_output_readers(out: AbortOnDropHandle<()>, err: AbortOnDropHandle<()>, abort: bool) {
+    if abort {
+        out.abort();
+        err.abort();
+    }
+    let _ = out.await;
+    let _ = err.await;
+}
+
 fn controller_name(run: &Value) -> &'static str {
-    if crate::execution::runs_natively(run) {
+    if crate::native::policy::native(&run["snapshot"]["agent"]) {
         "Native controller"
     } else {
         "VM controller"
@@ -1180,15 +1571,352 @@ fn current_exe() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        capabilities::plugin_packages::Authority, plugins::run_credentials::RunCredentials,
+    };
+
+    async fn preparation_fixture(root: &Path) -> (Arc<Service>, Value) {
+        use crate::run_fixture::DbRunFixture;
+        let config = serde_json::from_value(json!({
+            "dataDir": root.join("data"),
+            "home": root.join("home"),
+            "workspaceRoots": [root],
+            "publicUrl": "http://localhost:4310",
+            "host": "127.0.0.1",
+            "port": 0,
+            "codexBin": "false",
+            "concurrency": 1,
+            "logger": false,
+            "workerEnabled": false,
+            "runnerUrl": "http://runner.invalid",
+        }))
+        .unwrap();
+        let service = Service::new(config).await.unwrap();
+        let agent = service
+            .agent_snapshot(crate::config::MAIN_AGENT_ID)
+            .await
+            .unwrap();
+        let id = crate::config::id();
+        let record = json!({
+            "id": id, "taskId": id, "status": "running",
+            "snapshot": { "agent": agent, "task": { "id": id }, "projects": [] },
+        });
+        let run = service
+            .store
+            .transaction(move |db| db.add_run_fixture(&record, None))
+            .await
+            .unwrap();
+        (service, run)
+    }
+
+    #[tokio::test]
+    async fn initial_preparation_rechecks_revocation_between_remote_lookup_and_clone() {
+        use axum::{Router, routing::get};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut run) = preparation_fixture(root.path()).await;
+        let authority = crate::capabilities::plugin_packages::Authority::for_run(&service, &run)
+            .await
+            .unwrap();
+        let authorization = crate::plugins::run_credentials::Authorization::new(
+            &service,
+            authority,
+            &RunCredentials::default(),
+        );
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        let revoked = service.clone();
+        let run_id = text(&run, "id").to_owned();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route(
+                "/repo/info/refs",
+                get(move || {
+                    let (s, id, count) = (revoked.clone(), run_id.clone(), count.clone());
+                    async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        s.store
+                            .change_run(
+                                &id,
+                                crate::runs::RunChanges {
+                                    cancel_requested_at: Some(Some(now())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .unwrap();
+                        "0123456789012345678901234567890123456789\trefs/heads/main\n"
+                    }
+                }),
+            )
+            .route("/repo/HEAD", get(|| async { "ref: refs/heads/main\n" }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        for args in [
+            vec!["init".to_owned(), "-q".into()],
+            vec![
+                "remote".into(),
+                "add".into(),
+                "origin".into(),
+                format!("http://{address}/repo"),
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let project = crate::config::id();
+        run["snapshot"]["task"]["projectId"] = project.clone().into();
+        run["snapshot"]["projects"] = json!([{
+            "id": project, "name": "Revoked project", "path": source,
+            "sourceMode": "remote", "baseBranch": "main",
+        }]);
+        let error = execution::prepare_authorized(
+            &run,
+            &service.config,
+            &RunCredentials::default(),
+            None,
+            None,
+            &authorization,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, 403, "{error:?}");
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "no clone may contact the remote after ls-remote revokes the run"
+        );
+        assert!(
+            !service
+                .config
+                .data_dir
+                .join("runs")
+                .join(text(&run, "id"))
+                .join("workspace")
+                .join(project)
+                .exists()
+        );
+        server.abort();
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn remote_preparation_revocation_blocks_publication_and_every_launch() {
+        use axum::{Router, routing::post};
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut run) = preparation_fixture(root.path()).await;
+        let authority = crate::capabilities::plugin_packages::Authority::for_run(&service, &run)
+            .await
+            .unwrap();
+        let authorization = crate::plugins::run_credentials::Authorization::new(
+            &service,
+            authority,
+            &RunCredentials::default(),
+        );
+        let revoked = service.clone();
+        let run_id = text(&run, "id").to_owned();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/prepare/attempt",
+            post(move || {
+                let (s, id) = (revoked.clone(), run_id.clone());
+                async move {
+                    s.store
+                        .change_run(
+                            &id,
+                            crate::runs::RunChanges {
+                                cancel_requested_at: Some(Some(now())),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    axum::Json(json!({}))
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let id = text(&run, "id").to_owned();
+        let checkpoint = Checkpoint::new(
+            service.store.clone(),
+            id.clone(),
+            RunCheckpoint::fresh(Some(60_000)),
+        );
+        let cancel = CancellationToken::new();
+        let mut account = None;
+        let sensitive = History::default();
+        let mut execution = Execution {
+            s: &service,
+            id,
+            run: &mut run,
+            account: &mut account,
+            preparation: None,
+            cancel: &cancel,
+            checkpoint: &checkpoint,
+            sensitive: &sensitive,
+            observation: None,
+            provider: Provider::Codex,
+            directory: root.path().into(),
+            attempt_id: String::new(),
+            reservation: None,
+            output_probe: None,
+        };
+        let error = execution
+            .prepare_remote(
+                &format!("http://{address}"),
+                "attempt",
+                "remote",
+                &authorization,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 403);
+        let workspace = Workspace {
+            prepared: json!({ "cwd": root.path() }),
+            state_home: root.path().into(),
+            env: Environment::new(),
+            mcp: json!({}),
+            authorization,
+        };
+        // A separate/retried launch must also recheck, even if a caller already
+        // prepared a workspace. The nonexistent binary must never be spawned.
+        for _ in 0..2 {
+            let launch = Launch {
+                binary: "/nonexistent-revoked-agent".into(),
+                args: vec![],
+                prompt: String::new(),
+            };
+            let error = execution
+                .supervise(&workspace, launch, &mut 0)
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.status, 403);
+            assert!(!checkpoint.read(RunCheckpoint::launched).await);
+        }
+        server.abort();
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn active_clean_exit_requires_managed_provider_completion() {
+        use crate::run_fixture::DbRunFixture;
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::config::Config {
+            data_dir: root.path().join("data"),
+            home: root.path().join("home"),
+            workspace_roots: vec![root.path().into()],
+            public_url: "http://localhost:4310".into(),
+            host: "127.0.0.1".into(),
+            port: 0,
+            codex_bin: "codex".into(),
+            claude_bin: "claude".into(),
+            opencode_bin: "opencode".into(),
+            opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
+            concurrency: 1,
+            logger: false,
+            worker_enabled: false,
+            runner_url: String::new(),
+        })
+        .await
+        .unwrap();
+        for backend in ["native", "firecracker", "shared"] {
+            for completed in [false, true] {
+                let id = crate::config::id();
+                let run_fixture = json!({ "id": id, "taskId": id, "status": "running" });
+                service
+                    .store
+                    .transaction(move |db| db.add_run_fixture(&run_fixture, None).map(|_| ()))
+                    .await
+                    .unwrap();
+                let saved = RunCheckpoint::from_value(json!({
+                    "prepared": { "backend": backend, "isolated": backend != "shared" },
+                    "completed": completed, "terminalCode": 0, "remainingMs": null,
+                }))
+                .unwrap();
+                let checkpoint = Checkpoint::new(service.store.clone(), id.clone(), saved.clone());
+                let mut run = service.store.run(&id).await.unwrap();
+                let mut account = None;
+                let cancel = CancellationToken::new();
+                let sensitive = History::default();
+                let execution = Execution {
+                    s: &service,
+                    id: id.clone(),
+                    run: &mut run,
+                    account: &mut account,
+                    preparation: None,
+                    cancel: &cancel,
+                    checkpoint: &checkpoint,
+                    sensitive: &sensitive,
+                    observation: None,
+                    provider: Provider::Codex,
+                    directory: root.path().into(),
+                    attempt_id: String::new(),
+                    reservation: None,
+                    output_probe: None,
+                };
+                let workspace = Workspace {
+                    prepared: json!({ "output": root.path().join("missing-result").to_string_lossy() }),
+                    state_home: root.path().into(),
+                    env: Environment::new(),
+                    mcp: json!({}),
+                    authorization: crate::plugins::run_credentials::Authorization::new(
+                        &service,
+                        Authority::default(),
+                        &RunCredentials::default(),
+                    ),
+                };
+                execution
+                    .finish(
+                        &workspace,
+                        &Exit {
+                            code: Some(0),
+                            ..Default::default()
+                        },
+                        &saved,
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                let state = service.store.run_state(&id).await.unwrap();
+                let expected = if completed || backend == "shared" {
+                    RunStatus::Succeeded
+                } else {
+                    RunStatus::Failed
+                };
+                assert_eq!(
+                    state.status, expected,
+                    "backend={backend}, completed={completed}"
+                );
+                if expected == RunStatus::Failed {
+                    assert!(state.error.unwrap().contains("completion was recorded"));
+                }
+            }
+        }
+        service.shutdown.cancel();
+    }
 
     #[test]
     fn controller_messages_follow_the_execution_backend() {
         assert_eq!(
-            controller_name(&json!({ "executionBackend": "native" })),
+            controller_name(
+                &json!({ "snapshot": { "agent": { "access": { "backend": "native" } } } })
+            ),
             "Native controller"
         );
         assert_eq!(
-            controller_name(&json!({ "executionBackend": "firecracker" })),
+            controller_name(
+                &json!({ "snapshot": { "agent": { "access": { "backend": "firecracker" } } } })
+            ),
             "VM controller"
         );
         assert_eq!(controller_name(&json!({})), "VM controller");
@@ -1205,7 +1933,10 @@ mod tests {
             public_url: "http://localhost:4310".into(),
             host: "127.0.0.1".into(),
             port: 0,
-            codex_bin: "/bin/false".into(),
+            codex_bin: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/codex.mjs")
+                .to_string_lossy()
+                .into_owned(),
             claude_bin: "/bin/false".into(),
             opencode_bin: "/bin/false".into(),
             opencode_go_usage_url: crate::accounts::opencode::USAGE_URL.into(),
@@ -1218,7 +1949,7 @@ mod tests {
         .unwrap();
         for provider in ["codex", "claude", "opencode"] {
             let mut run = json!({
-                "isolated": true, "executionBackend": "native", "nativeModeInterruption": crate::config::id(),
+                "isolated": true, "nativeModeInterruption": crate::config::id(),
                 "snapshot": { "agent": { "provider": provider, "access": { "backend": "native" } } },
             });
             assert!(
@@ -1251,7 +1982,7 @@ mod tests {
                 "{provider}"
             );
             run["nativeModeInterruption"] = crate::config::id().into();
-            run["executionBackend"] = "firecracker".into();
+            run["snapshot"]["agent"]["access"]["backend"] = "firecracker".into();
             assert!(
                 saved_session(&s, &run, root.path(), root.path())
                     .await

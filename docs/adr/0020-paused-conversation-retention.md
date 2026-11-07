@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0024](0024-anonymous-snapshots-with-private-guest-memory.md) pour la mémoire guest en memfd partagé ; la conservation des VM en pause reste applicable.
+
 # 0020 — Bounded CPU-paused conversation retention
 
 Date: 2026-10-01

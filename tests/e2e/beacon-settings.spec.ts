@@ -1,11 +1,62 @@
 import {
   expect,
   expectSingleScroll,
+  expectUncovered,
   signIn,
   test,
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+
+test('an explicit performance opt-out survives focus when browser storage writes fail', async ({ page }) => {
+  await page.addInitScript(() => {
+    const set = Storage.prototype.setItem
+    set.call(localStorage, 'cairn_performance_upload', 'true')
+    Storage.prototype.setItem = function (key, value) {
+      if (key === 'cairn_performance_upload')
+        throw new DOMException('Storage unavailable', 'QuotaExceededError')
+      return set.call(this, key, value)
+    }
+  })
+  await page.goto(workspacePath('/settings/account'))
+  await signIn(page)
+  const toggle = page.getByRole('region', { name: 'Performance diagnostics', exact: true }).getByRole('switch', { name: 'Send performance diagnostics' })
+  await expect(toggle).toBeChecked()
+  await toggle.uncheck()
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+  await expect(toggle).not.toBeChecked()
+})
+
+test('account settings expose bounded local performance diagnostics on desktop and mobile', async ({ page }) => {
+  await page.goto(workspacePath('/settings/account'))
+  await signIn(page)
+  const diagnostics = page.getByRole('region', { name: 'Performance diagnostics', exact: true })
+  await expect(diagnostics).toBeVisible()
+  await expect(diagnostics.getByRole('switch', { name: 'Send performance diagnostics' })).toBeChecked()
+  await diagnostics.getByRole('button', { name: 'Refresh report', exact: true }).click()
+  const report = diagnostics.getByLabel('Local performance report')
+  await expectSingleScroll(page)
+  await diagnostics.getByText('Inspect local report', { exact: true }).click()
+  await expect(report).toBeVisible()
+  await expectSingleScroll(page)
+  const before = JSON.parse((await report.textContent())!)
+  expect(before).toMatchObject({ schema: 2, platform: 'web', buildType: 'release' })
+  expect(before.buildId).toMatch(/^[a-f0-9]{64}$/)
+  await diagnostics.getByRole('button', { name: 'Reset local report', exact: true }).click()
+  const after = JSON.parse((await report.textContent())!)
+  expect(after.measurements.windowId).not.toBe(before.measurements.windowId)
+  expect(after.measurements.operations).toEqual([])
+  await diagnostics.getByRole('switch', { name: 'Send performance diagnostics' }).uncheck()
+  await page.reload()
+  await expect(diagnostics.getByRole('switch', { name: 'Send performance diagnostics' })).not.toBeChecked()
+  await expect(report).not.toBeVisible()
+  await diagnostics.getByText('Inspect local report', { exact: true }).click()
+  for (const width of [1440, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 })
+    await expectSingleScroll(page)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  }
+})
 
 test('the header and settings sections support keyboard navigation, deep links and mobile back navigation', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' })
@@ -284,9 +335,11 @@ test('conversation retention defaults to seven days, confirms changes and persis
   await page.goto(workspacePath('/settings/installation'))
   const days = page.getByRole('spinbutton', { name: 'Days of inactivity' })
   await expect(days).toHaveValue('7')
+  await expect(page.getByRole('heading', { name: 'Automatic environment cleanup' })).toBeVisible()
   await days.fill('14')
   await page.getByRole('button', { name: 'Save conversation retention', exact: true }).click()
   await expect(page.getByRole('dialog')).toContainText('including existing conversations')
+  await expect(page.getByRole('dialog')).toContainText('History, uploaded attachments and published files are retained')
   await page.getByRole('button', { name: 'Cancel', exact: true }).click()
   await page.reload()
   await expect(days).toHaveValue('7')
@@ -305,4 +358,52 @@ test('conversation retention defaults to seven days, confirms changes and persis
   await expect(page.getByRole('dialog')).toHaveCount(0)
   await page.reload()
   await expect(days).toHaveValue('0')
+})
+
+test('task storage limit is installation-wide, revision-guarded and preserves invalid drafts', async ({ page, workspace }) => {
+  await page.goto(workspacePath('/'))
+  await signIn(page)
+  await page.goto(workspacePath('/settings/installation'))
+  const maximum = page.getByRole('spinbutton', { name: 'Maximum disk per task (GiB)', exact: true })
+  const save = page.getByRole('button', { name: 'Save task storage limit', exact: true })
+  await expect(maximum).toHaveValue('150')
+  await expect(save).toBeDisabled()
+  for (const invalid of ['31', '1025', '']) {
+    await maximum.fill(invalid)
+    await expect(save).toBeDisabled()
+  }
+
+  await maximum.fill('75')
+  await expectUncovered(maximum)
+  await save.click()
+  await expect(page.getByText('Task storage limit saved', { exact: true })).toBeVisible()
+  await page.reload()
+  await expect(maximum).toHaveValue('75')
+
+  const current = await workspace.api('/api/settings/task-storage')
+  await workspace.api('/api/settings/task-storage', 'PUT', { ...current, maxDiskGiB: 100 })
+  await maximum.fill('80')
+  await save.click()
+  await expect(page.getByRole('alert').filter({ hasText: 'Task storage limits changed.' })).toBeVisible()
+  await expect(maximum).toHaveValue('80')
+  await page.getByRole('button', { name: 'Reload saved limit', exact: true }).click()
+  await expect(maximum).toHaveValue('100')
+  await expect(save).toBeDisabled()
+  await maximum.fill('200')
+  await save.click()
+  await expect.poll(async () => (await workspace.api('/api/settings/task-storage')).maxDiskGiB).toBe(200)
+  await page.reload()
+  await expect(maximum).toHaveValue('200')
+  await expectSingleScroll(page)
+  const section = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Storage per task', exact: true }) })
+  await section.scrollIntoViewIfNeeded()
+  await test.info().attach('task-storage-limit', { body: await section.screenshot(), contentType: 'image/png' })
+  await page.setViewportSize({ width: 360, height: 640 })
+  await maximum.scrollIntoViewIfNeeded()
+  await maximum.click()
+  await maximum.fill('150')
+  await expectUncovered(maximum)
+  await expect(save).toBeEnabled()
+  await expectSingleScroll(page)
+  await test.info().attach('task-storage-limit-mobile', { body: await section.screenshot(), contentType: 'image/png' })
 })

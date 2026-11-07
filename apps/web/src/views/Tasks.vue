@@ -10,6 +10,7 @@ import {
   watch,
 } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { listMissions } from '../../../../packages/contracts/generated/listMissions'
 import { api, state } from '../api'
 import AgentAvatar from '../components/AgentAvatar.vue'
 import Empty from '../components/Empty.vue'
@@ -121,7 +122,7 @@ async function loadActivity() {
     return
   refreshing = true
   try {
-    const [runs, recent, tasks] = await Promise.all([api<RunListItem[]>('/tasks/activity'), api<RunListItem[]>('/runs?limit=100'), api<Task[]>('/tasks')])
+    const [runs, recent, tasks] = await Promise.all([api<RunListItem[]>('/tasks/activity'), api<RunListItem[]>('/runs?limit=100'), listMissions(api, {}).then(output => output.tasks)])
     if (disposed)
       return
     latestRuns.value = runs

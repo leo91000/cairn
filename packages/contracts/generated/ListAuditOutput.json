@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "AuditEntry": {
+      "additionalProperties": false,
+      "description": "One recorded installation change; `detail` is the JSON recorded with it.",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "id": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "createdAt",
+        "action",
+        "detail"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "The 100 most recent entries, newest first.",
+  "properties": {
+    "entries": {
+      "items": {
+        "$ref": "#/definitions/AuditEntry"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "entries"
+  ],
+  "title": "ListAuditOutput",
+  "type": "object"
+}

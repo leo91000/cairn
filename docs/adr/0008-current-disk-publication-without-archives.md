@@ -1,3 +1,5 @@
+> Statut : Remplacée par [ADR-0041](0041-immediate-conversation-deletion.md) pour le délai de récupération des nouvelles suppressions ; la publication courante sans archives reste applicable.
+
 # Publication du disque courant sans archives
 
 Le propriétaire ne souhaite ni archivage des conversations ni historique de restauration. Le journal local durable reste synchronisé de façon asynchrone vers S3 ; une publication remplace l’état courant après vérification de tous ses blocs. Les versions antérieures ne subsistent que tant qu’un disque ou une opération en cours les référence, puis sont collectées, y compris pour les conversations inactives.

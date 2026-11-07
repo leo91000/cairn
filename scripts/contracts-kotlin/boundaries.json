@@ -1,0 +1,12 @@
+{
+  "customClasses": {
+    "extension": {
+      "x-kotlin-type": {
+        "TaskOutcome": "build.cairn.boundary.TaskOutcome",
+        "NodeBackup": "build.cairn.boundary.NodeBackup",
+        "RunStorage": "build.cairn.boundary.RunStorage",
+        "RunUsage": "kotlinx.serialization.json.JsonObject"
+      }
+    }
+  }
+}

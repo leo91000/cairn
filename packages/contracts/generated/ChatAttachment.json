@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "chatId": {
+      "default": "",
+      "type": "string"
+    },
+    "createdAt": {
+      "default": 0,
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "digest": {
+      "default": "",
+      "type": "string"
+    },
+    "height": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "id": {
+      "type": "string"
+    },
+    "kind": {
+      "default": "file",
+      "pattern": "^(image|file)$",
+      "type": "string"
+    },
+    "mediaType": {
+      "default": "application/octet-stream",
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "size": {
+      "default": 0,
+      "format": "uint64",
+      "maximum": 41943040,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "width": {
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "id",
+    "name"
+  ],
+  "title": "ChatAttachment",
+  "type": "object"
+}

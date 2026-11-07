@@ -19,6 +19,9 @@ pub enum Server {
 pub struct Configuration {
     pub servers: BTreeMap<String, Server>,
     pub token: String,
+    /// A plan turn: tools are already restricted to read-only ones. Engines that
+    /// cannot allowlist command-server tools must reject any other tool name.
+    pub planning: bool,
 }
 
 impl Configuration {
@@ -26,6 +29,7 @@ impl Configuration {
         Self {
             servers: BTreeMap::new(),
             token,
+            planning: false,
         }
     }
 

@@ -1,6 +1,6 @@
 id = "discord"
 name = "Discord"
-version = "0.4.0"
+version = "0.4.1"
 description = "Mention a bot in your server to start a conversation with one of your agents."
 apiVersion = 2
 capabilities = [

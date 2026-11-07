@@ -1,5 +1,5 @@
 //! What each Cairn account has read. A conversation turn or a mission run that finished
-//! successfully stays unread in the Fil until the account opens it. Marks belong to the
+//! stays unread in the Fil until the account opens it. Marks belong to the
 //! account, so every device and the web share them, and each member reads on their own.
 //!
 //! A mission that reports it is blocked asks for attention until the account sets that outcome
@@ -11,35 +11,24 @@ use crate::{
     run_status::RunStatus,
     service::Service,
     store::Db,
-    validation::{text, uuid},
+    validation::text,
 };
-use serde_json::{Value, json};
+use cairn_contracts::{
+    MarkReadInput, MarkReadOutput, OutcomeAsideAction, OutcomeDismissal, ReadTarget,
+    SetOutcomeAsideInput, SetOutcomeAsideOutput,
+};
+use rusqlite::OptionalExtension;
+use serde_json::Value;
+use sql::{ReadKind, StoredDismissal};
 use std::collections::HashMap;
+
+pub(crate) mod migration;
+pub mod sql;
 
 const MAX_ITEMS: usize = 200;
 /// The longest a blocked mission can be snoozed.
 const MAX_SNOOZE_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const PREVIEW_CHARS: usize = 240;
-
-fn since_key(account: &str) -> String {
-    format!("read-since:{account}")
-}
-
-fn marks_prefix(account: &str) -> String {
-    format!("read:{account}:")
-}
-
-fn dismissals_prefix(account: &str) -> String {
-    format!("dismissed:{account}:")
-}
-
-/// An outcome set aside, by the finish time of the run that reported it.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
-#[serde(rename_all = "camelCase")]
-struct Dismissal {
-    finished_at: i64,
-    until: Option<i64>,
-}
 
 /// The account an API request reads for. Every installation request carries one.
 pub(crate) fn account(input: &Input) -> Result<&str> {
@@ -54,53 +43,56 @@ pub(crate) fn account(input: &Input) -> Result<&str> {
 /// When an account first reads the installation, earlier work counts as read: the Fil starts
 /// clear rather than with the whole history.
 pub(crate) async fn begin(s: &Service, account: &str) -> Result<()> {
-    let key = since_key(account);
-    if s.store.kv(&key).await?.is_some() {
+    let reader = account.to_owned();
+    if s.store
+        .read(move |db| db.read_start(&reader))
+        .await?
+        .is_some()
+    {
         return Ok(());
     }
+    let account = account.to_owned();
     s.store
-        .transaction(move |db| {
-            if db.kv(&key)?.is_none() {
-                db.set(&key, &now().into(), None)?;
-            }
-            Ok(())
-        })
+        .transaction(move |db| db.start_reading(&account, now()))
         .await
 }
 
-/// One account's read marks, keyed by Fil item (`chat:<id>` or `task:<id>`), and the mission
-/// outcomes it set aside.
+/// One account's read marks and the mission outcomes it set aside. Without an account,
+/// nothing is unread and nothing is set aside: personal state is never shared.
 pub(crate) struct Reads {
     since: i64,
-    marks: HashMap<String, i64>,
-    dismissals: HashMap<String, Dismissal>,
+    marks: HashMap<(ReadKind, String), i64>,
+    dismissals: HashMap<String, StoredDismissal>,
 }
 
 impl Reads {
     pub(crate) fn load(db: &Db<'_>, account: &str) -> Result<Self> {
         // Until `begin` records a start, nothing is unread.
-        let since = db.kv_as::<i64>(&since_key(account))?.unwrap_or(i64::MAX);
-        let prefix = marks_prefix(account);
-        let marks = db
-            .keys_as::<i64>(&prefix)?
-            .into_iter()
-            .map(|(key, at)| (key[prefix.len()..].to_owned(), at))
-            .collect();
-        let prefix = dismissals_prefix(account);
-        let dismissals = db
-            .keys_as::<Dismissal>(&prefix)?
-            .into_iter()
-            .map(|(key, dismissal)| (key[prefix.len()..].to_owned(), dismissal))
-            .collect();
         Ok(Self {
-            since,
-            marks,
-            dismissals,
+            since: db.read_start(account)?.unwrap_or(i64::MAX),
+            marks: db.read_marks(account)?,
+            dismissals: db.dismissals(account)?,
         })
     }
 
-    fn unread(&self, item: &str, finished_at: Option<i64>) -> bool {
-        let read_at = self.marks.get(item).copied().unwrap_or(0).max(self.since);
+    pub(crate) fn load_for(db: &Db<'_>, account: Option<&str>) -> Result<Self> {
+        match account {
+            Some(account) => Self::load(db, account),
+            None => Ok(Self {
+                since: i64::MAX,
+                marks: HashMap::new(),
+                dismissals: HashMap::new(),
+            }),
+        }
+    }
+
+    fn unread(&self, kind: ReadKind, id: &str, finished_at: Option<i64>) -> bool {
+        let read_at = self
+            .marks
+            .get(&(kind, id.to_owned()))
+            .copied()
+            .unwrap_or(0)
+            .max(self.since);
         finished_at.is_some_and(|finished| finished > read_at)
     }
 
@@ -110,11 +102,21 @@ impl Reads {
     pub(crate) fn chats(&self, db: &Db<'_>, chats: &mut [Value]) -> Result<()> {
         for chat in chats {
             let id = text(chat, "id");
-            let finished = chat["status"] == RunStatus::Succeeded
-                && chat["paused"] != true
-                && db.kv(&format!("plugin-conversation:{id}"))?.is_none();
-            let item = format!("chat:{id}");
-            let unread = finished && self.unread(&item, chat["finishedAt"].as_i64());
+            let question = chat["pendingQuestions"].as_u64().unwrap_or(0) > 0;
+            let finished = matches!(
+                chat["status"].as_str(),
+                Some("succeeded" | "failed" | "interrupted")
+            ) && chat["requestedBy"].is_null()
+                && chat["paused"] != true;
+            let unread = (question || finished)
+                && db.kv(&format!("plugin-conversation:{id}"))?.is_none()
+                && self.unread(
+                    ReadKind::Chat,
+                    id,
+                    chat["readAt"]
+                        .as_i64()
+                        .or_else(|| chat["finishedAt"].as_i64()),
+                );
             chat["unread"] = unread.into();
             if unread {
                 chat["preview"] = summary_preview(db, text(chat, "runId"))?;
@@ -127,27 +129,32 @@ impl Reads {
     /// outcomes it set aside.
     pub(crate) fn runs(&self, db: &Db<'_>, runs: &mut [Value]) -> Result<()> {
         for run in runs {
-            let mission = run["trigger"] != "chat" && run["status"] == RunStatus::Succeeded;
-            let item = format!("task:{}", text(run, "taskId"));
-            let unread = mission && self.unread(&item, run["finishedAt"].as_i64());
+            let mission = run["trigger"] != "chat"
+                && matches!(
+                    run["status"].as_str(),
+                    Some("succeeded" | "failed" | "interrupted")
+                );
+            let task = text(run, "taskId").to_owned();
+            let unread =
+                mission && self.unread(ReadKind::Mission, &task, run["finishedAt"].as_i64());
             run["unread"] = unread.into();
             if unread {
                 run["preview"] = summary_preview(db, text(run, "id"))?;
             }
-            run["dismissal"] = self.dismissal(&item, run).into();
+            run["dismissal"] = serde_json::to_value(self.dismissal(&task, run))?;
         }
         Ok(())
     }
 
     /// How the account set this run's outcome aside, if it still applies. A later finish asks
     /// again, and input the agent asked for can only be snoozed.
-    fn dismissal(&self, item: &str, run: &Value) -> Option<Value> {
+    fn dismissal(&self, task: &str, run: &Value) -> Option<OutcomeDismissal> {
         let waiting = run["trigger"] != "chat"
             && run["status"] == RunStatus::Succeeded
             && run["outcome"]["status"]
                 .as_str()
                 .is_some_and(|status| status != "completed");
-        let dismissal = self.dismissals.get(item).filter(|dismissal| {
+        let dismissal = self.dismissals.get(task).filter(|dismissal| {
             waiting
                 && run["finishedAt"]
                     .as_i64()
@@ -156,12 +163,18 @@ impl Reads {
         if dismissal.until.is_none() && run["outcome"]["status"] == "needs_input" {
             return None;
         }
-        Some(json!({ "until": dismissal.until }))
+        Some(OutcomeDismissal {
+            until: dismissal.until,
+        })
     }
 }
 
 fn summary_preview(db: &Db<'_>, run: &str) -> Result<Value> {
-    let summary = db.run(run)?.map(|run| preview(text(&run, "summary")));
+    let summary =
+        db.0.prepare_cached("SELECT summary FROM runs WHERE id=?")?
+            .query_row([run], |row| row.get::<_, String>(0))
+            .optional()?
+            .map(|summary| preview(&summary));
     Ok(summary.filter(|preview| !preview.is_empty()).into())
 }
 
@@ -212,114 +225,152 @@ pub(crate) fn preview(summary: &str) -> String {
 }
 
 /// Records the completion the account actually saw, so opening an older run or a delayed
-/// request cannot consume newer work. String keys remain accepted for older clients.
-async fn mark(s: &Service, account: &str, body: &Value) -> Result<Value> {
-    let items = body["items"]
-        .as_array()
-        .filter(|items| !items.is_empty() && items.len() <= MAX_ITEMS)
-        .ok_or_else(|| Error::bad("List between 1 and 200 items to mark as read."))?;
+/// request cannot consume newer work.
+pub(crate) async fn mark(
+    s: &Service,
+    account: &str,
+    input: MarkReadInput,
+) -> Result<MarkReadOutput> {
+    if input.items.is_empty() || input.items.len() > MAX_ITEMS {
+        return Err(Error::bad("List between 1 and 200 items to mark as read."));
+    }
     let read_at = now();
-    let mut keys = Vec::with_capacity(items.len());
-    for item in items {
-        let (key, finished_at) = if let Some(key) = item.as_str() {
-            (key, read_at)
-        } else {
-            let finished_at = item["finishedAt"]
-                .as_i64()
-                .filter(|at| *at > 0 && *at <= read_at)
-                .ok_or_else(|| Error::bad("Include the finish time of the work you read."))?;
-            (text(item, "key"), finished_at)
-        };
-        let id = key
-            .strip_prefix("chat:")
-            .or_else(|| key.strip_prefix("task:"))
-            .ok_or_else(|| Error::bad("Mark conversations or missions as read."))?;
-        uuid(id)?;
-        keys.push((format!("{}{key}", marks_prefix(account)), finished_at));
+    if input
+        .items
+        .iter()
+        .any(|item| item.finished_at <= 0 || item.finished_at > read_at)
+    {
+        return Err(Error::bad("Include the finish time of the work you read."));
     }
-
-    begin(s, account).await?;
-    let count = keys.len();
+    let read = input.items.len() as u32;
+    let account = account.to_owned();
     s.store
         .transaction(move |db| {
-            for (key, finished_at) in &keys {
-                let previous = db.kv_as::<i64>(key)?.unwrap_or(0);
-                db.set(key, &previous.max(*finished_at).into(), None)?;
+            db.start_reading(&account, read_at)?;
+            for item in &input.items {
+                let (kind, id) = match &item.target {
+                    ReadTarget::Chat { chat_id } => (ReadKind::Chat, chat_id.to_string()),
+                    ReadTarget::Mission { task_id } => (ReadKind::Mission, task_id.to_string()),
+                };
+                db.mark_read(&account, kind, &id, item.finished_at)?;
             }
             Ok(())
         })
         .await?;
-    Ok(json!({ "read": count, "readAt": read_at }))
+    Ok(MarkReadOutput { read, read_at })
 }
 
-/// Sets blocked mission outcomes aside for the account, or brings them back with `restore`.
-/// `until` snoozes one rather than dismissing it.
-async fn dismiss(s: &Service, account: &str, body: &Value) -> Result<Value> {
-    let items = body["items"]
-        .as_array()
-        .filter(|items| !items.is_empty() && items.len() <= MAX_ITEMS)
-        .ok_or_else(|| Error::bad("List between 1 and 200 missions to set aside."))?;
+/// Sets a blocked mission outcome aside for the account, or brings it back.
+pub(crate) async fn set_aside(
+    s: &Service,
+    account: &str,
+    input: SetOutcomeAsideInput,
+) -> Result<SetOutcomeAsideOutput> {
     let at = now();
-    let mut changes = Vec::with_capacity(items.len());
-    for item in items {
-        let key = text(item, "key");
-        let id = key
-            .strip_prefix("task:")
-            .ok_or_else(|| Error::bad("Only mission outcomes can be set aside."))?;
-        uuid(id)?;
-        let stored = format!("{}{key}", dismissals_prefix(account));
-        if item["restore"] == true {
-            changes.push((stored, None));
-            continue;
+    let finished = |finished_at: i64| {
+        if finished_at <= 0 || finished_at > at {
+            return Err(Error::bad(
+                "Include the finish time of the outcome you set aside.",
+            ));
         }
-
-        let finished_at = item["finishedAt"]
-            .as_i64()
-            .filter(|finished| *finished > 0 && *finished <= at)
-            .ok_or_else(|| Error::bad("Include the finish time of the outcome you set aside."))?;
-        let until = match &item["until"] {
-            Value::Null => None,
-            until => Some(
-                until
-                    .as_i64()
-                    .filter(|until| *until > at && *until <= at + MAX_SNOOZE_MS)
-                    .ok_or_else(|| Error::bad("Snooze a mission for up to 30 days."))?,
-            ),
-        };
-        changes.push((stored, Some(Dismissal { finished_at, until })));
-    }
-
-    let count = changes.len();
-    s.store
-        .transaction(move |db| {
-            for (key, dismissal) in &changes {
-                match dismissal {
-                    Some(dismissal) => db.set_as(key, dismissal, None)?,
-                    None => db.delete(key)?,
-                }
-            }
-            Ok(())
-        })
-        .await?;
-    Ok(json!({ "updated": count }))
-}
-
-pub(crate) async fn routes(s: &Service, input: &Input) -> Option<Result<Value>> {
-    let dismissals = match (input.method.as_str(), input.path.as_str()) {
-        ("POST", "/api/reads") => false,
-        ("POST", "/api/dismissals") => true,
-        _ => return None,
+        Ok(finished_at)
     };
-    Some(match account(input) {
-        Ok(account) if dismissals => dismiss(s, account, &input.body).await,
-        Ok(account) => mark(s, account, &input.body).await,
-        Err(error) => Err(error),
+    let dismissal = match input.action {
+        OutcomeAsideAction::Restore => None,
+        OutcomeAsideAction::Dismiss { finished_at } => Some(StoredDismissal {
+            finished_at: finished(finished_at)?,
+            until: None,
+        }),
+        OutcomeAsideAction::Snooze { finished_at, until } => {
+            if until <= at || until > at + MAX_SNOOZE_MS {
+                return Err(Error::bad("Snooze a mission for up to 30 days."));
+            }
+            Some(StoredDismissal {
+                finished_at: finished(finished_at)?,
+                until: Some(until),
+            })
+        }
+    };
+    let account = account.to_owned();
+    let task = input.task_id.to_string();
+    s.store
+        .transaction(move |db| db.set_dismissal(&account, &task, dismissal))
+        .await?;
+    Ok(SetOutcomeAsideOutput {
+        task_id: input.task_id,
+        dismissal: dismissal.map(|dismissal| OutcomeDismissal {
+            until: dismissal.until,
+        }),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::preview;
+
+    #[tokio::test]
+    async fn unread_previews_do_not_read_execution_snapshots() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            let state = serde_json::from_value(serde_json::json!({
+                "id": "run", "taskId": "task", "status": "succeeded", "summary": "## Finished\n\nSaved **answer**.",
+            }))?;
+            db.admit_run(&state, None, &serde_json::json!({}), None)?;
+            Ok(())
+        }).await.unwrap();
+        let connection = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
+        let columns = connection
+            .prepare("PRAGMA table_xinfo(runs)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .map(|name| {
+                let name = name.unwrap();
+                if name == "snapshot" {
+                    "snapshot_probe(snapshot) AS snapshot".to_owned()
+                } else {
+                    format!("\"{name}\"")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        connection.execute_batch(&format!("ALTER TABLE runs RENAME TO retained_runs; CREATE VIEW runs AS SELECT {columns} FROM retained_runs;")).unwrap();
+        // SQLite retargets dependent views when the physical table is renamed.
+        // Rebind the wire view so this probe also guards its snapshot access.
+        connection.execute_batch("DROP VIEW run_views").unwrap();
+        connection
+            .execute_batch(crate::runs::PROJECTION_SCHEMA)
+            .unwrap();
+        connection
+            .create_scalar_function(
+                "snapshot_probe",
+                1,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+                |_| -> rusqlite::Result<String> {
+                    Err(rusqlite::Error::UserFunctionError(Box::new(
+                        std::io::Error::other("snapshot was read"),
+                    )))
+                },
+            )
+            .unwrap();
+        let db = crate::store::Db(&connection);
+        assert_eq!(
+            super::summary_preview(&db, "run").unwrap(),
+            "Finished. Saved answer."
+        );
+        assert!(super::summary_preview(&db, "missing").unwrap().is_null());
+        assert_eq!(db.runs(None, None, 10, 0, false).unwrap().len(), 1);
+        assert_eq!(db.run_page(None, None, 10, 0).unwrap().len(), 1);
+        assert!(
+            db.runs(None, None, 10, 0, true).is_err(),
+            "the full SQL wire view must exercise the probe"
+        );
+        assert!(
+            db.run("run").is_err(),
+            "the full run read must exercise the probe"
+        );
+    }
 
     #[test]
     fn previews_read_as_one_plain_line() {

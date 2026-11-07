@@ -1,0 +1,5 @@
+name: Observe backend with durable checkpoints
+description: Publish bounded immutable receipts during diagnostic-only backend execution.
+runs:
+  using: node24
+  main: index.mjs

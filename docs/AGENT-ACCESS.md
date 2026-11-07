@@ -69,14 +69,9 @@ queued. Reducing an agent's access (fewer projects, skills, MCP servers or tools
 or a stricter sandbox) prevents its queued runs, resumptions and chat
 follow-ups from executing under the old grants, and revokes their project and MCP
 access; enqueue again or start a new chat to use the new policy. Unchanged or wider
-access, other agent settings, settings older versions saved and node grants do not
+access, other saved agent settings and node grants do not
 interrupt work: it continues with the grants it was queued with. Running work keeps
 its snapshot: cancel it before changing permissions when immediate revocation matters.
-
-Existing tasks retain their project, explicit skills, schedules, and history.
-Existing agents retain unrestricted YOLO behavior. Database schema 3 is required;
-back up before upgrading from 0.1.x. Restore the matching schema-2 backup as well as
-the old image if rolling back.
 
 ## Execution modes
 

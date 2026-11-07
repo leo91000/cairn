@@ -1,3 +1,10 @@
+use crate::common::run_fixture::DbRunFixture;
+use crate::common::run_fixture::RunFixture;
+use common::AgentFixture;
+use common::MissionFixture;
+use common::ProjectFixture;
+use common::StoreAgentFixture;
+
 mod common;
 
 use cairn_installation::plugins::run_credentials::RunCredentials;
@@ -33,7 +40,7 @@ async fn fixture() -> (TempDir, Arc<Service>, Vec<Value>) {
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join("hello"), name).unwrap();
         projects.push(
-            s.project(json!({ "name": name, "path": path }), None)
+            s.project_fixture(json!({ "name": name, "path": path }), None)
                 .await
                 .unwrap(),
         );
@@ -49,12 +56,15 @@ async fn run(s: &Service, project: Value, agent: &str) -> Value {
         "projectId": project,
         "prompt": "Hello",
     });
-    let task = s.task(task, None).await.unwrap();
+    let task = s.task_fixture(task, None).await.unwrap();
     s.enqueue(text(&task, "id"), "manual", None).await.unwrap()
 }
 
 async fn patch_run(s: &Service, run: &Value, patch: Value) {
-    s.store.patch_run(text(run, "id"), patch).await.unwrap();
+    s.store
+        .change_run_fixture(text(run, "id"), patch)
+        .await
+        .unwrap();
 }
 
 /// Marks `run` running and returns the MCP token of its grant.
@@ -105,6 +115,10 @@ async fn empty_start_does_not_touch_unselected_repositories_and_selected_start_l
         !prompt.contains(text(&projects[0], "path")),
         "host paths must not be advertised as guest workspaces"
     );
+    empty["chatExecution"] = json!({ "plan": true });
+    let plan_prompt = run_output::prompt(&empty, true);
+    assert!(plan_prompt.contains("Plan turns cannot import project files"));
+    assert!(!plan_prompt.contains("call cairn_workspace.open_project"));
     std::fs::create_dir(text(&projects[1], "path")).unwrap();
     let selected = run(&s, projects[0]["id"].clone(), MAIN_AGENT_ID).await;
     let prepared = execution::prepare(&selected, &s.config, &RunCredentials::default(), None, None)
@@ -140,7 +154,7 @@ async fn managed_resume_does_not_depend_on_unopened_project_sources() {
                 Value::Null
             };
             let mut run = run(&s, project, MAIN_AGENT_ID).await;
-            run["executionBackend"] = backend.into();
+            run["snapshot"]["agent"]["access"]["backend"] = backend.into();
             let prepared =
                 execution::prepare(&run, &s.config, &RunCredentials::default(), None, None)
                     .await
@@ -193,16 +207,13 @@ fn access_covers_unchanged_or_wider_grants_but_not_reduced_ones() {
         "skills": null,
         "mcps": ["m"],
         "mcpTools": { "m": ["read"] },
-        "github": false,
         "sandbox": "workspace-write",
         "nodes": ["laptop"],
-        "maxResources": null,
     }));
     let same = agent(json!({
         "projects": ["a"],
         "mcps": ["m"],
         "mcpTools": { "m": ["read"] },
-        "github": false,
         "sandbox": "workspace-write",
         "nodes": null,
     }));
@@ -211,7 +222,6 @@ fn access_covers_unchanged_or_wider_grants_but_not_reduced_ones() {
         "projects": ["a", "b"],
         "mcps": null,
         "mcpTools": {},
-        "github": false,
         "sandbox": "yolo",
     }));
     assert!(covers(&wider, &granted));
@@ -228,12 +238,6 @@ fn access_covers_unchanged_or_wider_grants_but_not_reduced_ones() {
         reduced["access"][key] = value;
         assert!(!covers(&reduced, &granted), "{key}");
     }
-    // GitHub became a plugin grant: the setting older snapshots carry no longer counts.
-    let mut github = same.clone();
-    github["access"]["github"] = false.into();
-    let mut with_github = granted.clone();
-    with_github["access"]["github"] = true.into();
-    assert!(covers(&github, &with_github));
 }
 
 #[tokio::test]
@@ -242,11 +246,11 @@ async fn scoped_access_rejects_other_projects_expired_grants_and_reduced_permiss
     let mut restricted = restricted_agent("Restricted");
     restricted["access"]["projects"] = json!([projects[0]["id"]]);
     restricted["access"]["sandbox"] = "read-only".into();
-    let agent = s.agent(restricted, None).await.unwrap();
+    let agent = s.agent_fixture(restricted, None).await.unwrap();
     let run = run(&s, Value::Null, text(&agent, "id")).await;
     patch_run(&s, &run, json!({ "status": RunStatus::Running })).await;
     let config = s.mcps.run_configuration(&s, &run).await.unwrap();
-    assert!(config["args"].to_string().contains("cairn_workspace"));
+    assert!(config["codexConfig"].get("cairn_workspace").is_some());
     let token = text(&config["env"], "CAIRN_MCP_RUN_TOKEN");
     assert_eq!(
         s.projects
@@ -260,11 +264,11 @@ async fn scoped_access_rejects_other_projects_expired_grants_and_reduced_permiss
     let mut widened = agent.clone();
     widened["access"]["projects"] = json!([projects[0]["id"], projects[1]["id"]]);
     widened["access"]["sandbox"] = "workspace-write".into();
-    s.store.put("agents", widened).await.unwrap();
+    s.store.put_agent_fixture(widened).await.unwrap();
     project_workspaces::authorize(&s, token).await.unwrap();
     let mut changed = agent.clone();
     changed["access"]["projects"] = json!([]);
-    s.store.put("agents", changed).await.unwrap();
+    s.store.put_agent_fixture(changed).await.unwrap();
     assert_eq!(
         project_workspaces::authorize(&s, token)
             .await
@@ -346,13 +350,6 @@ async fn open_imports_once_reuses_seed_and_restores_loaded_catalog_without_check
         .await
         .unwrap();
     assert_eq!(restored["workspaces"], saved["workspaces"]);
-    let mut legacy = restored.clone();
-    legacy.as_object_mut().unwrap().remove("projectRoot");
-    let upgraded = execution::restore(&saved, legacy, &s.config, &RunCredentials::default())
-        .await
-        .unwrap();
-    assert_eq!(upgraded["projectRoot"], restored["projectRoot"]);
-    assert_eq!(upgraded["workspaces"], restored["workspaces"]);
     assert_eq!(calls.lock().await.len(), 3);
     server.abort();
 }
@@ -369,16 +366,16 @@ async fn delivered_message_retains_its_original_submission_timestamp() {
         .chat_send(text(&chat, "id"), json!({ "id": id(), "text": "Hello" }))
         .await
         .unwrap();
-    let mut chat = chat;
+    let mut chat = s.conversation_boundary(text(&chat, "id")).await.unwrap();
     chat["runId"] = run["id"].clone();
-    s.store.put("chats", chat).await.unwrap();
+    s.store.save_conversation_boundary(chat).await.unwrap();
     s.chat_acknowledge(text(&run, "id"), text(&message, "id"))
         .await
         .unwrap();
     let run_id = text(&run, "id").to_owned();
     let events = s
         .store
-        .read(move |db| db.events(&run_id, 0, 100))
+        .read(move |db| db.events_fixture(&run_id, 0, 100))
         .await
         .unwrap();
     let event = events.iter().find(|e| e["type"] == "chat.user").unwrap();
@@ -404,42 +401,82 @@ async fn builtin_mcp_endpoint_exposes_scoped_workspace_tools_and_checks_the_run_
     let token = &running_run_token(&s, &run).await;
     let client = reqwest::Client::new();
     let endpoint = format!("{url}/mcp-workspace");
-    for (method, params) in [
-        ("initialize", json!({ "protocolVersion": "2025-11-25" })),
-        ("tools/list", json!({})),
+    for version in [
+        cairn_installation::mcp_client::LEGACY,
+        cairn_installation::mcp_client::MODERN,
     ] {
-        let response = client
-            .post(&endpoint)
-            .bearer_auth(token)
-            .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }))
-            .send()
-            .await
-            .unwrap();
-        assert!(response.status().is_success());
-        assert_eq!(response.headers()["cache-control"], "no-store");
-        let value: Value = response.json().await.unwrap();
-        assert!(value["error"].is_null(), "{value}");
-        if method == "tools/list" {
-            // Plugin tools such as 1Password's appear only for agents granted an instance.
-            let tools = value["result"]["tools"].as_array().unwrap();
-            assert_eq!(tools.len(), 13);
-            assert!(
-                !tools
+        let negotiation = if version == cairn_installation::mcp_client::MODERN {
+            "server/discover"
+        } else {
+            "initialize"
+        };
+        let mut status_schema = Value::Null;
+        for (method, params) in [
+            (negotiation, json!({ "protocolVersion": version })),
+            ("tools/list", json!({})),
+            (
+                "tools/call",
+                json!({ "name": "exclusive_status", "arguments": {} }),
+            ),
+        ] {
+            let response = client
+                .post(&endpoint)
+                .bearer_auth(token)
+                .header("mcp-protocol-version", version)
+                .header("mcp-method", method)
+                .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }))
+                .send()
+                .await
+                .unwrap();
+            assert!(response.status().is_success());
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            let value: Value = response.json().await.unwrap();
+            assert!(value["error"].is_null(), "{value}");
+            if method == "tools/list" {
+                // Plugin tools such as 1Password's appear only for agents granted an instance.
+                let tools = value["result"]["tools"].as_array().unwrap();
+                assert_eq!(tools.len(), 14);
+                assert!(
+                    !tools
+                        .iter()
+                        .any(|tool| tool["name"] == "onepassword" || tool["name"] == "sleep")
+                );
+                for name in [
+                    "ask_questions",
+                    "wait_for",
+                    "acquire_exclusive",
+                    "release_exclusive",
+                    "exclusive_status",
+                    "renew_exclusive",
+                ] {
+                    assert!(tools.iter().any(|tool| tool["name"] == name));
+                }
+                assert_eq!(value["result"]["tools"][2]["name"], "list_nodes");
+                assert_eq!(value["result"]["tools"][1]["name"], "publish_artifact");
+                assert_eq!(value["result"]["tools"][0]["name"], "open_project");
+                for tool in tools {
+                    if let Some(schema) = tool.get("outputSchema") {
+                        // A legacy MCP Tool accepts only an object output-schema root.
+                        // Validate the complete returned catalogue, not a hand-built descriptor.
+                        assert_eq!(schema["type"], "object", "{version}: {tool}");
+                    }
+                }
+                status_schema = tools
                     .iter()
-                    .any(|tool| tool["name"] == "onepassword" || tool["name"] == "sleep")
-            );
-            for name in [
-                "wait_for",
-                "acquire_exclusive",
-                "release_exclusive",
-                "exclusive_status",
-                "renew_exclusive",
-            ] {
-                assert!(tools.iter().any(|tool| tool["name"] == name));
+                    .find(|tool| tool["name"] == "exclusive_status")
+                    .unwrap()["outputSchema"]
+                    .clone();
+            } else if method == "tools/call" {
+                assert_ne!(value["result"]["isError"], true, "{value}");
+                let structured = &value["result"]["structuredContent"];
+                assert_eq!(
+                    structured,
+                    &json!({ "reservations": [] }),
+                    "{version}: {value}"
+                );
+                let validator = jsonschema::validator_for(&status_schema).unwrap();
+                assert!(validator.is_valid(structured), "{version}: {value}");
             }
-            assert_eq!(value["result"]["tools"][2]["name"], "list_nodes");
-            assert_eq!(value["result"]["tools"][1]["name"], "publish_artifact");
-            assert_eq!(value["result"]["tools"][0]["name"], "open_project");
         }
     }
     s.mcps.revoke_run(&s, text(&run, "id")).await.unwrap();
@@ -452,6 +489,165 @@ async fn builtin_mcp_endpoint_exposes_scoped_workspace_tools_and_checks_the_run_
         .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
     server.abort();
+}
+
+/// Sends one JSON-RPC request to the built-in workspace MCP.
+async fn workspace_rpc(s: &Arc<Service>, token: &str, method: &str, params: Value) -> Value {
+    let app = cairn_installation::http::router(s.clone()).await.unwrap();
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    let request = common::request("POST", "/mcp-workspace")
+        .header("authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    common::read_json(common::send(&app, request).await).await
+}
+
+fn tool_names(listing: &Value) -> Vec<String> {
+    let mut names = listing["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| text(tool, "name").to_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn plan_turns_list_and_call_only_workspace_tools_without_effects() {
+    let (_root, s, _) = fixture().await;
+    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let planning = json!({ "messageId": "plan-message", "text": "Plan", "plan": true });
+    patch_run(
+        &s,
+        &run,
+        json!({ "status": RunStatus::Running, "chatExecution": planning }),
+    )
+    .await;
+    let run = s.store.run(text(&run, "id")).await.unwrap();
+    let token = run_token(&s, &run).await;
+
+    let listing = workspace_rpc(&s, &token, "tools/list", json!({})).await;
+    assert_eq!(
+        tool_names(&listing),
+        [
+            "ask_questions",
+            "exclusive_status",
+            "list_nodes",
+            "pending_questions",
+            "withdraw_question"
+        ]
+    );
+    for (name, arguments) in [
+        ("open_project", json!({ "projectId": id() })),
+        ("publish_artifact", json!({ "path": "result.md" })),
+        ("wait_for", json!({ "delay": 60 })),
+        (
+            "report_outcome",
+            json!({ "status": "completed", "reason": "Done" }),
+        ),
+        ("acquire_exclusive", json!({})),
+        ("onepassword", json!({})),
+    ] {
+        let response = workspace_rpc(
+            &s,
+            &token,
+            "tools/call",
+            json!({ "name": name, "arguments": arguments }),
+        )
+        .await;
+        assert_eq!(response["result"]["isError"], true, "{name}: {response}");
+        assert!(
+            response.to_string().contains("plan turn"),
+            "{name}: {response}"
+        );
+    }
+    let pending = workspace_rpc(
+        &s,
+        &token,
+        "tools/call",
+        json!({ "name": "pending_questions", "arguments": {} }),
+    )
+    .await;
+    assert!(!pending.to_string().contains("plan turn"), "{pending}");
+
+    // A plan turn can ask the user; the answer continues the plan, never implementation.
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = text(&chat, "id").to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    let ask = |request: &str| {
+        json!({
+            "name": "ask_questions",
+            "arguments": {
+                "requestId": request,
+                "questions": [{ "id": "scope", "title": "Which scope?", "options": [{ "id": "web", "label": "Web" }] }],
+            },
+        })
+    };
+    let answer = |s: Arc<Service>, question: &str| {
+        let (chat_id, question) = (chat_id.clone(), question.to_owned());
+        async move {
+            let id = id();
+            s.question_answer(
+                &chat_id,
+                &question,
+                json!({ "id": id, "answers": { "scope": { "selected": ["web"] } } }),
+            )
+            .await
+            .unwrap();
+            let detail = s.chat_detail(&chat_id).await.unwrap();
+            detail["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|message| message["id"] == id.as_str())
+                .unwrap()
+                .clone()
+        }
+    };
+    let asked = workspace_rpc(&s, &token, "tools/call", ask(&id().to_string())).await;
+    assert_ne!(asked["result"]["isError"], true, "{asked}");
+    let later = workspace_rpc(&s, &token, "tools/call", ask(&id().to_string())).await;
+    let during = answer(
+        s.clone(),
+        text(&asked["result"]["structuredContent"], "questionId"),
+    )
+    .await;
+    assert_eq!(during["plan"], true);
+    assert_eq!(during["mode"], "steer");
+    // Once a turn that can change files runs, the answer waits for its own plan turn.
+    let ordinary = json!({ "messageId": "ordinary-message", "text": "Implement" });
+    patch_run(&s, &run, json!({ "chatExecution": ordinary })).await;
+    // Reopen the real database through a new service before answering.
+    let restarted = Service::new(s.config.clone()).await.unwrap();
+    let after = answer(
+        restarted,
+        text(&later["result"]["structuredContent"], "questionId"),
+    )
+    .await;
+    assert_eq!(after["plan"], true);
+    assert_eq!(after["mode"], "queue");
+    // A question asked by a turn that can change files keeps an ordinary answer.
+    let current = s.store.run(text(&run, "id")).await.unwrap();
+    let ordinary_token = run_token(&s, &current).await;
+    let asked = workspace_rpc(&s, &ordinary_token, "tools/call", ask(&id().to_string())).await;
+    assert_ne!(asked["result"]["isError"], true, "{asked}");
+    let plain = answer(
+        s.clone(),
+        text(&asked["result"]["structuredContent"], "questionId"),
+    )
+    .await;
+    assert!(plain.get("plan").is_none(), "{plain}");
+    assert_eq!(plain["mode"], "steer");
+
+    // The next turn's grant offers the whole catalog again.
+    let next = json!({ "messageId": "next-message", "text": "Implement", "afterPlan": true });
+    patch_run(&s, &run, json!({ "chatExecution": next })).await;
+    let run = s.store.run(text(&run, "id")).await.unwrap();
+    let token = run_token(&s, &run).await;
+    let listing = workspace_rpc(&s, &token, "tools/list", json!({})).await;
+    assert_eq!(tool_names(&listing).len(), 14);
 }
 
 #[tokio::test]
@@ -504,7 +700,10 @@ fn git(directory: &Path, args: &[&str]) -> String {
 
 async fn archive_seed(s: &Service, project: &Value, root: &Path) -> PathBuf {
     std::fs::create_dir(root).unwrap();
-    let run = json!({ "id": id(), "snapshot": { "agent": { "access": { "backend": "native" } }, "task": { "worktree": true } } });
+    let run = json!({
+        "id": id(),
+        "snapshot": { "agent": { "access": { "backend": "native" } }, "task": { "worktree": true } },
+    });
     let entry = execution::project_seed(&run, project, &s.config, root, &RunCredentials::default())
         .await
         .unwrap();
@@ -531,7 +730,7 @@ async fn new_git_work_is_fresh_and_local_snapshots_preserve_the_registered_check
     let current = git(&origin, &["rev-parse", "HEAD"]);
     std::fs::write(source.join("file"), "uncommitted").unwrap();
     let mut project = s
-        .project(json!({ "name": "Git", "path": source }), None)
+        .project_fixture(json!({ "name": "Git", "path": source }), None)
         .await
         .unwrap();
     let fresh = root.path().join("fresh");
@@ -683,7 +882,7 @@ async fn partial_clone_missing_blobs_are_fetched_from_the_real_promisor() {
         "fixture must actually omit blobs"
     );
     let mut project = s
-        .project(json!({ "name": "Partial", "path": source }), None)
+        .project_fixture(json!({ "name": "Partial", "path": source }), None)
         .await
         .unwrap();
     for mode in ["remote", "local"] {
@@ -839,7 +1038,7 @@ async fn isolated_commits_keep_the_configured_owner_for_main_and_restricted_agen
     )
     .unwrap();
     let agent = s
-        .agent(restricted_agent("Another agent"), None)
+        .agent_fixture(restricted_agent("Another agent"), None)
         .await
         .unwrap();
     for agent_id in [MAIN_AGENT_ID, text(&agent, "id")] {
@@ -876,7 +1075,7 @@ async fn isolated_commits_fall_back_to_the_granted_plugin_account() {
     )
     .unwrap();
     let agent = s
-        .agent(restricted_agent("Dedicated agent"), None)
+        .agent_fixture(restricted_agent("Dedicated agent"), None)
         .await
         .unwrap();
     for (agent_id, name, expected) in [
@@ -950,7 +1149,7 @@ async fn question_tools_only_withdraw_the_authorized_conversations_pending_quest
     let mut chat = s.chat_create(json!({})).await.unwrap();
     chat["runId"] = run["id"].clone();
     let chat_id = text(&chat, "id").to_owned();
-    s.store.put("chats", chat).await.unwrap();
+    s.store.save_conversation_boundary(chat).await.unwrap();
     let question = "a".repeat(64);
     s.question_receive(text(&run, "id"), json!({
         "id": question, "blocking": true, "fields": [{ "id": "scope", "title": "Still needed?" }],
@@ -1006,4 +1205,631 @@ async fn question_tools_only_withdraw_the_authorized_conversations_pending_quest
     .await;
     // Authorization errors can be returned as tool errors, never as question data.
     assert!(revoked.is_err() || revoked.unwrap()["isError"] == true);
+}
+
+#[tokio::test]
+async fn common_questionnaires_are_idempotent_and_keep_choices_distinct_from_comments() {
+    let (_root, s, _) = fixture().await;
+    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let bearer = running_run_token(&s, &run).await;
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = text(&chat, "id").to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    let input = json!({
+        "requestId": id(),
+        "questions": [
+            {
+                "id": "platforms",
+                "title": "Which platforms?",
+                "mode": "multiple",
+                "minChoices": 2,
+                "maxChoices": 2,
+                "options": [
+                    {
+                        "id": "android",
+                        "label": "Android",
+                        "recommended": true,
+                    },
+                    {
+                        "id": "web",
+                        "label": "Web",
+                    },
+                ],
+            },
+        ],
+    });
+    let call = |args: Value| {
+        json!({
+            "name": "ask_questions",
+            "arguments": args,
+        })
+    };
+    let created = project_workspaces::rpc(&s, &bearer, "tools/call", &call(input.clone()))
+        .await
+        .unwrap();
+    assert_ne!(created["isError"], true, "{created}");
+    let question_id = text(&created["structuredContent"], "questionId");
+    assert!(!question_id.is_empty());
+    let repeated = project_workspaces::rpc(&s, &bearer, "tools/call", &call(input.clone()))
+        .await
+        .unwrap();
+    assert_eq!(repeated["structuredContent"]["questionId"], question_id);
+    assert_eq!(
+        s.chat_detail(&chat_id).await.unwrap()["questions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    // A native session closing must not erase a common questionnaire.
+    s.question_release(text(&run, "id"), None).await.unwrap();
+    assert_eq!(
+        s.chat_detail(&chat_id).await.unwrap()["questions"][0]["status"],
+        "pending"
+    );
+    let invalid = json!({
+        "id": id(),
+        "answers": {
+            "platforms": {
+                "selected": [
+                    "android",
+                ],
+                "comment": "Android first",
+            },
+        },
+    });
+    assert!(
+        s.question_answer(&chat_id, question_id, invalid)
+            .await
+            .is_err()
+    );
+    let answer = json!({
+        "id": id(),
+        "answers": {
+            "platforms": {
+                "selected": [
+                    "android",
+                    "web",
+                ],
+                "comment": "Android first",
+            },
+        },
+    });
+    s.question_answer(&chat_id, question_id, answer.clone())
+        .await
+        .unwrap();
+    s.question_answer(&chat_id, question_id, answer)
+        .await
+        .unwrap();
+    let detail = s.chat_detail(&chat_id).await.unwrap();
+    assert_eq!(detail["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        detail["messages"][0]["answers"]["platforms"]["selected"],
+        json!(["android", "web",])
+    );
+    assert_eq!(
+        detail["messages"][0]["answers"]["platforms"]["comment"],
+        "Android first"
+    );
+    assert!(text(&detail["messages"][0], "text").contains("Android first"));
+}
+
+#[tokio::test]
+async fn common_questionnaires_validate_bounds_complete_groups_and_text_only_alternatives() {
+    let (_root, s, _) = fixture().await;
+    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let bearer = running_run_token(&s, &run).await;
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = text(&chat, "id").to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    let input = json!({
+        "requestId": id(),
+        "questions": [
+            {
+                "id": "platforms",
+                "title": "Which platforms?",
+                "mode": "multiple",
+                "minChoices": 2,
+                "maxChoices": 2,
+                "options": [
+                    {
+                        "id": "android",
+                        "label": "Android",
+                    },
+                    {
+                        "id": "web",
+                        "label": "Web",
+                    },
+                    {
+                        "id": "desktop",
+                        "label": "Desktop",
+                    },
+                ],
+            },
+            {
+                "id": "note",
+                "title": "Next step?",
+            },
+        ],
+    });
+    let call = |args: Value| {
+        json!({
+            "name": "ask_questions",
+            "arguments": args,
+        })
+    };
+    for invalid in [
+        json!({
+            "mode": "single",
+            "maxChoices": 2,
+        }),
+        json!({
+            "minChoices": 3,
+            "maxChoices": 2,
+        }),
+        json!({
+            "maxChoices": 4,
+        }),
+        json!({
+            "options": [
+                {
+                    "id": "same",
+                    "label": "A",
+                },
+                {
+                    "id": "same",
+                    "label": "B",
+                },
+            ],
+        }),
+    ] {
+        let mut args = input.clone();
+        cairn_installation::store::merge(&mut args["questions"][0], &invalid);
+        let rejected = project_workspaces::rpc(&s, &bearer, "tools/call", &call(args))
+            .await
+            .unwrap();
+        assert_eq!(rejected["isError"], true, "{rejected}");
+    }
+    let created = project_workspaces::rpc(&s, &bearer, "tools/call", &call(input.clone()))
+        .await
+        .unwrap();
+    let question = text(&created["structuredContent"], "questionId");
+    let mut changed = input;
+    changed["questions"][0]["title"] = "Different content".into();
+    assert_eq!(
+        project_workspaces::rpc(&s, &bearer, "tools/call", &call(changed))
+            .await
+            .unwrap()["isError"],
+        true
+    );
+    for selected in [
+        json!(["android",]),
+        json!(["android", "android",]),
+        json!(["android", "missing",]),
+        json!(["android", "web", "desktop",]),
+    ] {
+        assert!(
+            s.question_answer(
+                &chat_id,
+                question,
+                json!({
+                    "id": id(),
+                    "answers": {
+                        "platforms": {
+                            "selected": selected,
+                            "comment": "A comment does not count as a choice",
+                        },
+                        "note": {
+                            "comment": "Next",
+                        },
+                    },
+                })
+            )
+            .await
+            .is_err()
+        );
+    }
+    for answers in [
+        json!({
+            "platforms": {
+                "comment": "Text only",
+            },
+        }),
+        json!({
+            "platforms": {
+                "comment": "Text only",
+            },
+            "note": {},
+        }),
+    ] {
+        assert!(
+            s.question_answer(
+                &chat_id,
+                question,
+                json!({
+                    "id": id(),
+                    "answers": answers,
+                })
+            )
+            .await
+            .is_err()
+        );
+    }
+    let answer = json!({
+        "id": id(),
+        "answers": {
+            "platforms": {
+                "comment": "  Another idea  ",
+            },
+            "note": {
+                "comment": "Next",
+            },
+        },
+    });
+    s.question_answer(&chat_id, question, answer.clone())
+        .await
+        .unwrap();
+    let detail = s.chat_detail(&chat_id).await.unwrap();
+    assert_eq!(
+        detail["messages"][0]["answers"]["platforms"],
+        json!({
+            "selected": [],
+            "comment": "Another idea",
+        })
+    );
+    assert!(
+        s.chat_edit(&chat_id, text(&answer, "id"), None)
+            .await
+            .is_err()
+    );
+    assert!(
+        s.chat_edit(
+            &chat_id,
+            text(&answer, "id"),
+            Some(json!({
+                "text": "Replacement",
+            }))
+        )
+        .await
+        .is_err()
+    );
+    let pending = json!({
+        "requestId": id(),
+        "questions": [
+            {
+                "id": "followup",
+                "title": "Anything else?",
+            },
+        ],
+    });
+    let pending = project_workspaces::rpc(&s, &bearer, "tools/call", &call(pending))
+        .await
+        .unwrap();
+    s.question_complete(text(&run, "id")).await.unwrap();
+    let detail = s.chat_detail(&chat_id).await.unwrap();
+    assert!(
+        detail["questions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|q| q["id"] == pending["structuredContent"]["questionId"]
+                && q["status"] == "cancelled")
+    );
+    assert_eq!(detail["messages"].as_array().unwrap().len(), 1);
+    patch_run(
+        &s,
+        &run,
+        json!({
+            "status": RunStatus::Succeeded,
+        }),
+    )
+    .await;
+    let revoked = project_workspaces::rpc(
+        &s,
+        &bearer,
+        "tools/call",
+        &call(json!({
+            "requestId": id(),
+            "questions": [
+                {
+                    "id": "q",
+                    "title": "Forbidden?",
+                },
+            ],
+        })),
+    )
+    .await;
+    assert!(revoked.is_err() || revoked.unwrap()["isError"] == true);
+}
+
+#[tokio::test]
+async fn valid_large_choice_answers_use_the_questionnaire_delivery_budget() {
+    let (_root, s, _) = fixture().await;
+    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    let bearer = running_run_token(&s, &run).await;
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = text(&chat, "id").to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    let options = (0..30)
+        .map(|i| {
+            json!({
+                "id": i.to_string(),
+                "label": "a".repeat(2000),
+            })
+        })
+        .collect::<Vec<_>>();
+    let field = json!({
+        "id": "choices",
+        "title": "Select the relevant choices",
+        "mode": "multiple",
+        "options": options,
+    });
+    let call = |questions: Value| {
+        json!({
+            "name": "ask_questions",
+            "arguments": {
+                "requestId": id(),
+                "questions": questions,
+            },
+        })
+    };
+    let created =
+        project_workspaces::rpc(&s, &bearer, "tools/call", &call(json!([field.clone(),])))
+            .await
+            .unwrap();
+    assert_ne!(created["isError"], true, "{created}");
+    s.question_answer(
+        &chat_id,
+        text(&created["structuredContent"], "questionId"),
+        json!({
+            "id": id(),
+            "answers": {
+                "choices": {
+                    "selected": (0..30).map(|i| i.to_string()).collect::<Vec<_>>(),
+                },
+            },
+        }),
+    )
+    .await
+    .unwrap();
+    let detail = s.chat_detail(&chat_id).await.unwrap();
+    assert!(text(&detail["messages"][0], "text").len() > 50_000);
+    let mut other = field.clone();
+    other["id"] = "other".into();
+    let oversized =
+        project_workspaces::rpc(&s, &bearer, "tools/call", &call(json!([field, other,])))
+            .await
+            .unwrap();
+    assert_eq!(oversized["isError"], true, "{oversized}");
+}
+
+#[tokio::test]
+async fn concurrent_large_questionnaire_responses_are_delivered_in_bounded_batches() {
+    let (_root, s, _) = fixture().await;
+    let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    running_run_token(&s, &run).await;
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = text(&chat, "id").to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    let fields = (0..20)
+        .map(|i| {
+            json!({
+                "id": i.to_string(),
+                "title": "Details",
+            })
+        })
+        .collect::<Vec<_>>();
+    let answers = (0..20)
+        .map(|i| {
+            (
+                i.to_string(),
+                json!({
+                    "comment": "\0".repeat(10_000),
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    for digit in ["3", "4"] {
+        let question = digit.repeat(64);
+        s.question_receive(
+            text(&run, "id"),
+            json!({
+                "id": question,
+                "blocking": false,
+                "fields": fields,
+            }),
+        )
+        .await
+        .unwrap();
+        s.question_answer(
+            &chat_id,
+            &question,
+            json!({
+                "id": id(),
+                "answers": answers,
+            }),
+        )
+        .await
+        .unwrap();
+    }
+    let inbox = s
+        .config
+        .data_dir
+        .join("runs")
+        .join(text(&run, "id"))
+        .join("chat-input/messages.json");
+    let mut received = Vec::new();
+    for _ in 0..2 {
+        s.chat_tick(&std::collections::HashSet::new())
+            .await
+            .unwrap();
+        let bytes = tokio::fs::read(&inbox).await.unwrap();
+        assert!(bytes.len() <= 2_000_000);
+        let messages: Vec<Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0]["answers"].is_null());
+        let message = text(&messages[0], "id");
+        assert!(!received.iter().any(|old| old == message));
+        received.push(message.to_owned());
+        s.chat_acknowledge(text(&run, "id"), message).await.unwrap();
+    }
+    assert_eq!(received.len(), 2);
+}
+
+#[tokio::test]
+async fn plan_question_can_be_retired_after_chat_clarification_without_answer_or_authorization() {
+    let (_root, s, _) = fixture().await;
+    let original = run(&s, Value::Null, MAIN_AGENT_ID).await;
+    patch_run(
+        &s,
+        &original,
+        json!({
+            "status": RunStatus::Running,
+            "chatExecution": { "messageId": "plan-request", "text": "Explore", "plan": true }
+        }),
+    )
+    .await;
+    let current = s.store.run(text(&original, "id")).await.unwrap();
+    let token = run_token(&s, &current).await;
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = current["id"].clone();
+    let chat_id = text(&chat, "id").to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    let asked = workspace_rpc(&s, &token, "tools/call", json!({
+        "name": "ask_questions", "arguments": {
+            "requestId": id(),
+            "questions": [{ "id": "scope", "title": "Which scope?", "options": [{ "id": "web", "label": "Web" }] }]
+        }
+    })).await;
+    assert_ne!(asked["result"]["isError"], true, "{asked}");
+    let question = text(&asked["result"]["structuredContent"], "questionId").to_owned();
+    let sent = s
+        .chat_send(
+            &chat_id,
+            json!({ "id": id(), "text": "Only explore the web client.", "mode": "queue" }),
+        )
+        .await
+        .unwrap();
+    let before = s.chat_detail(&chat_id).await.unwrap()["messages"].clone();
+    let withdrawn = workspace_rpc(
+        &s,
+        &token,
+        "tools/call",
+        json!({ "name": "withdraw_question", "arguments": { "questionId": question } }),
+    )
+    .await;
+    assert_eq!(
+        withdrawn["result"]["structuredContent"]["status"], "cancelled",
+        "{withdrawn}"
+    );
+    assert_eq!(s.chat_detail(&chat_id).await.unwrap()["messages"], before);
+    assert_ne!(sent["plan"], true);
+    s.store.event(text(&current, "id"), &cairn_contracts::EventKind::ItemCompleted, "", Some(json!({
+        "item": { "id": "approach", "type": "proposed_plan", "text": "Read the web caller, then propose tests.", "request_id": "plan-request" }
+    }))).await.unwrap();
+    let reopened = Service::new(s.config.clone()).await.unwrap();
+    let question_id = question.clone();
+    let saved = reopened
+        .store
+        .read(move |db| {
+            Ok(db.0.query_row(
+                "SELECT status,plan FROM chat_questions WHERE id=?",
+                [question_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(saved, ("cancelled".to_owned(), true));
+    assert_eq!(
+        reopened.chat_detail(&chat_id).await.unwrap()["messages"],
+        before
+    );
+}
+
+#[tokio::test]
+async fn plan_policy_read_failure_cannot_write_outcome_or_dispatch_plugin_command() {
+    for plugin in [false, true] {
+        let (_root, s, _) = fixture().await;
+        let run = run(&s, Value::Null, MAIN_AGENT_ID).await;
+        patch_run(
+            &s,
+            &run,
+            json!({
+                "status": RunStatus::Running,
+                "chatExecution": { "messageId": "plan-message", "text": "Plan", "plan": true }
+            }),
+        )
+        .await;
+        let run = s.store.run(text(&run, "id")).await.unwrap();
+        let token = run_token(&s, &run).await;
+        let app = cairn_installation::http::router(s.clone()).await.unwrap();
+        common::policy_read_fault::fail_next_grant_read(&s.store).await;
+        if plugin {
+            // With the old swallowed read error this proceeds to command lookup
+            // and returns 404. The policy error must stop dispatch first.
+            let request = common::request("POST", "/plugin-command")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from(
+                    json!({ "plugin": "not-installed", "command": "mutate", "arguments": [] })
+                        .to_string(),
+                ))
+                .unwrap();
+            let response = common::send(&app, request).await;
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            );
+        } else {
+            // Call the real MCP dispatcher after endpoint authentication, so the
+            // one-shot failure occurs in the Plan guard, not the outer HTTP gate.
+            let result = project_workspaces::rpc(
+                &s,
+                &token,
+                "tools/call",
+                &json!({
+                    "name": "report_outcome",
+                    "arguments": { "status": "completed", "reason": "Must not write", "evidence": ["synthetic fixture"] }
+                }),
+            )
+            .await;
+            assert_eq!(result.unwrap_err().status, 500);
+        }
+        // The same token is valid after the single failing reader lookup. The
+        // old outcome path could authorize successfully on the writer and write.
+        assert!(project_workspaces::authorize(&s, &token).await.is_ok());
+        let stored = s.store.run(text(&run, "id")).await.unwrap();
+        assert!(stored["outcome"].is_null(), "{stored}");
+        assert_eq!(stored["chatExecution"]["plan"], true);
+        if plugin {
+            let input = json!({ "plugin": "not-installed", "command": "mutate", "arguments": [] });
+            assert_eq!(
+                s.plugins
+                    .command(&s, &token, &input)
+                    .await
+                    .unwrap_err()
+                    .status,
+                403
+            );
+            patch_run(
+                &s,
+                &run,
+                json!({ "chatExecution": { "messageId": "plan-message", "plan": false } }),
+            )
+            .await;
+            // Ordinary authority still reaches lookup; no blanket plugin ban.
+            assert_eq!(
+                s.plugins
+                    .command(&s, &token, &input)
+                    .await
+                    .unwrap_err()
+                    .status,
+                404
+            );
+        }
+    }
 }

@@ -1,6 +1,11 @@
 //! The Discord package runs entirely in Luau: its Gateway session over the generic
 //! `socket` capability, its setup form, its test and its panel. Discord is simulated
 //! by local HTTP and WebSocket servers.
+#[allow(unused_imports)]
+use common::{PluginServiceFixture as _, PluginStoreFixture as _};
+
+use common::AgentFixture;
+
 mod common;
 
 use axum::{
@@ -11,10 +16,7 @@ use axum::{
     routing::get,
 };
 use cairn_installation::{
-    plugins::{
-        connections::{self, Connection},
-        forms, panels, registry, socket, work,
-    },
+    plugins::{connections::Connection, panels, registry, socket},
     service::Service,
     validation::text,
 };
@@ -38,10 +40,10 @@ async fn service() -> (TempDir, Arc<Service>, Value) {
     s.plugins
         .use_worker(PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
     let agent = s
-        .agent(
+        .agent_fixture(
             json!({
                 "name": "Discord agent",
-                "access": { "projects": [], "skills": [], "mcps": [], "github": false, "installation": false },
+                "access": { "projects": [], "skills": [], "mcps": [], "installation": false },
             }),
             None,
         )
@@ -186,7 +188,7 @@ async fn save(
     agent: &Value,
     settings: Value,
 ) -> cairn_installation::error::Result<Value> {
-    connections::save(
+    common::save_plugin(
         s,
         "discord",
         &json!({
@@ -211,13 +213,13 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
     assert!(registry::builtin("discord").unwrap().manifest.instance_form);
 
     // Before a token: guidance only.
-    let empty = forms::form(&s, "discord", &json!({ "settings": {} }))
+    let empty = common::plugin_form(&s, "discord", &json!({ "settings": {} }))
         .await
         .unwrap();
     assert_eq!(empty["view"][0]["title"], "Create the bot");
     assert_eq!(empty["options"], json!({}));
 
-    let result = forms::form(
+    let result = common::plugin_form(
         &s,
         "discord",
         &json!({ "token": "synthetic_discord_token", "settings": { "guildId": "100", "channelId": "200" } }),
@@ -227,7 +229,7 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
     assert_eq!(result["errors"], json!({}), "{result}");
     assert_eq!(
         result["options"]["guildId"],
-        json!([{ "value": "100", "label": "Acme" }])
+        json!([{ "value": "100", "label": "Acme", "description": "", "disabled": false }])
     );
     let channels = result["options"]["channelId"].as_array().unwrap();
     let names = channels
@@ -272,7 +274,7 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
     );
 
     // A new server resets the channel; unknown servers and bad tokens explain themselves.
-    let changed = forms::form(
+    let changed = common::plugin_form(
         &s,
         "discord",
         &json!({ "token": "synthetic_discord_token", "settings": { "guildId": "100", "channelId": "200" }, "changed": "guildId" }),
@@ -280,7 +282,7 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
     .await
     .unwrap();
     assert_eq!(changed["values"]["channelId"], "");
-    let unknown = forms::form(
+    let unknown = common::plugin_form(
         &s,
         "discord",
         &json!({ "token": "synthetic_discord_token", "settings": { "guildId": "999" } }),
@@ -291,7 +293,7 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
         unknown["errors"]["guildId"],
         "The bot isn’t in this server yet. Invite it, then refresh."
     );
-    let rejected = forms::form(
+    let rejected = common::plugin_form(
         &s,
         "discord",
         &json!({ "token": "wrong_token", "settings": {} }),
@@ -322,7 +324,7 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
     let connection: Connection = serde_json::from_value(saved).unwrap();
 
     // Editing reuses the saved token; the test and the panel run in Luau too.
-    let editing = forms::form(
+    let editing = common::plugin_form(
         &s,
         "discord",
         &json!({ "instance": connection.id, "settings": connection.settings }),
@@ -330,7 +332,9 @@ async fn setup_form_lists_servers_and_channels_the_bot_can_use() {
     .await
     .unwrap();
     assert_eq!(editing["values"]["botName"], "cairn");
-    let tested = panels::test(&s, "discord", &connection.id).await.unwrap();
+    let tested = common::plugin_test(&s, "discord", &connection.id)
+        .await
+        .unwrap();
     assert_eq!(tested["message"], "Token works · signed in as cairn");
     let panel = panels::view(&s, "discord", &connection.id).await.unwrap();
     assert_eq!(panel["view"][0]["items"][2]["value"], "#support");
@@ -355,10 +359,121 @@ async fn receive(socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::Tcp
     loop {
         match socket.next().await.unwrap().unwrap() {
             Message::Text(text) => return serde_json::from_str(text.as_str()).unwrap(),
-            Message::Close(_) => panic!("closed"),
+            Message::Close(frame) => panic!("closed: {frame:?}"),
             _ => {}
         }
     }
+}
+
+async fn receive_op(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    op: u64,
+) -> Value {
+    loop {
+        let payload = receive(socket).await;
+        // Discord permits heartbeats before Identify or Resume. Acknowledge them
+        // while waiting, so the client does not treat this gateway as a zombie.
+        if payload["op"] == 1 && op != 1 {
+            send(socket, json!({ "op": 11 })).await;
+            continue;
+        }
+
+        assert_eq!(payload["op"], op, "unexpected gateway payload: {payload}");
+        return payload;
+    }
+}
+
+async fn acknowledge_heartbeat(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    sequence: u64,
+) -> Value {
+    loop {
+        let heartbeat = receive_op(socket, 1).await;
+        send(socket, json!({ "op": 11 })).await;
+        if heartbeat["d"] == sequence {
+            return heartbeat;
+        }
+        assert!(
+            heartbeat["d"].is_null()
+                || heartbeat["d"]
+                    .as_u64()
+                    .is_some_and(|value| value < sequence),
+            "unexpected gateway heartbeat: {heartbeat}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn gateway_expectations_acknowledge_heartbeats_until_the_dispatch_sequence() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream = async {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        assert_eq!(
+            acknowledge_heartbeat(&mut socket, 3).await,
+            json!({ "op": 1, "d": 3 })
+        );
+    };
+    let client = async {
+        let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (mut socket, _) = tokio_tungstenite::client_async("ws://localhost", stream)
+            .await
+            .unwrap();
+        for sequence in [Value::Null, json!(1), json!(2), json!(3)] {
+            send(&mut socket, json!({ "op": 1, "d": sequence })).await;
+            assert_eq!(receive(&mut socket).await, json!({ "op": 11 }));
+        }
+    };
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(upstream, client);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn gateway_expectations_acknowledge_heartbeats_before_authentication() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let upstream = async {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+
+        for op in [2, 6] {
+            let payload = receive_op(&mut socket, op).await;
+            assert_eq!(
+                payload,
+                json!({ "op": op, "d": { "token": "synthetic_discord_token" } })
+            );
+        }
+    };
+    let client = async {
+        let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (mut socket, _) = tokio_tungstenite::client_async("ws://localhost", stream)
+            .await
+            .unwrap();
+
+        for op in [2, 6] {
+            for sequence in [Value::Null, json!(3)] {
+                send(&mut socket, json!({ "op": 1, "d": sequence })).await;
+                assert_eq!(receive(&mut socket).await, json!({ "op": 11 }));
+            }
+
+            send(
+                &mut socket,
+                json!({ "op": op, "d": { "token": "synthetic_discord_token" } }),
+            )
+            .await;
+        }
+    };
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(upstream, client);
+    })
+    .await
+    .unwrap();
 }
 
 fn mention(sequence: u64) -> Value {
@@ -392,7 +507,7 @@ async fn gateway_identifies_heartbeats_admits_mentions_and_resumes_in_luau() {
             json!({ "op": 10, "d": { "heartbeat_interval": 300 } }),
         )
         .await;
-        let identify = receive(&mut socket).await;
+        let identify = receive_op(&mut socket, 2).await;
         assert_eq!(identify["op"], 2);
         assert_eq!(identify["d"]["intents"], 513);
         // The host put the token where the script wrote {{secret}}.
@@ -428,7 +543,7 @@ async fn gateway_identifies_heartbeats_admits_mentions_and_resumes_in_luau() {
             json!({ "op": 10, "d": { "heartbeat_interval": 300 } }),
         )
         .await;
-        let resume = receive(&mut socket).await;
+        let resume = receive_op(&mut socket, 6).await;
         assert_eq!(resume["op"], 6);
         assert_eq!(
             resume["d"],
@@ -467,13 +582,13 @@ async fn gateway_identifies_heartbeats_admits_mentions_and_resumes_in_luau() {
     // A new session asks Discord for its URL and session budget; a resume does not.
     assert_eq!(gateway.calls(), 1);
     server.abort();
-    let events = s.store.list(work::EVENTS).await.unwrap();
+    let events = common::plugin_events(&s.store).await.unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["payload"]["content"], "<@400> hello");
     assert_eq!(events[0]["payload"]["botId"], "400");
     let status = s
         .store
-        .kv(&format!("plugin-status:{}", connection.id))
+        .status_fixture(&connection.id)
         .await
         .unwrap()
         .unwrap();
@@ -525,6 +640,7 @@ async fn sockets_reach_only_declared_hosts_from_the_transport_worker() {
         management: None,
         connection: connection.clone(),
         manifest: package.manifest.clone(),
+        package_digest: None,
         event: json!({ "name": "socket" }),
         link: Some(link.clone()),
         draft: None,
@@ -640,6 +756,80 @@ fn closes(commands: &[socket::Command]) -> Vec<u16> {
             _ => None,
         })
         .collect()
+}
+
+#[tokio::test]
+async fn unused_session_budget_connects_and_identifies() {
+    let (_root, s, agent) = service().await;
+    let saved = save(&s, &agent, json!({ "guildId": "100", "channelId": "200" }))
+        .await
+        .unwrap();
+    let connection: Connection = serde_json::from_value(saved).unwrap();
+    let (origin, server, gateway) = rest_with_gateway().await;
+
+    // A bot that has never identified has its full budget and no reset countdown.
+    gateway.remaining(1000, 0);
+    s.plugins.route_http_to(Some(origin));
+    let package = registry::active(&s, "discord").await.unwrap();
+    let mut session = s
+        .plugins
+        .host
+        .start(
+            &PathBuf::from(env!("CARGO_BIN_EXE_cairn")),
+            &package.manifest,
+            &package.source,
+        )
+        .await
+        .unwrap();
+    let (link, mut commands) = socket::Link::channel();
+    let mut on = async |event: Value| {
+        handle(&s, &connection, &mut session, &link, &mut commands, event).await
+    };
+    on(json!({ "type": "start", "settings": connection.settings })).await;
+    let issued = on(json!({ "type": "tick", "name": "connect" })).await;
+    assert_eq!(
+        connected_to(&issued).0,
+        "wss://gateway-test.discord.gg/?v=10&encoding=json"
+    );
+    on(json!({ "type": "open" })).await;
+    let issued = on(frame(
+        &json!({ "op": 10, "d": { "heartbeat_interval": 41250 } }),
+    ))
+    .await;
+    assert_eq!(sent(&issued)[0]["op"], 2);
+    on(frame(&json!({
+        "op": 0,
+        "s": 1,
+        "t": "READY",
+        "d": {
+            "session_id": "synthetic_session",
+            "user": { "id": "400", "username": "Cairn", "bot": true },
+            "resume_gateway_url": "wss://gateway-test.discord.gg",
+        },
+    })))
+    .await;
+    let status = s
+        .store
+        .status_fixture(&connection.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status["state"], "connected");
+
+    // Zero reset time never grants a session when the balance is exhausted.
+    gateway.remaining(0, 0);
+    let issued = on(json!({ "type": "close", "code": 1000, "reason": "" })).await;
+    assert_eq!(
+        timer(&issued, "connect"),
+        Some((Duration::from_secs(1), None))
+    );
+    assert!(
+        !issued
+            .iter()
+            .any(|command| matches!(command, socket::Command::Connect { .. }))
+    );
+    session.stop().await;
+    server.abort();
 }
 
 #[tokio::test]
@@ -793,7 +983,7 @@ async fn gateway_lifecycle_matches_discord_and_discord_js() {
     connected_to(&issued);
     let status = s
         .store
-        .kv(&format!("plugin-status:{}", connection.id))
+        .status_fixture(&connection.id)
         .await
         .unwrap()
         .unwrap();
@@ -829,15 +1019,34 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     s.plugins
         .route_sockets_to(Some(format!("ws://{}", listener.local_addr().unwrap())));
-    let upstream = tokio::spawn(async move {
+    let (phase, current_phase) = tokio::sync::watch::channel("preparing_large_frame");
+    let mut upstream = tokio::spawn(async move {
+        // Construct and serialize the large frame before Hello starts heartbeat
+        // timers. The mock gateway must keep reading and acknowledging beats.
+        let channels = (0..12_000)
+            .map(|index| json!({ "id": format!("{}", 10_000 + index), "type": 0, "name": "x".repeat(80) }))
+            .collect::<Vec<_>>();
+        let large = json!({ "op": 0, "s": 2, "t": "GUILD_CREATE", "d": {
+            "id": "100", "channels": channels, "threads": [
+                { "id": "700", "guild_id": "100", "parent_id": "200", "thread_metadata": { "archived": false }, "irrelevant": "x".repeat(1_100_000) },
+                { "id": "701", "guild_id": "100", "parent_id": "999" },
+            ],
+        } })
+        .to_string();
+        assert!(large.len() > 1_048_576);
+        phase.send_replace("accepting_connection");
         let (stream, _) = listener.accept().await.unwrap();
+        stream.set_nodelay(true).unwrap();
         let mut socket = accept_async(stream).await.unwrap();
+        phase.send_replace("sending_hello");
         send(
             &mut socket,
             json!({ "op": 10, "d": { "heartbeat_interval": 30000 } }),
         )
         .await;
-        assert_eq!(receive(&mut socket).await["op"], 2);
+        phase.send_replace("awaiting_identify");
+        assert_eq!(receive_op(&mut socket, 2).await["op"], 2);
+        phase.send_replace("sending_ready");
         send(
             &mut socket,
             json!({ "op": 0, "s": 1, "t": "READY", "d": {
@@ -847,21 +1056,17 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
             } }),
         )
         .await;
-        // Queue an earlier heartbeat, as the random first heartbeat can do.
+        // Request an earlier heartbeat, as the random first heartbeat can do.
+        // ACK it before further dispatches: otherwise the first periodic tick
+        // can correctly detect a zombie while this mock is still sending.
         send(&mut socket, json!({ "op": 1 })).await;
+        phase.send_replace("acknowledging_earlier_heartbeat");
+        acknowledge_heartbeat(&mut socket, 1).await;
         // A large server's GUILD_CREATE, well over what a script receives whole.
-        let channels = (0..12_000)
-            .map(|index| json!({ "id": format!("{}", 10_000 + index), "type": 0, "name": "x".repeat(80) }))
-            .collect::<Vec<_>>();
-        let large = json!({ "op": 0, "s": 2, "t": "GUILD_CREATE", "d": {
-            "id": "100", "channels": channels, "threads": [
-                { "id": "700", "guild_id": "100", "parent_id": "200", "thread_metadata": { "archived": false }, "irrelevant": "x".repeat(1_100_000) },
-                { "id": "701", "guild_id": "100", "parent_id": "999" },
-            ],
-        } });
-        assert!(large.to_string().len() > 1_048_576);
-        send(&mut socket, large).await;
+        phase.send_replace("sending_large_frame");
+        socket.send(Message::Text(large.into())).await.unwrap();
         // A reply in a thread retained by projection, without the slow REST endpoint.
+        phase.send_replace("sending_thread_message");
         send(
             &mut socket,
             json!({ "op": 0, "s": 3, "t": "MESSAGE_CREATE", "d": {
@@ -871,20 +1076,11 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
         )
         .await;
         send(&mut socket, json!({ "op": 1 })).await;
-        let heartbeat = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let heartbeat = receive(&mut socket).await;
-                let caught_up = heartbeat["d"]
-                    .as_u64()
-                    .is_some_and(|sequence| sequence >= 3);
-                if heartbeat["op"] != 1 || caught_up {
-                    break heartbeat;
-                }
-                // A periodic heartbeat can precede the requested one. Acknowledge
-                // it while waiting for the response after the large dispatch.
-                send(&mut socket, json!({ "op": 11 })).await;
-            }
-        })
+        phase.send_replace("acknowledging_final_heartbeat");
+        let heartbeat = tokio::time::timeout(
+            Duration::from_secs(1),
+            acknowledge_heartbeat(&mut socket, 3),
+        )
         .await
         .expect("oversized thread routing must not block heartbeats on REST");
         assert_eq!(
@@ -892,6 +1088,7 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
             json!({ "op": 1, "d": 3 }),
             "the session followed the large payload"
         );
+        phase.send_replace("closing_connection");
         socket
             .close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame {
                 code: 4004.into(),
@@ -899,18 +1096,36 @@ async fn oversized_gateway_payloads_keep_threads_without_blocking_on_rest() {
             }))
             .await
             .unwrap();
+        phase.send_replace("closed");
     });
-    let package = registry::active(&s, "discord").await.unwrap();
+    let mut package = registry::active(&s, "discord").await.unwrap();
+    // This scenario requests heartbeats at its dispatch barriers. Keep the first
+    // periodic tick beyond the outer deadline: it can otherwise correctly detect
+    // a missing ACK just before the mock's ACK or fatal close is read. Periodic
+    // heartbeats are exercised by the separate gateway lifecycle tests.
+    let gateway = package.source.modules.get_mut("gateway.luau").unwrap();
+    *gateway = format!(
+        "local math = table.clone(math)\nmath.random = function() return 0.95 end\n{gateway}"
+    );
     let stop = CancellationToken::new();
-    let result = tokio::time::timeout(
-        Duration::from_secs(20),
-        socket::run(&s, &connection, &package, &stop),
-    )
+    let result = tokio::time::timeout(Duration::from_secs(20), async {
+        let transport = socket::run(&s, &connection, &package, &stop);
+        tokio::pin!(transport);
+        tokio::select! {
+            result = &mut transport => {
+                upstream.await.unwrap();
+                result
+            }
+            result = &mut upstream => {
+                result.unwrap();
+                transport.await
+            }
+        }
+    })
     .await
-    .unwrap();
-    upstream.await.unwrap();
+    .unwrap_or_else(|_| panic!("gateway timed out during {}", *current_phase.borrow()));
     assert_eq!(result.unwrap_err().status, 403);
-    let events = s.store.list(work::EVENTS).await.unwrap();
+    let events = common::plugin_events(&s.store).await.unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["payload"]["threadId"], "700");
     server.abort();
@@ -938,6 +1153,7 @@ async fn same_credential_reserves_the_last_session_start_across_instances() {
         management: None,
         connection,
         manifest: package.manifest.clone(),
+        package_digest: None,
         event: json!({ "name": "socket" }),
         link: Some(link.clone()),
         draft: None,
@@ -1254,30 +1470,33 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     // Instructions are not part of the approved access.
     let mut described = agent.clone();
     described["instructions"] = "Be brief.".into();
-    let preview = s.agent_preview(described, &id).await.unwrap();
+    let preview = s.agent_preview_fixture(described, &id).await.unwrap();
     assert_eq!(effect(&preview)["id"], connection);
     assert_eq!(effect(&preview)["suspended"], false);
 
     // A stricter sandbox changes the access the owner approved for Discord people.
     let mut stricter = agent.clone();
     stricter["access"]["sandbox"] = "read-only".into();
-    let preview = s.agent_preview(stricter.clone(), &id).await.unwrap();
+    let preview = s
+        .agent_preview_fixture(stricter.clone(), &id)
+        .await
+        .unwrap();
     assert_eq!(effect(&preview)["suspended"], true);
     assert_eq!(effect(&preview)["blocked"], Value::Null);
     assert_eq!(effect(&preview)["alreadySuspended"], false);
 
     stricter["reapproveDelegations"] = json!([connection]);
-    let updated = s.agent(stricter, Some(&id)).await.unwrap();
+    let updated = s.agent_fixture(stricter, Some(&id)).await.unwrap();
     let stored: Connection = serde_json::from_value(
         s.store
-            .get(connections::KIND, &connection)
+            .instance_fixture(&connection)
             .await
             .unwrap()
             .unwrap(),
     )
     .unwrap();
     assert_eq!(
-        stored.granted_access,
+        serde_json::to_value(stored.granted_access).unwrap(),
         cairn_installation::service::policy(&updated)
     );
     assert_ne!(stored.revision, text(&saved, "revision"));
@@ -1285,19 +1504,22 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     // The owner may approve installation access for Discord people too.
     let mut installation = updated.clone();
     installation["access"]["installation"] = true.into();
-    let preview = s.agent_preview(installation.clone(), &id).await.unwrap();
+    let preview = s
+        .agent_preview_fixture(installation.clone(), &id)
+        .await
+        .unwrap();
     assert_eq!(effect(&preview)["suspended"], true);
     assert_eq!(effect(&preview)["blocked"], Value::Null);
     installation["reapproveDelegations"] = json!([connection]);
-    let updated = s.agent(installation, Some(&id)).await.unwrap();
+    let updated = s.agent_fixture(installation, Some(&id)).await.unwrap();
 
     // Without reapproval the save succeeds and the bot waits for the owner.
     let mut wider = updated.clone();
     wider["access"]["sandbox"] = "yolo".into();
-    let widened = s.agent(wider, Some(&id)).await.unwrap();
+    let widened = s.agent_fixture(wider, Some(&id)).await.unwrap();
     let stored = s
         .store
-        .get(connections::KIND, &connection)
+        .instance_fixture(&connection)
         .await
         .unwrap()
         .unwrap();
@@ -1308,17 +1530,17 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
     // A later unrelated edit reports that the bot was already suspended.
     let mut renamed = widened.clone();
     renamed["description"] = "Renamed".into();
-    let preview = s.agent_preview(renamed.clone(), &id).await.unwrap();
+    let preview = s.agent_preview_fixture(renamed.clone(), &id).await.unwrap();
     assert_eq!(effect(&preview)["suspended"], true);
     assert_eq!(effect(&preview)["alreadySuspended"], true);
 
     // A bot bound to a previous installation owner cannot be reapproved from the agent.
     let mut previous = stored.clone();
     previous["ownerAccessId"] = "previous-owner".into();
-    s.store.put(connections::KIND, previous).await.unwrap();
+    s.store.put_instance_fixture(previous).await.unwrap();
     let mut restored = renamed.clone();
     restored["access"] = updated["access"].clone();
-    let preview = s.agent_preview(restored, &id).await.unwrap();
+    let preview = s.agent_preview_fixture(restored, &id).await.unwrap();
     assert_eq!(effect(&preview)["suspended"], false);
     assert!(effect(&preview)["blocked"].is_string());
     assert_eq!(effect(&preview)["alreadySuspended"], true);
@@ -1327,7 +1549,7 @@ async fn agent_edits_preview_and_reapprove_the_bot_answering_as_the_agent() {
 #[tokio::test]
 async fn plugin_grants_keep_a_bot_anyone_can_reach_answering() {
     let (_root, s, agent) = service().await;
-    let saved = connections::save(
+    let saved = common::save_plugin(
         &s,
         "discord",
         &json!({
@@ -1343,7 +1565,7 @@ async fn plugin_grants_keep_a_bot_anyone_can_reach_answering() {
     )
     .await
     .unwrap();
-    let account = connections::save(
+    let account = common::save_plugin(
         &s,
         "onepassword",
         &json!({ "name": "Production", "enabled": true, "secrets": { "token": "ops_fixture" } }),
@@ -1356,15 +1578,15 @@ async fn plugin_grants_keep_a_bot_anyone_can_reach_answering() {
     // The approved policy is unchanged: the owner chose who may reach this agent.
     let mut secret = agent.clone();
     secret["plugins"] = json!([account["id"]]);
-    let preview = s.agent_preview(secret.clone(), &id).await.unwrap();
+    let preview = s.agent_preview_fixture(secret.clone(), &id).await.unwrap();
     let effect = &preview["delegations"][0];
     assert_eq!(effect["id"], saved["id"]);
     assert_eq!(effect["suspended"], false);
     assert_eq!(effect["blocked"], Value::Null);
-    s.agent(secret, Some(&id)).await.unwrap();
+    s.agent_fixture(secret, Some(&id)).await.unwrap();
     let stored: Connection = serde_json::from_value(
         s.store
-            .get(connections::KIND, text(&saved, "id"))
+            .instance_fixture(text(&saved, "id"))
             .await
             .unwrap()
             .unwrap(),

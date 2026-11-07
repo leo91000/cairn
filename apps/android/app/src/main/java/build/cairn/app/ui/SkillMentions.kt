@@ -36,7 +36,12 @@ private val mentionPattern = Regex("""(?<![\w$\\])\$([a-z0-9][a-z0-9-]{0,63})(?!
 private val codePattern = Regex("""```[\s\S]*?```|`[^`\n]*`""")
 private val typingPattern = Regex("""(?<![\w$\\])\$([a-z0-9-]*)$""")
 
-data class SkillOption(val name: String, val description: String, val scope: String)
+data class SkillOption(
+    val name: String,
+    val description: String,
+    val scope: String,
+    val usageCount: Int = 0,
+)
 
 data class SkillMention(val start: Int, val end: Int, val query: String)
 
@@ -60,7 +65,8 @@ fun chatSkills(skills: List<Skill>, agent: Agent?, projectId: String?): List<Ski
         .forEach { skill ->
             // A project skill shadows the global one with the same name in the list.
             if (skill.name !in byName || skill.scope != "global")
-                byName[skill.name] = SkillOption(skill.name, skill.description, skill.scope)
+                byName[skill.name] =
+                    SkillOption(skill.name, skill.description, skill.scope, skill.usageCount)
         }
     return byName.values.sortedBy { it.name }
 }
@@ -93,6 +99,7 @@ fun matchSkills(skills: List<SkillOption>, query: String, limit: Int = 50): List
         .filter { it.second >= 0 }
         .sortedWith(
             compareBy<Pair<SkillOption, Int>> { it.second }
+                .thenByDescending { it.first.usageCount }
                 .thenBy { if (query.isEmpty()) 0 else it.first.name.length }
                 .thenBy { it.first.name }
         )

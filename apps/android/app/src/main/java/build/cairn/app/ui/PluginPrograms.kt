@@ -9,15 +9,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
+import build.cairn.contracts.*
 
 /** Program preparation belongs to the package, independently of its instances. */
 @Composable
 internal fun PluginPrograms(vm: CairnViewModel, state: Workspace, plugin: String) {
     var programs by remember(plugin) { mutableStateOf<ProgramInstallations?>(null) }
     suspend fun load() {
-        programs = vm.api.get("/plugins/${segment(plugin)}/programs")
+        programs = vm.api.listPluginPrograms(ListPluginProgramsInput(plugin))
     }
     Poll("plugin-programs-$plugin", 5000) {
         if (!state.busy)
@@ -28,9 +27,14 @@ internal fun PluginPrograms(vm: CairnViewModel, state: Workspace, plugin: String
             }
     }
     fun act(program: ProgramInstallation, action: String) = vm.perform {
-        api.pluginOperation(
-            "/plugins/${segment(plugin)}/programs/${segment(program.name)}/$action",
-            buildJsonObject { program.digest?.let { put("digest", it) } },
+        api.preparePluginProgram(
+            when (action) {
+                "check" -> PluginProgramInput.A(plugin, program.name)
+                "install" ->
+                    PluginProgramInput.B(requireNotNull(program.digest), plugin, program.name)
+                "rollback" -> PluginProgramInput.C(plugin, program.name)
+                else -> error("Unknown program action")
+            }
         )
         load()
     }

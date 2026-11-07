@@ -1,6 +1,11 @@
 import type { Agent } from '../../../packages/contracts/contracts'
+import type { PluginCommand } from '../../../packages/contracts/generated/typescript/PluginCommand'
+import type { PluginConnection } from '../../../packages/contracts/generated/typescript/PluginConnection'
+import type { PluginManifest as Manifest } from '../../../packages/contracts/generated/typescript/PluginManifest'
+import type { PluginOption as GeneratedPluginOption } from '../../../packages/contracts/generated/typescript/PluginOption'
 import type { IconName } from './icons'
-import type { PluginSetup, SetupRisk } from './plugin-setup'
+
+import type { SetupRisk } from './plugin-setup'
 import {
   BrandLinear,
   BrandSlack,
@@ -19,13 +24,7 @@ import {
   Wrench,
 } from './icons'
 
-export interface FieldOption {
-  value: string
-  label: string
-  /** Shown under the choice, e.g. why it can't be picked. */
-  description?: string
-  disabled?: boolean
-}
+export type FieldOption = Pick<GeneratedPluginOption, 'value' | 'label'> & Partial<GeneratedPluginOption>
 
 /** One field of a declarative plugin form (instance settings or a view's form). */
 export interface SettingField {
@@ -51,194 +50,23 @@ export interface SettingField {
   default?: unknown
 }
 
-/** What a package's `form` handler returns while the owner edits an instance. */
-export interface FormResult {
-  options: Record<string, FieldOption[]>
-  values: Record<string, unknown>
-  errors: Record<string, string>
-  view: any[]
-}
+export type { InstalledProgram } from '../../../packages/contracts/generated/typescript/InstalledProgram'
 
-export interface PluginArgument {
-  name: string
-  flag?: string
-  positional?: boolean
-  required?: boolean
-  description?: string
-}
+export type { PackageVersion } from '../../../packages/contracts/generated/typescript/PackageVersion'
+export type { PluginActivity as Activity } from '../../../packages/contracts/generated/typescript/PluginActivity'
+export type { PluginArgument } from '../../../packages/contracts/generated/typescript/PluginArgument'
+export type { PluginCatalog as Catalog } from '../../../packages/contracts/generated/typescript/PluginCatalog'
+export type { PluginCommand } from '../../../packages/contracts/generated/typescript/PluginCommand'
+export type { PluginConnection } from '../../../packages/contracts/generated/typescript/PluginConnection'
+export type { PluginEntry } from '../../../packages/contracts/generated/typescript/PluginEntry'
+export type { PluginFormResult as FormResult } from '../../../packages/contracts/generated/typescript/PluginFormResult'
+export type { PluginLabel as Label } from '../../../packages/contracts/generated/typescript/PluginLabel'
+export type { PluginManifest as Manifest } from '../../../packages/contracts/generated/typescript/PluginManifest'
 
-export interface PluginCommand {
-  name: string
-  description?: string
-  output?: 'json' | 'text' | 'secret'
-  arguments?: PluginArgument[]
-}
-
-export interface Manifest {
-  id: string
-  name: string
-  version: string
-  description: string
-  apiVersion: number
-  capabilities: string[]
-  hosts?: string[]
-  credential?: {
-    label: string
-    header: string
-    prefix?: string
-    /** The owner can sign in on the service's page instead of pasting a token. */
-    deviceFlow?: {
-      authorizationUrl: string
-      tokenUrl: string
-      clientId: string
-      scopes?: string[]
-    }
-    oauth?: {
-      authorizationUrl: string
-      tokenUrl: string
-      revocationUrl?: string
-      clientIdSetting: string
-      clientSecretSetting?: string
-      scopes?: string[]
-      scopeSettings?: Record<string, string[]>
-      authorizationParameters?: Record<string, string>
-    }
-  }
-  settings?: SettingField[]
-  instances?: { singular: string, plural: string }
-  brand?: { color: string, path?: string }
-  programs?: {
-    name: string
-    path?: string
-    installer?: string
-    description?: string
-  }[]
-  agentAccess?: { description?: string }
-  commands?: PluginCommand[]
-  tools?: { name: string, description: string }[]
-  instructions?: string
-  instanceView?: boolean
-  instanceTest?: boolean
-  instanceForm?: boolean
-  /** Where its enabled instances import projects from. */
-  projectSources?: PluginSource[]
-  /** Where its enabled instances import skills from, with the location's fields. */
-  skillSources?: (PluginSource & { fields: SettingField[] })[]
-  /** Conditions granted agents can wait for; agents use them, the owner never edits them. */
-  conditions?: { name: string, description: string, project?: boolean }[]
-  /** What granted agents' runs receive from its instance, such as git credentials. */
-  runCredentials?: Record<string, unknown>
-  secretPatterns?: string[]
-  /** What connecting takes and the steps the owner follows, as the package declares them. */
-  setup?: Partial<PluginSetup>
-}
-
-/** A named source a package offers, such as GitHub repositories. */
-export interface PluginSource {
-  name: string
-  title: string
-  description?: string
-}
-
-export interface ProgramRelease {
-  version: string
-  url: string
-  sha256?: string
-  format: 'zip' | 'binary'
-  executable: string
-}
-
-export interface InstalledProgram {
-  release: ProgramRelease
-  archiveSha256: string
-  binarySha256: string
-}
-
-export interface ProgramState {
-  name: string
-  installer: string
-  installed?: InstalledProgram | null
-  previous?: InstalledProgram | null
-  candidate?: ProgramRelease | null
-  digest?: string | null
-}
-
-export interface PackageVersion {
-  version: string
-  digest?: string
-  /** The package's Luau files, `main.luau` first. */
-  files?: { path: string, bytes: number }[]
-  manifest?: Manifest
-  /** The steps the owner follows, resolved by the installation. */
-  setup?: PluginSetup
-  approved?: boolean
-  error?: string
-}
-
-/** A bundled or installed package and the owner's approval state. */
-export interface PluginEntry {
-  id: string
-  builtin: boolean
-  status: 'active' | 'update' | 'needs_approval' | 'invalid'
-  active: string | null
-  manifest: Manifest | null
-  /** The steps the owner follows; older installations send only the manifest. */
-  setup?: PluginSetup | null
-  versions: PackageVersion[]
-}
-
-export interface Catalog {
-  packages: PluginEntry[]
-  capabilities: { name: string, description: string }[]
-  connections: PluginConnection[]
-}
-
-export interface Label {
-  id: string
-  name: string
-}
-
-export interface AccessRequest {
-  id: string
-  userId: string
-  name: string
-  mentions: number
-  updatedAt: number
-}
-
-export interface Activity {
-  id: string
-  chatId: string
-  userId: string
-  name: string
-  preview: string
-  status: 'working' | 'replied' | 'failed' | 'stopped'
-  createdAt: number
-}
-
-export interface PluginConnection {
-  id: string
-  pluginId: string
-  name: string
-  enabled: boolean
-  settings: Record<string, any>
-  /** Agents granted the package's commands and tools on this instance. */
-  agentIds?: string[]
-  /** Secret fields saved in the vault; values never reach the browser. */
-  secretKeys?: string[]
-  userIds: string[]
-  people: Label[]
-  accessMode: 'allowlist' | 'requests' | 'everyone'
-  maxPerPersonPerHour?: number
-  agentId: string
-  projectId: string | null
-  maxMessagesPerHour: number
-  /** Live state, with the package's own message (e.g. who it is signed in as). */
-  status: { state: string, message?: string | null }
-  usage: { hour: number }
-  requests: AccessRequest[]
-  activity: Activity[]
-}
+export type { PluginProjectSource as PluginSource } from '../../../packages/contracts/generated/typescript/PluginProjectSource'
+export type { PluginRequest as AccessRequest } from '../../../packages/contracts/generated/typescript/PluginRequest'
+export type { ProgramRelease } from '../../../packages/contracts/generated/typescript/ProgramRelease'
+export type { ProgramState } from '../../../packages/contracts/generated/typescript/ProgramState'
 
 /** How each host capability reads in the catalogue. */
 export const capabilityLabels: Record<string, [IconName, string]> = {

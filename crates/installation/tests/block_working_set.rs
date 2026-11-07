@@ -1,6 +1,5 @@
 use cairn_installation::storage::{BlockSource, Disk, LazyDisk};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::{collections::HashMap, io, sync::Arc};
 
 struct Offline;
@@ -158,7 +157,7 @@ async fn controller_retains_verified_blocks_between_conversations_and_releases_t
     .await
     .unwrap();
     let bytes = vec![37; 4 * 1024 * 1024];
-    let hash = hex::encode(Sha256::digest(&bytes));
+    let hash = cairn_installation::storage::digest::block(&bytes);
     let manifest = json!({
         "version": 1,
         "size": bytes.len(),
@@ -205,7 +204,7 @@ fn small_interleaved_reads_reuse_verified_blocks_across_conversation_disks() {
     let mut data = HashMap::new();
     for index in 0..9 {
         let bytes = vec![index as u8 + 1; BLOCK as usize];
-        let hash = hex::encode(Sha256::digest(&bytes));
+        let hash = cairn_installation::storage::digest::block(&bytes);
         blocks.push(json!({"offset": index * BLOCK, "size": BLOCK, "hash": hash}));
         data.insert(hash, bytes);
     }

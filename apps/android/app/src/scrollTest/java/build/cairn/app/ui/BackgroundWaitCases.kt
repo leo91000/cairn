@@ -8,11 +8,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
+import build.cairn.contracts.ServiceTier
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
@@ -28,6 +30,100 @@ abstract class BackgroundWaitCases {
     protected open fun capture(name: String) {}
 
     @Test
+    fun rejectedQuotaSwitchRemainsVisibleAfterOptionsRefresh() =
+        conversation("running", quota = true, codingAgentChoices = true, rejectSwitch = true) {
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Continuer avec Codex").performScrollTo().performClick()
+            // The changed label proves the options response after the POST was rendered.
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex disponible")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Switch refused. Review the accounts.").assertExists()
+        }
+
+    @Test
+    fun quotaAlternativesRefreshWhenCodexBecomesAvailable() =
+        conversation(
+            "running",
+            quota = true,
+            codingAgentChoices = true,
+            initialAlternatives = "unavailable",
+        ) {
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Continuer avec Codex").performScrollTo().assertIsDisplayed()
+        }
+
+    @Test
+    fun quotaAlternativesRetryAfterAReadFailure() =
+        conversation(
+            "running",
+            quota = true,
+            codingAgentChoices = true,
+            initialAlternatives = "error",
+        ) {
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Continuer avec Codex").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Alternatives temporarily unavailable.").assertDoesNotExist()
+        }
+
+    @Test
+    fun quotaOffersOneClickCodingAgentSwitchForTheCurrentTurn() =
+        conversation("running", quota = true, codingAgentChoices = true) { server ->
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodesWithText("Continuer avec Codex")
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Continuer avec Codex").performScrollTo().assertIsDisplayed()
+            capture("quota-switch-android")
+            compose.onNodeWithText("Continuer avec Codex").performClick()
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first { it.method == "POST" && it.path?.endsWith("/coding-agent") == true }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            assertTrue(body["provider"] == JsonPrimitive("codex"))
+            assertTrue(body["runId"] == JsonPrimitive(SAVED_RUN_ID))
+            assertTrue(body["turnId"] == JsonPrimitive("quota-turn"))
+            assertTrue(body["requestId"]!!.jsonPrimitive.content.isNotBlank())
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodes(hasText("Annuler le changement") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Annuler le changement").performScrollTo().performClick()
+            compose.waitUntil(5000) {
+                compose
+                    .onAllNodes(hasText("Continuer avec Codex") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose.onNodeWithText("Claude Code").assertIsSelected()
+            compose.onNodeWithText("Codex").assertIsNotSelected()
+        }
+
+    @Test
     fun recoveredQuotaDoesNotRestoreDuplicateErrors() =
         conversation("succeeded", quota = true) {
             compose.onNodeWithTag("chat-quota").assertDoesNotExist()
@@ -40,7 +136,9 @@ abstract class BackgroundWaitCases {
     fun quotaWaitFoldsDuplicateErrorsAndExpandsOneTechnicalMessage() =
         conversation("running", quota = true) {
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
-            compose.onAllNodesWithText("Quota Claude Code atteint").assertCountEquals(1)
+            compose
+                .onAllNodesWithText("Limite de dépense Claude Code atteinte")
+                .assertCountEquals(1)
             compose
                 .onNodeWithText("Reprise automatique dès qu’un compte est disponible.")
                 .assertIsDisplayed()
@@ -64,14 +162,32 @@ abstract class BackgroundWaitCases {
             history = { _, now ->
                 quotaEvents(now) +
                     listOf(
-                        RunEvent(7, now, "turn.started", "", runId = "run"),
-                        RunEvent(8, now, "turn.completed", "", runId = "run"),
-                        RunEvent(9, now, "status", "succeeded", runId = "run"),
+                        RunEvent(
+                            id = 7,
+                            createdAt = now,
+                            type = "turn.started",
+                            text = "",
+                            runId = SAVED_RUN_ID,
+                        ),
+                        RunEvent(
+                            id = 8,
+                            createdAt = now,
+                            type = "turn.completed",
+                            text = "",
+                            runId = SAVED_RUN_ID,
+                        ),
+                        RunEvent(
+                            id = 9,
+                            createdAt = now,
+                            type = "status",
+                            text = "succeeded",
+                            runId = SAVED_RUN_ID,
+                        ),
                     )
             },
         ) {
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
-            compose.onNodeWithText("La limite d’usage du compte est atteinte.").assertIsDisplayed()
+            compose.onNodeWithText("Quota Claude Code atteint").assertIsDisplayed()
             compose
                 .onNodeWithText("La limite de dépense du compte est atteinte.")
                 .assertDoesNotExist()
@@ -96,7 +212,7 @@ abstract class BackgroundWaitCases {
 
     @Test
     fun savedQuotaFailureOffersManualResumeInsteadOfPromisingAutomaticRecovery() =
-        conversation("failed", quota = true) { server ->
+        conversation("failed", quota = true, resumableTurn = true) { server ->
             compose.onNodeWithTag("chat-quota").assertIsDisplayed()
             compose.onNodeWithText("Reprendre la conversation").assertExists()
             compose
@@ -117,6 +233,7 @@ abstract class BackgroundWaitCases {
                 .assertIsDisplayed()
                 .performClick()
             val effects = mutableListOf<String>()
+            var resumeBody: JsonObject? = null
             compose.waitUntil(10000) {
                 compose.waitForIdle()
                 var request = server.takeRequest(0, TimeUnit.MILLISECONDS)
@@ -126,22 +243,515 @@ abstract class BackgroundWaitCases {
                         request.method == "POST" &&
                             path in
                                 listOf(
-                                    "/api/installations/fixture/api/runs/run/resume",
-                                    "/api/installations/fixture/api/chats/chat/pause",
+                                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume",
+                                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/pause",
                                 )
-                    )
+                    ) {
                         effects.add(path)
+                        if (path.endsWith("/resume")) {
+                            resumeBody = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+                        }
+                    }
                     request = server.takeRequest(0, TimeUnit.MILLISECONDS)
                 }
                 effects.size == 2
             }
             org.junit.Assert.assertEquals(
                 listOf(
-                    "/api/installations/fixture/api/runs/run/resume",
-                    "/api/installations/fixture/api/chats/chat/pause",
+                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume",
+                    "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/pause",
                 ),
                 effects,
             )
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                resumeBody!!["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(
+                SAVED_RUN_ID,
+                resumeBody!!["runId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(
+                "quota-turn",
+                resumeBody!!["turnId"]!!.jsonPrimitive.content,
+            )
+        }
+
+    @Test
+    fun savedCodexQuotaResumeSubmitsChangedModelDefaultEffort() =
+        conversation("failed", quota = true, resumeChangedModel = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("GPT-6 Sol").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose
+                .onNode(hasText("Modèle de la conversation") and isSelectable())
+                .assertIsSelected()
+                .assert(hasText("GPT-6 Sol", substring = true))
+            compose.onNodeWithText("GPT-6 Luna").performScrollTo().performClick()
+            compose.onNodeWithTag("reasoning-slider").assert(hasStateDescription("Faible"))
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(
+                "gpt-6-luna",
+                body["selection"]!!.jsonObject["model"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(
+                "low",
+                body["selection"]!!.jsonObject["reasoning"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(
+                "standard",
+                body["selection"]!!.jsonObject["speed"]!!.jsonPrimitive.content,
+            )
+        }
+
+    @Test
+    fun savedOpenCodeGroupedRouteResumeSubmitsTheExplicitRouteId() =
+        conversation("failed", quota = true, resumeRouteSelection = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Sonnet").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose.onNodeWithText("OpenCode Zen · Crédits").performScrollTo().performClick()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(
+                "opencode/ling-3.1-flash-free",
+                body["selection"]!!.jsonObject["model"]!!.jsonPrimitive.content,
+            )
+        }
+
+    @Test
+    fun savedOpenCodeAutoRouteResumeSubmitsTheGroupedModelId() =
+        conversation(
+            "failed",
+            quota = true,
+            resumeRouteSelection = true,
+            resumePinnedRouteSelection = true,
+        ) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(
+                        hasTestTag("model-picker") and
+                            hasContentDescription("Sonnet · OpenCode Zen", substring = true)
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            val pinnedRoute = compose.onNode(hasText("OpenCode Zen · Crédits") and hasClickAction())
+            pinnedRoute.assertIsSelected()
+            val automaticRoute = compose.onNode(hasText("Auto") and hasClickAction())
+            automaticRoute.performClick()
+            automaticRoute.assertIsSelected()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(
+                "auto/sonnet",
+                body["selection"]!!.jsonObject["model"]!!.jsonPrimitive.content,
+            )
+        }
+
+    @Test
+    fun savedCodexQuotaResumeKeepsEmptyInheritedEffortWithoutPickerChanges() =
+        conversation("failed", quota = true, resumeInheritedEffort = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(
+                        hasTestTag("model-picker") and
+                            hasContentDescription("GPT-6 Sol · effort moyen", substring = true)
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertFalse(body.containsKey("selection"))
+        }
+
+    @Test
+    fun savedCodexQuotaResumePreservesEmptyEffortForSpeedOnlySelection() =
+        conversation(
+            "failed",
+            quota = true,
+            resumeInheritedEffort = true,
+            resumeInheritedSpeed = true,
+        ) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(
+                        hasTestTag("model-picker") and
+                            hasContentDescription("GPT-6 Sol · effort moyen", substring = true)
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            val inheritedEffort = compose.onNodeWithTag("reasoning-default")
+            inheritedEffort.assertIsSelected()
+            inheritedEffort.assert(hasText("Par défaut · Moyen", substring = true))
+            compose
+                .onNode(hasText("Standard") and hasAnyAncestor(hasTestTag("speed-options")))
+                .performClick()
+            inheritedEffort.assertIsSelected()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            val selection = body["selection"]!!.jsonObject
+            org.junit.Assert.assertEquals("gpt-6-sol", selection["model"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("", selection["reasoning"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(
+                "standard",
+                selection["speed"]!!.jsonPrimitive.content,
+            )
+        }
+
+    @Test
+    fun savedCodexQuotaResumeUsesExplicitSameModelDefaultEffort() =
+        conversation("failed", quota = true, resumeSameModelDefault = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(
+                        hasTestTag("model-picker") and
+                            hasContentDescription("GPT-6 Sol · effort élevé", substring = true)
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose
+                .onNode(
+                    hasText("GPT-6 Sol", substring = false) and
+                        hasClickAction() and
+                        hasAnyAncestor(hasTestTag("model-settings-sheet"))
+                )
+                .performScrollTo()
+                .performClick()
+            val defaultEffort = compose.onNodeWithTag("reasoning-default")
+            defaultEffort.assert(hasText("Par défaut · Moyen", substring = true))
+            defaultEffort.performClick()
+            compose
+                .onNode(hasText("Standard") and hasAnyAncestor(hasTestTag("speed-options")))
+                .performClick()
+            defaultEffort.assertIsSelected()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            val selection = body["selection"]!!.jsonObject
+            org.junit.Assert.assertEquals("gpt-6-sol", selection["model"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("medium", selection["reasoning"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("standard", selection["speed"]!!.jsonPrimitive.content)
+        }
+
+    @Test
+    fun savedCodexQuotaResumeKeepsExplicitEffortOverModelDefault() =
+        conversation("failed", quota = true, resumeExplicitEffort = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(
+                        hasTestTag("model-picker") and
+                            hasContentDescription("GPT-6 Sol · effort élevé", substring = true)
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose
+                .onNode(
+                    hasText("GPT-6 Sol", substring = false) and
+                        hasClickAction() and
+                        hasAnyAncestor(hasTestTag("model-settings-sheet"))
+                )
+                .performScrollTo()
+                .performClick()
+            compose.onNodeWithTag("reasoning-slider").performSemanticsAction(
+                SemanticsActions.SetProgress
+            ) {
+                it(0f)
+            }
+            compose.onNodeWithTag("reasoning-slider").assert(hasStateDescription("Faible"))
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(
+                "gpt-6-sol",
+                body["selection"]!!.jsonObject["model"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(
+                "low",
+                body["selection"]!!.jsonObject["reasoning"]!!.jsonPrimitive.content,
+            )
+        }
+
+    @Test
+    fun savedCodexQuotaResumeClearsDefaultIntentWhenReturningToConversationModel() =
+        conversation("failed", quota = true, resumeResetIntent = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.waitUntil(10000) {
+                compose
+                    .onAllNodes(
+                        hasTestTag("model-picker") and
+                            hasContentDescription("GPT-6 Sol · effort élevé", substring = true)
+                    )
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("model-picker").performClick()
+            compose
+                .onNode(
+                    hasText("GPT-6 Sol", substring = false) and
+                        hasClickAction() and
+                        hasAnyAncestor(hasTestTag("model-settings-sheet"))
+                )
+                .performScrollTo()
+                .performClick()
+            compose.onNodeWithTag("reasoning-default").performClick()
+            compose
+                .onNode(hasText("Modèle de la conversation") and isSelectable())
+                .performScrollTo()
+                .performClick()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertFalse(body.containsKey("selection"))
+        }
+
+    @Test
+    fun prelaunchQuotaFailureUsesOrdinaryResumeWithoutSavedSelection() =
+        conversation("failed", quota = true, resumePrelaunch = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(
+                "6cc6efab-10af-54c7-a91b-dcff664166a1",
+                body["chatId"]!!.jsonPrimitive.content,
+            )
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertFalse(body.containsKey("selection"))
+        }
+
+    @Test
+    fun savedCodexResumeKeepsUntouchedBlankModelWhenNothingChanges() =
+        conversation("failed", quota = true, resumeBlankModelNoChange = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            org.junit.Assert.assertEquals(SAVED_RUN_ID, body["runId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("quota-turn", body["turnId"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertFalse(body.containsKey("selection"))
+        }
+
+    @Test
+    fun savedCodexResumePreservesBlankModelForSpeedOnlyChange() =
+        conversation("failed", quota = true, resumeBlankModelSpeedOnly = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.onNodeWithTag("model-picker").performClick()
+            compose
+                .onNode(hasText("Modèle de la conversation") and isSelectable())
+                .assertIsSelected()
+            compose
+                .onNode(hasText("Standard") and hasAnyAncestor(hasTestTag("speed-options")))
+                .performClick()
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            val selection = body["selection"]!!.jsonObject
+            org.junit.Assert.assertEquals("", selection["model"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(true, selection["preserveModel"]!!.jsonPrimitive.boolean)
+            org.junit.Assert.assertEquals("", selection["reasoning"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("standard", selection["speed"]!!.jsonPrimitive.content)
+        }
+
+    @Test
+    fun savedCodexResumePreservesBlankModelForReasoningOnlyChange() =
+        conversation("failed", quota = true, resumeBlankModelReasoning = true) { server ->
+            compose.onNodeWithTag("chat-quota").assertIsDisplayed()
+            compose.onNodeWithTag("model-picker").performClick()
+            compose
+                .onNode(hasText("Modèle de la conversation") and isSelectable())
+                .assertIsSelected()
+            compose.onNodeWithTag("reasoning-slider").performSemanticsAction(
+                SemanticsActions.SetProgress
+            ) {
+                it(2f)
+            }
+            compose.onNodeWithTag("reasoning-slider").assert(hasStateDescription("Élevé"))
+            compose.onNodeWithText("Terminé").performClick()
+            compose.onNodeWithText("Reprendre la conversation").performScrollTo().performClick()
+
+            val request = generateSequence {
+                server.takeRequest(5, TimeUnit.SECONDS)
+            }
+                .first {
+                    it.method == "POST" &&
+                        it.path?.endsWith("/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume") ==
+                            true
+                }
+            val body = Json.parseToJsonElement(request.body.readUtf8()).jsonObject
+            val selection = body["selection"]!!.jsonObject
+            org.junit.Assert.assertEquals("", selection["model"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals(true, selection["preserveModel"]!!.jsonPrimitive.boolean)
+            org.junit.Assert.assertEquals("high", selection["reasoning"]!!.jsonPrimitive.content)
+            org.junit.Assert.assertEquals("standard", selection["speed"]!!.jsonPrimitive.content)
         }
 
     @Test
@@ -250,31 +860,49 @@ abstract class BackgroundWaitCases {
             history = { wakeup, now ->
                 fun message(id: Long, text: String) =
                     RunEvent(
-                        id,
-                        now - 20_000 + id,
-                        "item.completed",
-                        "",
-                        mapOf(
-                            "item" to
-                                buildJsonObject {
-                                    put("id", "message-$id")
-                                    put("type", "agent_message")
-                                    put("text", text)
-                                }
-                        ),
+                        id = id,
+                        createdAt = now - 20_000 + id,
+                        type = "item.completed",
+                        text = "",
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                mapOf(
+                                    "item" to
+                                        buildJsonObject {
+                                            put("id", "message-$id")
+                                            put("type", "agent_message")
+                                            put("text", text)
+                                        }
+                                )
+                            ),
                     )
                 listOf(
-                    RunEvent(1, now - 30_000, "turn.started", "", emptyMap()),
+                    RunEvent(
+                        id = 1,
+                        createdAt = now - 30_000,
+                        type = "turn.started",
+                        text = "",
+                        payload = kotlinx.serialization.json.JsonObject(emptyMap()),
+                    ),
                     message(2, "Lot poussé dans la PR."),
                     RunEvent(
-                        3,
-                        now - 15_000,
-                        "chat.wait",
-                        reason,
-                        wireJson.encodeToJsonElement(wakeup!!).jsonObject,
+                        id = 3,
+                        createdAt = now - 15_000,
+                        type = "chat.wait",
+                        text = reason,
+                        payload =
+                            kotlinx.serialization.json.JsonObject(
+                                wireJson.encodeToJsonElement(wakeup!!).jsonObject
+                            ),
                     ),
                     message(4, "CI en cours, reprise programmée pour la vérifier."),
-                    RunEvent(5, now - 5_000, "turn.completed", "", emptyMap()),
+                    RunEvent(
+                        id = 5,
+                        createdAt = now - 5_000,
+                        type = "turn.completed",
+                        text = "",
+                        payload = kotlinx.serialization.json.JsonObject(emptyMap()),
+                    ),
                 )
             },
         ) {
@@ -296,7 +924,7 @@ abstract class BackgroundWaitCases {
     @Test
     fun longWaitReasonIsClampedUntilExpanded() {
         val reason = List(40) { "Vérifier la CI puis poursuivre le lot suivant." }.joinToString(" ")
-        val wakeup = ChatWakeup("wait", "message", reason, 60, 1, 60001)
+        val wakeup = wakeupFixture("wait", "message", reason, 60, 1, 60001)
         compose.setContent {
             CairnTheme {
                 CompositionLocalProvider(LocalLiveWait provides LiveWait(wakeup, paused = false)) {
@@ -312,7 +940,7 @@ abstract class BackgroundWaitCases {
     @Test
     fun resolvedWaitHonorsPauseAndCancellationUntilItResumes() {
         val wakeup =
-            ChatWakeup(
+            wakeupFixture(
                 "wait",
                 "message",
                 "Attendre les checks",
@@ -329,6 +957,7 @@ abstract class BackgroundWaitCases {
                     buildJsonObject {
                         put("title", "Waiting for required checks on PR #1")
                         put("short", "PR #1 checks")
+                        putJsonArray("details") {}
                     },
             )
         // The plugin words its result; the app shows it as given.
@@ -398,7 +1027,7 @@ abstract class BackgroundWaitCases {
     @Test
     fun explicitImmediateResultReplacesPendingWaitWithChangedWording() {
         val wakeup =
-            ChatWakeup(
+            wakeupFixture(
                 "wake",
                 "message",
                 "Attente initiale",
@@ -420,16 +1049,25 @@ abstract class BackgroundWaitCases {
             put("status", "succeeded")
         }
         val waits =
-            timelineEntries(
+            fixtureEntries(
                     listOf(
                         RunEvent(
-                            1,
-                            1,
-                            "chat.wait",
-                            "",
-                            wireJson.encodeToJsonElement(wakeup).jsonObject,
+                            id = 1,
+                            createdAt = 1,
+                            type = "chat.wait",
+                            text = "",
+                            payload =
+                                kotlinx.serialization.json.JsonObject(
+                                    wireJson.encodeToJsonElement(wakeup).jsonObject
+                                ),
                         ),
-                        RunEvent(2, 2, "chat.wait_ready", "Result available", observation),
+                        RunEvent(
+                            id = 2,
+                            createdAt = 2,
+                            type = "chat.wait_ready",
+                            text = "Result available",
+                            payload = kotlinx.serialization.json.JsonObject(observation),
+                        ),
                     ),
                     chat = true,
                 )
@@ -453,6 +1091,23 @@ abstract class BackgroundWaitCases {
         sleeping: Boolean = false,
         conditional: Boolean = false,
         quota: Boolean = false,
+        resumeSelection: Boolean = false,
+        resumeChangedModel: Boolean = false,
+        resumeInheritedEffort: Boolean = false,
+        resumeInheritedSpeed: Boolean = false,
+        resumeSameModelDefault: Boolean = false,
+        resumeExplicitEffort: Boolean = false,
+        resumeResetIntent: Boolean = false,
+        resumeBlankModelNoChange: Boolean = false,
+        resumeBlankModelSpeedOnly: Boolean = false,
+        resumeBlankModelReasoning: Boolean = false,
+        resumePrelaunch: Boolean = false,
+        resumeRouteSelection: Boolean = false,
+        resumePinnedRouteSelection: Boolean = false,
+        resumableTurn: Boolean = false,
+        codingAgentChoices: Boolean = false,
+        initialAlternatives: String? = null,
+        rejectSwitch: Boolean = false,
         paused: Boolean = false,
         reason: String = "Attendre la CI",
         history: ((ChatWakeup?, Long) -> List<RunEvent>)? = null,
@@ -460,22 +1115,113 @@ abstract class BackgroundWaitCases {
     ) {
         MockWebServer().use { server ->
             val now = System.currentTimeMillis()
+            val hasResumeSelection =
+                resumeSelection ||
+                    resumeChangedModel ||
+                    resumeInheritedEffort ||
+                    resumeSameModelDefault ||
+                    resumeExplicitEffort ||
+                    resumeResetIntent ||
+                    resumeBlankModelNoChange ||
+                    resumeBlankModelSpeedOnly ||
+                    resumeBlankModelReasoning ||
+                    resumeRouteSelection
+            val hasSavedTurn = hasResumeSelection || resumableTurn || resumePrelaunch
             val chat =
                 Chat(
-                    "chat",
+                    id = "6cc6efab-10af-54c7-a91b-dcff664166a1",
                     title = "Conversation de test",
                     agentId = MAIN_AGENT_ID,
                     agentName = "Agent principal",
                     paused = paused,
-                    runId = "run",
+                    runId = SAVED_RUN_ID,
                     run =
                         Run(
-                            "run",
+                            id = SAVED_RUN_ID,
                             status = status,
                             startedAt = now - 60_000,
+                            resumeAvailable = hasSavedTurn && !resumePrelaunch,
+                            sessionId =
+                                if (hasSavedTurn && !resumePrelaunch) "saved-session" else null,
+                            chatExecution =
+                                if (hasSavedTurn) ChatExecution(messageId = "quota-turn") else null,
                             snapshot =
                                 Snapshot(
-                                    agent = Agent(provider = if (quota) "claude" else "codex")
+                                    agent =
+                                        Agent(
+                                            exclusiveNodes = emptyList(),
+                                            plugins = emptyList(),
+                                            id = "00000000-0000-4000-8000-000000000000",
+                                            name = "",
+                                            revision = "",
+                                            createdAt = 0,
+                                            access =
+                                                AccessPolicy(
+                                                    mcpTools =
+                                                        build.cairn.contracts.McpTools(emptyMap()),
+                                                    projects = null,
+                                                    skills = null,
+                                                    mcps = null,
+                                                ),
+                                            provider =
+                                                if (resumeRouteSelection) "opencode"
+                                                else if (
+                                                    quota &&
+                                                        !resumePrelaunch &&
+                                                        !resumeSelection &&
+                                                        !resumeChangedModel &&
+                                                        !resumeInheritedEffort &&
+                                                        !resumeSameModelDefault &&
+                                                        !resumeExplicitEffort &&
+                                                        !resumeResetIntent &&
+                                                        !resumeBlankModelNoChange &&
+                                                        !resumeBlankModelSpeedOnly &&
+                                                        !resumeBlankModelReasoning
+                                                )
+                                                    "claude"
+                                                else "codex",
+                                            model =
+                                                when {
+                                                    resumePinnedRouteSelection ->
+                                                        "opencode/ling-3.1-flash-free"
+                                                    resumeRouteSelection -> "auto/sonnet"
+                                                    resumeChangedModel ||
+                                                        resumeInheritedEffort ||
+                                                        resumeSameModelDefault ||
+                                                        resumeExplicitEffort ||
+                                                        resumeResetIntent -> "gpt-6-sol"
+                                                    else -> ""
+                                                },
+                                            reasoning =
+                                                when {
+                                                    resumeRouteSelection -> "medium"
+                                                    resumeSelection -> "high"
+                                                    resumeChangedModel -> "high"
+                                                    resumeSameModelDefault ||
+                                                        resumeExplicitEffort ||
+                                                        resumeResetIntent -> "high"
+                                                    else -> ""
+                                                },
+                                            speed =
+                                                if (
+                                                    resumeSelection ||
+                                                        resumeChangedModel ||
+                                                        resumeInheritedSpeed ||
+                                                        resumeSameModelDefault ||
+                                                        resumeExplicitEffort ||
+                                                        resumeResetIntent ||
+                                                        resumeBlankModelSpeedOnly
+                                                )
+                                                    "priority"
+                                                else "",
+                                        ),
+                                    task =
+                                        build.cairn.contracts.RunTaskSnapshot(
+                                            agentId = build.cairn.app.data.MAIN_AGENT_ID,
+                                            id = "00000000-0000-4000-8000-000000000003",
+                                            name = "Fixture",
+                                            prompt = "Fixture",
+                                        ),
                                 ),
                             accountWaitReason =
                                 when {
@@ -486,10 +1232,11 @@ abstract class BackgroundWaitCases {
                                     else -> null
                                 },
                             error = if (quota && status == "failed") SPEND_LIMIT else null,
+                            taskId = "",
                         ),
                     wakeup =
                         if (sleeping || conditional)
-                            ChatWakeup(
+                            wakeupFixture(
                                 "wake",
                                 "message",
                                 reason,
@@ -508,32 +1255,92 @@ abstract class BackgroundWaitCases {
                 )
             val waiting =
                 RunEvent(
-                    1,
-                    now - 30_000,
-                    "turn.waiting",
-                    "",
-                    mapOf(
-                        "tasks" to
-                            buildJsonArray {
-                                addJsonObject { put("description", "Vérifier la CI") }
-                            }
-                    ),
+                    id = 1,
+                    createdAt = now - 30_000,
+                    type = "turn.waiting",
+                    text = "",
+                    payload =
+                        kotlinx.serialization.json.JsonObject(
+                            mapOf(
+                                "tasks" to
+                                    buildJsonArray {
+                                        addJsonObject { put("description", "Vérifier la CI") }
+                                    }
+                            )
+                        ),
                 )
             val batch =
                 wireJson.encodeToString(
-                    LiveBatch(
-                        history?.invoke(chat.wakeup, now)
-                            ?: if (quota) quotaEvents(now) else listOf(waiting),
-                        LiveState(chat = chat),
-                        true,
-                        false,
-                    )
+                    timelineBatch(
+                            history?.invoke(chat.wakeup, now)
+                                ?: if (quota) quotaEvents(now) else listOf(waiting),
+                            LiveState(chat = chat),
+                            true,
+                            false,
+                        )
+                        .let { if (quota) quotaCards(it) else it }
                 )
             server.dispatcher =
                 object : Dispatcher() {
+                    @Volatile var switching = false
+                    @Volatile var switchRejected = false
+                    var alternativesReads = 0
+
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path!!.substringBefore('?')
-                        if (path == "/api/installations/fixture/api/chats/chat/stream")
+                        if (codingAgentChoices && path.endsWith("/stop")) {
+                            switching = false
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody("{}")
+                        }
+                        if (codingAgentChoices && path.endsWith("/coding-agent")) {
+                            if (request.method == "POST" && rejectSwitch) {
+                                switchRejected = true
+                                return MockResponse()
+                                    .setResponseCode(409)
+                                    .setHeader("Content-Type", "application/json")
+                                    .setBody("""{"error":"Switch refused. Review the accounts."}""")
+                            }
+                            if (request.method == "GET" && alternativesReads++ == 0) {
+                                if (initialAlternatives == "error")
+                                    return MockResponse()
+                                        .setResponseCode(500)
+                                        .setHeader("Content-Type", "application/json")
+                                        .setBody(
+                                            """{"error":"Alternatives temporarily unavailable."}"""
+                                        )
+                                if (initialAlternatives == "unavailable")
+                                    return MockResponse()
+                                        .setHeader("Content-Type", "application/json")
+                                        .setBody(
+                                            """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"claude","choices":[]}"""
+                                        )
+                            }
+                            if (request.method == "POST") switching = true
+                            val progress =
+                                if (switching) ""","switching":{"provider":"codex","error":null}"""
+                                else ""
+                            val label = if (switchRejected) "Codex disponible" else "Codex"
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody(
+                                    if (request.method == "POST") "{}"
+                                    else
+                                        """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"claude","choices":[{"provider":"codex","label":"$label"}]$progress}"""
+                                )
+                        }
+                        if (hasResumeSelection && path.endsWith("/coding-agent"))
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody(
+                                    """{"runId":"$SAVED_RUN_ID","turnId":"quota-turn","provider":"${if (resumeRouteSelection) "opencode" else "codex"}","choices":[]}"""
+                                )
+
+                        if (
+                            path ==
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/stream"
+                        )
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
                                 .apply {
@@ -556,12 +1363,184 @@ abstract class BackgroundWaitCases {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
-                                        listOf(Agent(MAIN_AGENT_ID, "Agent principal"))
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(
+                                                Agent(
+                                                    exclusiveNodes = emptyList(),
+                                                    plugins = emptyList(),
+                                                    revision = "",
+                                                    createdAt = 0,
+                                                    access =
+                                                        AccessPolicy(
+                                                            mcpTools =
+                                                                build.cairn.contracts.McpTools(
+                                                                    emptyMap()
+                                                                ),
+                                                            projects = null,
+                                                            skills = null,
+                                                            mcps = null,
+                                                        ),
+                                                    id = MAIN_AGENT_ID,
+                                                    name = "Agent principal",
+                                                    model =
+                                                        if (resumeChangedModel) "gpt-6-sol" else "",
+                                                    reasoning =
+                                                        if (resumeChangedModel) "high" else "",
+                                                )
+                                            )
+                                        )
                                     )
-                                "/api/installations/fixture/api/chats/chat" ->
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1" ->
                                     wireJson.encodeToString(chat)
-                                "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
+                                "/api/installations/fixture/api/codex/models" ->
+                                    wireJson.encodeToString(
+                                        ModelCatalog(
+                                            models =
+                                                listOf(
+                                                    CodingAgentModel(
+                                                        model = "gpt-6-sol",
+                                                        displayName = "GPT-6 Sol",
+                                                        isDefault = true,
+                                                        defaultReasoningEffort = "medium",
+                                                        supportedReasoningEfforts =
+                                                            listOf(
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "low"
+                                                                ),
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "medium"
+                                                                ),
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "high"
+                                                                ),
+                                                            ),
+                                                        serviceTiers =
+                                                            if (
+                                                                resumeBlankModelSpeedOnly ||
+                                                                    resumeResetIntent
+                                                            )
+                                                                listOf(
+                                                                    ServiceTier(
+                                                                        id = "priority",
+                                                                        name = "Priority",
+                                                                    )
+                                                                )
+                                                            else emptyList(),
+                                                    ),
+                                                    CodingAgentModel(
+                                                        model = "gpt-6-luna",
+                                                        displayName = "GPT-6 Luna",
+                                                        defaultReasoningEffort = "low",
+                                                        supportedReasoningEfforts =
+                                                            listOf(
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "low"
+                                                                ),
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "high"
+                                                                ),
+                                                            ),
+                                                        serviceTiers = emptyList(),
+                                                    ),
+                                                ),
+                                            checkedAt = now,
+                                        )
+                                    )
+                                "/api/installations/fixture/api/opencode/models" ->
+                                    wireJson.encodeToString(
+                                        ModelCatalog(
+                                            models =
+                                                listOf(
+                                                    CodingAgentModel(
+                                                        model = "auto/sonnet",
+                                                        displayName = "Sonnet",
+                                                        isDefault = true,
+                                                        supportedReasoningEfforts =
+                                                            listOf(
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "medium"
+                                                                ),
+                                                                ReasoningOption(
+                                                                    reasoningEffort = "high"
+                                                                ),
+                                                            ),
+                                                        routes =
+                                                            listOf(
+                                                                ModelRoute(
+                                                                    model =
+                                                                        "opencode/ling-3.1-flash-free",
+                                                                    provider = "opencode",
+                                                                    providerName = "OpenCode Zen",
+                                                                    billing = "credits",
+                                                                    supportedReasoningEfforts =
+                                                                        listOf(
+                                                                            ReasoningOption(
+                                                                                reasoningEffort =
+                                                                                    "medium"
+                                                                            ),
+                                                                            ReasoningOption(
+                                                                                reasoningEffort =
+                                                                                    "high"
+                                                                            ),
+                                                                        ),
+                                                                ),
+                                                                ModelRoute(
+                                                                    model =
+                                                                        "opencode-go/ling-3.1-flash-free",
+                                                                    provider = "opencode-go",
+                                                                    providerName = "OpenCode Go",
+                                                                    billing = "subscription",
+                                                                    supportedReasoningEfforts =
+                                                                        listOf(
+                                                                            ReasoningOption(
+                                                                                reasoningEffort =
+                                                                                    "medium"
+                                                                            ),
+                                                                            ReasoningOption(
+                                                                                reasoningEffort =
+                                                                                    "high"
+                                                                            ),
+                                                                        ),
+                                                                ),
+                                                            ),
+                                                    )
+                                                ),
+                                            checkedAt = now,
+                                        )
+                                    )
+                                "/api/installations/fixture/api/runs/$SAVED_RUN_ID/resume" ->
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ResumeRunOutput(SAVED_RUN_ID)
+                                    )
+                                "/api/installations/fixture/api/chats/6cc6efab-10af-54c7-a91b-dcff664166a1/resume" ->
+                                    wireJson.encodeToString(
+                                        chat.run!!.copy(status = "queued", resumeAvailable = false)
+                                    )
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")
@@ -591,7 +1570,7 @@ abstract class BackgroundWaitCases {
                                 ChatScreen(
                                     vm,
                                     state,
-                                    "chat",
+                                    "6cc6efab-10af-54c7-a91b-dcff664166a1",
                                     openChat = {},
                                     openRun = {},
                                     back = {},
@@ -630,7 +1609,15 @@ private fun quotaEvents(now: Long): List<RunEvent> {
         type: String,
         text: String = "",
         payload: Map<String, JsonElement>? = null,
-    ) = RunEvent(id, now - 30_000 + id * 1000, type, text, payload, runId = "run")
+    ) =
+        RunEvent(
+            id = id,
+            createdAt = now - 30_000 + id * 1000,
+            type = type,
+            text = text,
+            payload = (payload)?.let { kotlinx.serialization.json.JsonObject(it) },
+            runId = SAVED_RUN_ID,
+        )
     fun message(id: Long, text: String) =
         event(
             id,
@@ -667,8 +1654,47 @@ private fun quotaEvents(now: Long): List<RunEvent> {
     )
 }
 
+/**
+ * The server's usage-limit bookkeeping for [quotaEvents]: the reply repeating the limit is an echo,
+ * the turn failure and final status stay in the run log, and the failure stays current until the
+ * turn or execution moves on. The Rust reducer tests qualify these decisions.
+ */
+private fun quotaCards(batch: LiveBatch): LiveBatch {
+    val movedOn = batch.events.any { it.type == "turn.completed" || it.text == "succeeded" }
+    return batch.copy(
+        entries =
+            batch.entries.map { change ->
+                val card = (change as build.cairn.contracts.TimelineChange.A).entry
+                val content =
+                    when (val content = card.content) {
+                        is build.cairn.contracts.TimelineContent.B ->
+                            if (content.text == SPEND_LIMIT) content.copy(echo = true) else content
+                        is build.cairn.contracts.TimelineContent.C ->
+                            content.copy(
+                                notice =
+                                    content.notice.copy(
+                                        prominent = false,
+                                        quota =
+                                            if (card.source == 5L)
+                                                build.cairn.contracts.QuotaFailure(
+                                                    current = !movedOn,
+                                                    message = SPEND_LIMIT,
+                                                    resetsAt = null,
+                                                )
+                                            else null,
+                                    )
+                            )
+                        else -> content
+                    }
+                build.cairn.contracts.TimelineChange.A(card.copy(content = content))
+            }
+    )
+}
+
 private class BackgroundWaitVault : SessionVault {
     override fun read(origin: String): String? = null
 
     override fun write(origin: String, cookie: String?) = Unit
 }
+
+private const val SAVED_RUN_ID = "123e4567-e89b-42d3-a456-426614174000"

@@ -50,16 +50,7 @@ internal fun JsonElement?.plain(): String = (this as? JsonPrimitive)?.contentOrN
 
 internal fun RunEvent.activityData(): JsonObject? =
     // Stderr can itself look like a protocol event; it is always process output.
-    if (type == "diagnostic") null
-    else
-        payload?.let(::JsonObject)
-            ?: runCatching {
-                if (text.firstOrNull { !it.isWhitespace() } != '{') return@runCatching null
-                (wireJson.parseToJsonElement(text) as? JsonObject)?.takeIf {
-                    type == "chat.wait_ready" || it.string("type") == type || it.containsKey("item")
-                }
-            }
-                .getOrNull()
+    if (type == "diagnostic") null else payload?.let(::JsonObject)
 
 internal fun readableField(value: String): String =
     value
@@ -241,17 +232,9 @@ internal fun expectedOutcome(view: CommandView, code: Int?): String? {
     }
 }
 
-// CSI sequences (colors, cursor moves), OSC sequences (titles, links) and two-byte escapes.
-private val terminalEscape =
-    Regex("\u001B(?:\\[[0-?]*[ -/]*[@-~]|\\][^\u0007\u001B]*(?:\u0007|\u001B\\\\)?|[@-Z\\\\-_])")
-
-/** Agent stderr recorded by older runners keeps its terminal styling. */
-internal fun withoutTerminalStyling(text: String) = text.replace(terminalEscape, "")
-
 internal fun presentActivity(event: RunEvent): ActivityPresentation =
     if (event.type == "diagnostic")
-        presentEvent(event.copy(text = withoutTerminalStyling(event.text)))
-            .copy(title = "Diagnostic de l’agent", verbatim = true)
+        presentEvent(event).copy(title = "Diagnostic de l’agent", verbatim = true)
     else presentEvent(event)
 
 private fun presentEvent(event: RunEvent): ActivityPresentation {
@@ -300,13 +283,6 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                 paths = command.paths,
                 output = item.string("aggregated_output").ifBlank { item.string("output") },
             )
-        "saved_output" ->
-            base.copy(
-                kind = ActivityKind.OUTPUT,
-                title = "Résultat enregistré",
-                subtitle = "Étape issue de l’historique",
-                output = item.string("text"),
-            )
         "file_change" ->
             base.copy(
                 kind = ActivityKind.FILES,
@@ -314,6 +290,12 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                 subtitle = "${item?.get("changes").asArray()?.size ?: 0} fichier(s)",
             )
         "todo_list" -> base.copy(kind = ActivityKind.PLAN, title = "Plan de travail")
+        "proposed_plan" ->
+            base.copy(
+                kind = ActivityKind.THINKING,
+                title = "Proposition du sous-agent",
+                output = item.string("text"),
+            )
         "reasoning" ->
             base.copy(
                 kind = ActivityKind.THINKING,
@@ -360,94 +342,29 @@ private fun presentEvent(event: RunEvent): ActivityPresentation {
                 output = item.string("text"),
             )
         else -> {
-            // Statuses keep their text as the title; a payload only adds metadata.
+            // Unknown items and engine markers Cairn does not know yet. Messages, the run cycle,
+            // errors and retries are presented from their timeline cards.
             val plain =
-                if (data == null || event.type == "status") event.text
+                if (data == null) event.text
                 else
                     data.string("message").ifBlank {
                         data?.get("error").asObject().string("message")
                     }
-            val account = if (event.type == "status") accountUsed(event.text) else null
-            val backgroundTasks =
-                if (event.type != "turn.waiting") emptyList()
-                else
-                    data?.get("tasks").asArray().orEmpty().mapNotNull {
-                        it.asObject()?.get("description").plain().trim().ifEmpty { null }
-                    }
             val title =
                 when (event.type) {
-                    "thread.started" -> "Session ouverte"
-                    "turn.started",
                     "run.started" -> "Travail commencé"
-                    "turn.completed" -> "Travail terminé"
-                    "turn.waiting" ->
-                        if (data?.get("tasks").asArray().isNullOrEmpty())
-                            "Tâches en arrière-plan terminées"
-                        else "En attente de tâches en arrière-plan"
-                    "turn.failed",
-                    "error" -> "L’agent a rencontré une erreur"
-                    "status" ->
-                        when {
-                            account != null -> "Compte ${account.first} sélectionné"
-                            event.text.lowercase() in
-                                listOf(
-                                    "succeeded",
-                                    "running",
-                                    "failed",
-                                    "queued",
-                                    "cancelled",
-                                    "interrupted",
-                                ) ->
-                                mapOf(
-                                        "succeeded" to "Exécution réussie",
-                                        "running" to "Exécution en cours",
-                                        "failed" to "Exécution en échec",
-                                        "queued" to "Exécution en attente",
-                                        "cancelled" to "Exécution annulée",
-                                        "interrupted" to "Exécution interrompue",
-                                    )[event.text.lowercase()]
-                                    .orEmpty()
-                            else -> plain.take(120).ifBlank { "État de l’exécution" }
-                        }
                     "output",
                     "item.completed" -> "Résultat enregistré"
                     "item.started" -> "Étape enregistrée"
                     else -> readableField(type.ifBlank { event.type })
                 }
-            val usage = data?.get("usage").asObject()
-            val subtitle =
-                if (account != null) account.second
-                else if (backgroundTasks.isNotEmpty()) backgroundTasks.joinToString(" · ")
-                else if (usage != null)
-                    listOf("input_tokens" to "entrée", "output_tokens" to "sortie")
-                        .mapNotNull { (key, label) ->
-                            usage[key]?.plain()?.takeIf { it.isNotEmpty() }?.let { "$it $label" }
-                        }
-                        .joinToString(" · ")
-                else ""
             base.copy(
                 kind =
                     if (item != null || event.type in listOf("output", "item.completed"))
                         ActivityKind.OUTPUT
                     else ActivityKind.NOTICE,
                 title = title,
-                subtitle = subtitle,
-                output =
-                    if (
-                        event.type in
-                            listOf(
-                                "status",
-                                "thread.started",
-                                "turn.started",
-                                "run.started",
-                                "turn.completed",
-                            )
-                    ) {
-                        // A final status may say why the run ended.
-                        if (event.type == "status") data?.get("error").asObject().string("message")
-                        else if (data != null) plain
-                        else plain.takeUnless { it.startsWith('{') }.orEmpty()
-                    } else plain.ifBlank { if (data == null) event.text else "" },
+                output = plain.ifBlank { if (data == null) event.text else "" },
             )
         }
     }
@@ -552,10 +469,3 @@ internal fun resultParts(source: String): List<ResultPart> {
     if (start < source.length) parts.add(ResultPart.Text(source.substring(start)))
     return parts.ifEmpty { listOf(ResultPart.Text(source)) }
 }
-
-/** "Using Claude Code account: Studio" → ("Claude Code", "Studio"). */
-private fun accountUsed(text: String): Pair<String, String>? =
-    Regex("^Using (Codex|Claude Code) account: (.+)$").find(text)?.destructured?.let { (agent, name)
-        ->
-        agent to name.trim()
-    }

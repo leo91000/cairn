@@ -1,0 +1,27 @@
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+@Serializable
+{{#properties}}{{#constValue}}@SerialName("{{&.}}")
+{{/constValue}}{{/properties}}{{#additionalPropertiesSchema}}@JvmInline
+value class {{&className}}(val value: Map<String, {{#additionalProperties}}{{>type}}{{/additionalProperties}}>) : Map<String, {{#additionalProperties}}{{>type}}{{/additionalProperties}}> by value
+{{/additionalPropertiesSchema}}{{^additionalPropertiesSchema}}{{#properties}}{{#first}}{{#last}}{{^constValue}}data {{/constValue}}{{/last}}{{^last}}data {{/last}}{{/first}}{{/properties}}class {{&className}}(
+{{#properties}}{{^constValue}}{{^isRequired}}    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+{{/isRequired}}    val {{&kotlinName}}: {{>type}}{{#defaultValue}} = {{>default_value}}{{/defaultValue}}{{^defaultValue}}{{^isRequired}} = null{{/isRequired}}{{/defaultValue}},
+{{/constValue}}{{/properties}}){{#interfaces}}{{#first}} : {{/first}}{{^first}}, {{/first}}{{&className}}{{/interfaces}} {
+    init {
+{{#properties}}{{^constValue}}{{#validations}}{{#type}}{{#PATTERN}}        {{#nullable}}{{&kotlinName}}?.let { require(Regex({{&value.value.kotlinString}}).containsMatchIn(it)) }{{/nullable}}{{^nullable}}require(Regex({{&value.value.kotlinString}}).containsMatchIn({{&kotlinName}})){{/nullable}}
+{{/PATTERN}}{{#MAX_ITEMS}}        {{#nullable}}{{&kotlinName}}?.let { require(it.size <= {{&value}}) }{{/nullable}}{{^nullable}}require({{&kotlinName}}.size <= {{&value}}){{/nullable}}
+{{/MAX_ITEMS}}{{#MIN_ITEMS}}        {{#nullable}}{{&kotlinName}}?.let { require(it.size >= {{&value}}) }{{/nullable}}{{^nullable}}require({{&kotlinName}}.size >= {{&value}}){{/nullable}}
+{{/MIN_ITEMS}}{{#CONST_ITEMS}}        {{#nullable}}{{&kotlinName}}?.let { require(it.size == {{&value}}) }{{/nullable}}{{^nullable}}require({{&kotlinName}}.size == {{&value}}){{/nullable}}
+{{/CONST_ITEMS}}{{#RANGE_ITEMS}}        {{#nullable}}{{&kotlinName}}?.let { require(it.size in {{&value.first}}..{{&value.second}}) }{{/nullable}}{{^nullable}}require({{&kotlinName}}.size in {{&value.first}}..{{&value.second}}){{/nullable}}
+{{/RANGE_ITEMS}}{{#MINIMUM_INT}}        {{#nullable}}{{&kotlinName}}?.let { require(it >= {{&value}}) }{{/nullable}}{{^nullable}}require({{&kotlinName}} >= {{&value}}){{/nullable}}
+{{/MINIMUM_INT}}{{#MINIMUM_LONG}}        {{#nullable}}{{&kotlinName}}?.let { require(it >= {{&value}}L) }{{/nullable}}{{^nullable}}require({{&kotlinName}} >= {{&value}}L){{/nullable}}
+{{/MINIMUM_LONG}}{{#MAXIMUM_INT}}        {{#nullable}}{{&kotlinName}}?.let { require(it <= {{&value}}) }{{/nullable}}{{^nullable}}require({{&kotlinName}} <= {{&value}}){{/nullable}}
+{{/MAXIMUM_INT}}{{#MAXIMUM_LONG}}        {{#nullable}}{{&kotlinName}}?.let { require(it <= {{&value}}L) }{{/nullable}}{{^nullable}}require({{&kotlinName}} <= {{&value}}L){{/nullable}}
+{{/MAXIMUM_LONG}}{{#RANGE_INT}}        {{#nullable}}{{&kotlinName}}?.let { require(it in {{&value.first}}..{{&value.second}}) }{{/nullable}}{{^nullable}}require({{&kotlinName}} in {{&value.first}}..{{&value.second}}){{/nullable}}
+{{/RANGE_INT}}{{#RANGE_LONG}}        {{#nullable}}{{&kotlinName}}?.let { require(it in {{&value.first}}L..{{&value.second}}L) }{{/nullable}}{{^nullable}}require({{&kotlinName}} in {{&value.first}}L..{{&value.second}}L){{/nullable}}
+{{/RANGE_LONG}}{{#CONST_INT}}        {{#nullable}}{{&kotlinName}}?.let { require(it == {{&value}}) }{{/nullable}}{{^nullable}}require({{&kotlinName}} == {{&value}}){{/nullable}}
+{{/CONST_INT}}{{#CONST_LONG}}        {{#nullable}}{{&kotlinName}}?.let { require(it == {{&value}}L) }{{/nullable}}{{^nullable}}require({{&kotlinName}} == {{&value}}L){{/nullable}}
+{{/CONST_LONG}}{{/type}}{{/validations}}{{#isSystemClass}}{{#systemClass}}{{#UUID}}        {{#nullable}}{{&kotlinName}}?.let { java.util.UUID.fromString(it) }{{/nullable}}{{^nullable}}java.util.UUID.fromString({{&kotlinName}}){{/nullable}}
+{{/UUID}}{{/systemClass}}{{/isSystemClass}}{{/constValue}}{{/properties}}    }
+}
+{{/additionalPropertiesSchema}}

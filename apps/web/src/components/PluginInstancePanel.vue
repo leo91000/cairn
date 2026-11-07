@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { notify } from '../api'
-import { pluginOperation } from '../plugin-operations'
+import { pluginCommand } from '../plugin-management'
 import PluginView from './PluginView.vue'
 import UiAlert from './UiAlert.vue'
 
@@ -11,13 +11,12 @@ const props = defineProps<{ plugin: string, instance: string, name: string }>()
 const nodes = ref<any[] | null>(null)
 const busy = ref(false)
 const error = ref('')
-const path = () => `/plugins/${props.plugin}/connections/${props.instance}`
 
 async function load() {
   busy.value = true
   error.value = ''
   try {
-    nodes.value = (await pluginOperation<{ view: any[] | null }>(`${path()}/view`, undefined, 'GET')).view
+    nodes.value = (await pluginCommand({ kind: 'view', pluginId: props.plugin, instanceId: props.instance }, 'view')).view
   }
   catch (e) {
     error.value = (e as Error).message
@@ -31,7 +30,12 @@ async function act(action: string, payload: unknown, values?: Record<string, any
   busy.value = true
   error.value = ''
   try {
-    const result = await pluginOperation<{ notice?: string, view?: any[] }>(`${path()}/actions`, { action, payload, values: values ?? {} })
+    const { result } = await pluginCommand({
+      kind: 'action',
+      pluginId: props.plugin,
+      instanceId: props.instance,
+      data: { action, payload, values: values ?? {} },
+    }, 'action')
     if (result.view)
       nodes.value = result.view
     if (result.notice)

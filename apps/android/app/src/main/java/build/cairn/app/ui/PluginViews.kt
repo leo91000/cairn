@@ -39,7 +39,14 @@ private fun tone(name: String) =
  * Errors stay in the panel; an expired session still signs out.
  */
 @Composable
-internal fun PluginPanel(vm: CairnViewModel, state: Workspace, path: String, name: String) {
+internal fun PluginPanel(
+    vm: CairnViewModel,
+    state: Workspace,
+    pluginId: String,
+    instanceId: String,
+    name: String,
+) {
+    val path = "$pluginId/$instanceId"
     var nodes by remember(path) { mutableStateOf<JsonArray?>(null) }
     var error by remember(path) { mutableStateOf<String?>(null) }
     var busy by remember(path) { mutableStateOf(false) }
@@ -60,25 +67,14 @@ internal fun PluginPanel(vm: CairnViewModel, state: Workspace, path: String, nam
     }
     LaunchedEffect(path) {
         guard {
-            nodes =
-                vm.api.pluginOperation("$path/view", method = "GET").jsonObject["view"]
-                    as? JsonArray
+            nodes = vm.api.pluginView(pluginId, instanceId) as? JsonArray
         }
     }
     fun act(action: String, payload: JsonElement, values: JsonObject) {
         scope.launch {
             guard {
                 val result =
-                    vm.api
-                        .pluginOperation(
-                            "$path/actions",
-                            buildJsonObject {
-                                put("action", action)
-                                put("payload", payload)
-                                put("values", values)
-                            },
-                        )
-                        .jsonObject
+                    vm.api.pluginAction(pluginId, instanceId, action, payload, values).jsonObject
                 (result["view"] as? JsonArray)?.let { nodes = it }
                 result.text("notice").takeIf { it.isNotBlank() }?.let(vm::notify)
             }

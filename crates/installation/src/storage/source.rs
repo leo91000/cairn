@@ -5,6 +5,7 @@ use crate::error::{Error, Result};
 use serde_json::Value;
 use std::{
     io,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock, TryLockError},
 };
 use tokio_util::sync::CancellationToken;
@@ -14,6 +15,7 @@ pub struct Source {
     assignment: Mutex<()>,
     runtime: tokio::runtime::Handle,
     stop: CancellationToken,
+    report_directory: Option<PathBuf>,
 }
 
 impl Source {
@@ -33,6 +35,7 @@ impl Source {
             assignment: Mutex::new(()),
             runtime,
             stop,
+            report_directory: None,
         })
     }
 
@@ -42,7 +45,30 @@ impl Source {
             assignment: Mutex::new(()),
             runtime,
             stop,
+            report_directory: None,
         }
+    }
+
+    pub(crate) fn persistent(mut self, directory: &Path) -> Result<Self> {
+        self.report_directory = Some(directory.to_owned());
+        if let Some(bound) = self.binding.get_mut().map_err(Error::internal)?.as_mut() {
+            let source = (**bound).clone().persistent(directory)?;
+            source.replay();
+            *bound = Arc::new(source);
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn acknowledge(
+        &self,
+        state: &Path,
+        disk: &super::LazyDisk,
+        generation: i64,
+        publication: &str,
+    ) -> Result<()> {
+        self.binding()?
+            .ok_or_else(|| Error::conflict("Disk is not authorized."))?
+            .acknowledge(state, disk, generation, publication)
     }
 
     fn binding(&self) -> io::Result<Option<Arc<RemoteSource>>> {
@@ -91,14 +117,15 @@ impl Source {
                 "Disk authorization has already been assigned.",
             ));
         }
-        let bound = Arc::new(RemoteSource::new(
-            context,
-            self.runtime.clone(),
-            self.stop.clone(),
-        )?);
+        let bound = RemoteSource::new(context, self.runtime.clone(), self.stop.clone())?;
+        let bound = Arc::new(match &self.report_directory {
+            Some(directory) => bound.persistent(directory)?,
+            None => bound,
+        });
         // Health/control probes keep seeing an unassigned source throughout
         // slow fsync. Never hold their read lock across persistent disk I/O.
         persist()?;
+        bound.replay();
         *self.binding.write().map_err(Error::internal)? = Some(bound);
         Ok(())
     }
@@ -129,7 +156,10 @@ mod tests {
     async fn prepared_source_rejects_reads_and_publication_until_persistence_succeeds() {
         let source = Source::prepared(tokio::runtime::Handle::current(), CancellationToken::new());
         assert_eq!(
-            source.fetch(&"a".repeat(64)).unwrap_err().kind(),
+            source
+                .fetch(&format!("b3-{}", "a".repeat(64)))
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::PermissionDenied
         );
         assert!(source.grant_id().is_err());
@@ -185,7 +215,10 @@ mod tests {
                 assert!(!source.waiting());
                 assert!(source.grant_id().is_err());
                 assert_eq!(
-                    source.fetch(&"a".repeat(64)).unwrap_err().kind(),
+                    source
+                        .fetch(&format!("b3-{}", "a".repeat(64)))
+                        .unwrap_err()
+                        .kind(),
                     io::ErrorKind::PermissionDenied
                 );
                 assert!(
@@ -234,7 +267,7 @@ mod tests {
             )
             .unwrap();
         let read = |source: Arc<Source>| {
-            tokio::task::spawn_blocking(move || source.fetch(&"a".repeat(64)))
+            tokio::task::spawn_blocking(move || source.fetch(&format!("b3-{}", "a".repeat(64))))
         };
         assert_eq!(
             read(source.clone()).await.unwrap().unwrap(),

@@ -1,14 +1,17 @@
 <script setup lang="ts">
 import type { ChatView } from '../../../../packages/contracts/chats'
-import type { FilItem } from '../signal'
+import type { FilEntry, FilItem } from '../signal'
 import {
   computed,
+  nextTick,
   onBeforeUnmount,
   onMounted,
   ref,
   watch,
 } from 'vue'
 import { useRouter } from 'vue-router'
+import { runMission as queueMission } from '../../../../packages/contracts/generated/runMission'
+import { setMissionState } from '../../../../packages/contracts/generated/setMissionState'
 import {
   api,
   notify,
@@ -17,14 +20,22 @@ import {
 } from '../api'
 import { waitLeft } from '../chat-wait'
 import { setAside } from '../dismissals'
+import { activeFilView } from '../fil-view'
 import {
   Archive,
   Check,
   CheckCheck,
+  ChevronDown,
+  Circle,
+  CircleAlert,
+  CirclePause,
+  CircleX,
   Clock,
   CornerDownRight,
+  Hourglass,
   ListFilter,
   MoreHorizontal,
+  RefreshCw,
   RotateCcw,
   Search,
   X,
@@ -34,10 +45,11 @@ import { localReads, markRead } from '../reads'
 import { typingTarget } from '../shortcuts'
 import {
   dismissible,
+  filFolds,
   filOf,
-  greeting,
+  filThread,
+  filViews,
   isUnread,
-  outcomeLabels,
   shortAge,
   tomorrowMorning,
 } from '../signal'
@@ -47,9 +59,6 @@ import Icon from './Icon.vue'
 import InstallationHeader from './InstallationHeader.vue'
 import MenuButton from './MenuButton.vue'
 
-// The Fil: what needs the user, live work, waiting and recent conversations. J/K move the selection,
-// Enter opens it, E marks finished work as read or dismisses a blocked mission, and / filters, as in
-// a mail client.
 const props = withDefaults(defineProps<{
   chats: ChatView[]
   selected?: string | null
@@ -61,119 +70,209 @@ const runs = useMissionRuns()
 const filter = ref('')
 const filterInput = ref<HTMLInputElement>()
 const cursor = ref<string | null>(null)
+const tab = activeFilView
 const now = ref(Date.now())
 const clock = setInterval(() => now.value = Date.now(), 30000)
 onBeforeUnmount(() => clearInterval(clock))
-
-const fil = computed(() => filOf(props.chats, state.tasks, runs.value, localReads, now.value))
-const opened = (item: FilItem) => (item.chatId && item.chatId === props.selected) || (item.runId && item.runId === props.selectedRun)
-
-// Finished work opened from For you stays there, read, while it is open: it moves to Recent once
-// the user moves on rather than jumping away under the cursor. Work that finishes while it is
-// open was read as it happened and goes straight to Recent.
-const lingering = ref<FilItem | null>(null)
-watch(() => [props.selected, props.selectedRun], () => {
-  lingering.value = fil.value.forYou.find(item => isUnread(item) && opened(item)) ?? null
-}, { immediate: true })
-const readingNow = (item: FilItem) => isUnread(item) && opened(item) && item.key !== lingering.value?.key
-const forYou = computed(() => {
-  const items = fil.value.forYou.filter(item => !readingNow(item))
-  const kept = lingering.value
-  if (!kept || [...items, ...fil.value.live, ...fil.value.waiting].some(item => item.key === kept.key))
-    return items
-  const firstUnread = items.findIndex(isUnread)
-  const at = firstUnread < 0 ? items.length : firstUnread
-  return [...items.slice(0, at), kept, ...items.slice(at)]
-})
-// A mission read as it finishes simply leaves For you; only blocked ones set aside reach Recent.
-const recent = computed(() => [
-  ...fil.value.forYou.filter(item => item.chatId && readingNow(item)).map(item => ({ ...item, kind: 'recent' as const, preview: undefined })),
-  ...fil.value.recent.filter(item => item.key !== lingering.value?.key),
-].sort((a, b) => b.at - a.at))
-const unread = computed(() => fil.value.forYou.filter(item => isUnread(item) && !readingNow(item)))
-const read = (item: FilItem) => isUnread(item) && !fil.value.forYou.some(other => other.key === item.key)
-
-function matches(item: FilItem) {
+const views = computed(() => filViews(filOf(props.chats, state.tasks, runs.value, localReads, now.value)))
+const tabs = computed(() => [
+  { key: 'unread' as const, label: 'À lire', count: views.value.unread.length },
+  { key: 'ongoing' as const, label: 'En cours', count: views.value.ongoing.length },
+  { key: 'all' as const, label: 'Tout', count: null },
+])
+const rows = computed(() => filThread(views.value[tab.value].filter((item) => {
   const query = filter.value.trim().toLowerCase()
   return !query || [item.title, item.subtitle, item.agent, item.project ?? ''].some(value => value.toLowerCase().includes(query))
+})))
+const opened = (item: FilItem) => (item.chatId && item.chatId === props.selected) || (item.runId && item.runId === props.selectedRun)
+const current = (item: FilItem) => opened(item) || cursor.value === item.key
+// Quiet missions fold together, except while filtering, which looks for each row.
+const unfolded = ref(new Set<string>())
+const lines = computed(() => (filter.value.trim() ? rows.value as FilEntry[] : filFolds(rows.value)).flatMap((entry) => {
+  if (!entry.folded) {
+    return [{
+      key: entry.item.key,
+      item: entry.item,
+      nested: entry.nested,
+      folded: undefined,
+      open: false,
+    }]
+  }
+
+  const key = `fold:${entry.item.key}`
+  // The work open beside the Fil stays visible in its fold.
+  const open = unfolded.value.has(key) || entry.folded.some(opened)
+  return [
+    {
+      key,
+      item: entry.item,
+      nested: false,
+      folded: entry.folded,
+      open,
+    },
+    ...(open
+      ? entry.folded.map(item => ({
+          key: item.key,
+          item,
+          nested: true,
+          folded: undefined,
+          open: false,
+        }))
+      : []),
+  ]
+}))
+const flat = computed(() => lines.value.filter(line => !line.folded).map(line => line.item))
+
+// A finished result's opening, beside the Fil: reading it there neither opens nor reads the work.
+const peeked = ref<{ item: FilItem, top: number, left: number } | null>(null)
+const peekCard = ref<HTMLElement>()
+let peekTarget: HTMLElement | undefined
+let peekTimer: ReturnType<typeof setTimeout> | undefined
+let hidePeekTimer: ReturnType<typeof setTimeout> | undefined
+const hoverable = typeof matchMedia === 'function' && matchMedia('(hover: hover)').matches
+onBeforeUnmount(unpeek)
+
+function peek(item: FilItem, event: Event) {
+  const target = event.currentTarget as HTMLElement
+  // Keyboard focus owns its preview until it moves or Escape dismisses it.
+  if (event.type === 'mouseenter' && peekTarget !== target && peekTarget?.matches(':focus'))
+    return
+  if (!item.preview || !hoverable) {
+    if (!peekTarget?.matches(':hover, :focus') && !peekCard.value?.matches(':hover'))
+      unpeek()
+    return
+  }
+
+  clearTimeout(peekTimer)
+  keepPeek()
+  peekTarget = target
+  const row = peekTarget.closest('article')!.getBoundingClientRect()
+  const width = 320
+  const beside = row.right + 12 + width <= innerWidth - 8
+  peekTimer = setTimeout(() => {
+    peekTimer = undefined
+    peeked.value = {
+      item,
+      left: beside ? row.right + 12 : Math.max(8, row.right - width),
+      top: Math.max(8, Math.min(beside ? row.top : row.bottom + 4, innerHeight - 240)),
+    }
+  }, 350)
 }
 
-const sections = computed(() => [
-  { key: 'for-you', label: 'For you', items: forYou.value.filter(matches) },
-  { key: 'live', label: 'Live', items: fil.value.live.filter(matches) },
-  { key: 'waiting', label: 'Waiting', items: fil.value.waiting.filter(matches) },
-  { key: 'recent', label: 'Recent', items: recent.value.filter(matches) },
-])
-const flat = computed(() => sections.value.flatMap(section => section.items))
-const summary = computed(() => {
-  const need = fil.value.forYou.filter(item => !isUnread(item)).length
-  const working = fil.value.live.filter(item => item.kind === 'running').length
-  const suspended = fil.value.live.filter(item => item.kind === 'suspended').length
-  const waiting = fil.value.waiting.length
-  return [
-    need ? `${need} need${need === 1 ? 's' : ''} you` : unread.value.length ? '' : 'Nothing needs you',
-    unread.value.length ? `${unread.value.length} to read` : '',
-    working ? `${working} working` : '',
-    suspended ? `${suspended} suspended` : '',
-    waiting ? `${waiting} waiting` : '',
-  ].filter(Boolean).join(' · ')
-})
-watch(() => props.selected, (id) => {
-  if (id)
-    cursor.value = `chat:${id}`
-})
-watch(() => props.selectedRun, (id) => {
-  const item = id && flat.value.find(item => item.runId === id)
-  if (item)
-    cursor.value = item.key
+function unpeek() {
+  clearTimeout(peekTimer)
+  clearTimeout(hidePeekTimer)
+  peekTimer = undefined
+  hidePeekTimer = undefined
+  peekTarget = undefined
+  peeked.value = null
+}
+
+function keepPeek() {
+  clearTimeout(hidePeekTimer)
+  hidePeekTimer = undefined
+}
+
+function leavePeek() {
+  // Preserve focus/hover ownership and allow the pointer to cross the gap to the card.
+  if (peekTarget?.matches(':hover, :focus') || peekCard.value?.matches(':hover'))
+    return
+  clearTimeout(peekTimer)
+  peekTimer = undefined
+  keepPeek()
+  hidePeekTimer = setTimeout(unpeek, 150)
+}
+
+function toggleFold(key: string) {
+  const next = new Set(unfolded.value)
+  if (!next.delete(key))
+    next.add(key)
+  unfolded.value = next
+}
+
+const tabIndex = computed(() => tabs.value.findIndex(view => view.key === tab.value))
+// The agents at work, once each, for the header's stack of avatars.
+const working = computed(() => [...new Map(views.value.all
+  .filter(item => item.kind === 'running')
+  .map(item => [item.agentKey || item.agent, item])).values()])
+// The filter opens on demand and stays open while it holds a query.
+const searchOpen = ref(false)
+const searching = computed(() => searchOpen.value || !!filter.value)
+
+async function openSearch() {
+  searchOpen.value = true
+  await nextTick()
+  filterInput.value?.focus()
+}
+
+function closeSearch() {
+  filter.value = ''
+  searchOpen.value = false
+  filterInput.value?.blur()
+}
+
+watch(() => [props.selected, props.selectedRun], () => {
+  cursor.value = views.value.all.find(opened)?.key ?? null
 }, { immediate: true })
 
-function current(item: FilItem) {
-  return opened(item) || cursor.value === item.key
+function tone(item: FilItem) {
+  if (item.kind === 'question' || (item.kind === 'review' && item.outcome === 'needs_input'))
+    return 'text-answer'
+  if (item.kind === 'failed' || item.kind === 'failed-mission')
+    return 'text-coral'
+  if (item.kind === 'review')
+    return 'text-warning'
+  if (['running', 'queued', 'waiting', 'snoozed', 'suspended'].includes(item.kind))
+    return 'text-accent'
+  return 'text-muted'
 }
 
-function badge(item: FilItem) {
-  return item.kind === 'question' ? 'question' : item.kind === 'failed' || item.kind === 'failed-mission' ? 'failed' : item.kind === 'unread' ? 'done' : item.kind === 'queued' ? 'queued' : item.kind === 'waiting' || item.kind === 'snoozed' ? 'waiting' : item.kind === 'paused' || item.kind === 'suspended' ? 'paused' : null
-}
-
-const labels: Partial<Record<FilItem['kind'], string>> = {
-  'question': 'Needs your answer',
-  'failed': 'Failed',
-  'failed-mission': 'Mission failed',
-  'review': 'Needs review',
+// The corner of the agent's avatar: what the row asks for, while finished work stays quiet.
+function mark(item: FilItem) {
+  if (item.kind === 'question' || (item.kind === 'review' && item.outcome === 'needs_input'))
+    return CircleAlert
+  if (item.kind === 'failed' || item.kind === 'failed-mission')
+    return CircleX
+  if (item.kind === 'review' || item.kind === 'paused')
+    return CirclePause
+  if (['queued', 'waiting', 'snoozed', 'suspended'].includes(item.kind))
+    return Clock
+  if (item.kind === 'set-aside')
+    return Hourglass
+  return Circle
 }
 
 function label(item: FilItem) {
-  if (isUnread(item))
+  if (item.kind === 'question' || (item.kind === 'review' && item.outcome === 'needs_input'))
+    return 'Answer'
+  if (item.kind === 'unread')
     return item.taskId ? 'Mission finished' : 'Finished'
-  return labels[item.kind]
-}
-
-// The coloured edge says what kind of attention a card asks for.
-function edge(item: FilItem) {
-  if (read(item))
-    return 'bg-line'
-  return item.kind === 'review' ? 'bg-warning' : isUnread(item) ? 'bg-accent' : 'bg-coral'
-}
-
-function tone(item: FilItem) {
-  if (read(item))
-    return 'text-muted'
-  return item.kind === 'review' ? 'text-warning' : isUnread(item) ? 'text-accent' : 'text-coral'
-}
-
-function action(item: FilItem) {
-  return item.kind === 'question' ? 'Answer' : item.kind === 'failed' ? 'Resume' : isUnread(item) && !read(item) ? 'Read' : 'Open'
+  if (item.kind === 'failed-mission')
+    return 'Mission failed'
+  if (item.kind === 'review')
+    return 'Blocked'
+  return item.subtitle
 }
 
 function open(item: FilItem) {
+  unpeek()
   cursor.value = item.key
+  // Only the synced detail acknowledges the work once it has actually been displayed.
   void router.push(item.to)
+}
+
+function read(item: FilItem) {
+  if (item.readAt)
+    void markRead([{ key: item.key, at: item.readAt }])
+}
+
+function readAll() {
+  void markRead(views.value.unread.filter(item => item.readAt).map(item => ({ key: item.key, at: item.readAt! })))
 }
 
 async function runAgain(item: FilItem) {
   try {
-    await api(`/tasks/${item.taskId}/run`, { method: 'POST' })
+    await queueMission(api, { taskId: item.taskId! })
     notify(`${item.title} started`)
     await refreshMissionRuns()
   }
@@ -182,15 +281,12 @@ async function runAgain(item: FilItem) {
   }
 }
 
-// A blocked mission's outcome, for the account's dismissal or snooze.
-const outcomeOf = (item: FilItem) => ({ id: item.runId!, taskId: item.taskId!, finishedAt: item.at })
-
 function dismiss(item: FilItem) {
-  void setAside(outcomeOf(item))
+  void setAside({ id: item.runId!, taskId: item.taskId!, finishedAt: item.at })
 }
 
 function snooze(item: FilItem) {
-  void setAside(outcomeOf(item), tomorrowMorning(now.value))
+  void setAside({ id: item.runId!, taskId: item.taskId!, finishedAt: item.at }, tomorrowMorning(now.value))
 }
 
 async function archive(item: FilItem) {
@@ -198,7 +294,12 @@ async function archive(item: FilItem) {
   if (!task)
     return
   try {
-    await api(`/tasks/${task.id}`, { method: 'PUT', body: JSON.stringify({ ...task, archived: true, enabled: false }) })
+    await setMissionState(api, {
+      taskId: task.id,
+      revision: task.revision,
+      archived: true,
+      enabled: false,
+    })
     await refresh()
     notify(`${item.title} archived`)
   }
@@ -218,13 +319,18 @@ function move(delta: number) {
 }
 
 function key(event: KeyboardEvent) {
-  if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || typingTarget(event.target) || document.querySelector('dialog[open]'))
+  if (!event.defaultPrevented && event.key === 'Escape' && (peeked.value || peekTimer)) {
+    event.preventDefault()
+    unpeek()
+    return
+  }
+
+  if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || typingTarget(event.target) || document.querySelector('dialog[open], [popover]:popover-open'))
     return
   if (event.key === 'j' || event.key === 'k') {
     event.preventDefault()
     move(event.key === 'j' ? 1 : -1)
   }
-  // Enter belongs to a focused control; it opens the selection only when focus rests on the page.
   else if (event.key === 'Enter' && cursor.value && !(event.target instanceof HTMLElement && event.target.closest('a, button, input, textarea, select, summary, [tabindex]'))) {
     const item = flat.value.find(item => item.key === cursor.value)
     if (item) {
@@ -234,19 +340,25 @@ function key(event: KeyboardEvent) {
   }
   else if (event.key === 'e') {
     const item = flat.value.find(item => item.key === cursor.value)
-    if (item && isUnread(item) && !read(item)) {
+    if (item && isUnread(item)) {
       event.preventDefault()
-      void markRead([item])
-    }
-    else if (item && dismissible(item)) {
-      event.preventDefault()
-      dismiss(item)
+      read(item)
     }
   }
   else if (event.key === '/') {
     event.preventDefault()
-    filterInput.value?.focus()
+    void openSearch()
   }
+}
+
+function tabKey(event: KeyboardEvent, index: number) {
+  const delta = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? 2 : delta ? (index + delta + 3) % 3 : null
+  if (next === null)
+    return
+  event.preventDefault()
+  tab.value = tabs.value[next].key
+  ;(event.currentTarget as HTMLElement).parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus()
 }
 
 onMounted(() => document.addEventListener('keydown', key))
@@ -254,265 +366,296 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
 </script>
 
 <template>
-  <div class="fil flex h-full min-h-0 flex-col">
-    <header class="shrink-0 px-5 pb-3" :class="compact ? 'pt-5' : 'pt-6 phone:px-4 phone:pt-[max(10px,env(safe-area-inset-top))]'">
+  <div class="fil flex h-full min-h-0 flex-col [--fil-bg:var(--color-inset)] tablet:[--fil-bg:var(--color-canvas)]">
+    <header class="shrink-0 px-5 pb-2" :class="compact ? 'pt-5' : 'pt-6 phone:px-4 phone:pt-[max(10px,env(safe-area-inset-top))]'">
       <InstallationHeader v-if="!compact" class="mb-4" />
-      <div class="flex items-start gap-3">
-        <div class="min-w-0 flex-1">
-          <p class="eyebrow">
-            {{ greeting() }}
-          </p>
-          <h1 class="mt-1 font-heading text-[28px]! font-extrabold leading-none! tracking-[-0.03em]! text-ink phone:text-[34px]!">
-            Fil
-          </h1>
-          <p class="mt-2 text-[13px] text-muted">
-            {{ summary }}
-          </p>
+      <div class="flex h-9 items-center gap-2">
+        <h1 class="font-heading text-xl! font-bold! tracking-tight text-ink">
+          Fil
+        </h1>
+        <button
+          v-if="working.length"
+          type="button"
+          class="ml-1 flex items-center gap-1.5 rounded-full bg-soft py-0.5 pl-0.5 pr-2.5 text-[11px] font-medium text-accent transition-colors hover:bg-soft/70"
+          data-testid="fil-at-work"
+          @click="tab = 'ongoing'"
+        >
+          <span class="flex -space-x-1">
+            <span v-for="item in working.slice(0, 3)" :key="item.key" class="rounded-[7px] ring-2 ring-soft">
+              <AgentAvatar :name="item.agent" :identity="item.agentKey" :size="18" />
+            </span>
+          </span>
+          {{ working.length }} at work
+        </button>
+        <div class="ml-auto flex items-center gap-0.5">
+          <button
+            type="button"
+            class="grid size-8 place-items-center rounded-lg transition-colors hover:bg-hover hover:text-ink"
+            :class="searching ? 'bg-hover text-ink' : 'text-muted'"
+            aria-label="Filter the Fil"
+            title="Filter the Fil (/)"
+            :aria-expanded="searching"
+            aria-controls="fil-search"
+            @mousedown.prevent
+            @click="searching ? closeSearch() : openSearch()"
+          >
+            <Icon :name="Search" :size="16" />
+          </button>
+          <button
+            v-if="views.unread.length"
+            type="button"
+            class="grid size-8 place-items-center rounded-lg text-muted transition-colors hover:bg-hover hover:text-ink"
+            aria-label="Mark all as read"
+            title="Mark all as read"
+            @click="readAll"
+          >
+            <Icon :name="CheckCheck" :size="16" />
+          </button>
         </div>
       </div>
-      <label class="fil-filter mt-4 flex h-10 flex-row! items-center gap-2 rounded-xl border border-line bg-surface px-3 text-muted transition focus-within:border-accent focus-within:shadow-focus">
-        <Icon :name="ListFilter" :size="16" />
-        <input
-          ref="filterInput"
-          v-model="filter"
-          class="min-h-0! min-w-0 flex-1 border-0! bg-transparent! p-0! text-[13px] text-ink shadow-none! outline-none placeholder:text-subtle"
-          placeholder="Filter the Fil"
-          aria-label="Filter conversations"
-          @keydown.esc.stop="filter = ''; filterInput?.blur()"
-        >
-        <kbd v-if="!filter" class="keycap phone:hidden">/</kbd>
-        <button
-          v-else
-          type="button"
-          class="grid size-6 place-items-center rounded-md hover:bg-hover"
-          aria-label="Clear filter"
-          @click="filter = ''"
-        >
-          <Icon :name="X" :size="14" />
-        </button>
-      </label>
-    </header>
-
-    <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-10 [scrollbar-width:thin] phone:pb-32">
-      <p v-if="filter && !flat.length" class="px-3 py-10 text-center text-[13px] text-muted">
-        Nothing matches “{{ filter }}”.
-      </p>
-      <template v-for="section in sections" :key="section.key">
-        <section v-if="section.items.length || section.key === 'for-you'" class="mt-3" :aria-label="section.label">
-          <h2 class="flex items-center gap-2 px-3 pb-2 pt-2 text-base!">
-            <span class="eyebrow" :class="{ 'text-coral!': section.key === 'for-you' && section.items.some(item => !isUnread(item)), 'text-accent!': section.key === 'for-you' && section.items.length && section.items.every(isUnread) }">{{ section.label }}</span>
-            <span class="rounded-full px-1.5 text-[10.5px] font-bold tabular-nums" :class="section.key !== 'for-you' || !section.items.length ? 'bg-hover text-muted' : section.items.some(item => !isUnread(item)) ? 'bg-coral-soft text-coral' : 'bg-soft text-accent'">{{ section.items.length }}</span>
-            <span v-if="section.key === 'live' && section.items.some(item => item.kind === 'running')" class="live-dot ml-auto mr-1" />
-            <button
-              v-if="section.key === 'for-you' && unread.length"
-              type="button"
-              class="press -my-1 ml-auto flex h-7 items-center gap-1.5 rounded-full px-2.5 text-[11.5px] font-semibold text-muted transition-colors hover:bg-hover hover:text-ink"
-              :aria-label="`Mark ${unread.length} finished ${unread.length === 1 ? 'item' : 'items'} as read`"
-              @click="markRead(unread)"
-            >
-              <Icon :name="CheckCheck" :size="14" /> Mark all read
-            </button>
-          </h2>
-          <p v-if="section.key === 'for-you' && !section.items.length && !filter" class="mx-2 flex items-center gap-2 rounded-2xl border border-dashed border-line px-4 py-3 text-[13px] text-muted">
-            <Icon :name="CheckCheck" :size="16" class="text-success" /> All clear — nothing is waiting on you.
-          </p>
-          <TransitionGroup
-            tag="div"
-            name="fil-row"
-            class="relative flex flex-col"
-            :class="section.key === 'for-you' ? 'gap-2 px-1' : 'gap-0.5'"
+      <div
+        id="fil-search"
+        class="fil-search grid transition-[grid-template-rows,opacity,margin] duration-200 ease-out motion-reduce:transition-none"
+        :class="searching ? 'mt-3 grid-rows-[1fr] opacity-100' : 'mt-0 grid-rows-[0fr] opacity-0'"
+        :inert="!searching"
+      >
+        <div class="min-h-0 overflow-hidden">
+          <label
+            class="fil-filter flex h-9 flex-row! items-center gap-2 rounded-full border border-line bg-surface px-3.5 text-muted transition-transform duration-200 ease-out focus-within:border-accent motion-reduce:transition-none"
+            :class="searching ? 'translate-y-0 scale-100' : '-translate-y-2 scale-[0.97]'"
           >
-            <template v-if="section.key === 'for-you'">
-              <article
-                v-for="item in section.items"
-                :key="item.key"
-                :data-fil-key="item.key"
-                class="lift relative overflow-hidden rounded-2xl border bg-surface"
-                :class="[current(item) ? 'border-accent shadow-focus' : 'border-line', { 'fil-unread': isUnread(item) && !read(item) }]"
-                :data-unread="isUnread(item) && !read(item) ? '' : undefined"
-              >
-                <span class="absolute inset-y-0 left-0 w-[3px] transition-colors duration-500" :class="edge(item)" />
-                <button type="button" class="flex w-full items-start gap-3 px-4 pb-3 pt-3.5 text-left" @click="open(item)">
-                  <AgentAvatar
-                    :name="item.agent"
-                    :identity="item.agentKey"
-                    :size="34"
-                    :badge="badge(item)"
-                  />
-                  <span class="min-w-0 flex-1">
-                    <span v-if="item.chatId && item.requester" class="mb-1 flex min-w-0 items-center gap-1 text-[11px] leading-tight text-subtle" data-testid="fil-requester">
-                      <Icon :name="CornerDownRight" :size="11" class="shrink-0" /><span class="truncate">Delegated by {{ item.requester.title }}</span>
-                    </span>
-                    <span class="flex items-center gap-2 whitespace-nowrap text-[11.5px] font-semibold">
-                      <span
-                        v-if="isUnread(item)"
-                        class="unread-dot"
-                        :class="{ 'unread-dot-read': read(item) }"
-                        :aria-label="read(item) ? undefined : 'Unread'"
-                        :role="read(item) ? undefined : 'img'"
-                      />
-                      <span class="transition-colors duration-500" :class="tone(item)">{{ read(item) ? 'Read' : label(item) }}</span>
-                      <span class="text-subtle">·</span>
-                      <span class="flex min-w-0 items-center gap-1 font-medium text-muted"><span class="truncate">{{ item.agent }}</span><template v-if="item.harness || item.project"> · <HarnessMark v-if="item.harness" :provider="item.harness" /> <span v-if="item.project" class="truncate">{{ item.project }}</span></template></span>
-                      <span class="ml-auto shrink-0 font-medium text-subtle">{{ shortAge(item.at, now) }}</span>
-                    </span>
-                    <span class="mt-1 line-clamp-2 block font-heading text-[14.5px] font-bold leading-snug text-ink">{{ item.title }}</span>
-                    <span v-if="item.preview" class="fil-preview mt-2 line-clamp-2 block rounded-lg bg-inset px-2.5 py-1.5 text-[12.5px] leading-relaxed text-muted phone:line-clamp-3">{{ item.preview }}</span>
-                    <span v-else class="mt-1 line-clamp-1 text-[12.5px] leading-relaxed text-muted phone:line-clamp-2">{{ item.subtitle }}</span>
-                  </span>
-                </button>
-                <div class="flex gap-1.5 px-4 pb-3.5 pl-[62px]">
-                  <button
-                    v-if="item.kind === 'failed-mission'"
-                    type="button"
-                    :aria-label="`Run “${item.title}” again`"
-                    class="press flex h-8 items-center gap-1.5 rounded-full bg-coral-soft px-3 text-[12.5px] font-semibold text-coral"
-                    @click="runAgain(item)"
-                  >
-                    <Icon :name="RotateCcw" :size="14" /> Run again
-                  </button>
-                  <button
-                    type="button"
-                    :aria-label="`${action(item)} “${item.title}”`"
-                    class="press h-8 rounded-full px-3 text-[12.5px] font-semibold"
-                    :class="item.kind === 'question' ? 'bg-accent text-surface' : isUnread(item) && !read(item) ? 'bg-soft text-accent' : 'text-muted hover:bg-hover'"
-                    @click="open(item)"
-                  >
-                    {{ action(item) }}
-                  </button>
-                  <button
-                    v-if="isUnread(item) && !read(item)"
-                    type="button"
-                    :aria-label="`Mark “${item.title}” as read`"
-                    title="Mark as read (E)"
-                    class="press flex h-8 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-semibold text-muted hover:bg-hover hover:text-ink"
-                    @click="markRead([item])"
-                  >
-                    <Icon :name="Check" :size="14" /> Mark as read
-                  </button>
-                  <button
-                    v-if="dismissible(item)"
-                    type="button"
-                    :aria-label="`Dismiss “${item.title}”`"
-                    title="Nothing to do on your side: it leaves For you until the mission reports again (E)"
-                    class="press flex h-8 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-semibold text-muted hover:bg-hover hover:text-ink"
-                    @click="dismiss(item)"
-                  >
-                    <Icon :name="Check" :size="14" /> Dismiss
-                  </button>
-                  <MenuButton
-                    v-if="item.kind === 'review'"
-                    :label="`More actions for “${item.title}”`"
-                    title="More actions"
-                    trigger-class="press ml-auto grid size-8 place-items-center rounded-full text-muted hover:bg-hover hover:text-ink"
-                    :width="232"
-                  >
-                    <template #trigger>
-                      <Icon :name="MoreHorizontal" :size="16" />
-                    </template>
-                    <template #default="{ select }">
-                      <button
-                        type="button"
-                        role="menuitem"
-                        tabindex="-1"
-                        class="menu-item"
-                        @click="select(() => snooze(item))"
-                      >
-                        <Icon :name="Clock" :size="16" />Remind me tomorrow
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        tabindex="-1"
-                        class="menu-item"
-                        @click="select(() => runAgain(item))"
-                      >
-                        <Icon :name="RotateCcw" :size="16" />Run again
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        tabindex="-1"
-                        class="menu-item"
-                        @click="select(() => archive(item))"
-                      >
-                        <Icon :name="Archive" :size="16" />Archive mission
-                      </button>
-                    </template>
-                  </MenuButton>
-                </div>
-              </article>
+            <Icon :name="ListFilter" :size="15" />
+            <input
+              ref="filterInput"
+              v-model="filter"
+              class="min-h-0! min-w-0 flex-1 border-0! bg-transparent! p-0! text-[12px] text-ink shadow-none! outline-none"
+              placeholder="Title, agent or project"
+              aria-label="Filter conversations"
+              @keydown.esc.stop="closeSearch"
+              @blur="searchOpen = !!filter"
+            >
+            <button
+              type="button"
+              class="grid size-6 place-items-center rounded-full hover:bg-hover"
+              aria-label="Close the filter"
+              @mousedown.prevent
+              @click="closeSearch"
+            ><Icon :name="X" :size="14" /></button>
+          </label>
+        </div>
+      </div>
+      <div role="tablist" aria-label="Fil views" class="relative mt-3 grid grid-cols-3 rounded-xl bg-variant/60 p-1">
+        <span
+          aria-hidden="true"
+          class="absolute inset-y-1 left-1 w-[calc((100%-8px)/3)] rounded-lg bg-surface shadow-[0_1px_2px_#0000001f] ring-1 ring-line/70 transition-transform duration-200 ease-out motion-reduce:transition-none"
+          :style="{ transform: `translateX(${tabIndex * 100}%)` }"
+        />
+        <button
+          v-for="(view, index) in tabs"
+          :key="view.key"
+          type="button"
+          role="tab"
+          :aria-selected="tab === view.key"
+          :tabindex="tab === view.key ? 0 : -1"
+          class="relative flex h-7 items-center justify-center gap-1.5 rounded-lg text-[12px] font-medium transition-colors"
+          :class="tab === view.key ? 'text-ink' : 'text-muted hover:text-ink'"
+          @click="tab = view.key"
+          @keydown="tabKey($event, index)"
+        >
+          {{ view.label }}<span v-if="view.count" class="min-w-4 rounded-full px-1 text-center text-[10px] font-semibold leading-4 tabular-nums" :class="view.key === 'unread' ? 'bg-accent text-surface' : 'bg-line text-muted'">{{ view.count }}</span>
+        </button>
+      </div>
+    </header>
+    <div
+      class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-10 [scrollbar-width:thin] phone:pb-32"
+      role="region"
+      :aria-label="tabs.find(view => view.key === tab)?.label"
+      @scroll.passive="unpeek"
+    >
+      <p v-if="!lines.length" class="px-3 py-10 text-center text-[13px] text-muted">
+        {{ filter ? `Nothing matches “${filter}”.` : tab === 'unread' ? 'All read. Your tasks are in En cours and Tout.' : tab === 'ongoing' ? 'No work in progress.' : 'No conversations yet.' }}
+      </p>
+      <template v-for="{ key: lineKey, item, nested, folded, open: unfoldedLine } in lines" :key="lineKey">
+        <button
+          v-if="folded"
+          type="button"
+          class="flex w-full items-start gap-2 rounded-lg py-2.5 pr-2 pl-1.5 text-left transition-colors hover:bg-hover/70"
+          :aria-expanded="unfoldedLine"
+          :aria-label="`${folded.length} missions finished: ${folded.map(entry => entry.title).join(', ')}`"
+          :data-fil-fold="lineKey"
+          @click="toggleFold(lineKey)"
+        >
+          <span class="w-1.5 shrink-0" />
+          <span class="relative mt-0.5 size-[26px] shrink-0">
+            <span class="absolute top-0 left-0 opacity-80"><AgentAvatar :name="folded[1].agent" :identity="folded[1].agentKey" :size="18" /></span>
+            <span class="absolute right-0 bottom-0 rounded-[7px] ring-2 ring-(--fil-bg)"><AgentAvatar :name="folded[0].agent" :identity="folded[0].agentKey" :size="18" /></span>
+          </span>
+          <span class="min-w-0 flex-1">
+            <span class="flex items-baseline gap-2"><span class="truncate text-[13px] leading-snug font-medium text-ink/85">{{ folded.length }} missions finished</span><span class="ml-auto shrink-0 text-[10px] text-subtle tabular-nums">{{ shortAge(item.at, now) }}</span></span>
+            <span class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-subtle">
+              <Icon :name="RefreshCw" :size="10" /><span class="truncate">{{ folded.map(entry => entry.title).join(' · ') }}</span>
+              <Icon
+                :name="ChevronDown"
+                :size="13"
+                class="ml-auto shrink-0 transition-transform duration-200 motion-reduce:transition-none"
+                :class="unfoldedLine && 'rotate-180'"
+              />
+            </span>
+          </span>
+        </button>
+        <article
+          v-else
+          :data-fil-key="item.key"
+          :data-fil-kind="item.kind"
+          :data-unread="isUnread(item) ? '' : undefined"
+          :data-fil-nested="nested ? '' : undefined"
+          class="group relative flex items-center rounded-lg"
+          :class="[current(item) ? 'bg-hover' : 'hover:bg-hover/70', nested && 'ml-[33px] rounded-l-none border-l border-line']"
+        >
+          <button
+            type="button"
+            class="flex min-w-0 flex-1 items-start gap-2 py-2.5 pr-2 text-left"
+            :class="nested ? 'pl-2.5' : 'pl-1.5'"
+            :aria-label="`Open “${item.title}”`"
+            :aria-description="item.finished ? label(item) : undefined"
+            :aria-current="opened(item) ? 'page' : undefined"
+            :aria-describedby="peeked?.item.key === item.key ? 'fil-peek' : undefined"
+            @click="open(item)"
+            @mouseenter="peek(item, $event)"
+            @mouseleave="leavePeek"
+            @focus="peek(item, $event)"
+            @blur="leavePeek"
+          >
+            <span class="mt-[11px] w-1.5 shrink-0"><span
+              v-if="isUnread(item)"
+              class="block size-1.5 rounded-full bg-accent"
+              role="img"
+              aria-label="Unread"
+            /></span>
+            <span class="relative mt-0.5 shrink-0">
+              <AgentAvatar
+                :name="item.agent"
+                :identity="item.agentKey"
+                :size="nested ? 20 : 26"
+                :working="item.kind === 'running'"
+              />
+              <span
+                v-if="!item.finished && item.kind !== 'running'"
+                class="absolute -right-1.5 -bottom-1 grid size-4 place-items-center rounded-full bg-(--fil-bg)"
+                data-testid="fil-mark"
+              ><Icon :name="mark(item)" :size="13" :class="tone(item) === 'text-muted' ? 'text-subtle' : tone(item)" /></span>
+            </span>
+            <span class="min-w-0 flex-1">
+              <span class="flex items-baseline gap-2"><span class="truncate text-[13px] leading-snug" :class="[isUnread(item) ? 'font-semibold text-ink' : 'font-medium', !isUnread(item) && (nested ? 'text-muted' : 'text-ink/85')]">{{ item.title }}</span><span class="ml-auto shrink-0 text-[10px] tabular-nums text-subtle group-hover:invisible group-has-[[aria-expanded=true]]:invisible phone:visible!">{{ shortAge(item.at, now) }}</span></span>
+              <span v-if="!nested || !item.finished" class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-subtle">
+                <span :class="item.finished ? 'sr-only' : ['truncate font-medium', tone(item)]">{{ label(item) }}</span><span v-if="!item.finished && !nested">·</span><template v-if="!nested"><HarnessMark v-if="item.harness" :provider="item.harness" /><Icon v-if="item.taskId" :name="RefreshCw" :size="10" /><span class="truncate">{{ item.project || item.agent }}</span></template>
+              </span>
+              <span v-if="item.requester && !nested" class="mt-0.5 flex items-center gap-1 truncate text-[10px] text-subtle" data-testid="fil-requester"><Icon :name="CornerDownRight" :size="10" />Delegated by {{ item.requester.title }}</span>
+              <span v-if="item.wakeAt !== undefined" class="mt-0.5 block text-[10px] text-accent">{{ waitLeft({ wakeAt: item.wakeAt, condition: item.condition, resolved: item.resolved }, now) }}</span>
+            </span>
+          </button>
+          <MenuButton :label="`More actions for “${item.title}”`" trigger-class="absolute right-1 top-1.5 grid size-7 shrink-0 place-items-center rounded-md bg-hover text-muted opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-ink aria-expanded:opacity-100 phone:static phone:mr-1 phone:bg-transparent phone:opacity-100" :width="210">
+            <template #trigger>
+              <Icon :name="MoreHorizontal" :size="15" />
             </template>
-            <template v-else>
+            <template #default="{ select }">
               <button
-                v-for="item in section.items"
-                :key="item.key"
+                v-if="isUnread(item) && item.readAt"
                 type="button"
-                :data-fil-key="item.key"
-                class="group relative flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors duration-150"
-                :class="current(item) ? 'bg-hover' : 'hover:bg-hover/70'"
-                :aria-current="opened(item) ? 'page' : undefined"
-                @click="open(item)"
+                role="menuitem"
+                tabindex="-1"
+                class="menu-item"
+                @click="select(() => read(item))"
               >
-                <span class="absolute left-0 top-1/2 h-6 w-[3px] -translate-y-1/2 rounded-full bg-accent transition-transform duration-300" :class="current(item) ? 'scale-y-100' : 'scale-y-0'" />
-                <AgentAvatar
-                  :name="item.agent"
-                  :identity="item.agentKey"
-                  :size="34"
-                  :working="item.kind === 'running'"
-                  :badge="badge(item)"
-                />
-                <span class="min-w-0 flex-1">
-                  <span v-if="item.chatId && item.requester" class="mb-0.5 flex min-w-0 items-center gap-1 text-[11px] leading-tight text-subtle" data-testid="fil-requester">
-                    <Icon :name="CornerDownRight" :size="11" class="shrink-0" /><span class="truncate">Delegated by {{ item.requester.title }}</span>
-                  </span>
-                  <span class="block truncate text-[13.5px] font-semibold leading-tight text-ink">{{ item.title }}</span>
-                  <span class="mt-1 flex min-w-0 items-center text-[12px] leading-tight">
-                    <template v-if="item.kind === 'running'">
-                      <span class="shrink-0 font-semibold text-accent">{{ item.taskId ? 'Mission running' : 'Working' }}</span>
-                      <span class="working-wave text-accent"><i /><i /><i /></span>
-                      <span v-if="item.harness || item.project" class="ml-2 flex min-w-0 items-center gap-1 text-muted"><HarnessMark v-if="item.harness" :provider="item.harness" /> <span v-if="item.project" class="truncate">{{ item.project }}</span></span>
-                    </template>
-                    <template v-else-if="item.kind === 'queued'">
-                      <span class="shrink-0 font-semibold text-muted">Queued</span>
-                      <span class="ml-1.5 flex min-w-0 items-center gap-1 text-subtle">· <HarnessMark v-if="item.harness" :provider="item.harness" /> <span class="truncate">{{ item.subtitle }}</span></span>
-                    </template>
-                    <template v-else-if="item.kind === 'waiting'">
-                      <span class="truncate font-medium text-accent">{{ item.subtitle }}</span>
-                      <span v-if="item.harness || item.project" class="ml-1.5 flex min-w-0 items-center gap-1 text-subtle">· <HarnessMark v-if="item.harness" :provider="item.harness" /> <span v-if="item.project" class="truncate">{{ item.project }}</span></span>
-                    </template>
-                    <template v-else-if="item.kind === 'snoozed' || item.kind === 'set-aside'">
-                      <span class="shrink-0 font-medium" :class="item.kind === 'snoozed' ? 'text-accent' : 'text-warning'">{{ item.kind === 'snoozed' ? 'Snoozed' : outcomeLabels[item.outcome!] }}</span>
-                      <span class="ml-1.5 flex min-w-0 items-center gap-1 text-subtle">· <HarnessMark v-if="item.harness" :provider="item.harness" /> <span class="truncate">{{ item.kind === 'snoozed' ? outcomeLabels[item.outcome!] : item.subtitle }}</span></span>
-                    </template>
-                    <template v-else-if="item.kind === 'suspended'">
-                      <span class="flex min-w-0 items-center gap-1 font-medium text-muted"><HarnessMark v-if="item.harness" :provider="item.harness" /> <span class="truncate">{{ item.subtitle }}</span></span>
-                    </template>
-                    <template v-else>
-                      <span class="shrink-0 font-medium text-muted">{{ item.agent }}</span>
-                      <span class="ml-1.5 flex min-w-0 items-center gap-1 text-subtle">· <HarnessMark v-if="item.harness" :provider="item.harness" /> <span class="truncate">{{ item.kind === 'paused' ? 'Paused' : item.project || 'No project' }}</span></span>
-                    </template>
-                  </span>
-                </span>
-                <span
-                  v-if="(item.kind === 'waiting' || item.kind === 'snoozed') && item.wakeAt !== undefined"
-                  class="shrink-0 self-start pt-0.5 text-[11px] font-semibold tabular-nums text-accent"
-                  :title="item.kind === 'snoozed' ? 'Time left before it is back in For you' : item.condition ? 'Resumes when the result arrives, at the latest by its deadline' : 'Time left before it resumes'"
-                >{{ waitLeft({ wakeAt: item.wakeAt!, condition: item.condition, resolved: item.resolved }, now) }}</span>
-                <span v-else class="shrink-0 self-start pt-0.5 text-[11px] tabular-nums" :class="item.kind === 'running' ? 'font-semibold text-accent' : 'text-subtle'">{{ shortAge(item.at, now) }}</span>
+                <Icon :name="Check" :size="16" />Mark as read
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                class="menu-item"
+                @click="select(() => open(item))"
+              >
+                Open conversation
+              </button>
+              <button
+                v-if="dismissible(item)"
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                class="menu-item"
+                @click="select(() => dismiss(item))"
+              >
+                <Icon :name="Check" :size="16" />Dismiss outcome
+              </button>
+              <button
+                v-if="item.kind === 'review'"
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                class="menu-item"
+                @click="select(() => snooze(item))"
+              >
+                <Icon :name="Clock" :size="16" />Remind me tomorrow
+              </button>
+              <button
+                v-if="item.taskId"
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                class="menu-item"
+                @click="select(() => runAgain(item))"
+              >
+                <Icon :name="RotateCcw" :size="16" />Run again
+              </button>
+              <button
+                v-if="item.taskId"
+                type="button"
+                role="menuitem"
+                tabindex="-1"
+                class="menu-item"
+                @click="select(() => archive(item))"
+              >
+                <Icon :name="Archive" :size="16" />Archive mission
               </button>
             </template>
-          </TransitionGroup>
-        </section>
+          </MenuButton>
+        </article>
       </template>
-      <p v-if="!compact" class="mt-6 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11.5px] text-subtle phone:hidden">
-        <span><kbd class="keycap">J</kbd> <kbd class="keycap">K</kbd> move</span>
-        <span v-if="unread.length"><kbd class="keycap">E</kbd> read</span>
-        <span v-else-if="forYou.some(dismissible)"><kbd class="keycap">E</kbd> dismiss</span>
-        <span><kbd class="keycap">C</kbd> new</span>
-        <span class="inline-flex items-center gap-1"><Icon :name="Search" :size="12" /><kbd class="keycap">⌘ K</kbd></span>
-        <span><kbd class="keycap">?</kbd> shortcuts</span>
-      </p>
     </div>
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition duration-150 ease-out motion-reduce:transition-none"
+        enter-from-class="opacity-0 -translate-x-1"
+        leave-active-class="transition duration-100 ease-in motion-reduce:transition-none"
+        leave-to-class="opacity-0"
+      >
+        <div
+          v-if="peeked"
+          id="fil-peek"
+          ref="peekCard"
+          role="tooltip"
+          class="fixed z-40 w-80 rounded-xl border border-line bg-raised p-3.5 shadow-[0_12px_32px_#0000002e]"
+          :style="{ top: `${peeked.top}px`, left: `${peeked.left}px` }"
+          @mouseenter="keepPeek"
+          @mouseleave="leavePeek"
+        >
+          <div class="flex items-center gap-2">
+            <AgentAvatar :name="peeked.item.agent" :identity="peeked.item.agentKey" :size="20" />
+            <span class="truncate text-[12px] font-medium text-muted">{{ [peeked.item.agent, peeked.item.project].filter(Boolean).join(' · ') }}</span>
+            <span class="ml-auto shrink-0 text-[10px] text-subtle tabular-nums">{{ shortAge(peeked.item.at, now) }}</span>
+          </div>
+          <p class="mt-2 line-clamp-2 text-[13px] font-semibold text-ink">
+            {{ peeked.item.title }}
+          </p>
+          <p class="mt-1.5 line-clamp-6 text-[12.5px] leading-relaxed whitespace-pre-line text-muted">
+            {{ peeked.item.preview }}
+          </p>
+          <p class="mt-2.5 text-[10.5px] text-subtle">
+            Open it to read it all. It stays unread until then.
+          </p>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>

@@ -3,9 +3,9 @@
 //! and the project, schedules observations and resumes the conversation; the package
 //! only answers whether its condition is complete.
 use super::{
-    connections::{self, Connection},
+    connections::Connection,
     registry::{self, Package},
-    scope::{self, Scope},
+    scope::{self},
 };
 use crate::{
     config::now,
@@ -14,6 +14,7 @@ use crate::{
     store::Db,
     validation::text,
 };
+use cairn_contracts::{EventKind, PluginContributionKind as Kind};
 use futures_util::{StreamExt, stream};
 use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -31,9 +32,12 @@ pub fn is_condition(condition: &Value) -> bool {
 /// Packages with conditions and the enabled instances granting `agent_id`.
 async fn granted(s: &Service, agent_id: &str) -> Result<Vec<(Package, Vec<Connection>)>> {
     let mut by_plugin = BTreeMap::<String, Vec<Connection>>::new();
-    for value in s.store.list(connections::KIND).await? {
-        if let Ok(connection) = serde_json::from_value::<Connection>(value)
-            && connection.grants(agent_id)
+    for connection in s.store.plugin_instances().await? {
+        let (agent, id) = (agent_id.to_owned(), connection.id.clone());
+        if connection.enabled
+            && s.store
+                .read(move |db| db.has_plugin_grant(&agent, &id))
+                .await?
         {
             by_plugin
                 .entry(connection.plugin_id.clone())
@@ -53,6 +57,29 @@ async fn granted(s: &Service, agent_id: &str) -> Result<Vec<(Package, Vec<Connec
         output.push((package, instances));
     }
     Ok(output)
+}
+
+async fn allowed_instances(
+    s: &Service,
+    agent: &str,
+    instances: &[Connection],
+    name: &str,
+) -> Result<Vec<Connection>> {
+    let (agent, name, instances) = (agent.to_owned(), name.to_owned(), instances.to_vec());
+    s.store
+        .read(move |db| {
+            let mut allowed = Vec::new();
+            for instance in instances {
+                if db
+                    .plugin_contribution(&agent, &instance.id, Kind::Condition, &name)?
+                    .is_some()
+                {
+                    allowed.push(instance);
+                }
+            }
+            Ok(allowed)
+        })
+        .await
 }
 
 /// The `wait_for` schema of one condition: its type, the project when pinned to one,
@@ -89,17 +116,18 @@ fn schema(package: &Package, condition: &cairn_plugin_api::Condition) -> Value {
 
 /// Condition schemas for the agent, for the `wait_for` tool.
 pub async fn schemas(s: &Service, agent_id: &str) -> Result<Vec<Value>> {
-    Ok(granted(s, agent_id)
-        .await?
-        .iter()
-        .flat_map(|(package, _)| {
-            package
-                .manifest
-                .conditions
-                .iter()
-                .map(|condition| schema(package, condition))
-        })
-        .collect())
+    let mut output = Vec::new();
+    for (package, instances) in granted(s, agent_id).await? {
+        for condition in &package.manifest.conditions {
+            if !allowed_instances(s, agent_id, &instances, &condition.name)
+                .await?
+                .is_empty()
+            {
+                output.push(schema(&package, condition));
+            }
+        }
+    }
+    Ok(output)
 }
 
 /// Integral floats JSON Schema accepted as integers become integers, so identical
@@ -123,8 +151,14 @@ pub async fn normalize(s: &Service, agent_id: &str, condition: &Value) -> Result
     if matches!(kind, "run_finished" | "task_finished") {
         return Ok(None);
     }
-    for (package, _) in granted(s, agent_id).await? {
+    for (package, instances) in granted(s, agent_id).await? {
         if let Some(declared) = package.manifest.condition_of_type(kind) {
+            if allowed_instances(s, agent_id, &instances, &declared.name)
+                .await?
+                .is_empty()
+            {
+                continue;
+            }
             let schema = schema(&package, declared);
             let mut condition = condition.clone();
             if let Some(object) = condition.as_object_mut() {
@@ -146,13 +180,21 @@ pub async fn normalize(s: &Service, agent_id: &str, condition: &Value) -> Result
 pub(crate) fn access(db: &Db<'_>, run: &Value, condition: &Value) -> Result<()> {
     let agent_id = text(&run["snapshot"]["agent"], "id");
     let plugin = text(condition, "pluginId");
-    let granted = db.list(connections::KIND)?.into_iter().any(|value| {
-        value["pluginId"] == plugin
-            && value["enabled"] == true
-            && value["agentIds"]
-                .as_array()
-                .is_some_and(|ids| ids.iter().any(|id| id == agent_id))
-    });
+    let name = text(condition, "type")
+        .strip_prefix(&format!("{plugin}_"))
+        .unwrap_or("");
+    let mut granted = false;
+    for instance in db.plugin_instances()? {
+        if instance.enabled
+            && instance.plugin_id == plugin
+            && db
+                .plugin_contribution(agent_id, &instance.id, Kind::Condition, name)?
+                .is_some()
+        {
+            granted = true;
+            break;
+        }
+    }
     if !granted {
         return Err(Error::forbidden(
             "This agent is no longer granted the plugin of this wait.",
@@ -171,19 +213,19 @@ fn project(db: &Db<'_>, run: &Value, condition: &Value) -> Result<Value> {
         .find(|p| p["id"] == id)
         .ok_or_else(|| Error::forbidden("This project is not authorized for the wait."))?;
     let current = db
-        .get("projects", id)?
+        .project(id)?
         .ok_or_else(|| Error::not_found("Project no longer exists."))?;
-    if current["origin"] != granted["origin"] {
+    if current.origin != granted["origin"].as_str().unwrap_or("") {
         return Err(Error::conflict(
             "Project origin changed; register a new wait.",
         ));
     }
     Ok(json!({
-        "id": current["id"],
-        "name": current["name"],
-        "origin": current["origin"],
-        "baseBranch": current["baseBranch"],
-        "source": current["source"],
+        "id": current.id,
+        "name": current.settings.name,
+        "origin": current.origin,
+        "baseBranch": current.settings.base_branch,
+        "source": current.source,
     }))
 }
 
@@ -235,6 +277,17 @@ pub struct Observed {
 }
 
 pub async fn observe(s: &Service, run: &Value, condition: &Value) -> Result<Observed> {
+    observe_with(s, run, condition, None)
+        .await
+        .map(|(observed, _)| observed)
+}
+
+async fn observe_with(
+    s: &Service,
+    run: &Value,
+    condition: &Value,
+    owner: Option<Arc<crate::waits::Owner>>,
+) -> Result<(Observed, crate::capabilities::plugin_packages::Authority)> {
     let caller = run.clone();
     let source = condition.clone();
     let project = s
@@ -269,10 +322,30 @@ pub async fn observe(s: &Service, run: &Value, condition: &Value) -> Result<Obse
             object.remove(key);
         }
     }
-    let scope = Scope::Agent {
-        agent_id: agent_id.clone(),
-        instances,
+    let snapshot = if let Some(owner) = owner {
+        super::grant_authorization::Snapshot::for_wait(s, run, &package, owner).await?
+    } else {
+        super::grant_authorization::Snapshot::for_run(s, run, &package).await?
     };
+    let scope = super::grant_authorization::contribution_scope(
+        s,
+        snapshot,
+        instances,
+        Kind::Condition,
+        &declared.name,
+        &input,
+    )
+    .await?;
+    let scope = Arc::new(scope);
+    let local = scope.clone();
+    let asynchronous = scope.clone();
+    let publication = crate::capabilities::plugin_packages::Authority::default()
+        .with_guard(move |db| scope::authorize_in(db, &local))
+        .with_recheck_guard(move |s| {
+            let scope = asynchronous.clone();
+            Box::pin(async move { scope::authorize(s, &scope).await })
+        });
+    let publication = crate::delegation::authorize_async_with(s, run, publication).await?;
     let payload = json!({
         "condition": declared.name,
         "input": input,
@@ -286,6 +359,7 @@ pub async fn observe(s: &Service, run: &Value, condition: &Value) -> Result<Obse
     )
     .await
     .map_err(|_| Error::bad_gateway("The condition could not be checked in time."))??;
+    publication.recheck(s).await?;
     if serde_json::to_string(&value)?.len() > MAX_OBSERVATION_BYTES {
         return Err(Error::bad_gateway(
             "The plugin returned too large a result.",
@@ -302,11 +376,14 @@ pub async fn observe(s: &Service, run: &Value, condition: &Value) -> Result<Obse
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
     });
     let Some(state) = state.filter(|state| !state.is_empty()) else {
-        return Ok(Observed {
-            result: None,
-            display: waiting_display(&value["display"]),
-            check_after,
-        });
+        return Ok((
+            Observed {
+                result: None,
+                display: waiting_display(&value["display"]),
+                check_after,
+            },
+            publication,
+        ));
     };
     let mut result = value.as_object().cloned().unwrap_or_default();
     result.remove("checkAfter");
@@ -322,72 +399,130 @@ pub async fn observe(s: &Service, run: &Value, condition: &Value) -> Result<Obse
             .unwrap_or_else(|| "The condition cannot be observed.".into());
         result.insert("message".into(), message.into());
     }
-    Ok(Observed {
-        result: Some(Value::Object(result)),
-        display: None,
-        check_after,
-    })
+    Ok((
+        Observed {
+            result: Some(Value::Object(result)),
+            display: None,
+            check_after,
+        },
+        publication,
+    ))
 }
 
-fn watchable(owner: &crate::waits::Owner, run: &Value, time: i64) -> bool {
-    let wakeup = &owner.record["wakeup"];
-    owner.resumable(run)
-        && is_condition(&wakeup["condition"])
-        && !wakeup["observation"].is_object()
-        && wakeup["wakeAt"]
-            .as_i64()
-            .is_some_and(|deadline| deadline > time)
-        && wakeup["nextCheckAt"]
-            .as_i64()
-            .is_none_or(|next| next <= time)
+/// One plugin condition of a wait: the whole wait (`None`), or one condition of a group.
+type Slot = Option<usize>;
+
+// Share each wait snapshot: cloning its full member list per watcher is quadratic.
+type Watch = (Arc<crate::waits::Owner>, Arc<Value>, Slot);
+
+fn condition_of(
+    wakeup: &cairn_contracts::ChatWakeup,
+    slot: Slot,
+) -> Option<&cairn_contracts::WaitCondition> {
+    match (slot, wakeup.condition.as_ref()?) {
+        (Some(index), cairn_contracts::WaitCondition::Group { conditions, .. }) => {
+            conditions.get(index)
+        }
+        (None, condition) => Some(condition),
+        _ => None,
+    }
 }
 
-/// One batch is capped and deduplicated; slow services never hold the admission tick.
+fn progress_of(
+    wakeup: &mut cairn_contracts::ChatWakeup,
+    slot: Slot,
+) -> Option<&mut cairn_contracts::WaitMemberProgress> {
+    match slot {
+        Some(index) => wakeup.members.as_mut()?.get_mut(index),
+        None => Some(&mut wakeup.progress),
+    }
+}
+
+fn watched(owner: &crate::waits::Owner, run: &Value, time: i64) -> Vec<Slot> {
+    let Some(wakeup) = owner
+        .wakeup
+        .as_ref()
+        .filter(|w| owner.resumable(run) && w.progress.observation.is_none() && w.wake_at > time)
+    else {
+        return Vec::new();
+    };
+    let slots = match &wakeup.condition {
+        Some(cairn_contracts::WaitCondition::Group { conditions, .. }) => {
+            (0..conditions.len()).map(Some).collect::<Vec<_>>()
+        }
+        _ => vec![None],
+    };
+    slots
+        .into_iter()
+        .filter(|slot| {
+            let progress = match slot {
+                Some(index) => wakeup.members.as_ref().and_then(|m| m.get(*index)),
+                None => Some(&wakeup.progress),
+            };
+            matches!(
+                condition_of(wakeup, *slot),
+                Some(cairn_contracts::WaitCondition::Plugin { .. })
+            ) && progress.is_some_and(|p| {
+                p.observation.is_none() && p.next_check_at.is_none_or(|at| at <= time)
+            })
+        })
+        .collect()
+}
+
 pub async fn poll_once(s: &Service) -> Result<()> {
     let groups = s
         .store
         .read(|db| {
-            let mut groups: BTreeMap<String, Vec<(crate::waits::Owner, Value)>> = BTreeMap::new();
-            let mut owners = db
-                .list("chats")?
-                .into_iter()
-                .map(|record| crate::waits::Owner { chat: true, record })
-                .collect::<Vec<_>>();
-            owners.extend(
-                db.active()?
-                    .into_iter()
-                    .filter(|run| run["status"] == "waiting")
-                    .map(|record| crate::waits::Owner {
-                        chat: false,
-                        record,
-                    }),
-            );
+            let mut groups = BTreeMap::<String, Vec<Watch>>::new();
+            let mut owners = Vec::new();
+            for record in db.conversations()? {
+                owners.push(crate::waits::Owner::conversation(record));
+            }
+            for record in db.waiting_run_records()? {
+                owners.push(crate::waits::Owner::mission(record));
+            }
             for owner in owners {
                 let Some(run) = db.run(owner.run_id())? else {
                     continue;
                 };
-                if !watchable(&owner, &run, now()) {
-                    continue;
+                let owner = Arc::new(owner);
+                let run = Arc::new(run);
+                for slot in watched(&owner, &run, now()) {
+                    let condition = condition_of(owner.wakeup.as_ref().unwrap(), slot).unwrap();
+                    let wire = crate::waits::condition_wire(condition);
+                    let project_id = &wire["projectId"];
+                    let granted_origin = crate::project_workspaces::catalog(&run)
+                        .into_iter()
+                        .find(|p| &p["id"] == project_id)
+                        .map(|p| p["origin"].clone());
+                    let requester = db
+                        .conversation_for_run(text(&run, "id"))?
+                        .and_then(|chat| chat.requested_by);
+                    let key = json!({
+                        "agentId": run["snapshot"]["agent"]["id"],
+                        "access": policy(&run["snapshot"]["agent"]),
+                        "condition": condition,
+                        "projectOrigin": granted_origin,
+                        "requester": requester,
+                    })
+                    .to_string();
+                    groups
+                        .entry(key)
+                        .or_default()
+                        .push((owner.clone(), run.clone(), slot));
                 }
-                let project_id = &owner.record["wakeup"]["condition"]["projectId"];
-                let granted_origin = crate::project_workspaces::catalog(&run)
-                    .into_iter()
-                    .find(|project| &project["id"] == project_id)
-                    .map(|project| project["origin"].clone());
-                let key = json!({
-                    "agentId": run["snapshot"]["agent"]["id"],
-                    "access": policy(&run["snapshot"]["agent"]),
-                    "condition": owner.record["wakeup"]["condition"],
-                    "projectOrigin": granted_origin,
-                })
-                .to_string();
-                groups.entry(key).or_default().push((owner, run));
             }
-            let mut groups: Vec<_> = groups.into_values().collect();
+            let mut groups = groups.into_values().collect::<Vec<_>>();
             groups.sort_by_key(|group| {
                 group
                     .iter()
-                    .filter_map(|(c, _)| c.record["wakeup"]["nextCheckAt"].as_i64())
+                    .filter_map(|(owner, _, slot)| {
+                        let w = owner.wakeup.as_ref()?;
+                        match slot {
+                            Some(index) => w.members.as_ref()?.get(*index)?.next_check_at,
+                            None => w.progress.next_check_at,
+                        }
+                    })
                     .min()
                     .unwrap_or(0)
             });
@@ -397,10 +532,18 @@ pub async fn poll_once(s: &Service) -> Result<()> {
         .await?;
     let results = stream::iter(groups)
         .map(|group| async move {
-            let (first, run) = &group[0];
-            let observed = observe(s, run, &first.record["wakeup"]["condition"]).await;
+            let (first, run, slot) = &group[0];
+            let condition = condition_of(first.wakeup.as_ref().unwrap(), *slot).unwrap();
+            let observer = text(run, "id").to_owned();
+            let observed = observe_with(
+                s,
+                run,
+                &crate::waits::condition_wire(condition),
+                Some(first.clone()),
+            )
+            .await;
             s.store
-                .transaction(move |db| record(db, group, &observed))
+                .transaction(move |db| record_authorized(db, group, observed, &observer))
                 .await
         })
         .buffer_unordered(4)
@@ -413,60 +556,105 @@ pub async fn poll_once(s: &Service) -> Result<()> {
     Ok(())
 }
 
+fn unchanged(
+    current: Option<&cairn_contracts::ChatWakeup>,
+    expected: Option<&cairn_contracts::ChatWakeup>,
+    slot: Slot,
+) -> bool {
+    let (Some(current), Some(expected)) = (current, expected) else {
+        return false;
+    };
+    match slot {
+        Some(index) => {
+            current.id == expected.id
+                && current.condition == expected.condition
+                && current.members.as_ref().and_then(|m| m.get(index))
+                    == expected.members.as_ref().and_then(|m| m.get(index))
+        }
+        None => current == expected,
+    }
+}
+
+fn record_authorized(
+    db: &Db<'_>,
+    group: Vec<Watch>,
+    observed: Result<(Observed, crate::capabilities::plugin_packages::Authority)>,
+    observer: &str,
+) -> Result<()> {
+    let observed = observed.and_then(|(observed, publication)| {
+        publication.authorize(db)?;
+        Ok(observed)
+    });
+    record(db, group, &observed, observer)
+}
+
 fn record(
     db: &Db<'_>,
-    group: Vec<(crate::waits::Owner, Value)>,
+    group: Vec<Watch>,
     observed: &Result<Observed>,
+    observer: &str,
 ) -> Result<()> {
-    for (expected, observed_run) in group {
+    for (expected, observed_run, slot) in group {
         let Some(mut owner) = expected.reload(db)? else {
             continue;
         };
         let Some(run) = db.run(owner.run_id())? else {
             continue;
         };
-        // A merge can transfer a sleeping run while its plugin check is in flight.
-        // Retry under the current profile rather than recording a stale denial.
         if run["id"] != observed_run["id"]
             || run["snapshot"]["agent"] != observed_run["snapshot"]["agent"]
-            || owner.record["wakeup"] != expected.record["wakeup"]
-            || !watchable(&owner, &run, now())
+            || !unchanged(owner.wakeup.as_ref(), expected.wakeup.as_ref(), slot)
+            || !watched(&owner, &run, now()).contains(&slot)
         {
             continue;
         }
-        let authorized = crate::waits::access(db, &run, &owner.record["wakeup"]["condition"]);
+        let condition = condition_of(owner.wakeup.as_ref().unwrap(), slot)
+            .unwrap()
+            .clone();
+        let authorized = crate::waits::access(db, &run, &crate::waits::condition_wire(&condition));
         let result = match (&authorized, observed) {
-            (Err(error), _) => Some(json!({ "state": "unavailable", "message": error.message })),
+            (Err(error), _) => Some(json!({"state":"unavailable","message":error.message})),
             (Ok(()), Ok(value)) => value.result.clone(),
-            (Ok(()), Err(error)) if matches!(error.status, 403 | 404 | 409) => {
-                Some(json!({ "state": "unavailable", "message": error.message }))
+            (Ok(()), Err(error))
+                if matches!(error.status, 403 | 404 | 409) && owner.run_id() == observer =>
+            {
+                Some(json!({"state":"unavailable","message":error.message}))
             }
             _ => None,
         };
+        let result = result
+            .as_ref()
+            .map(crate::waits::observed_from_wire)
+            .transpose()?;
+        let progress = progress_of(owner.wakeup.as_mut().unwrap(), slot).unwrap();
         let mut delay = POLL_MS;
-        if let Some(result) = result {
-            owner.record["wakeup"]["observation"] = result.clone();
-            db.event(
-                text(&run, "id"),
-                owner.event("wait_ready"),
-                "Wait condition resolved",
-                Some(&result),
-            )?;
+        if let Some(result) = &result {
+            progress.observation = Some(result.clone());
         } else if observed.is_err() {
-            owner.record["wakeup"]["lastError"] =
-                "The service is temporarily unavailable; retrying until the wait deadline.".into();
-        } else if let Some(wakeup) = owner.record["wakeup"].as_object_mut() {
-            // A successful check means the service answers again.
-            wakeup.remove("lastError");
+            progress.last_error = Some(
+                "The service is temporarily unavailable; retrying until the wait deadline.".into(),
+            );
+        } else {
+            progress.last_error = None;
         }
         if let Ok(observed) = observed {
             if let Some(display) = &observed.display {
-                owner.record["wakeup"]["display"] = display.clone();
+                progress.display = Some(serde_json::from_value(display.clone())?);
             }
             delay = observed.check_after.unwrap_or(POLL_MS);
         }
-        owner.record["wakeup"]["nextCheckAt"] = (now() + delay).into();
-        owner.record["updatedAt"] = now().into();
+        progress.next_check_at = Some(now() + delay);
+        if slot.is_some() {
+            crate::waits::record_members(db, &mut owner, &run)?;
+        } else if let Some(result) = result {
+            db.event(
+                text(&run, "id"),
+                &EventKind::from_adapter(owner.event("wait_ready")),
+                "Wait condition resolved",
+                Some(&serde_json::to_value(result)?),
+            )?;
+        }
+        owner.touch(now());
         owner.save(db)?;
     }
     Ok(())
@@ -492,6 +680,9 @@ pub(crate) async fn maintain(s: Arc<Service>) {
 }
 
 #[cfg(test)]
+use crate::run_fixture::DbRunFixture;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -501,49 +692,48 @@ mod tests {
         let store = crate::store::Store::open(root.path()).unwrap();
         store
             .transaction(|db| {
-                let source = json!({ "id": "source" });
-                let target = json!({ "id": "target" });
-                db.put("agents", &target)?;
-                db.put(
-                    connections::KIND,
-                    &json!({
-                        "id": "instance", "pluginId": "fixture", "enabled": true,
-                        "agentIds": ["target"],
-                    }),
-                )?;
+                let source = json!({ "id": "00000000-0000-4000-8000-000000000010" });
+                let target = json!({ "id": "00000000-0000-4000-8000-000000000011" });
+                let mut profile = crate::agent_fixture::profile(target.clone())?;
+                profile.settings.plugins = vec!["00000000-0000-4000-8000-000000000012".into()];
+                let mut instance = Connection::draft("00000000-0000-4000-8000-000000000012", "fixture", json!({}), Vec::new());
+                instance.name = "Fixture".into();
+                instance.revision = "r1".into();
+                instance.enabled = true;
+                db.save_plugin_version("fixture", "1", &"0".repeat(64))?;
+                db.save_plugin_instance(&instance)?;
+                db.save_agent(&profile)?;
                 let captured_run = json!({
                     "id": "run", "taskId": "task", "status": "succeeded", "createdAt": now(),
                     "snapshot": { "agent": source }, "chatExecution": { "messageId": "message" },
                 });
-                db.add_run(&captured_run, None)?;
-                let chat = db.put(
-                    "chats",
-                    &json!({
-                        "id": "chat", "agentId": "target", "runId": "run",
+                db.add_run_fixture(&captured_run, None)?;
+                let chat = db.save_conversation_boundary(&json!({
+                        "id": "chat", "agentId": "00000000-0000-4000-8000-000000000011", "runId": "run",
                         "wakeup": {
-                            "messageId": "message", "wakeAt": now() + 60_000,
-                            "condition": { "type": "fixture_ready", "pluginId": "fixture" },
+                            "id":"fixture-wait", "messageId": "message", "wakeAt": now() + 60_000,
+                            "reason":"Fixture", "seconds":60,"createdAt":now(),
+                            "condition": { "type": "plugin", "conditionType":"fixture_ready", "pluginId": "fixture", "input":{} },
                         },
                     }),
                 )?;
-                let current_run =
-                    db.patch_run("run", &json!({ "snapshot": { "agent": target } }))?;
+                let current_run = { db.0.execute("UPDATE runs SET snapshot=json_set(snapshot, '$.agent', json(?)) WHERE id='run'", [target.to_string()])?; db.run("run")?.unwrap() };
                 let stale_denial =
-                    crate::waits::access(db, &captured_run, &chat["wakeup"]["condition"])
+                    crate::waits::access(db, &captured_run, &crate::waits::condition_wire(db.wakeup(true,"chat")?.unwrap().condition.as_ref().unwrap()))
                         .unwrap_err();
                 record(
                     db,
                     vec![(
-                        crate::waits::Owner {
-                            chat: true,
-                            record: chat.clone(),
-                        },
-                        captured_run,
+                        crate::waits::Owner::conversation(db.conversation("chat")?.unwrap())
+                        .into(),
+                        captured_run.into(),
+                        None,
                     )],
                     &Err(stale_denial),
+                    "run",
                 )?;
-                assert_eq!(db.get("chats", "chat")?.unwrap(), chat);
-                assert!(db.events("run", 0, 10)?.is_empty());
+                assert_eq!(db.conversation_boundary("chat")?.unwrap(), chat);
+                assert!(db.events_fixture("run", 0, 10)?.is_empty());
 
                 let fresh = Ok(Observed {
                     result: Some(json!({ "state": "completed" })),
@@ -553,19 +743,114 @@ mod tests {
                 record(
                     db,
                     vec![(
-                        crate::waits::Owner {
-                            chat: true,
-                            record: chat,
-                        },
-                        current_run,
+                        crate::waits::Owner::conversation(db.conversation("chat")?.unwrap())
+                        .into(),
+                        current_run.into(),
+                        None,
                     )],
                     &fresh,
+                    "run",
                 )?;
                 assert_eq!(
-                    db.get("chats", "chat")?.unwrap()["wakeup"]["observation"]["state"],
+                    db.conversation_boundary("chat")?.unwrap()["wakeup"]["observation"]["state"],
                     "completed"
                 );
-                assert_eq!(db.events("run", 0, 10)?.len(), 1);
+                assert_eq!(db.events_fixture("run", 0, 10)?.len(), 1);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_second_granted_instance_cannot_publish_the_revoked_observers_result() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let agent = "00000000-0000-4000-8000-000000000011";
+                let first = "00000000-0000-4000-8000-000000000012";
+                let second = "00000000-0000-4000-8000-000000000013";
+                let mut profile = crate::agent_fixture::profile(json!({ "id": agent }))?;
+                profile.settings.plugins = vec![first.into(), second.into()];
+                db.save_plugin_version("fixture", "1", &"0".repeat(64))?;
+                let mut observed_instance = None;
+                for id in [first, second] {
+                    let mut instance = Connection::draft(id, "fixture", json!({}), vec![]);
+                    instance.name = id.into();
+                    instance.revision = "r1".into();
+                    instance.enabled = true;
+                    db.save_plugin_instance(&instance)?;
+                    if id == first {
+                        observed_instance = Some(instance);
+                    }
+                }
+                db.save_agent(&profile)?;
+                let run = json!({
+                    "id": "run",
+                    "taskId": "task",
+                    "status": "succeeded",
+                    "createdAt": now(),
+                    "snapshot": { "agent": { "id": agent } },
+                    "chatExecution": { "messageId": "message" },
+                });
+                db.add_run_fixture(&run, None)?;
+                let run = db.run("run")?.unwrap();
+                db.save_conversation_boundary(&json!({
+                    "id": "chat",
+                    "agentId": agent,
+                    "runId": "run",
+                    "wakeup": {
+                        "id": "fixture-wait",
+                        "messageId": "message",
+                        "wakeAt": now() + 60_000,
+                        "reason": "Fixture",
+                        "seconds": 60,
+                        "createdAt": now(),
+                        "condition": {
+                            "type": "plugin",
+                            "conditionType": "fixture_ready",
+                            "pluginId": "fixture",
+                            "input": {},
+                        },
+                    },
+                }))?;
+                let instance = observed_instance.unwrap();
+                let scope = scope::Scope::Agent {
+                    agent_id: agent.into(),
+                    instances: vec![instance.clone()],
+                };
+                let publication = crate::capabilities::plugin_packages::Authority::default()
+                    .with_guard(move |db| scope::authorize_in(db, &scope));
+                let mut revoked = instance;
+                revoked.enabled = false;
+                revoked.revision = "r2".into();
+                db.save_plugin_instance(&revoked)?;
+                let owner = crate::waits::Owner::conversation(db.conversation("chat")?.unwrap());
+                let condition = crate::waits::condition_wire(
+                    owner.wakeup.as_ref().unwrap().condition.as_ref().unwrap(),
+                );
+                assert!(
+                    crate::waits::access(db, &run, &condition).is_ok(),
+                    "the other instance still grants the condition"
+                );
+                record_authorized(
+                    db,
+                    vec![(owner.into(), run.into(), None)],
+                    Ok((
+                        Observed {
+                            result: Some(json!({ "state": "completed" })),
+                            display: None,
+                            check_after: None,
+                        },
+                        publication,
+                    )),
+                    "run",
+                )?;
+                assert_eq!(
+                    db.conversation_boundary("chat")?.unwrap()["wakeup"]["observation"]["state"],
+                    "unavailable"
+                );
                 Ok(())
             })
             .await

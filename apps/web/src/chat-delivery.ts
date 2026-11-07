@@ -1,5 +1,6 @@
 import type { ChatDetail, ChatMessage } from '../../../packages/contracts/chats'
-import type { Run, RunEvent } from '../../../packages/contracts/contracts'
+import type { Run } from '../../../packages/contracts/contracts'
+import type { TimelineEntry } from '../../../packages/contracts/live'
 import { providers } from '../../../packages/contracts/accounts'
 
 export interface SendingMessage {
@@ -27,8 +28,8 @@ export function chatWaitNotice(run: Run | null | undefined) {
 }
 
 /** The dispatch queue is durable storage; only waiting follow-ups belong in the UI queue. */
-export function chatDelivery(chat: ChatDetail | null, events: RunEvent[], outgoing: ChatMessage | null = null) {
-  const acknowledged = new Set(events.filter(event => event.type === 'chat.user').map(event => event.payload?.messageId))
+export function chatDelivery(chat: ChatDetail | null, cards: TimelineEntry[], outgoing: ChatMessage | null = null) {
+  const acknowledged = new Set(cards.flatMap(card => card.content.kind === 'userMessage' && card.content.messageId ? [card.content.messageId] : []))
   const messages = (chat?.messages ?? []).filter(message => message.status === 'queued' || message.status === 'sending')
   if (outgoing && !messages.some(message => message.id === outgoing.id))
     messages.push(outgoing)

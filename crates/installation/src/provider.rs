@@ -14,10 +14,10 @@ pub enum Provider {
 impl Provider {
     pub const ALL: [Provider; 3] = [Provider::Codex, Provider::Claude, Provider::Opencode];
 
-    /// Agents saved before Claude Code support have no provider and run on Codex.
+    /// Current agent and run records explicitly select their coding engine.
     pub fn of_agent(agent: &Value) -> Result<Self> {
         match agent.get("provider") {
-            None => Ok(Self::Codex),
+            None => Err(Error::bad("Missing coding agent in saved state.")),
             Some(Value::String(value)) => Self::parse(value),
             Some(_) => Err(Error::bad("Invalid coding agent.")),
         }
@@ -48,11 +48,37 @@ impl Provider {
         }
     }
 
+    /// Whether the coding agent can compact its native context on request. OpenCode runs
+    /// with automatic compaction disabled and exposes no compaction control to Cairn.
+    pub fn compacts_context(self) -> bool {
+        matches!(self, Self::Codex | Self::Claude)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Codex => "Codex",
             Self::Claude => "Claude Code",
             Self::Opencode => "OpenCode",
+        }
+    }
+}
+
+impl From<Provider> for cairn_contracts::AgentProvider {
+    fn from(value: Provider) -> Self {
+        match value {
+            Provider::Codex => Self::Codex,
+            Provider::Claude => Self::Claude,
+            Provider::Opencode => Self::Opencode,
+        }
+    }
+}
+
+impl From<cairn_contracts::AgentProvider> for Provider {
+    fn from(value: cairn_contracts::AgentProvider) -> Self {
+        match value {
+            cairn_contracts::AgentProvider::Codex => Self::Codex,
+            cairn_contracts::AgentProvider::Claude => Self::Claude,
+            cairn_contracts::AgentProvider::Opencode => Self::Opencode,
         }
     }
 }
@@ -63,8 +89,8 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn agents_without_a_provider_run_on_codex() {
-        assert_eq!(Provider::of_agent(&json!({})).unwrap(), Provider::Codex);
+    fn records_require_an_explicit_provider() {
+        assert!(Provider::of_agent(&json!({})).is_err());
         assert_eq!(
             Provider::of_agent(&json!({ "provider": "claude" })).unwrap(),
             Provider::Claude

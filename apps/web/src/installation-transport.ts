@@ -1,5 +1,11 @@
-import { DirectChannel, TransportLost, TransportNotSent } from './direct-channel'
+import {
+  DirectChannel,
+  ProtocolMismatch,
+  TransportLost,
+  TransportNotSent,
+} from './direct-channel'
 import { DirectSource } from './direct-source'
+import { documentLifetime, documentSignal } from './document-lifetime'
 import { observeTransport } from './transport-observation'
 
 export type TransportRoute = 'direct' | 'relay'
@@ -10,6 +16,7 @@ interface Context {
   authenticated: boolean
   ready: boolean
   transportRoute: TransportRoute
+  protocolError: string
 }
 
 interface GrantResponse {
@@ -111,21 +118,30 @@ export class InstallationTransport {
   }
 
   private async control(path: string, body: unknown) {
+    const signal = documentSignal(this.controlAbort?.signal)
     const response = await fetch(`${this.base}${path}`, {
       method: 'POST',
-      signal: this.controlAbort?.signal,
+      signal,
       headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': this.context.csrf },
       body: JSON.stringify(body),
     })
+    signal.throwIfAborted()
     if (response.status === 401)
       this.context.authenticated = false
-    if (!response.ok)
+    if (!response.ok) {
+      if ([422, 426].includes(response.status)) {
+        const body = await response.json().catch(() => undefined)
+        throw new ProtocolMismatch(typeof body?.error === 'string' ? body.error : undefined)
+      }
+
       throw new SignalingError(response.status)
+    }
+
     return response.status === 204 ? undefined : response.json()
   }
 
   start() {
-    if (this.started || !this.context.ready || !this.context.authenticated || !this.context.installationId || typeof RTCPeerConnection === 'undefined')
+    if (documentLifetime.value.signal.aborted || this.started || !this.context.ready || !this.context.authenticated || !this.context.installationId || typeof RTCPeerConnection === 'undefined')
       return
     this.started = true
     this.stopped = false
@@ -201,6 +217,13 @@ export class InstallationTransport {
   }
 
   private failed(error?: unknown) {
+    if (error instanceof ProtocolMismatch) {
+      this.context.protocolError = error.message
+      this.blocked = true
+      this.traffic?.close(error)
+      window.dispatchEvent(new Event('cairn-transport-change'))
+    }
+
     if (error instanceof SignalingError && [401, 403].includes(error.status))
       this.blocked = true
     if (error instanceof DOMException && error.name === 'NotAllowedError')
@@ -230,7 +253,7 @@ export class InstallationTransport {
   }
 
   private async connect(iceRestart: boolean) {
-    if (this.stopped || this.blocked || this.online === false || !this.context.authenticated || !navigator.onLine || document.hidden)
+    if (documentLifetime.value.signal.aborted || this.stopped || this.blocked || this.context.protocolError || this.online === false || !this.context.authenticated || !navigator.onLine || document.hidden)
       return
     // Visibility resumes an expired retry, but never shortens its deadline.
     if (Date.now() < this.retryAt)
@@ -238,7 +261,8 @@ export class InstallationTransport {
     this.fallback()
     this.controlAbort = new AbortController()
     const generation = this.generation
-    const current = () => !this.stopped && this.generation === generation
+    const lifetime = documentLifetime.value
+    const current = () => !lifetime.signal.aborted && !this.stopped && this.generation === generation
     try {
       const peer = new RTCPeerConnection()
       this.peer = peer
@@ -248,9 +272,9 @@ export class InstallationTransport {
       channel.addEventListener('open', () => {
         if (current()) {
           this.failures = 0
-          this.traffic = new DirectChannel(channel, this.grant!.grant.claims, () => {
+          this.traffic = new DirectChannel(channel, this.grant!.grant.claims, (error) => {
             if (current())
-              this.failed()
+              this.failed(error)
           })
           clearTimeout(this.handshake)
           this.route('direct')
@@ -275,10 +299,12 @@ export class InstallationTransport {
           this.failed()
       }, 30000)
       const offer = await peer.createOffer({ iceRestart })
+      if (!current())
+        return
       const fingerprint = /^a=fingerprint:(sha-256 [A-Fa-f0-9:]+)\r?$/m.exec(offer.sdp || '')?.[1]?.toUpperCase().replace('SHA-256', 'sha-256')
       if (!fingerprint)
         throw new Error('Missing DTLS fingerprint')
-      const authorization = { fingerprint, versions: [4] }
+      const authorization = { fingerprint, version: 4 }
       const grant = await this.control('/authorize', authorization) as GrantResponse
       if (!current())
         return
@@ -368,15 +394,19 @@ export class InstallationTransport {
   }
 
   private async sendRequest(path: string, url: string, options: RequestInit = {}) {
+    if (this.context.protocolError)
+      throw new ProtocolMismatch(this.context.protocolError)
     const traffic = this.context.transportRoute === 'direct' && (options.body == null || typeof options.body === 'string') ? this.traffic : undefined
     if (traffic) {
       try {
         return await traffic.request(`/api${path}`, options)
       }
       catch (error) {
+        options.signal?.throwIfAborted()
         const method = (options.method || 'GET').toUpperCase()
         const message = method === 'POST' && /^\/chats\/[^/]+\/messages$/.test(path) && typeof options.body === 'string' && typeof JSON.parse(options.body).id === 'string'
-        const replayable = error instanceof TransportNotSent || (error instanceof TransportLost && (method === 'GET' || method === 'HEAD' || message))
+        const immutableContentRead = method === 'POST' && /^\/(?:chats|runs)\/[^/]+\/(?:timeline|event)-content$/.test(path)
+        const replayable = error instanceof TransportNotSent || (error instanceof TransportLost && (method === 'GET' || method === 'HEAD' || message || immutableContentRead))
         if (!replayable)
           throw error
         const response = await fetch(url, options)
@@ -394,7 +424,9 @@ export class InstallationTransport {
   }
 
   async request(path: string, url: string, options: RequestInit = {}) {
-    const response = await this.sendRequest(path, url, options)
+    const signal = documentSignal(options.signal)
+    const response = await this.sendRequest(path, url, { ...options, signal })
+    signal.throwIfAborted()
     if (response.ok) {
       const route = response.headers.get('x-cairn-transport')
       if (route === 'direct' || route === 'relay')
@@ -435,13 +467,27 @@ export class InstallationTransport {
   }
 
   source(path: string, url: string): EventSource {
+    const signal = documentSignal()
+    if (this.context.protocolError)
+      throw new ProtocolMismatch(this.context.protocolError)
     const traffic = this.context.transportRoute === 'direct' ? this.traffic : undefined
-    if (!traffic)
-      return Object.assign(new EventSource(url), { transportRoute: 'relay' as const })
-    return new DirectSource(
-      signal => traffic.request(`/api${path}`, { signal, headers: { accept: 'text/event-stream' } }),
-      () => new EventSource(url),
-    ) as unknown as EventSource
+    const source = !traffic
+      ? Object.assign(new EventSource(url), { transportRoute: 'relay' as const })
+      : new DirectSource(
+        signal => traffic.request(`/api${path}`, { signal, headers: { accept: 'text/event-stream' } }),
+        () => {
+          signal.throwIfAborted()
+          return new EventSource(url)
+        },
+      ) as unknown as EventSource
+    const close = source.close.bind(source)
+    source.close = () => {
+      signal.removeEventListener('abort', source.close)
+      close()
+    }
+
+    signal.addEventListener('abort', source.close, { once: true })
+    return source
   }
 
   private scheduleRenewal(authorization: unknown, path: string, current: () => boolean, extended = true) {

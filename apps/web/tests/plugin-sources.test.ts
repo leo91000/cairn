@@ -4,7 +4,6 @@ import { expect, it } from 'vitest'
 import {
   pluginSources,
   projectMatches,
-  projectsPath,
   updatedLabel,
 } from '../src/plugin-sources'
 
@@ -15,6 +14,7 @@ function entry(id: string, manifest: Partial<NonNullable<PluginEntry['manifest']
     status,
     active: '1.0.0',
     versions: [],
+    setup: null,
     manifest: {
       id,
       name: id[0]!.toUpperCase() + id.slice(1),
@@ -83,7 +83,6 @@ it('offers the sources of approved packages with an enabled instance to import t
 })
 
 it('pages a source through one instance, and filters what it loaded on every typed word', () => {
-  expect(projectsPath('github', 'repositories', 'work', 2)).toBe('/plugins/github/projects?source=repositories&instance=work&page=2')
   const project: PluginProject = {
     id: 'leo91000/cairn',
     name: 'leo91000/cairn',

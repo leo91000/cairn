@@ -33,6 +33,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.RunMissionInput
+import build.cairn.contracts.runMission
 
 internal enum class SearchKind(val label: String) {
     CHAT("Conversations"),
@@ -144,7 +146,7 @@ fun SearchScreen(
     val topMission = hits.firstOrNull { it.kind == SearchKind.MISSION }
     val topAgent = hits.firstOrNull { it.kind == SearchKind.AGENT }
     fun launch(taskId: String) = vm.perform {
-        openRun(api.send<Run>("POST", "/tasks/${segment(taskId)}/run").id)
+        openRun(api.runMission(RunMissionInput(taskId)).id)
     }
     Column(Modifier.fillMaxSize()) {
         Row(

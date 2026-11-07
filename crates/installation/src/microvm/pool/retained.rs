@@ -62,7 +62,7 @@ pub(super) fn eligible(plan: &Plan) -> bool {
         && plan.as_value()["chat"].is_object()
         && plan
             .chat_provider()
-            .is_ok_and(|provider| provider == crate::provider::Provider::Codex)
+            .is_ok_and(|provider| provider == Some(crate::provider::Provider::Codex))
 }
 
 /// Filesystem mounts, privileges and disk geometry cannot change on a live VM.

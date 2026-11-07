@@ -30,9 +30,8 @@ producing an unsuitable template. CLI update images regenerate the templates.
 
 A Codex chat installs templates only when its home already exists and contains
 no SQLite state, including WAL remnants. Existing databases, partial prior
-installations, symlinked homes and custom SQLite files remain untouched. The
-native migration path handles those homes normally. A missing template directory
-also keeps compatibility with older retained guest images.
+installations, symlinked homes and custom SQLite files remain untouched. Codex’s
+own database initialization handles those homes normally.
 
 Each new file is written privately, owned by the agent, synced, published without
 replacement and followed by a directory sync before Codex starts. An interrupted

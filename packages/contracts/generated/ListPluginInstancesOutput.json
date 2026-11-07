@@ -1,0 +1,291 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "PluginActivity": {
+      "additionalProperties": false,
+      "properties": {
+        "chatId": {
+          "default": "",
+          "type": "string"
+        },
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "preview": {
+          "default": "",
+          "type": "string"
+        },
+        "status": {
+          "default": "working",
+          "pattern": "^(working|replied|failed|stopped)$",
+          "type": "string"
+        },
+        "userId": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "chatId",
+        "userId",
+        "name",
+        "preview",
+        "status",
+        "createdAt"
+      ],
+      "type": "object"
+    },
+    "PluginConnection": {
+      "additionalProperties": false,
+      "description": "Explicit owner/agent view: no credential, approved policy or native provenance.",
+      "properties": {
+        "accessMode": {
+          "default": "allowlist",
+          "pattern": "^(allowlist|requests|everyone)$",
+          "type": "string"
+        },
+        "activity": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginActivity"
+          },
+          "type": "array"
+        },
+        "agentId": {
+          "default": "",
+          "type": "string"
+        },
+        "agentIds": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "maxMessagesPerHour": {
+          "default": 20,
+          "format": "uint32",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maxPerPersonPerHour": {
+          "default": 5,
+          "format": "uint32",
+          "maximum": 50,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "people": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginLabel"
+          },
+          "type": "array"
+        },
+        "pluginId": {
+          "default": "",
+          "type": "string"
+        },
+        "projectId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requests": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginRequest"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "default": "",
+          "type": "string"
+        },
+        "secretKeys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "settings": {
+          "additionalProperties": true,
+          "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+          "type": "object",
+          "x-cairn-json-object": true
+        },
+        "status": {
+          "$ref": "#/definitions/PluginStatus"
+        },
+        "usage": {
+          "$ref": "#/definitions/PluginUsage"
+        },
+        "userIds": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "pluginId",
+        "name",
+        "enabled",
+        "revision",
+        "settings",
+        "secretKeys",
+        "agentIds",
+        "agentId",
+        "projectId",
+        "accessMode",
+        "userIds",
+        "people",
+        "maxMessagesPerHour",
+        "maxPerPersonPerHour",
+        "status",
+        "usage",
+        "requests",
+        "activity"
+      ],
+      "type": "object"
+    },
+    "PluginLabel": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "type": "object"
+    },
+    "PluginRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "mentions": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "updatedAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "userId": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "name",
+        "mentions",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "PluginStatus": {
+      "additionalProperties": false,
+      "properties": {
+        "message": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "default": "disconnected",
+          "pattern": "^(disconnected|connecting|connected|needs_review|ready)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "message"
+      ],
+      "type": "object"
+    },
+    "PluginUsage": {
+      "additionalProperties": false,
+      "properties": {
+        "hour": {
+          "default": 0,
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "hour"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "connections": {
+      "items": {
+        "$ref": "#/definitions/PluginConnection"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "connections"
+  ],
+  "title": "ListPluginInstancesOutput",
+  "type": "object"
+}

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { IconName } from '../icons'
+
 import {
   computed,
   nextTick,
@@ -9,6 +10,7 @@ import {
   watch,
 } from 'vue'
 import { useRouter } from 'vue-router'
+import { runMission as queueMission } from '../../../../packages/contracts/generated/runMission'
 import { api, notify, state } from '../api'
 import { chatList } from '../chat-list'
 import {
@@ -32,7 +34,7 @@ import {
 import { refreshMissionRuns, useMissionRuns } from '../mission-runs'
 import { localReads } from '../reads'
 import { modifier } from '../shortcuts'
-import { filOf, isUnread } from '../signal'
+import { filOf, filViews } from '../signal'
 import { setThemePreference, themePreference } from '../theme'
 import { chatPath } from '../workspace-links'
 import AgentAvatar from './AgentAvatar.vue'
@@ -64,7 +66,7 @@ const go = (to: string) => () => router.push(to)
 
 async function runMission(id: string, name: string) {
   try {
-    await api(`/tasks/${id}/run`, { method: 'POST' })
+    await queueMission(api, { taskId: id })
     notify(`${name} started`)
     await refreshMissionRuns()
   }
@@ -172,10 +174,10 @@ const commands = computed<Command[]>(() => {
   }
 
   const fil = filOf(chatList.value, state.tasks, runs.value, localReads)
-  for (const item of fil.forYou) {
+  for (const item of filViews(fil).unread) {
     items.push({
       id: `need-${item.key}`,
-      group: isUnread(item) ? 'To read' : 'Needs you',
+      group: 'To read',
       label: item.title,
       hint: item.preview || item.subtitle,
       avatar: { name: item.agent, key: item.agentKey },
@@ -183,7 +185,7 @@ const commands = computed<Command[]>(() => {
     })
   }
 
-  const needs = new Set(fil.forYou.map(item => item.key))
+  const needs = new Set(filViews(fil).unread.map(item => item.key))
   for (const chat of [...chatList.value].sort((a, b) => b.updatedAt - a.updatedAt)) {
     if (!needs.has(`chat:${chat.id}`)) {
       items.push({

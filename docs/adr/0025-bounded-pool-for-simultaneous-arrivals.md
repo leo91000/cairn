@@ -1,3 +1,5 @@
+> Statut : Remplacée pour la création de VM par snapshot par le boot normal ; le pool borné de VM prêtes et sa taille configurable restent applicables.
+
 # Pool borné pour les arrivées simultanées
 
 Date : 2026-10-03. Statut : pool qualifié sur deux rafales en production ;

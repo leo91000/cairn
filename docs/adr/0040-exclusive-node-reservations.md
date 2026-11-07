@@ -1,3 +1,5 @@
+> Statut : Les snapshots mémoire anonymes sont abandonnés ; la suspension, la pagination de VM vivantes et les réservations exclusives restent applicables.
+
 # 0040 — Durable exclusive node reservations
 
 Date: 2026-10-13
@@ -126,7 +128,7 @@ remain required. A skipped check does not qualify RAM reclamation on that host.
 It checks the same command/VMM PIDs and buffer contents, nested-vCPU progress,
 admission fencing, checkpoint arbitration, reservation expiry and automatic resumption.
 Optional Android mode checks that the same booted emulator survives pause/reclamation.
-Hosted AMD Android boot is still unqualified (see NESTED-KVM-RESEARCH.md), so this
+Hosted AMD Android boot is still unqualified, so this
 mode is skipped in ordinary image CI and can be requested with the
 `exclusive-android` workflow-dispatch input. Run it on a compatible Intel host
 before claiming nested Android continuity:
@@ -137,7 +139,3 @@ CAIRN_EXCLUSIVE_REQUIRE_RECLAIM=true CAIRN_EXCLUSIVE_ANDROID=true \
 ```
 
 Android UI cases run on JVM and on an actual AOSP emulator.
-
-Local metadata measurements and their limits are recorded in
-[EXCLUSIVE-NODE-MEASUREMENTS.md](../EXCLUSIVE-NODE-MEASUREMENTS.md). They are not
-production VM acquisition, paging, network or filesystem latency measurements.

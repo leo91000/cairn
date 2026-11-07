@@ -26,27 +26,52 @@ class ActivityViewsTest {
 
     private fun item(id: Long, json: String) =
         RunEvent(
-            id,
-            1789375200000,
-            "item.completed",
-            "",
-            mapOf("item" to wireJson.parseToJsonElement(json)),
+            id = id,
+            createdAt = 1789375200000,
+            type = "item.completed",
+            text = "",
+            payload =
+                kotlinx.serialization.json.JsonObject(
+                    mapOf("item" to wireJson.parseToJsonElement(json))
+                ),
         )
 
     @Test
     fun `chat problems expose details without expanding a session group`() {
         val events =
             listOf(
-                RunEvent(1, 1000, "turn.started", ""),
-                RunEvent(2, 2000, "error", "Permission denied"),
-                RunEvent(3, 3000, "status", "interrupted"),
-                RunEvent(4, 4000, "status", "succeeded"),
+                RunEvent(
+                    id = 1,
+                    createdAt = 1000,
+                    type = "turn.started",
+                    text = "",
+                ),
+                RunEvent(
+                    id = 2,
+                    createdAt = 2000,
+                    type = "error",
+                    text = "Permission denied",
+                ),
+                RunEvent(
+                    id = 3,
+                    createdAt = 3000,
+                    type = "status",
+                    text = "interrupted",
+                ),
+                RunEvent(
+                    id = 4,
+                    createdAt = 4000,
+                    type = "status",
+                    text = "succeeded",
+                ),
             )
         compose.setContent {
             ActivityFixture {
                 Page {
-                    timelineEntries(events, chat = true).forEach { entry ->
-                        ChatNotice(presentActivity(entry.events.single()))
+                    fixtureEntries(events, chat = true).forEach { entry ->
+                        (entry.card?.content as? build.cairn.contracts.TimelineContent.C)?.let {
+                            ChatNotice(it.notice)
+                        }
                     }
                 }
             }
@@ -63,11 +88,52 @@ class ActivityViewsTest {
     fun `session notices are readable and JSON is only shown on request`() {
         val events =
             listOf(
-                RunEvent(1, 1000, "turn.completed", """{"type":"turn.completed"}"""),
-                RunEvent(2, 1000, "status", "succeeded"),
-                RunEvent(3, 1000, "status", "Using Codex account: Compte principal"),
+                RunEvent(
+                    id = 1,
+                    createdAt = 1000,
+                    type = "turn.completed",
+                    text = """{"type":"turn.completed"}""",
+                ),
+                RunEvent(
+                    id = 2,
+                    createdAt = 1000,
+                    type = "status",
+                    text = "succeeded",
+                ),
+                RunEvent(
+                    id = 3,
+                    createdAt = 1000,
+                    type = "status",
+                    text = "Using Codex account: Compte principal",
+                ),
             )
-        compose.setContent { ActivityFixture { Page { events.forEach { ActivityCard(it) } } } }
+        // The run log presents each lifecycle event from the server's card.
+        val (covered, cards) = withTimeline(events)
+        val notices = cards.associate {
+            it.source to (it.content as build.cairn.contracts.TimelineContent.C).notice
+        }
+        val account =
+            notices
+                .getValue(3)
+                .copy(
+                    code = "accountSelected",
+                    account = build.cairn.contracts.AccountNotice("Codex", "Compte principal"),
+                )
+        compose.setContent {
+            ActivityFixture {
+                Page {
+                    covered.forEach {
+                        ActivityCard(
+                            it,
+                            presentNotice(
+                                if (it.id == 3L) account else notices.getValue(it.id),
+                                it,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
         compose.onNodeWithText("Compte Codex sélectionné").assertExists()
         compose.onNodeWithText("Travail terminé").performClick()
         compose.onAllNodesWithText("\"type\"", substring = true).assertCountEquals(0)

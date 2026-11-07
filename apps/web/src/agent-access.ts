@@ -7,20 +7,7 @@ import { LOCAL_NODE_ID } from '../../../packages/contracts/nodes'
 
 // Everything an agent can reach or do is edited on its page, as one draft.
 export type AgentAccess = Agent['access']
-export interface AgentDraft {
-  name: string
-  description: string
-  instructions: string
-  provider: Agent['provider']
-  model: string
-  reasoning: string
-  timeoutMinutes: number
-  access: AgentAccess
-  // Live grants, kept beside `access` rather than inside it: nodes the agent may reserve
-  // exclusively and plugin instances it may use.
-  exclusiveNodes: string[]
-  plugins: string[]
-}
+export type AgentDraft = import('../../../packages/contracts/generated/typescript/AgentSettings').AgentSettings
 
 export type SectionId
   = | 'identity'
@@ -52,16 +39,37 @@ export interface SelectionItem {
 export const mainLockedSections: SectionId[] = ['projects', 'skills', 'mcps']
 
 export const sandboxOptions = [
-  { value: 'yolo', label: 'YOLO', description: 'Private VM with sudo and Docker; on a native node, a managed host account with GPU and system tools. Host privileges follow the node’s confirmed mode. Default.' },
+  { value: 'yolo', label: 'YOLO', description: 'Private VM with sudo and Docker. Default.' },
   { value: 'workspace-write', label: 'Workspace write', description: 'Writes limited to task workspaces, no sudo.' },
   { value: 'read-only', label: 'Read only', description: 'Project files are read-only; nothing can be changed.' },
 ] as const
 
 /**
- * Where the agent's conversations run, for the execution mode section: each conversation keeps
- * the backend it started on (see docs/NATIVE-NODES.md).
+ * The execution modes as they apply to the agent's backend: a native process runs under a managed
+ * account on the host, without sudo or Docker (see docs/NATIVE-NODES.md).
  */
-export const isolationNote = 'Conversations run in a private VM, or as a host process on a native node they are moved to, with weaker isolation. Sandboxed runs never bypass denied operations or wait for unattended approvals.'
+export function sandboxOptionsFor(backend: Backend) {
+  if (backend === 'auto') {
+    return sandboxOptions.map(option => option.value === 'yolo'
+      ? { ...option, description: 'Privileges follow the selected node: private VM or trusted native host.' }
+      : option)
+  }
+
+  if (backend !== 'native')
+    return sandboxOptions
+  return sandboxOptions.map(option => option.value === 'yolo'
+    ? { ...option, description: 'Native process under a managed account. Host privileges follow the node’s confirmed protected or administrator mode. Default.' }
+    : option)
+}
+
+/** Where the agent's conversations run, for the execution mode section. */
+export function isolationNote(backend: Backend) {
+  if (backend === 'auto')
+    return 'New conversations use an available authorized VM or native node, following this agent’s priorities. Existing conversations keep their environment until explicitly migrated.'
+  return backend === 'native'
+    ? 'This agent runs as a native process on its native nodes, with weaker isolation than a VM. Sandboxed runs never bypass denied operations or wait for unattended approvals.'
+    : 'Every agent runs in a private VM. Sandboxed runs never bypass denied operations or wait for unattended approvals.'
+}
 
 export const alwaysAvailable = 'Publish deliverables (including public links), wait for a delay or a condition, see its nodes and move the conversation between them, report its outcome.'
 
@@ -77,8 +85,10 @@ export function newAgentDraft(): AgentDraft {
     provider: 'codex',
     model: '',
     reasoning: '',
+    speed: '',
     timeoutMinutes: 0,
     access: {
+      backend: 'auto',
       nodes: [LOCAL_NODE_ID],
       projects: [],
       skills: [],
@@ -89,11 +99,12 @@ export function newAgentDraft(): AgentDraft {
       sandbox: 'yolo',
     },
     exclusiveNodes: [],
+    nodePriorities: [],
     plugins: [],
   }
 }
 
-/** The editable part of a saved agent, with the defaults older records omit. */
+/** The editable part of a saved agent. */
 export function draftOf(agent: Agent): AgentDraft {
   const access = (agent.access ?? {}) as Partial<AgentAccess>
   return {
@@ -103,8 +114,10 @@ export function draftOf(agent: Agent): AgentDraft {
     provider: agent.provider ?? 'codex',
     model: agent.model ?? '',
     reasoning: agent.reasoning ?? '',
+    speed: agent.speed,
     timeoutMinutes: agent.timeoutMinutes ?? 0,
     access: {
+      backend: access.backend ?? 'firecracker',
       nodes: access.nodes === undefined ? [LOCAL_NODE_ID] : access.nodes === null ? null : [...access.nodes],
       projects: access.projects ? [...access.projects] : null,
       skills: access.skills ? [...access.skills] : null,
@@ -116,12 +129,24 @@ export function draftOf(agent: Agent): AgentDraft {
     },
     // Responses omit empty live grants: absent means none.
     exclusiveNodes: [...(agent.exclusiveNodes ?? [])],
+    nodePriorities: [...(agent.nodePriorities ?? [])],
     plugins: [...(agent.plugins ?? [])],
   }
 }
 
 function same(left: unknown, right: unknown) {
   return JSON.stringify(left) === JSON.stringify(right)
+}
+
+/** Preserve an edited order and concurrent additions/removals within current grants. */
+function mergePriorities(base: string[], mine: string[], theirs: string[], nodes: string[] | null) {
+  const order = same(base, mine)
+    ? theirs
+    : [
+        ...mine.filter(id => !base.includes(id) || theirs.includes(id)),
+        ...theirs.filter(id => !base.includes(id) && !mine.includes(id)),
+      ]
+  return order.filter(id => nodes === null || nodes.includes(id))
 }
 
 /**
@@ -164,6 +189,13 @@ export function rebaseDraft(base: AgentDraft, mine: AgentDraft, theirs: AgentDra
     .map(key => [key, pick(base.access[key], mine.access[key], theirs.access[key])]))
   for (const key of listAccess)
     access[key] = mergeList(base.access[key], mine.access[key], theirs.access[key])
+  // Fixed backends take the switching side's selection. Automatic placement can
+  // merge both kinds while preserving concurrent grant removals.
+  const backendChanged = backendOf(mine.access) !== backendOf(base.access) || backendOf(theirs.access) !== backendOf(base.access)
+  const ownBackend = backendOf(mine.access) !== backendOf(base.access)
+  const compatibleNodes = access.backend === 'auto'
+  if (backendChanged && !compatibleNodes)
+    access.nodes = ownBackend ? mine.access.nodes : theirs.access.nodes
   access.mcpTools = mergeTools(base.access.mcpTools ?? {}, mine.access.mcpTools ?? {}, theirs.access.mcpTools ?? {})
   const rebased: AgentDraft = {
     name: pick(base.name, mine.name, theirs.name),
@@ -172,11 +204,19 @@ export function rebaseDraft(base: AgentDraft, mine: AgentDraft, theirs: AgentDra
     provider: pick(base.provider, mine.provider, theirs.provider),
     model: pick(base.model, mine.model, theirs.model),
     reasoning: pick(base.reasoning, mine.reasoning, theirs.reasoning),
+    speed: pick(base.speed, mine.speed, theirs.speed),
     timeoutMinutes: pick(base.timeoutMinutes, mine.timeoutMinutes, theirs.timeoutMinutes),
     access: access as unknown as AgentAccess,
-    exclusiveNodes: mergeList(base.exclusiveNodes, mine.exclusiveNodes, theirs.exclusiveNodes) ?? [],
+    exclusiveNodes: backendChanged && !compatibleNodes
+      ? (ownBackend ? mine.exclusiveNodes : theirs.exclusiveNodes)
+      : mergeList(base.exclusiveNodes, mine.exclusiveNodes, theirs.exclusiveNodes) ?? [],
     plugins: mergeList(base.plugins, mine.plugins, theirs.plugins) ?? [],
+    nodePriorities: backendChanged && !compatibleNodes
+      ? (ownBackend ? mine.nodePriorities : theirs.nodePriorities).filter(id => access.nodes === null || (access.nodes as string[]).includes(id))
+      : mergePriorities(base.nodePriorities ?? [], mine.nodePriorities ?? [], theirs.nodePriorities ?? [], access.nodes as string[] | null),
   }
+  // Revocation removes retained preferences even when this editor changed backend.
+  rebased.nodePriorities = rebased.nodePriorities.filter(id => !(base.nodePriorities ?? []).includes(id) || (theirs.nodePriorities ?? []).includes(id))
   return JSON.parse(JSON.stringify(rebased))
 }
 
@@ -193,60 +233,6 @@ export function savedDraft(draft: AgentDraft, existingMcps?: string[]): AgentDra
     return draft
   return { ...draft, access: { ...draft.access, mcpTools: granted } }
 }
-
-/**
- * An installation that predates live grants on the agent ignores top-level `exclusiveNodes` and
- * `plugins` and keeps them on the resources, as Android handles it. Current installations mark
- * every listed agent with the computed `grantsOnAgent` capability; revisions alone are not proof,
- * since agents keep them after a rollback.
- */
-export function olderInstallation(agents: object[]) {
-  return agents.length > 0 && !agents.some(agent => (agent as { grantsOnAgent?: unknown }).grantsOnAgent === true)
-}
-
-/** The draft as the server applies it: an older installation never receives live grant changes. */
-export function sentDraft(saved: AgentDraft, draft: AgentDraft, older: boolean): AgentDraft {
-  return older ? { ...draft, exclusiveNodes: saved.exclusiveNodes, plugins: saved.plugins } : draft
-}
-
-/** On an older installation, the agent's live grants as its resources record them. */
-export function withResourceGrants(draft: AgentDraft, agentId: string, connections: Pick<PluginConnection, 'id' | 'agentIds'>[], nodes: Pick<ExecutionNode, 'id' | 'local' | 'exclusiveAgents'>[]): AgentDraft {
-  return {
-    ...draft,
-    plugins: connections.filter(connection => connection.agentIds?.includes(agentId)).map(connection => connection.id),
-    exclusiveNodes: nodes.filter(node => node.exclusiveAgents?.includes(agentId)).map(node => node.local ? LOCAL_NODE_ID : node.id),
-  }
-}
-
-/**
- * The agents an instance save must send back unchanged on an older installation (or one not known
- * yet), which replaces the list when it is omitted; undefined when it should be omitted.
- */
-export function keptAgentIds(agents: object[], entry: Pick<PluginEntry, 'manifest'> | undefined, connection: Pick<PluginConnection, 'agentIds'> | null | undefined) {
-  // Main always exists: no agent at all means the list did not load, and the installation is unknown.
-  const unknown = agents.length === 0
-  if (!(unknown || olderInstallation(agents)) || !entry?.manifest?.agentAccess || !connection?.agentIds?.length)
-    return undefined
-  return [...connection.agentIds]
-}
-
-/**
- * `keptAgentIds` from the instance as it is now, re-read right before saving: an agent revoked
- * meanwhile from its page is not granted back. Undefined when nothing has to be sent.
- */
-export async function currentAgentIds(
-  agents: object[],
-  entry: Pick<PluginEntry, 'manifest'> | undefined,
-  connection: Pick<PluginConnection, 'id' | 'agentIds'> | null | undefined,
-  connections: () => Promise<Pick<PluginConnection, 'id' | 'agentIds'>[]>,
-) {
-  if (!connection || keptAgentIds(agents, entry, { agentIds: ['?'] }) === undefined)
-    return undefined
-  const fresh = (await connections()).find(item => item.id === connection.id)
-  return keptAgentIds(agents, entry, fresh ?? connection)
-}
-
-export const updateForGrants = 'Update the installation to grant these from the agent page.'
 
 /** "All, including future" | "3 of 12" | "None". */
 export function selectionSummary(selected: string[] | null, total: number) {
@@ -276,13 +262,22 @@ export function nodeName(node: Pick<ExecutionNode, 'id' | 'name' | 'local'> | un
   return node?.name ?? 'Removed node'
 }
 
-export type Backend = 'firecracker' | 'native'
+export type Backend = 'auto' | 'firecracker' | 'native'
 
-export const backendLabels: Record<Backend, string> = { firecracker: 'Firecracker VM', native: 'Native process' }
+export const backendOptions = [
+  { value: 'auto', label: 'Automatic · available VM or native node' },
+  { value: 'firecracker', label: 'Firecracker VM' },
+  { value: 'native', label: 'Native process · trusted people only' },
+] as const
 
-const nativeHelp = 'Conversations moved there run as host processes with its GPU and weaker isolation; the node must trust the people directing this agent.'
+export const nativeHelp = 'Uses the host GPU and OS tools with weaker isolation. Each native node must enable execution and authorize the people directing this agent.'
 
-export function nodeBackend(node: Pick<ExecutionNode, 'capabilities'>): Backend {
+/** The agent's execution backend; records from before native execution run in Firecracker VMs. */
+export function backendOf(access: Pick<AgentAccess, 'backend'> | undefined): Backend {
+  return access?.backend ?? 'firecracker'
+}
+
+export function nodeBackend(node: Pick<ExecutionNode, 'capabilities'>): Exclude<Backend, 'auto'> {
   return node.capabilities.backend === 'native' ? 'native' : 'firecracker'
 }
 
@@ -291,6 +286,47 @@ const placeholders = new WeakSet<ExecutionNode>()
 /** The current runner when the node list does not report it: its state is unknown. */
 function currentRunner(): ExecutionNode {
   const node: ExecutionNode = {
+    revision: 'fixture',
+    createdAt: 0,
+    systemTags: [],
+    runtimeSlots: null,
+    nativeEnabled: false,
+    nativeAccounts: [],
+    nativeReviewedAgents: [],
+    nativeModeRequest: null,
+    nativeModeObserved: null,
+    nativeModeProposal: null,
+    nativeModeStatus: null,
+    exclusiveReservations: false,
+    exclusiveReservation: null,
+    exclusiveAgents: [],
+    usage: null,
+    budgetError: null,
+    pressure: null,
+    executionReady: false,
+    maintenance: null,
+    maintenanceError: null,
+    maintenanceGeneration: null,
+    maintenanceStartedAt: null,
+    imageDigest: null,
+    updateError: null,
+    retainedRuns: null,
+    diskGrowthProtocol: null,
+    diskCapacity: null,
+    occupiedSlots: 0,
+    availableSlots: 4,
+    agents: [],
+    staleDisks: { count: 0, diskMiB: 0 },
+    diskAccounting: null,
+    storage: {
+      cacheMiB: 102400,
+      memoryCacheMiB: 256,
+      reserveMiB: 10240,
+      reservePercent: 5,
+      backupSeconds: 60,
+      maxDirtySeconds: 300,
+    },
+
     id: LOCAL_NODE_ID,
     name: 'Current runner',
     local: true,
@@ -299,12 +335,18 @@ function currentRunner(): ExecutionNode {
     status: 'local',
     tags: [],
     capabilities: {
+      backend: 'firecracker',
+      ublk: false,
+      vmDisks: false,
+      nativeModeProtocol: 0,
+      diskTotalMiB: 0,
       cpu: 0,
       memoryMiB: 0,
       diskMiB: 0,
       os: '',
       arch: '',
       kvm: false,
+
     },
     limits: { cpu: 0, memoryMiB: 0, diskMiB: 0 },
     slots: 0,
@@ -321,44 +363,56 @@ export function unknownNode(node: ExecutionNode) {
 }
 
 /**
- * Nodes an agent can be granted, VM and native alike: each conversation keeps its own backend. The
- * current runner is always offered as Android does, even when the node list omits it. Native nodes
- * also require each node to trust the originating people.
+ * Nodes an agent of `backend` can be granted: those of the same backend. The current runner is a
+ * VM runner, always offered to Firecracker agents as Android does, even when the node list omits
+ * it. Native grants also require each node to trust the originating people.
  */
-export function nodesFor(nodes: ExecutionNode[]) {
-  const granted = nodes.filter(node => !node.revoked)
-  if (!nodes.some(node => node.local || node.id === LOCAL_NODE_ID))
-    return [currentRunner(), ...granted]
-  return granted
+export function nodesFor(nodes: ExecutionNode[], backend: Backend) {
+  const matching = nodes.filter(node => !node.revoked && (backend === 'auto' || nodeBackend(node) === backend) && !(backend === 'native' && (node.local || node.id === LOCAL_NODE_ID)))
+  if (backend !== 'native' && !nodes.some(node => node.local || node.id === LOCAL_NODE_ID))
+    return [currentRunner(), ...matching]
+  return matching
 }
 
 /**
- * Whether a node the agent may run on is gone: revoked or deleted. The current runner counts as
- * present even when unreported.
+ * Why a node the agent may run on cannot be used: it was revoked or deleted, or it belongs to the
+ * other execution backend. The current runner counts as present even when unreported.
  */
-export function runProblem(id: string, nodes: ExecutionNode[]): 'missing' | '' {
+export function runProblem(id: string, access: AgentAccess, nodes: ExecutionNode[]): 'missing' | 'backend' | '' {
   const node = nodes.find(item => item.id === id)
-  if (id === LOCAL_NODE_ID || node?.local === true)
-    return ''
-  return !node || node.revoked ? 'missing' : ''
-}
-
-/** Native nodes the agent may run on, `null` = every node included. */
-function nativeNodes(nodes: string[] | null, all: ExecutionNode[]) {
-  return all.filter(node => !node.revoked && nodeBackend(node) === 'native' && (nodes === null || nodes.includes(node.id)))
+  const local = id === LOCAL_NODE_ID || node?.local === true
+  if (local)
+    return backendOf(access) === 'native' ? 'backend' : ''
+  if (!node || node.revoked)
+    return 'missing'
+  return backendOf(access) === 'auto' || nodeBackend(node) === backendOf(access) ? '' : 'backend'
 }
 
 /**
  * Node access after allowing or forbidding a node: forbidding it also drops its exclusive
- * reservation, which could never be used, unless reservations are read-only (an older installation
- * keeps them on its nodes and never receives them from here).
+ * reservation, which could never be used.
  */
-export function withRun(access: AgentAccess, exclusiveNodes: string[], node: string, on: boolean, readOnlyGrants = false) {
+export function withRun(access: AgentAccess, exclusiveNodes: string[], node: string, on: boolean) {
   const nodes = (access.nodes ?? []).filter(id => id !== node)
   return {
     nodes: on ? [...nodes, node] : nodes,
-    exclusiveNodes: on || readOnlyGrants ? exclusiveNodes : exclusiveNodes.filter(id => id !== node),
+    exclusiveNodes: on ? exclusiveNodes : exclusiveNodes.filter(id => id !== node),
   }
+}
+
+/** Node access for another execution backend: the choices start over, read-only reservations stay. */
+export function withBackend() {
+  return { nodes: [] as string[], exclusiveNodes: [] }
+}
+
+/** Drop preferences outside the explicit selection when leaving wildcard grants. */
+export function withAllNodes(access: AgentAccess, priorities: string[], nodes: ExecutionNode[], all: boolean, agentId = '') {
+  const selected = all
+    ? null
+    : access.nodes ?? nodesFor(nodes, backendOf(access))
+      .filter(node => node.nativeModeRequest?.mode !== 'administrator' || node.nativeReviewedAgents?.includes(agentId))
+      .map(node => node.id)
+  return { nodes: selected, nodePriorities: priorities.filter(id => selected === null || selected.includes(id)) }
 }
 
 /** Whether the agent may run on a node: listed, or every node allowed. */
@@ -461,7 +515,7 @@ export function changes(saved: AgentDraft, draft: AgentDraft) {
 
   for (const key of ['name', 'description', 'instructions'] as const)
     add('identity', Number(saved[key] !== draft[key]))
-  for (const key of ['provider', 'model', 'reasoning'] as const)
+  for (const key of ['provider', 'model', 'reasoning', 'speed'] as const)
     add('model', Number(saved[key] !== draft[key]))
   add('advanced', Number(saved.timeoutMinutes !== draft.timeoutMinutes))
   add('projects', listCount(saved.access.projects, draft.access.projects))
@@ -476,6 +530,8 @@ export function changes(saved: AgentDraft, draft: AgentDraft) {
     add('mcps', Number(asSet(savedTools[connection]) !== asSet(draftTools[connection])))
   add('sandbox', Number(saved.access.sandbox !== draft.access.sandbox))
   add('powers', Number(saved.access.installation !== draft.access.installation) + Number(!!saved.access.delegation !== !!draft.access.delegation))
+  add('nodes', Number(backendOf(saved.access) !== backendOf(draft.access)))
+  add('nodes', Number(!same(saved.nodePriorities ?? [], draft.nodePriorities ?? [])))
   add('nodes', listCount(saved.access.nodes, draft.access.nodes))
   // Responses omit empty live grants: absent means none.
   add('nodes', listCount(saved.exclusiveNodes ?? [], draft.exclusiveNodes ?? []))
@@ -514,7 +570,7 @@ function restrictedTools(saved: AgentAccess, draft: AgentAccess) {
  * secrets, and removed access when `runs` says work is affected.
  */
 export function nativeReviewNodes(draft: AgentDraft, context: Context) {
-  if (draft.access.nodes === null)
+  if (backendOf(draft.access) === 'firecracker' || draft.access.nodes === null)
     return []
   return context.nodes.filter(node => node.nativeModeRequest?.mode === 'administrator'
     && draft.access.nodes!.includes(node.id) && !node.nativeReviewedAgents?.includes(context.agentId ?? '')).map(node => node.id)
@@ -528,13 +584,8 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
 
   for (const id of listChanges(saved.exclusiveNodes ?? [], draft.exclusiveNodes ?? []).added)
     lines.push({ kind: 'power', section: 'nodes', text: `Added: exclusive reservation on ${node(id)}. This agent will be able to suspend other agents’ conversations on this machine.` })
-  // Native nodes run conversations as host processes: each newly allowed one is a power.
-  const nativeBefore = nativeNodes(saved.access.nodes, context.nodes).map(item => item.id)
-  const nativeAdded = nativeNodes(draft.access.nodes, context.nodes).filter(item => !nativeBefore.includes(item.id))
-  if (draft.access.nodes === null && saved.access.nodes !== null && nativeAdded.length)
-    lines.push({ kind: 'power', section: 'nodes', text: 'Added: all nodes, including native nodes. Conversations moved to a native node run as host processes with its GPU and weaker isolation; each native node must trust the people directing this agent.' })
-  else
-    lines.push(...nativeAdded.map(item => ({ kind: 'power' as const, section: 'nodes' as const, text: `Added: native node ${node(item.id)}. ${nativeHelp}` })))
+  if (backendOf(draft.access) !== 'firecracker' && backendOf(saved.access) === 'firecracker')
+    lines.push({ kind: 'power', section: 'nodes', text: `Added: native execution. ${nativeHelp}` })
   if (draft.access.installation && !saved.access.installation)
     lines.push({ kind: 'power', section: 'powers', text: 'Added: installation management. This agent will be able to create and change agents, projects, skills, MCP connections, missions and runs on your behalf.' })
   if (draft.access.delegation && !saved.access.delegation)
@@ -567,6 +618,8 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
     removed.push('installation management')
   if (saved.access.delegation && !draft.access.delegation)
     removed.push('task delegation')
+  if (backendOf(saved.access) !== 'firecracker' && backendOf(draft.access) === 'firecracker')
+    removed.push('native execution')
   if (sandboxStrictness[draft.access.sandbox] > sandboxStrictness[saved.access.sandbox]) {
     const mode = sandboxOptions.find(option => option.value === draft.access.sandbox)?.label ?? draft.access.sandbox
     removed.push(`execution mode (now ${mode})`)
@@ -586,28 +639,9 @@ export function reviewLines(saved: AgentDraft, draft: AgentDraft, context: Conte
 }
 
 /** A plugin delegation answering as the agent, as `POST /agents/{id}/preview` reports it. */
-export interface DelegationEffect {
-  id: string
-  pluginId: string
-  name: string
-  enabled: boolean
-  suspended: boolean
-  // The saved agent already no longer matches the delegation's approval, before this edit.
-  alreadySuspended?: boolean
-  // Why the new access cannot be reapproved, when it cannot.
-  blocked: string | null
-}
+export type DelegationEffect = import('../../../packages/contracts/generated/typescript/AgentDelegationEffect').AgentDelegationEffect
+export type Preview = import('../../../packages/contracts/generated/typescript/AgentPreview').AgentPreview
 
-export interface Preview {
-  runs: { queued: number, running: number }
-  delegations: DelegationEffect[]
-}
-
-/**
- * Whether saving needs the review first: a power or a secret added, interrupted work, or a
- * delegation this edit suspends. A delegation already suspended by an earlier change, blocked or
- * not, is listed when the review opens, but never opens it.
- */
 export function needsReview(lines: ReviewLine[], preview: Preview | null) {
   const runs = preview ? preview.runs.queued + preview.runs.running : 0
   const delegations = preview?.delegations.some(item => item.suspended && !item.alreadySuspended) ?? false
@@ -645,8 +679,11 @@ export function issues(draft: AgentDraft, context: Context, isMain: boolean, age
   }
 
   for (const id of context.nodesUnavailable ? [] : access.nodes ?? []) {
-    if (runProblem(id, context.nodes) === 'missing')
+    const problem = runProblem(id, access, context.nodes)
+    if (problem === 'missing')
       found.push({ section: 'nodes', text: 'A node this agent can run on no longer exists.' })
+    else if (problem === 'backend')
+      found.push({ section: 'nodes', text: `${nodeName(context.nodes.find(item => item.id === id), id)} uses another execution backend: this agent cannot run there.` })
   }
 
   for (const id of context.nodesUnavailable ? [] : draft.exclusiveNodes ?? []) {
@@ -684,12 +721,9 @@ export function issues(draft: AgentDraft, context: Context, isMain: boolean, age
 }
 
 /** "3 projects · 2 nodes · 1Password" for the agents list. */
-export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 'connections'> & { nodes?: ExecutionNode[] }, older = false) {
+export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 'connections'> & { nodes?: ExecutionNode[] }) {
   const access = agent.access ?? {} as AgentAccess
-  // An older installation keeps plugin grants on its instances (unknown to members, who get none).
-  const plugins = older
-    ? context.connections.filter(connection => connection.agentIds?.includes(agent.id)).map(connection => connection.id)
-    : agent.plugins ?? []
+  const plugins = agent.plugins ?? []
   const count = (value: string[] | null | undefined, noun: string, all: string) => value === null || value === undefined
     ? all
     : `${value.length || 'No'} ${noun}${value.length === 1 ? '' : 's'}`
@@ -697,8 +731,7 @@ export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 
   const parts = [
     agent.id === MAIN_AGENT_ID ? 'All projects' : count(access.projects, 'project', 'All projects'),
     count(nodes, 'node', 'All nodes'),
-    // Only when the node list says so; without it, no native node is claimed.
-    ...(context.nodes && nativeNodes(nodes, context.nodes).length ? ['Native nodes'] : []),
+    ...(backendOf(access) === 'native' ? ['Native process'] : []),
   ]
   // Named by package when the catalogue says which; members, who do not see plugins, get a count.
   const packages = new Set<string>()
@@ -716,7 +749,7 @@ export function accessSummary(agent: Agent, context: Pick<Context, 'packages' | 
   if (unnamed)
     parts.push(`${unnamed} ${packages.size ? 'other ' : ''}plugin${unnamed === 1 ? '' : 's'}`)
   // Only an effective reservation, which the node list says; without it, none is claimed.
-  if (!older && agent.exclusiveNodes?.length && context.nodes && effectiveExclusive({ access, exclusiveNodes: agent.exclusiveNodes }, context.nodes).length)
+  if (agent.exclusiveNodes?.length && context.nodes && effectiveExclusive({ access, exclusiveNodes: agent.exclusiveNodes }, context.nodes).length)
     parts.push('Exclusive reservation')
   if (access.installation)
     parts.push('Installation management')
@@ -735,7 +768,7 @@ export function errorSection(message: string): SectionId | undefined {
     ['mcps', /mcp|tool/],
     ['skills', /skill/],
     ['projects', /project/],
-    ['model', /model|provider|reasoning|codex|claude|opencode/],
+    ['model', /model|provider|reasoning|speed|codex|claude|opencode/],
     ['advanced', /time limit|timeout/],
     ['identity', /name|description|instruction/],
   ]

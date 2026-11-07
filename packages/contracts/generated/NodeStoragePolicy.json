@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "backupSeconds": {
+      "default": 60,
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "cacheMiB": {
+      "default": 102400,
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "maxDirtySeconds": {
+      "default": 300,
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "memoryCacheMiB": {
+      "default": 256,
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "reserveMiB": {
+      "default": 10240,
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "reservePercent": {
+      "default": 5,
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "title": "NodeStoragePolicy",
+  "type": "object"
+}

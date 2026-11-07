@@ -9,7 +9,6 @@ use std::{
 
 const HEADER: usize = 112;
 const SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
-const LEGACY_MAGIC: &[u8; 8] = b"CAIRNJ02";
 const MAGIC: &[u8; 8] = b"CAIRNJ03";
 
 #[cfg(test)]
@@ -27,19 +26,6 @@ pub(super) fn crash_point(directory: &Path, phase: &str) {
 }
 
 #[derive(Clone)]
-enum Location {
-    Segment {
-        file: Arc<File>,
-        position: u64,
-        header: [u8; HEADER],
-    },
-    Legacy {
-        db: Arc<Mutex<Connection>>,
-        checksum: String,
-    },
-}
-
-#[derive(Clone)]
 pub(super) struct Record {
     pub sequence: i64,
     pub generation: i64,
@@ -47,46 +33,29 @@ pub(super) struct Record {
     pub end: u64,
     zero: bool,
     written_at: i64,
-    location: Location,
+    file: Arc<File>,
+    position: u64,
+    header: [u8; HEADER],
 }
 
 impl Record {
-    pub fn read(&self, size: u64) -> io::Result<Vec<u8>> {
-        match &self.location {
-            Location::Segment {
-                file,
-                position,
-                header,
-            } => {
-                let mut actual = [0; HEADER];
-                file.read_exact_at(&mut actual, *position)?;
-                let mut data = vec![0; (self.end - self.start) as usize];
-                file.read_exact_at(&mut data, position + HEADER as u64)?;
-                if &actual != header
-                    || digest(&actual[..48], &[]) != actual[48..80]
-                    || digest(&actual[..80], &data) != actual[80..]
-                {
-                    return Err(failure("Local journal integrity check failed"));
-                }
-                Ok(data)
-            }
-            Location::Legacy { db, checksum } => {
-                let db = db.lock().map_err(failure)?;
-                db.query_row(
-                    "SELECT start,data,checksum,seq,generation,end FROM writes WHERE seq=?1",
-                    [self.sequence],
-                    |row| Ok((LazyDisk::record(row, size), row.get::<_, String>(2)?)),
-                )
-                .map_err(failure)
-                .and_then(|(record, actual)| {
-                    let (start, bytes) = record?;
-                    if start != self.start || &actual != checksum {
-                        return Err(failure("Legacy journal changed"));
-                    }
-                    Ok(bytes)
-                })
-            }
+    pub fn read(&self) -> io::Result<Vec<u8>> {
+        let sample = crate::performance::publication::start(
+            crate::performance::publication::Stage::NodeLocalRead,
+        );
+        let mut actual = [0; HEADER];
+        self.file.read_exact_at(&mut actual, self.position)?;
+        let mut data = vec![0; (self.end - self.start) as usize];
+        self.file
+            .read_exact_at(&mut data, self.position + HEADER as u64)?;
+        sample.finish(actual.len() + data.len());
+        if actual != self.header
+            || digest(&actual[..48], &[]) != actual[48..80]
+            || digest(&actual[..80], &data) != actual[80..]
+        {
+            return Err(failure("Local journal integrity check failed"));
         }
+        Ok(data)
     }
 
     pub fn cache_key(&self) -> String {
@@ -98,38 +67,18 @@ impl Record {
 }
 
 pub(super) fn digest(header: &[u8], data: &[u8]) -> [u8; 32] {
-    if &header[..8] == MAGIC {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(header);
-        hasher.update(data);
-        return *hasher.finalize().as_bytes();
-    }
-    let mut context = aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA256);
-    context.update(header);
-    context.update(data);
-    context.finish().as_ref().try_into().unwrap()
+    let sample =
+        crate::performance::publication::start(crate::performance::publication::Stage::JournalHash);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(header);
+    hasher.update(data);
+    let digest = *hasher.finalize().as_bytes();
+    sample.finish(header.len() + data.len());
+    digest
 }
 
 fn integer(header: &[u8], offset: usize) -> i64 {
     i64::from_le_bytes(header[offset..offset + 8].try_into().unwrap())
-}
-
-fn legacy_guard(directory: &Path) -> io::Result<()> {
-    use std::io::Write;
-    const GUARD: &[u8] = b"CAIRN segmented journal v2; upgrade required\n";
-    let path = directory.join("journal.sqlite");
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() == GUARD.len() as u64)
-        && std::fs::read(&path).is_ok_and(|bytes| bytes == GUARD)
-    {
-        return Ok(());
-    }
-    let mut guard = tempfile::NamedTempFile::new_in(directory)?;
-    guard.write_all(GUARD)?;
-    guard.as_file().sync_all()?;
-    guard
-        .persist(directory.join("journal.sqlite"))
-        .map_err(failure)?;
-    File::open(directory)?.sync_all()
 }
 
 struct Segment {
@@ -220,7 +169,6 @@ pub(super) struct Journal {
     failed: bool,
     durable_through: i64,
     pending: BTreeMap<String, (Arc<File>, i64)>,
-    legacy_through: i64,
     dirty_bytes: u64,
     dirty_since: Option<i64>,
     journal_bytes: u64,
@@ -228,6 +176,21 @@ pub(super) struct Journal {
 
 impl Journal {
     pub fn open(directory: &Path, db: &Connection, size: u64) -> io::Result<Self> {
+        Self::recover(directory, db, size, false)
+    }
+
+    /// Shared prepared bases must be checked before they are offered to a
+    /// conversation, including payloads that a normal lazy open does not read.
+    pub fn open_verified(directory: &Path, db: &Connection, size: u64) -> io::Result<Self> {
+        Self::recover(directory, db, size, true)
+    }
+
+    fn recover(
+        directory: &Path,
+        db: &Connection,
+        size: u64,
+        verify_payloads: bool,
+    ) -> io::Result<Self> {
         let (generation, next): (i64, i64) = db
             .query_row(
                 "SELECT generation,next_sequence FROM state WHERE id=1",
@@ -242,17 +205,6 @@ impl Journal {
         if cutoff < 0 || cutoff >= generation {
             return Err(failure("Invalid publication cutoff"));
         }
-        let legacy_through = db
-            .query_row(
-                "SELECT value FROM settings WHERE key='legacyThrough'",
-                [],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(failure)?
-            .map(|v| v.parse::<i64>().map_err(failure))
-            .transpose()?
-            .unwrap_or(-1);
         let mut journal = Self {
             records: BTreeMap::new(),
             blocks: BTreeMap::new(),
@@ -265,52 +217,10 @@ impl Journal {
             failed: false,
             durable_through: next - 1,
             pending: BTreeMap::new(),
-            legacy_through,
             dirty_bytes: 0,
             dirty_since: None,
             journal_bytes: 0,
         };
-        if legacy_through > cutoff {
-            let path = directory.join("journal.sqlite");
-            if !path.exists() {
-                return Err(failure("Legacy journal is missing"));
-            }
-            let legacy = Arc::new(Mutex::new(
-                Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                    .map_err(failure)?,
-            ));
-            {
-                let connection = legacy.lock().map_err(failure)?;
-                let mut statement = connection
-                    .prepare(
-                        "SELECT start,data,checksum,seq,w.generation,end,COALESCE(e.written_at,0) \
-                    FROM writes w LEFT JOIN epochs e ON e.generation=w.generation \
-                    WHERE w.generation>?1 ORDER BY seq",
-                    )
-                    .map_err(failure)?;
-                let mut rows = statement.query([cutoff]).map_err(failure)?;
-                while let Some(row) = rows.next().map_err(failure)? {
-                    let (start, bytes) = LazyDisk::record(row, size)?;
-                    let sequence = row.get::<_, i64>(3).map_err(failure)?;
-                    let generation = row.get::<_, i64>(4).map_err(failure)?;
-                    if sequence >= next || generation > journal.generation {
-                        return Err(failure("Invalid legacy journal ordering"));
-                    }
-                    journal.insert(Record {
-                        sequence,
-                        generation,
-                        start,
-                        end: start + bytes.len() as u64,
-                        zero: bytes.iter().all(|byte| *byte == 0),
-                        written_at: row.get(6).map_err(failure)?,
-                        location: Location::Legacy {
-                            db: legacy.clone(),
-                            checksum: row.get(2).map_err(failure)?,
-                        },
-                    });
-                }
-            }
-        }
         let mut statement = db
             .prepare("SELECT name,generation,first_sequence FROM segments ORDER BY first_sequence")
             .map_err(failure)?;
@@ -367,7 +277,7 @@ impl Journal {
                 let start = integer(&header, 24);
                 let count = integer(&header, 32);
                 let written_at = integer(&header, 40);
-                if (&header[..8] != MAGIC && &header[..8] != LEGACY_MAGIC)
+                if &header[..8] != MAGIC
                     || sequence < *first
                     || sequence <= previous
                     || (position == 0 && sequence != *first)
@@ -394,13 +304,18 @@ impl Journal {
                     end: start as u64 + count as u64,
                     zero: false,
                     written_at,
-                    location: Location::Segment {
-                        file: file.clone(),
-                        position,
-                        header,
-                    },
+                    file: file.clone(),
+                    position,
+                    header,
                 };
-                record.zero = record.read(size)?.iter().all(|byte| *byte == 0);
+                // The authenticated header and file length suffice to recover
+                // this frame's location. Record::read authenticates its payload
+                // before serving or publishing bytes. Re-reading obsolete
+                // payloads here makes every status query scan the whole backlog.
+                // Recovered frames carry no trusted zero-range hint.
+                if verify_payloads {
+                    record.zero = record.read()?.iter().all(|byte| *byte == 0);
+                }
                 journal.insert(record);
                 previous = sequence;
                 journal.next = journal.next.max(
@@ -443,7 +358,6 @@ impl Journal {
                 std::fs::remove_file(entry.path())?;
             }
         }
-        journal.reclaim_legacy(directory, cutoff)?;
         File::open(directory)?.sync_all()?;
         journal.durable_through = journal.next - 1;
         Ok(journal)
@@ -545,8 +459,8 @@ impl Journal {
             .collect()
     }
 
-    /// Metadata-only no-op detection. Every recovered frame was authenticated
-    /// before indexing; this hint is in memory and changes no persisted format.
+    /// Metadata-only no-op detection. Only live, known-zero writes carry this
+    /// hint; recovered frames conservatively require a new write or data read.
     pub fn zeroed(&self, start: u64, end: u64, base_zero: bool) -> bool {
         let mut records = self.overlapping(i64::MAX, start, end);
         if records.iter().any(|record| !record.zero) {
@@ -647,7 +561,7 @@ impl Journal {
             segment.file.write_all_at(&header, position)?;
             if zero {
                 // Appends always extend the file. Sparse zeros have precisely
-                // the existing frame bytes/checksums, including on old readers.
+                // the same frame bytes/checksums as ordinary zero writes.
                 // Never punch an earlier frame or reclaim before publication.
                 segment
                     .file
@@ -671,11 +585,9 @@ impl Journal {
             end: offset + data.len() as u64,
             zero,
             written_at,
-            location: Location::Segment {
-                file: segment.file.clone(),
-                position,
-                header,
-            },
+            file: segment.file.clone(),
+            position,
+            header,
         };
         self.insert(record);
         let sequence = self.next;
@@ -753,35 +665,11 @@ impl Journal {
             false
         });
         self.journal_bytes = self.segments.iter().map(|s| s.length).sum();
-        if self.legacy_through >= 0 && generation >= self.legacy_through {
-            for suffix in ["", "-wal", "-shm"] {
-                retired.push(PathBuf::from(format!("journal.sqlite{suffix}")));
-            }
-        }
         retired
-    }
-
-    fn reclaim_legacy(&self, directory: &Path, cutoff: i64) -> io::Result<()> {
-        if self.legacy_through < 0 || cutoff < self.legacy_through {
-            return Ok(());
-        }
-        legacy_guard(directory)?;
-        for suffix in ["-wal", "-shm"] {
-            match std::fs::remove_file(directory.join(format!("journal.sqlite{suffix}"))) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(())
     }
 
     pub fn reclaim(directory: &Path, retired: &[PathBuf]) -> io::Result<()> {
         for name in retired {
-            if name == Path::new("journal.sqlite") {
-                legacy_guard(directory)?;
-                continue;
-            }
             match std::fs::remove_file(directory.join(name)) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -809,14 +697,11 @@ pub(super) fn published(db: &Connection) -> io::Result<Value> {
 
 pub(super) fn metadata(directory: &Path, initial: Option<(&Value, i64)>) -> io::Result<Connection> {
     let path = directory.join("journal-v2.sqlite");
-    let legacy = directory.join("journal.sqlite");
-    if initial.is_some() && (path.exists() || legacy.exists()) {
+    if initial.is_some() && path.exists() {
         return Err(failure("Disk already exists"));
     }
     if !path.exists() {
-        if initial.is_none() && !legacy.exists() {
-            return Err(failure("Disk journal is missing"));
-        }
+        let (manifest, generation) = initial.ok_or_else(|| failure("Disk journal is missing"))?;
         let temporary = directory.join("journal-v2.partial");
         // A partial metadata copy is never authoritative.
         for suffix in ["", "-journal"] {
@@ -831,61 +716,20 @@ pub(super) fn metadata(directory: &Path, initial: Option<(&Value, i64)>) -> io::
             CREATE TABLE sealed (generation INTEGER PRIMARY KEY,manifest TEXT);
             CREATE TABLE settings (key TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE segments (name TEXT PRIMARY KEY,generation INTEGER NOT NULL,first_sequence INTEGER NOT NULL UNIQUE);").map_err(failure)?;
-        if let Some((manifest, generation)) = initial {
-            db.execute(
-                "INSERT INTO state VALUES (1,?1,?2,1)",
-                params![manifest.to_string(), generation],
-            )
-            .map_err(failure)?;
-        } else {
-            db.execute(
-                "ATTACH DATABASE ?1 AS legacy",
-                [legacy.to_string_lossy().as_ref()],
-            )
-            .map_err(failure)?;
-            db.execute_batch("INSERT INTO state SELECT * FROM legacy.state;
-                INSERT INTO sealed SELECT * FROM legacy.sealed;
-                INSERT INTO settings SELECT * FROM legacy.settings;
-                INSERT INTO settings VALUES ('legacyThrough',(SELECT COALESCE(MAX(generation),0) FROM legacy.writes));").map_err(failure)?;
-        }
+        db.execute(
+            "INSERT INTO state VALUES (1,?1,?2,1)",
+            params![manifest.to_string(), generation],
+        )
+        .map_err(failure)?;
         db.execute_batch("COMMIT").map_err(failure)?;
         db.close().map_err(|(_, e)| failure(e))?;
         File::open(&temporary)?.sync_all()?;
         std::fs::rename(&temporary, &path)?;
         File::open(directory)?.sync_all()?;
-        if initial.is_some() {
-            legacy_guard(directory)?;
-        }
     }
     let db = Connection::open(path).map_err(failure)?;
-    if !legacy.exists() {
-        legacy_guard(directory)?;
-    }
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
         .map_err(failure)?;
-    // A legacy application must fail closed instead of serving stale bytes after
-    // a downgrade. Copy counters durably first, then invalidate the old writer.
-    if db
-        .query_row(
-            "SELECT value FROM settings WHERE key='legacyThrough'",
-            [],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(failure)?
-        .is_some()
-        && legacy.exists()
-    {
-        use std::io::Read;
-        let mut header = [0; 16];
-        let length = File::open(&legacy)?.read(&mut header)?;
-        if length == 16 && &header == b"SQLite format 3\0" {
-            let old =
-                Connection::open_with_flags(&legacy, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
-                    .map_err(failure)?;
-            old.execute_batch("PRAGMA synchronous=FULL; UPDATE state SET generation=0 WHERE id=1 AND generation<>0;").map_err(failure)?;
-        }
-    }
     Ok(db)
 }
 

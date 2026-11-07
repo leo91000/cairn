@@ -1,4 +1,6 @@
 """Downloader and update recovery tests; no services, drivers or real credentials."""
+import ast
+import contextlib
 import hashlib
 import importlib.util
 import io
@@ -17,14 +19,87 @@ SPEC.loader.exec_module(host)
 
 def release(**changes):
     value = dict(sha256='a' * 64, toolsSha256='b' * 64, size=3, toolsSize=3,
-                 os='linux', arch='x86_64', protocolMin=2, protocolMax=2,
-                 dataEpoch=5, runtimeId='synthetic-runtime',
+                 os='linux', arch='x86_64', nodeProtocol=2,
+                 runtimeId='synthetic-runtime',
                  binaryPath='/internal/nodes/native-binary', toolsPath='/internal/nodes/native-tools')
     value.update(changes)
     return value
 
 
 class NativeHostTests(unittest.TestCase):
+    def test_entrypoint_exposes_only_allowlisted_prerequisite_diagnostics(self):
+        source = Path(SPEC.origin).read_text()
+        entrypoint = ast.parse(source).body[-1]
+        self.assertIsInstance(entrypoint, ast.If)
+        code = compile(ast.Module(body=[entrypoint], type_ignores=[]), SPEC.origin, 'exec')
+        for error, expected in [
+            (host.PrerequisiteError('uidmap'), 'distribution uidmap package'),
+            (host.PrerequisiteError('subids'), '/etc/subuid and /etc/subgid'),
+            (host.PrerequisiteError('tun'), '/dev/net/tun'),
+            (host.PrerequisiteError('systemd'), 'systemd 255'),
+            (ValueError('synthetic-private-credential'), 'Native node failed: ValueError'),
+            (OSError('synthetic-private-credential'), 'Native node failed: OSError'),
+        ]:
+            with self.subTest(error=type(error).__name__, expected=expected):
+                scope = dict(vars(host), __name__='__main__', install=Mock(side_effect=error))
+                output = io.StringIO()
+                with patch.object(host.os, 'geteuid', return_value=0), \
+                        patch.object(host.signal, 'signal'), \
+                        patch.object(host.sys, 'argv', ['native-host.py', 'install', 'https://manager.example.test']), \
+                        contextlib.redirect_stderr(output), self.assertRaises(SystemExit) as exit_status:
+                    exec(code, scope)
+                self.assertEqual(exit_status.exception.code, 1)
+                scope['install'].assert_called_once_with('https://manager.example.test')
+                self.assertIn(expected, output.getvalue())
+                self.assertNotIn('synthetic-private-credential', output.getvalue())
+
+    def test_missing_uidmap_reports_a_controlled_prerequisite(self):
+        with patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 255')), \
+                patch.object(host.Path, 'exists', return_value=False), \
+                patch.object(host.shutil, 'which', return_value=None), \
+                self.assertRaisesRegex(host.PrerequisiteError, 'distribution uidmap package'):
+            host.require_docker_host()
+
+    def test_apparmor_profile_failure_does_not_expose_arbitrary_os_error(self):
+        with patch.object(host.Path, 'exists', return_value=True), \
+                patch.object(host.Path, 'read_text', return_value='1'), \
+                patch.object(host.Path, 'write_text', side_effect=PermissionError('synthetic-private-credential')), \
+                patch.object(host.shutil, 'which', return_value='/synthetic/apparmor_parser'), \
+                self.assertRaisesRegex(host.PrerequisiteError, 'AppArmor tooling') as error:
+            host.configure_docker_apparmor(Path('/synthetic/docker'))
+        self.assertNotIn('synthetic-private-credential', str(error.exception))
+
+    def test_mapping_helpers_accept_only_their_effective_global_file_capability(self):
+        metadata = Mock(st_uid=0, st_mode=host.stat.S_IFREG | 0o755)
+        def capability(*words):
+            return b''.join(word.to_bytes(4, 'little') for word in words)
+        for bit in (1 << 7, 1 << 6):
+            for data, expected in [
+                (capability(0x02000001, bit, 0, 0, 0), True),
+                (capability(0x03000001, bit, 0, 0, 0, 0), True),
+                (capability(0x02000000, bit, 0, 0, 0), False),
+                (capability(0x02000001, bit | 1, 0, 0, 0), False),
+                (capability(0x03000001, bit, 0, 0, 0, 1000), False),
+            ]:
+                with patch.object(host.Path, 'stat', return_value=metadata), patch.object(host.os, 'getxattr', return_value=data):
+                    self.assertEqual(expected, host.trusted_mapping_helper('/synthetic', bit))
+        with patch.object(host.Path, 'stat', return_value=Mock(st_uid=0, st_mode=host.stat.S_IFREG | 0o4755)):
+            self.assertTrue(host.trusted_mapping_helper('/synthetic', 1 << 7))
+
+    def test_disabled_user_namespaces_fail_without_changing_global_restrictions(self):
+        with patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 255')), \
+                patch.object(host.Path, 'exists', return_value=True), \
+                patch.object(host.Path, 'read_text', return_value='0'), \
+                patch.object(host.Path, 'write_text') as write, \
+                self.assertRaisesRegex(ValueError, 'enabled unprivileged user namespaces'):
+            host.require_docker_host()
+        write.assert_not_called()
+
+    def test_rootless_mapping_fails_before_enrollment_on_implicit_nnp_systemd(self):
+        with patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 252')), \
+                self.assertRaisesRegex(ValueError, 'systemd 255'):
+            host.require_docker_host()
+
     def test_codex_companion_is_extracted_and_rechecked_before_reuse(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -67,7 +142,7 @@ class NativeHostTests(unittest.TestCase):
         self.assertEqual([], companion.kwargs['extra_groups'])
 
     def test_inventory_rejects_unlisted_companions_and_duplicate_entries(self):
-        files = [{'path': 'bin/' + name} for name in ('codex', 'claude', 'opencode', 'node', 'gh')]
+        files = [{'path': 'bin/' + name} for name in ('codex', 'claude', 'opencode', 'node', 'gh', 'codex-code-mode-host')]
         manifest = dict(version=1, os='linux', arch='x86_64', files=files)
         for extra in ('bin/unapproved-host', 'bin/codex'):
             with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, 'inventory'):
@@ -80,7 +155,7 @@ class NativeHostTests(unittest.TestCase):
                 if controllers is not None:
                     (root / 'cgroup.controllers').write_text(controllers)
                 with patch.object(host, 'ROOT', root / 'state'), patch.object(host, 'CGROUP_ROOT', root), \
-                        patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 252')), \
+                        patch.object(host.subprocess, 'run', return_value=Mock(stdout='systemd 255')), \
                         patch.object(host.getpass, 'getpass') as enrollment, patch.object(host, 'prepare') as prepare:
                     with self.assertRaisesRegex(ValueError, 'cgroup v2'):
                         host.install('https://manager.example.test')
@@ -122,8 +197,8 @@ class NativeHostTests(unittest.TestCase):
     def test_only_exact_compatible_release_artifacts_are_accepted(self):
         self.assertEqual(release(), host.validate_release(release()))
         for change in ({'sha256': '../escape'}, {'size': 1 << 40}, {'arch': 'aarch64'},
-                       {'os': 'windows'}, {'protocolMin': 3}, {'toolsPath': 'https://elsewhere.test/tool'},
-                       {'dataEpoch': None}, {'runtimeId': 'bad%runtime'}):
+                       {'os': 'windows'}, {'nodeProtocol': 3}, {'toolsPath': 'https://elsewhere.test/tool'},
+                       {'runtimeId': 'bad%runtime'}):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 host.validate_release(release(**change))
 
@@ -164,7 +239,7 @@ class NativeHostTests(unittest.TestCase):
             files = []
             with zipfile.ZipFile(archive, 'w') as bundle:
                 bundle.writestr('bin/', b'')
-                for name in ('codex', 'claude', 'opencode', 'node', 'gh'):
+                for name in ('codex', 'claude', 'opencode', 'node', 'gh', 'codex-code-mode-host'):
                     payload = b'synthetic executable'
                     files.append(dict(path='bin/' + name, size=len(payload), sha256=hashlib.sha256(payload).hexdigest()))
                     bundle.writestr('bin/' + name, payload)
@@ -186,7 +261,7 @@ class NativeHostTests(unittest.TestCase):
             digest = hashlib.sha256(payload).hexdigest()
             (root / 'cairn').write_bytes(payload)
             entries = []
-            for name in ('codex', 'claude', 'opencode', 'node', 'gh'):
+            for name in ('codex', 'claude', 'opencode', 'node', 'gh', 'codex-code-mode-host'):
                 (root / 'tools/bin' / name).write_bytes(payload)
                 entries.append(dict(path='bin/' + name, size=len(payload), sha256=digest))
             (root / 'tools/manifest.json').write_text(json.dumps(dict(version=1, os='linux', arch='x86_64', files=entries)))
@@ -214,30 +289,99 @@ class NativeHostTests(unittest.TestCase):
             self.assertTrue(all(path.exists() for path in paths[:3]))
             self.assertFalse(paths[3].exists())
 
-    def test_failed_candidate_health_restores_the_previous_version(self):
-        previous, candidate = Path('/synthetic/previous'), Path('/synthetic/candidate')
-        active, trial, restored = Mock(), Mock(), Mock()
+    def test_failed_candidate_health_retains_candidate_for_restart(self):
+        candidate = Path('/synthetic/candidate')
+        active, trial = Mock(), Mock()
         trial.poll.return_value = None
-        with patch.object(host, 'terminate') as terminate, patch.object(host, 'start_node', side_effect=[trial, restored]), \
-                patch.object(host, 'health', side_effect=[False, True]), patch.object(host, 'select') as select:
-            child, selected, error = host.activate(candidate, previous, active)
-            self.assertIs(restored, child)
-            self.assertEqual(previous, selected)
-            self.assertIn('previous compatible version restored', error)
-            select.assert_not_called()
+        with patch.object(host, 'terminate') as terminate, patch.object(host, 'start_node', return_value=trial) as start, \
+                patch.object(host, 'health', return_value=False), patch.object(host, 'select') as select:
+            with self.assertRaisesRegex(RuntimeError, 'candidate retained'):
+                host.activate(candidate, active)
+            start.assert_called_once_with(candidate)
+            select.assert_called_once_with(candidate)
             self.assertEqual([unittest.mock.call(active), unittest.mock.call(trial)], terminate.call_args_list)
 
-    def test_success_selects_the_candidate_only_after_health_passes(self):
-        previous, candidate = Path('/synthetic/previous'), Path('/synthetic/candidate')
+    def test_healthy_candidate_runs_after_selection(self):
+        candidate = Path('/synthetic/candidate')
         active, trial = Mock(), Mock()
         trial.poll.return_value = None
         with patch.object(host, 'terminate'), patch.object(host, 'start_node', return_value=trial), \
                 patch.object(host, 'health', return_value=True), patch.object(host, 'select') as select:
-            child, selected, error = host.activate(candidate, previous, active)
+            child = host.activate(candidate, active)
             self.assertIs(trial, child)
-            self.assertEqual(candidate, selected)
-            self.assertIsNone(error)
             select.assert_called_once_with(candidate)
+
+    def test_restarted_healthy_candidate_completes_maintenance_even_after_a_lost_reply(self):
+        for lost_reply in [False, True]:
+            with self.subTest(lost_reply=lost_reply), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / 'state'
+                install = Path(temporary) / 'install'
+                identity = root / 'data/node/identity.json'
+                identity.parent.mkdir(parents=True)
+                identity.write_text(json.dumps({'token': 'synthetic-node-token'}))
+                (root / 'settings.json').write_text(json.dumps({'manager': 'https://manager.example.test'}))
+                previous_release = release(sha256='0' * 64, toolsSha256='1' * 64, runtimeId='previous')
+                candidate_release = release(sha256='2' * 64, toolsSha256='3' * 64, runtimeId='candidate')
+                versions = []
+                for metadata in [previous_release, candidate_release]:
+                    directory = install / 'versions' / (metadata['sha256'] + '-' + metadata['toolsSha256'])
+                    directory.mkdir(parents=True)
+                    (directory / 'release.json').write_text(json.dumps(metadata))
+                    versions.append(directory)
+                previous, candidate = versions
+                maintenance = None
+                completions = []
+
+                def request(_manager, path, body=None, token=None):
+                    nonlocal maintenance
+                    if path.endswith('/native-release'):
+                        return candidate_release
+                    self.assertEqual(token, 'synthetic-node-token')
+                    if body['action'] == 'drain':
+                        maintenance = 'ready-to-update'
+                    elif body['action'] == 'complete':
+                        self.assertIsNone(body['error'])
+                        maintenance = None
+                        completions.append(body)
+                        host.STOP = True
+                        if lost_reply and len(completions) == 1:
+                            raise OSError('Synthetic lost acknowledgement')
+                    return {'maintenance': maintenance}
+
+                def terminate(child):
+                    child.poll.return_value = 0
+
+                children = [Mock() for _ in range(4)]
+                for child in children:
+                    child.poll.return_value = None
+                with patch.object(host, 'ROOT', root), patch.object(host, 'INSTALL', install), \
+                        patch.object(host, 'STOP', False), patch.object(host, 'require_storage'), \
+                        patch.object(host, 'require_docker_host'), \
+                        patch.object(host, 'prepare_docker_tools', return_value=install / 'docker-tools'), \
+                        patch.object(host, 'configure_docker_apparmor') as apparmor, \
+                        patch.object(host, 'start_node', side_effect=children), \
+                        patch.object(host, 'terminate', side_effect=terminate), \
+                        patch.object(host, 'prepare', return_value=candidate), \
+                        patch.object(host, 'verify_workload_tools'), patch.object(host, 'json_request', side_effect=request):
+                    host.select(previous)
+                    with patch.object(host, 'health', side_effect=[True, False]):
+                        with self.assertRaisesRegex(RuntimeError, 'no longer running'):
+                            host.run()
+                    self.assertEqual((install / 'current').resolve(), candidate)
+                    self.assertEqual(maintenance, 'ready-to-update')
+                    self.assertTrue((root / 'update-pending.json').exists())
+                    self.assertEqual(completions, [])
+
+                    with patch.object(host, 'health', return_value=True):
+                        host.run()
+                        if lost_reply:
+                            self.assertTrue((root / 'update-pending.json').exists())
+                            host.STOP = False
+                            host.run()
+                    self.assertIsNone(maintenance)
+                    self.assertFalse((root / 'update-pending.json').exists())
+                    self.assertEqual(len(completions), 2 if lost_reply else 1)
+                    apparmor.assert_called_with(install / 'docker-tools')
 
 
 if __name__ == '__main__':

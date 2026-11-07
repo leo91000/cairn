@@ -3,7 +3,7 @@ mod worker;
 
 pub use worker::run as worker;
 
-use super::{ToolResult, catalog, operations, resource_metadata};
+use super::{ToolResult, catalog, model_result, operations, resource_metadata};
 use crate::{
     error::{Error, Result},
     service::Service,
@@ -24,28 +24,34 @@ use tokio::{
 };
 
 const MAX_FRAME: usize = 8 * 1024 * 1024;
-const MAX_RESULT: usize = 1024 * 1024;
 const MAX_CALLS: usize = 64;
 const DEADLINE: Duration = Duration::from_secs(30);
+
+enum Completed {
+    Value(Value),
+    Truncated { value_bytes: usize },
+}
 
 /// Execution identity stays in the manager and never enters the JavaScript worker.
 #[derive(Clone)]
 pub(crate) enum Authorization {
-    Public(Vec<String>),
+    Public(Vec<String>, Option<String>),
     Installation(String),
 }
 
 impl Authorization {
     async fn operations(&self, s: &Service) -> Result<Vec<Value>> {
         match self {
-            Self::Public(_) => Ok(operations()),
+            Self::Public(..) => Ok(operations()),
             Self::Installation(token) => crate::installation_mcp::operations(s, token).await,
         }
     }
 
     async fn invoke(&self, s: &Arc<Service>, name: &str, args: Value) -> Result<Value> {
         match self {
-            Self::Public(scopes) => super::operation(s, scopes, name, args).await,
+            Self::Public(scopes, credential) => {
+                super::operation(s, scopes, credential.as_deref(), name, args).await
+            }
             Self::Installation(token) => {
                 crate::installation_mcp::operation(s, token, name, args).await
             }
@@ -82,7 +88,7 @@ impl CodeMode {
         code: &str,
         data: Value,
         denied_scope: &mut Option<String>,
-    ) -> Result<Value> {
+    ) -> Result<Completed> {
         let _slot = self
             .slots
             .try_acquire()
@@ -141,10 +147,12 @@ impl CodeMode {
                         let reply = match auth.invoke(s, &name, args).await {
                             Ok(value) => Frame::Reply { value },
                             Err(error) => {
-                                if matches!(auth, Authorization::Public(_))
+                                // Only a missing scope asks the client to step up; an
+                                // actor refusal (owner-only in the apps) cannot be granted.
+                                if let Authorization::Public(granted, _) = auth
                                     && matches!(error.status, 401 | 403)
                                 {
-                                    *denied_scope = operations()
+                                    let required = operations()
                                         .iter()
                                         .find(|op| op["name"] == name)
                                         .and_then(|op| {
@@ -152,6 +160,12 @@ impl CodeMode {
                                                 .as_str()
                                                 .map(str::to_owned)
                                         });
+                                    if required
+                                        .as_ref()
+                                        .is_some_and(|scope| !granted.contains(scope))
+                                    {
+                                        *denied_scope = required;
+                                    }
                                 }
                                 Frame::Denied {
                                     message: error.message,
@@ -162,12 +176,10 @@ impl CodeMode {
                         write(&mut input, &reply).await?;
                     }
                     Frame::Done { value } => {
-                        if serde_json::to_vec(&value)?.len() > MAX_RESULT {
-                            return Err(Error::too_large(
-                                "Code result exceeds 1 MiB. Filter results or read bounded pages.",
-                            ));
-                        }
-                        return Ok(value);
+                        return Ok(Completed::Value(value));
+                    }
+                    Frame::Truncated { value_bytes } => {
+                        return Ok(Completed::Truncated { value_bytes });
                     }
                     Frame::Failure { message } => return Err(Error::bad(message)),
                     _ => return Err(Error::bad_gateway("Invalid code worker response.")),
@@ -206,6 +218,9 @@ enum Frame {
     },
     Done {
         value: Value,
+    },
+    Truncated {
+        value_bytes: usize,
     },
     Failure {
         message: String,
@@ -301,7 +316,7 @@ pub(crate) async fn call(
     let operation = async {
         let args = parse(&format!("mcp:{name}"), args)?;
         match name {
-            "search" => Ok(search(auth.operations(s).await?, &args)),
+            "search" => Ok(Completed::Value(search(auth.operations(s).await?, &args))),
             "execute" => {
                 s.code_mode
                     .execute(
@@ -318,7 +333,12 @@ pub(crate) async fn call(
     }
     .await;
     let mut result = match operation {
-        Ok(value) => ToolResult::success(value.to_string(), json!({ "result": value })),
+        Ok(Completed::Value(value)) => {
+            ToolResult::success(value.to_string(), json!({ "result": value }))
+        }
+        Ok(Completed::Truncated { value_bytes }) => {
+            return Ok(model_result::omitted_value(value_bytes));
+        }
         Err(error) => ToolResult::failure(&error.message),
     };
     if result.is_error

@@ -1,3 +1,6 @@
+import type { Page } from '@playwright/test'
+import type { Workspace } from './fixtures'
+import type { ResumeDiagnosticRecord } from './resume-diagnostic'
 import { randomUUID } from 'node:crypto'
 import {
   signIn as authenticateWorkspace,
@@ -9,6 +12,126 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+import { projectResumeDiagnostic, RESUME_DIAGNOSTIC_MARKER } from './resume-diagnostic'
+
+type ResumeDiagnosticWindow = Window & {
+  __cairnTestResumeDiagnostic?: (record: ResumeDiagnosticRecord) => void
+  __cairnTestResumeDiagnosticRecords?: ResumeDiagnosticRecord[]
+}
+
+async function installResumeDiagnosticProbe(page: Page) {
+  await page.addInitScript(() => {
+    const records: ResumeDiagnosticRecord[] = []
+    const diagnosticWindow = window as ResumeDiagnosticWindow
+    diagnosticWindow.__cairnTestResumeDiagnosticRecords = records
+    diagnosticWindow.__cairnTestResumeDiagnostic = (record) => {
+      if (records.length < 16)
+        records.push({ ...record })
+    }
+  })
+}
+
+async function reportResumeDiagnostic(page: Page, requestCount: number) {
+  let report = projectResumeDiagnostic(requestCount, undefined)
+  try {
+    const source = await page.evaluate(() => (window as ResumeDiagnosticWindow).__cairnTestResumeDiagnosticRecords)
+    report = projectResumeDiagnostic(requestCount, source)
+  }
+  catch {
+    // Failure reporting must not replace the original request-count assertion.
+  }
+
+  try {
+    await test.info().attach('resume-diagnostic.json', {
+      body: JSON.stringify(report),
+      contentType: 'application/json',
+    })
+  }
+  catch {
+    report = projectResumeDiagnostic(requestCount, undefined)
+    try {
+      await test.info().attach('resume-diagnostic.json', {
+        body: JSON.stringify(report),
+        contentType: 'application/json',
+      })
+    }
+    catch {
+      // Keep the fixed console record as the last available diagnostic.
+    }
+  }
+
+  try {
+    console.error(`${RESUME_DIAGNOSTIC_MARKER} ${JSON.stringify(report)}`)
+  }
+  catch {
+    // Keep the original assertion as the reported failure.
+  }
+}
+
+async function expectSingleResumeRequest(page: Page, requestCount: () => number) {
+  try {
+    await expect.poll(() => ({ requests: requestCount() })).toMatchObject({ requests: 1 })
+  }
+  catch (failure) {
+    try {
+      await reportResumeDiagnostic(page, requestCount())
+    }
+    catch {
+      // Diagnostic reporting cannot mask the original request-count assertion.
+    }
+
+    throw failure
+  }
+}
+
+async function createFailedCodexQuotaChat(
+  workspace: Workspace,
+  agentSettings: { model: string, reasoning: string, speed: string },
+) {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  const turnId = randomUUID()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: turnId, text: 'Keep this Codex turn and session' })
+  await expect.poll(() => workspace.service.chats.detail(chat.id).run?.status).toBe('succeeded')
+  const before = workspace.service.chats.detail(chat.id).run!
+  workspace.service.store.updateRun(before.id, {
+    status: 'failed',
+    error: 'Usage limit has been reached',
+    resumeAvailable: true,
+    snapshot: {
+      ...before.snapshot,
+      agent: {
+        ...before.snapshot.agent,
+        provider: 'codex',
+        ...agentSettings,
+      },
+    },
+  })
+  workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, paused: true })
+  workspace.service.store.event(before.id, 'turn.failed', 'Usage limit has been reached', { type: 'turn.failed' })
+  workspace.service.store.event(before.id, 'status', 'failed')
+
+  return { chat, before, turnId }
+}
+
+test('expired environments retain the conversation and explain fresh resumption and cleanup retries', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  workspace.service.store.put('chats', { ...chat, environmentState: 'expired', environmentExpiredAt: Date.now() })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const notice = page.getByRole('status').filter({ hasText: 'Working environment expired' })
+  await expect(notice).toContainText('Your next message starts a fresh environment')
+  await expect(notice).toContainText('published files and shared links are retained')
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible()
+  workspace.service.store.put('chats', {
+    ...chat,
+    environmentState: 'cleaning',
+    environmentRetryAfter: Date.now() + 3600_000,
+    environmentError: 'Node unavailable',
+  })
+  await page.reload()
+  await expect(notice).toContainText('Please wait before sending another message')
+  await expect(notice).toContainText('Cleanup will retry: Node unavailable')
+})
 
 test('a lost message acknowledgement retries the same submission without duplicating it', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
@@ -164,7 +287,8 @@ test('a durable scheduled wait survives restart and resumes without a user messa
   await expect(page.getByRole('button', { name: 'Cancel scheduled wait', exact: true })).toBeVisible()
   await expect(page.getByRole('textbox', { name: 'Message' })).toHaveAttribute('placeholder', 'Reply now — this cancels the wait')
   // The Fil lists it apart, until it resumes.
-  const waiting = page.getByRole('region', { name: 'Waiting', exact: true })
+  await page.getByRole('tab', { name: /^En cours/ }).click()
+  const waiting = page.getByRole('region', { name: 'En cours', exact: true })
   await expect(waiting.locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText(/Resumes at .+\d min/)
   await expect(page.locator('.agent-waiting')).toHaveCount(0)
   for (const width of [1280, 390]) {
@@ -265,10 +389,12 @@ test('a durable condition wait follows a dependency across restart and queue pau
   workspace.service.store.set('deployment-lease', 'condition-wait-fixture', Date.now() + 120000)
   try {
     const task = await workspace.api('/api/tasks', 'POST', {
-      name: 'Condition dependency',
-      prompt: 'Other work',
-      agentId: agent.id,
-      worktree: false,
+      settings: {
+        name: 'Condition dependency',
+        prompt: 'Other work',
+        agentId: agent.id,
+        worktree: false,
+      },
     })
     const target = await workspace.api(`/api/tasks/${task.id}/run`, 'POST', {})
     const wakeup = {
@@ -286,7 +412,8 @@ test('a durable condition wait follows a dependency across restart and queue pau
     await authenticateWorkspace(page)
     await expect(page.locator('.chat-wait')).toContainText(/Waiting for another run to finish.*Join dependency.*up to \d+ min/)
     await expect(page.getByText(/^Awaiting result · up to \d+ min$/).first()).toBeVisible()
-    await expect(page.getByRole('region', { name: 'Waiting', exact: true }).locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('Another run')
+    await page.getByRole('tab', { name: /^En cours/ }).click()
+    await expect(page.getByRole('region', { name: 'En cours', exact: true }).locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('Another run')
     await expect(page.locator('.agent-waiting')).toHaveCount(0)
     for (const width of [1280, 390]) {
       await page.setViewportSize({ width, height: 844 })
@@ -304,6 +431,80 @@ test('a durable condition wait follows a dependency across restart and queue pau
     expect(resumed.run.sessionId).toBe(detail.run.sessionId)
     expect(resumed.wakeup).toBeNull()
     expect(workspace.service.store.events(detail.run.id, 0, 100).filter(event => event.type === 'chat.user')).toHaveLength(1)
+  }
+  finally {
+    workspace.service.store.delete('deployment-lease')
+  }
+})
+
+test('a large grouped wait pages through every condition and resumes once all are in', async ({ page, workspace }) => {
+  test.setTimeout(90000)
+  const agent = workspace.service.store.get('agents', '00000000-0000-4000-8000-000000000001')!
+  workspace.service.store.put('agents', { ...agent, access: { ...agent.access, installation: true } })
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Finish after all dependencies' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  const detail = await workspace.api(`/api/chats/${chat.id}`)
+  workspace.service.store.set('deployment-lease', 'grouped-wait-fixture', Date.now() + 120000)
+  try {
+    const targets = await Promise.all(Array.from({ length: 23 }, (_, index) => `Grouped dependency ${index + 1}`).map(async (name) => {
+      const task = await workspace.api('/api/tasks', 'POST', {
+        settings: {
+          name,
+          prompt: 'Other work',
+          agentId: agent.id,
+          worktree: false,
+        },
+      })
+      return workspace.api(`/api/tasks/${task.id}/run`, 'POST', {})
+    }))
+    const first = targets[0]
+    const last = targets.at(-1)!
+    workspace.service.store.updateRun(first.id, { status: 'failed', finishedAt: Date.now() })
+    const conditions = targets.map(target => ({ type: 'run_finished' as const, runId: target.id }))
+    const wakeup = {
+      id: randomUUID(),
+      messageId: detail.run.chatExecution.messageId,
+      reason: 'Join all dependencies',
+      seconds: 420,
+      createdAt: Date.now(),
+      wakeAt: Date.now() + 420000,
+      condition: { type: 'group' as const, mode: 'all' as const, conditions },
+      members: targets.map(() => ({})),
+    }
+    workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, wakeup })
+    workspace.service.store.event(detail.run.id, 'chat.wait', wakeup.reason, wakeup)
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    const card = page.locator('.chat-wait')
+    await expect(card).toContainText('Waiting for 23 results')
+    // The failure already counts as a result: Cairn records it while the other run is pending.
+    await expect(card.getByTestId('wait-member')).toHaveCount(10)
+    await expect(card.getByTestId('wait-member').first()).toContainText('The run failed')
+    await expect(card.getByTestId('wait-member').last()).toContainText('Waiting for it to finish')
+    await expect(card).toContainText('1/23')
+    await page.getByRole('tab', { name: /^En cours/ }).click()
+    await expect(page.getByRole('region', { name: 'En cours', exact: true }).locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('1 of 23 results')
+    await expect(card.getByRole('link', { name: `Open run ${first.id.slice(0, 8)}` })).toHaveAttribute('href', new RegExp(`/runs/${first.id}$`))
+    await expect(card.getByRole('button', { name: 'Previous conditions' })).toBeDisabled()
+    await card.getByRole('button', { name: 'Next conditions' }).click()
+    await expect(card).toContainText('11–20 of 23')
+    await card.getByRole('button', { name: 'Next conditions' }).click()
+    await expect(card.getByTestId('wait-member')).toHaveCount(3)
+    await expect(card).toContainText('21–23 of 23')
+    await expect(card.getByRole('button', { name: 'Next conditions' })).toBeDisabled()
+    await expect(card.getByRole('link', { name: `Open run ${last.id.slice(0, 8)}` })).toHaveAttribute('href', new RegExp(`/runs/${last.id}$`))
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 844 })
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+    }
+
+    for (const target of targets.slice(1))
+      workspace.service.store.updateRun(target.id, { status: 'succeeded', finishedAt: Date.now() })
+    workspace.service.store.delete('deployment-lease')
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.summary, { timeout: 30000 }).toContain('Cairn resumed this conversation')
+    await expect(card).toContainText('All 23 results in')
+    await expect(card).toContainText('1 failed · 22 succeeded')
   }
   finally {
     workspace.service.store.delete('deployment-lease')
@@ -612,29 +813,65 @@ test('a transient agent error shows a retry countdown and resumes without user i
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.retry?.attempt).toBe(1)
   const waiting = (await workspace.api(`/api/chats/${chat.id}`)).run
   expect(waiting.status).toBe('queued')
+  waiting.retry.nextAttemptAt = Date.now() + 60_000
+  workspace.service.store.updateRun(waiting.id, { retry: waiting.retry })
   // A retry keeps earlier conversation events, including an interrupted background wait.
   workspace.service.store.event(waiting.id, 'turn.waiting', '', {
     tasks: [{ id: 'old-build', description: 'Earlier background build' }],
   })
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
-  const notice = page.getByRole('status').filter({ hasText: /Temporary agent error\. Retrying in \d+ seconds \(attempt 1\/3\)\./ })
+  const notice = page.getByTestId('recovery-notice')
   await expect(notice).toBeVisible()
   // The failed attempt shows one card, marked as a temporary error Cairn retries itself.
   const failure = page.getByRole('note').filter({ hasText: 'workspace routing discovery timed out' })
   await expect(failure).toHaveCount(1)
-  await expect(failure).toContainText('Temporary error — automatic retry 1/3')
+  await expect(failure).toContainText('Temporary error — automatic retry 1/5')
   await expect(page.locator('.agent-waiting')).toHaveCount(0)
   await expect(page.getByText('Background task', { exact: true })).toHaveCount(0)
   const before = await notice.textContent()
   await expect.poll(() => notice.textContent()).not.toBe(before)
-  await page.screenshot({ path: test.info().outputPath('agent-retry-countdown.png') })
+  for (const colorScheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme })
+    for (const width of [1280, 390, 320]) {
+      await page.setViewportSize({ width, height: 900 })
+      await expect(notice).toBeVisible()
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+      await page.screenshot({ path: test.info().outputPath(`agent-retry-${colorScheme}-${width}.png`) })
+    }
+  }
+
   expect((await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(false)
   workspace.service.store.updateRun(waiting.id, { retry: { ...waiting.retry, nextAttemptAt: Date.now() } })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
   await expect(page.getByText('Ready for the next step.', { exact: false }).last()).toBeVisible()
   await expect(notice).toHaveCount(0)
   await expect(failure).toHaveCount(1)
+})
+
+test('cancelling automatic recovery pauses the conversation and preserves its work', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', {
+    id: randomUUID(),
+    text: 'fixture:agent-failures:[{"code":"server_overloaded","message":"Please try again"}]',
+  })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.retry?.attempt).toBe(1)
+  const waiting = (await workspace.api(`/api/chats/${chat.id}`)).run
+  workspace.service.store.updateRun(waiting.id, { retry: { ...waiting.retry, nextAttemptAt: Date.now() + 60_000 } })
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const notice = page.getByTestId('recovery-notice')
+  await expect(notice.getByText('Retry 1 of 5')).toBeVisible()
+  await notice.getByText('What happened').click()
+  await expect(notice.getByText('Please try again')).toBeVisible()
+  await notice.getByRole('button', { name: 'Cancel retry' }).click()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).paused).toBe(true)
+  await expect(notice).toHaveCount(0)
+  const stopped = (await workspace.api(`/api/chats/${chat.id}`)).run
+  expect(stopped.id).toBe(waiting.id)
+  expect(stopped.workspace).toBe(waiting.workspace)
+  expect(stopped.retry).toBeNull()
+  expect(stopped.status).toBe('cancelled')
 })
 
 test('native Codex reconnect notices remain visible until work continues', async ({ page, workspace }) => {
@@ -1141,6 +1378,517 @@ test('failed replies show the current error instead of an old answer and can be 
   await expect(page.getByRole('alert')).toContainText('The response stopped before finishing')
 })
 
+test('same-provider quota resume submits the saved turn with the picker-applied speed', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  const turnId = randomUUID()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: turnId, text: 'Keep this Codex turn and session' })
+  await expect.poll(() => workspace.service.chats.detail(chat.id).run?.status).toBe('succeeded')
+  const before = workspace.service.chats.detail(chat.id).run!
+  const savedAgent = before.snapshot.agent
+  workspace.service.store.updateRun(before.id, {
+    status: 'failed',
+    error: 'Usage limit has been reached',
+    resumeAvailable: true,
+    snapshot: {
+      ...before.snapshot,
+      agent: {
+        ...savedAgent,
+        provider: 'codex',
+        model: 'fixture-fast',
+        reasoning: 'low',
+        speed: 'priority',
+      },
+    },
+  })
+  workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, paused: true })
+  workspace.service.store.event(before.id, 'turn.failed', 'Usage limit has been reached', { type: 'turn.failed' })
+  workspace.service.store.event(before.id, 'status', 'failed')
+
+  await page.route('**/codex/models', route => route.fulfill({
+    json: {
+      models: [
+        {
+          model: 'fixture-fast',
+          displayName: 'Quick coder',
+          description: 'Fast everyday coding',
+          hidden: false,
+          isDefault: true,
+          defaultReasoningEffort: 'low',
+          supportedReasoningEfforts: [{ reasoningEffort: 'low', description: '' }],
+          routes: [],
+          serviceTiers: [{ id: 'priority', name: 'Priority' }],
+          defaultServiceTier: null,
+          resolvedModel: null,
+        },
+        {
+          model: 'fixture-deep',
+          displayName: 'Deep thinker',
+          description: 'Complex investigations',
+          hidden: false,
+          isDefault: false,
+          defaultReasoningEffort: 'high',
+          supportedReasoningEfforts: [
+            { reasoningEffort: 'high', description: '' },
+            { reasoningEffort: 'ultra', description: '' },
+          ],
+          routes: [],
+          serviceTiers: [],
+          defaultServiceTier: null,
+          resolvedModel: null,
+        },
+      ],
+      checkedAt: Date.now(),
+      stale: false,
+      error: '',
+    },
+  }))
+  const resumeRequests: Record<string, unknown>[] = []
+  await installResumeDiagnosticProbe(page)
+  await page.route(`**/chats/${chat.id}/resume`, async (route) => {
+    expect(route.request().method()).toBe('POST')
+    resumeRequests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { ...before, status: 'queued', resumeAvailable: false } })
+  })
+
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const card = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(card).toBeVisible()
+  const picker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
+  await picker.click()
+  const menu = page.getByRole('dialog', { name: 'Agent & model' })
+  const inheritedModel = menu.getByRole('radio', { name: 'Conversation model', exact: true })
+  await expect(inheritedModel).toHaveAttribute('aria-checked', 'true')
+  await expect(inheritedModel).toContainText('Quick coder')
+  const selectedModel = menu.getByRole('radio', { name: 'Deep thinker', exact: true })
+  await selectedModel.click()
+  await expect(selectedModel).toHaveAttribute('aria-checked', 'true')
+  await menu.getByRole('radio', { name: 'Ultra', exact: true }).click()
+  await expect(menu.getByRole('radiogroup', { name: 'Speed' })).toContainText('Standard')
+  await menu.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(picker).toHaveAccessibleName(/Deep thinker · Ultra reasoning/)
+  await card.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => resumeRequests.length)
+
+  expect(resumeRequests[0]).toMatchObject({
+    chatId: chat.id,
+    runId: before.id,
+    turnId,
+    selection: { model: 'fixture-deep', reasoning: 'ultra', speed: 'standard' },
+  })
+  expect(workspace.service.store.chatMessages(chat.id).map(message => message.id)).toContain(turnId)
+})
+
+test('same-provider quota resume retries a prelaunch turn without selection', async ({ page, workspace }) => {
+  const failed = await createFailedCodexQuotaChat(workspace, {
+    model: '',
+    reasoning: '',
+    speed: '',
+  })
+  workspace.service.store.updateRun(failed.before.id, { resumeAvailable: false })
+  await useRelayForHttpMocks(page)
+
+  const requests: Record<string, unknown>[] = []
+  await page.route(`**/chats/${failed.chat.id}/resume`, async (route) => {
+    requests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { ...failed.before, status: 'queued', resumeAvailable: false } })
+  })
+  await page.route(`**/chats/${failed.chat.id}/pause`, async (route) => {
+    await route.fulfill({ json: { paused: false } })
+  })
+
+  await page.goto(workspacePath(`/chats/${failed.chat.id}`))
+  await authenticateWorkspace(page)
+  const card = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(card).toBeVisible()
+  await card.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => requests.length)
+
+  expect(requests[0]).toMatchObject({
+    chatId: failed.chat.id,
+    runId: failed.before.id,
+    turnId: failed.turnId,
+  })
+  expect(requests[0]).not.toHaveProperty('selection')
+})
+
+test('same-provider quota resume preserves an inherited blank model', async ({ page, workspace }) => {
+  const unchanged = await createFailedCodexQuotaChat(workspace, {
+    model: '',
+    reasoning: '',
+    speed: '',
+  })
+  const speedOnly = await createFailedCodexQuotaChat(workspace, {
+    model: '',
+    reasoning: '',
+    speed: 'priority',
+  })
+  const reasoningOnly = await createFailedCodexQuotaChat(workspace, {
+    model: '',
+    reasoning: '',
+    speed: '',
+  })
+  await useRelayForHttpMocks(page)
+  await page.route('**/codex/models', route => route.fulfill({
+    json: {
+      models: [
+        {
+          model: 'fixture-fast',
+          displayName: 'Quick coder',
+          description: 'Fast everyday coding',
+          hidden: false,
+          isDefault: true,
+          defaultReasoningEffort: 'low',
+          supportedReasoningEfforts: [
+            { reasoningEffort: 'low', description: '' },
+            { reasoningEffort: 'high', description: '' },
+          ],
+          routes: [],
+          serviceTiers: [{ id: 'priority', name: 'Priority' }],
+          defaultServiceTier: null,
+          resolvedModel: null,
+        },
+      ],
+      checkedAt: Date.now(),
+      stale: false,
+      error: '',
+    },
+  }))
+
+  const requests = new Map<string, Record<string, unknown>[]>()
+  for (const saved of [unchanged, speedOnly, reasoningOnly]) {
+    const body: Record<string, unknown>[] = []
+    requests.set(saved.chat.id, body)
+    await page.route(`**/chats/${saved.chat.id}/resume`, async (route) => {
+      body.push(route.request().postDataJSON())
+      await route.fulfill({ json: { ...saved.before, status: 'queued', resumeAvailable: false } })
+    })
+  }
+
+  await page.goto(workspacePath(`/chats/${unchanged.chat.id}`))
+  await authenticateWorkspace(page)
+  const unchangedCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(unchangedCard).toBeVisible()
+  await unchangedCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => requests.get(unchanged.chat.id)!.length)
+  expect(requests.get(unchanged.chat.id)![0]).not.toHaveProperty('selection')
+
+  await page.goto(workspacePath(`/chats/${speedOnly.chat.id}`))
+  await authenticateWorkspace(page)
+  const speedCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(speedCard).toBeVisible()
+  await page.getByRole('button', { name: /^Agent, model, reasoning and speed/ }).click()
+  const speedMenu = page.getByRole('dialog', { name: 'Agent & model' })
+  const inheritedModel = speedMenu.getByRole('radiogroup', { name: 'Model' })
+    .getByRole('radio', { name: 'Conversation model', exact: true })
+  await expect(inheritedModel).toHaveAttribute('aria-checked', 'true')
+  await expect(inheritedModel).toContainText('Quick coder')
+  await speedMenu.getByRole('radiogroup', { name: 'Speed' })
+    .getByRole('radio', { name: 'Standard', exact: true })
+    .click()
+  await speedMenu.getByRole('button', { name: 'Close', exact: true }).click()
+  await speedCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => requests.get(speedOnly.chat.id)!.length)
+  expect(requests.get(speedOnly.chat.id)![0]).toMatchObject({
+    chatId: speedOnly.chat.id,
+    runId: speedOnly.before.id,
+    turnId: speedOnly.turnId,
+    selection: {
+      model: '',
+      preserveModel: true,
+      reasoning: '',
+      speed: 'standard',
+    },
+  })
+
+  await page.goto(workspacePath(`/chats/${reasoningOnly.chat.id}`))
+  await authenticateWorkspace(page)
+  const reasoningCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(reasoningCard).toBeVisible()
+  await page.getByRole('button', { name: /^Agent, model, reasoning and speed/ }).click()
+  const reasoningMenu = page.getByRole('dialog', { name: 'Agent & model' })
+  await reasoningMenu.getByRole('radiogroup', { name: 'Reasoning' })
+    .getByRole('radio', { name: 'High', exact: true })
+    .click()
+  await reasoningMenu.getByRole('button', { name: 'Close', exact: true }).click()
+  await reasoningCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => requests.get(reasoningOnly.chat.id)!.length)
+  expect(requests.get(reasoningOnly.chat.id)![0]).toMatchObject({
+    chatId: reasoningOnly.chat.id,
+    runId: reasoningOnly.before.id,
+    turnId: reasoningOnly.turnId,
+    selection: {
+      model: '',
+      preserveModel: true,
+      reasoning: 'high',
+      speed: 'standard',
+    },
+  })
+})
+
+test('same-provider quota resume submits the changed model default and unchanged saved effort', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const changed = await createFailedCodexQuotaChat(workspace, {
+    model: 'fixture-fast',
+    reasoning: 'low',
+    speed: 'priority',
+  })
+  const unchanged = await createFailedCodexQuotaChat(workspace, {
+    model: 'fixture-fast',
+    reasoning: 'high',
+    speed: 'priority',
+  })
+  const inheritedNoChange = await createFailedCodexQuotaChat(workspace, {
+    model: 'fixture-fast',
+    reasoning: '',
+    speed: '',
+  })
+  const inheritedSpeedOnly = await createFailedCodexQuotaChat(workspace, {
+    model: 'fixture-fast',
+    reasoning: '',
+    speed: 'priority',
+  })
+  const sameModelDefault = await createFailedCodexQuotaChat(workspace, {
+    model: 'fixture-fast',
+    reasoning: 'high',
+    speed: 'priority',
+  })
+  const sameModelEffort = await createFailedCodexQuotaChat(workspace, {
+    model: 'fixture-fast',
+    reasoning: 'high',
+    speed: '',
+  })
+  const resetDefaultIntent = await createFailedCodexQuotaChat(workspace, {
+    model: 'fixture-fast',
+    reasoning: 'high',
+    speed: '',
+  })
+  await page.route('**/codex/models', route => route.fulfill({
+    json: {
+      models: [
+        {
+          model: 'fixture-fast',
+          displayName: 'Quick coder',
+          description: 'Fast everyday coding',
+          hidden: false,
+          isDefault: true,
+          defaultReasoningEffort: 'low',
+          supportedReasoningEfforts: [
+            { reasoningEffort: 'low', description: '' },
+            { reasoningEffort: 'high', description: '' },
+          ],
+          routes: [],
+          serviceTiers: [{ id: 'priority', name: 'Priority' }],
+          defaultServiceTier: null,
+          resolvedModel: null,
+        },
+        {
+          model: 'fixture-deep',
+          displayName: 'Deep thinker',
+          description: 'Complex investigations',
+          hidden: false,
+          isDefault: false,
+          defaultReasoningEffort: 'high',
+          supportedReasoningEfforts: [
+            { reasoningEffort: 'low', description: '' },
+            { reasoningEffort: 'high', description: '' },
+          ],
+          routes: [],
+          serviceTiers: [],
+          defaultServiceTier: null,
+          resolvedModel: null,
+        },
+      ],
+      checkedAt: Date.now(),
+      stale: false,
+      error: '',
+    },
+  }))
+  const changedRequests: Record<string, unknown>[] = []
+  const unchangedRequests: Record<string, unknown>[] = []
+  const inheritedNoChangeRequests: Record<string, unknown>[] = []
+  const inheritedSpeedRequests: Record<string, unknown>[] = []
+  const sameModelDefaultRequests: Record<string, unknown>[] = []
+  const sameModelEffortRequests: Record<string, unknown>[] = []
+  const resetDefaultRequests: Record<string, unknown>[] = []
+  await installResumeDiagnosticProbe(page)
+  await page.route(`**/chats/${changed.chat.id}/resume`, async (route) => {
+    changedRequests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { ...changed.before, status: 'queued', resumeAvailable: false } })
+  })
+  await page.route(`**/chats/${unchanged.chat.id}/resume`, async (route) => {
+    unchangedRequests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { ...unchanged.before, status: 'queued', resumeAvailable: false } })
+  })
+  await page.route(`**/chats/${inheritedNoChange.chat.id}/resume`, async (route) => {
+    inheritedNoChangeRequests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { ...inheritedNoChange.before, status: 'queued', resumeAvailable: false } })
+  })
+  await page.route(`**/chats/${inheritedSpeedOnly.chat.id}/resume`, async (route) => {
+    inheritedSpeedRequests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { ...inheritedSpeedOnly.before, status: 'queued', resumeAvailable: false } })
+  })
+  await page.route(`**/chats/${sameModelDefault.chat.id}/resume`, async (route) => {
+    sameModelDefaultRequests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { ...sameModelDefault.before, status: 'queued', resumeAvailable: false } })
+  })
+  await page.route(`**/chats/${sameModelEffort.chat.id}/resume`, async (route) => {
+    sameModelEffortRequests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { ...sameModelEffort.before, status: 'queued', resumeAvailable: false } })
+  })
+  await page.route(`**/chats/${resetDefaultIntent.chat.id}/resume`, async (route) => {
+    resetDefaultRequests.push(route.request().postDataJSON())
+    await route.fulfill({ json: { ...resetDefaultIntent.before, status: 'queued', resumeAvailable: false } })
+  })
+
+  await page.goto(workspacePath(`/chats/${changed.chat.id}`))
+  await authenticateWorkspace(page)
+  const changedCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(changedCard).toBeVisible()
+  const picker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
+  await picker.click()
+  const menu = page.getByRole('dialog', { name: 'Agent & model' })
+  const selectedModel = menu.getByRole('radio', { name: 'Deep thinker', exact: true })
+  await selectedModel.click()
+  const changedDefault = menu.getByRole('radiogroup', { name: 'Reasoning' })
+    .getByRole('radio', { name: 'Model default · High', exact: true })
+  await expect(changedDefault).toHaveAttribute('aria-checked', 'true')
+  await menu.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(picker).toHaveAccessibleName(/Deep thinker · High reasoning/)
+  await changedCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => changedRequests.length)
+  expect(changedRequests[0]).toMatchObject({
+    chatId: changed.chat.id,
+    runId: changed.before.id,
+    turnId: changed.turnId,
+    selection: { model: 'fixture-deep', reasoning: 'high', speed: 'standard' },
+  })
+
+  await page.goto(workspacePath(`/chats/${unchanged.chat.id}`))
+  const unchangedCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(unchangedCard).toBeVisible()
+  const inheritedPicker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
+  await expect(inheritedPicker).toHaveAccessibleName(/Quick coder · High reasoning/)
+  await inheritedPicker.click()
+  const inheritedMenu = page.getByRole('dialog', { name: 'Agent & model' })
+  const savedDefault = inheritedMenu.getByRole('radiogroup', { name: 'Reasoning' })
+    .getByRole('radio', { name: 'Conversation default · High', exact: true })
+  await expect(savedDefault).toHaveAttribute('aria-checked', 'true')
+  await inheritedMenu.getByRole('radiogroup', { name: 'Speed' }).getByRole('radio', { name: 'Standard', exact: true }).click()
+  await inheritedMenu.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(inheritedPicker).toHaveAccessibleName(/Quick coder · High reasoning/)
+  await unchangedCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => unchangedRequests.length)
+  expect(unchangedRequests[0]).toMatchObject({
+    chatId: unchanged.chat.id,
+    runId: unchanged.before.id,
+    turnId: unchanged.turnId,
+    selection: { model: 'fixture-fast', reasoning: 'high', speed: 'standard' },
+  })
+
+  await page.goto(workspacePath(`/chats/${inheritedNoChange.chat.id}`))
+  const inheritedNoChangeCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(inheritedNoChangeCard).toBeVisible()
+  const inheritedNoChangePicker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
+  await expect(inheritedNoChangePicker).toHaveAccessibleName(/Quick coder · Low reasoning/)
+  await inheritedNoChangeCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => inheritedNoChangeRequests.length)
+  expect(inheritedNoChangeRequests[0]).toMatchObject({
+    chatId: inheritedNoChange.chat.id,
+    runId: inheritedNoChange.before.id,
+    turnId: inheritedNoChange.turnId,
+  })
+  expect(inheritedNoChangeRequests[0]).not.toHaveProperty('selection')
+
+  await page.goto(workspacePath(`/chats/${inheritedSpeedOnly.chat.id}`))
+  const inheritedSpeedCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(inheritedSpeedCard).toBeVisible()
+  const inheritedSpeedPicker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
+  await expect(inheritedSpeedPicker).toHaveAccessibleName(/Quick coder · Low reasoning/)
+  await inheritedSpeedPicker.click()
+  const inheritedSpeedMenu = page.getByRole('dialog', { name: 'Agent & model' })
+  const inheritedEffort = inheritedSpeedMenu.getByRole('radiogroup', { name: 'Reasoning' })
+    .getByRole('radio', { name: 'Conversation default · Low', exact: true })
+  await expect(inheritedEffort).toHaveAttribute('aria-checked', 'true')
+  await inheritedSpeedMenu.getByRole('radiogroup', { name: 'Speed' }).getByRole('radio', { name: 'Standard', exact: true }).click()
+  await expect(inheritedEffort).toHaveAttribute('aria-checked', 'true')
+  await inheritedSpeedMenu.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(inheritedSpeedPicker).toHaveAccessibleName(/Quick coder · Low reasoning/)
+  await inheritedSpeedCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => inheritedSpeedRequests.length)
+  expect(inheritedSpeedRequests[0]).toMatchObject({
+    chatId: inheritedSpeedOnly.chat.id,
+    runId: inheritedSpeedOnly.before.id,
+    turnId: inheritedSpeedOnly.turnId,
+    selection: { model: 'fixture-fast', reasoning: '', speed: 'standard' },
+  })
+
+  await page.goto(workspacePath(`/chats/${sameModelDefault.chat.id}`))
+  const sameModelDefaultCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(sameModelDefaultCard).toBeVisible()
+  const sameModelDefaultPicker = page.getByRole('button', { name: /^Agent, model, reasoning and speed/ })
+  await sameModelDefaultPicker.click()
+  const sameModelDefaultMenu = page.getByRole('dialog', { name: 'Agent & model' })
+  await sameModelDefaultMenu.getByRole('radio', { name: 'Quick coder', exact: true }).click()
+  const explicitModelDefault = sameModelDefaultMenu.getByRole('radiogroup', { name: 'Reasoning' })
+    .getByRole('radio', { name: 'Model default · Low', exact: true })
+  await explicitModelDefault.click()
+  await expect(explicitModelDefault).toHaveAttribute('aria-checked', 'true')
+  await sameModelDefaultMenu.getByRole('radiogroup', { name: 'Speed' })
+    .getByRole('radio', { name: 'Standard', exact: true })
+    .click()
+  await expect(explicitModelDefault).toHaveAttribute('aria-checked', 'true')
+  await sameModelDefaultMenu.getByRole('button', { name: 'Close', exact: true }).click()
+  await sameModelDefaultCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => sameModelDefaultRequests.length)
+  expect(sameModelDefaultRequests[0]).toMatchObject({
+    chatId: sameModelDefault.chat.id,
+    runId: sameModelDefault.before.id,
+    turnId: sameModelDefault.turnId,
+    selection: { model: 'fixture-fast', reasoning: 'low', speed: 'standard' },
+  })
+
+  await page.goto(workspacePath(`/chats/${sameModelEffort.chat.id}`))
+  const sameModelEffortCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(sameModelEffortCard).toBeVisible()
+  await page.getByRole('button', { name: /^Agent, model, reasoning and speed/ }).click()
+  const sameModelEffortMenu = page.getByRole('dialog', { name: 'Agent & model' })
+  await sameModelEffortMenu.getByRole('radio', { name: 'Quick coder', exact: true }).click()
+  await sameModelEffortMenu.getByRole('radiogroup', { name: 'Reasoning' })
+    .getByRole('radio', { name: 'Low', exact: true })
+    .click()
+  await sameModelEffortMenu.getByRole('button', { name: 'Close', exact: true }).click()
+  await sameModelEffortCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => sameModelEffortRequests.length)
+  expect(sameModelEffortRequests[0]).toMatchObject({
+    chatId: sameModelEffort.chat.id,
+    runId: sameModelEffort.before.id,
+    turnId: sameModelEffort.turnId,
+    selection: { model: 'fixture-fast', reasoning: 'low', speed: 'standard' },
+  })
+
+  await page.goto(workspacePath(`/chats/${resetDefaultIntent.chat.id}`))
+  const resetDefaultCard = page.getByRole('status', { name: 'Coding agent quota reached' })
+  await expect(resetDefaultCard).toBeVisible()
+  await page.getByRole('button', { name: /^Agent, model, reasoning and speed/ }).click()
+  const resetDefaultMenu = page.getByRole('dialog', { name: 'Agent & model' })
+  await resetDefaultMenu.getByRole('radio', { name: 'Quick coder', exact: true }).click()
+  await resetDefaultMenu.getByRole('radiogroup', { name: 'Reasoning' })
+    .getByRole('radio', { name: 'Model default · Low', exact: true })
+    .click()
+  await resetDefaultMenu.getByRole('radio', { name: 'Conversation model', exact: true }).click()
+  await resetDefaultMenu.getByRole('button', { name: 'Close', exact: true }).click()
+  await resetDefaultCard.getByRole('button', { name: 'Resume conversation', exact: true }).click()
+  await expectSingleResumeRequest(page, () => resetDefaultRequests.length)
+  expect(resetDefaultRequests[0]).toMatchObject({
+    chatId: resetDefaultIntent.chat.id,
+    runId: resetDefaultIntent.before.id,
+    turnId: resetDefaultIntent.turnId,
+  })
+  expect(resetDefaultRequests[0]).not.toHaveProperty('selection')
+})
+
 test('starts project chats, steers, edits the queue and preserves a compact mobile composer', async ({ page, workspace }) => {
   initializeRepository(workspace.projectPath)
   await page.goto(workspacePath('/tasks'))
@@ -1200,9 +1948,10 @@ test('starts project chats, steers, edits the queue and preserves a compact mobi
 })
 
 test('withdraws an obsolete question without sending an answer on desktop and mobile', async ({ page, workspace }) => {
+  await workspace.restart()
   for (const width of [1440, 390]) {
     const chat = await workspace.api('/api/chats', 'POST', {})
-    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:question blocking' })
+    await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:cairn-question' })
     await page.setViewportSize({ width, height: 844 })
     await page.goto(workspacePath(`/chats/${chat.id}`))
     await authenticateWorkspace(page)
@@ -1233,7 +1982,7 @@ test('answers in-flight questions with choices or free text on desktop and mobil
   await authenticateWorkspace(page)
   await expect(page.locator('.task-focus-detail')).toBeVisible()
   await page.goto(workspacePath('/chats'))
-  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Plan the navigation refresh. fixture:question')
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Plan the navigation refresh. fixture:cairn-question')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Answer pending questions' })).toBeVisible()
   await page.setViewportSize({ width: 1440, height: 1000 })
@@ -1241,14 +1990,15 @@ test('answers in-flight questions with choices or free text on desktop and mobil
   await expectSingleScroll(page)
   await page.screenshot({ path: test.info().outputPath('questions-chat-desktop.png'), animations: 'disabled' })
   await page.getByRole('button', { name: 'Answer', exact: true }).click()
-  await expect(page.getByText('Agent keeps working', { exact: true })).toBeVisible()
+  await expect(page.getByText('Continue the conversation', { exact: true })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Send answer', exact: true })).toBeDisabled()
-  await expect(page.getByRole('radio').first()).not.toBeChecked()
+  await expect(page.getByRole('checkbox').first()).not.toBeChecked()
   await expectSingleScroll(page)
   await page.screenshot({ path: test.info().outputPath('questions-desktop-light.png'), animations: 'disabled' })
   await page.emulateMedia({ colorScheme: 'dark' })
   await page.screenshot({ path: test.info().outputPath('questions-desktop-dark.png'), animations: 'disabled' })
-  await page.getByRole('radio', { name: /Gradual rollout/ }).check()
+  await page.getByRole('checkbox', { name: /Chat view/ }).check()
+  await page.getByRole('checkbox', { name: /Android/ }).check()
   await expect(page.getByRole('button', { name: 'Send answer', exact: true })).toBeEnabled()
   await page.getByRole('button', { name: 'Answer later' }).click()
   await page.reload()
@@ -1259,17 +2009,18 @@ test('answers in-flight questions with choices or free text on desktop and mobil
   await expectSingleScroll(page)
   await page.screenshot({ path: test.info().outputPath('questions-mobile-dark.png'), animations: 'disabled' })
   await page.emulateMedia({ colorScheme: 'light' })
-  await page.getByRole('textbox', { name: 'Or write your own answer' }).fill('Start with the chat, keeping keyboard navigation intact.')
+  await page.getByRole('textbox', { name: 'Comment or your own answer (optional with choices)' }).fill('Start with the chat, keeping keyboard navigation intact.')
   await page.screenshot({ path: test.info().outputPath('questions-mobile-light.png'), animations: 'disabled' })
   await page.setViewportSize({ width: 320, height: 600 })
   await expectSingleScroll(page)
   await page.getByRole('button', { name: 'Send answer', exact: true }).click()
   await expect(page.getByRole('dialog')).not.toBeVisible()
   await expect(page.getByRole('button', { name: 'Answer pending questions' })).not.toBeVisible()
-  await expectChatReady(page)
   const chatKey = new URL(page.url()).pathname.split('/').at(-1)!
   const chatId = (await workspace.api(`/api/chats/${chatKey}`)).id
-  expect(workspace.service.questions.list(chatId)[0].status).toBe('answered')
+  // Submission queues the answer; Ready can still describe the preceding turn.
+  await expect.poll(() => workspace.service.questions.list(chatId)[0].status).toBe('answered')
+  await expectChatReady(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.getByRole('button', { name: 'Chat details', exact: true }).click()
   await page.getByRole('link', { name: 'Question notifications' }).click()
@@ -1540,4 +2291,82 @@ test('a plugin condition wait reads in its plugin\'s words, with generic fallbac
   await expect(cards.last()).toContainText('Action required')
   await expect(cards.last()).toContainText('A condition · The result was already available')
   await expect(cards.filter({ hasText: /GitHub|unreachable/ })).toHaveCount(0)
+})
+
+test('context usage shows the latest request and an explicit compaction keeps the visible history', async ({ page, workspace }, testInfo) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Measure the context' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 15000 }).toBe('succeeded')
+  const opened = await workspace.api(`/api/chats/${chat.id}`)
+  const before = opened.run
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+
+  // Codex reports the latest request (40,900 tokens), not the thread's cumulative total.
+  const indicator = page.getByTestId('context-indicator')
+  await expect(indicator).toHaveText('Context 41K / 258K · 16%')
+  const earlierReply = page.getByRole('region', { name: 'Run conversation', exact: true })
+    .getByText('Ready for the next step.', { exact: true })
+  await expect(earlierReply).toBeVisible()
+  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  const details = page.getByRole('dialog', { name: 'Chat details', exact: true })
+  await expect(details.getByTestId('context-usage')).toContainText('40,900 of 258,400 tokens (16%)')
+  await expect(details.getByTestId('context-usage')).toContainText('36,000 tokens read from cache')
+  await page.screenshot({ path: testInfo.outputPath('context-details.png'), animations: 'disabled' })
+  await details.getByRole('button', { name: 'Compact context', exact: true }).click()
+  const confirmation = page.getByRole('dialog', { name: 'Compact the agent context?', exact: true })
+  await expect(confirmation).toContainText('Every message stays visible')
+  await confirmation.getByRole('button', { name: 'Compact context', exact: true }).click()
+  await expect(confirmation).toHaveCount(0)
+
+  const divider = page.getByTestId('context-compaction')
+  await expect(divider).toHaveCount(1)
+  await expect(divider).toContainText('Context compacted', { timeout: 15000 })
+  await expect(indicator).toHaveText('Context ≈ 6K / 258K · 2%')
+  // The earlier reply and request stay in the transcript; no reply or new finish is invented.
+  await expect(earlierReply).toBeVisible()
+  await expect(page.locator('.user-bubble').filter({ hasText: 'Measure the context' })).toBeVisible()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).compaction?.available).toBe(true)
+  const after = await workspace.api(`/api/chats/${chat.id}`)
+  expect(after.run.status).toBe('succeeded')
+  expect(after.run.finishedAt).toBe(before.finishedAt)
+  expect(after.run.summary).toBe(before.summary)
+  // The compaction is not a chat message.
+  expect(after.messages).toEqual(opened.messages)
+  expect(after.contextUsage).toEqual({
+    contextTokens: 6200,
+    contextWindow: 258400,
+    cachedTokens: null,
+    estimated: true,
+  })
+
+  for (const colorScheme of ['light', 'dark'] as const) {
+    await page.emulateMedia({ colorScheme })
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 844 })
+      await divider.scrollIntoViewIfNeeded()
+      await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBeLessThanOrEqual(1)
+      await page.screenshot({ path: testInfo.outputPath(`context-compaction-${colorScheme}-${width}.png`), animations: 'disabled' })
+    }
+  }
+
+  // On phones the details sheet carries the same measurement and action.
+  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  await expect(details.getByTestId('context-usage')).toContainText('Estimated by the coding agent')
+  await expect(details.getByRole('button', { name: 'Compact context', exact: true })).toBeEnabled()
+  await page.screenshot({ path: testInfo.outputPath('context-details-phone.png'), animations: 'disabled' })
+})
+
+test('compaction is unavailable while a turn runs and explains why', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:chat-hang' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 15000 }).toBe('running')
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  await page.getByRole('button', { name: 'Chat details', exact: true }).click()
+  const details = page.getByRole('dialog', { name: 'Chat details', exact: true })
+  await expect(details.getByRole('button', { name: 'Compact context', exact: true })).toBeDisabled()
+  await expect(details).toContainText('Wait for the current turn to finish before compacting.')
+  await expect(workspace.api(`/api/chats/${chat.id}/compact`, 'POST', {})).rejects.toThrow(/Wait for the current turn to finish/)
+  await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
 })

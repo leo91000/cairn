@@ -5,6 +5,8 @@
 
 package build.cairn.app.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -40,9 +42,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import build.cairn.app.data.*
+import build.cairn.contracts.ActivatePluginPackageInput
+import build.cairn.contracts.ApprovePluginPackageInput
+import build.cairn.contracts.ListPluginPackagesInput
+import build.cairn.contracts.activatePluginPackage
+import build.cairn.contracts.approvePluginPackage
+import build.cairn.contracts.installPluginPackage
+import build.cairn.contracts.listPluginPackages
 import kotlinx.serialization.json.*
 
-/** The installation's web page for steps that stay on the web: package uploads. */
+/** Resolve an authenticated installation page for external links. */
 internal fun webPage(api: CairnApi, path: String): String =
     api.origin
         .newBuilder()
@@ -55,9 +64,20 @@ internal fun webPage(api: CairnApi, path: String): String =
 fun PluginsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) {
     var catalog by remember { mutableStateOf<PluginCatalog?>(null) }
     val context = LocalContext.current
+    val upload =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { folder ->
+            if (folder != null)
+                vm.perform {
+                    val version = api.installPluginPackage(readPluginPackage(context, folder))
+                    catalog = api.listPluginPackages(ListPluginPackagesInput())
+                    notify(
+                        "${version.manifest?.name ?: version.version} installé · examinez-le avant activation"
+                    )
+                }
+        }
     Poll("plugins", 10_000) {
         try {
-            catalog = vm.api.get("/plugins")
+            catalog = vm.api.listPluginPackages(ListPluginPackagesInput())
         } catch (e: Exception) {
             vm.report(e)
         }
@@ -88,20 +108,20 @@ fun PluginsScreen(vm: CairnViewModel, state: Workspace, open: (String) -> Unit) 
         SignalCard(Modifier.fillMaxWidth().padding(top = 8.dp)) {
             Text("Installer un package", style = MaterialTheme.typography.titleSmall)
             Text(
-                "Un plugin est un manifest.json ou manifest.toml et un main.luau. L’envoi des fichiers se fait sur le web, puis vous l’approuvez ici ou sur le web.",
+                "Choisissez le dossier contenant manifest.json ou manifest.toml et main.luau, puis examinez le package avant de l’activer.",
                 Modifier.padding(top = 4.dp, bottom = 12.dp),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             SignalButton(
-                "Continuer sur le web",
+                "Choisir le dossier",
                 icon = CairnIcons.External,
                 container = MaterialTheme.colorScheme.surface,
                 content = MaterialTheme.colorScheme.onSurface,
                 border = true,
                 height = 40.dp,
             ) {
-                runCatching { browse(context, webPage(vm.api, "/plugins")) }
+                upload.launch(null)
             }
         }
     }
@@ -198,7 +218,7 @@ private fun PluginInstances(
     var reviewing by remember { mutableStateOf(false) }
     val context = LocalContext.current
     suspend fun load() {
-        catalog = vm.api.get<PluginCatalog>("/plugins")
+        catalog = vm.api.listPluginPackages(ListPluginPackagesInput())
     }
     Poll("plugin-$id", 5000) {
         if (editing == null && !reviewing && !state.busy)
@@ -289,6 +309,10 @@ private fun PluginInstances(
                         PluginConnection(
                             name = if (manifest.instances == null) manifest.name else "",
                             accessMode = "requests",
+                            settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                            status = PluginStatus(),
+                            usage = PluginUsage(),
+                            enabled = true,
                         )
                 }
         }
@@ -299,6 +323,10 @@ private fun PluginInstances(
                     PluginConnection(
                         name = if (manifest.instances == null) manifest.name else "",
                         accessMode = "requests",
+                        settings = kotlinx.serialization.json.JsonObject(emptyMap()),
+                        status = PluginStatus(),
+                        usage = PluginUsage(),
+                        enabled = true,
                     )
             }
         instances.forEach { connection ->
@@ -365,10 +393,7 @@ private fun PluginInstances(
             dismiss = { removing = null },
         ) {
             vm.perform {
-                api.request(
-                    "DELETE",
-                    "/plugins/${segment(id)}/connections/${segment(connection.id)}",
-                )
+                api.deletePlugin(id, connection.id)
                 removing = null
                 load()
             }
@@ -390,12 +415,11 @@ private fun InstanceCard(
     remove: () -> Unit,
     changed: suspend () -> Unit,
 ) {
-    val path = "/plugins/${segment(connection.pluginId)}/connections/${segment(connection.id)}"
     val agent = state.agents.find { it.id == connection.agentId }
     val project = state.projects.find { it.id == connection.projectId }
     val badge = connection.state()
     fun person(userId: String, action: String) = vm.perform {
-        api.request("POST", "$path/people/${segment(userId)}/$action")
+        api.pluginPerson(connection.pluginId, connection.id, userId, action)
         changed()
     }
     SignalCard(
@@ -476,7 +500,7 @@ private fun InstanceCard(
                 }
             }
             // Packages with their own panel describe the instance there; secrets show as set.
-            manifest.settings
+            manifest.settingFields
                 .filter { !it.hidden && (!manifest.instanceView || it.type == "secret") }
                 .forEach { field ->
                     if (field.type == "secret")
@@ -578,7 +602,8 @@ private fun InstanceCard(
                     ActivityRow(connection, item) { openChat(item.chatId) }
                 }
             }
-            if (manifest.instanceView) PluginPanel(vm, state, path, connection.name)
+            if (manifest.instanceView)
+                PluginPanel(vm, state, connection.pluginId, connection.id, connection.name)
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Toggle(
                 if (manifest.delegates) "Accepter les nouveaux messages" else "Active",
@@ -586,11 +611,7 @@ private fun InstanceCard(
             ) { enabled ->
                 if (!state.busy)
                     vm.perform {
-                        api.request(
-                            "POST",
-                            "$path/enabled",
-                            buildJsonObject { put("enabled", enabled) },
-                        )
+                        api.enablePlugin(connection.pluginId, connection.id, enabled)
                         changed()
                     }
             }
@@ -599,11 +620,7 @@ private fun InstanceCard(
                     TextButton(
                         onClick = {
                             vm.perform {
-                                val result = api.send<JsonObject>("POST", "$path/disconnect")
-                                notify(
-                                    result["message"]?.jsonPrimitive?.contentOrNull
-                                        ?: "Compte déconnecté"
-                                )
+                                notify(api.disconnectPlugin(connection.pluginId, connection.id))
                                 changed()
                             }
                         },
@@ -615,9 +632,7 @@ private fun InstanceCard(
                     TextButton(
                         onClick = {
                             vm.perform {
-                                val result = api.pluginOperation("$path/test").jsonObject
-                                val message =
-                                    result["message"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                                val message = api.testPlugin(connection.pluginId, connection.id)
                                 notify(
                                     "${connection.name} : ${message.ifBlank { "ça fonctionne" }}"
                                 )
@@ -1080,13 +1095,11 @@ private fun PluginReview(
     val added =
         manifest?.capabilities.orEmpty().filter { active != null && it !in active.capabilities }
     fun act(operation: String) = vm.perform {
-        api.pluginOperation(
-            "/plugins/packages/${segment(entry.id)}/$operation",
-            buildJsonObject {
-                put("version", selected)
-                version?.digest?.let { put("digest", it) }
-            },
-        )
+        if (operation == "approve")
+            api.approvePluginPackage(
+                ApprovePluginPackageInput(requireNotNull(version?.digest), entry.id, selected)
+            )
+        else api.activatePluginPackage(ActivatePluginPackageInput(entry.id, selected))
         notify("${manifest?.name ?: entry.name} $selected est actif")
         close()
         changed()

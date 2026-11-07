@@ -68,6 +68,9 @@ impl Host {
         manifest.validate().map_err(str::to_owned)?;
         let sources = source.into();
         sources.validate().map_err(str::to_owned)?;
+        let digest = sources
+            .digest(manifest)
+            .map_err(|_| "Invalid plugin package.")?;
         let Sources { main, modules } = sources;
         let permit = self
             .slots
@@ -92,6 +95,7 @@ impl Host {
             input,
             output,
             manifest: manifest.clone(),
+            digest,
             deadline: self.deadline,
             broken: false,
             _permit: permit,
@@ -151,6 +155,7 @@ pub struct Session {
     input: ChildStdin,
     output: BufReader<ChildStdout>,
     manifest: Manifest,
+    digest: String,
     deadline: Duration,
     broken: bool,
     _permit: OwnedSemaphorePermit,
@@ -162,6 +167,10 @@ impl Session {
     /// A broken session must be replaced; its script state is gone.
     pub fn alive(&self) -> bool {
         !self.broken
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
     }
 
     pub fn manifest(&self) -> &Manifest {

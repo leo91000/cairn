@@ -5,7 +5,7 @@ Date: 2026-10-12.
 ## Context
 
 Accounts already use a shared pool with native authentication and usage drivers
-([shared-account-pool decision](0002-one-account-pool-for-coding-agents.md)). Execution still made repeated Claude-versus-Codex choices in the worker,
+([shared-account-pool decision](0061-one-account-pool-for-coding-agents.md)). Execution still made repeated Claude-versus-Codex choices in the worker,
 runner entrypoint, recovery and MCP configuration. A third coding agent would have
 expanded those choices throughout shared orchestration. Web and Android model
 catalogs also stored one field for each of the two existing coding agents.
@@ -23,11 +23,10 @@ MCP authorization builds an engine-independent collection of HTTP and command
 servers with their allowed tools. Only the selected adapter serializes that
 collection into its native configuration. The gateway and run grants remain shared;
 Codex receives allowlists and per-thread bearer headers, while Claude receives its
-native MCP document and denied command-tool names. Existing run-plan field names
-remain compatible with older native adapters.
+native MCP document and denied command-tool names. All components run the same version.
 
 Explicit unknown or malformed coding-agent values fail rather than selecting Codex.
-Only an absent provider field keeps the historical Codex default. Web and Android
+ Web and Android
 store model catalogs by coding-agent identifier and use a metadata registry for
 selection and labels. Existing model endpoints and saved model selections remain
 unchanged.

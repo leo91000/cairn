@@ -1,0 +1,186 @@
+{
+  "inputs": [
+    {
+      "kind": "setup",
+      "pluginId": "fixture"
+    },
+    {
+      "kind": "save",
+      "pluginId": "fixture",
+      "data": {
+        "name": "Test instance",
+        "enabled": true,
+        "settings": {
+          "nested": {
+            "ids": [
+              1,
+              null,
+              false
+            ]
+          },
+          "scope": true
+        },
+        "secrets": {
+          "token": "synthetic-secret"
+        }
+      }
+    },
+    {
+      "kind": "form",
+      "pluginId": "fixture",
+      "instanceId": "00000000-0000-4000-8000-000000000013",
+      "data": {
+        "revision": "r1",
+        "settings": {
+          "choices": [
+            "a",
+            "b"
+          ]
+        },
+        "secrets": {},
+        "changed": "choices"
+      }
+    },
+    {
+      "kind": "action",
+      "pluginId": "fixture",
+      "instanceId": "00000000-0000-4000-8000-000000000013",
+      "data": {
+        "action": "refresh",
+        "payload": null,
+        "values": {
+          "count": 2
+        }
+      }
+    },
+    {
+      "kind": "enabled",
+      "pluginId": "fixture",
+      "instanceId": "00000000-0000-4000-8000-000000000013",
+      "data": {
+        "enabled": false
+      }
+    },
+    {
+      "kind": "signin",
+      "pluginId": "fixture",
+      "data": {
+        "settings": {},
+        "secrets": {},
+        "sharedFrom": "00000000-0000-4000-8000-000000000013"
+      }
+    },
+    {
+      "kind": "signin_status",
+      "pluginId": "fixture",
+      "flowId": "flow"
+    },
+    {
+      "kind": "signin_cancel",
+      "pluginId": "fixture",
+      "flowId": "flow"
+    },
+    {
+      "kind": "people",
+      "pluginId": "fixture",
+      "instanceId": "00000000-0000-4000-8000-000000000013",
+      "userId": "person_1",
+      "operation": "approve"
+    },
+    {
+      "kind": "test",
+      "pluginId": "fixture",
+      "instanceId": "00000000-0000-4000-8000-000000000013"
+    },
+    {
+      "kind": "view",
+      "pluginId": "fixture",
+      "instanceId": "00000000-0000-4000-8000-000000000013"
+    },
+    {
+      "kind": "delete",
+      "pluginId": "fixture",
+      "instanceId": "00000000-0000-4000-8000-000000000013"
+    },
+    {
+      "kind": "disconnect",
+      "pluginId": "fixture",
+      "instanceId": "00000000-0000-4000-8000-000000000013"
+    }
+  ],
+  "invalidInputs": [
+    {
+      "action": "setup",
+      "pluginId": "fixture"
+    },
+    {
+      "kind": "setup",
+      "pluginId": "fixture",
+      "data": {
+        "policy": true
+      }
+    },
+    {
+      "kind": "test",
+      "pluginId": "fixture",
+      "instanceId": "wrong"
+    },
+    {
+      "kind": "enabled",
+      "pluginId": "fixture",
+      "instanceId": "00000000-0000-4000-8000-000000000013",
+      "data": {
+        "enabled": "yes"
+      }
+    },
+    {
+      "kind": "save",
+      "pluginId": "fixture",
+      "data": {
+        "name": "A",
+        "enabled": true,
+        "settings": {},
+        "ownerAccessId": "forged"
+      }
+    },
+    {
+      "kind": "save",
+      "pluginId": "fixture",
+      "data": {
+        "name": "A",
+        "enabled": true,
+        "settings": []
+      }
+    },
+    {
+      "kind": "form",
+      "pluginId": "fixture",
+      "data": {
+        "settings": {},
+        "secrets": {},
+        "grantedAccess": {}
+      }
+    },
+    {
+      "kind": "people",
+      "pluginId": "fixture",
+      "instanceId": "00000000-0000-4000-8000-000000000013",
+      "userId": "x",
+      "operation": "grant"
+    },
+    {
+      "kind": "unbounded",
+      "pluginId": "fixture"
+    },
+    {
+      "kind": "save",
+      "pluginId": "fixture",
+      "data": {
+        "name": "A",
+        "enabled": true,
+        "settings": {},
+        "maxMessagesPerHour": 4294967296
+      }
+    }
+  ]
+}

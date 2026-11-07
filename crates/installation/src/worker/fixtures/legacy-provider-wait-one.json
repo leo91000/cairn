@@ -1,0 +1,37 @@
+{
+  "checkpoint": {
+    "completed": false,
+    "controllerObservation": {
+      "attempt": "old-attempt",
+      "inFlight": false,
+      "requests": 1
+    },
+    "lastError": "Provider unavailable",
+    "prepared": {
+      "backend": "native",
+      "isolated": true
+    },
+    "providerFailed": true,
+    "remainingMs": null,
+    "retryCause": {
+      "kind": "server",
+      "message": "Provider unavailable",
+      "startup": false
+    },
+    "runnerId": "old-attempt",
+    "terminalCode": 1
+  },
+  "recoveryPending": true,
+  "retry": {
+    "attempt": 1,
+    "cause": {
+      "kind": "server",
+      "message": "Provider unavailable",
+      "startup": false
+    },
+    "deadlineAt": 1793383433807,
+    "limit": 5,
+    "nextAttemptAt": 1793382838972,
+    "startedAt": 1793382833807
+  }
+}

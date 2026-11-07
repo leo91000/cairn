@@ -54,17 +54,10 @@ def prepare(root, legacy_init=None, control_image=None):
     bridge.write_text('''#!/bin/sh
 set -eu
 rm /oldroot/run/data/gone
-if [ -b /dev/vdd ]; then
- mount -t ext4 /dev/vdc /data
- rm /data/gone
-fi
 sync
 echo CAIRN_LEGACY_BRIDGE_RUNNING
 sleep 70
 [ "$(cat /oldroot/run/data/keep)" = retained-live-file ]
-if [ -b /dev/vdd ]; then
- [ "$(cat /data/keep)" = retained-live-file ]
-fi
 echo CAIRN_LIVE_DATA_VERIFIED
 while true; do sleep 1; done
 ''')
@@ -92,10 +85,10 @@ while true; do sleep 1; done
     return data
 
 
-def trial(root, data, paired, maintenance, args):
+def trial(root, data, maintenance, args):
     images = []
-    for index in range(2 if paired else 1):
-        image = root / f"data-{paired}-{maintenance}-{index}.ext4"
+    for index in range(1):
+        image = root / f"data-{maintenance}-{index}.ext4"
         run("truncate", "-s", "64M", image)
         run("/usr/sbin/mkfs.ext4", "-q", "-F", "-d", data, image)
         images.append(image)
@@ -105,16 +98,16 @@ def trial(root, data, paired, maintenance, args):
         drives.append({"drive_id": f"data{index}", "path_on_host": str(image), "is_root_device": False, "is_read_only": False, "io_engine": "Async", "discard": True})
     # The reference also has a read-only placeholder so device numbers match.
     drives.append({"drive_id": "control", "path_on_host": str(root / "control.squashfs"), "is_root_device": False, "is_read_only": True})
-    device = "/dev/vdd" if paired else "/dev/vdc"
+    device = "/dev/vdc"
     boot = "console=ttyS0 loglevel=5 i8042.nokbd i8042.noaux reboot=k panic=1 pci=off root=/dev/vda ro "
     if maintenance:
         boot += f'init=/bin/sh -- -c "set -e; mount -t devtmpfs devtmpfs /dev || true; mount -t squashfs -o ro,nodev,nosuid {device} /mnt; exec /mnt/cairn-init"'
     else:
         boot += "init=/sbin/cairn-init"
     config = {"boot-source": {"kernel_image_path": str(args.kernel), "boot_args": boot}, "drives": drives, "machine-config": {"vcpu_count": 1, "mem_size_mib": 256}}
-    path = root / f"config-{paired}-{maintenance}.json"
+    path = root / f"config-{maintenance}.json"
     path.write_text(json.dumps(config))
-    log_path = root / f"boot-{paired}-{maintenance}.log"
+    log_path = root / f"boot-{maintenance}.log"
     command = [str(args.firecracker), "--no-api", "--config-file", str(path)]
     if args.no_seccomp:
         command.append("--no-seccomp")
@@ -136,7 +129,7 @@ def trial(root, data, paired, maintenance, args):
                         except ValueError:
                             pass
                 completed = {event.get("mount") for event in events if event.get("operation") == "guest_trim" and event.get("invocationSucceeded")}
-                expected = {"/oldroot/run/data", "/data"} if paired else {"/oldroot/run/data"}
+                expected = {"/oldroot/run/data"}
                 if maintenance and completed == expected and "CAIRN_LIVE_DATA_VERIFIED" in text:
                     break
                 if not maintenance and ready_ms is not None:
@@ -151,7 +144,7 @@ def trial(root, data, paired, maintenance, args):
             reclaimed = allocated_before - allocated_after
             if maintenance:
                 assert reclaimed >= 7 * 1024 * 1024 * len(images), (allocated_before, allocated_after)
-            return {"paired": paired, "maintenance": maintenance, "readyMs": ready_ms, "allocatedBefore": allocated_before, "allocatedAfter": allocated_after, "reclaimedBytes": reclaimed, "liveDataVerified": bool(maintenance), "trimEvents": events}
+            return {"maintenance": maintenance, "readyMs": ready_ms, "allocatedBefore": allocated_before, "allocatedAfter": allocated_after, "reclaimedBytes": reclaimed, "liveDataVerified": bool(maintenance), "trimEvents": events}
         finally:
             if process.poll() is None:
                 process.kill()
@@ -171,7 +164,7 @@ def main():
         root = Path(temporary)
         data = prepare(root)
         original = digest(root / "root.ext4")
-        results = [trial(root, data, paired, maintenance, args) for paired in [False, True] for maintenance in [False, True]]
+        results = [trial(root, data, maintenance, args) for maintenance in [False, True]]
         assert digest(root / "root.ext4") == original, "Retained guest image was modified"
         report = {
             "schema": 1,

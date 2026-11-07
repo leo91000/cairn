@@ -14,19 +14,16 @@ async fn grouped_pending_ids_match_native_histories_in_existing_chat_order() {
                 .enumerate()
             {
                 let chat_id = format!("chat-{i}");
-                db.put(
-                    "chats",
-                    &json!({
-                        "id": chat_id,
-                        "updatedAt": i,
-                        "slug": format!("synthetic-{i}"),
-                    }),
-                )?;
-                // Db::put uses the wall clock for records.updated_at. Set a
-                // deterministic fixture order independently of JSON updatedAt.
+                db.save_conversation_boundary(&json!({
+                    "id": chat_id,
+                    "updatedAt": i,
+                    "slug": format!("synthetic-{i}"),
+                }))?;
+                // The writer uses the wall clock for persisted_at. Set a
+                // deterministic fixture order independently of public updatedAt.
                 let updated_at = i as i64;
                 db.0.execute(
-                    "UPDATE records SET updated_at=? WHERE id=?",
+                    "UPDATE conversations SET persisted_at=? WHERE id=?",
                     rusqlite::params![updated_at, chat_id],
                 )?;
                 for j in 0..2 {
@@ -39,14 +36,11 @@ async fn grouped_pending_ids_match_native_histories_in_existing_chat_order() {
                     }))?;
                 }
             }
-            db.put(
-                "chats",
-                &json!({
-                    "id": "no-messages",
-                    "updatedAt": 10,
-                    "slug": "synthetic-empty",
-                }),
-            )?;
+            db.save_conversation_boundary(&json!({
+                "id": "no-messages",
+                "updatedAt": 10,
+                "slug": "synthetic-empty",
+            }))?;
             Ok(())
         })
         .await
@@ -56,14 +50,14 @@ async fn grouped_pending_ids_match_native_histories_in_existing_chat_order() {
             let grouped: HashSet<String> = db
                 .json_rows_as(
                     "SELECT DISTINCT json_quote(chat_id) FROM chat_messages
-                     WHERE json_extract(data,'$.status') IN ('queued','sending')",
+                     WHERE status IN ('queued','sending')",
                     [],
                 )?
                 .into_iter()
                 .collect();
             assert_eq!(grouped.len(), 2);
 
-            let chats = db.list("chats")?;
+            let chats = db.conversations_boundary()?;
             let mut reference = Vec::new();
             for chat in &chats {
                 let id = chat["id"].as_str().unwrap();

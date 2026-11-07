@@ -108,7 +108,7 @@ export function firecrackerRunnerCompose(compose) {
   const document = parseDocument(normalized)
   let changed = normalized !== compose
   if (document.errors.length)
-    throw new Error('Cannot migrate invalid service Compose.')
+    throw new Error('Invalid service Compose.')
   const managerEnvironment = document.getIn(['services', 'manager', 'environment'])
   if (!managerEnvironment || typeof managerEnvironment.toJSON !== 'function' || typeof managerEnvironment.set !== 'function')
     throw new Error('Manager environment not found.')
@@ -149,46 +149,7 @@ export function firecrackerRunnerCompose(compose) {
   const state = mounts.find(mount => typeof mount === 'string' && /:\/runner-state(?::ro|:rw)?$/.test(mount))
   if (!data || !state)
     throw new Error('Runner data and persistent disk storage are required.')
-  const configuredConcurrency = Array.isArray(environment)
-    ? environment.find(value => typeof value === 'string' && value.startsWith('CONCURRENCY='))?.slice('CONCURRENCY='.length)
-    : environment.CONCURRENCY
-  // eslint-disable-next-line no-template-curly-in-string -- Preserve the Compose environment expression.
-  const concurrency = configuredConcurrency ?? '${CONCURRENCY:-4}'
-  const alreadyUsesVms = runner.get('devices')?.toJSON()?.some(device => typeof device === 'string' && device.split(':')[0] === '/dev/kvm')
-  const runnerEnvironment = runner.get('environment')?.toJSON()
-  const runnerSetting = key => Array.isArray(runnerEnvironment)
-    ? runnerEnvironment.find(value => typeof value === 'string' && value.startsWith(`${key}=`))?.slice(key.length + 1)
-    : runnerEnvironment?.[key]
-  const poolSetting = runnerSetting('CAIRN_READY_VM_POOL')
-  const migratedEnvironment = { DATA_DIR: '/data', CONCURRENCY: concurrency }
-  if (poolSetting !== undefined)
-    migratedEnvironment.CAIRN_READY_VM_POOL = poolSetting
-
-  const poolSize = runnerSetting('CAIRN_READY_VM_POOL_SIZE')
-  if (poolSize !== undefined && !/^[1-4]$/.test(poolSize))
-    throw new Error('Runner pool size must be between 1 and 4.')
-  if (poolSize !== undefined)
-    migratedEnvironment.CAIRN_READY_VM_POOL_SIZE = poolSize
-
-  const blockTransport = runnerSetting('CAIRN_BLOCK_TRANSPORT')
-  if (blockTransport !== undefined && !['vhost-user', 'ublk'].includes(blockTransport))
-    throw new Error('Unsupported runner block transport.')
-  migratedEnvironment.CAIRN_BLOCK_TRANSPORT = 'ublk'
-
-  const diskLayout = runnerSetting('CAIRN_DISK_LAYOUT')
-  const snapshots = runnerSetting('CAIRN_VM_SNAPSHOTS')
-  if (diskLayout !== undefined && !['flat-ext4-v1', 'paired-ext4-v1'].includes(diskLayout))
-    throw new Error('Unsupported runner disk layout.')
-  if (snapshots !== undefined && !['true', 'false'].includes(snapshots))
-    throw new Error('Runner snapshots must be true or false.')
-  if (snapshots === 'true' && diskLayout !== 'paired-ext4-v1')
-    throw new Error('Snapshots require paired disks.')
-  if (diskLayout !== undefined)
-    migratedEnvironment.CAIRN_DISK_LAYOUT = diskLayout
-  if (snapshots !== undefined)
-    migratedEnvironment.CAIRN_VM_SNAPSHOTS = snapshots
-
-  const devices = ['/dev/kvm:/dev/kvm', '/dev/fuse:/dev/fuse', '/dev/net/tun:/dev/net/tun']
+  const devices = ['/dev/kvm:/dev/kvm', '/dev/net/tun:/dev/net/tun']
   const configuredDevices = runner.get('devices')?.toJSON()
   const rules = runner.get('device_cgroup_rules')?.toJSON()
   const control = '/dev/ublk-control:/dev/ublk-control'
@@ -217,11 +178,10 @@ export function firecrackerRunnerCompose(compose) {
     devices,
     sysctls: { 'net.ipv4.ip_forward': '1', 'net.ipv6.conf.all.disable_ipv6': '1' },
     tmpfs: ['/run', '/tmp'],
-    environment: migratedEnvironment,
     volumes: [data.replace(/:(ro|rw)$/, ''), state.replace(/:(ro|rw)$/, '')],
-    // Set defaults when migrating to VMs; preserve subsequent operator sizing.
-    mem_limit: alreadyUsesVms ? runner.get('mem_limit') ?? '20g' : '20g',
-    cpus: alreadyUsesVms ? runner.get('cpus') ?? 8 : 8,
+    // Preserve operator sizing.
+    mem_limit: runner.get('mem_limit') ?? '20g',
+    cpus: runner.get('cpus') ?? 8,
     healthcheck: {
       test: ['CMD', 'node', '-e', 'fetch(\'http://127.0.0.1:4311/health\').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))'],
       start_period: '120s',
@@ -236,7 +196,7 @@ export function firecrackerRunnerCompose(compose) {
 
   // The old generated cap counted host vCPU threads, not guest processes.
   // Preserve explicit operator limits, but remove the former default.
-  if (runner.has('pids_limit') && (!alreadyUsesVms || runner.get('pids_limit') === 256)) {
+  if (runner.get('pids_limit') === 256) {
     runner.delete('pids_limit')
     changed = true
   }

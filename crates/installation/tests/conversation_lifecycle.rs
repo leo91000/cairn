@@ -1,9 +1,14 @@
+use crate::common::run_fixture::{DbRunFixture, RunFixture};
+use cairn_contracts::EventKind;
+use common::account_fixture::AccountFixtures;
+use common::node_fixture::*;
+
 mod common;
 
 use common::relay_fixture::router;
 
 use axum::{Router, body::Body, http::StatusCode};
-use cairn_installation::{config::id, run_status::RunStatus, service::Service};
+use cairn_installation::{config::id, run_status::RunStatus, service::Service, validation::text};
 use common::RelayContext;
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc};
@@ -20,8 +25,17 @@ struct App {
 
 impl App {
     async fn new() -> Self {
+        Self::with_public_url(None).await
+    }
+
+    async fn with_public_url(public_url: Option<String>) -> Self {
         let root = TempDir::new().unwrap();
-        let service = Service::new(common::config(root.path())).await.unwrap();
+        let mut config = common::config(root.path());
+        config.opencode_bin = common::fixture("opencode.mjs");
+        if let Some(public_url) = public_url {
+            config.public_url = public_url;
+        }
+        let service = Service::new(config).await.unwrap();
         let router = router(service.clone()).await.unwrap();
         let session = RelayContext::new(&common::relay_fixture::context(&service).await);
         Self {
@@ -49,7 +63,16 @@ impl App {
     }
 
     async fn create_chat(&self) -> Value {
-        self.request("POST", CHATS, json!({})).await.1
+        let (status, view) = self.request("POST", CHATS, json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        // Fixture mutations retain the stored authority snapshot. The generated
+        // public view deliberately does not expose internal directing grants.
+        self.service
+            .store
+            .conversation_boundary(text(&view, "id"))
+            .await
+            .unwrap()
+            .unwrap()
     }
 
     /// Lets the chat scheduler run once, with no conversation active.
@@ -59,19 +82,37 @@ impl App {
 
     /// Inserts a finished run, with its events, directly in the database.
     async fn add_finished_run(&self, run: &str, status: RunStatus, extra: Value, context: &str) {
+        self.add_finished_run_with_request(run, status, extra, context, None)
+            .await;
+    }
+
+    async fn add_finished_run_with_request(
+        &self,
+        run: &str,
+        status: RunStatus,
+        extra: Value,
+        context: &str,
+        request_id: Option<&str>,
+    ) {
         let (run, context) = (run.to_owned(), context.to_owned());
-        let mut record = json!({ "id": run, "status": status });
+        let payload = request_id.map(|request_id| json!({ "messageId": request_id }));
+        let mut record = json!({
+            "id": run,
+            "taskId": run,
+            "createdAt": 0,
+            "status": status,
+            "nativeProvenanceUnknown": true,
+            "nativePrincipals": [],
+            "nativeAuthorityNodes": [],
+        });
         for (key, value) in extra.as_object().unwrap() {
             record[key] = value.clone();
         }
         self.service
             .store
             .transaction(move |db| {
-                db.0.execute(
-                    "INSERT INTO runs(id,task_id,project_id,status,created_at,data) VALUES(?1,?1,'',?2,0,?3)",
-                    rusqlite::params![run, status.as_str(), record.to_string()],
-                )?;
-                db.event(&run, "chat.user", &context, None)?;
+                db.add_run_fixture(&record, None)?;
+                db.event(&run, &EventKind::ChatUser, &context, payload.as_ref())?;
                 Ok(())
             })
             .await
@@ -167,7 +208,11 @@ async fn trash_denies_direct_run_history_and_artifact_access() {
     app.add_finished_run(&run, RunStatus::Succeeded, json!({}), "Private transcript")
         .await;
     chat["runId"] = run.clone().into();
-    app.service.store.put("chats", chat.clone()).await.unwrap();
+    app.service
+        .store
+        .save_conversation_boundary(chat.clone())
+        .await
+        .unwrap();
     let path = chat_path(&chat);
     assert_eq!(
         app.request("DELETE", &path, json!({})).await.0,
@@ -191,7 +236,11 @@ async fn cleanup_racing_cancellation_still_returns_successful_deletion() {
     app.add_finished_run(&run, RunStatus::Succeeded, json!({}), "Finished work")
         .await;
     chat["runId"] = run.into();
-    app.service.store.put("chats", chat.clone()).await.unwrap();
+    app.service
+        .store
+        .save_conversation_boundary(chat.clone())
+        .await
+        .unwrap();
     let path = chat_path(&chat);
     let active = app.service.worker.active.lock().await;
     let deleting = app.clone();
@@ -206,7 +255,7 @@ async fn cleanup_racing_cancellation_still_returns_successful_deletion() {
             let current = app
                 .service
                 .store
-                .get("chats", chat["id"].as_str().unwrap())
+                .conversation_boundary(chat["id"].as_str().unwrap())
                 .await
                 .unwrap()
                 .unwrap();
@@ -236,7 +285,11 @@ async fn deletion_waits_for_running_agents_before_removing_their_files() {
     app.add_finished_run(&run, RunStatus::Running, json!({}), "Work in progress")
         .await;
     chat["runId"] = run.clone().into();
-    app.service.store.put("chats", chat.clone()).await.unwrap();
+    app.service
+        .store
+        .save_conversation_boundary(chat.clone())
+        .await
+        .unwrap();
     let cancellation = tokio_util::sync::CancellationToken::new();
     app.service
         .worker
@@ -264,7 +317,13 @@ async fn deletion_waits_for_running_agents_before_removing_their_files() {
     );
     app.service
         .store
-        .patch_run(&run, json!({ "status": RunStatus::Succeeded }))
+        .change_run(
+            &run,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Succeeded),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     app.service.cleanup_conversations().await.unwrap();
@@ -290,7 +349,6 @@ async fn incompatible_restored_session_requires_consent_and_never_restarts_on_it
     let run = id();
     chat["runId"] = run.clone().into();
     chat["paused"] = true.into();
-    app.service.store.put("chats", chat.clone()).await.unwrap();
     app.add_finished_run(
         &run,
         RunStatus::Failed,
@@ -298,6 +356,11 @@ async fn incompatible_restored_session_requires_consent_and_never_restarts_on_it
         "Context to preserve",
     )
     .await;
+    app.service
+        .store
+        .save_conversation_boundary(chat.clone())
+        .await
+        .unwrap();
     common::set_checkpoint(
         &app.service.store,
         &run,
@@ -330,18 +393,26 @@ async fn incompatible_restored_session_requires_consent_and_never_restarts_on_it
 }
 
 #[tokio::test]
-async fn fresh_session_availability_uses_current_and_legacy_restorations_and_keeps_its_lifetime() {
+async fn fresh_session_availability_uses_restored_runs_and_keeps_its_lifetime() {
     for historical_chat in [false, true] {
         let app = App::new().await;
         let mut chat = app.create_chat().await;
         let run = id();
         chat["runId"] = run.clone().into();
-        if historical_chat {
-            chat["restoredAt"] = 10.into();
-        }
-        app.service.store.put("chats", chat.clone()).await.unwrap();
         app.add_finished_run(&run, RunStatus::Failed, json!({}), "History")
             .await;
+        app.service
+            .store
+            .save_conversation_boundary(chat.clone())
+            .await
+            .unwrap();
+        if historical_chat {
+            app.service
+                .store
+                .update_run_boundary_fixture(&run, json!({ "restoredAt": 10 }))
+                .await
+                .unwrap();
+        }
         let path = chat_path(&chat);
         assert_eq!(
             app.get(&path).await.1["canRequestNewSession"],
@@ -360,7 +431,7 @@ async fn fresh_session_availability_uses_current_and_legacy_restorations_and_kee
             );
             app.service
                 .store
-                .patch_run(&run, json!({ "restoredAt": 10 }))
+                .update_run_boundary_fixture(&run, json!({ "restoredAt": 10 }))
                 .await
                 .unwrap();
         }
@@ -373,7 +444,13 @@ async fn fresh_session_availability_uses_current_and_legacy_restorations_and_kee
         ] {
             app.service
                 .store
-                .patch_run(&run, json!({ "status": status }))
+                .change_run(
+                    &run,
+                    cairn_installation::runs::RunChanges {
+                        status: Some(RunStatus::parse(status).unwrap()),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .unwrap();
             assert_eq!(app.get(&path).await.1["canRequestNewSession"], available);
@@ -402,8 +479,19 @@ async fn fresh_session_availability_uses_current_and_legacy_restorations_and_kee
         assert_eq!(status, StatusCode::OK);
         assert_eq!(pending["sessionRestartRequested"], true);
         assert_eq!(pending["paused"], true);
+        let mut chat = app
+            .service
+            .store
+            .conversation_boundary(text(&chat, "id"))
+            .await
+            .unwrap()
+            .unwrap();
         chat["lifecycle"] = "trash".into();
-        app.service.store.put("chats", chat).await.unwrap();
+        app.service
+            .store
+            .save_conversation_boundary(chat)
+            .await
+            .unwrap();
         assert_eq!(app.get(&path).await.1["canRequestNewSession"], false);
     }
 }
@@ -414,7 +502,11 @@ async fn inactivity_never_archives_even_with_an_old_enabled_policy() {
     let mut chat = app.create_chat().await;
     chat["updatedAt"] = (cairn_installation::config::now() - 2 * 86_400_000).into();
     let path = chat_path(&chat);
-    app.service.store.put("chats", chat).await.unwrap();
+    app.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
     let policy = json!({ "enabled": true, "inactivityDays": 1, "coldAfterDays": 1 });
     app.service
         .store
@@ -466,6 +558,174 @@ async fn immediate_deletion_removes_files_and_records_without_archival() {
     app.service.cleanup_conversations().await.unwrap();
     assert_eq!(app.get(&path).await.0, StatusCode::NOT_FOUND);
     assert!(!directory.exists());
+}
+
+#[tokio::test]
+async fn permanent_revocation_does_not_block_requested_conversation_erasure() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    for (revoked, recorded_volume) in [
+        (Some(true), true),
+        (Some(true), false),
+        (Some(false), true),
+        (None, true),
+    ] {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let observed = requests.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let public_url = format!("http://{}", listener.local_addr().unwrap());
+        let backend = Router::new().fallback(move || {
+            let observed = observed.clone();
+            async move {
+                observed.fetch_add(1, Ordering::SeqCst);
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, backend).await.unwrap() });
+        let app = App::with_public_url(Some(public_url)).await;
+        let mut chat = app.create_chat().await;
+        let run = id();
+        let node = id();
+        let grant = id();
+        app.add_finished_run(
+            &run,
+            RunStatus::Succeeded,
+            json!({ "isolated": true }),
+            "retired work",
+        )
+        .await;
+        chat["runId"] = run.clone().into();
+        app.service
+            .store
+            .save_conversation_boundary(chat.clone())
+            .await
+            .unwrap();
+        if let Some(revoked) = revoked {
+            app.service
+                .store
+                .put_node_fixture(json!({ "id": node, "revoked": revoked, "local": false }))
+                .await
+                .unwrap();
+        }
+        app.service
+            .store
+            .save_checkpoint_boundary(&run, json!({ "nodeId": node }))
+            .await
+            .unwrap();
+        app.service
+            .store
+            .put(
+                "node-disk-grants",
+                json!({ "id": grant, "runId": run, "nodeId": node }),
+            )
+            .await
+            .unwrap();
+        if recorded_volume {
+            app.service
+                .store
+                .put(
+                    "node-volumes",
+                    json!({ "id": format!("{run}:{node}"), "runId": run, "nodeId": node }),
+                )
+                .await
+                .unwrap();
+        }
+        let publication = id();
+        let kept_publication = id();
+        let unique = id();
+        let shared = id();
+        let (owned, kept, exclusive, reused, owner) = (
+            publication.clone(),
+            kept_publication.clone(),
+            unique.clone(),
+            shared.clone(),
+            run.clone(),
+        );
+        app.service.store.transaction(move |db| {
+            db.0.execute("INSERT INTO shared_publications VALUES(?1,?2)", rusqlite::params![owned, owner])?;
+            db.0.execute("INSERT INTO shared_publications VALUES(?1,'other-retained-run')", [&kept])?;
+            for (object, hash) in [(&exclusive, "exclusive"), (&reused, "shared")] {
+                db.0.execute("INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES(?1,'fixture',?2,4096,'{}','ready')", rusqlite::params![object, hash])?;
+                db.0.execute("INSERT INTO shared_references VALUES(?1,?2)", rusqlite::params![owned, object])?;
+            }
+            db.0.execute("INSERT INTO shared_references VALUES(?1,?2)", rusqlite::params![kept, reused])?;
+            Ok(())
+        }).await.unwrap();
+        let directory = app.service.config.data_dir.join("runs").join(&run);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("private.txt"),
+            "deleted conversation contents",
+        )
+        .unwrap();
+        let path = chat_path(&chat);
+        assert_eq!(
+            app.request("DELETE", &path, json!({})).await.0,
+            StatusCode::OK
+        );
+        app.service.cleanup_conversations().await.unwrap();
+
+        if revoked == Some(true) {
+            assert_eq!(app.get(&path).await.0, StatusCode::NOT_FOUND);
+            assert!(!directory.exists());
+            assert!(
+                app.service
+                    .store
+                    .get("node-disk-grants", &grant)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                app.service
+                    .store
+                    .get("node-volumes", &format!("{run}:{node}"))
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(requests.load(Ordering::SeqCst), 0);
+        } else {
+            assert_eq!(app.get(&path).await.0, StatusCode::OK);
+            assert!(directory.join("private.txt").exists());
+            assert!(
+                app.service
+                    .store
+                    .get("node-disk-grants", &grant)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                app.service
+                    .store
+                    .get("node-volumes", &format!("{run}:{node}"))
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(requests.load(Ordering::SeqCst) > 0);
+        }
+        let (exclusive, reused) = (unique.clone(), shared.clone());
+        let (unique_unused, shared_unused) = app
+            .service
+            .store
+            .read(move |db| {
+                let unused = |object: &str| {
+                    db.0.query_row(
+                        "SELECT unused_at IS NOT NULL FROM shared_objects WHERE id=?1",
+                        [object],
+                        |row| row.get::<_, bool>(0),
+                    )
+                };
+                Ok((unused(&exclusive)?, unused(&reused)?))
+            })
+            .await
+            .unwrap();
+        assert_eq!(unique_unused, revoked == Some(true));
+        assert!(!shared_unused, "Another conversation still owns this block");
+        server.abort();
+    }
 }
 
 #[tokio::test]
@@ -530,62 +790,17 @@ async fn previously_trashed_conversations_keep_their_recovery_deadline() {
     chat["lifecycle"] = "trash".into();
     chat["trashedAt"] = cairn_installation::config::now().into();
     chat["purgeAt"] = (cairn_installation::config::now() + 30 * 86_400_000).into();
-    app.service.store.put("chats", chat).await.unwrap();
+    app.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap();
     app.service.cleanup_conversations().await.unwrap();
     let (status, restored) = app
         .request("POST", &format!("{path}/restore"), json!({}))
         .await;
     assert_eq!(status, StatusCode::OK, "{restored}");
     assert_eq!(restored["lifecycle"], "active");
-}
-
-#[tokio::test]
-async fn legacy_conversations_get_stable_slugs_without_changing_activity_or_uuid() {
-    use cairn_installation::store::Store;
-    let root = TempDir::new().unwrap();
-    let store = Store::open(root.path()).unwrap();
-    let chat_id = id();
-    let legacy = json!({ "id": chat_id, "title": "Legacy conversation", "updatedAt": 123 });
-    let record = legacy.clone();
-    store
-        .write(move |db| {
-            db.0.execute(
-                "INSERT INTO records VALUES(?1,'chats',?2,123)",
-                rusqlite::params![record["id"].as_str(), record.to_string()],
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-    drop(store);
-
-    let store = Store::open(root.path()).unwrap();
-    let migrated = store.get("chats", &chat_id).await.unwrap().unwrap();
-    assert_eq!(migrated["id"], legacy["id"]);
-    assert_eq!(migrated["updatedAt"], 123);
-    let timestamp = store
-        .read(|db| {
-            Ok(db.0.query_row(
-                "SELECT updated_at FROM records WHERE kind='chats'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )?)
-        })
-        .await
-        .unwrap();
-    assert_eq!(timestamp, 123);
-    let mut edited = migrated.clone();
-    edited["slug"] = "changed-slug".into();
-    edited["title"] = "Renamed conversation".into();
-    let saved = store.put("chats", edited).await.unwrap();
-    assert_eq!(saved["slug"], migrated["slug"]);
-    drop(store);
-
-    let reopened = Store::open(root.path()).unwrap();
-    assert_eq!(
-        reopened.get("chats", &chat_id).await.unwrap().unwrap()["slug"],
-        migrated["slug"]
-    );
 }
 
 #[tokio::test]
@@ -617,7 +832,74 @@ async fn old_chat(app: &App, days: i64) -> Value {
     chat["createdAt"] = activity.into();
     chat["updatedAt"] = activity.into();
     chat["lastActivityAt"] = activity.into();
-    app.service.store.put("chats", chat).await.unwrap()
+    app.service
+        .store
+        .save_conversation_boundary(chat)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn empty_and_converted_chats_start_their_inactivity_clock_at_creation() {
+    for converted in [false, true] {
+        let app = App::new().await;
+        let mut chat = if converted {
+            let run = id();
+            let agent = app
+                .service
+                .store
+                .agent_snapshot(cairn_installation::config::MAIN_AGENT_ID)
+                .await
+                .unwrap()
+                .unwrap();
+            app.add_finished_run(
+                &run,
+                RunStatus::Succeeded,
+                json!({
+                    "snapshot": {
+                        "agent": agent,
+                        "task": { "name": "Completed mission", "prompt": "Inspect the workspace" },
+                    },
+                    "sessionId": "mission-session",
+                    "finishedAt": cairn_installation::config::now() - 8 * DAY,
+                }),
+                "Completed mission history",
+            )
+            .await;
+            app.service
+                .store
+                .save_checkpoint_boundary(&run, json!({ "prepared": {}, "completed": true }))
+                .await
+                .unwrap();
+            let (status, chat) = app
+                .request("POST", &format!("/api/runs/{run}/chat"), json!({}))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{chat}");
+            chat
+        } else {
+            app.create_chat().await
+        };
+        let activity = chat["lastActivityAt"].as_i64().unwrap();
+        assert_eq!(chat["lastActivityAt"], chat["createdAt"]);
+        assert_eq!(chat["lastActivityAt"], chat["updatedAt"]);
+        app.service.cleanup_conversations().await.unwrap();
+        assert_eq!(app.get(&chat_path(&chat)).await.0, StatusCode::OK);
+
+        let expired = activity - 8 * DAY;
+        for field in ["createdAt", "updatedAt", "lastActivityAt"] {
+            chat[field] = expired.into();
+        }
+        app.service
+            .store
+            .save_conversation_boundary(chat.clone())
+            .await
+            .unwrap();
+        app.service.cleanup_conversations().await.unwrap();
+        assert_eq!(
+            app.get(&chat_path(&chat)).await.1["environmentState"],
+            "expired"
+        );
+    }
 }
 
 #[tokio::test]
@@ -646,13 +928,191 @@ async fn retention_defaults_to_seven_days_and_validates_persisted_owner_settings
     let root = app.service.config.data_dir.clone();
     let reopened = cairn_installation::store::Store::open(&root).unwrap();
     assert_eq!(
-        reopened.kv("conversation-expiration").await.unwrap(),
-        Some(policy)
+        serde_json::to_value(
+            reopened
+                .read(|db| db.conversation_retention())
+                .await
+                .unwrap()
+        )
+        .unwrap(),
+        policy
     );
 }
 
 #[tokio::test]
-async fn seven_day_expiration_removes_history_files_and_public_access() {
+async fn expired_remote_conversation_continues_with_history_without_fencing_a_retired_node() {
+    let app = App::new().await;
+    std::fs::create_dir_all(&app.service.config.home).unwrap();
+    let chat = app.create_chat().await;
+    let path = chat_path(&chat);
+    let first = id();
+    app.request(
+        "POST",
+        &format!("{path}/messages"),
+        json!({ "id": first, "text": "Preserve this decision" }),
+    )
+    .await;
+    app.tick().await;
+    let detail = app.get(&path).await.1;
+    let run = text(&detail["run"], "id").to_owned();
+    assert!(!run.is_empty(), "{detail}");
+    assert!(
+        app.service.config.runner_url.is_empty(),
+        "Control-only manager fixture"
+    );
+    let node = id();
+    app.service
+        .store
+        .put_node_fixture(json!({ "id": node, "revoked": true, "local": false }))
+        .await
+        .unwrap();
+    let chat_id = text(&chat, "id").to_owned();
+    let run_id = run.clone();
+    app.service
+        .store
+        .transaction(move |db| {
+            for mut message in db.messages(&chat_id)? {
+                message["status"] = "delivered".into();
+                db.put_message(&message).expect("fixture delivered message");
+            }
+            db.event(
+                &run_id,
+                &EventKind::ChatUser,
+                "Preserve this decision",
+                None,
+            )
+            .expect("fixture history");
+            db.change_run(
+                &run_id,
+                cairn_installation::runs::RunChanges {
+                    status: Some(RunStatus::Succeeded),
+                    finished_at: Some(Some(cairn_installation::config::now() - 8 * DAY)),
+                    recovery_pending: Some(false),
+                    session_id: Some(Some("old-native-session".into())),
+                    boundary: Some(json!({ "isolated": true })),
+                    ..Default::default()
+                },
+            )
+            .expect("fixture finished run");
+            db.save_checkpoint_boundary(
+                &run_id,
+                &json!({
+                        "prepared": { "workspace": "old-workspace" },
+                        "launched": true,
+                        "completed": true,
+                        "workspaceInitialized": true,
+                        "runnerId": id(),
+                "nodeId": node,
+                    }),
+            )
+            .expect("fixture checkpoint");
+            let mut chat = db.conversation_boundary(&chat_id)?.unwrap();
+            chat["lastActivityAt"] = (cairn_installation::config::now() - 8 * DAY).into();
+            db.save_conversation_boundary(&chat)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    app.service.cleanup_conversations().await.unwrap();
+    assert_eq!(app.get(&path).await.1["environmentState"], "expired");
+    assert_eq!(
+        app.request(
+            "POST",
+            &format!("{path}/messages"),
+            json!({ "id": id(), "text": "Continue" })
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    app.tick().await;
+    let detail = app.get(&path).await.1;
+    assert!(detail["environmentState"].is_null(), "{detail}");
+    assert_eq!(detail["run"]["id"], run);
+    assert_eq!(detail["run"]["status"], "queued");
+    assert_eq!(detail["run"]["isolated"], false);
+    cairn_installation::recovery::fence(&app.service, &detail["run"])
+        .await
+        .unwrap();
+    assert!(detail["run"]["sessionId"].is_null());
+    assert!(text(&detail["run"]["chatExecution"], "context").contains("Preserve this decision"));
+    assert!(detail["run"]["environmentExpiredAt"].is_number());
+    let checkpoint = app
+        .service
+        .store
+        .checkpoint_boundary(&run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(checkpoint["prepared"].is_null());
+    assert!(checkpoint["runnerId"].is_null());
+    assert_ne!(checkpoint["workspaceInitialized"], true);
+    assert_eq!(checkpoint["launched"], false);
+    assert_eq!(checkpoint["completed"], false);
+}
+
+#[tokio::test]
+async fn interrupted_environment_cleanup_blocks_execution_and_retries_after_policy_is_disabled() {
+    let app = App::new().await;
+    let mut chat = old_chat(&app, 8).await;
+    let run = id();
+    app.add_finished_run(
+        &run,
+        RunStatus::Succeeded,
+        json!({
+            "workspaces": [{ "kind": "worktree", "path": app._root.path().to_str().unwrap() }],
+        }),
+        "Kept history",
+    )
+    .await;
+    chat["runId"] = run.clone().into();
+    app.service
+        .store
+        .save_conversation_boundary(chat.clone())
+        .await
+        .unwrap();
+    app.service.cleanup_conversations().await.unwrap();
+    let detail = app.get(&chat_path(&chat)).await.1;
+    assert_eq!(detail["environmentState"], "cleaning");
+    assert!(detail["environmentError"].is_string());
+    assert_eq!(
+        app.request(
+            "POST",
+            &format!("{}/messages", chat_path(&chat)),
+            json!({ "id": id(), "text": "Wait for erasure" })
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    app.request("PUT", RETENTION, json!({ "inactivityDays": 0 }))
+        .await;
+    app.service
+        .store
+        .update_run_boundary_fixture(&run, json!({ "workspaces": [] }))
+        .await
+        .unwrap();
+    let mut current = app
+        .service
+        .store
+        .conversation_boundary(text(&chat, "id"))
+        .await
+        .unwrap()
+        .unwrap();
+    current["environmentRetryAfter"] = 0.into();
+    app.service
+        .store
+        .save_conversation_boundary(current)
+        .await
+        .unwrap();
+    app.service.cleanup_conversations().await.unwrap();
+    let detail = app.get(&chat_path(&chat)).await.1;
+    assert_eq!(detail["environmentState"], "expired");
+    assert!(detail["environmentError"].is_null());
+}
+
+#[tokio::test]
+async fn seven_day_expiration_preserves_history_uploads_artifacts_and_public_access() {
     let app = App::new().await;
     let mut expired = old_chat(&app, 8).await;
     let recent = old_chat(&app, 6).await;
@@ -667,7 +1127,7 @@ async fn seven_day_expiration_removes_history_files_and_public_access() {
     expired["runId"] = run.clone().into();
     app.service
         .store
-        .put("chats", expired.clone())
+        .save_conversation_boundary(expired.clone())
         .await
         .unwrap();
     let attachments = app
@@ -687,37 +1147,38 @@ async fn seven_day_expiration_removes_history_files_and_public_access() {
         .join(&artifact);
     std::fs::create_dir_all(artifact_path.parent().unwrap()).unwrap();
     std::fs::write(&artifact_path, "shared work").unwrap();
+    let record = common::deliverable(
+        &run,
+        &artifact,
+        &json!({
+            "publicToken": "expired-share", "publicUrl":"https://example.invalid/artifacts/expired-share", "visibility": "public"
+        }),
+    );
     app.service
         .store
-        .set(
-            &format!("artifact:{run}:{artifact}"),
-            json!({ "id": artifact, "publicToken": "expired-share", "visibility": "public" }),
-            None,
-        )
+        .transaction(move |db| db.insert_artifact(&record))
         .await
         .unwrap();
-    app.service
-        .store
-        .set(
-            "artifact-share:expired-share",
-            json!({ "runId": run }),
-            None,
-        )
-        .await
-        .unwrap();
+    let workspace = app.service.config.data_dir.join("runs").join(&run);
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("unpublished.txt"), "unpublished work").unwrap();
     assert_eq!(app.get(&chat_path(&expired)).await.0, StatusCode::OK);
     app.service.cleanup_conversations().await.unwrap();
-    assert_eq!(app.get(&chat_path(&expired)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        app.get(&chat_path(&expired)).await.1["environmentState"],
+        "expired"
+    );
     assert_eq!(app.get(&chat_path(&recent)).await.0, StatusCode::OK);
-    assert!(!attachments.exists());
-    assert!(!artifact_path.exists());
+    assert!(!workspace.exists());
+    assert!(attachments.exists());
+    assert!(artifact_path.exists());
     assert!(
         app.service
             .store
-            .kv("artifact-share:expired-share")
+            .read(|db| db.public_artifact("expired-share"))
             .await
             .unwrap()
-            .is_none()
+            .is_some()
     );
     let run_id = run.clone();
     assert!(
@@ -726,8 +1187,35 @@ async fn seven_day_expiration_removes_history_files_and_public_access() {
             .read(move |db| db.run(&run_id))
             .await
             .unwrap()
-            .is_none()
+            .is_some()
     );
+
+    let checkpoint = app
+        .service
+        .store
+        .checkpoint_boundary(&run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(checkpoint["prepared"].is_null());
+    let retained = app.service.store.run(&run).await.unwrap();
+    assert!(retained["sessionId"].is_null());
+    assert_eq!(retained["resumeAvailable"], false);
+    assert_eq!(
+        app.request("POST", &format!("/api/runs/{run}/resume"), json!({}))
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    // Another sweep cannot erase retained files or re-expire an already empty environment.
+    app.service.cleanup_conversations().await.unwrap();
+    assert!(artifact_path.exists());
+    // Explicit deletion still erases everything, including previously retained artifacts.
+    app.request("DELETE", &chat_path(&expired), json!({})).await;
+    app.service.cleanup_conversations().await.unwrap();
+    assert!(!artifact_path.exists());
+    assert!(!attachments.exists());
+    assert_eq!(app.get(&chat_path(&expired)).await.0, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -749,7 +1237,10 @@ async fn disabling_and_extending_retention_preserves_old_chats_but_manual_deleti
     app.request("PUT", RETENTION, json!({ "inactivityDays": 3 }))
         .await;
     app.service.cleanup_conversations().await.unwrap();
-    assert_eq!(app.get(&chat_path(&chat)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        app.get(&chat_path(&chat)).await.1["environmentState"],
+        "expired"
+    );
 }
 
 #[tokio::test]
@@ -785,7 +1276,12 @@ async fn retention_protects_pending_work_recent_completion_and_worker_finalizati
         .await;
         chat["runId"] = run.clone().into();
         if protection == "wakeup" {
-            chat["wakeup"] = json!({ "at": 1 });
+            chat["wakeup"] =
+                serde_json::to_value(common::run_fixture::complete_wakeup_fixture(&json!({
+                    "id": "retention-wakeup", "createdAt": cairn_installation::config::now(),
+                    "wakeAt": cairn_installation::config::now() + 3600000,
+                })))
+                .unwrap();
         }
         if protection == "finalizing" {
             app.service
@@ -816,49 +1312,69 @@ async fn retention_protects_pending_work_recent_completion_and_worker_finalizati
                 .unwrap();
         }
         if protection == "question" {
+            let question = serde_json::from_value(json!({
+                "id": "question", "chatId": chat_id, "runId": run,
+                "source": "cairn", "blocking": false, "status": "pending",
+                "fields": [{"id":"scope","title":"Pending question"}],
+            }))
+            .unwrap();
             app.service
                 .store
-                .set(
-                    &format!("chat-question:{chat_id}:question"),
-                    json!({ "id": "question", "status": "pending" }),
-                    None,
-                )
+                .transaction(move |db| db.save_question(&question))
                 .await
                 .unwrap();
         }
-        app.service.store.put("chats", chat.clone()).await.unwrap();
+        app.service
+            .store
+            .save_conversation_boundary(chat.clone())
+            .await
+            .unwrap();
         app.service.cleanup_conversations().await.unwrap();
         assert_eq!(
             app.get(&chat_path(&chat)).await.1["lifecycle"],
             "active",
             "{protection}"
         );
+        assert!(
+            app.get(&chat_path(&chat)).await.1["environmentState"].is_null(),
+            "{protection}"
+        );
     }
 }
 
 #[tokio::test]
-async fn expiration_uses_recent_activity_and_legacy_fallback_and_bounds_each_pass() {
+async fn expiration_uses_recorded_activity_and_bounds_each_pass() {
     let app = App::new().await;
     let mut recent = old_chat(&app, 10).await;
     recent["lastActivityAt"] = cairn_installation::config::now().into();
     app.service
         .store
-        .put("chats", recent.clone())
+        .save_conversation_boundary(recent.clone())
         .await
         .unwrap();
-    let mut legacy = old_chat(&app, 8).await;
-    legacy.as_object_mut().unwrap().remove("lastActivityAt");
-    app.service
-        .store
-        .put("chats", legacy.clone())
-        .await
-        .unwrap();
+    let expired = old_chat(&app, 8).await;
     let second = old_chat(&app, 8).await;
     app.service.cleanup_conversations().await.unwrap();
-    assert_eq!(app.service.store.list("chats").await.unwrap().len(), 2);
+    assert_eq!(
+        app.service
+            .store
+            .conversations_boundary()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|c| c["environmentState"] == "expired")
+            .count(),
+        1
+    );
     app.service.cleanup_conversations().await.unwrap();
-    assert_eq!(app.get(&chat_path(&legacy)).await.0, StatusCode::NOT_FOUND);
-    assert_eq!(app.get(&chat_path(&second)).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(
+        app.get(&chat_path(&expired)).await.1["environmentState"],
+        "expired"
+    );
+    assert_eq!(
+        app.get(&chat_path(&second)).await.1["environmentState"],
+        "expired"
+    );
     assert_eq!(app.get(&chat_path(&recent)).await.0, StatusCode::OK);
 }
 
@@ -904,7 +1420,11 @@ async fn expiration_rechecks_policy_and_activity_after_waiting_for_worker_lock()
                 .await;
         } else {
             chat["lastActivityAt"] = cairn_installation::config::now().into();
-            app.service.store.put("chats", chat.clone()).await.unwrap();
+            app.service
+                .store
+                .save_conversation_boundary(chat.clone())
+                .await
+                .unwrap();
         }
         drop(active);
         cleanup.await.unwrap();
@@ -935,8 +1455,14 @@ async fn measure_retention_storage() {
     for _ in 0..100 {
         old_chat(&app, 8).await;
     }
-    let chat = app.service.store.list("chats").await.unwrap().remove(0);
-    let id = chat["id"].as_str().unwrap();
+    let mut chat = app
+        .service
+        .store
+        .conversations_boundary()
+        .await
+        .unwrap()
+        .remove(0);
+    let id = chat["id"].as_str().unwrap().to_owned();
     let encoded = serde_json::to_vec(&chat).unwrap().len();
     for enabled in [false, true] {
         app.service
@@ -950,17 +1476,22 @@ async fn measure_retention_storage() {
         let mut cleanup = Vec::new();
         for _ in 0..50 {
             let start = Instant::now();
-            app.service.store.get("chats", id).await.unwrap();
+            app.service.store.conversation_boundary(&id).await.unwrap();
             warm.push(start.elapsed().as_secs_f64() * 1000.0);
             // Fresh SQLite connections, with the host OS page cache still warm.
             let reopened =
                 cairn_installation::store::Store::open(&app.service.config.data_dir).unwrap();
             let start = Instant::now();
-            reopened.get("chats", id).await.unwrap();
+            reopened.conversation_boundary(&id).await.unwrap();
             cold.push(start.elapsed().as_secs_f64() * 1000.0);
             drop(reopened);
             let start = Instant::now();
-            app.service.store.put("chats", chat.clone()).await.unwrap();
+            chat = app
+                .service
+                .store
+                .save_conversation_boundary(chat.clone())
+                .await
+                .unwrap();
             writes.push(start.elapsed().as_secs_f64() * 1000.0);
         }
         for _ in 0..20 {
@@ -978,8 +1509,1286 @@ async fn measure_retention_storage() {
                 "writeMedianMs": median(writes),
                 "cleanupMedianMs": median(cleanup),
                 "cpuSeconds": cpu_seconds() - before_cpu,
-                "remainingChats": app.service.store.list("chats").await.unwrap().len()
+                "remainingChats": app.service.store.conversations_boundary().await.unwrap().len()
             })
         );
+    }
+}
+
+#[tokio::test]
+async fn http_edits_change_plan_explicitly_and_preserve_it_when_omitted() {
+    for (initial, requested, expected) in [
+        (false, Some(true), true),
+        (true, Some(false), false),
+        (true, None, true),
+    ] {
+        let app = App::new().await;
+        common::managed_codex_home(&app.service.config.home);
+        let chat = app.create_chat().await;
+        let path = chat_path(&chat);
+        let messages = format!("{path}/messages");
+        let (status, body) = app
+            .request("POST", &format!("{path}/pause"), json!({ "paused": true }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let message = id();
+        let (status, body) = app
+            .request(
+                "POST",
+                &messages,
+                json!({ "id": message, "text": "Original request", "plan": initial }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let mut edit = json!({ "text": "Edited request" });
+        if let Some(plan) = requested {
+            edit["plan"] = plan.into();
+        }
+        let (status, body) = app
+            .request("PUT", &format!("{messages}/{message}"), edit)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (_, detail) = app.get(&path).await;
+        let saved = detail["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|saved| saved["id"] == message.as_str())
+            .unwrap();
+        assert_eq!(saved["plan"] == true, expected, "{saved}");
+        let (status, body) = app
+            .request("POST", &format!("{path}/pause"), json!({ "paused": false }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        app.tick().await;
+        let (_, detail) = app.get(&path).await;
+        assert_eq!(
+            detail["run"]["chatExecution"]["messageId"],
+            message.as_str()
+        );
+        assert_eq!(
+            detail["run"]["chatExecution"]["plan"] == true,
+            expected,
+            "{detail}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_plan_request_admitted_while_idle_never_joins_a_turn_that_can_change_files() {
+    let app = App::new().await;
+    common::managed_codex_home(&app.service.config.home);
+    let chat = app.create_chat().await;
+    let path = chat_path(&chat);
+    let messages = format!("{path}/messages");
+    let inbox = |run: &Value| {
+        let file = app
+            .service
+            .config
+            .data_dir
+            .join("runs")
+            .join(run["id"].as_str().unwrap())
+            .join("chat-input/messages.json");
+        serde_json::from_slice::<Value>(&std::fs::read(file).unwrap()).unwrap()
+    };
+
+    // With the queue paused no turn runs, so a plan request asking to steer is admitted.
+    let (status, _) = app
+        .request("POST", &format!("{path}/pause"), json!({ "paused": true }))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let ordinary = id();
+    let plan = id();
+    for message in [
+        json!({ "id": ordinary, "text": "Refactor the queue" }),
+        json!({ "id": plan, "text": "Plan the follow-up", "mode": "steer", "plan": true }),
+    ] {
+        let (status, body) = app.request("POST", &messages, message).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    app.request("POST", &format!("{path}/pause"), json!({ "paused": false }))
+        .await;
+
+    // The ordinary message ahead starts a turn that can change files.
+    app.tick().await;
+    let run = app
+        .service
+        .chat_detail(chat["id"].as_str().unwrap())
+        .await
+        .unwrap()["run"]
+        .clone();
+    assert_eq!(run["chatExecution"]["messageId"], ordinary.as_str());
+    assert_ne!(run["chatExecution"]["plan"], true);
+    let run_id = run["id"].as_str().unwrap().to_owned();
+    app.service
+        .store
+        .change_run_fixture(&run_id, json!({ "status": "running" }))
+        .await
+        .unwrap();
+    app.service
+        .chat_acknowledge(&run_id, &ordinary)
+        .await
+        .unwrap();
+    app.service
+        .store
+        .save_checkpoint_boundary(&run_id, json!({ "completed": true, "launched": true }))
+        .await
+        .unwrap();
+
+    // Steering never hands it the plan request, which stays queued.
+    app.tick().await;
+    assert_eq!(inbox(&run), json!([]));
+    let (_, detail) = app.get(&path).await;
+    let pending = detail["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["id"] == plan.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(pending["status"], "queued");
+
+    // After the turn boundary it runs as its own plan turn.
+    app.service
+        .store
+        .change_run_fixture(
+            &run_id,
+            json!({ "status": "succeeded", "sessionId": "saved-session", "workspace": "/saved/workspace" }),
+        )
+        .await
+        .unwrap();
+    app.tick().await;
+    let next = app
+        .service
+        .chat_detail(chat["id"].as_str().unwrap())
+        .await
+        .unwrap()["run"]
+        .clone();
+    assert_eq!(next["chatExecution"]["messageId"], plan.as_str());
+    assert_eq!(next["chatExecution"]["plan"], true);
+}
+
+/// Admission can reach quota before there is a checkpoint or an engine session.
+async fn quota_switch_fixture(app: &App) -> (String, Value) {
+    std::fs::create_dir_all(&app.service.config.home).unwrap();
+    common::relay_fixture::claimed(&app.service).await.unwrap();
+    let chat = app.create_chat().await;
+    let path = chat_path(&chat);
+    let message = json!({"id":uuid::Uuid::new_v4(),"text":"Keep my pending request"});
+    assert_eq!(
+        app.request("POST", &format!("{path}/messages"), message)
+            .await
+            .0,
+        StatusCode::OK
+    );
+    app.tick().await;
+    let detail = app.get(&path).await.1;
+    let run = detail["run"].clone();
+    assert!(run["id"].is_string(), "{detail}");
+    app.service
+        .store
+        .change_run(
+            text(&run, "id"),
+            cairn_installation::runs::RunChanges {
+                account_wait_reason: Some(Some(
+                    "Waiting for a Codex account with available usage.".into(),
+                )),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut account = serde_json::to_value(
+        app.service
+            .accounts
+            .create(
+                &app.service,
+                cairn_installation::provider::Provider::Claude,
+                "Alternative",
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    account["state"] = "ready".into();
+    app.service
+        .store
+        .save_account_fixture(account)
+        .await
+        .unwrap();
+    let input = json!({"requestId":uuid::Uuid::new_v4(),"runId":run["id"],"turnId":run["chatExecution"]["messageId"],"provider":"claude"});
+    (path, input)
+}
+
+#[tokio::test]
+async fn quota_switch_uses_the_configured_opencode_model_before_catalog_fallback() {
+    for customize_agent in [false, true] {
+        let app = App::new().await;
+        let (path, mut input) = quota_switch_fixture(&app).await;
+        app.service
+            .accounts
+            .connect_api_key(
+                &app.service,
+                cairn_installation::provider::Provider::Opencode,
+                "Zen",
+                "opencode",
+                "synthetic-switch-zen-key",
+                None,
+            )
+            .await
+            .unwrap();
+        common::save_native_configuration(
+            &app.service,
+            "opencode",
+            customize_agent.then_some(cairn_installation::config::MAIN_AGENT_ID),
+            r#"{"model":"opencode/cat-jam-free"}"#,
+        )
+        .await;
+        input["provider"] = "opencode".into();
+        let (status, accepted) = app
+            .request("POST", &format!("{path}/coding-agent"), input.clone())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{accepted}");
+        for mut account in app.service.store.account_fixtures().await.unwrap() {
+            account["enabled"] = false.into();
+            app.service
+                .store
+                .save_account_fixture(account)
+                .await
+                .unwrap();
+        }
+        app.service.worker.tick(&app.service).await.unwrap();
+        common::eventually(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(20),
+            async || {
+                let run = app.service.store.run(text(&input, "runId")).await.unwrap();
+                (run["snapshot"]["agent"]["provider"] == "opencode").then_some(())
+            },
+        )
+        .await;
+        let run = app.service.store.run(text(&input, "runId")).await.unwrap();
+        assert_eq!(run["snapshot"]["agent"]["model"], "opencode/cat-jam-free");
+        assert!(
+            run["snapshot"]["nativeConfiguration"]["document"]
+                .as_str()
+                .unwrap()
+                .contains("opencode/cat-jam-free")
+        );
+    }
+}
+
+#[tokio::test]
+async fn quota_switch_is_revision_checked_idempotent_and_cancellable() {
+    for failed in [false, true] {
+        let app = App::new().await;
+        let (path, input) = quota_switch_fixture(&app).await;
+        if failed {
+            app.service
+                .store
+                .change_run(
+                    text(&input, "runId"),
+                    cairn_installation::runs::RunChanges {
+                        status: Some(RunStatus::Failed),
+                        error: Some(Some("Claude AI usage limit reached".into())),
+                        account_wait_reason: Some(None),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let endpoint = format!("{path}/coding-agent");
+        let (status, options) = app.get(&endpoint).await;
+        assert_eq!(status, StatusCode::OK, "{options}");
+        assert_eq!(
+            options["choices"],
+            json!([{"provider":"claude","label":"Claude Code"}])
+        );
+        assert_eq!(options["turnId"], input["turnId"]);
+        let mut stale = input.clone();
+        stale["turnId"] = "different-turn".into();
+        assert_eq!(
+            app.request("POST", &endpoint, stale).await.0,
+            StatusCode::CONFLICT
+        );
+        let mut malformed = input.clone();
+        malformed["turnId"] = "".into();
+        assert_eq!(
+            app.request("POST", &endpoint, malformed).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        let (status, accepted) = app.request("POST", &endpoint, input.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{accepted}");
+        assert_eq!(accepted["codingAgentSwitch"]["provider"], "claude");
+        assert!(
+            app.service
+                .store
+                .run_state(text(&input, "runId"))
+                .await
+                .unwrap()
+                .cancel_requested_at
+                .is_some()
+        );
+        // Accepted identities remain idempotent even if the account is paused meanwhile.
+        for mut account in app.service.store.account_fixtures().await.unwrap() {
+            account["enabled"] = false.into();
+            app.service
+                .store
+                .save_account_fixture(account)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            app.request("POST", &endpoint, input.clone()).await.0,
+            StatusCode::OK
+        );
+        let mut reused = input.clone();
+        reused["provider"] = "opencode".into();
+        assert_eq!(
+            app.request("POST", &endpoint, reused).await.0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            app.request("POST", &format!("{path}/stop"), json!({}))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        app.service.worker.tick(&app.service).await.unwrap();
+        let stopped = app.get(&path).await.1;
+        assert!(stopped["codingAgentSwitch"].is_null());
+        assert_eq!(stopped["run"]["snapshot"]["agent"]["provider"], "codex");
+        assert_eq!(stopped["paused"], true);
+        assert_eq!(
+            stopped["run"]["status"],
+            if failed { "failed" } else { "cancelled" }
+        );
+    }
+}
+
+#[tokio::test]
+async fn accepted_quota_switch_recovers_after_restart_without_releasing_paused_followups() {
+    for pause_before_acceptance in [true, false] {
+        let app = App::new().await;
+        let (path, input) = quota_switch_fixture(&app).await;
+        let endpoint = format!("{path}/coding-agent");
+        if pause_before_acceptance {
+            assert_eq!(
+                app.request("POST", &format!("{path}/pause"), json!({"paused":true}))
+                    .await
+                    .0,
+                StatusCode::OK
+            );
+        }
+
+        assert_eq!(
+            app.request("POST", &endpoint, input.clone()).await.0,
+            StatusCode::OK
+        );
+        if !pause_before_acceptance {
+            assert_eq!(
+                app.request("POST", &format!("{path}/pause"), json!({"paused":true}))
+                    .await
+                    .0,
+                StatusCode::OK
+            );
+        }
+        let followup_id = id();
+        assert_eq!(
+            app.request(
+                "POST",
+                &format!("{path}/messages"),
+                json!({"id":followup_id,"text":"Keep this follow-up paused","mode":"queue"})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        // Keep the new execution queued so this test observes recovery without invoking a CLI.
+        for mut account in app.service.store.account_fixtures().await.unwrap() {
+            account["enabled"] = false.into();
+            app.service
+                .store
+                .save_account_fixture(account)
+                .await
+                .unwrap();
+        }
+        let restarted = Service::new(app.service.config.clone()).await.unwrap();
+        restarted.worker.tick(&restarted).await.unwrap();
+        common::eventually(
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(20),
+            async || {
+                let run = restarted.store.run(text(&input, "runId")).await.unwrap();
+                (run["snapshot"]["agent"]["provider"] == "claude").then_some(())
+            },
+        )
+        .await;
+        let resumed = app.get(&path).await.1;
+        assert_eq!(resumed["run"]["id"], input["runId"]);
+        assert_eq!(
+            resumed["run"]["chatExecution"]["messageId"],
+            input["turnId"]
+        );
+        assert_eq!(resumed["run"]["status"], "queued");
+        assert!(resumed["run"]["cancelRequestedAt"].is_null());
+        assert!(resumed["codingAgentSwitch"].is_null());
+        assert_eq!(resumed["paused"], true);
+        assert_eq!(resumed["messages"].as_array().unwrap().len(), 2);
+        assert!(
+            resumed["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["id"] == followup_id && message["status"] == "queued")
+        );
+        restarted.shutdown.cancel();
+        restarted.worker.close().await;
+    }
+}
+
+#[tokio::test]
+async fn completed_quota_switch_replay_does_not_cancel_the_replacement_or_a_later_turn() {
+    let app = App::new().await;
+    let (path, input) = quota_switch_fixture(&app).await;
+    let endpoint = format!("{path}/coding-agent");
+    assert_eq!(
+        app.request("POST", &endpoint, input.clone()).await.0,
+        StatusCode::OK
+    );
+    // The same turn can return to its original engine after another quota switch.
+    // Both the latest receipt and an older receipt must leave active work untouched.
+    for latest_request in [
+        input["requestId"].clone(),
+        uuid::Uuid::new_v4().to_string().into(),
+    ] {
+        let chat_id = path.rsplit('/').next().unwrap().to_owned();
+        let original = input["requestId"].as_str().unwrap().to_owned();
+        let saved_chat = chat_id.clone();
+        let completed = app
+            .service
+            .store
+            .transaction(move |db| {
+                let mut receipt = db.engine_switch_receipt(&chat_id, &original)?.unwrap();
+                receipt.request_id = latest_request.as_str().unwrap().to_owned();
+                receipt.pending = false;
+                db.save_engine_switch(&receipt)?;
+                Ok(serde_json::to_value(db.engine_switch(&chat_id)?)?)
+            })
+            .await
+            .unwrap();
+        app.service
+            .store
+            .change_run(
+                text(&input, "runId"),
+                cairn_installation::runs::RunChanges {
+                    cancel_requested_at: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let token = tokio_util::sync::CancellationToken::new();
+        app.service
+            .worker
+            .active
+            .lock()
+            .await
+            .insert(text(&input, "runId").to_owned(), token.clone());
+        assert_eq!(
+            app.request("POST", &endpoint, input.clone()).await.0,
+            StatusCode::OK
+        );
+        assert!(
+            !token.is_cancelled(),
+            "An idempotent replay must not cancel the replacement run"
+        );
+        assert_eq!(
+            app.service
+                .store
+                .read(move |db| Ok(serde_json::to_value(db.engine_switch(&saved_chat)?)?))
+                .await
+                .unwrap(),
+            completed
+        );
+        app.service.worker.active.lock().await.clear();
+    }
+}
+
+#[tokio::test]
+async fn quota_switch_does_not_offer_or_accept_an_engine_that_cannot_preserve_the_sandbox() {
+    let app = App::new().await;
+    let (path, mut input) = quota_switch_fixture(&app).await;
+    let mut run = app.service.store.run(text(&input, "runId")).await.unwrap();
+    run["snapshot"]["agent"]["access"]["sandbox"] = "workspace-write".into();
+    app.service
+        .store
+        .change_run(
+            text(&input, "runId"),
+            cairn_installation::runs::RunChanges {
+                snapshot: Some(serde_json::from_value(run["snapshot"].clone()).unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut account = serde_json::to_value(
+        app.service
+            .accounts
+            .create(
+                &app.service,
+                cairn_installation::provider::Provider::Opencode,
+                "Alternative",
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    account["state"] = "ready".into();
+    account["modelProvider"] = "opencode".into();
+    app.service
+        .store
+        .save_account_fixture(account)
+        .await
+        .unwrap();
+    let endpoint = format!("{path}/coding-agent");
+    let (status, options) = app.get(&endpoint).await;
+    assert_eq!(status, StatusCode::OK, "{options}");
+    assert!(
+        options["choices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|choice| choice["provider"] != "opencode")
+    );
+    input["provider"] = "opencode".into();
+    assert_eq!(
+        app.request("POST", &endpoint, input.clone()).await.0,
+        StatusCode::CONFLICT
+    );
+    assert!(
+        app.service
+            .store
+            .run_state(text(&input, "runId"))
+            .await
+            .unwrap()
+            .cancel_requested_at
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn quota_switch_recognizes_current_structured_limits_without_reusing_recovered_failures() {
+    for (field, code) in [
+        ("code", "usage_limit_reached"),
+        ("codexErrorInfo", "usageLimitExceeded"),
+    ] {
+        let app = App::new().await;
+        let (path, input) = quota_switch_fixture(&app).await;
+        let run_id = text(&input, "runId");
+        let message = "Account usage is exhausted.";
+        app.service
+            .store
+            .change_run(
+                run_id,
+                cairn_installation::runs::RunChanges {
+                    status: Some(RunStatus::Failed),
+                    error: Some(Some(message.into())),
+                    account_wait_reason: Some(None),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mut payload = json!({"type":"turn.failed","error":{"message":message}});
+        payload["error"][field] = code.into();
+        app.service
+            .store
+            .event(
+                run_id,
+                &EventKind::TurnFailed,
+                message,
+                Some(payload.clone()),
+            )
+            .await
+            .unwrap();
+        // A recovered failure in an earlier attempt is insufficient for switching this one.
+        app.service
+            .store
+            .event(run_id, &EventKind::TurnStarted, "", None)
+            .await
+            .unwrap();
+        let endpoint = format!("{path}/coding-agent");
+        assert_eq!(app.get(&endpoint).await.1["choices"], json!([]));
+        assert_eq!(
+            app.request("POST", &endpoint, input.clone()).await.0,
+            StatusCode::CONFLICT
+        );
+        app.service
+            .store
+            .event(run_id, &EventKind::TurnFailed, message, Some(payload))
+            .await
+            .unwrap();
+        assert_eq!(
+            app.get(&endpoint).await.1["choices"],
+            json!([{"provider":"claude","label":"Claude Code"}])
+        );
+        assert_eq!(
+            app.request("POST", &endpoint, input).await.0,
+            StatusCode::OK
+        );
+    }
+}
+
+#[tokio::test]
+async fn quota_switch_keeps_a_plan_turn_on_an_engine_that_enforces_it() {
+    let app = App::new().await;
+    let (path, mut input) = quota_switch_fixture(&app).await;
+    let run_id = text(&input, "runId").to_owned();
+    let mut account = serde_json::to_value(
+        app.service
+            .accounts
+            .create(
+                &app.service,
+                cairn_installation::provider::Provider::Opencode,
+                "Alternative",
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    account["state"] = "ready".into();
+    account["modelProvider"] = "opencode".into();
+    app.service
+        .store
+        .save_account_fixture(account)
+        .await
+        .unwrap();
+    let endpoint = format!("{path}/coding-agent");
+    let mut execution = app.service.store.run(&run_id).await.unwrap()["chatExecution"].clone();
+    execution["plan"] = true.into();
+    app.service
+        .store
+        .change_run_fixture(&run_id, json!({ "chatExecution": execution }))
+        .await
+        .unwrap();
+
+    // OpenCode cannot enforce a plan turn's boundary: it is not accepted.
+    let (status, options) = app.get(&endpoint).await;
+    assert_eq!(status, StatusCode::OK, "{options}");
+    assert_eq!(
+        options["choices"],
+        json!([{"provider":"claude","label":"Claude Code"}])
+    );
+    let mut opencode = input.clone();
+    opencode["provider"] = "opencode".into();
+    let (status, refused) = app.request("POST", &endpoint, opencode).await;
+    assert!(status.is_client_error(), "{refused}");
+    assert!(app.get(&path).await.1["codingAgentSwitch"].is_null());
+
+    // Claude Code takes the same plan turn over, still as a plan turn.
+    input["requestId"] = uuid::Uuid::new_v4().to_string().into();
+    assert_eq!(
+        app.request("POST", &endpoint, input.clone()).await.0,
+        StatusCode::OK
+    );
+    for mut account in app.service.store.account_fixtures().await.unwrap() {
+        account["enabled"] = false.into();
+        app.service
+            .store
+            .save_account_fixture(account)
+            .await
+            .unwrap();
+    }
+    let restarted = Service::new(app.service.config.clone()).await.unwrap();
+    restarted.worker.tick(&restarted).await.unwrap();
+    common::eventually(
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_millis(20),
+        async || {
+            let run = restarted.store.run(&run_id).await.unwrap();
+            (run["snapshot"]["agent"]["provider"] == "claude").then_some(())
+        },
+    )
+    .await;
+    let switched = restarted.store.run(&run_id).await.unwrap();
+    assert_eq!(switched["chatExecution"]["messageId"], input["turnId"]);
+    assert_eq!(switched["chatExecution"]["plan"], true);
+    restarted.shutdown.cancel();
+    restarted.worker.close().await;
+}
+
+#[tokio::test]
+async fn implementation_approval_is_atomic_with_concurrent_requests_and_retries() {
+    let app = App::new().await;
+    let chat = app.create_chat().await;
+    let chat_id = text(&chat, "id").to_owned();
+    let run = id();
+    app.add_finished_run(
+        &run,
+        RunStatus::Succeeded,
+        json!({ "snapshot": { "agent": { "provider": "codex" } } }),
+        "Plan request",
+    )
+    .await;
+    let c = chat_id.clone();
+    let r = run.clone();
+    app.service
+        .store
+        .transaction(move |db| {
+            let mut chat = db.conversation_boundary(&c)?.unwrap();
+            chat["runId"] = r.clone().into();
+            db.save_conversation_boundary(&chat)?;
+            db.event(
+                &r,
+                &EventKind::ItemCompleted,
+                "Reviewed plan",
+                Some(&json!({
+                    "type": "item.completed",
+                    "item": { "id": "proposal", "type": "proposed_plan", "text": "Reviewed plan" },
+                })),
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let path = chat_path(&chat);
+    let (_, snapshot) = app.get(&path).await;
+    let r = run.clone();
+    let event_id = app
+        .service
+        .store
+        .read(move |db| {
+            Ok(db
+                .0
+                .query_row("SELECT MAX(id) FROM events WHERE run_id=?", [r], |row| {
+                    row.get::<_, i64>(0)
+                })?)
+        })
+        .await
+        .unwrap();
+    let approval = json!({
+        "sourceId": format!("{run}:{event_id}"), "revision": snapshot["revision"],
+    });
+    let messages = format!("{path}/messages");
+    let first_request = json!({
+        "id": id(), "text": "Implement the plan you proposed.", "planApproval": approval,
+    });
+    let mut competing_request = first_request.clone();
+    competing_request["id"] = id().into();
+    // Two clients approve the same snapshot concurrently: exactly one can be accepted.
+    let (first_result, competing_result) = tokio::join!(
+        app.request("POST", &messages, first_request.clone()),
+        app.request("POST", &messages, competing_request.clone()),
+    );
+    let (accepted, first) = if first_result.0 == StatusCode::OK {
+        assert_eq!(
+            competing_result.0,
+            StatusCode::CONFLICT,
+            "{competing_result:?}"
+        );
+        (first_request, first_result.1)
+    } else {
+        assert_eq!(first_result.0, StatusCode::CONFLICT, "{first_result:?}");
+        assert_eq!(competing_result.0, StatusCode::OK, "{competing_result:?}");
+        (competing_request, competing_result.1)
+    };
+    let (status, retry) = app.request("POST", &messages, accepted).await;
+    assert_eq!(status, StatusCode::OK, "{retry}");
+    assert_eq!(first["id"], retry["id"]);
+    // Remove the accepted request, then capture the refreshed idle boundary.
+    app.request(
+        "DELETE",
+        &format!("{messages}/{}", text(&first, "id")),
+        Value::Null,
+    )
+    .await;
+    let (_, snapshot) = app.get(&path).await;
+    let stale =
+        json!({ "sourceId": format!("{run}:{event_id}"), "revision": snapshot["revision"] });
+    // B is accepted after A captured the card, before A's request reaches the manager.
+    let revision = json!({ "id": id(), "text": "Revise the approach", "plan": true });
+    let (status, body) = app.request("POST", &messages, revision).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = app
+        .request(
+            "POST",
+            &messages,
+            json!({
+                "id": id(), "text": "Implement the plan you proposed.", "planApproval": stale,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let (_, after) = app.get(&path).await;
+    assert!(
+        after["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| { message["text"] != "Implement the plan you proposed." })
+    );
+    // Manually written ordinary messages keep their ordinary queue semantics.
+    assert_eq!(
+        app.request(
+            "POST",
+            &messages,
+            json!({ "id": id(), "text": "An ordinary follow-up" })
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn proposal_replay_cannot_renew_an_invalidated_request_boundary() {
+    let app = App::new().await;
+    for request in [json!("request-a"), Value::Null] {
+        let chat = app.create_chat().await;
+        let chat_id = text(&chat, "id").to_owned();
+        let run = id();
+        app.add_finished_run(
+            &run,
+            RunStatus::Succeeded,
+            json!({ "snapshot": { "agent": { "provider": "codex" } } }),
+            "Plan request",
+        )
+        .await;
+        let (c, r) = (chat_id.clone(), run.clone());
+        let replayed = app.service.store.transaction(move |db| {
+            let mut chat = db.conversation_boundary(&c)?.unwrap();
+            chat["runId"] = r.clone().into();
+            db.save_conversation_boundary(&chat)?;
+            db.event(&r, &EventKind::ChatUser, "Initial request", Some(&json!({ "messageId": "request-a" })))?;
+            let proposal = json!({ "item": { "id": "proposal", "type": "proposed_plan", "text": "Original approach", "request_id": request } });
+            db.event(&r, &EventKind::ItemCompleted, "Original approach", Some(&proposal))?;
+            db.event(&r, &EventKind::ChatUser, "Clarification", Some(&json!({ "messageId": "request-b" })))?;
+            // Recovery restores the same artifact, not a new approach to the clarification.
+            db.event(&r, &EventKind::ItemCompleted, "Original approach", Some(&proposal))?;
+            Ok(db.0.query_row("SELECT MAX(id) FROM events WHERE run_id=?", [r], |row| row.get::<_, i64>(0))?)
+        }).await.unwrap();
+        let path = chat_path(&chat);
+        let (_, current) = app.get(&path).await;
+        let (status, body) = app.request("POST", &format!("{path}/messages"), json!({
+            "id": id(), "text": "Implement the plan you proposed.",
+            "planApproval": { "sourceId": format!("{run}:{replayed}"), "revision": current["revision"] }
+        })).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(
+            app.get(&path).await.1["messages"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let r = run.clone();
+        let completed = app.service.store.transaction(move |db| {
+            db.event(&r, &EventKind::ItemCompleted, "Clarified approach", Some(&json!({
+                "item": { "id": "revised", "type": "proposed_plan", "text": "Clarified approach", "request_id": "request-b" }
+            })))?;
+            Ok(db.0.query_row("SELECT MAX(id) FROM events WHERE run_id=?", [r], |row| row.get::<_, i64>(0))?)
+        }).await.unwrap();
+        let (_, current) = app.get(&path).await;
+        let request = json!({ "id": id(), "text": "Implement the plan you proposed.",
+            "planApproval": { "sourceId": format!("{run}:{completed}"), "revision": current["revision"] } });
+        let (status, accepted) = app
+            .request("POST", &format!("{path}/messages"), request.clone())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{accepted}");
+        let (status, retry) = app
+            .request("POST", &format!("{path}/messages"), request)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(accepted["id"], retry["id"]);
+    }
+}
+
+#[tokio::test]
+async fn legacy_proposals_without_request_ids_require_one_unambiguous_request() {
+    let app = App::new().await;
+    for (request_ids, should_accept) in [
+        (vec!["request-a"], true),
+        (vec!["request-a", "request-a"], true),
+        (vec!["request-a", "request-b"], false),
+    ] {
+        let chat = app.create_chat().await;
+        let chat_id = text(&chat, "id").to_owned();
+        let run = id();
+        app.add_finished_run_with_request(
+            &run,
+            RunStatus::Succeeded,
+            json!({ "snapshot": { "agent": { "provider": "codex" } } }),
+            "Plan request",
+            Some(request_ids[0]),
+        )
+        .await;
+        let (c, r) = (chat_id.clone(), run.clone());
+        let proposal_id = app
+            .service
+            .store
+            .transaction(move |db| {
+                let mut chat = db.conversation_boundary(&c)?.unwrap();
+                chat["runId"] = r.clone().into();
+                db.save_conversation_boundary(&chat)?;
+                // The run helper already recorded the first human delivery.
+                for request_id in request_ids.into_iter().skip(1) {
+                    db.event(
+                        &r,
+                        &EventKind::ChatUser,
+                        "Plan request",
+                        Some(&json!({ "messageId": request_id })),
+                    )?;
+                }
+                db.event(
+                    &r,
+                    &EventKind::ItemCompleted,
+                    "Reviewed legacy plan",
+                    Some(&json!({
+                        "item": {
+                            "id": "legacy-plan",
+                            "type": "proposed_plan",
+                            "text": "Reviewed legacy plan"
+                        }
+                    })),
+                )?;
+                Ok(db
+                    .0
+                    .query_row("SELECT MAX(id) FROM events WHERE run_id=?", [r], |row| {
+                        row.get::<_, i64>(0)
+                    })?)
+            })
+            .await
+            .unwrap();
+        let path = chat_path(&chat);
+        let (_, current) = app.get(&path).await;
+        let request = json!({
+            "id": id(),
+            "text": "Implement the plan you proposed.",
+            "planApproval": {
+                "sourceId": format!("{run}:{proposal_id}"),
+                "revision": current["revision"]
+            }
+        });
+        let (status, body) = app
+            .request("POST", &format!("{path}/messages"), request.clone())
+            .await;
+        if should_accept {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let (retry_status, retry) = app
+                .request("POST", &format!("{path}/messages"), request)
+                .await;
+            assert_eq!(retry_status, StatusCode::OK, "{retry}");
+            assert_eq!(body["id"], retry["id"]);
+        } else {
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert!(
+                app.get(&path).await.1["messages"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn implementation_rejects_newer_unfinished_root_lifecycles() {
+    let app = App::new().await;
+    for status in [RunStatus::Failed, RunStatus::Cancelled] {
+        for proposal in ["proposal", "replacement"] {
+            for phase in [
+                EventKind::ItemStarted,
+                EventKind::ItemUpdated,
+                EventKind::ItemCompleted,
+            ] {
+                let chat = app.create_chat().await;
+                let chat_id = text(&chat, "id").to_owned();
+                let run = id();
+                app.add_finished_run(
+                    &run,
+                    status,
+                    json!({
+                        "snapshot": { "agent": { "provider": "codex" } }
+                    }),
+                    "Plan request",
+                )
+                .await;
+                let (c, r) = (chat_id.clone(), run.clone());
+                let old_event = app.service.store.transaction(move |db| {
+                    let mut chat = db.conversation_boundary(&c)?.unwrap();
+                    chat["runId"] = r.clone().into();
+                    db.save_conversation_boundary(&chat)?;
+                    db.event(&r, &EventKind::ItemCompleted, "Reviewed plan", Some(&json!({
+                        "item": { "id": "proposal", "type": "proposed_plan", "text": "Reviewed plan" }
+                    })))?;
+                    let old: i64 = db.0.query_row("SELECT MAX(id) FROM events WHERE run_id=?", [&r], |row| row.get(0))?;
+                    db.event(&r, &phase, "", Some(&json!({
+                        "item": { "id": proposal, "type": "proposed_plan", "text": "" }
+                    })))?;
+                    Ok(old)
+                }).await.unwrap();
+                let path = chat_path(&chat);
+                let (_, snapshot) = app.get(&path).await;
+                let message = json!({
+                    "id": id(), "text": "Implement the plan you proposed.",
+                    "planApproval": { "sourceId": format!("{run}:{old_event}"), "revision": snapshot["revision"] }
+                });
+                let (response, body) = app
+                    .request("POST", &format!("{path}/messages"), message)
+                    .await;
+                assert_eq!(
+                    response,
+                    StatusCode::CONFLICT,
+                    "{status:?} {proposal}: {body}"
+                );
+                assert!(
+                    app.get(&path).await.1["messages"]
+                        .as_array()
+                        .unwrap()
+                        .is_empty()
+                );
+
+                // An empty completion is a lifecycle marker, not a reviewable approach.
+                let r = run.clone();
+                let marker = app
+                    .service
+                    .store
+                    .read(move |db| {
+                        Ok(db.0.query_row(
+                            "SELECT MAX(id) FROM events WHERE run_id=?",
+                            [r],
+                            |row| row.get::<_, i64>(0),
+                        )?)
+                    })
+                    .await
+                    .unwrap();
+                let (_, current) = app.get(&path).await;
+                let (response, body) = app.request("POST", &format!("{path}/messages"), json!({
+                    "id": id(), "text": "Implement the plan you proposed.",
+                    "planApproval": { "sourceId": format!("{run}:{marker}"), "revision": current["revision"] }
+                })).await;
+                assert_eq!(response, StatusCode::CONFLICT, "{body}");
+
+                // Steering before the final completion belongs to the reviewed approach.
+                let r = run.clone();
+                let completed = app
+                    .service
+                    .store
+                    .transaction(move |db| {
+                        let request_id = id();
+                        db.event(
+                            &r,
+                            &EventKind::ChatUser,
+                            "Clarify the design",
+                            Some(&json!({
+                                "messageId": request_id
+                            })),
+                        )?;
+                        db.event(
+                            &r,
+                            &EventKind::ItemCompleted,
+                            "Clarified plan",
+                            Some(&json!({
+                                "item": {
+                                    "id": proposal,
+                                    "type": "proposed_plan",
+                                    "text": "Clarified plan",
+                                    "request_id": request_id
+                                }
+                            })),
+                        )?;
+                        Ok(db.0.query_row(
+                            "SELECT MAX(id) FROM events WHERE run_id=?",
+                            [r],
+                            |row| row.get::<_, i64>(0),
+                        )?)
+                    })
+                    .await
+                    .unwrap();
+                let (_, snapshot) = app.get(&path).await;
+                let message = json!({
+                    "id": id(), "text": "Implement the plan you proposed.",
+                    "planApproval": { "sourceId": format!("{run}:{completed}"), "revision": snapshot["revision"] }
+                });
+                let (response, accepted) = app
+                    .request("POST", &format!("{path}/messages"), message.clone())
+                    .await;
+                assert_eq!(response, StatusCode::OK, "{accepted}");
+                let (response, retry) = app
+                    .request("POST", &format!("{path}/messages"), message)
+                    .await;
+                assert_eq!(response, StatusCode::OK, "{retry}");
+                assert_eq!(accepted["id"], retry["id"]);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn early_codex_plan_is_approved_only_after_its_start_is_accepted() {
+    use cairn_installation::chat_process;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    for resumed in [false, true] {
+        for rejected in [false, true] {
+            let app = App::new().await;
+            let root = app._root.path();
+            let home = root.join("early-codex");
+            let inbox = root.join("early-inbox");
+            std::fs::create_dir(&home).unwrap();
+            std::fs::create_dir(&inbox).unwrap();
+            let mut config = app.service.config.clone();
+            config.codex_bin = common::fixture("codex.mjs");
+            let mut plan = json!({
+                "execution": {"messageId": id(), "text": "Earlier request", "recovery": false},
+                "instructions": "Test instructions", "inputDirectory": inbox,
+                "output": root.join("early-result.md"), "cwd": root,
+                "model": "", "reasoning": "medium", "sandbox": "yolo",
+                "writableRoots": [], "args": [],
+            });
+            if resumed {
+                let (tx, mut rx) = mpsc::channel(64);
+                let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+                chat_process::run(&config, &home, plan.clone(), tx, CancellationToken::new())
+                    .await
+                    .unwrap();
+                drain.await.unwrap();
+                plan["sessionId"] = "fixture-chat".into();
+            }
+            let request_id = id();
+            plan["execution"]["messageId"] = request_id.clone().into();
+            plan["execution"]["text"] = if rejected {
+                "fixture:early-plan-rejected"
+            } else {
+                "fixture:early-plan"
+            }
+            .into();
+            plan["planning"] = true.into();
+            plan["sandbox"] = "read-only".into();
+            let (tx, mut rx) = mpsc::channel(64);
+            let (cfg, native_home) = (config.clone(), home.clone());
+            let stop = CancellationToken::new();
+            let native_stop = stop.clone();
+            let task = tokio::spawn(async move {
+                chat_process::run(&cfg, &native_home, plan, tx, native_stop).await
+            });
+            let collected = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                let mut events = Vec::new();
+                let mut premature = false;
+                let mut gate_seen = false;
+                while let Some(event) = rx.recv().await {
+                    // This notification follows the early plan on the native pipe,
+                    // while the fixture withholds BOTH its initial user item and RPC reply.
+                    if event["type"] == "context.usage" && event["usage"]["contextTokens"] == 12345
+                    {
+                        premature = events.iter().any(|event: &Value| {
+                            event["item"]["type"] == "proposed_plan"
+                                || (event["type"] == "chat.delivered"
+                                    && event["messageId"] == request_id)
+                        });
+                        gate_seen = true;
+                        // Always release, even on the old failing implementation.
+                        std::fs::write(home.join("fixture-early-plan-release"), "release").unwrap();
+                    }
+                    events.push(event);
+                }
+                (events, premature, gate_seen)
+            })
+            .await;
+            stop.cancel();
+            let result = task.await.unwrap();
+            let (events, premature, gate_seen) = collected.expect("bounded native start handshake");
+            assert!(gate_seen);
+            assert!(
+                !premature,
+                "request/proposal emitted before native acceptance: {events:?}"
+            );
+            if rejected {
+                assert!(result.is_err());
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| event["item"]["type"] == "proposed_plan"
+                            || (event["type"] == "chat.delivered"
+                                && event["messageId"] == request_id))
+                );
+                continue;
+            }
+            result.unwrap();
+            let delivered = events
+                .iter()
+                .position(|event| {
+                    event["type"] == "chat.delivered" && event["messageId"] == request_id
+                })
+                .unwrap();
+            let completed = events
+                .iter()
+                .position(|event| {
+                    event["type"] == "item.completed" && event["item"]["type"] == "proposed_plan"
+                })
+                .unwrap();
+            assert!(delivered < completed);
+            assert_eq!(events[completed]["item"]["request_id"], request_id);
+
+            // Store the actual adapter emission order, then exercise the public
+            // HTTP/common send acceptance contract against that durable history.
+            let chat = app.create_chat().await;
+            let (chat_id, run) = (text(&chat, "id").to_owned(), id());
+            app.add_finished_run(
+                &run,
+                RunStatus::Succeeded,
+                json!({"snapshot":{"agent":{"provider":"codex"}}}),
+                "Earlier context",
+            )
+            .await;
+            let r = run.clone();
+            let source = app
+                .service
+                .store
+                .transaction(move |db| {
+                    let mut chat = db.conversation_boundary(&chat_id)?.unwrap();
+                    chat["runId"] = r.clone().into();
+                    db.save_conversation_boundary(&chat)?;
+                    let mut source = 0_i64;
+                    for event in events {
+                        if event["type"] == "chat.delivered" {
+                            db.event(
+                                &r,
+                                &EventKind::ChatUser,
+                                "Plan request",
+                                Some(&json!({"messageId":event["messageId"], "plan":event["messageId"] == request_id})),
+                            )?;
+                        } else if event["type"]
+                            .as_str()
+                            .is_some_and(|kind| kind.starts_with("item."))
+                        {
+                            let kind = serde_json::from_value(event["type"].clone())?;
+                            db.event(&r, &kind, text(&event["item"], "text"), Some(&event))?;
+                            if event["type"] == "item.completed" && event["item"]["type"] == "proposed_plan" {
+                                source = db.0.query_row(
+                                    "SELECT MAX(id) FROM events WHERE run_id=?",
+                                    [&r],
+                                    |row| row.get(0),
+                                )?;
+                            }
+                        }
+                    }
+                    Ok(source)
+                })
+                .await
+                .unwrap();
+            let path = chat_path(&chat);
+            let (_, snapshot) = app.get(&path).await;
+            let input = json!({"id":id(), "text":"Implement the plan you proposed.",
+                "planApproval":{"sourceId":format!("{run}:{source}"), "revision":snapshot["revision"]}});
+            for _ in 0..2 {
+                let (status, body) = app
+                    .request("POST", &format!("{path}/messages"), input.clone())
+                    .await;
+                assert_eq!(status, StatusCode::OK, "resumed={resumed}: {body}");
+            }
+        }
     }
 }

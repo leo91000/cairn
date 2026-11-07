@@ -1,6 +1,6 @@
 # Merging agent profiles
 
-Use `merge_agents` to consolidate two agent profiles, for example Claude
+Use `merge_agents` to consolidate two Firecracker profiles, for example Claude
 into the main Omni profile. Discover its schema through MCP `search`, then call it
 through `execute` on the public management MCP or `cairn_installation`:
 
@@ -33,15 +33,15 @@ records the source, destination and transferred task/chat/run counts.
 The operation requires two existing, different profiles. Main can only be the
 destination. Before changing anything it refuses:
 
-- A source with queued, running, recovering or still settling execution, including
-  a live backend conversion after its worker has stopped. Wait
+- A source with queued, running, recovering or still settling execution. Wait
   for it to finish and retry; a merge never cancels work.
+- A destination missing its own administrator review for a native node granted to
+  the source. Reviews remain tied to their identity and are never transferred.
+- An active backend conversion, including its stopped source while destination
+  capacity is pending. A failed or interrupted conversion does not block a merge.
 - A destination that does not already cover the source's access, node selection,
   plugin grants (including GitHub credentials) and exclusive node grants. Grant
   access explicitly first.
-- A destination missing its own owner confirmation for an administrator node the
-  source is approved to use. Confirm the destination's access to that host first;
-  merging never transfers administrator approvals automatically.
 - Any plugin delegation still pointing at the source, even when disabled.
   Reassign and reapprove it using the normal owner workflow first.
 
@@ -50,13 +50,12 @@ request returns `sourceId`, `targetId`, `deleted: true` and `transferred` counts
 The source no longer exists, so an identical retry returns a not-found error;
 read the destination and references before retrying an ambiguous timeout.
 
-## Data compatibility
+## Saved records
 
-The installation data epoch remains unchanged. This operation writes only
+This operation writes only
 existing record fields and IDs through the current store contracts. It adds no
 record format, identity alias, schema, secret envelope or checkpoint format.
-A build using the same data epoch reads the transferred records and can resume
-their sessions; it simply does not expose the merge operation. The audit records the original
+The audit records the original
 profile identity, while saved snapshots keep the original name and settings.
 
 Integration coverage exercises the owner API, both MCP interfaces and their

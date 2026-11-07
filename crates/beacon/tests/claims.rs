@@ -88,7 +88,11 @@ async fn claim_codes_require_a_session_and_csrf_and_expire_without_claiming() {
             }))
     };
     assert_eq!(
-        claim(&code, 1).send().await.unwrap().status(),
+        claim(&code, cairn_protocol::PROTOCOL_VERSION)
+            .send()
+            .await
+            .unwrap()
+            .status(),
         StatusCode::UNAUTHORIZED
     );
     let code: Value = issue_code().send().await.unwrap().json().await.unwrap();
@@ -97,7 +101,10 @@ async fn claim_codes_require_a_session_and_csrf_and_expire_without_claiming() {
         StatusCode::CONFLICT
     );
     // Incompatible claims leave the code available; racing valid claims have one winner.
-    let (first, second) = tokio::join!(claim(&code, 1).send(), claim(&code, 1).send());
+    let (first, second) = tokio::join!(
+        claim(&code, cairn_protocol::PROTOCOL_VERSION).send(),
+        claim(&code, cairn_protocol::PROTOCOL_VERSION).send()
+    );
     let statuses = [first.unwrap().status(), second.unwrap().status()];
     assert!(statuses.contains(&StatusCode::CREATED));
     assert!(statuses.contains(&StatusCode::UNAUTHORIZED));

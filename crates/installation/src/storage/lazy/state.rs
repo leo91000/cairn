@@ -9,27 +9,70 @@ pub(super) fn encode_context(value: &Value) -> io::Result<String> {
     Ok(encoded)
 }
 
+fn stored_manifest(directory: &Path, timeout: std::time::Duration) -> io::Result<Value> {
+    let path = directory.join("journal-v2.sqlite");
+    let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(failure)?;
+    db.busy_timeout(timeout).map_err(failure)?;
+    let encoded: String = db
+        .query_row("SELECT manifest FROM state WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .map_err(failure)?;
+    let manifest: Value = serde_json::from_str(&encoded).map_err(failure)?;
+    validate(&manifest)?;
+    Ok(manifest)
+}
+
 impl LazyDisk {
     /// Bootstrap only needs geometry when no resize/recovery is pending. The
-    /// subsequent mounted Volume still performs the complete integrity scan.
-    pub(crate) fn geometry(directory: &Path) -> io::Result<(u64, super::super::layout::Layout)> {
-        let path = if directory.join("journal-v2.sqlite").exists() {
-            directory.join("journal-v2.sqlite")
-        } else {
-            directory.join("journal.sqlite")
+    /// subsequent mounted Volume validates the journal headers during recovery
+    /// and authenticates each payload when it is read.
+    pub(crate) fn geometry(directory: &Path) -> io::Result<u64> {
+        let manifest = stored_manifest(directory, std::time::Duration::from_secs(5))?;
+        Ok(manifest["size"].as_u64().unwrap())
+    }
+
+    /// Conservative local backing: only exclusively allocated decoded cache
+    /// objects referenced by the current base. Journal frames and SQLite are
+    /// deliberately withheld; old append frames are not current backing.
+    pub(crate) fn cached_backing_bytes(directory: &Path) -> io::Result<u64> {
+        use std::os::unix::fs::MetadataExt;
+        let cache = directory.join("cache");
+        let metadata = match std::fs::symlink_metadata(&cache) {
+            Ok(metadata) if metadata.is_dir() => metadata,
+            _ => return Ok(0),
         };
-        let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(failure)?;
-        let encoded: String = db
-            .query_row("SELECT manifest FROM state WHERE id=1", [], |row| {
-                row.get(0)
+        if metadata.file_type().is_symlink() {
+            return Ok(0);
+        }
+        // Withhold uncertain credit rather than delaying a lease heartbeat.
+        let manifest = stored_manifest(directory, std::time::Duration::ZERO)?;
+        let mut referenced = manifest["blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|block| {
+                block["hash"]
+                    .as_str()
+                    .map(|hash| (hash, block["size"].as_u64().unwrap()))
             })
-            .map_err(failure)?;
-        let manifest: Value = serde_json::from_str(&encoded).map_err(failure)?;
-        Ok((
-            validate(&manifest)?,
-            super::super::layout::Layout::from_manifest(&manifest)?,
-        ))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut bytes = 0u64;
+        for entry in std::fs::read_dir(cache)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(size) = name.to_str().and_then(|name| referenced.remove(name)) else {
+                continue;
+            };
+            let Ok(metadata) = std::fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if metadata.is_file() && metadata.nlink() == 1 && metadata.len() == size {
+                bytes = bytes.saturating_add(metadata.blocks().saturating_mul(512).min(size));
+            }
+        }
+        Ok(bytes)
     }
 
     pub fn performance(&self) -> Value {
@@ -45,7 +88,7 @@ impl LazyDisk {
 
     /// Private controller context, never included in exported recovery manifests.
     pub fn set_context(&self, value: &Value) -> io::Result<()> {
-        let policy = super::super::policy::Policy::for_node(&value["policy"]).map_err(failure)?;
+        let policy = crate::storage::policy::for_node(&value["policy"]).map_err(failure)?;
         self.memory_budget(policy.memory_cache_mi_b as usize * 1024 * 1024)?;
         let encoded = encode_context(value)?;
         self.db
@@ -62,11 +105,7 @@ impl LazyDisk {
 
     pub fn context(directory: &Path) -> io::Result<Value> {
         let db = Connection::open_with_flags(
-            if directory.join("journal-v2.sqlite").exists() {
-                directory.join("journal-v2.sqlite")
-            } else {
-                directory.join("journal.sqlite")
-            },
+            directory.join("journal-v2.sqlite"),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .map_err(failure)?;

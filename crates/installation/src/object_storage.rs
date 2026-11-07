@@ -1,5 +1,6 @@
 //! S3 operations stay server-side. Recovery blocks use a shared SDK client;
 //! bucket administration and purge operations use the AWS CLI.
+use crate::performance::publication::{self as diagnostic, Stage};
 use crate::{
     error::{Error, Result},
     service::Service,
@@ -42,6 +43,8 @@ struct StorageCredentials {
     secret_key: String,
 }
 
+type DirectProbes = HashMap<(Option<String>, String), Arc<OnceCell<()>>>;
+
 /// Recovery operations reuse a client for each storage configuration, including
 /// retained disks on a previously selected endpoint.
 pub struct HotS3 {
@@ -54,6 +57,7 @@ pub struct HotS3 {
     get_metrics: Counter,
     put_metrics: Counter,
     purge_metrics: Counter,
+    direct_probes: Mutex<DirectProbes>,
 }
 
 impl HotS3 {
@@ -68,6 +72,7 @@ impl HotS3 {
             get_metrics: Counter::default(),
             put_metrics: Counter::default(),
             purge_metrics: Counter::default(),
+            direct_probes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -175,7 +180,6 @@ fn server_side_encryption(
 
 fn setting(config: &Value, suffix: &str, key: &str) -> String {
     non_empty_env(&format!("STORAGE_S3_{suffix}"))
-        .or_else(|| non_empty_env(&format!("ARCHIVE_S3_{suffix}")))
         .unwrap_or_else(|| config[key].as_str().unwrap_or("").into())
 }
 
@@ -184,12 +188,7 @@ fn non_empty_env(name: &str) -> Option<String> {
 }
 
 fn read_config(s: &Service) -> Result<Value> {
-    let primary = s.config.data_dir.join("storage-s3.json");
-    let file = if primary.exists() {
-        primary
-    } else {
-        s.config.data_dir.join("archive-s3.json")
-    };
+    let file = s.config.data_dir.join("storage-s3.json");
     if file.exists() {
         Ok(serde_json::from_slice(&std::fs::read(file)?)?)
     } else {
@@ -197,39 +196,40 @@ fn read_config(s: &Service) -> Result<Value> {
     }
 }
 
-pub fn settings(s: &Service) -> Result<Value> {
+/// The default storage for new disks, without its credentials.
+pub fn settings(s: &Service) -> Result<cairn_contracts::StorageSettings> {
     let config = read_config(s)?;
-    let environment_managed = ["BUCKET", "ENDPOINT", "REGION"].iter().any(|suffix| {
-        non_empty_env(&format!("STORAGE_S3_{suffix}")).is_some()
-            || non_empty_env(&format!("ARCHIVE_S3_{suffix}")).is_some()
-    });
-    Ok(json!({
-        "configured": Storage::configured(s).is_ok(),
-        "bucket": setting(&config, "BUCKET", "bucket"),
-        "endpoint": setting(&config, "ENDPOINT", "endpoint"),
-        "region": setting(&config, "REGION", "region"),
-        "integrated": config["integrated"] == true,
-        "environmentManaged": environment_managed,
-    }))
+    let environment_managed = ["BUCKET", "ENDPOINT", "REGION"]
+        .iter()
+        .any(|suffix| non_empty_env(&format!("STORAGE_S3_{suffix}")).is_some());
+    Ok(cairn_contracts::StorageSettings {
+        configured: Storage::configured(s).is_ok(),
+        bucket: setting(&config, "BUCKET", "bucket"),
+        endpoint: setting(&config, "ENDPOINT", "endpoint"),
+        region: setting(&config, "REGION", "region"),
+        integrated: config["integrated"] == true,
+        environment_managed,
+    })
 }
 
-pub async fn save_settings(s: &Service, input: &Value) -> Result<Value> {
+/// Checks the candidate over the network before replacing the private storage file.
+pub async fn save_settings(
+    s: &Service,
+    input: cairn_contracts::SaveStorageSettingsInput,
+) -> Result<cairn_contracts::StorageSettings> {
     let _lock = s.hot_s3.settings_lock.lock().await;
-    if settings(s)?["environmentManaged"] == true {
+    if settings(s)?.environment_managed {
         return Err(Error::conflict(
             "Remove server S3 environment overrides before using storage settings.",
         ));
     }
-    let field = |name: &str, max: usize| -> Result<String> {
-        let value = input[name]
-            .as_str()
-            .filter(|value| {
-                !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control)
-            })
-            .ok_or_else(|| Error::bad(format!("{name}: enter a valid value.")))?;
-        Ok(value.to_owned())
+    let field = |name: &str, value: String, max: usize| -> Result<String> {
+        if value.is_empty() || value.len() > max || value.chars().any(char::is_control) {
+            return Err(Error::bad(format!("{name}: enter a valid value.")));
+        }
+        Ok(value)
     };
-    let endpoint = field("endpoint", 2048)?;
+    let endpoint = field("endpoint", input.endpoint, 2048)?;
     let url = url::Url::parse(&endpoint).map_err(|_| Error::bad("Use an HTTPS S3 endpoint."))?;
     if url.scheme() != "https"
         || url.host_str().is_none()
@@ -244,12 +244,12 @@ pub async fn save_settings(s: &Service, input: &Value) -> Result<Value> {
     }
     let mut previous = read_config(s)?;
     let mut next = json!({
-        "bucket": field("bucket", 63)?,
+        "bucket": field("bucket", input.bucket, 63)?,
         "endpoint": endpoint,
-        "region": field("region", 100)?,
-        "accessKeyId": field("accessKeyId", 256)?,
-        "secretAccessKey": field("secretAccessKey", 256)?,
-        "privateBucketConfirmed": input["privateBucketConfirmed"] == true,
+        "region": field("region", input.region, 100)?,
+        "accessKeyId": field("accessKeyId", input.access_key_id, 256)?,
+        "secretAccessKey": field("secretAccessKey", input.secret_access_key, 256)?,
+        "privateBucketConfirmed": input.private_bucket_confirmed,
     });
     // Executable selection is server configuration, never user input.
     if previous["awsBinary"].is_string() {
@@ -317,6 +317,202 @@ fn read_error(
 }
 
 impl Storage {
+    /// Qualify direct request destinations and writes for the actual S3 driver.
+    /// These tiny control objects never contain a conversation's disk data.
+    #[cfg(test)]
+    pub(crate) async fn require_direct(&self) -> Result<()> {
+        self.require_direct_authorized(&crate::authorization::Authorization::default())
+            .await
+    }
+
+    pub(crate) async fn require_direct_authorized(
+        &self,
+        authorize: &crate::authorization::Authorization,
+    ) -> Result<()> {
+        authorize.recheck().await?;
+        let cache_key = (self.endpoint.clone(), self.bucket.clone());
+        let probe = self
+            .hot
+            .direct_probes
+            .lock()
+            .await
+            .entry(cache_key)
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .clone();
+        probe
+            .get_or_try_init(|| async {
+                let client = self
+                    .hot
+                    .client(
+                        self.endpoint.as_deref(),
+                        &self.region,
+                        self.credentials.as_ref(),
+                    )
+                    .await;
+                let key = format!("direct-probes/{}", crate::config::id());
+                // Check reachability rules before performing even a control PUT.
+                let signed = client
+                    .get_object()
+                    .bucket(&self.bucket)
+                    .key(&key)
+                    .presigned(
+                        aws_sdk_s3::presigning::PresigningConfig::expires_in(Duration::from_secs(
+                            60,
+                        ))
+                        .map_err(Error::internal)?,
+                    )
+                    .await
+                    .map_err(|_| Error::unavailable("Cannot sign direct storage requests."))?;
+                crate::storage::direct::Request::signed(&signed, self.integrated)?;
+                let checksum = base64::engine::general_purpose::STANDARD
+                    .encode(Md5::digest(b"cairn-direct-probe"));
+                let request = || {
+                    client
+                        .put_object()
+                        .bucket(&self.bucket)
+                        .key(&key)
+                        .if_none_match("*")
+                        .content_md5(checksum.clone())
+                        .set_server_side_encryption(self.server_side_encryption.clone())
+                        .body(aws_sdk_s3::primitives::ByteStream::from_static(
+                            b"cairn-direct-probe",
+                        ))
+                };
+                let result = async {
+                    authorize.recheck().await?;
+                    request().send().await.map_err(|_| {
+                        Error::unavailable("Direct storage capability probe failed.")
+                    })?;
+                    authorize.recheck().await?;
+                    match request().send().await {
+                        Err(error)
+                            if error
+                                .raw_response()
+                                .is_some_and(|response| response.status().as_u16() == 412) =>
+                        {
+                            Ok(())
+                        }
+                        // Some S3 stores (including bundled Garage) ignore this
+                        // condition. Trusted supervisors still enforce logical
+                        // immutability: every PUT verifies the exact plaintext hash,
+                        // size and incarnation key before encoding. A replay may
+                        // replace ciphertext, never the authenticated content.
+                        Ok(_) => Ok(()),
+                        _ => Err(Error::unavailable(
+                            "Direct storage write qualification failed.",
+                        )),
+                    }
+                }
+                .await;
+                // Cleanup is confined to this probe's random control key;
+                // it removes no caller data and remains necessary on revocation.
+                let cleanup = client
+                    .delete_object()
+                    .bucket(&self.bucket)
+                    .key(&key)
+                    .send()
+                    .await;
+                result?;
+                cleanup.map_err(|_| {
+                    Error::unavailable("Direct storage capability probe cleanup failed.")
+                })?;
+                Ok::<(), Error>(())
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn direct_read(
+        &self,
+        vault: &crate::vault::Vault,
+        hash: &str,
+        object: &str,
+        size: u64,
+    ) -> Result<crate::storage::direct::Read> {
+        use crate::storage::direct::{AUTH_SECONDS, Read, Request};
+        let key = crate::nodes::shared_blocks::object_key(3, hash, object);
+        let client = self
+            .hot
+            .client(
+                self.endpoint.as_deref(),
+                &self.region,
+                self.credentials.as_ref(),
+            )
+            .await;
+        let signed = client
+            .get_object()
+            .bucket(&self.bucket)
+            .key(&key)
+            .presigned(
+                aws_sdk_s3::presigning::PresigningConfig::expires_in(Duration::from_secs(
+                    AUTH_SECONDS,
+                ))
+                .map_err(Error::internal)?,
+            )
+            .await
+            .map_err(|_| Error::unavailable("Direct storage read authorization unavailable."))?;
+        Ok(Read {
+            object: object.to_owned(),
+            hash: hash.to_owned(),
+            size,
+            key: base64::engine::general_purpose::STANDARD.encode(vault.storage_object_key(&key)),
+            expires_at: crate::config::now() + AUTH_SECONDS as i64 * 1000,
+            get: Request::signed(&signed, self.integrated)?,
+        })
+    }
+
+    pub(crate) async fn direct_upload(
+        &self,
+        vault: &crate::vault::Vault,
+        hash: &str,
+        object: &str,
+        size: u64,
+    ) -> Result<crate::storage::direct::Upload> {
+        use crate::storage::direct::{AUTH_SECONDS, Request, Upload};
+        let read = self.direct_read(vault, hash, object, size).await?;
+        let scope = crate::nodes::shared_blocks::object_key(3, hash, object);
+        let client = self
+            .hot
+            .client(
+                self.endpoint.as_deref(),
+                &self.region,
+                self.credentials.as_ref(),
+            )
+            .await;
+        let signed = client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(scope)
+            .if_none_match("*")
+            .set_server_side_encryption(self.server_side_encryption.clone())
+            .presigned(
+                aws_sdk_s3::presigning::PresigningConfig::expires_in(Duration::from_secs(
+                    AUTH_SECONDS,
+                ))
+                .map_err(Error::internal)?,
+            )
+            .await
+            .map_err(|_| Error::unavailable("Direct storage upload authorization unavailable."))?;
+        let put = Request::signed(&signed, self.integrated)?;
+        let signed_headers = url::Url::parse(&put.url)
+            .ok()
+            .and_then(|url| {
+                url.query_pairs()
+                    .find(|(name, _)| name == "X-Amz-SignedHeaders")
+                    .map(|(_, value)| value.into_owned())
+            })
+            .unwrap_or_default();
+        if !signed_headers
+            .split(';')
+            .any(|name| name == "if-none-match")
+        {
+            return Err(Error::unavailable(
+                "Storage signing did not bind the create-only condition.",
+            ));
+        }
+        Ok(Upload { read, put })
+    }
+
     /// Existing disks keep their original storage; changing the default does not move or orphan them.
     pub(crate) fn for_location(s: &Service, location: &Value) -> Result<Self> {
         let config = read_config(s)?;
@@ -331,7 +527,7 @@ impl Storage {
                 return Self::from_config(s, saved);
             }
         }
-        // Preserve the existing contract for older recovery points in a different bucket on the same endpoint.
+        // Current credentials can also serve retained points in another bucket on the same endpoint.
         if current.endpoint.as_deref() == location["endpoint"].as_str() {
             return Ok(current);
         }
@@ -356,6 +552,34 @@ impl Storage {
         let cleanup = self.purge_key(&key).await;
         checked?;
         cleanup
+    }
+
+    pub(crate) async fn probe_live(
+        &self,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<()> {
+        authorize.recheck().await?;
+        let key = format!("installation-check/{}", uuid::Uuid::new_v4());
+        let checked = async {
+            let bytes = b"Cairn storage check";
+            self.upload_bytes_checked(bytes.to_vec(), &key, Some(&authorize))
+                .await?;
+            // The fresh probe key cannot be shared with an unrelated reader.
+            let remote = self
+                .fetch_bytes_checked(&key, bytes.len() as u64, Some(&authorize))
+                .await?;
+            if remote != bytes {
+                return Err(Error::bad("Remote backup checksum mismatch."));
+            }
+            authorize.recheck().await
+        }
+        .await;
+        // The host owns this probe key from admission. Always clean it up,
+        // including after the initiating execution loses authority.
+        let cleanup = self.purge_key(&key).await;
+        checked?;
+        cleanup?;
+        authorize.recheck().await
     }
 
     pub fn configured(s: &Service) -> Result<Self> {
@@ -492,9 +716,36 @@ impl Storage {
     }
 
     pub async fn validate(&self) -> Result<()> {
+        self.validate_checked(None).await
+    }
+
+    pub(crate) async fn validate_live(
+        &self,
+        authorize: &crate::authorization::Authorization,
+    ) -> Result<()> {
+        self.validate_checked(Some(authorize)).await
+    }
+
+    async fn validation_call(
+        &self,
+        args: Vec<String>,
+        missing: Option<&str>,
+        authorize: Option<&crate::authorization::Authorization>,
+    ) -> Result<Value> {
+        if let Some(authorize) = authorize {
+            authorize.recheck().await?;
+        }
+        self.optional(args, missing).await
+    }
+
+    async fn validate_checked(
+        &self,
+        authorize: Option<&crate::authorization::Authorization>,
+    ) -> Result<()> {
         // Garage has neither public ACLs nor bucket policies, and is private on the Compose network.
         if self.integrated {
-            self.call(self.s3api("head-bucket", &[])).await?;
+            self.validation_call(self.s3api("head-bucket", &[]), None, authorize)
+                .await?;
             return Ok(());
         }
         let privacy = async {
@@ -503,13 +754,14 @@ impl Storage {
                 return Ok(());
             }
             let block = self
-                .optional(
+                .validation_call(
                     self.s3api("get-public-access-block", &[]),
                     Some("NotImplemented"),
+                    authorize,
                 )
                 .await?;
             if block.is_null() {
-                self.validate_private().await?;
+                self.validate_private(authorize).await?;
             } else if [
                 "BlockPublicAcls",
                 "IgnorePublicAcls",
@@ -527,9 +779,10 @@ impl Storage {
         };
         let lifecycle = async {
             let lifecycle = self
-                .optional(
+                .validation_call(
                     self.s3api("get-bucket-lifecycle-configuration", &[]),
                     Some("NoSuchLifecycleConfiguration"),
+                    authorize,
                 )
                 .await?;
             if lifecycle["Rules"]
@@ -549,9 +802,10 @@ impl Storage {
                 return Ok(());
             }
             let lock = self
-                .optional(
+                .validation_call(
                     self.s3api("get-object-lock-configuration", &[]),
                     Some("ObjectLockConfigurationNotFoundError"),
+                    authorize,
                 )
                 .await?;
             if lock["ObjectLockConfiguration"]["ObjectLockEnabled"] == "Enabled" {
@@ -567,14 +821,19 @@ impl Storage {
             privacy,
             lifecycle,
             object_lock,
-            self.call(self.s3api("head-bucket", &[]))
+            self.validation_call(self.s3api("head-bucket", &[]), None, authorize)
         )?;
         Ok(())
     }
 
     /// Providers without public access blocks (OVHcloud) must show a private ACL and no bucket policy.
-    async fn validate_private(&self) -> Result<()> {
-        let acl = self.call(self.s3api("get-bucket-acl", &[])).await?;
+    async fn validate_private(
+        &self,
+        authorize: Option<&crate::authorization::Authorization>,
+    ) -> Result<()> {
+        let acl = self
+            .validation_call(self.s3api("get-bucket-acl", &[]), None, authorize)
+            .await?;
         if acl["Grants"].as_array().into_iter().flatten().any(|grant| {
             let uri = grant["Grantee"]["URI"].as_str().unwrap_or("");
             uri.ends_with("/AllUsers") || uri.ends_with("/AuthenticatedUsers")
@@ -582,6 +841,9 @@ impl Storage {
             return Err(Error::bad(
                 "The storage bucket must not grant public access.",
             ));
+        }
+        if let Some(authorize) = authorize {
+            authorize.recheck().await?;
         }
         let policy = self
             .optional(
@@ -606,8 +868,56 @@ impl Storage {
     }
 
     pub async fn upload_bytes(&self, bytes: Vec<u8>, key: &str) -> Result<()> {
+        self.upload_bytes_checked(bytes, key, None).await
+    }
+
+    pub(crate) async fn upload_bytes_authorized(
+        &self,
+        bytes: Vec<u8>,
+        key: &str,
+        authorize: &crate::authorization::Authorization,
+    ) -> Result<()> {
+        self.upload_bytes_checked(bytes, key, Some(authorize)).await
+    }
+
+    pub(crate) async fn upload_file_verified_authorized(
+        &self,
+        path: &Path,
+        key: &str,
+        authorize: &crate::authorization::Authorization,
+    ) -> Result<()> {
+        authorize.recheck().await?;
+        let bytes = tokio::fs::read(path).await?;
+        self.upload_bytes_checked(bytes, key, Some(authorize)).await
+    }
+
+    pub(crate) async fn download_bytes_authorized(
+        &self,
+        key: &str,
+        limit: u64,
+        authorize: &crate::authorization::Authorization,
+    ) -> Result<Vec<u8>> {
+        if !authorize.has_async_checks() {
+            return self.download_bytes(key, limit).await;
+        }
+        let bytes = self
+            .fetch_bytes_checked(key, limit, Some(authorize))
+            .await?;
+        authorize.recheck().await?;
+        Ok(bytes)
+    }
+
+    async fn upload_bytes_checked(
+        &self,
+        bytes: Vec<u8>,
+        key: &str,
+        authorize: Option<&crate::authorization::Authorization>,
+    ) -> Result<()> {
         let sample = self.hot.put_metrics.start();
+        let slot = diagnostic::start(Stage::PutSlot);
         let _permit = self.hot.writes.acquire().await.map_err(Error::internal)?;
+        slot.finish(0);
+        let client_sample = diagnostic::start(Stage::S3Client);
         let client = self
             .hot
             .client(
@@ -616,10 +926,17 @@ impl Storage {
                 self.credentials.as_ref(),
             )
             .await;
+        client_sample.finish(0);
         let bytes = bytes::Bytes::from(bytes);
         // MD5 detects transfer corruption; block identity and encryption retain
         // their existing cryptographic checks on recovery reads.
+        let checksum_sample = diagnostic::start(Stage::PutChecksum);
         let checksum = base64::engine::general_purpose::STANDARD.encode(Md5::digest(&bytes));
+        checksum_sample.finish(bytes.len());
+        if let Some(authorize) = authorize {
+            authorize.recheck().await?;
+        }
+        let request_sample = diagnostic::start(Stage::PutRequest);
         client
             .put_object()
             .content_md5(checksum)
@@ -632,6 +949,7 @@ impl Storage {
             .map_err(|_| {
                 Error::unavailable("Recovery block upload failed; local data is retained.")
             })?;
+        request_sample.finish(bytes.len());
         sample.finish(bytes.len());
         Ok(())
     }
@@ -665,6 +983,7 @@ impl Storage {
                     pending
                 })
         };
+        let wait_sample = diagnostic::start(Stage::GetCoalesced);
         let result = pending
             .get_or_init(|| async { self.fetch_bytes(key, limit).await.map(bytes::Bytes::from) })
             .await
@@ -676,12 +995,27 @@ impl Storage {
         {
             reads.remove(&request);
         }
+        if let Ok(bytes) = &result {
+            wait_sample.finish(bytes.len());
+        }
         result.map(|bytes| bytes.to_vec())
     }
 
     async fn fetch_bytes(&self, key: &str, limit: u64) -> Result<Vec<u8>> {
+        self.fetch_bytes_checked(key, limit, None).await
+    }
+
+    async fn fetch_bytes_checked(
+        &self,
+        key: &str,
+        limit: u64,
+        authorize: Option<&crate::authorization::Authorization>,
+    ) -> Result<Vec<u8>> {
         let sample = self.hot.get_metrics.start();
+        let slot = diagnostic::start(Stage::GetSlot);
         let _permit = self.hot.reads.acquire().await.map_err(Error::internal)?;
+        slot.finish(0);
+        let client_sample = diagnostic::start(Stage::S3Client);
         let client = self
             .hot
             .client(
@@ -690,7 +1024,12 @@ impl Storage {
                 self.credentials.as_ref(),
             )
             .await;
+        client_sample.finish(0);
+        if let Some(authorize) = authorize {
+            authorize.recheck().await?;
+        }
         let bytes = tokio::time::timeout(Duration::from_secs(60), async {
+            let headers = diagnostic::start(Stage::GetHeaders);
             let output = client
                 .get_object()
                 .bucket(&self.bucket)
@@ -698,6 +1037,8 @@ impl Storage {
                 .send()
                 .await
                 .map_err(|error| read_error(&error))?;
+            headers.finish(0);
+            let body_sample = diagnostic::start(Stage::GetBody);
             if output
                 .content_length()
                 .is_some_and(|length| length < 0 || length as u64 > limit)
@@ -715,6 +1056,7 @@ impl Storage {
                 }
                 bytes.extend_from_slice(&chunk);
             }
+            body_sample.finish(bytes.len());
             Ok(bytes)
         })
         .await
@@ -879,10 +1221,19 @@ impl Storage {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    async fn fixture_storage(endpoint: &str, bucket: &str, hot: Arc<HotS3>) -> Storage {
+    pub(crate) async fn fixture_storage(endpoint: &str, bucket: &str, hot: Arc<HotS3>) -> Storage {
+        fixture_storage_at(endpoint, endpoint, bucket, hot).await
+    }
+
+    pub(crate) async fn fixture_storage_at(
+        endpoint: &str,
+        logical_endpoint: &str,
+        bucket: &str,
+        hot: Arc<HotS3>,
+    ) -> Storage {
         use aws_sdk_s3::config::{Credentials, Region, retry::RetryConfig};
 
         let sdk = aws_sdk_s3::Client::from_conf(
@@ -899,7 +1250,7 @@ mod tests {
         );
         hot.clients.lock().await.insert(
             ClientKey {
-                endpoint: Some(endpoint.into()),
+                endpoint: Some(logical_endpoint.into()),
                 region: "us-east-1".into(),
                 environment_endpoint: std::env::var("AWS_ENDPOINT_URL_S3").ok(),
                 profile: std::env::var("AWS_PROFILE").ok(),
@@ -910,7 +1261,7 @@ mod tests {
         Storage {
             bucket: bucket.into(),
             binary: "unused".into(),
-            endpoint: Some(endpoint.into()),
+            endpoint: Some(logical_endpoint.into()),
             region: "us-east-1".into(),
             credentials: None,
             integrated: false,
@@ -918,6 +1269,466 @@ mod tests {
             server_side_encryption: Some(aws_sdk_s3::types::ServerSideEncryption::Aes256),
             hot,
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable Garage with synthetic keys; CAIRN_DIRECT_S3_TEST_ENDPOINT must be loopback"]
+    async fn direct_garage_replays_preserve_verified_content_without_manager_transit() {
+        use crate::storage::direct::{self, Batch};
+        let endpoint = std::env::var("CAIRN_DIRECT_S3_TEST_ENDPOINT").unwrap();
+        assert_eq!(
+            url::Url::parse(&endpoint).unwrap().host_str(),
+            Some("127.0.0.1")
+        );
+        let hot = Arc::new(HotS3::new());
+        let storage = Storage {
+            bucket: "cairn-node-test".into(),
+            binary: "unused".into(),
+            endpoint: Some(endpoint),
+            region: "garage".into(),
+            credentials: Some(StorageCredentials {
+                access_key: format!("GK{}", "42".repeat(16)),
+                secret_key: "ab".repeat(32),
+            }),
+            integrated: false,
+            r2: false,
+            server_side_encryption: Some(aws_sdk_s3::types::ServerSideEncryption::Aes256),
+            hot,
+        };
+        storage.require_direct().await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let vault =
+            crate::vault::Vault::new(crate::store::Store::open(root.path()).unwrap(), root.path())
+                .unwrap();
+        let snapshot = root.path().join("snapshot");
+        tokio::fs::create_dir(&snapshot).await.unwrap();
+        let bytes = vec![37; 8192];
+        tokio::fs::write(snapshot.join("disk"), &bytes)
+            .await
+            .unwrap();
+        let manifest = crate::nodes::snapshots::index(&snapshot.join("disk"))
+            .await
+            .unwrap();
+        tokio::fs::write(snapshot.join("manifest.json"), manifest.to_string())
+            .await
+            .unwrap();
+        let hash = crate::storage::digest::block(&bytes);
+        let object = crate::config::id();
+        for _ in 0..2 {
+            let plan = storage
+                .direct_upload(&vault, &hash, &object, bytes.len() as u64)
+                .await
+                .unwrap();
+            let read = plan.read.clone();
+            direct::upload_snapshot(
+                &snapshot,
+                Batch {
+                    require_reader: false,
+                    diagnostics: None,
+                    publication_id: crate::config::id(),
+                    objects: vec![plan],
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(direct::download(read).await.unwrap(), bytes);
+        }
+        tokio::fs::write(snapshot.join("disk"), vec![38; 8192])
+            .await
+            .unwrap();
+        let plan = storage
+            .direct_upload(&vault, &hash, &object, bytes.len() as u64)
+            .await
+            .unwrap();
+        let read = plan.read.clone();
+        assert!(
+            direct::upload_snapshot(
+                &snapshot,
+                Batch {
+                    require_reader: false,
+                    diagnostics: None,
+                    publication_id: crate::config::id(),
+                    objects: vec![plan]
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            direct::download(read).await.unwrap(),
+            bytes,
+            "a corrupt source must never replace published content"
+        );
+        assert_eq!(storage.hot.get_metrics.snapshot()["count"], 0);
+        assert_eq!(storage.hot.put_metrics.snapshot()["count"], 0);
+        storage
+            .hot
+            .client(
+                storage.endpoint.as_deref(),
+                &storage.region,
+                storage.credentials.as_ref(),
+            )
+            .await
+            .delete_object()
+            .bucket(&storage.bucket)
+            .key(crate::nodes::shared_blocks::object_key(3, &hash, &object))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn direct_node_upload_and_read_use_scoped_requests_without_payload_relay() {
+        use crate::storage::direct::{self, Batch, Receipt};
+        use axum::{
+            Router,
+            extract::Request,
+            http::{Method, StatusCode},
+            response::IntoResponse,
+            routing::any,
+        };
+        let objects = Arc::new(Mutex::new(HashMap::<String, Vec<u8>>::new()));
+        let failing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let conditional = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let state = objects.clone();
+        let fail = failing.clone();
+        let condition = conditional.clone();
+        let app = Router::new().fallback(any(move |request: Request| {
+            let (objects, failing, conditional) = (state.clone(), fail.clone(), condition.clone());
+            async move {
+                let path = request.uri().path().to_owned();
+                let method = request.method().clone();
+                if method == Method::DELETE {
+                    objects.lock().await.remove(&path);
+                    return StatusCode::NO_CONTENT.into_response();
+                }
+                if method == Method::GET {
+                    return match objects.lock().await.get(&path) {
+                        Some(bytes) => bytes.clone().into_response(),
+                        None => StatusCode::NOT_FOUND.into_response(),
+                    };
+                }
+                if method != Method::PUT {
+                    return StatusCode::METHOD_NOT_ALLOWED.into_response();
+                }
+                assert_eq!(request.headers()["if-none-match"], "*");
+                if failing.load(std::sync::atomic::Ordering::SeqCst) {
+                    return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                }
+                let checksum = request.headers()["content-md5"]
+                    .to_str()
+                    .unwrap()
+                    .to_owned();
+                let bytes = axum::body::to_bytes(request.into_body(), 5 * 1024 * 1024)
+                    .await
+                    .unwrap()
+                    .to_vec();
+                assert_eq!(
+                    checksum,
+                    base64::engine::general_purpose::STANDARD.encode(Md5::digest(&bytes))
+                );
+                let mut objects = objects.lock().await;
+                if objects.contains_key(&path)
+                    && conditional.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    return StatusCode::PRECONDITION_FAILED.into_response();
+                }
+                objects.insert(path, bytes);
+                StatusCode::OK.into_response()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let storage = fixture_storage(&origin, "private", Arc::new(HotS3::new())).await;
+        storage.require_direct().await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let vault =
+            crate::vault::Vault::new(crate::store::Store::open(root.path()).unwrap(), root.path())
+                .unwrap();
+        let snapshot = root.path().join("snapshot");
+        tokio::fs::create_dir(&snapshot).await.unwrap();
+        let bytes = vec![37; 8192];
+        tokio::fs::write(snapshot.join("disk"), &bytes)
+            .await
+            .unwrap();
+        let manifest = crate::nodes::snapshots::index(&snapshot.join("disk"))
+            .await
+            .unwrap();
+        tokio::fs::write(snapshot.join("manifest.json"), manifest.to_string())
+            .await
+            .unwrap();
+        let hash = crate::storage::digest::block(&bytes);
+        let object = crate::config::id();
+        let publication = crate::config::id();
+        let plan = storage
+            .direct_upload(&vault, &hash, &object, bytes.len() as u64)
+            .await
+            .unwrap();
+        let get = plan.read.clone();
+        let batch = Batch {
+            require_reader: false,
+            diagnostics: None,
+            publication_id: publication.clone(),
+            objects: vec![plan],
+        };
+        let receipt: Receipt = serde_json::from_value(
+            crate::nodes::snapshots::upload_direct(&snapshot, &serde_json::to_vec(&batch).unwrap())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(receipt.publication_id, publication);
+        assert_eq!(receipt.objects, vec![object.clone()]);
+        assert_eq!(receipt.plaintext_bytes, bytes.len() as u64);
+        assert!(receipt.encoded_bytes < receipt.plaintext_bytes);
+        assert_eq!(direct::download(get.clone()).await.unwrap(), bytes);
+        let replay = storage
+            .direct_upload(&vault, &hash, &object, bytes.len() as u64)
+            .await
+            .unwrap();
+        // A second PUT gets 412; only a verified direct GET permits accepting it.
+        direct::upload_snapshot(
+            &snapshot,
+            Batch {
+                require_reader: false,
+                diagnostics: None,
+                publication_id: crate::config::id(),
+                objects: vec![replay],
+            },
+        )
+        .await
+        .unwrap();
+        let key = crate::nodes::shared_blocks::object_key(3, &hash, &object);
+        let path = format!("/private/{key}");
+        *objects
+            .lock()
+            .await
+            .get_mut(&path)
+            .unwrap()
+            .last_mut()
+            .unwrap() ^= 1;
+        assert!(direct::download(get).await.is_err());
+        let corrupt_replay = storage
+            .direct_upload(&vault, &hash, &object, bytes.len() as u64)
+            .await
+            .unwrap();
+        assert!(
+            direct::upload_snapshot(
+                &snapshot,
+                Batch {
+                    require_reader: false,
+                    diagnostics: None,
+                    publication_id: crate::config::id(),
+                    objects: vec![corrupt_replay]
+                }
+            )
+            .await
+            .is_err(),
+            "412 must not accept an existing corrupt object"
+        );
+        failing.store(true, std::sync::atomic::Ordering::SeqCst);
+        let upload = storage
+            .direct_upload(&vault, &hash, &crate::config::id(), bytes.len() as u64)
+            .await
+            .unwrap();
+        assert!(
+            direct::upload_snapshot(
+                &snapshot,
+                Batch {
+                    require_reader: false,
+                    diagnostics: None,
+                    publication_id: crate::config::id(),
+                    objects: vec![upload]
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(tokio::fs::read(snapshot.join("disk")).await.unwrap(), bytes);
+        assert_eq!(
+            storage.hot.get_metrics.snapshot()["count"],
+            0,
+            "The manager never downloads a disk block"
+        );
+        assert_eq!(
+            storage.hot.put_metrics.snapshot()["count"],
+            0,
+            "The manager never uploads a disk block"
+        );
+        failing.store(false, std::sync::atomic::Ordering::SeqCst);
+        conditional.store(false, std::sync::atomic::Ordering::SeqCst);
+        let overwrite_driver = fixture_storage(&origin, "private", Arc::new(HotS3::new())).await;
+        overwrite_driver.require_direct().await.unwrap();
+        let replay = overwrite_driver
+            .direct_upload(&vault, &hash, &object, bytes.len() as u64)
+            .await
+            .unwrap();
+        let read = replay.read.clone();
+        direct::upload_snapshot(
+            &snapshot,
+            Batch {
+                require_reader: false,
+                diagnostics: None,
+                publication_id: crate::config::id(),
+                objects: vec![replay],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            direct::download(read).await.unwrap(),
+            bytes,
+            "a store without conditional writes still receives only the authorized plaintext"
+        );
+        server.abort();
+    }
+
+    async fn check_probe_revocation(wait_for_write_slot: bool) {
+        use axum::{body::Body, extract::Request, response::IntoResponse};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(crate::common::config(root.path()))
+            .await
+            .unwrap();
+        let allowed = Arc::new(AtomicBool::new(true));
+        let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (permission, observed) = (allowed.clone(), requests.clone());
+        let app = axum::Router::new().fallback(move |request: Request<Body>| {
+            let (permission, observed) = (permission.clone(), observed.clone());
+            async move {
+                let method = request.method().as_str().to_owned();
+                observed.lock().await.push(method.clone());
+                if method == "PUT" && !wait_for_write_slot {
+                    permission.store(false, Ordering::SeqCst);
+                }
+                if method == "GET" {
+                    (axum::http::StatusCode::OK, "Cairn storage check").into_response()
+                } else {
+                    axum::http::StatusCode::OK.into_response()
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let hot = Arc::new(HotS3::new());
+        let mut storage = fixture_storage(&origin, "fixture", hot.clone()).await;
+        storage.integrated = true;
+        let permission = allowed.clone();
+        let authorize = crate::authorization::Authorization::new(&service, move |_| {
+            if permission.load(Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err(Error::forbidden("Revoked"))
+            }
+        });
+        let held = if wait_for_write_slot {
+            Some(
+                hot.writes
+                    .acquire_many(HOT_WRITE_CONCURRENCY as u32)
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let probe = tokio::spawn(async move { storage.probe_live(authorize).await });
+        if wait_for_write_slot {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while hot.put_metrics.snapshot()["inFlight"] != 1 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            allowed.store(false, Ordering::SeqCst);
+        }
+        drop(held);
+        let error = tokio::time::timeout(Duration::from_secs(10), probe)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.status, 403);
+        let requests = requests.lock().await;
+        assert!(
+            !requests.iter().any(|method| method == "GET"),
+            "read after revocation: {requests:?}"
+        );
+        if wait_for_write_slot {
+            assert!(
+                !requests.iter().any(|method| method == "PUT"),
+                "write after revocation: {requests:?}"
+            );
+        }
+        assert_eq!(
+            requests.last().map(String::as_str),
+            Some("DELETE"),
+            "the owned probe object must be cleaned up"
+        );
+        service.shutdown.cancel();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn probe_authority_is_rechecked_after_put_before_read() {
+        check_probe_revocation(false).await;
+    }
+
+    #[tokio::test]
+    async fn probe_authority_is_rechecked_after_write_slot_wait() {
+        check_probe_revocation(true).await;
+    }
+
+    #[tokio::test]
+    async fn publication_diagnostics_record_real_slot_cancellation_and_later_put() {
+        use crate::config::id;
+        use crate::performance::publication::{Metrics, scope};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new().fallback(|| async { axum::http::StatusCode::OK });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let hot = Arc::new(HotS3::new());
+        let storage = fixture_storage(&endpoint, "fixture", hot.clone()).await;
+        let held = hot
+            .writes
+            .acquire_many(HOT_WRITE_CONCURRENCY as u32)
+            .await
+            .unwrap();
+        let metrics = Metrics::new(&id(), &id(), &id(), "manager");
+        let pending = storage.clone();
+        let caller = tokio::spawn(scope(Some(metrics.clone()), async move {
+            pending.upload_bytes(b"block".to_vec(), "fixture").await
+        }));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while metrics.snapshot()["stages"]["putSlot"]["inFlight"] != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            metrics.snapshot()["stages"]["putSlot"]["failedOrCancelled"],
+            1
+        );
+        assert_eq!(metrics.snapshot()["stages"]["putRequest"]["started"], 0);
+        drop(held);
+        scope(
+            Some(metrics.clone()),
+            storage.upload_bytes(b"block".to_vec(), "fixture"),
+        )
+        .await
+        .unwrap();
+        let value = metrics.snapshot();
+        assert_eq!(value["stages"]["putRequest"]["bytes"], 5);
+        assert_eq!(value["stages"]["putSlot"]["completed"], 1);
+        assert!(value["stages"]["putSlot"]["wallUsSum"].as_u64().unwrap() >= 15_000);
+        assert_eq!(hot.writes.available_permits(), HOT_WRITE_CONCURRENCY);
+        server.abort();
     }
 
     #[tokio::test]

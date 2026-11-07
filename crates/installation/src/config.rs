@@ -44,7 +44,7 @@ impl Config {
             "claudeBin": get("CLAUDE_BIN", "claude"),
             "opencodeBin": get("OPENCODE_BIN", "opencode"),
             "concurrency": concurrency()?,
-            "logger": get("NODE_ENV", "") != "test",
+            "logger": true,
             "workerEnabled": get("WORKER_ENABLED", "true") != "false",
             "runnerUrl": get("RUNNER_URL", ""),
         });
@@ -82,7 +82,35 @@ impl Config {
     }
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    /// Override wall time only in an explicitly scoped test future.
+    pub(crate) static TEST_NOW: std::sync::Arc<std::sync::atomic::AtomicI64>;
+}
+
+#[cfg(feature = "worker-fixture-hooks")]
+static FIXTURE_CLOCK: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Installs a clock for the disposable worker test fixture before startup.
+#[cfg(feature = "worker-fixture-hooks")]
+pub fn set_fixture_clock(path: std::path::PathBuf) {
+    FIXTURE_CLOCK.set(path).expect("fixture clock already set");
+}
+
 pub fn now() -> i64 {
+    #[cfg(test)]
+    if let Ok(now) = TEST_NOW.try_with(|now| now.load(std::sync::atomic::Ordering::SeqCst)) {
+        return now;
+    }
+
+    #[cfg(feature = "worker-fixture-hooks")]
+    if let Some(path) = FIXTURE_CLOCK.get() {
+        return std::fs::read_to_string(path)
+            .expect("fixture clock is readable")
+            .parse()
+            .expect("fixture clock contains milliseconds");
+    }
+
     chrono::Utc::now().timestamp_millis()
 }
 

@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Progress of an owner-started sign-in, never its challenge or credential.",
+  "properties": {
+    "accountId": {
+      "type": "string"
+    },
+    "phase": {
+      "pattern": "^(starting|authorizing|verifying)$",
+      "type": "string"
+    },
+    "provider": {
+      "pattern": "^(codex|claude|opencode)$",
+      "type": "string"
+    },
+    "state": {
+      "pattern": "^(pending|complete|failed|cancelled)$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "accountId",
+    "provider",
+    "state",
+    "phase"
+  ],
+  "title": "AccountSignInProgress",
+  "type": "object"
+}

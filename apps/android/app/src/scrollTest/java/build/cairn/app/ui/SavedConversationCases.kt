@@ -29,12 +29,31 @@ abstract class SavedConversationCases {
 
     private fun select(fromCache: Boolean = false, wasSelected: Boolean = false) {
         MockWebServer().use { server ->
-            val run = Run("run", status = "succeeded", finishedAt = 20)
-            val chat = Chat("saved", runId = run.id, updatedAt = 10, status = run.status)
+            val run =
+                Run(
+                    id = "run",
+                    status = "succeeded",
+                    finishedAt = 20,
+                    taskId = "",
+                )
+            val chat =
+                Chat(
+                    id = "2a8c541e-da31-5626-abc9-62a7fb054a7b",
+                    runId = run.id,
+                    updatedAt = 10,
+                    status = run.status,
+                )
             val oldState = LiveState(chat = chat, run = run)
-            val event = RunEvent(1, 1, "chat.user", "Saved output", runId = run.id)
-            val history = "v1:run:1"
-            val path = "/chats/saved/stream"
+            val event =
+                RunEvent(
+                    id = 1,
+                    createdAt = 1,
+                    type = "chat.user",
+                    text = "Saved output",
+                    runId = run.id,
+                )
+            val history = "v2:run:1"
+            val path = "/chats/2a8c541e-da31-5626-abc9-62a7fb054a7b/stream"
             val requests = AtomicInteger()
             val requested = CountDownLatch(1)
             val release = CountDownLatch(1)
@@ -49,7 +68,7 @@ abstract class SavedConversationCases {
                                 check(release.await(30, TimeUnit.SECONDS))
                             }
                             val batch =
-                                LiveBatch(
+                                timelineBatch(
                                     listOf(
                                         if (fresh) event.copy(id = 2, text = "Current output")
                                         else event
@@ -79,8 +98,31 @@ abstract class SavedConversationCases {
                             when (endpoint) {
                                 "/api/account/session" -> beaconAccountFixture()
                                 "/api/installations" -> beaconInstallationsFixture()
-                                "/api/installations/fixture/api/overview" -> "{}"
-                                else -> "[]"
+                                "/api/installations/fixture/api/overview" ->
+                                    installationOverviewFixture()
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         return MockResponse().setBody(body)
                     }
@@ -114,7 +156,7 @@ abstract class SavedConversationCases {
                                 val api = vm.api
                                 vm.historyCache.save(
                                     vm.historyCache.key(api.cacheScope, api.csrf, path),
-                                    CachedHistory(1, history, oldState, listOf(event)),
+                                    timelineCache(1, history, oldState, listOf(event)),
                                 )
                             }
                             prepared = true

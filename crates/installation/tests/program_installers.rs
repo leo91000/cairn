@@ -61,6 +61,7 @@ struct Publisher {
     files: Mutex<HashMap<String, Vec<u8>>>,
     requests: AtomicUsize,
     download_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    metadata_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
 async fn serve(
@@ -71,7 +72,14 @@ async fn serve(
     assert!(headers.get("authorization").is_none());
     publisher.requests.fetch_add(1, Ordering::SeqCst);
     let path = request.uri().path();
+    // The opt-in feed can advertise a prerelease even when a stable release exists.
+    if path == "/check/1/0/CLI2/en/2.0.0/Y" {
+        return Json(json!({ "available": "1", "version": "2.43.0-beta.02" })).into_response();
+    }
     if path == "/latest" || path.starts_with("/check/") {
+        if let Some(gate) = publisher.metadata_gate.lock().await.clone() {
+            gate.notified().await;
+        }
         return Json(publisher.release.lock().await.clone()).into_response();
     }
     if path == "/redirect" {
@@ -92,11 +100,14 @@ async fn serve(
 }
 
 fn archive(name: &str, version: &str) -> Vec<u8> {
+    archive_program(name, &format!("#!/bin/sh\nprintf '{version}'\n"))
+}
+
+fn archive_program(name: &str, program: &str) -> Vec<u8> {
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     zip.start_file(name, zip::write::SimpleFileOptions::default())
         .unwrap();
-    zip.write_all(format!("#!/bin/sh\nprintf '{version}'\n").as_bytes())
-        .unwrap();
+    zip.write_all(program.as_bytes()).unwrap();
     zip.finish().unwrap().into_inner()
 }
 
@@ -167,7 +178,7 @@ impl Fixture {
         manifest: &str,
         installer: &str,
     ) -> cairn_installation::error::Result<Value> {
-        registry::install(
+        common::package_install(
             &self.service,
             &json!({
                 "manifest": manifest, "manifestFormat": "toml", "source": "return {}",
@@ -177,9 +188,32 @@ impl Fixture {
         .await
     }
 
+    async fn replace_owner_access(&self) -> tokio::task::JoinHandle<()> {
+        let (origin, policy) = common::serve_locally(Router::new().fallback(|| async {
+            Json(cairn_protocol::TaskAuthorPolicy {
+                owner: cairn_protocol::TaskAuthorGrant {
+                    account_id: "fixture-owner".into(),
+                    access_id: "replacement-access".into(),
+                },
+                members: Vec::new(),
+            })
+        }))
+        .await;
+        let identity_path = self
+            .service
+            .config
+            .data_dir
+            .join("installation-relay/identity.json");
+        let mut identity: Value =
+            serde_json::from_slice(&std::fs::read(&identity_path).unwrap()).unwrap();
+        identity["origin"] = json!(origin);
+        std::fs::write(identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
+        policy
+    }
+
     async fn approve(&self) -> Value {
         let package = self.upload(MANIFEST, INSTALLER).await.unwrap();
-        registry::approve(
+        common::package_approve(
             &self.service,
             "program-probe",
             "1.0.0",
@@ -223,12 +257,12 @@ async fn toml_packages_prepare_only_after_approval_and_keep_exact_releases_acros
             .is_err()
     );
     assert!(
-        registry::approve(&f.service, "program-probe", "1.0.0", "stale")
+        common::package_approve(&f.service, "program-probe", "1.0.0", "stale")
             .await
             .is_err()
     );
     assert_eq!(f.publisher.requests.load(Ordering::SeqCst), 0);
-    registry::approve(
+    common::package_approve(
         &f.service,
         "program-probe",
         "1.0.0",
@@ -241,7 +275,7 @@ async fn toml_packages_prepare_only_after_approval_and_keep_exact_releases_acros
 
     // JSON and TOML are normalized before hashing and persistence.
     let package = registry::active(&f.service, "program-probe").await.unwrap();
-    let same = registry::install(&f.service, &json!({
+    let same = common::package_install(&f.service, &json!({
         "manifest": package.manifest, "source": "return {}", "modules": { "programs/probe.luau": INSTALLER },
     })).await.unwrap();
     assert_eq!(same["digest"], upload["digest"]);
@@ -331,7 +365,7 @@ async fn installers_cannot_request_instance_secrets_or_other_capabilities() {
         let manifest = MANIFEST.replace("program-probe", &name);
         let package = f.upload(&manifest, &installer).await.unwrap();
         assert!(
-            registry::approve(
+            common::package_approve(
                 &f.service,
                 &name,
                 "1.0.0",
@@ -356,7 +390,7 @@ async fn failed_program_preparation_does_not_activate_a_new_package_version() {
         "cairn.fail('Unsupported platform')",
     );
     let update = f.upload(&manifest, &installer).await.unwrap();
-    let error = registry::approve(
+    let error = common::package_approve(
         &f.service,
         "program-probe",
         "2.0.0",
@@ -502,7 +536,7 @@ async fn release_metadata_larger_than_half_a_frame_is_not_duplicated() {
         json!({ "release": release, "padding": "x".repeat(600_000) });
     let installer = INSTALLER.replace("return response.json", "return response.json.release");
     let package = f.upload(MANIFEST, &installer).await.unwrap();
-    registry::approve(
+    common::package_approve(
         &f.service,
         "program-probe",
         "1.0.0",
@@ -515,7 +549,6 @@ async fn release_metadata_larger_than_half_a_frame_is_not_duplicated() {
 
 #[tokio::test]
 async fn first_use_can_finish_a_download_longer_than_the_normal_handler_deadline() {
-    use cairn_installation::plugins::connections;
     let f = Fixture::new().await;
     *f.publisher.release.lock().await = json!({ "version": "2.41.0" });
     let arch = if std::env::consts::ARCH == "aarch64" {
@@ -523,11 +556,25 @@ async fn first_use_can_finish_a_download_longer_than_the_normal_handler_deadline
     } else {
         "amd64"
     };
+    // This first-use path exercises the bundled package, including its foreground
+    // cache declaration. The downloaded fixture must implement both CLI roles.
+    let program = r#"#!/usr/bin/python3
+import os,socket,sys
+if sys.argv[1:2] == ['daemon']:
+    server=socket.socket(socket.AF_UNIX)
+    server.bind(os.environ['OP_SOCK'])
+    server.listen(128)
+    while True:
+        client,_=server.accept()
+        client.close()
+else:
+    print('[]')
+"#;
     f.publisher.files.lock().await.insert(
         format!("/dist/1P/op2/pkg/v2.41.0/op_linux_{arch}_v2.41.0.zip"),
-        archive("op", "[]"),
+        archive_program("op", program),
     );
-    let account = connections::save(
+    let account = common::save_plugin(
         &f.service,
         "onepassword",
         &json!({
@@ -539,20 +586,13 @@ async fn first_use_can_finish_a_download_longer_than_the_normal_handler_deadline
     .unwrap();
     let gate = Arc::new(tokio::sync::Notify::new());
     *f.publisher.download_gate.lock().await = Some(gate.clone());
-    let request = axum::http::Request::builder()
-        .method("POST")
-        .uri(format!(
-            "/api/plugins/onepassword/connections/{}/test",
-            account["id"].as_str().unwrap()
-        ))
-        .body(Body::empty())
-        .unwrap();
-    let input = cairn_installation::http::Input::read(request)
-        .await
-        .unwrap();
+    let path = format!(
+        "/api/plugins/onepassword/connections/{}/test",
+        account["id"].as_str().unwrap()
+    );
     let accepted = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        cairn_installation::plugins::routes(&f.service, &input),
+        common::owner_plugin_route(&f.service, "POST", &path, json!({})),
     )
     .await
     .unwrap()
@@ -580,7 +620,7 @@ async fn first_use_can_finish_a_download_longer_than_the_normal_handler_deadline
     )
     .await;
     assert_eq!(completed["state"], "completed", "{completed}");
-    assert_eq!(completed["result"]["ok"], true);
+    assert_eq!(completed["result"]["output"]["ok"], true);
 }
 
 /// Reproducible local I/O reference; deliberately excluded from normal tests.
@@ -742,11 +782,11 @@ async fn owner_preparation_is_tracked_without_holding_a_relay_request_open() {
     let package = f.upload(MANIFEST, INSTALLER).await.unwrap();
     let gate = Arc::new(tokio::sync::Notify::new());
     *f.publisher.download_gate.lock().await = Some(gate.clone());
-    let accepted = registry::activate_request(
+    let accepted = common::owner_plugin_route(
         &f.service,
-        "program-probe",
-        "1.0.0",
-        package["digest"].as_str(),
+        "POST",
+        "/api/plugins/packages/program-probe/approve",
+        json!({ "version": "1.0.0", "digest": package["digest"] }),
     )
     .await
     .unwrap();
@@ -784,16 +824,23 @@ async fn owner_preparation_is_tracked_without_holding_a_relay_request_open() {
         .service
         .plugins
         .operations
-        .start(f.service.clone(), async move {
-            program_installation::action(
-                &service,
-                "program-probe",
-                "probe",
-                "install",
-                &json!({ "digest": candidate["digest"] }),
-            )
-            .await
-        })
+        .start(
+            f.service.clone(),
+            cairn_installation::plugins::operations::Audience::Owner,
+            async move {
+                let value = program_installation::action(
+                    &service,
+                    "program-probe",
+                    "probe",
+                    "install",
+                    &json!({ "digest": candidate["digest"] }),
+                )
+                .await?;
+                Ok(cairn_contracts::PluginOperationResult::Program {
+                    program: serde_json::from_value(value)?,
+                })
+            },
+        )
         .unwrap();
     let operation = accepted["operation"].as_str().unwrap();
     let failed = common::eventually(
@@ -827,4 +874,589 @@ async fn unarchived_binaries_can_be_installed_and_reused() {
     assert_eq!(f.output().await, "2.0.0");
     assert_eq!(f.output().await, "2.0.0");
     assert_eq!(f.publisher.requests.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn cancelling_owner_preparation_prevents_activation_and_restart_does_not_replay_it() {
+    let f = Fixture::new().await;
+    let package = f.upload(MANIFEST, INSTALLER).await.unwrap();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *f.publisher.download_gate.lock().await = Some(gate.clone());
+    let accepted = common::owner_plugin_route(
+        &f.service,
+        "POST",
+        "/api/plugins/packages/program-probe/approve",
+        json!({"version":"1.0.0","digest":package["digest"]}),
+    )
+    .await
+    .unwrap();
+    let id = accepted["operation"].as_str().unwrap();
+    common::eventually(
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_millis(10),
+        async || (f.publisher.requests.load(Ordering::SeqCst) >= 2).then_some(()),
+    )
+    .await;
+    let cancelled = common::owner_plugin_route(
+        &f.service,
+        "DELETE",
+        &format!("/api/plugins/packages/operations/{id}"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    assert_eq!(cancelled["state"], "cancelled");
+    gate.notify_waiters();
+    assert!(registry::active(&f.service, "program-probe").await.is_err());
+    let restarted = Service::new(common::config(f.root.path())).await.unwrap();
+    assert_eq!(
+        restarted.plugins.operations.get(id).unwrap_err().status,
+        404
+    );
+    assert!(registry::active(&restarted, "program-probe").await.is_err());
+}
+
+#[tokio::test]
+async fn concurrent_package_approvals_preserve_committed_authority() {
+    let f = Fixture::new().await;
+    let package = f.upload(MANIFEST, INSTALLER).await.unwrap();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *f.publisher.download_gate.lock().await = Some(gate.clone());
+    let start = || {
+        common::owner_plugin_route(
+            &f.service,
+            "POST",
+            "/api/plugins/packages/program-probe/approve",
+            json!({"version":"1.0.0","digest":package["digest"]}),
+        )
+    };
+    let one = start().await.unwrap();
+    common::eventually(
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_millis(10),
+        async || (f.publisher.requests.load(Ordering::SeqCst) >= 2).then_some(()),
+    )
+    .await;
+    let two = start().await.unwrap();
+    // Both commands capture the current package revision before installer preparation.
+    // Polling metadata twice proves the first reached its gate; the second can only
+    // publish after that same preparation mutex is released.
+    tokio::task::yield_now().await;
+    gate.notify_waiters();
+    let states = common::eventually(
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_millis(10),
+        async || {
+            let one = f
+                .service
+                .plugins
+                .operations
+                .get(one["operation"].as_str().unwrap())
+                .unwrap();
+            let two = f
+                .service
+                .plugins
+                .operations
+                .get(two["operation"].as_str().unwrap())
+                .unwrap();
+            (one["state"] != "running" && two["state"] != "running").then_some((one, two))
+        },
+    )
+    .await;
+    assert_eq!(states.0["state"], "completed");
+    if states.1["state"] == "failed" {
+        assert!(
+            states.1["error"]
+                .as_str()
+                .unwrap()
+                .contains("package changed")
+        );
+    } else {
+        assert_eq!(states.1["state"], "completed");
+    }
+    let state = f
+        .service
+        .store
+        .read(|db| db.plugin_package("program-probe"))
+        .await
+        .unwrap();
+    assert_eq!(state.active.as_deref(), Some("1.0.0"));
+    assert_eq!(
+        state.approvals.get("1.0.0").map(String::as_str),
+        package["digest"].as_str()
+    );
+}
+
+#[tokio::test]
+async fn revoked_owner_cannot_publish_a_prepared_program_or_package() {
+    fn has_lock(path: &std::path::Path) -> bool {
+        path.is_dir()
+            && std::fs::read_dir(path).unwrap().any(|entry| {
+                let path = entry.unwrap().path();
+                path.file_name().is_some_and(|name| name == "lock.json") || has_lock(&path)
+            })
+    }
+
+    let f = Fixture::new().await;
+    let package = f.upload(MANIFEST, INSTALLER).await.unwrap();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *f.publisher.download_gate.lock().await = Some(gate.clone());
+    let accepted = common::owner_plugin_route(
+        &f.service,
+        "POST",
+        "/api/plugins/packages/program-probe/approve",
+        json!({"version":"1.0.0","digest":package["digest"]}),
+    )
+    .await
+    .unwrap();
+    common::eventually(
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_millis(10),
+        async || (f.publisher.requests.load(Ordering::SeqCst) >= 2).then_some(()),
+    )
+    .await;
+    // The same account with a new access ID must invalidate the old proof.
+    let policy = f.replace_owner_access().await;
+    gate.notify_waiters();
+    let operation = common::eventually(
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_millis(10),
+        async || {
+            let operation = f
+                .service
+                .plugins
+                .operations
+                .get(accepted["operation"].as_str().unwrap())
+                .unwrap();
+            (operation["state"] != "running").then_some(operation)
+        },
+    )
+    .await;
+    assert_eq!(operation["state"], "failed", "{operation}");
+    assert!(
+        operation["error"].as_str().unwrap().contains("owner"),
+        "{operation}"
+    );
+    assert!(registry::active(&f.service, "program-probe").await.is_err());
+    let programs = program_installation::list(&f.service, "program-probe").await;
+    assert!(
+        programs.is_err(),
+        "An unapproved package must remain inactive"
+    );
+    // The binary and lock must not have been published before the final check.
+    assert!(!has_lock(
+        &f.service.config.data_dir.join("plugin-programs")
+    ));
+    policy.abort();
+}
+
+#[tokio::test]
+async fn cold_instance_preparation_rechecks_owner_access_before_installing_and_returning() {
+    for revoke in [false, true] {
+        let f = Fixture::new().await;
+        let manifest = MANIFEST.replace("[[programs]]", "instanceTest = true\n[[programs]]");
+        let package = common::package_install(&f.service, &json!({
+            "manifest": manifest, "manifestFormat": "toml",
+            "source": "return { test = function() cairn.exec.run({program='probe'}) return {ok=true} end }",
+            "modules": { "programs/probe.luau": INSTALLER },
+        })).await.unwrap();
+        common::package_approve(
+            &f.service,
+            "program-probe",
+            "1.0.0",
+            package["digest"].as_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        let instance = cairn_installation::plugins::connections::save(
+            &f.service,
+            "program-probe",
+            serde_json::from_value(json!({"name":"Probe","enabled":true,"settings":{}})).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        // Model a missing local program after restart while retaining the approved package.
+        std::fs::remove_dir_all(f.service.config.data_dir.join("plugin-programs")).unwrap();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        *f.publisher.download_gate.lock().await = Some(gate.clone());
+        let accepted = common::owner_plugin_route(
+            &f.service,
+            "POST",
+            &format!(
+                "/api/plugins/program-probe/connections/{}/test",
+                instance.id
+            ),
+            json!({}),
+        )
+        .await
+        .unwrap();
+        common::eventually(
+            std::time::Duration::from_secs(15),
+            std::time::Duration::from_millis(10),
+            async || (f.publisher.requests.load(Ordering::SeqCst) >= 4).then_some(()),
+        )
+        .await;
+        let policy = if revoke {
+            Some(f.replace_owner_access().await)
+        } else {
+            None
+        };
+        gate.notify_waiters();
+        let operation = common::eventually(
+            std::time::Duration::from_secs(15),
+            std::time::Duration::from_millis(10),
+            async || {
+                let operation = f
+                    .service
+                    .plugins
+                    .operations
+                    .get(accepted["operation"].as_str().unwrap())
+                    .unwrap();
+                (operation["state"] != "running").then_some(operation)
+            },
+        )
+        .await;
+        let programs = program_installation::list(&f.service, "program-probe")
+            .await
+            .unwrap();
+        if let Some(policy) = policy {
+            assert_eq!(operation["state"], "failed", "{operation}");
+            assert!(
+                operation["error"].as_str().unwrap().contains("owner"),
+                "{operation}"
+            );
+            assert!(programs["programs"][0]["installed"].is_null(), "{programs}");
+            policy.abort();
+        } else {
+            assert_eq!(operation["state"], "completed", "{operation}");
+            assert!(
+                !programs["programs"][0]["installed"].is_null(),
+                "{programs}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancelling_an_operation_fences_its_queued_package_publication() {
+    use std::future::Future;
+    let f = Fixture::new().await;
+    let package = f.upload(MANIFEST, INSTALLER).await.unwrap();
+    let digest = package["digest"].as_str().unwrap().to_owned();
+    let (release, wait) = std::sync::mpsc::channel();
+    let occupied = Arc::new(tokio::sync::Notify::new());
+    let blocker = tokio::spawn({
+        let s = f.service.clone();
+        let occupied = occupied.clone();
+        async move {
+            s.store
+                .write(move |_| {
+                    occupied.notify_one();
+                    let _ = wait.recv_timeout(std::time::Duration::from_secs(30));
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+    });
+    occupied.notified().await;
+    let queued = Arc::new(tokio::sync::Notify::new());
+    let started = f
+        .service
+        .plugins
+        .operations
+        .start(
+            f.service.clone(),
+            cairn_installation::plugins::operations::Audience::Owner,
+            {
+                let s = f.service.clone();
+                let queued = queued.clone();
+                async move {
+                    let publication = s.store.transaction(move |db| {
+                        db.activate_plugin_version("program-probe", "1.0.0", &digest, true)
+                    });
+                    tokio::pin!(publication);
+                    std::future::poll_fn(|context| {
+                        let result = publication.as_mut().poll(context);
+                        if result.is_pending() {
+                            queued.notify_one();
+                        }
+                        result
+                    })
+                    .await?;
+                    Ok(cairn_contracts::PluginOperationResult::Package {
+                        version: Box::new(serde_json::from_value(package).unwrap()),
+                    })
+                }
+            },
+        )
+        .unwrap();
+    queued.notified().await;
+    let operation = started["operation"].as_str().unwrap();
+    let cancelled = common::owner_plugin_route(
+        &f.service,
+        "DELETE",
+        &format!("/api/plugins/packages/operations/{operation}"),
+        Value::Null,
+    )
+    .await
+    .unwrap();
+    assert_eq!(cancelled["state"], "cancelled");
+    release.send(()).unwrap();
+    blocker.await.unwrap();
+    f.service.store.write(|_| Ok(())).await.unwrap();
+    let state = f
+        .service
+        .store
+        .read(|db| db.plugin_package("program-probe"))
+        .await
+        .unwrap();
+    assert!(state.active.is_none());
+    assert!(state.approvals.is_empty());
+    assert_eq!(
+        f.service.plugins.operations.get(operation).unwrap()["state"],
+        "cancelled"
+    );
+}
+
+#[tokio::test]
+async fn revoked_public_mcp_cannot_activate_an_approved_package_after_preparation() {
+    let f = Fixture::new().await;
+    f.approve().await;
+    let previous = f
+        .service
+        .store
+        .read(|db| db.plugin_package("program-probe"))
+        .await
+        .unwrap();
+    std::fs::remove_dir_all(f.service.config.data_dir.join("plugin-programs")).unwrap();
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *f.publisher.download_gate.lock().await = Some(gate.clone());
+    let token = common::relay_fixture::grant(&f.service, &["manage"]).await;
+    let app = common::relay_fixture::router(f.service.clone())
+        .await
+        .unwrap();
+    let arguments = common::mcp_arguments(
+        "activate_plugin_package",
+        &json!({ "pluginId": "program-probe", "version": "1.0.0" }),
+    );
+    let request = common::request("POST", "/mcp")
+        .header("authorization", format!("Bearer {token}"))
+        .body(Body::from(
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": arguments,
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let response = common::read_json(common::send(&app, request).await).await;
+    assert_ne!(response["result"]["isError"], true, "{response}");
+    let operation = response["result"]["structuredContent"]["result"]["operation"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    common::eventually(
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_millis(10),
+        async || (f.publisher.requests.load(Ordering::SeqCst) >= 4).then_some(()),
+    )
+    .await;
+    f.service
+        .store
+        .delete(&format!(
+            "test-relay:{}",
+            cairn_installation::auth::digest(&token)
+        ))
+        .await
+        .unwrap();
+    gate.notify_waiters();
+    let result = common::eventually(
+        std::time::Duration::from_secs(15),
+        std::time::Duration::from_millis(10),
+        async || {
+            let result = f.service.plugins.operations.get(&operation).unwrap();
+            (result["state"] != "running").then_some(result)
+        },
+    )
+    .await;
+    assert_eq!(result["state"], "failed", "{result}");
+    assert!(
+        result["error"]
+            .as_str()
+            .unwrap()
+            .contains("MCP authorization"),
+        "{result}"
+    );
+    let current = f
+        .service
+        .store
+        .read(|db| db.plugin_package("program-probe"))
+        .await
+        .unwrap();
+    assert_eq!(current.revision, previous.revision);
+    assert_eq!(current.active, previous.active);
+    let programs = program_installation::list(&f.service, "program-probe")
+        .await
+        .unwrap();
+    assert!(programs["programs"][0]["installed"].is_null(), "{programs}");
+}
+
+#[tokio::test]
+async fn revoked_agent_first_use_cannot_download_or_publish_a_program() {
+    use cairn_installation::{config::MAIN_AGENT_ID, plugins::agents, validation::text};
+    use common::{AgentFixture, MissionFixture};
+    for metadata in [true, false] {
+        let mut f = Fixture::new().await;
+        common::reconfigure(&mut f.service, |config| {
+            config.runner_url = "http://runner.invalid".into();
+        })
+        .await;
+        *f.publisher.release.lock().await = json!({ "version": "2.41.0" });
+        let arch = if std::env::consts::ARCH == "aarch64" {
+            "arm64"
+        } else {
+            "amd64"
+        };
+        f.publisher.files.lock().await.insert(
+            format!("/dist/1P/op2/pkg/v2.41.0/op_linux_{arch}_v2.41.0.zip"),
+            archive_program("op", "#!/bin/sh\nprintf '[]'\n"),
+        );
+        let account = common::save_plugin(
+            &f.service,
+            "onepassword",
+            &json!({
+                "name": "Fixture", "secrets": { "token": "ops_fixture" }, "enabled": true,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+        let instance = text(&account, "id").to_owned();
+        f.service
+            .agent_fixture(json!({ "plugins": [instance] }), Some(MAIN_AGENT_ID))
+            .await
+            .unwrap();
+        let task = f
+            .service
+            .task_fixture(
+                json!({
+                    "name": "Probe",
+                    "agentId": MAIN_AGENT_ID,
+                    "prompt": "Probe",
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let run = f
+            .service
+            .enqueue(text(&task, "id"), "manual", None)
+            .await
+            .unwrap();
+        let run_id = text(&run, "id").to_owned();
+        f.service
+            .store
+            .change_run(
+                &run_id,
+                cairn_installation::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let run = f.service.store.run(&run_id).await.unwrap();
+        let configuration = f
+            .service
+            .mcps
+            .run_configuration(&f.service, &run)
+            .await
+            .unwrap();
+        let bearer = text(&configuration["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        if metadata {
+            *f.publisher.metadata_gate.lock().await = Some(gate.clone());
+        } else {
+            *f.publisher.download_gate.lock().await = Some(gate.clone());
+        }
+        let s = f.service.clone();
+        let mut call = tokio::spawn(async move {
+            if metadata {
+                agents::call_tool(
+                    &s,
+                    &bearer,
+                    "onepassword",
+                    &json!({
+                        "operation": "vaults",
+                        "accountId": instance,
+                    }),
+                )
+                .await
+                .map(|_| ())
+            } else {
+                agents::command(
+                    &s,
+                    &bearer,
+                    &json!({
+                        "plugin": "onepassword",
+                        "command": "vaults",
+                        "args": ["--account", instance],
+                    }),
+                )
+                .await
+                .map(|_| ())
+            }
+        });
+        let requests = if metadata { 1 } else { 2 };
+        tokio::select! {
+            result = &mut call => {
+                panic!("First-use call ended before the installer gate: {result:?}");
+            }
+            () = common::eventually(
+                std::time::Duration::from_secs(15),
+                std::time::Duration::from_millis(10),
+                async || {
+                    (f.publisher.requests.load(Ordering::SeqCst) == requests).then_some(())
+                },
+            ) => {}
+        }
+        if metadata {
+            f.service
+                .agent_fixture(json!({ "plugins": [] }), Some(MAIN_AGENT_ID))
+                .await
+                .unwrap();
+        } else {
+            f.service
+                .mcps
+                .revoke_run(&f.service, &run_id)
+                .await
+                .unwrap();
+        }
+        gate.notify_one();
+        assert!(call.await.unwrap().is_err());
+        assert_eq!(
+            f.publisher.requests.load(Ordering::SeqCst),
+            requests,
+            "revocation must prevent the next installer HTTP effect"
+        );
+        let package = registry::active(&f.service, "onepassword").await.unwrap();
+        let directory = f
+            .service
+            .config
+            .data_dir
+            .join("plugin-programs/onepassword")
+            .join(package.digest)
+            .join("op")
+            .join(format!(
+                "{}-{}",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            ));
+        assert!(
+            !directory.join("lock.json").exists(),
+            "revoked execution published an installed release"
+        );
+    }
 }

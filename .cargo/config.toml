@@ -1,4 +1,0 @@
-[build]
-# Cargo caches workspace artifacts by the wrapper path. Use a new versioned
-# filename whenever the wrapper changes the compiler arguments it supplies.
-rustc-workspace-wrapper = "scripts/rust-release-inline75-v1.sh"

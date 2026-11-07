@@ -1,0 +1,15 @@
+{
+  "creates": [
+    { "settings": { "name": "Project", "path": "/workspace/project" } },
+    { "creationId": "00000000-0000-4000-8000-000000000002", "settings": { "name": "Second", "path": "/workspace/second", "description": "A project", "sourceMode": "local", "baseBranch": "work/branch" } }
+  ],
+  "invalidCreates": [
+    { "creationId": null, "settings": { "name": "Project", "path": "/workspace" } },
+    { "creationId": "00000000-0000-0000-0000-000000000000", "settings": { "name": "Project", "path": "/workspace" } },
+    { "settings": { "name": "Project", "path": "/workspace", "sourceMode": "other" } },
+    { "settings": { "name": "", "path": "/workspace" } },
+    { "settings": { "name": "Project", "path": "" } },
+    { "settings": { "name": "Project", "path": "/workspace", "baseBranch": "-bad" } },
+    { "settings": { "name": "Project", "path": "/workspace", "extra": true } }
+  ]
+}

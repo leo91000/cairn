@@ -26,6 +26,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.ImportSkillInput
+import build.cairn.contracts.ListPluginPackagesInput
+import build.cairn.contracts.importSkill
+import build.cairn.contracts.listPluginPackages
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
@@ -67,7 +71,7 @@ internal fun SkillImportSheet(
     var error by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
         try {
-            catalog = vm.api.get<PluginCatalog>("/plugins")
+            catalog = vm.api.listPluginPackages(ListPluginPackagesInput())
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -76,7 +80,7 @@ internal fun SkillImportSheet(
     }
     val sources = catalog?.skillSources().orEmpty()
     val pluginSource = sources.find { it.key == sourceKey } ?: sources.firstOrNull()
-    val fields = pluginSource?.source?.fields.orEmpty()
+    val fields = pluginSource?.source?.settingFields.orEmpty()
     val chosenInstance =
         pluginSource?.instances?.let { instances ->
             instances.find { it.id == instance } ?: instances.firstOrNull()
@@ -126,16 +130,16 @@ internal fun SkillImportSheet(
                         vm.api.importSkill(skillScope, requireNotNull(upload), path = chosen)
                     else {
                         val origin = requireNotNull(pluginSource) { "Choisissez une source." }
-                        vm.api.importPluginSkill(
-                            skillScope,
-                            PluginSkillImport(
-                                origin.entry.id,
-                                origin.source.name,
-                                chosenInstance?.id,
-                                pluginSettings(fields, location),
-                                // A chosen candidate is a folder of the location.
-                                folder = chosen ?: folder,
-                            ),
+                        vm.api.importSkill(
+                            ImportSkillInput.B(
+                                scope = skillScope,
+                                pluginId = origin.entry.id,
+                                skillSource = origin.source.name,
+                                instance = chosenInstance?.id,
+                                location = pluginSettings(fields, location),
+                                folder =
+                                    (chosen ?: folder).trim().trim('/').takeIf { it.isNotEmpty() },
+                            )
                         )
                     }
                 val bundle = result.imported

@@ -1,5 +1,6 @@
 pub mod channel;
 pub mod record;
+pub mod sql;
 
 use crate::{
     auth::{hex_digest, token},
@@ -8,10 +9,10 @@ use crate::{
     run_status::RunStatus,
     service::{Service, allowed, covers, policy},
     store::Db,
-    validation::{parse, text},
+    validation::text,
 };
+use cairn_contracts::{McpInput, McpView};
 use record::{AuthKind, ConnectionState, GrantScope, McpSecrets, McpServer, RunGrant};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -56,15 +57,15 @@ pub async fn callback_url(s: &Service) -> Result<String> {
 }
 
 pub(crate) fn grant_key(bearer: &str) -> String {
-    format!("mcp-grant:{}", hex_digest(bearer))
+    hex_digest(bearer)
 }
 
 /// The run a bearer was granted to, if its grant still exists.
 pub(crate) async fn granted_run(s: &Service, bearer: &str) -> Result<Option<String>> {
-    let Some(grant) = s.store.kv(&grant_key(bearer)).await? else {
+    let Some(grant) = s.store.mcp_run_grant(&grant_key(bearer)).await? else {
         return Ok(None);
     };
-    Ok(Some(RunGrant::deserialize(&grant)?.run_id))
+    Ok(Some(grant.run_id))
 }
 
 /// Where the agent of `run` reaches run-scoped MCP. Inside a VM, only its
@@ -79,12 +80,7 @@ fn agent_origin<'a>(s: &'a Service, run: &Value) -> &'a str {
 
 /// Drops OAuth authorizations started for this connection.
 pub(crate) fn cancel_pending(db: &Db<'_>, id: &str) -> Result<()> {
-    for (key, value) in db.keys("mcp-oauth:")? {
-        if value["connectionId"] == id {
-            db.delete(&key)?;
-        }
-    }
-    Ok(())
+    db.cancel_mcp_oauth(id)
 }
 
 fn reserved_env(key: &str) -> bool {
@@ -98,48 +94,6 @@ fn failure_message(error: &Error) -> &str {
         "Sign in to connect this server."
     } else {
         "Could not connect. Check the endpoint, credentials, and server availability."
-    }
-}
-
-/// Secret fields submitted with connection settings; never stored in the record.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SecretChanges {
-    token: Option<String>,
-    client_secret: Option<String>,
-    env: Option<BTreeMap<String, String>>,
-    #[serde(default)]
-    remove_env: Vec<String>,
-}
-
-impl SecretChanges {
-    const KEYS: [&str; 4] = ["token", "clientSecret", "env", "removeEnv"];
-
-    fn take(settings: &mut Value) -> Result<Self> {
-        let changes = Self::deserialize(&*settings)?;
-        if let Some(settings) = settings.as_object_mut() {
-            for key in Self::KEYS {
-                settings.remove(key);
-            }
-        }
-        Ok(changes)
-    }
-
-    fn apply(self, secrets: &mut McpSecrets) {
-        if let Some(token) = self.token {
-            secrets.token = Some(token);
-        }
-        if let Some(client_secret) = self.client_secret {
-            secrets.client_secret = Some(client_secret);
-        }
-        if let Some(env) = self.env {
-            secrets.env.get_or_insert_default().extend(env);
-        }
-        if let Some(env) = secrets.env.as_mut() {
-            for key in &self.remove_env {
-                env.remove(key);
-            }
-        }
     }
 }
 
@@ -157,17 +111,6 @@ fn validate_credentials(server: &McpServer, secrets: &McpSecrets) -> Result<()> 
         ));
     }
     Ok(())
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct McpView<'a> {
-    #[serde(flatten)]
-    server: &'a McpServer,
-    has_token: bool,
-    has_client_secret: bool,
-    env_keys: Vec<String>,
-    callback_url: String,
 }
 
 /// Authorized MCP servers and shared secrets for one execution.
@@ -266,23 +209,18 @@ fn selected_tools(server: &McpServer, selection: &Value) -> Option<Vec<String>> 
 /// Removes a deleted connection from every agent's access policy. Other settings,
 /// including live grants such as 1Password, are kept as saved.
 fn revoke_agent_access(db: &Db<'_>, id: &str) -> Result<()> {
-    for mut agent in db.list("agents")? {
-        let mut access = policy(&agent);
+    for mut agent in db.agents()? {
         let mut changed = false;
-        if let Some(mcps) = access["mcps"].as_array_mut() {
+        if let Some(mcps) = &mut agent.settings.access.mcps {
             let before = mcps.len();
-            mcps.retain(|m| m != id);
-            changed |= mcps.len() != before;
+            mcps.retain(|mcp| mcp != id);
+            changed |= before != mcps.len();
         }
-        if let Some(tools) = access["mcpTools"].as_object_mut() {
-            changed |= tools.remove(id).is_some();
+        changed |= agent.settings.access.mcp_tools.remove(id).is_some();
+        if changed {
+            agent.revision = crate::config::id();
+            db.save_agent(&agent)?;
         }
-        if !changed {
-            continue;
-        }
-        agent["access"] = access;
-        crate::service::touch(&mut agent);
-        db.put("agents", &agent)?;
     }
     Ok(())
 }
@@ -309,26 +247,31 @@ impl Mcps {
             .await
     }
 
-    pub async fn get(&self, s: &Service, id: &str) -> Result<Value> {
-        required(s.store.get("mcps", id).await?, NOT_FOUND)
-    }
-
     pub async fn server(&self, s: &Service, id: &str) -> Result<McpServer> {
-        Ok(McpServer::deserialize(&self.get(s, id).await?)?)
+        required(s.store.mcp_server(id).await?, NOT_FOUND)
     }
 
     pub async fn put_server(&self, s: &Service, server: &McpServer) -> Result<()> {
-        s.store.put("mcps", serde_json::to_value(server)?).await?;
+        let server = server.clone();
+        s.store
+            .transaction(move |db| db.save_mcp_server(&server))
+            .await?;
         Ok(())
     }
 
-    pub async fn secrets(&self, s: &Service, id: &str) -> Result<Value> {
-        Ok(s.vault.get(id).await?.unwrap_or_else(|| json!({})))
-    }
-
     pub async fn server_secrets(&self, s: &Service, id: &str) -> Result<McpSecrets> {
-        match s.vault.get(id).await? {
-            Some(secrets) => Ok(serde_json::from_value(secrets)?),
+        let id = id.to_owned();
+        let ciphertext = s
+            .store
+            .read({
+                let id = id.clone();
+                move |db| db.mcp_credentials(&id)
+            })
+            .await?;
+        match ciphertext {
+            Some(bytes) => Ok(serde_json::from_slice(
+                &s.vault.decrypt_bytes(&id, &bytes)?,
+            )?),
             None => Ok(McpSecrets::default()),
         }
     }
@@ -353,35 +296,65 @@ impl Mcps {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.update_secrets_live(
+            s,
+            id,
+            change,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn update_secrets_live(
+        &self,
+        s: &Service,
+        id: &str,
+        change: impl FnOnce(&mut McpSecrets),
+        authorize: crate::authorization::Authorization,
+    ) -> Result<()> {
+        authorize.recheck().await?;
         let mut secrets = self.server_secrets(s, id).await?;
         change(&mut secrets);
-        let secrets = serde_json::to_value(secrets)?;
-        let vault = s.vault.clone();
+        let secrets = s.vault.encrypt_bytes(id, &serde_json::to_vec(&secrets)?)?;
         let id = id.to_owned();
+        authorize.recheck().await?;
         s.store
             .transaction(move |db| {
-                authorize(db)?;
-                vault.set_in(db, &id, &secrets)
+                authorize.authorize(db)?;
+                db.save_mcp_credentials(&id, &secrets)
             })
             .await
     }
 
-    async fn view(&self, s: &Service, server: &McpServer) -> Result<Value> {
+    async fn view(&self, s: &Service, server: &McpServer) -> Result<McpView> {
         let secrets = self.server_secrets(s, &server.id).await?;
+        let mut public = server.clone();
+        public.tools = server
+            .tools
+            .iter()
+            .map(|tool| {
+                json!({
+                    "name":text(tool,"name"),
+                    "title":tool["title"].as_str(),
+                    "description":tool["description"].as_str(),
+                    "inputSchema":tool.get("inputSchema").cloned().unwrap_or_else(||json!({})),
+                })
+            })
+            .collect();
         let view = McpView {
-            server,
+            server: public,
             has_token: !secrets.token().is_empty(),
             has_client_secret: !secrets.client_secret().is_empty(),
             env_keys: secrets.env_keys(),
             callback_url: callback_url(s).await.unwrap_or_default(),
         };
-        Ok(serde_json::to_value(view)?)
+        Ok(view)
     }
 
-    pub async fn list(&self, s: &Service) -> Result<Vec<Value>> {
+    pub async fn list(&self, s: &Service) -> Result<Vec<McpView>> {
         let mut result = Vec::new();
-        for item in s.store.list("mcps").await? {
-            result.push(self.view(s, &McpServer::deserialize(&item)?).await?);
+        for server in s.store.mcp_servers().await? {
+            result.push(self.view(s, &server).await?);
         }
         Ok(result)
     }
@@ -410,29 +383,81 @@ impl Mcps {
         Ok(())
     }
 
-    pub async fn save(&self, s: &Service, input: Value, existing: Option<&str>) -> Result<Value> {
-        self.save_authorized(s, input, existing, |_| Ok(())).await
+    pub async fn save(
+        &self,
+        s: &Service,
+        input: McpInput,
+        existing: Option<&str>,
+        expected: Option<u64>,
+    ) -> Result<McpView> {
+        self.save_authorized(s, input, existing, expected, |_| Ok(()))
+            .await
     }
 
     pub(crate) async fn save_authorized<F>(
         &self,
         s: &Service,
-        input: Value,
+        input: McpInput,
         existing: Option<&str>,
+        expected: Option<u64>,
         authorize: F,
-    ) -> Result<Value>
+    ) -> Result<McpView>
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
-        let mut settings = parse("mcp", input)?;
-        let changes = SecretChanges::take(&mut settings)?;
-        let mut server = McpServer::deserialize(&settings)?;
+        self.save_live(
+            s,
+            input,
+            existing,
+            expected,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn save_live(
+        &self,
+        s: &Service,
+        mut input: McpInput,
+        existing: Option<&str>,
+        expected: Option<u64>,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<McpView> {
+        authorize.recheck().await?;
+        validate_input(&mut input)?;
+        if existing.is_some() && expected.is_none() {
+            return Err(Error::bad("The current connection revision is required."));
+        }
+        let mut server = McpServer {
+            name: input.name,
+            transport: input.transport,
+            url: input.url,
+            command: input.command,
+            args: input.args,
+            auth: input.auth,
+            client_id: input.client_id,
+            scopes: input.scopes,
+            allow_private_network: input.allow_private_network,
+            enabled: input.enabled,
+            enabled_tools: input.enabled_tools,
+            ..Default::default()
+        };
         let id = existing.map_or_else(id, str::to_owned);
         let _guard = self.lock(&id).await;
-        let previous = match s.store.get("mcps", &id).await? {
-            Some(previous) => Some(McpServer::deserialize(&previous)?),
-            None => None,
-        };
+        authorize.recheck().await?;
+        let previous = s.store.mcp_server(&id).await?;
+        if existing.is_some() && previous.is_none() {
+            return Err(Error::not_found(NOT_FOUND));
+        }
+        if let Some(expected) = expected
+            && previous
+                .as_ref()
+                .is_none_or(|server| server.revision != expected)
+        {
+            return Err(Error::conflict(
+                "This connection was changed elsewhere. Reload it before saving.",
+            ));
+        }
         let endpoint_changed = previous
             .as_ref()
             .is_some_and(|previous| !previous.same_endpoint(&server));
@@ -441,21 +466,34 @@ impl Mcps {
         } else {
             self.server_secrets(s, &id).await?
         };
-        changes.apply(&mut secrets);
+        if let Some(token) = input.token {
+            secrets.token = Some(token);
+        }
+        if let Some(secret) = input.client_secret {
+            secrets.client_secret = Some(secret);
+        }
+        if let Some(env) = input.env {
+            secrets.env.get_or_insert_default().extend(env.0);
+        }
+        if let Some(env) = secrets.env.as_mut() {
+            for key in input.remove_env {
+                env.remove(&key);
+            }
+        }
         validate_credentials(&server, &secrets)?;
         server.id.clone_from(&id);
         server.created_at = previous.as_ref().map_or_else(now, |p| p.created_at);
         server.revision = previous.as_ref().map_or(0, |p| p.revision) + 1;
         server.tools = previous.map(|p| p.tools).unwrap_or_default();
         server.reset_state(ConnectionState::Untested);
-        let record = serde_json::to_value(&server)?;
-        let secrets = serde_json::to_value(&secrets)?;
-        let vault = s.vault.clone();
+        let record = server.clone();
+        let secrets = s.vault.encrypt_bytes(&id, &serde_json::to_vec(&secrets)?)?;
+        authorize.recheck().await?;
         s.store
             .transaction(move |db| {
-                authorize(db)?;
-                db.put("mcps", &record)?;
-                vault.set_in(db, &id, &secrets)?;
+                authorize.authorize(db)?;
+                db.save_mcp_server(&record)?;
+                db.save_mcp_credentials(&id, &secrets)?;
                 cancel_pending(db, &id)?;
                 db.audit("mcp.saved", &json!({ "id": id }))
             })
@@ -477,22 +515,39 @@ impl Mcps {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.disconnect_live(
+            s,
+            id,
+            remove,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn disconnect_live(
+        &self,
+        s: &Service,
+        id: &str,
+        remove: bool,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<()> {
+        authorize.recheck().await?;
         let _guard = self.lock(id).await;
+        authorize.recheck().await?;
         let id = id.to_owned();
         s.store
             .transaction(move |db| {
-                authorize(db)?;
-                let item = required(db.get("mcps", &id)?, NOT_FOUND)?;
+                authorize.authorize(db)?;
+                let mut server = required(db.mcp_server(&id)?, NOT_FOUND)?;
                 cancel_pending(db, &id)?;
-                db.delete(&format!("mcp-secret:{id}"))?;
+                db.delete_mcp_credentials(&id)?;
                 if remove {
-                    db.remove("mcps", &id)?;
                     revoke_agent_access(db, &id)?;
+                    db.delete_mcp_server(&id)?;
                 } else {
-                    let mut server = McpServer::deserialize(&item)?;
                     server.revision += 1;
                     server.reset_state(ConnectionState::Untested);
-                    db.put("mcps", &serde_json::to_value(&server)?)?;
+                    db.save_mcp_server(&server)?;
                 }
                 let action = if remove {
                     "mcp.deleted"
@@ -520,31 +575,48 @@ impl Mcps {
             .await
     }
 
-    async fn record_discovery_authorized<F>(
+    pub(crate) async fn record_discovery_authorized<F>(
         &self,
         s: &Service,
-        mut server: McpServer,
+        server: McpServer,
         result: &Result<Vec<Value>>,
         authorize: F,
     ) -> Result<()>
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.record_discovery_live(
+            s,
+            server,
+            result,
+            crate::authorization::Authorization::once(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn record_discovery_live(
+        &self,
+        s: &Service,
+        mut server: McpServer,
+        result: &Result<Vec<Value>>,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<()> {
+        authorize.recheck().await?;
         match result {
             Ok(tools) => server.record_success(tools.clone(), now()),
             Err(error) => record_failure(&mut server, error),
         }
-        let record = serde_json::to_value(server)?;
+        let record = server;
         s.store
             .transaction(move |db| {
-                authorize(db)?;
-                db.put("mcps", &record)?;
+                authorize.authorize(db)?;
+                db.save_mcp_server(&record)?;
                 Ok(())
             })
             .await
     }
 
-    pub async fn test(&self, s: &Service, id: &str) -> Result<Value> {
+    pub async fn test(&self, s: &Service, id: &str) -> Result<McpView> {
         self.test_authorized(s, id, |_| Ok(())).await
     }
 
@@ -553,21 +625,32 @@ impl Mcps {
         s: &Service,
         id: &str,
         authorize: F,
-    ) -> Result<Value>
+    ) -> Result<McpView>
     where
         F: Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static,
     {
+        self.test_live(s, id, crate::authorization::Authorization::local(authorize))
+            .await
+    }
+
+    pub(crate) async fn test_live(
+        &self,
+        s: &Service,
+        id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<McpView> {
+        authorize.recheck().await?;
         let _guard = self.lock(id).await;
+        authorize.recheck().await?;
         let server = self.server(s, id).await?;
         s.store
             .read({
                 let authorize = authorize.clone();
-                move |db| authorize(db)
+                move |db| authorize.authorize(db)
             })
             .await?;
-        let tools =
-            crate::mcp_client::Client::list_tools_authorized(s, &server, authorize.clone()).await;
-        self.record_discovery_authorized(s, server, &tools, authorize)
+        let tools = crate::mcp_client::Client::list_tools_live(s, &server, authorize.clone()).await;
+        self.record_discovery_live(s, server, &tools, authorize)
             .await?;
         self.view(s, &self.server(s, id).await?).await
     }
@@ -578,11 +661,18 @@ impl Mcps {
         let access = policy(agent);
         let token = token();
         let mut configuration = RunConfiguration::new(token.clone());
+        let planning = crate::chats::planning(run);
+        configuration.native.planning = planning;
         let origin = agent_origin(s, run);
         let mut servers = BTreeMap::new();
-        for item in s.store.list("mcps").await? {
-            let server = McpServer::deserialize(&item)?;
+        for server in s.store.mcp_servers().await? {
             if !server.enabled || !allowed(&access["mcps"], &server.id) {
+                continue;
+            }
+            if planning {
+                // Third-party annotations cannot enforce a no-effects boundary. Do not
+                // pass connected MCP servers to the native process during Plan, for
+                // either transport; keep Cairn-owned tools below their own policy gates.
                 continue;
             }
             let tools = selected_tools(&server, &access["mcpTools"][&server.id]);
@@ -603,7 +693,7 @@ impl Mcps {
                 configuration.add_stdio(&server, tools, env);
             }
         }
-        let workspace = !s.config.runner_url.is_empty();
+        let workspace = !s.config.runner_url.is_empty() || run["trigger"] == "chat";
         if workspace {
             configuration.add_workspace(origin);
         }
@@ -615,14 +705,14 @@ impl Mcps {
             configuration.env.insert(RUN_TOKEN_ENV, token.clone());
             let grant = RunGrant {
                 run_id: text(run, "id").to_owned(),
-                message_id: crate::waits::execution_id(run).clone(),
+                message_id: crate::waits::execution_id(run).as_str().map(str::to_owned),
                 servers,
                 workspace,
                 installation,
             };
             let expires = crate::run_limits::budget_ms(agent).map(|budget| now() + budget);
             s.store
-                .set(&grant_key(&token), serde_json::to_value(grant)?, expires)
+                .transaction(move |db| db.save_mcp_run_grant(&grant_key(&token), &grant, expires))
                 .await?;
         }
         configuration.redactions.retain(|r| r.len() > 3);
@@ -640,49 +730,218 @@ impl Mcps {
         id: &str,
         bearer: &str,
     ) -> Result<(McpServer, GrantScope)> {
+        let (server, scope, _) = self.grant_authorized(s, id, bearer).await?;
+        Ok((server, scope))
+    }
+
+    pub(crate) async fn grant_authorized(
+        &self,
+        s: &Service,
+        id: &str,
+        bearer: &str,
+    ) -> Result<(
+        McpServer,
+        GrantScope,
+        crate::capabilities::plugin_packages::Authority,
+    )> {
         let (id, bearer) = (id.to_owned(), bearer.to_owned());
-        s.store
+        let (key, token) = (id.clone(), bearer.clone());
+        let (server, scope, run) = s
+            .store
             .read(move |db| {
-                let expired = || Error::unauthorized("MCP run access expired or was revoked.");
-                let grant = db.kv(&grant_key(&bearer))?.ok_or_else(expired)?;
-                let grant = RunGrant::deserialize(&grant)?;
-                let run = db.run(&grant.run_id)?.ok_or_else(expired)?;
-                let item = db.get("mcps", &id)?.ok_or_else(expired)?;
-                let server = McpServer::deserialize(&item)?;
-                let Some(scope) = grant.servers.get(&id) else {
-                    return Err(expired());
-                };
-                let revoked = grant.message_id != *crate::waits::execution_id(&run)
-                    || !run["cancelRequestedAt"].is_null()
-                    || run["status"] != RunStatus::Running
-                    || !server.enabled
-                    || server.revision != scope.revision;
-                if revoked {
-                    return Err(expired());
-                }
-                let agent = &run["snapshot"]["agent"];
-                let current = db
-                    .get("agents", text(agent, "id"))?
-                    .ok_or_else(|| Error::forbidden("Agent permissions changed."))?;
-                if !covers(&current, agent) {
-                    return Err(Error::forbidden("Agent permissions were reduced."));
-                }
-                Ok((server, scope.clone()))
+                let (server, scope) = grant_in(db, &key, &token)?;
+                let grant = crate::error::required(
+                    db.mcp_run_grant(&grant_key(&token))?,
+                    "MCP grant not found",
+                )?;
+                let run = crate::error::required(db.run(&grant.run_id)?, "Run not found")?;
+                Ok((server, scope, run))
             })
-            .await
+            .await?;
+        let authority = crate::capabilities::plugin_packages::Authority::for_execution(&run)
+            .with_guard(move |db| grant_in(db, &id, &bearer).map(|_| ()));
+        let authority = crate::delegation::authorize_async_with(s, &run, authority).await?;
+        Ok((server, scope, authority))
     }
 
     pub async fn revoke_run(&self, s: &Service, id: &str) -> Result<()> {
         let id = id.to_owned();
-        s.store
-            .write(move |db| {
-                for (key, value) in db.keys("mcp-grant:")? {
-                    if value["runId"] == id {
-                        db.delete(&key)?;
-                    }
-                }
+        s.store.write(move |db| db.revoke_mcp_run(&id)).await
+    }
+}
+
+fn validate_input(input: &mut McpInput) -> Result<()> {
+    input.name = input.name.trim().to_owned();
+    input.command = input.command.trim().to_owned();
+    input.client_id = input.client_id.trim().to_owned();
+    input.scopes = input
+        .scopes
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let bounded = |value: &str, max| value.chars().count() <= max;
+    if input.name.is_empty()
+        || !bounded(&input.name, 100)
+        || !bounded(&input.url, 2000)
+        || !bounded(&input.command, 1000)
+        || !bounded(&input.client_id, 500)
+        || !bounded(&input.scopes, 2000)
+        || input.args.len() > 100
+        || input.args.iter().any(|a| !bounded(a, 4000))
+        || input.enabled_tools.as_ref().is_some_and(|tools| {
+            tools.len() > 500 || tools.iter().any(|t| t.is_empty() || !bounded(t, 200))
+        })
+        || input.token.as_ref().is_some_and(|t| !bounded(t, 10000))
+        || input
+            .client_secret
+            .as_ref()
+            .is_some_and(|t| !bounded(t, 10000))
+        || input.remove_env.len() > 100
+    {
+        return Err(Error::bad(
+            "MCP settings exceed the supported content limits.",
+        ));
+    }
+    if let Some(env) = &input.env {
+        for (key, value) in &env.0 {
+            let mut chars = key.chars();
+            if !chars
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+                || !bounded(value, 10000)
+            {
+                return Err(Error::bad("Invalid environment variable."));
+            }
+        }
+    }
+    if input.transport == record::Transport::Http {
+        let invalid =
+            || Error::bad("Enter an HTTP(S) URL without embedded credentials or a fragment.");
+        let url = url::Url::parse(&input.url).map_err(|_| invalid())?;
+        if !["http", "https"].contains(&url.scheme())
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(invalid());
+        }
+    } else if input.command.is_empty() || input.auth != AuthKind::None {
+        return Err(Error::bad(
+            "Command servers require an executable and use environment variables for authentication.",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn grant_in(db: &Db<'_>, id: &str, bearer: &str) -> Result<(McpServer, GrantScope)> {
+    let expired = || Error::unauthorized("MCP run access expired or was revoked.");
+    let grant = db.mcp_run_grant(&grant_key(bearer))?.ok_or_else(expired)?;
+    let run = db.run(&grant.run_id)?.ok_or_else(expired)?;
+    let server = db.mcp_server(id)?.ok_or_else(expired)?;
+    let Some(scope) = grant.servers.get(id) else {
+        return Err(expired());
+    };
+    let revoked = grant.message_id.as_deref() != crate::waits::execution_id(&run).as_str()
+        || !run["cancelRequestedAt"].is_null()
+        || run["status"] != RunStatus::Running
+        || !server.enabled
+        || server.revision != scope.revision;
+    if revoked {
+        return Err(expired());
+    }
+    let agent = &run["snapshot"]["agent"];
+    let current = db
+        .agent_snapshot(text(agent, "id"))?
+        .ok_or_else(|| Error::forbidden("Agent permissions changed."))?;
+    if !covers(&current, agent) {
+        return Err(Error::forbidden("Agent permissions were reduced."));
+    }
+    crate::delegation::authorize_run(db, &run)?;
+    Ok((server, scope.clone()))
+}
+
+#[cfg(test)]
+mod management_authorization_tests {
+    use super::*;
+    use crate::{
+        agent_fixture::AgentFixture,
+        plugin_grant_fixture::{Fixture, contribution, support},
+    };
+    use std::sync::{Arc, atomic::Ordering};
+
+    #[tokio::test]
+    async fn connection_updates_recheck_delegation_after_waiting_for_the_lock() {
+        let f = Fixture::new().await;
+        f.marker("live-parent").await;
+        f.set(json!([contribution("tool", "grant_probe_post", support())]))
+            .await;
+        let child =
+            f.s.agent_fixture(
+                json!({
+                    "name": "Child",
+                    "access": { "installation": true },
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+        let child_id = text(&child, "id");
+        f.set_for(
+            child_id,
+            json!([contribution(
+                "tool",
+                "grant_probe_post",
+                json!([{ "resourceType": "thread", "id": "support-thread" }])
+            )]),
+        )
+        .await;
+        let (_, bearer) = f.delegated(crate::config::MAIN_AGENT_ID, child_id).await;
+        let initial = f
+            .s
+            .mcps
+            .save(
+                &f.s,
+                serde_json::from_value(json!({
+                    "name": "Original", "url": "https://service.example.test/mcp", "auth": "none",
+                }))
+                .unwrap(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let checked = Arc::new(tokio::sync::Notify::new());
+        let completed = checked.clone();
+        let (_, authority) = crate::installation_mcp::authorize_with_authority(&f.s, &bearer)
+            .await
+            .unwrap();
+        let authority = authority.with_recheck_guard(move |_| {
+            let completed = completed.clone();
+            Box::pin(async move {
+                completed.notify_one();
                 Ok(())
             })
+        });
+        let authorization = crate::authorization::Authorization::live(&f.s, authority);
+        let server_id = initial.server.id.clone();
+        let lock = f.s.mcps.lock(&server_id).await;
+        let service = f.s.clone();
+        let id = server_id.clone();
+        let update = tokio::spawn(async move {
+            service.mcps.save_live(&service, serde_json::from_value(json!({
+                "name": "Forbidden change", "url": "https://service.example.test/mcp", "auth": "none",
+            })).unwrap(), Some(&id), Some(initial.server.revision), authorization).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), checked.notified())
             .await
+            .unwrap();
+        f.moved_parent.store(true, Ordering::SeqCst);
+        drop(lock);
+        let error = update.await.unwrap().unwrap_err();
+        assert_eq!(error.status, 403);
+        let after = f.s.mcps.server(&f.s, &server_id).await.unwrap();
+        assert_eq!(after.name, "Original");
+        f.s.shutdown.cancel();
     }
 }

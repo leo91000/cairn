@@ -1,16 +1,16 @@
 mod chat_files;
-mod chat_tools;
+pub(crate) mod chat_tools;
 pub mod code_mode;
-mod node_tools;
+mod model_result;
 
 use crate::{
     error::{Error, Result, required},
     http::{App, Input},
     mcp_client::{LEGACY, MODERN, VERSIONS},
     rpc::jsonrpc::{Frame, Message},
-    service::{AgentEditor, Service},
+    service::Service,
     store::Db,
-    validation::{parse, text},
+    validation::{encoded_size, parse, text},
 };
 use axum::{
     Json,
@@ -38,7 +38,7 @@ const CACHEABLE: [&str; 5] = [
     "prompts/list",
 ];
 
-// Leave ample headroom below the gateway's 8 MiB ceiling: MCP serializes the
+// Leave headroom below the model-facing 1 MiB result budget: MCP serializes the
 // result both as structured data and as escaped text for older clients.
 const RUN_PAGE_BYTES: usize = 256 * 1024;
 
@@ -318,7 +318,7 @@ async fn respond(s: &Arc<Service>, request: Request) -> Result<Response> {
                 s,
                 &endpoint,
                 &bearer,
-                scopes.as_deref(),
+                input.identity.as_ref(),
                 method,
                 &body["params"],
                 modern,
@@ -336,11 +336,16 @@ async fn respond(s: &Arc<Service>, request: Request) -> Result<Response> {
             endpoint, connection_id, method, elapsed_ms = started.elapsed().as_millis() as u64,
             success = dispatched.is_ok());
     }
+    let dispatched = dispatched.and_then(|result| {
+        finish_result(
+            result,
+            method,
+            modern,
+            matches!(endpoint, Endpoint::Gateway(_)),
+        )
+    });
     let frame = match dispatched {
-        Ok(result) => Frame::strict(Message::Result {
-            id,
-            result: finish_result(result, method, modern),
-        }),
+        Ok(result) => Frame::strict(Message::Result { id, result }),
         Err(error) => {
             let code = if error.is_not_found() {
                 crate::rpc::jsonrpc::METHOD_NOT_FOUND
@@ -362,7 +367,12 @@ async fn respond(s: &Arc<Service>, request: Request) -> Result<Response> {
 }
 
 /// Adapts a result to the negotiated protocol's result metadata.
-fn finish_result(mut result: Value, method: &str, modern: bool) -> Value {
+fn finish_result(mut result: Value, method: &str, modern: bool, gateway: bool) -> Result<Value> {
+    if !result.is_object() {
+        return Err(Error::bad_gateway(
+            "MCP response result must be an object. Tool outcome is unknown; do not repeat the operation automatically.",
+        ));
+    }
     if modern && CACHEABLE.contains(&method) {
         result["ttlMs"] = 0.into();
         result["cacheScope"] = "private".into();
@@ -373,14 +383,20 @@ fn finish_result(mut result: Value, method: &str, modern: bool) -> Value {
     if !modern && let Some(object) = result.as_object_mut() {
         object.remove("resultType");
     }
-    result
+    if method == "tools/list" {
+        return model_result::advertise(result, gateway);
+    }
+    if method == "tools/call" {
+        return model_result::finish(result);
+    }
+    Ok(result)
 }
 
 async fn dispatch(
     s: &Arc<Service>,
     endpoint: &Endpoint,
     bearer: &str,
-    scopes: Option<&[String]>,
+    identity: Option<&crate::auth::InstallationIdentity>,
     method: &str,
     params: &Value,
     modern: bool,
@@ -427,7 +443,7 @@ async fn dispatch(
         _ => match endpoint {
             Endpoint::Workspace => crate::project_workspaces::rpc(s, bearer, method, params).await,
             Endpoint::Gateway(id) => proxy(s, id, bearer, method, params.clone()).await,
-            Endpoint::Management => management(s, scopes, method, params).await,
+            Endpoint::Management => management(s, identity, method, params).await,
             Endpoint::Installation => crate::installation_mcp::rpc(s, bearer, method, params).await,
         },
     }
@@ -435,7 +451,7 @@ async fn dispatch(
 
 async fn management(
     s: &Arc<Service>,
-    scopes: Option<&[String]>,
+    identity: Option<&crate::auth::InstallationIdentity>,
     method: &str,
     params: &Value,
 ) -> Result<Value> {
@@ -449,7 +465,17 @@ async fn management(
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            call(s, scopes, text(params, "name"), args).await
+            let owner = identity
+                .filter(|identity| identity.role == crate::auth::InstallationRole::Owner)
+                .map(|identity| identity.account_id.clone());
+            // Keep verified public callers separate from run-scoped delegation.
+            // Box the dispatcher so nested task-local scopes keep a bounded stack.
+            crate::native::policy::CALLER
+                .scope(
+                    owner,
+                    Box::pin(call(s, identity, text(params, "name"), args)),
+                )
+                .await
         }
         _ => Err(Error::not_found("Method not found")),
     }
@@ -476,7 +502,7 @@ struct OperationDescriptor {
 }
 
 pub(crate) fn operations() -> Vec<Value> {
-    CATALOG
+    let mut operations: Vec<Value> = CATALOG
         .iter()
         .map(|tool| {
             let name = tool.name.as_str();
@@ -499,7 +525,75 @@ pub(crate) fn operations() -> Vec<Value> {
             })
             .expect("serializable tool descriptor")
         })
-        .collect()
+        .collect();
+    operations.extend(
+        crate::capabilities::AGENT_OPERATIONS
+            .iter()
+            .map(crate::capabilities::AgentOperation::descriptor),
+    );
+    operations.extend(
+        crate::capabilities::MCP_OPERATIONS
+            .iter()
+            .map(crate::capabilities::McpOperation::descriptor),
+    );
+    operations.extend(
+        crate::capabilities::ACCOUNT_OPERATIONS
+            .iter()
+            .map(crate::capabilities::AccountOperation::descriptor),
+    );
+    operations.push(crate::capabilities::RESUME_RUN.descriptor());
+    operations.push(crate::capabilities::MANAGE_PLUGIN.descriptor());
+    operations.extend(
+        crate::capabilities::RUN_OPERATIONS
+            .iter()
+            .map(crate::capabilities::RunOperation::descriptor),
+    );
+    operations.extend(
+        crate::capabilities::PLUGIN_PACKAGE_OPERATIONS
+            .iter()
+            .map(crate::capabilities::plugin_packages::PluginPackageOperation::descriptor),
+    );
+    operations.extend(
+        crate::capabilities::NODE_OPERATIONS
+            .iter()
+            .map(crate::capabilities::NodeOperation::descriptor),
+    );
+    operations.extend(
+        crate::capabilities::CHAT_OPERATIONS
+            .iter()
+            .map(crate::capabilities::conversations::ChatOperation::descriptor),
+    );
+    operations.extend(
+        crate::capabilities::PROJECT_OPERATIONS
+            .iter()
+            .map(crate::capabilities::ProjectOperation::descriptor),
+    );
+    operations.extend(
+        crate::capabilities::MISSION_OPERATIONS
+            .iter()
+            .map(crate::capabilities::MissionOperation::descriptor),
+    );
+    operations.extend(
+        crate::capabilities::PERSONAL_OPERATIONS
+            .iter()
+            .map(crate::capabilities::personal::PersonalOperation::descriptor),
+    );
+    operations.extend(
+        crate::capabilities::SETTINGS_OPERATIONS
+            .iter()
+            .map(crate::capabilities::settings::SettingsOperation::descriptor),
+    );
+    operations.extend(
+        crate::capabilities::RESOURCE_OPERATIONS
+            .iter()
+            .map(crate::capabilities::ResourceOperation::descriptor),
+    );
+    operations.extend(
+        crate::capabilities::ARTIFACT_OPERATIONS
+            .iter()
+            .map(crate::capabilities::artifacts::ArtifactOperation::descriptor),
+    );
+    operations
 }
 
 pub(crate) fn catalog() -> Vec<Value> {
@@ -508,15 +602,19 @@ pub(crate) fn catalog() -> Vec<Value> {
 
 async fn call(
     s: &Arc<Service>,
-    scopes: Option<&[String]>,
+    identity: Option<&crate::auth::InstallationIdentity>,
     name: &str,
     args: Value,
 ) -> Result<Value> {
-    let scopes =
-        scopes.ok_or_else(|| Error::unauthorized("A verified beacon MCP grant is required."))?;
+    let scopes = identity
+        .and_then(|identity| identity.mcp_scopes.as_ref())
+        .ok_or_else(|| Error::unauthorized("A verified beacon MCP grant is required."))?;
     code_mode::call(
         s,
-        code_mode::Authorization::Public(scopes.to_vec()),
+        code_mode::Authorization::Public(
+            scopes.to_vec(),
+            identity.and_then(|identity| identity.mcp_credential_digest.clone()),
+        ),
         name,
         args,
     )
@@ -526,9 +624,190 @@ async fn call(
 pub(crate) async fn operation(
     s: &Arc<Service>,
     scopes: &[String],
+    credential: Option<&str>,
     name: &str,
     args: Value,
 ) -> Result<Value> {
+    if let Some(op) = crate::capabilities::artifact_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
+    if let Some(operation) = crate::capabilities::plugin_package_operation(name) {
+        return operation
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
+    if name == "manage_plugin" {
+        return crate::capabilities::MANAGE_PLUGIN
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::mission_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::mcp_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+                None,
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::agent_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::account_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::chat_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::node_operation(name) {
+        // Keep placement futures from inflating every public RPC stack frame.
+        return Box::pin(op.invoke(
+            s,
+            args,
+            crate::capabilities::ResumeContext::Public(
+                scopes.to_vec(),
+                credential.map(str::to_owned),
+            ),
+        ))
+        .await;
+    }
+    if let Some(op) = crate::capabilities::resource_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::project_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::run_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::personal_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
+    if let Some(op) = crate::capabilities::settings_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
+    if name == cairn_contracts::RESUME_RUN_ID {
+        let input = crate::capabilities::RESUME_RUN.decode(args)?;
+        let context = crate::capabilities::ResumeContext::Public(
+            scopes.to_vec(),
+            credential.map(str::to_owned),
+        );
+        let output = crate::capabilities::RESUME_RUN
+            .invoke(s, input, context)
+            .await?;
+        return Ok(serde_json::to_value(output)?);
+    }
     let tool = CATALOG
         .iter()
         .find(|tool| tool.name == name)
@@ -541,99 +820,266 @@ pub(crate) async fn operation(
     invoke(s, name, args, None).await
 }
 
-fn run_record_preview(record: Value, fields: &[&str]) -> Result<(Value, usize)> {
-    let bytes = serde_json::to_vec(&record)?.len();
-    if bytes <= RUN_PAGE_BYTES {
-        return Ok((record, bytes));
+fn event_preview(event: cairn_contracts::RunEvent) -> Result<cairn_contracts::RunEventPage> {
+    use cairn_contracts::{EventPreview, RunEventPage};
+    let total_bytes = encoded_size(&event)? as u64;
+    let complete = RunEventPage::Complete { event };
+    if encoded_size(&complete)? <= RUN_PAGE_BYTES - 2 {
+        return Ok(complete);
     }
-    let mut preview = json!({
-        "truncated": true,
-        "totalBytes": bytes
-    });
-    let mut bytes = serde_json::to_vec(&preview)?.len();
-    for field in fields {
-        if let Some(value) = record.get(*field) {
-            let size = serde_json::to_vec(value)?.len() + field.len() + 4;
-            if bytes + size <= RUN_PAGE_BYTES {
-                preview[*field] = value.clone();
-                bytes += size;
-            }
+    let RunEventPage::Complete { event } = complete else {
+        unreachable!()
+    };
+    let mut preview = RunEventPage::Truncated {
+        total_bytes,
+        preview: EventPreview {
+            id: event.id,
+            run_id: event.run_id,
+            created_at: event.created_at,
+            kind: None,
+            text: None,
+        },
+    };
+    if let RunEventPage::Truncated {
+        preview: fields, ..
+    } = &mut preview
+    {
+        // Unknown adapter markers can themselves be oversized. The full event
+        // remains addressable by ID; omit fields that do not fit the preview.
+        let marker = event.kind.as_str().to_owned();
+        let remaining = RUN_PAGE_BYTES - 1024;
+        let marker_bytes = encoded_size(&marker)?;
+        let text_bytes = encoded_size(&event.text)?;
+        if marker_bytes <= remaining {
+            fields.kind = Some(marker);
+        }
+        if marker_bytes.saturating_add(text_bytes) <= remaining {
+            fields.text = Some(event.text);
         }
     }
-    Ok((preview, bytes))
+    Ok(preview)
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RunHistory {
-    run: Value,
-    events: Vec<Value>,
-    next_after: i64,
-    has_more: bool,
+/// Keep the newest contiguous suffix of the UI window. A preview retains its
+/// event ID for read_run_content; trimming sets hasOlder and never skips a cursor.
+pub(crate) fn bounded_history_window(
+    page: cairn_contracts::HistoryPage,
+) -> Result<cairn_contracts::RunHistoryWindowOutput> {
+    let mut events = Vec::new();
+    let mut bytes = 2;
+    let mut has_older = page.has_older;
+    let mut oldest = page.oldest;
+    for event in page.events.into_iter().rev() {
+        let id = event.id;
+        let preview = event_preview(event)?;
+        let size = encoded_size(&preview)? + usize::from(!events.is_empty());
+        if !events.is_empty() && bytes + size > RUN_PAGE_BYTES {
+            has_older = true;
+            break;
+        }
+        bytes += size;
+        oldest = id;
+        events.push(preview);
+    }
+    events.reverse();
+    Ok(cairn_contracts::RunHistoryWindowOutput {
+        events,
+        history: page.history,
+        oldest,
+        has_older,
+    })
+}
+
+/// The newest cards before a position, as complete cards or explicit previews that
+/// keep the card's identity, cursor and source event for read_run_content.
+pub(crate) fn run_timeline(
+    db: &Db<'_>,
+    run: &str,
+    input: &cairn_contracts::ReadRunTimelineInput,
+) -> Result<cairn_contracts::RunTimelineOutput> {
+    use cairn_contracts::{TimelineContent, TimelineCursor, TimelineEntryPage, TimelinePreview};
+    const PREVIEW_BYTES: usize = 1024;
+    let (first, newest) = crate::live::event_bounds(db, run)?;
+    let history = format!("v2:{run}:{first}");
+    let changes = input.changes.as_ref();
+    if changes.is_some_and(|cursor| cursor.history != history || cursor.revision > newest) {
+        return Err(Error::conflict(
+            "Timeline history changed; restart from the newest page.",
+        ));
+    }
+    if input
+        .snapshot
+        .as_ref()
+        .is_some_and(|cursor| cursor.history != history || cursor.revision > newest)
+    {
+        return Err(Error::conflict(
+            "Timeline history changed; restart from the newest page.",
+        ));
+    }
+    let (cards, mut has_older) = if let Some(cursor) = changes {
+        let (mut cards, limited) =
+            crate::timeline::changes_after(db, run, cursor.revision, cursor.id.as_deref(), 101)?;
+        let more = limited || cards.len() > 100;
+        cards.truncate(100);
+        (cards, more)
+    } else {
+        let (mut cards, more) = crate::timeline::page(db, run, input.before, 100)?;
+        cards.reverse();
+        (cards, more)
+    };
+    let mut entries = Vec::new();
+    let mut bytes = 2;
+    let mut oldest = input.before;
+    let mut last_change = None;
+    for entry in cards {
+        let position = entry.position;
+        let cursor = (entry.revision, entry.id.clone());
+        let total_bytes = encoded_size(&entry)? as u64;
+        let complete = TimelineEntryPage::Complete {
+            entry: Box::new(entry),
+        };
+        let page = if encoded_size(&complete)? <= RUN_PAGE_BYTES - 2 {
+            complete
+        } else {
+            let TimelineEntryPage::Complete { entry } = complete else {
+                unreachable!()
+            };
+            let entry = *entry;
+            let (kind, text) = match &entry.content {
+                TimelineContent::UserMessage { text, .. } => ("userMessage", text.as_str()),
+                TimelineContent::AgentMessage { text, .. } => ("agentMessage", text.as_str()),
+                TimelineContent::Notice { notice } => {
+                    ("notice", notice.detail.as_deref().unwrap_or_default())
+                }
+            };
+            let mut end = text.len().min(PREVIEW_BYTES);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            TimelineEntryPage::Truncated {
+                total_bytes,
+                preview: TimelinePreview {
+                    id: entry.id.clone(),
+                    position,
+                    revision: entry.revision,
+                    source: entry.source,
+                    kind: kind.to_owned(),
+                    text: text[..end].to_owned(),
+                    snapshot: Box::new(crate::live::large_reference(entry).snapshot),
+                },
+            }
+        };
+        let size = encoded_size(&page)? + usize::from(!entries.is_empty());
+        if !entries.is_empty() && bytes + size > RUN_PAGE_BYTES {
+            has_older = true;
+            break;
+        }
+        bytes += size;
+        oldest = position;
+        last_change = Some(cursor);
+        entries.push(page);
+    }
+    if changes.is_none() {
+        entries.reverse();
+    }
+    let has_more_changes = changes.is_some() && has_older;
+    let change_cursor = if has_more_changes {
+        let (revision, id) = last_change.expect("a bounded page always includes one card");
+        TimelineCursor {
+            revision,
+            id: Some(id),
+            history,
+        }
+    } else if let Some(snapshot) = &input.snapshot {
+        snapshot.clone()
+    } else {
+        TimelineCursor {
+            revision: newest,
+            id: None,
+            history,
+        }
+    };
+    Ok(cairn_contracts::RunTimelineOutput {
+        entries,
+        oldest,
+        has_older: changes.is_none() && has_older,
+        change_cursor,
+        has_more_changes,
+    })
 }
 
 pub(crate) fn run_history(db: &Db<'_>, id: &str, after: i64) -> Result<Value> {
-    let run = required(db.run(id)?, "Run not found")?;
-    let (run, _) = run_record_preview(
-        run,
-        &[
-            "id",
-            "taskId",
-            "projectId",
-            "status",
-            "trigger",
-            "createdAt",
-            "startedAt",
-            "finishedAt",
-        ],
-    )?;
+    let run = required(db.run_view(id)?, "Run not found")?;
+    let total_bytes = encoded_size(&run)? as u64;
+    let run = if total_bytes <= RUN_PAGE_BYTES as u64 {
+        cairn_contracts::RunMetadataPage::Complete { run: Box::new(run) }
+    } else {
+        let state = run.state;
+        cairn_contracts::RunMetadataPage::Truncated {
+            total_bytes,
+            preview: cairn_contracts::RunPreview {
+                id: state.id,
+                task_id: state.task_id,
+                project_id: state.project_id,
+                status: state.status,
+                trigger: state.trigger,
+                created_at: state.created_at,
+                started_at: state.started_at,
+                finished_at: state.finished_at,
+            },
+        }
+    };
     let mut events = Vec::new();
-    let mut bytes = 0;
+    let mut bytes = 2;
     let mut next = after;
     for event in db.event_batch(id, after, 100, RUN_PAGE_BYTES)? {
         let event_id = event.id;
-        let (event, size) = run_record_preview(
-            serde_json::to_value(event)?,
-            &["id", "runId", "createdAt", "type", "text"],
-        )?;
+        let page = event_preview(event)?;
+        let size = encoded_size(&page)? + usize::from(!events.is_empty());
         if !events.is_empty() && bytes + size > RUN_PAGE_BYTES {
             break;
         }
         bytes += size;
-        events.push(event);
+        events.push(page);
         next = event_id;
     }
-    let more: bool = db.0.query_row(
-        "SELECT EXISTS(SELECT 1 FROM events WHERE run_id=? AND id>?)",
-        rusqlite::params![id, next],
-        |row| row.get(0),
-    )?;
-    let history = RunHistory {
+    let (first, newest) = crate::live::event_bounds(db, id)?;
+    let history = cairn_contracts::RunHistoryOutput {
         run,
         events,
+        history: format!("v2:{id}:{first}"),
         next_after: next,
-        has_more: more,
+        has_more: newest > next,
     };
     Ok(serde_json::to_value(history)?)
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RunContentChunk<'a> {
-    run_id: &'a str,
-    event_id: &'a Value,
-    encoding: &'static str,
-    format: &'static str,
-    offset: usize,
-    total_bytes: usize,
-    sha256: String,
-    data: &'a str,
-    next_offset: Option<usize>,
-}
-
-pub(crate) fn read_run_content(db: &Db<'_>, args: &Value) -> Result<Value> {
-    let id = text(args, "runId");
-    let data = if let Some(event_id) = args["eventId"].as_i64() {
+pub(crate) fn read_run_content(
+    db: &Db<'_>,
+    args: &cairn_contracts::ReadRunContentInput,
+) -> Result<Value> {
+    let run_id = args.run_id.to_string();
+    let id = run_id.as_str();
+    let data = if let Some(snapshot) = &args.timeline_snapshot {
+        db.require_run(id)?;
+        if args.entry_id.as_deref() != Some(snapshot.id.as_str())
+            || args.event_id.is_some()
+            || encoded_size(snapshot)? > RUN_PAGE_BYTES - 1024
+        {
+            return Err(Error::bad("Invalid timeline content reference."));
+        }
+        serde_json::to_string(&crate::timeline::snapshot_from_source(
+            db,
+            id,
+            (**snapshot).clone(),
+        )?)?
+    } else if let Some(entry_id) = &args.entry_id {
+        db.require_run(id)?;
+        serde_json::to_string(&required(
+            crate::timeline::entry(db, id, entry_id)?,
+            "Timeline entry not found in this run",
+        )?)?
+    } else if let Some(event_id) = args.event_id {
         db.require_run(id)?;
         let event = db
             .event_batch(id, event_id - 1, 1, RUN_PAGE_BYTES)?
@@ -643,11 +1089,19 @@ pub(crate) fn read_run_content(db: &Db<'_>, args: &Value) -> Result<Value> {
         // a potentially huge nested JSON object just to serialize it again.
         serde_json::to_string(&required(event, "Event not found in this run")?)?
     } else {
-        required(db.run(id)?, "Run not found")?.to_string()
+        serde_json::to_string(&required(db.run_view(id)?, "Run not found")?)?
     };
-    let digest = crate::auth::hex_digest(&data);
-    let offset = args["offset"].as_u64().unwrap() as usize;
-    if (offset > 0 || args["sha256"].is_string()) && text(args, "sha256") != digest {
+    chunk_run_content(&data, args)
+}
+
+pub(crate) fn chunk_run_content(
+    data: &str,
+    args: &cairn_contracts::ReadRunContentInput,
+) -> Result<Value> {
+    let run_id = args.run_id.to_string();
+    let digest = crate::auth::hex_digest(data);
+    let offset = usize::try_from(args.offset).map_err(|_| Error::bad("Invalid content offset."))?;
+    if (offset > 0 || args.sha256.is_some()) && args.sha256.as_deref() != Some(&digest) {
         return Err(Error::conflict(
             "Content changed or checksum missing. Restart at offset 0 and pass the returned sha256 with each subsequent chunk.",
         ));
@@ -657,17 +1111,25 @@ pub(crate) fn read_run_content(db: &Db<'_>, args: &Value) -> Result<Value> {
             "Offset must be a UTF-8 byte boundary within the content. Use nextOffset from the previous response.",
         ));
     }
-    let end = data.floor_char_boundary((offset + RUN_PAGE_BYTES).min(data.len()));
-    let chunk = RunContentChunk {
-        run_id: id,
-        event_id: &args["eventId"],
-        encoding: "utf-8",
-        format: "json",
-        offset,
-        total_bytes: data.len(),
+    // Bound the encoded response, including escaping and room for the envelope.
+    // Large plain-text answers can use almost the entire budget instead of
+    // requiring many more full-card checksum reads.
+    let budget = RUN_PAGE_BYTES - 16 * 1024;
+    let mut end = data.floor_char_boundary((offset + budget).min(data.len()));
+    while serde_json::to_vec(&data[offset..end])?.len() > budget {
+        end = data.floor_char_boundary(offset + (end - offset) / 2);
+    }
+    let chunk = cairn_contracts::RunContentOutput {
+        run_id,
+        event_id: args.event_id,
+        entry_id: args.entry_id.clone(),
+        encoding: "utf-8".into(),
+        format: "json".into(),
+        offset: offset as u64,
+        total_bytes: data.len() as u64,
         sha256: digest,
-        data: &data[offset..end],
-        next_offset: (end < data.len()).then_some(end),
+        data: data[offset..end].to_owned(),
+        next_offset: (end < data.len()).then_some(end as u64),
     };
     Ok(serde_json::to_value(chunk)?)
 }
@@ -678,213 +1140,27 @@ pub(crate) async fn invoke(
     args: Value,
     bearer: Option<&str>,
 ) -> Result<Value> {
-    let authorize = crate::installation_mcp::management_authorization(bearer);
+    let authorize = crate::installation_mcp::management_authorization(s, bearer).await?;
     match name {
         "get_chat_backend_migration" => {
-            if let Some(run) = args["runId"].as_str() {
-                crate::backend_migration::preview_run(s, run, authorize).await
-            } else {
-                crate::backend_migration::preview(s, text(&args, "chatId"), authorize).await
-            }
+            crate::backend_migration::preview_live(
+                s,
+                args["runId"]
+                    .as_str()
+                    .unwrap_or_else(|| text(&args, "chatId")),
+                authorize,
+            )
+            .await
         }
-        "migrate_chat_backend" => s.migrate_chat_backend(args, authorize).await,
-        "list_nodes"
-        | "list_native_callers"
-        | "create_node_enrollment"
-        | "update_node"
-        | "change_native_node_mode"
-        | "update_node_storage"
-        | "revoke_node" => node_tools::invoke(s, name, args, bearer).await,
+        "migrate_chat_backend" => s.migrate_chat_backend_live(args, authorize).await,
+
         "list_chat_artifacts"
         | "read_chat_artifact"
         | "set_chat_artifact_visibility"
         | "list_chat_attachments"
-        | "read_chat_attachment"
-        | "upload_chat_attachment" => chat_files::invoke(s, name, args, bearer).await,
-        "read_chat_content"
-        | "list_chat_questions"
-        | "answer_chat_question"
-        | "restore_chat"
-        | "restart_chat_session"
-        | "resume_chat"
-        | "list_chats"
-        | "get_chat"
-        | "create_chat"
-        | "send_chat_message"
-        | "edit_chat_message"
-        | "delete_chat_message"
-        | "rename_chat"
-        | "set_chat_paused"
-        | "stop_chat"
-        | "delete_chat" => chat_tools::invoke(s, name, args, bearer).await,
-        "list_agents" => Ok(s.store.list("agents").await?.into()),
-        "list_projects" => Ok(s.store.list("projects").await?.into()),
-        "list_tasks" => Ok(s.store.list("tasks").await?.into()),
-        "save_agent" => {
-            s.agent_authorized(args, None, AgentEditor::Installation, authorize)
-                .await
-        }
-        "save_project" => s.project_authorized(args, None, authorize).await,
-        "create_task" => s.task(args, None).await,
-        "update_agent" => {
-            let id = text(&args, "id");
-            let mut agent = s.get("agents", id).await?;
-            crate::store::merge(&mut agent, &args["agent"]);
-            s.agent_authorized(agent, Some(id), AgentEditor::Installation, authorize)
-                .await
-        }
-        "update_task" => s.task(args["task"].clone(), Some(text(&args, "id"))).await,
-        "delete_agent" => {
-            s.remove_authorized("agents", text(&args, "id"), authorize)
-                .await?;
-            Ok(json!({ "deleted": true }))
-        }
-        "merge_agents" => s.merge_agents_authorized(args, authorize).await,
-        "run_task" => s.enqueue(text(&args, "taskId"), "mcp", None).await,
-        "convert_run_to_chat" => {
-            s.chat_from_run_authorized(text(&args, "runId"), authorize)
-                .await
-        }
-        "cancel_run" => {
-            s.worker.cancel(s, text(&args, "runId")).await?;
-            Ok(json!({ "cancelled": true }))
-        }
-        "list_runs" => {
-            s.store
-                .read(move |db| {
-                    let runs = db.runs(
-                        args["status"].as_str(),
-                        None,
-                        args["limit"].as_i64().unwrap(),
-                        args["offset"].as_i64().unwrap(),
-                        false,
-                    )?;
-                    Ok(runs.into())
-                })
-                .await
-        }
-        "get_run" => {
-            let id = text(&args, "runId").to_owned();
-            let after = args["after"].as_i64().unwrap();
-            s.store.read(move |db| run_history(db, &id, after)).await
-        }
-        "read_run_content" => s.store.read(move |db| read_run_content(db, &args)).await,
-        "list_skills" | "read_skill" | "save_skill" | "edit_skill_files" => {
-            skills_tool(s, name, &args, bearer).await
-        }
-        "list_plugins" | "manage_plugin" => {
-            Box::pin(crate::plugins::management::invoke(s, name, &args, bearer)).await
-        }
-        "list_mcps" | "create_mcp" | "update_mcp" | "test_mcp" | "disconnect_mcp"
-        | "delete_mcp" => connection_tool(s, name, args, bearer).await,
+        | "read_chat_attachment" => chat_files::invoke(s, name, args, bearer).await,
+
         _ => Err(Error::not_found("Unknown tool")),
-    }
-}
-
-async fn skills_tool(s: &Service, name: &str, args: &Value, bearer: Option<&str>) -> Result<Value> {
-    let project_id = args["projectId"].as_str();
-    let project = match project_id {
-        Some(id) => Some(std::path::PathBuf::from(text(
-            &s.get("projects", id).await?,
-            "path",
-        ))),
-        None => None,
-    };
-    let project = project.as_deref();
-    let scope = project_id.unwrap_or("global");
-    let skill = text(args, "name");
-    match name {
-        "list_skills" => Ok(s.skills.list(scope, project).await?.into()),
-        "read_skill" => {
-            if let Some(path) = args["path"].as_str() {
-                return s.skills.read(skill, path, project).await;
-            }
-            let mut bundle = s.skills.bundle(scope, skill, project).await?;
-            crate::skills::sources::source(s, scope, skill, &mut bundle).await?;
-            Ok(bundle)
-        }
-        "edit_skill_files" => {
-            let (changes, uploads) = s.skills.changes(&args["changes"]).await?;
-            let saved = s
-                .skills
-                .apply_authorized(
-                    skill,
-                    args["base"].as_str(),
-                    &changes,
-                    project,
-                    Some((
-                        s.store.clone(),
-                        Box::new(crate::installation_mcp::management_authorization(bearer)),
-                    )),
-                )
-                .await?;
-            s.skills.discard(&uploads).await;
-            let mut bundle = crate::skills::bundle_response(scope, skill, &saved);
-            crate::skills::sources::source(s, scope, skill, &mut bundle).await?;
-            Ok(bundle)
-        }
-        _ => {
-            s.skills
-                .save_authorized(
-                    skill,
-                    text(args, "content"),
-                    project,
-                    Some((
-                        s.store.clone(),
-                        Box::new(crate::installation_mcp::management_authorization(bearer)),
-                    )),
-                )
-                .await
-        }
-    }
-}
-
-async fn connection_tool(
-    s: &Service,
-    name: &str,
-    args: Value,
-    bearer: Option<&str>,
-) -> Result<Value> {
-    let authorize = crate::installation_mcp::management_authorization(bearer);
-    let management_url = crate::relay::beacon_address(&s.config.data_dir)
-        .await?
-        .map(|(origin, installation)| format!("{origin}/installations/{installation}/mcps"));
-    let with_management_url = |mut result: Value| {
-        if let Some(url) = &management_url {
-            result["managementUrl"] = url.clone().into();
-        }
-        result
-    };
-    match name {
-        "list_mcps" => return Ok(s.mcps.list(s).await?.into()),
-        "create_mcp" => {
-            return Ok(with_management_url(
-                s.mcps.save_authorized(s, args, None, authorize).await?,
-            ));
-        }
-        _ => {}
-    }
-    let id = text(&args, "id");
-    s.mcps.assert_management(s, id).await?;
-    match name {
-        "update_mcp" => {
-            let saved = s
-                .mcps
-                .save_authorized(s, args["connection"].clone(), Some(id), authorize)
-                .await?;
-            Ok(with_management_url(saved))
-        }
-        "test_mcp" => s.mcps.test_authorized(s, id, authorize).await,
-        "delete_mcp" => {
-            s.mcps.disconnect_authorized(s, id, true, authorize).await?;
-            Ok(json!({ "deleted": true }))
-        }
-        _ => {
-            s.mcps
-                .disconnect_authorized(s, id, false, authorize)
-                .await?;
-            Ok(json!({ "disconnected": true }))
-        }
     }
 }
 
@@ -897,12 +1173,14 @@ async fn proxy(
     params: Value,
 ) -> Result<Value> {
     let _guard = s.mcps.lock(id).await;
-    let (server, scope) = s.mcps.grant(s, id, bearer).await?;
+    let (server, scope, authority) = s.mcps.grant_authorized(s, id, bearer).await?;
+    let authorize = crate::authorization::Authorization::live(s, authority.clone());
     if method == "tools/call" && !scope.allows(text(&params, "name")) {
         return Err(Error::forbidden("This tool is unavailable to this agent."));
     }
     let result = async {
-        let mut client = crate::mcp_client::Client::connect_server(s, &server).await?;
+        let mut client =
+            crate::mcp_client::Client::connect_server_live(s, &server, authority.clone()).await?;
         let unsupported = match method {
             "resources/list" | "resources/templates/list" => {
                 client.capabilities.get("resources").is_none()
@@ -911,12 +1189,15 @@ async fn proxy(
             _ => false,
         };
         let result = match method {
-            "tools/list" => client.discover().await.map(|tools| {
+            "tools/list" => client.discover().await.and_then(|tools| {
+                for tool in &tools {
+                    model_result::validate_descriptor(tool)?;
+                }
                 let tools = tools
                     .into_iter()
                     .filter(|tool| scope.allows(text(tool, "name")))
                     .collect::<Vec<_>>();
-                json!({ "tools": tools })
+                Ok(json!({ "tools": tools }))
             }),
             _ if unsupported => Ok(empty_listing(method).unwrap_or_default()),
             "tools/call"
@@ -931,8 +1212,18 @@ async fn proxy(
         result
     }
     .await;
+    authority.recheck(s).await?;
+    s.store
+        .read({
+            let authorize = authorize.clone();
+            move |db| authorize.authorize(db)
+        })
+        .await?;
     if let Err(error) = &result {
-        s.mcps.failure(s, server, error).await?;
+        // Recheck the same gateway grant before publishing a failure after network work.
+        s.mcps
+            .record_discovery_live(s, server, &Err(error.clone()), authorize)
+            .await?;
     }
     result
 }
@@ -953,7 +1244,6 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
         .split('/')
         .collect::<Vec<_>>();
     match (input.method.as_str(), segments.as_slice()) {
-        ("GET", ["mcps"]) => Ok(s.mcps.list(s).await?.into()),
         ("POST", ["mcps", "oauth", "callback"]) => {
             let parameters = serde_json::from_value(input.body.clone())?;
             if s.mcps.capture_native_callback(s, &parameters).await? {
@@ -965,40 +1255,48 @@ pub async fn routes(s: &Arc<Service>, input: &Input) -> Result<Value> {
                 .await?;
             Ok(json!({ "result": result }))
         }
-        ("POST", ["mcps"]) => s.mcps.save(s, input.body.clone(), None).await,
-        ("PUT", ["mcps", id]) => {
-            crate::validation::uuid(id)?;
-            s.mcps.get(s, id).await?;
-            s.mcps.save(s, input.body.clone(), Some(id)).await
-        }
-        ("DELETE", ["mcps", id]) => {
-            crate::validation::uuid(id)?;
-            s.mcps.disconnect(s, id, true).await?;
-            Ok(json!({ "ok": true }))
-        }
-        ("POST", ["mcps", id, "test"]) => {
-            crate::validation::uuid(id)?;
-            s.mcps.test(s, id).await
-        }
-        ("POST", ["mcps", id, "connect"]) => {
-            crate::validation::uuid(id)?;
-            let binding = oauth_binding(input)?;
-            if input.body["native"] == true {
-                s.mcps.connect_native(s, id, binding).await
+        _ => {
+            let (name, body) = match (input.method.as_str(), segments.as_slice()) {
+                ("GET", ["mcps"]) => ("list_mcps", json!({})),
+                ("POST", ["mcps"]) => ("create_mcp", input.body.clone()),
+                ("PUT", ["mcps", id]) => {
+                    let command: cairn_contracts::UpdateMcpInput =
+                        serde_json::from_value(input.body.clone())
+                            .map_err(|e| Error::bad(e.to_string()))?;
+                    if command.id != *id {
+                        return Err(Error::bad("Connection identity does not match the path."));
+                    }
+                    ("update_mcp", input.body.clone())
+                }
+                ("DELETE", ["mcps", id]) => ("delete_mcp", json!({"id":id})),
+                ("POST", ["mcps", id, "test"]) => ("test_mcp", json!({"id":id})),
+                ("POST", ["mcps", id, "disconnect"]) => ("disconnect_mcp", json!({"id":id})),
+                ("POST", ["mcps", id, "connect"]) => {
+                    let mut body = input.body.clone();
+                    if !body.is_object() {
+                        body = json!({});
+                    }
+                    body["id"] = (*id).into();
+                    ("begin_mcp_connection", body)
+                }
+                ("POST", ["mcps", id, "callback"]) => ("mcp_connection_status", json!({"id":id})),
+                ("POST", ["mcps", id, "cancel"]) => ("cancel_mcp_connection", json!({"id":id})),
+                _ => return Err(Error::not_found("Not found")),
+            };
+            let context = crate::capabilities::ResumeContext::http(input)?;
+            let binding = if input
+                .identity
+                .as_ref()
+                .is_some_and(|identity| identity.mcp_scopes.is_none())
+            {
+                Some(oauth_binding(input)?.to_owned())
             } else {
-                s.mcps.connect(s, id, binding).await
-            }
+                None
+            };
+            crate::capabilities::mcp_operation(name)
+                .unwrap()
+                .invoke(s, body, context, binding)
+                .await
         }
-        ("POST", ["mcps", id, "callback"]) => {
-            crate::validation::uuid(id)?;
-            let binding = oauth_binding(input)?;
-            s.mcps.finish_native_callback(s, id, binding).await
-        }
-        ("POST", ["mcps", id, "disconnect"]) => {
-            crate::validation::uuid(id)?;
-            s.mcps.disconnect(s, id, false).await?;
-            Ok(json!({ "ok": true }))
-        }
-        _ => Err(Error::not_found("Not found")),
     }
 }

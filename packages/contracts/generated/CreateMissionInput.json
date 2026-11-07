@@ -1,0 +1,100 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "MissionSettings": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "archived": {
+          "default": false,
+          "type": "boolean"
+        },
+        "cron": {
+          "default": null,
+          "maxLength": 100,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "projectId": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt": {
+          "maxLength": 50000,
+          "minLength": 1,
+          "type": "string"
+        },
+        "skills": {
+          "default": null,
+          "items": {
+            "maxLength": 160,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "maxLength": 30,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "type": "array"
+        },
+        "timezone": {
+          "default": "Europe/Paris",
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "worktree": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "prompt",
+        "agentId"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "creationId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "settings": {
+      "$ref": "#/definitions/MissionSettings"
+    }
+  },
+  "required": [
+    "settings"
+  ],
+  "title": "CreateMissionInput",
+  "type": "object"
+}

@@ -19,12 +19,20 @@ import org.robolectric.annotation.Config
 class HistoryCacheWriterTest {
     @get:Rule val directory = TemporaryFolder()
 
-    private fun record(cursor: Long, history: String = "v1:fixture:1") =
+    private fun record(cursor: Long, history: String = "v2:fixture:1") =
         CachedHistory(
             cursor,
             history,
             LiveState(),
-            listOf(RunEvent(1, 1, "chat.user", "Revision $cursor", runId = "fixture")),
+            listOf(
+                RunEvent(
+                    id = 1,
+                    createdAt = 1,
+                    type = "chat.user",
+                    text = "Revision $cursor",
+                    runId = "fixture",
+                )
+            ),
         )
 
     @Test
@@ -44,7 +52,15 @@ class HistoryCacheWriterTest {
     @Test
     fun positionsFromATrimmedQueuedSnapshotSurvivePersistence() = runBlocking {
         val cache = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
-        val events = (1L..4L).map { RunEvent(it, it, "output", "x".repeat(1200 * 1024)) }
+        val events =
+            (1L..4L).map {
+                RunEvent(
+                    id = it,
+                    createdAt = it,
+                    type = "output",
+                    text = "x".repeat(1200 * 1024),
+                )
+            }
         val request = cache.prepareSave("chat", record(4).copy(events = events), cache.generation)!!
         val restored = cache.read("chat")!!
         assertEquals(listOf(3L, 4L), restored.events.map { it.id })
@@ -67,7 +83,7 @@ class HistoryCacheWriterTest {
         cache.save("chat", record(9), true)
         cache.flush("chat")
         assertEquals(10L, cache.read("chat")?.cursor)
-        cache.save("chat", record(1, "v1:new-run:1"), true)
+        cache.save("chat", record(1, "v2:new-run:1"), true)
         assertEquals(1L, cache.read("chat")?.cursor)
     }
 
@@ -88,7 +104,15 @@ class HistoryCacheWriterTest {
     @Test
     fun aStaleQueuedBoundaryCannotDiscardTheRetainedReadingPosition() = runBlocking {
         val cache = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
-        val events = (1L..10L).map { RunEvent(it, it, "chat.user", "Message $it") }
+        val events =
+            (1L..10L).map {
+                RunEvent(
+                    id = it,
+                    createdAt = it,
+                    type = "chat.user",
+                    text = "Message $it",
+                )
+            }
         cache.save("chat", record(10).copy(events = events), true)
         val stale =
             cache.prepareSave(
@@ -254,7 +278,7 @@ class HistoryCacheWriterTest {
             writer.flush()
             val disk = HistoryCache(directory.root, { _, bytes -> bytes }, { _, bytes -> bytes })
             assertEquals(position, disk.read("chat")?.position)
-            writer.offer(record(3, "v1:other:1"), cache.generation)
+            writer.offer(record(3, "v2:other:1"), cache.generation)
             writer.flush()
             assertNull(cache.read("chat")?.position)
             // A terminal removal invalidates work already registered by a reader.

@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "confirm": {
+      "type": "boolean"
+    },
+    "sourceId": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "targetId": {
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "sourceId",
+    "targetId",
+    "confirm"
+  ],
+  "title": "MergeAgentsInput",
+  "type": "object"
+}

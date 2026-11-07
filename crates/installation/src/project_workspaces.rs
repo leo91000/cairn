@@ -2,12 +2,12 @@
 use crate::{
     error::{Error, Result},
     mcp_server::{ToolResult, empty_listing},
-    mcps::{grant_key, record::RunGrant},
+    mcps::grant_key,
     run_status::RunStatus,
     service::{Service, covers, run_projects},
     validation::{text, uuid},
 };
-use serde::Deserialize;
+use cairn_contracts::EventKind;
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 
 #[derive(Default)]
 pub struct Projects {
+    pub(crate) import: Mutex<()>,
     locks: Mutex<HashMap<String, Weak<Mutex<()>>>>,
 }
 
@@ -31,10 +32,9 @@ pub fn catalog(run: &Value) -> Vec<Value> {
 
 pub fn authorize_in(db: &crate::store::Db<'_>, bearer: &str) -> Result<Value> {
     let denied = || Error::unauthorized("Workspace access expired or was revoked.");
-    let grant = db.kv(&grant_key(bearer))?.ok_or_else(denied)?;
-    let grant = RunGrant::deserialize(&grant)?;
+    let grant = db.mcp_run_grant(&grant_key(bearer))?.ok_or_else(denied)?;
     let run = db.run(&grant.run_id)?.ok_or_else(denied)?;
-    let revoked = grant.message_id != *crate::waits::execution_id(&run)
+    let revoked = grant.message_id.as_deref() != crate::waits::execution_id(&run).as_str()
         || !grant.workspace
         || run["status"] != RunStatus::Running
         || !run["cancelRequestedAt"].is_null();
@@ -42,23 +42,29 @@ pub fn authorize_in(db: &crate::store::Db<'_>, bearer: &str) -> Result<Value> {
         return Err(denied());
     }
     let agent = &run["snapshot"]["agent"];
-    let current = db.get("agents", text(agent, "id"))?.ok_or_else(denied)?;
+    let current = db.agent_snapshot(text(agent, "id"))?.ok_or_else(denied)?;
     if !covers(&current, agent) {
         return Err(Error::forbidden("Agent permissions were reduced."));
     }
+    crate::delegation::authorize_run(db, &run)?;
     Ok(run)
 }
 
 pub async fn authorize(s: &Service, bearer: &str) -> Result<Value> {
+    let token = bearer.to_owned();
     let bearer = bearer.to_owned();
-    s.store.read(move |db| authorize_in(db, &bearer)).await
+    let run = s.store.read(move |db| authorize_in(db, &bearer)).await?;
+    let authority = crate::capabilities::plugin_packages::Authority::for_execution(&run)
+        .with_guard(move |db| authorize_in(db, &token).map(|_| ()));
+    crate::delegation::authorize_async_with(s, &run, authority).await?;
+    Ok(run)
 }
 
 /// Whether the registered project still matches the one this run was granted.
-fn unchanged(current: &Value, granted: &Value) -> bool {
-    current["path"] == granted["path"]
-        && current["baseBranch"] == granted["baseBranch"]
-        && (current["sourceMode"] == "local") == (granted["sourceMode"] == "local")
+fn unchanged(current: &cairn_contracts::Project, granted: &Value) -> bool {
+    current.settings.path == granted["path"].as_str().unwrap_or("")
+        && current.settings.base_branch == granted["baseBranch"].as_str().unwrap_or("")
+        && (current.settings.source_mode == "local") == (granted["sourceMode"] == "local")
 }
 
 impl Projects {
@@ -86,7 +92,7 @@ impl Projects {
             .ok_or_else(|| Error::forbidden("This project is not authorized for this run."))?;
         let current = s
             .store
-            .get("projects", project_id)
+            .project(project_id)
             .await?
             .ok_or_else(|| Error::not_found("Project no longer exists."))?;
         if !unchanged(&current, &project) {
@@ -96,7 +102,7 @@ impl Projects {
         }
         let checkpoint = s
             .store
-            .kv(&format!("run-checkpoint:{run_id}"))
+            .checkpoint_boundary(run_id)
             .await?
             .unwrap_or_default();
         let prepared = &checkpoint["prepared"];
@@ -111,19 +117,48 @@ impl Projects {
         let attempt = text(&checkpoint, "runnerId");
         uuid(attempt)?;
         let status = format!("Opening {}", text(&project, "name"));
-        s.store.event(run_id, "status", &status, None).await?;
-        let agent_id = text(&run["snapshot"]["agent"], "id");
-        let access = crate::plugins::run_credentials::fetch(s, Some(agent_id), &current).await?;
-        let credentials = crate::plugins::run_credentials::RunCredentials {
-            fetch: [(project_id.to_owned(), access)].into(),
-            ..Default::default()
-        };
-        let entry =
-            crate::execution::project_seed(&run, &project, &s.config, root, &credentials).await?;
+        s.store
+            .event(run_id, &EventKind::Status, &status, None)
+            .await?;
+        let token = bearer.to_owned();
+        let expected = current.clone();
+        let authority = crate::capabilities::plugin_packages::Authority::for_execution(&run)
+            .with_guard(move |db| {
+                authorize_in(db, &token)?;
+                let current = db
+                    .project(&expected.id.to_string())?
+                    .ok_or_else(|| Error::not_found("Project no longer exists."))?;
+                if current.revision != expected.revision {
+                    return Err(Error::conflict(
+                        "Project configuration changed during preparation.",
+                    ));
+                }
+                Ok(())
+            });
+        let authority = crate::delegation::authorize_async_with(s, &run, authority).await?;
+        let credentials = crate::plugins::run_credentials::for_execution_authorized(
+            s,
+            &run,
+            &[serde_json::to_value(&current)?],
+            authority.clone(),
+        )
+        .await?;
+        let authorization =
+            crate::plugins::run_credentials::Authorization::new(s, authority, &credentials);
+        let entry = crate::execution::project_seed_authorized(
+            &run,
+            &project,
+            &s.config,
+            root,
+            &credentials,
+            &authorization,
+        )
+        .await?;
         // Recheck the grant after a potentially slow clone and before transferring anything.
         authorize(s, bearer).await?;
-        let imported = import(s, &run, attempt, project_id, &entry).await?;
-        record_workspace(s, run_id, entry.clone()).await?;
+        let imported = import(s, &run, attempt, project_id, &entry, &authorization).await?;
+        authorization.recheck().await?;
+        record_workspace(s, run_id, entry.clone(), authorization).await?;
         Ok(json!({
             "projectId": project_id,
             "name": project["name"],
@@ -141,6 +176,7 @@ async fn import(
     attempt: &str,
     project_id: &str,
     entry: &Value,
+    authorization: &crate::plugins::run_credentials::Authorization,
 ) -> Result<Value> {
     let credential = crate::execution::secret(&s.config.data_dir, "runner-secret").await?;
     let node = crate::nodes::transport::url(s, text(run, "id")).await?;
@@ -149,6 +185,7 @@ async fn import(
         "source": entry["path"],
         "target": entry["path"]
     });
+    authorization.recheck().await?;
     let response = s
         .http
         .post(format!("{node}/runs/{attempt}/projects/{project_id}"))
@@ -162,12 +199,14 @@ async fn import(
                 "Project transfer was interrupted. Retry open_project; saved files are preserved.",
             )
         })?;
+    authorization.recheck().await?;
     if !response.status().is_success() {
         return Err(Error::unavailable(
             "Project could not be opened in this VM. Retry when the run is active.",
         ));
     }
     let response: Value = response.json().await.map_err(Error::internal)?;
+    authorization.recheck().await?;
     if response["ok"] != true {
         return Err(Error::unavailable("Project import was not acknowledged."));
     }
@@ -175,10 +214,16 @@ async fn import(
 }
 
 /// Adds the project to the run's opened workspaces, once.
-async fn record_workspace(s: &Service, run_id: &str, entry: Value) -> Result<()> {
+async fn record_workspace(
+    s: &Service,
+    run_id: &str,
+    entry: Value,
+    authorization: crate::plugins::run_credentials::Authorization,
+) -> Result<()> {
     let id = run_id.to_owned();
     s.store
-        .write(move |db| {
+        .transaction(move |db| {
+            authorization.authorize_in(db)?;
             let run = db
                 .run(&id)?
                 .ok_or_else(|| Error::not_found("Run not found."))?;
@@ -186,7 +231,7 @@ async fn record_workspace(s: &Service, run_id: &str, entry: Value) -> Result<()>
             if !entries.iter().any(|w| w["projectId"] == entry["projectId"]) {
                 entries.push(entry);
             }
-            db.patch_run(&id, &json!({ "workspaces": entries }))?;
+            db.update_run_boundary(&id, &json!({ "workspaces": entries }))?;
             Ok(())
         })
         .await
@@ -205,8 +250,27 @@ fn open_project_tool() -> Value {
     })
 }
 
+/// Workspace tools of a plan turn: reading Cairn's state, including delegated task
+/// reports, or retiring its own obsolete questions. Opening a project imports files into
+/// the runner workspace, so it is deliberately unavailable until implementation.
+const PLAN_TOOLS: [&str; 6] = [
+    "list_nodes",
+    "exclusive_status",
+    "ask_questions",
+    "pending_questions",
+    "withdraw_question",
+    "task_status",
+];
+
+const PLAN_DENIED: &str = "This tool is unavailable during a plan turn because it has effects beyond exploring. Include the step in your plan; the user starts implementation explicitly.";
+
 async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Result<Value> {
     let summary = Value::to_string;
+    let run = authorize(s, bearer).await?;
+    let planning = crate::chats::planning(&run);
+    if planning && !PLAN_TOOLS.contains(&name) {
+        return ToolResult::from_result(Err(Error::forbidden(PLAN_DENIED)), summary);
+    }
     match name {
         "acquire_exclusive" => ToolResult::from_result(
             crate::nodes::exclusive::acquire(s, bearer, args).await,
@@ -239,9 +303,15 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
         }
         "move_to_node" => {
             let run = authorize(s, bearer).await?;
-            let result = crate::nodes::moves::request_by_agent(s, &run, args).await;
+            let authorize = crate::nodes::moves::Authorization::workspace(bearer, &run);
+            let result =
+                crate::nodes::moves::request_by_agent_authorized(s, &run, args, authorize).await;
             ToolResult::from_result(result, summary)
         }
+        "ask_questions" => ToolResult::from_result(
+            crate::chats::questions::ask(s, bearer, args.clone()).await,
+            summary,
+        ),
         "pending_questions" | "withdraw_question" => ToolResult::from_result(
             crate::chats::questions::for_agent(
                 s,
@@ -285,6 +355,9 @@ async fn call_tool(s: &Service, bearer: &str, name: &str, args: &Value) -> Resul
                 )
             },
         ),
+        "task_models" => {
+            ToolResult::from_result(crate::delegation::models(s, bearer, args).await, summary)
+        }
         "task_status" => {
             ToolResult::from_result(crate::delegation::status(s, bearer, args).await, summary)
         }
@@ -321,14 +394,15 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         return Err(Error::not_found("Unknown workspace operation."));
     }
     // Conditions of granted plugins; listing without a live run offers Cairn's own.
-    let conditions = match authorize(s, bearer).await {
+    let (conditions, planning) = match authorize(s, bearer).await {
         Ok(run) => {
             let agent_id = text(&run["snapshot"]["agent"], "id");
-            crate::plugins::conditions::schemas(s, agent_id)
+            let conditions = crate::plugins::conditions::schemas(s, agent_id)
                 .await
-                .unwrap_or_default()
+                .unwrap_or_default();
+            (conditions, crate::chats::planning(&run))
         }
-        Err(_) => Vec::new(),
+        Err(_) => (Vec::new(), false),
     };
     let token = bearer.to_owned();
     let delegates = s
@@ -343,6 +417,7 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         crate::nodes::moves::tool(),
         crate::artifacts::sharing::tool(),
         crate::outcome::tool(),
+        crate::chats::questions::ask_tool(),
         crate::chats::questions::list_tool(),
         crate::chats::questions::cancel_tool(),
         crate::waits::tool(&conditions, delegates),
@@ -353,6 +428,10 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
     ];
     if delegates {
         tools.extend(crate::delegation::tools());
+    }
+    if planning {
+        tools.retain(|tool| PLAN_TOOLS.contains(&text(tool, "name")));
+        return Ok(json!({ "tools": tools }));
     }
     // Package tools never shadow Cairn's own.
     // Listing stays available without a live run; calls authorize on their own.
@@ -368,4 +447,82 @@ pub async fn rpc(s: &Service, bearer: &str, method: &str, params: &Value) -> Res
         }
     }
     Ok(json!({ "tools": tools }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn a_project_import_rechecks_the_caller_after_async_preparation() {
+        let root = tempfile::tempdir().unwrap();
+        let effects = Arc::new(AtomicUsize::new(0));
+        let count = effects.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().fallback(axum::routing::any(move || {
+            let count = count.clone();
+            async move {
+                count.fetch_add(1, Ordering::SeqCst);
+                axum::Json(json!({ "ok": true }))
+            }
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = serde_json::from_value(json!({
+            "dataDir": root.path().join("data"), "home": root.path().join("home"),
+            "workspaceRoots": [root.path()], "publicUrl": "http://localhost:4310",
+            "host": "127.0.0.1", "port": 0, "codexBin": "unused", "concurrency": 1,
+            "logger": false, "workerEnabled": false, "runnerUrl": format!("http://{address}"),
+        }))
+        .unwrap();
+        let s = Service::new(config).await.unwrap();
+        let live = Arc::new(AtomicBool::new(true));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let valid = live.clone();
+        let (arrived, proceed) = (entered.clone(), release.clone());
+        let authority = crate::capabilities::plugin_packages::Authority::default()
+            .with_guard(move |_| {
+                if valid.load(Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err(Error::forbidden("Caller revoked"))
+                }
+            })
+            .with_recheck_guard(move |_| {
+                let (arrived, proceed) = (arrived.clone(), proceed.clone());
+                Box::pin(async move {
+                    arrived.notify_one();
+                    proceed.acquire().await.unwrap().forget();
+                    Ok(())
+                })
+            });
+        let authorization = crate::plugins::run_credentials::Authorization::new(
+            &s,
+            authority,
+            &crate::plugins::run_credentials::RunCredentials::default(),
+        );
+        let service = s.clone();
+        let imported = tokio::spawn(async move {
+            import(
+                &service,
+                &json!({ "id": "run" }),
+                "attempt",
+                "project",
+                &json!({ "path": "/private/seed" }),
+                &authorization,
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(10), entered.notified())
+            .await
+            .unwrap();
+        live.store(false, Ordering::SeqCst);
+        release.add_permits(1);
+        assert_eq!(imported.await.unwrap().unwrap_err().status, 403);
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+        server.abort();
+        s.shutdown.cancel();
+    }
 }

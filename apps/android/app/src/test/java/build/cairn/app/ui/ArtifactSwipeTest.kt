@@ -243,10 +243,10 @@ class ArtifactSwipeTest {
     fun filesPanelUsesVisibleGroupOrderAndHidesSupersededVersions(): Unit = withFiles { vm ->
         val entries =
             listOf(
-                files[0].copy(group = "Plans"),
+                files[0].copy(group = "Plans", version = 2),
                 files[1].copy(group = "Photos"),
                 files[2].copy(group = "Plans"),
-                files[0].copy(id = "old", version = 0),
+                files[0].copy(id = "old", version = 1),
             )
         ArtifactsPanel(vm, entries)
     }
@@ -320,11 +320,56 @@ class ArtifactSwipeTest {
                                 "/api/installations" -> beaconInstallationsFixture()
                                 "/api/account/session" -> beaconAccountFixture("fixture")
                                 "/api/installations/fixture/api/agents" ->
-                                    wireJson.encodeToString(listOf(Agent(MAIN_AGENT_ID, "Cairn")))
+                                    wireJson.encodeToString(
+                                        build.cairn.contracts.ListAgentsOutput(
+                                            listOf(
+                                                Agent(
+                                                    exclusiveNodes = emptyList(),
+                                                    plugins = emptyList(),
+                                                    revision = "",
+                                                    createdAt = 0,
+                                                    access =
+                                                        AccessPolicy(
+                                                            mcpTools =
+                                                                build.cairn.contracts.McpTools(
+                                                                    emptyMap()
+                                                                ),
+                                                            projects = null,
+                                                            skills = null,
+                                                            mcps = null,
+                                                        ),
+                                                    id = MAIN_AGENT_ID,
+                                                    name = "Cairn",
+                                                )
+                                            )
+                                        )
+                                    )
                                 "/api/installations/fixture/api/overview",
                                 "/api/installations/fixture/api/codex/models",
                                 "/api/installations/fixture/api/claude/models" -> "{}"
-                                else -> "[]"
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
                             }
                         )
                 }

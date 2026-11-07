@@ -1,3 +1,5 @@
+> Statut : remplacée en partie par [ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) : la limite d’une instance par package ne vise plus que les identifiants de run, reçus seuls ou par un accès complet ; les autres contributions d’un même package peuvent venir de plusieurs instances. La règle « un agent ouvert à tout le monde n’a pas GitHub », déjà levée par [ADR-0068](0068-owner-chosen-agents-for-bot-delegation.md), n’a plus d’objet sans délégation externe.
+
 # GitHub devient un plugin livré avec Cairn
 
 Date : 2026-10-20.
@@ -59,26 +61,6 @@ est couverte par celle qui interdit tout droit de plugin à cet agent.
 
 La connexion « Se connecter avec GitHub » de Beacon reste : c'est un moyen de se
 connecter à un compte Cairn, sans rapport avec l'installation.
-
-## Compatibilité
-
-C'est une rupture de format : l'epoch de compatibilité passe de 7 à 8. Au premier
-démarrage, `plugins/legacy_github.rs` déplace l'existant, puis ne fait plus rien :
-
-- le login `gh` de l'installation devient l'instance « GitHub », accordée à chaque
-  agent qui avait `access.github` (vrai par défaut, Main compris) ;
-- chaque jeton dédié devient une instance « GitHub (<agent>) », chiffrée dans le
-  coffre, accordée à son agent ; le jeton d'un agent qui utilisait la connexion
-  partagée est gardé sans droit ;
-- `access.github` quitte les agents (leur politique est matérialisée avant, pour
-  qu'une restriction GitHub seule garde son effet sur les connexions MCP) et l'accès
-  approuvé des délégations ;
-- les sources de skills GitHub, les projets dont le remote est sur github.com et
-  les attentes GitHub en cours nomment le package.
-
-Les comptes migrés reçoivent leur login et leur identité de commit par le
-formulaire du package quand l'installation démarre ses plugins. Une version
-antérieure ne lit pas ces données : pas de retour arrière après la migration.
 
 ## Conséquences
 

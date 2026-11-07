@@ -1,0 +1,59 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "acceptsCode": {
+      "default": false,
+      "type": "boolean"
+    },
+    "accountId": {
+      "default": "",
+      "type": "string"
+    },
+    "code": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "error": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "expiresAt": {
+      "default": null,
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "phase": {
+      "default": "starting",
+      "pattern": "^(starting|authorizing|verifying)$",
+      "type": "string"
+    },
+    "provider": {
+      "default": "codex",
+      "pattern": "^(codex|claude|opencode)$",
+      "type": "string"
+    },
+    "state": {
+      "default": "pending",
+      "pattern": "^(pending|complete|failed|cancelled)$",
+      "type": "string"
+    },
+    "url": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "AccountSignIn",
+  "type": "object"
+}

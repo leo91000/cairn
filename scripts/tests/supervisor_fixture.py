@@ -14,8 +14,7 @@ def write_supervisors(root):
     if os.environ.get('FAILURE') == 'ublk':
         raise RuntimeError('Fixture ublk prerequisites unavailable')
     return ['--cap-add=SYS_RESOURCE', '--device=/dev/ublk-control',
-            '--device-cgroup-rule=c 238:* rwm', '--device-cgroup-rule=b 259:* rwm',
-            '-e', 'CAIRN_BLOCK_TRANSPORT=ublk']
+            '--device-cgroup-rule=c 238:* rwm', '--device-cgroup-rule=b 259:* rwm']
 ''' + source[end:]
     node = directory / 'node-host.py'
     node.write_text(source)

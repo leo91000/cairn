@@ -21,10 +21,10 @@ class HistoryCacheMeasurementTest {
         val events =
             (1L..1250L).map {
                 RunEvent(
-                    it,
-                    it,
-                    "item.completed",
-                    "Output $it\n" + "Synthetic output line.\n".repeat(20),
+                    id = it,
+                    createdAt = it,
+                    type = "item.completed",
+                    text = "Output $it\n" + "Synthetic output line.\n".repeat(20),
                 )
             }
         val process =
@@ -35,7 +35,7 @@ class HistoryCacheMeasurementTest {
             val value =
                 CachedHistory(
                     1250,
-                    "v1:measurement:1",
+                    "v2:measurement:1",
                     LiveState(),
                     events.takeLast(count).map {
                         if (scoped) it.copy(runId = "12345678-1234-1234-1234-123456789abc") else it

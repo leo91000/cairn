@@ -65,7 +65,7 @@ function stepState(step: (typeof steps.value)[number]) {
   if (step.running)
     return props.active && props.suspended ? 'Suspended' : 'Running'
   const [only] = step.items
-  return step.items.length === 1 ? only!.statusLabel ?? (only!.historical ? 'Recorded' : 'Completed') : 'Completed'
+  return step.items.length === 1 ? only!.statusLabel ?? 'Completed' : 'Completed'
 }
 </script>
 

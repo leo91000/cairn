@@ -3,6 +3,9 @@ package build.cairn.app.data
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.util.Base64
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onEach
@@ -11,14 +14,252 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.*
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okio.Buffer
 import org.junit.Assert.*
 import org.junit.Test
 
 class DirectTransportTest {
+    @Test
+    fun `direct history negotiates gzip and decodes unicode JSON`() = runTest {
+        MockWebServer().use { server ->
+            server.start()
+            val expected = body("text" to "History 🦊 ".repeat(1000)).toString()
+            val compressed =
+                java.io
+                    .ByteArrayOutputStream()
+                    .also { output ->
+                        java.util.zip.GZIPOutputStream(output).use {
+                            it.write(expected.toByteArray())
+                        }
+                    }
+                    .toByteArray()
+            val api = CairnApi(server.url("/"), MemoryVault(), installationId = "test")
+            lateinit var channel: DirectChannel
+            channel =
+                DirectChannel(
+                    { packet, _, _ ->
+                        val request =
+                            wireJson
+                                .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
+                                .jsonObject
+                        assertTrue(
+                            request["headers"]!!.jsonArray.any {
+                                it.jsonArray[0].jsonPrimitive.content == "accept-encoding" &&
+                                    it.jsonArray[1].jsonPrimitive.content == "gzip"
+                            }
+                        )
+                        val frame = buildJsonObject {
+                            put("type", "response")
+                            put("id", request["id"]!!)
+                            put("status", 200)
+                            put(
+                                "headers",
+                                buildJsonArray {
+                                    add(
+                                        buildJsonArray {
+                                            add("content-type")
+                                            add("application/json")
+                                        }
+                                    )
+                                    add(
+                                        buildJsonArray {
+                                            add("content-encoding")
+                                            add("gzip")
+                                        }
+                                    )
+                                    add(
+                                        buildJsonArray {
+                                            add("content-length")
+                                            add(compressed.size.toString())
+                                        }
+                                    )
+                                },
+                            )
+                            put(
+                                "body",
+                                if (request["method"]!!.jsonPrimitive.content == "HEAD") ""
+                                else Base64.getEncoder().encodeToString(compressed),
+                            )
+                        }
+                        channel.receive(singleFramePacket(frame.toString().toByteArray()))
+                    },
+                    {},
+                )
+            api.transport.attach(channel)
+            val head =
+                Request.Builder()
+                    .url(server.url("/api/installations/test/api/chats"))
+                    .head()
+                    .build()
+            channel.request(head, "/api/installations/test/api/", { false }).use {
+                assertEquals("gzip", it.header("content-encoding"))
+                assertEquals("", it.body.string())
+            }
+            assertEquals(expected, api.request("GET", "/runs/r/history?before=42&history=v1:r:1"))
+            assertEquals("direct", api.transport.route.value)
+            assertEquals(0, server.requestCount)
+            api.closeStreams()
+        }
+    }
+
+    @Test
+    fun `private artifact files stream like the Rust stream_path contract`() {
+        for (path in
+            listOf(
+                "/api/runs/run/artifacts/file",
+                "/api/runs/run/artifacts/file?download=1",
+                "/api/runs/run/artifacts/file?download=1&metadata=0",
+                "/api/shared-artifacts/token",
+                "/api/runs/run/stream?after=0",
+            )) assertTrue(path, DirectChannel.streamedRoute(path))
+        for (path in
+            listOf(
+                "/api/runs/run/artifacts/file?metadata=1",
+                "/api/runs/run/artifacts/file?download=1&metadata=1",
+                "/api/runs/run/artifacts/file?preview=1",
+                "/api/runs/run/artifacts/file?preview",
+                "/api/runs/run/artifacts",
+                "/api/runs/run/artifacts/",
+                "/api/runs/run/artifacts/file/visibility",
+                "/api/runs//artifacts/file",
+                "/api/chats/chat/artifacts/file",
+            )) assertFalse(path, DirectChannel.streamedRoute(path))
+    }
+
+    @Test
+    fun `stream paths request identity so JSON errors remain readable`() = runTest {
+        for (path in
+            listOf(
+                "/runs/r/stream?history=invalid",
+                "/shared-artifacts/a/file",
+                "/runs/r/artifacts/a?download=1",
+            )) {
+            MockWebServer().use { server ->
+                server.start()
+                lateinit var channel: DirectChannel
+                channel =
+                    DirectChannel(
+                        { packet, _, _ ->
+                            val request =
+                                wireJson
+                                    .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
+                                    .jsonObject
+                            val type = request["type"]!!.jsonPrimitive.content
+                            if (type == "request") {
+                                assertTrue(
+                                    request["headers"]!!.jsonArray.any {
+                                        it.jsonArray[0].jsonPrimitive.content ==
+                                            "accept-encoding" &&
+                                            it.jsonArray[1].jsonPrimitive.content == "identity"
+                                    }
+                                )
+                                channel.receive(
+                                    singleFramePacket(
+                                        buildJsonObject {
+                                            put("type", "stream_start")
+                                            put("id", request["id"]!!)
+                                            put("status", 400)
+                                            put(
+                                                "headers",
+                                                buildJsonArray {
+                                                    add(
+                                                        buildJsonArray {
+                                                            add("content-type")
+                                                            add("application/json")
+                                                        }
+                                                    )
+                                                },
+                                            )
+                                            put(
+                                                "body",
+                                                Base64.getEncoder()
+                                                    .encodeToString(
+                                                        """{"error":"Invalid history version."}"""
+                                                            .toByteArray()
+                                                    ),
+                                            )
+                                        }
+                                            .toString()
+                                            .toByteArray()
+                                    )
+                                )
+                            } else if (type == "stream_credit") {
+                                channel.receive(
+                                    singleFramePacket(
+                                        buildJsonObject {
+                                            put("type", "stream_end")
+                                            put("id", request["id"]!!)
+                                            put("failed", false)
+                                        }
+                                            .toString()
+                                            .toByteArray()
+                                    )
+                                )
+                            }
+                        },
+                        {},
+                    )
+                val request =
+                    Request.Builder().url(server.url("/api/installations/test/api$path")).build()
+                channel.request(request, "/api/installations/test/api/", { false }).use {
+                    assertEquals(400, it.code)
+                    assertEquals("""{"error":"Invalid history version."}""", it.body.string())
+                }
+                channel.close()
+            }
+        }
+    }
+
+    @Test
+    fun `a protocol mismatch is actionable and never falls back to relay`() = runBlocking {
+        val packets =
+            listOf(
+                ByteArray(13).apply { this[0] = 2 },
+                singleFramePacket(
+                    """{"type":"update_required","message":"Update required."}""".toByteArray()
+                ),
+            )
+        for (packet in packets) {
+            MockWebServer().use { server ->
+                server.start()
+                server.enqueue(MockResponse().setResponseCode(200))
+                val api = CairnApi(server.url("/"), MemoryVault(), installationId = "test")
+                val channel = DirectChannel({ _, _, _ -> }, {})
+                api.transport.attach(channel)
+                channel.receive(packet)
+                withTimeout(5000) { api.transport.protocolError.first { it != null } }
+                val failure = runCatching { api.request("GET", "/chats") }.exceptionOrNull()
+                assertTrue(failure is ProtocolMismatch)
+                assertFalse(isConnectionFailure(checkNotNull(failure)))
+                assertTrue(failure.message.orEmpty().contains("Mise à jour requise"))
+                val client = OkHttpClient.Builder().addInterceptor(api.transport).build()
+                val request =
+                    Request.Builder()
+                        .url(server.url("/api/installations/test/api/chats/stream"))
+                        .header("Accept", "text/event-stream")
+                        .build()
+                val streamFailure = runCatching {
+                    api.transport.newCall(client, request).execute().use {}
+                }
+                    .exceptionOrNull()
+                assertTrue(streamFailure is ProtocolMismatch)
+                assertEquals(0, server.requestCount)
+                api.closeStreams()
+            }
+        }
+    }
+
     @Test
     fun `response parsing and base64 validation leave the callback thread`() {
         for (bytes in
@@ -175,6 +416,129 @@ class DirectTransportTest {
                 } finally {
                     api.closeStreams()
                 }
+            }
+        }
+
+    @Test
+    fun `fragmented message write pressure can return a relay rejection before direct recovers`() =
+        runBlocking {
+            data class RelayRequest(val method: String, val path: String, val body: JsonElement)
+
+            val relayRequests = ConcurrentLinkedQueue<RelayRequest>()
+            lateinit var api: CairnApi
+            val client =
+                OkHttpClient.Builder()
+                    .addInterceptor { chain ->
+                        // Use the real route owner with an in-process relay continuation.
+                        // CairnApi still encodes the request and decodes the 413 response.
+                        api.transport.intercept(
+                            object : Interceptor.Chain by chain {
+                                override fun proceed(request: Request): Response {
+                                    val encoded = Buffer()
+                                    requireNotNull(request.body).writeTo(encoded)
+                                    relayRequests.add(
+                                        RelayRequest(
+                                            request.method,
+                                            request.url.encodedPath,
+                                            wireJson.parseToJsonElement(encoded.readUtf8()),
+                                        )
+                                    )
+                                    return Response.Builder()
+                                        .request(request)
+                                        .protocol(Protocol.HTTP_1_1)
+                                        .code(413)
+                                        .message("Payload rejected")
+                                        .body(
+                                            """{"error":"Fixture relay rejection."}"""
+                                                .toResponseBody("application/json".toMediaType())
+                                        )
+                                        .build()
+                                }
+                            }
+                        )
+                    }
+                    .build()
+            api = CairnApi("http://localhost/".toHttpUrl(), MemoryVault(), client, "test")
+            var disposed = false
+            var partialTransfer: Int? = null
+            var abortedTransfer: Int? = null
+            var acceptedFragments = 0
+            var pressuredFragments = 0
+            lateinit var channel: DirectChannel
+            channel =
+                DirectChannel(
+                    { packet, _, _ ->
+                        val envelope = ByteBuffer.wrap(packet)
+                        val transfer = envelope.getInt(1)
+                        val total = envelope.getInt(5)
+                        val offset = envelope.getInt(9)
+                        if (total == 0) {
+                            abortedTransfer = transfer
+                        } else if (total > DirectChannel.MAX_PACKET) {
+                            if (offset == 0) {
+                                partialTransfer = transfer
+                                acceptedFragments++
+                            } else {
+                                pressuredFragments++
+                                throw DirectRequestTimeout()
+                            }
+                        } else {
+                            val request =
+                                wireJson
+                                    .parseToJsonElement(String(packet.copyOfRange(13, packet.size)))
+                                    .jsonObject
+                            if (request["type"]!!.jsonPrimitive.content == "request")
+                                channel.receive(
+                                    singleFramePacket(
+                                        buildJsonObject {
+                                            put("type", "response")
+                                            put("id", request["id"]!!)
+                                            put("status", 200)
+                                            put("headers", buildJsonArray {})
+                                            put("body", "W10=")
+                                        }
+                                            .toString()
+                                            .toByteArray()
+                                    )
+                                )
+                        }
+                    },
+                    { disposed = true },
+                )
+            api.transport.attach(channel)
+            try {
+                assertEquals("[]", api.request("GET", "/chats"))
+                assertEquals("direct", api.transport.route.value)
+                assertEquals(0, relayRequests.size)
+                val message =
+                    body(
+                        "id" to "pressured-message",
+                        "text" to "x".repeat(DirectChannel.MAX_PACKET),
+                    )
+                val rejected =
+                    try {
+                        api.request("POST", "/chats/missing/messages", message)
+                        throw AssertionError("Expected the relay rejection")
+                    } catch (error: ApiException) {
+                        error
+                    }
+                assertEquals(413, rejected.status)
+                assertEquals("Fixture relay rejection.", rejected.message)
+                assertEquals(1, acceptedFragments)
+                assertEquals(1, pressuredFragments)
+                assertNotNull(partialTransfer)
+                assertEquals(partialTransfer, abortedTransfer)
+                assertFalse(disposed)
+                assertEquals("relay", api.transport.route.value)
+                assertEquals("[]", api.request("GET", "/chats"))
+                assertEquals("direct", api.transport.route.value)
+                assertEquals(1, relayRequests.size)
+                val replay = relayRequests.single()
+                assertEquals("POST", replay.method)
+                assertEquals("/api/installations/test/api/chats/missing/messages", replay.path)
+                assertEquals(message, replay.body)
+            } finally {
+                api.closeStreams()
             }
         }
 
@@ -490,7 +854,9 @@ class DirectTransportTest {
                 server.enqueue(MockResponse().setBody("{\"route\":\"relay\"}"))
                 server.start()
                 val api = CairnApi(server.url("/"), MemoryVault(), installationId = "test")
-                var disposed = false
+                val disposed = CompletableDeferred<Unit>()
+                val disposalStarted = CompletableDeferred<Unit>()
+                val allowDisposal = CountDownLatch(1)
                 lateinit var channel: DirectChannel
                 channel =
                     DirectChannel(
@@ -520,17 +886,31 @@ class DirectTransportTest {
                                 )
                             }
                         },
-                        { disposed = true },
+                        {
+                            disposalStarted.complete(Unit)
+                            allowDisposal.await()
+                            disposed.complete(Unit)
+                        },
                     )
                 api.transport.attach(channel)
-                assertEquals(
-                    "{\"route\":\"relay\"}",
-                    withTimeout(5000) { api.request("GET", "/chats") },
-                )
-                assertTrue(disposed)
-                assertEquals("relay", api.transport.route.value)
-                assertEquals(1, server.requestCount)
-                api.closeStreams()
+                try {
+                    assertEquals(
+                        "{\"route\":\"relay\"}",
+                        withTimeout(5000) { api.request("GET", "/chats") },
+                    )
+                    withTimeout(5000) { disposalStarted.await() }
+                    // A safe read may recover while native disposal is still running.
+                    assertFalse(disposed.isCompleted)
+                    assertEquals("relay", api.transport.route.value)
+                    assertEquals(1, server.requestCount)
+                    server.enqueue(MockResponse().setBody("[]"))
+                    assertEquals("[]", withTimeout(5000) { api.request("GET", "/chats") })
+                    assertEquals(2, server.requestCount)
+                } finally {
+                    allowDisposal.countDown()
+                    api.closeStreams()
+                }
+                withTimeout(5000) { disposed.await() }
             }
         }
     }
@@ -690,6 +1070,43 @@ class DirectTransportTest {
     }
 
     @Test
+    fun `immutable timeline snapshot reads replay on relay after direct loss`() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{}"))
+            server.start()
+            val api = CairnApi(server.url("/"), MemoryVault(), installationId = "test")
+            api.transport.attach(
+                DirectChannel({ _, _, _ -> throw IOException("acknowledgement lost") }, {})
+            )
+            val payload = body("offset" to "0")
+            assertEquals("{}", api.request("POST", "/runs/run/timeline-content", payload))
+            assertEquals(payload.toString(), server.takeRequest().body.readUtf8())
+            assertEquals("relay", api.transport.route.value)
+        }
+    }
+
+    @Test
+    fun `immutable event content reads replay on relay after direct loss`() = runTest {
+        MockWebServer().use { server ->
+            server.enqueue(MockResponse().setBody("{}"))
+            server.start()
+            val api = CairnApi(server.url("/"), MemoryVault(), installationId = "test")
+            api.transport.attach(
+                DirectChannel({ _, _, _ -> throw IOException("acknowledgement lost") }, {})
+            )
+            val payload = buildJsonObject {
+                put("runId", "run")
+                put("eventId", "event-1")
+                put("offset", 0)
+                put("sha256", JsonNull)
+            }
+            assertEquals("{}", api.request("POST", "/runs/run/event-content", payload))
+            assertEquals(payload.toString(), server.takeRequest().body.readUtf8())
+            assertEquals("relay", api.transport.route.value)
+        }
+    }
+
+    @Test
     fun `binary resources remain on relay while direct is attached`() = runTest {
         MockWebServer().use { server ->
             server.enqueue(MockResponse().setBody("image"))
@@ -762,22 +1179,58 @@ class DirectTransportTest {
         runBlocking {
             for (failure in listOf("closed", "corrupt", "credit", "end", "timeout")) {
                 MockWebServer().use { server ->
+                    val waitCard =
+                        TimelineCard(
+                            id = "notice:7",
+                            runId = "r1",
+                            position = 7,
+                            revision = 7,
+                            source = 7,
+                            turn = 0,
+                            attempt = 0,
+                            createdAt = 7,
+                            updatedAt = 7,
+                            content =
+                                build.cairn.contracts.TimelineContent.C(
+                                    build.cairn.contracts.TimelineNotice(
+                                        code = "backgroundTasks",
+                                        state = "info",
+                                        prominent = false,
+                                        tasks = listOf("Vérifier la CI"),
+                                        taskIds = listOf(""),
+                                        waitingSince = 7,
+                                    )
+                                ),
+                        )
                     fun sse(cursor: Long, events: List<RunEvent>) =
-                        "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(LiveBatch(events, LiveState(run = Run("r1", status = "running")), false, false, history = "h1"))}\n\n"
+                        "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(LiveBatch(events, LiveState(run = Run(id = "r1",
+status = "running",
+taskId = "",)), false, false, history = "h1", entries = listOf(build.cairn.contracts.TimelineChange.A(waitCard)),))}\n\n"
                     val first =
                         RunEvent(
-                            7,
-                            7,
-                            "turn.waiting",
-                            "direct",
-                            mapOf(
-                                "tasks" to
-                                    buildJsonArray {
-                                        addJsonObject { put("description", "Vérifier la CI") }
-                                    }
-                            ),
+                            id = 7,
+                            createdAt = 7,
+                            type = "turn.waiting",
+                            text = "direct",
+                            payload =
+                                kotlinx.serialization.json.JsonObject(
+                                    mapOf(
+                                        "tasks" to
+                                            buildJsonArray {
+                                                addJsonObject {
+                                                    put("description", "Vérifier la CI")
+                                                }
+                                            }
+                                    )
+                                ),
                         )
-                    val next = RunEvent(8, 8, "output", "relay")
+                    val next =
+                        RunEvent(
+                            id = 8,
+                            createdAt = 8,
+                            type = "output",
+                            text = "relay",
+                        )
                     server.enqueue(
                         MockResponse()
                             .setHeader("Content-Type", "text/event-stream")
@@ -879,8 +1332,8 @@ class DirectTransportTest {
                     assertEquals(listOf(7L, 8L), final.events.map { it.id })
                     assertEquals(listOf("direct", "relay"), final.events.map { it.text })
                     assertEquals(
-                        build.cairn.app.ui.BackgroundWait(listOf("Vérifier la CI"), 7),
-                        build.cairn.app.ui.backgroundWait(final.events),
+                        build.cairn.app.ui.BackgroundWait(listOf("Vérifier la CI"), 7, listOf("")),
+                        build.cairn.app.ui.backgroundWait(final.entries),
                     )
                     assertEquals(
                         "/api/installations/test/api/runs/r1/stream?after=7&history=h1&window=1&recent=1",

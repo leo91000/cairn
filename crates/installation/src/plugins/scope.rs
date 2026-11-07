@@ -3,7 +3,7 @@
 //! script may use; every call rereads the instance first.
 use super::{
     capabilities::{self, Context},
-    connections::{self, Connection},
+    connections::Connection,
     registry::Package,
 };
 use crate::{
@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
 pub enum Scope {
+    Contributions(Box<Scope>, Vec<(String, super::management::Authority)>),
     Managed(Box<Scope>, super::management::Authority),
     /// The owner, through one instance: views, actions and tests.
     Instance(Box<Connection>),
@@ -32,12 +33,33 @@ impl Scope {
     /// What the script receives about the instances it may use. Never secret values.
     pub fn instances(&self) -> Vec<Value> {
         match self {
-            Scope::Managed(scope, _) => scope.instances(),
+            Scope::Managed(scope, _) | Scope::Contributions(scope, _) => scope.instances(),
             Scope::Instance(connection) | Scope::Draft(connection, _) => {
                 vec![summary(connection)]
             }
             Scope::Agent { instances, .. } => instances.iter().map(summary).collect(),
         }
+    }
+}
+
+fn inner<'a>(
+    scope: &'a Scope,
+    args: &Value,
+) -> Result<(&'a Scope, Option<&'a super::management::Authority>)> {
+    match scope {
+        Scope::Managed(inner, authority) => Ok((inner, Some(authority))),
+        Scope::Contributions(inner, authorities) => {
+            let authority = match args["instance"].as_str() {
+                Some(id) => authorities.iter().find(|(instance, _)| instance == id),
+                None if authorities.len() == 1 => authorities.first(),
+                None => return Err(Error::bad("Name the instance to use.")),
+            }
+            .ok_or_else(|| {
+                Error::forbidden("This instance is not granted for the contribution.")
+            })?;
+            Ok((inner, Some(&authority.1)))
+        }
+        _ => Ok((scope, None)),
     }
 }
 
@@ -54,22 +76,21 @@ pub fn summary(connection: &Connection) -> Value {
 /// Rereads the target instance. Owner scopes need it unchanged; agent scopes also need
 /// it enabled and still granting the agent.
 async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection> {
-    let scope = if let Scope::Managed(inner, authority) = scope {
-        let authority = authority.clone();
-        s.store.read(move |db| authority.authorize(db)).await?;
-        inner.as_ref()
-    } else {
-        scope
-    };
+    let (scope, authority) = inner(scope, args)?;
+    if let Some(authority) = authority {
+        authority.recheck(s).await?;
+    }
     let requested = args["instance"].as_str();
-    if let Scope::Draft(connection, _) = scope {
+    if let Scope::Draft(connection, draft) = scope {
+        let draft = draft.clone();
+        s.store.read(move |db| draft.authorize(db)).await?;
         if requested.is_some_and(|id| id != connection.id) {
             return Err(Error::forbidden("Another instance is not available here."));
         }
         return Ok((**connection).clone());
     }
     let expected = match scope {
-        Scope::Managed(..) => unreachable!(),
+        Scope::Managed(..) | Scope::Contributions(..) => unreachable!(),
         Scope::Draft(..) => unreachable!(),
         Scope::Instance(connection) => {
             if requested.is_some_and(|id| id != connection.id) {
@@ -88,15 +109,21 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
     };
     let value = s
         .store
-        .get(connections::KIND, &expected.id)
+        .plugin_instance(&expected.id)
         .await?
         .ok_or_else(|| Error::forbidden("The instance was removed."))?;
-    let connection: Connection = serde_json::from_value(value)?;
+    let connection = value;
     let unchanged = connection.revision == expected.revision;
     let granted = match scope {
-        Scope::Managed(..) => unreachable!(),
+        Scope::Managed(..) | Scope::Contributions(..) => unreachable!(),
         Scope::Instance(_) | Scope::Draft(..) => true,
-        Scope::Agent { agent_id, .. } => connection.grants(agent_id),
+        Scope::Agent { agent_id, .. } => {
+            let (agent, id) = (agent_id.clone(), connection.id.clone());
+            connection.enabled
+                && s.store
+                    .read(move |db| db.has_plugin_grant(&agent, &id))
+                    .await?
+        }
     };
     if !unchanged || !granted {
         return Err(Error::forbidden(
@@ -104,6 +131,60 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
         ));
     }
     Ok(connection)
+}
+
+/// Resource operations retain this scope until their result is delivered.
+pub(crate) async fn authorize(s: &Service, scope: &Scope) -> Result<()> {
+    for instance in scope.instances() {
+        current(s, scope, &json!({ "instance": instance["id"] })).await?;
+    }
+    Ok(())
+}
+
+/// Take the local grant/revision snapshot after all remote authorization.
+pub(crate) fn authorize_in(db: &crate::store::Db<'_>, scope: &Scope) -> Result<()> {
+    match scope {
+        Scope::Contributions(inner, authorities) => {
+            for (_, authority) in authorities {
+                authority.authorize(db)?;
+            }
+            return authorize_in(db, inner);
+        }
+        Scope::Managed(inner, authority) => {
+            authority.authorize(db)?;
+            return authorize_in(db, inner);
+        }
+        Scope::Draft(_, draft) => {
+            draft.authorize(db)?;
+            return Ok(());
+        }
+        _ => {}
+    }
+    let (instances, agent): (&[Connection], Option<&str>) = match scope {
+        Scope::Instance(connection) => (std::slice::from_ref(connection.as_ref()), None),
+        Scope::Agent {
+            agent_id,
+            instances,
+        } => (instances, Some(agent_id)),
+        Scope::Managed(..) | Scope::Contributions(..) | Scope::Draft(..) => unreachable!(),
+    };
+    for expected in instances {
+        let current = db
+            .plugin_instance(&expected.id)?
+            .ok_or_else(|| Error::forbidden("The instance was removed."))?;
+        if current.revision != expected.revision
+            || !current.enabled
+            || match agent {
+                Some(agent) => !db.has_plugin_grant(agent, &current.id)?,
+                None => false,
+            }
+        {
+            return Err(Error::forbidden(
+                "The instance or its grants changed. Retry the operation.",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// One capability call from a one-shot handler, after the manifest gate.
@@ -115,10 +196,8 @@ pub async fn call(
     args: &Value,
 ) -> Result<Value> {
     let connection = current(s, scope, args).await?;
-    let (scope, management) = match scope {
-        Scope::Managed(inner, authority) => (inner.as_ref(), Some(authority.clone())),
-        _ => (scope, None),
-    };
+    let (scope, management) = inner(scope, args)?;
+    let management = management.cloned();
     let draft = match scope {
         Scope::Draft(_, draft) => Some(draft.clone()),
         _ => None,
@@ -131,14 +210,21 @@ pub async fn call(
     let context = Context {
         connection,
         manifest: package.manifest.clone(),
+        package_digest: Some(package.digest.clone()),
         event: Value::Null,
         link: None,
         draft,
         management: management.clone(),
     };
-    if ["conversations.", "inbound.", "instance.", "socket."]
-        .iter()
-        .any(|family| method.starts_with(family))
+    if [
+        "conversations.",
+        "inbound.",
+        "hooks.",
+        "instance.",
+        "socket.",
+    ]
+    .iter()
+    .any(|family| method.starts_with(family))
     {
         return Err(Error::forbidden(
             "Conversations and connections belong to the instance's worker.",
@@ -151,7 +237,7 @@ pub async fn call(
     {
         current(s, scope, args).await?;
         if let Some(authority) = management {
-            s.store.read(move |db| authority.authorize(db)).await?;
+            authority.recheck(s).await?;
         }
     }
     Ok(result)
@@ -166,6 +252,7 @@ pub async fn invoke(
     payload: Value,
     scope: &Scope,
 ) -> Result<Value> {
+    authorize(s, scope).await?;
     let refused = Mutex::new(None::<Error>);
     let refused_ref = &refused;
     let preparing = super::program_installation::needs_preparation(s, package).then(|| {
@@ -182,7 +269,9 @@ pub async fn invoke(
             event,
             payload,
             |method, args| async move {
-                call(s, package, scope, &method, &args)
+                // Host effects compose large native futures. Keep their state off
+                // the polling stack when a source is called through MCP code mode.
+                Box::pin(call(s, package, scope, &method, &args))
                     .await
                     .map_err(|error| {
                         let code = capabilities::code(&error);
@@ -192,6 +281,14 @@ pub async fn invoke(
             },
         )
         .await;
+    if let Scope::Draft(_, draft) = scope {
+        let draft = draft.clone();
+        s.store.read(move |db| draft.authorize(db)).await?;
+    } else {
+        for instance in scope.instances() {
+            current(s, scope, &json!({ "instance": instance["id"] })).await?;
+        }
+    }
     match (result, refused.into_inner().unwrap()) {
         (Ok(value), _) => Ok(value),
         (Err(InvocationError::Rejected(message)), _) => Err(Error::bad_gateway(message)),

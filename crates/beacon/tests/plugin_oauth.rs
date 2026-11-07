@@ -65,7 +65,7 @@ async fn one_beacon_callback_routes_two_installations_and_rejects_altered_state(
         .unwrap();
     let identity = second.config.data_dir.join("installation-relay");
     cairn_installation::relay::claim(
-        &relay.app.url,
+        &relay.beacon_origin,
         &identity,
         claim["code"].as_str().unwrap(),
         "Second installation",
@@ -142,7 +142,7 @@ async fn one_beacon_callback_routes_two_installations_and_rejects_altered_state(
     );
     let first_flow = start(&relay.installation, &binding).await;
     let second_flow = start(&second, &binding).await;
-    let expected = format!("{}/plugins/oauth/callback", relay.app.url);
+    let expected = format!("{}/plugins/oauth/callback", relay.beacon_origin);
     for (service, flow) in [(&relay.installation, &first_flow), (&second, &second_flow)] {
         assert_eq!(oauth::callback_url(service).await.unwrap(), expected);
         let url = url::Url::parse(flow["verificationUri"].as_str().unwrap()).unwrap();

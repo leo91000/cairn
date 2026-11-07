@@ -6,9 +6,11 @@ import type {
   ChatDetail,
   ChatMessage,
 } from '../../../../packages/contracts/chats'
+import type { ResumeExecutionSelection } from '../../../../packages/contracts/generated/typescript/ResumeExecutionSelection'
 import type { DraftState } from '../attachments'
 import type { LiveWait } from '../chat-wait'
 import type { CachedHistory } from '../history-cache'
+import type { ResumeReasoningIntent } from '../speeds'
 import {
   computed,
   inject,
@@ -22,8 +24,24 @@ import { useRoute, useRouter } from 'vue-router'
 import { providers } from '../../../../packages/contracts/accounts'
 import { latestArtifacts } from '../../../../packages/contracts/artifacts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
-import { failureReason, sameReason, stopEcho } from '../activity'
-import { api, apiUpload, state } from '../api'
+import { compactChat } from '../../../../packages/contracts/generated/compactChat'
+import { createChat } from '../../../../packages/contracts/generated/createChat'
+import { deleteChatMessage } from '../../../../packages/contracts/generated/deleteChatMessage'
+import { editChatMessage } from '../../../../packages/contracts/generated/editChatMessage'
+import { restartChatSession } from '../../../../packages/contracts/generated/restartChatSession'
+import { restoreChat } from '../../../../packages/contracts/generated/restoreChat'
+import { resumeChat } from '../../../../packages/contracts/generated/resumeChat'
+import { sendChatMessage } from '../../../../packages/contracts/generated/sendChatMessage'
+import { setChatPaused } from '../../../../packages/contracts/generated/setChatPaused'
+import { stopChat } from '../../../../packages/contracts/generated/stopChat'
+import { sameReason } from '../activity'
+import {
+  api,
+  ApiError,
+  apiUpload,
+  refreshSkills,
+  state,
+} from '../api'
 import { reuseAttachmentKey } from '../attachment-media'
 import {
   isImage,
@@ -33,7 +51,7 @@ import {
 } from '../attachments'
 import { chatDelivery, chatWaitNotice, scheduledWakeup } from '../chat-delivery'
 import { chatListCarried, chatList as chats, publishChats } from '../chat-list'
-import { chatQuota, isQuotaMessage, quotaHiddenEvents } from '../chat-quota'
+import { chatQuota, isQuotaMessage } from '../chat-quota'
 import { liveWakeup, waitStatus } from '../chat-wait'
 import ActivityFeed from '../components/ActivityFeed.vue'
 import AgentAvatar from '../components/AgentAvatar.vue'
@@ -50,6 +68,7 @@ import Modal from '../components/Modal.vue'
 import NodeExecution from '../components/NodeExecution.vue'
 import PlanBar from '../components/PlanBar.vue'
 import QueueStrip from '../components/QueueStrip.vue'
+import RecoveryNotice from '../components/RecoveryNotice.vue'
 import SkillTextarea from '../components/SkillTextarea.vue'
 import SubagentBar from '../components/SubagentBar.vue'
 import SubagentPanel from '../components/SubagentPanel.vue'
@@ -58,6 +77,7 @@ import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
 import UiNotice from '../components/UiNotice.vue'
 import VirtualSelect from '../components/VirtualSelect.vue'
+import { contextSummary } from '../context-usage'
 import {
   ArrowDown,
   ArrowUp,
@@ -77,6 +97,7 @@ import {
   Maximize2,
   Menu,
   MoreHorizontal,
+  NotebookPen,
   Paperclip,
   Plug,
   Plus,
@@ -87,20 +108,92 @@ import {
   Zap,
 } from '../icons'
 import { connectionTone, installationKey, routeLabel } from '../installation-context'
+import { modelCatalogs } from '../models'
 import { useReadWhileOpen } from '../reads'
-import { useRetryNotice } from '../run-retry'
+import { useRetryState } from '../run-retry'
 import { exclusiveSuspensionLabel, isExclusivelySuspended } from '../run-status'
 import { backgroundWait } from '../signal'
 import { chatSkills } from '../skill-mentions'
+import {
+  needsResumeSelection,
+  pickerAppliedSpeed,
+
+  resumeSelectionReasoning,
+  resumeSelectionSpeed,
+} from '../speeds'
 import { delegatedChatsKey, openSubagentKey, subagentState } from '../subagents'
 import { iconButton } from '../ui'
 import { useLiveRun } from '../use-live-run'
 import { workspaceActionsKey } from '../workspace-actions'
 import { chatPath } from '../workspace-links'
 
+type ResumeDiagnosticStage
+  = | 'handler-entered'
+    | 'guard-no-detail'
+    | 'guard-busy'
+    | 'run-state'
+    | 'selection-start'
+    | 'catalog-state'
+    | 'selection-ready'
+    | 'resume-attempt'
+    | 'resume-returned'
+    | 'pause-attempt'
+    | 'pause-returned'
+    | 'caught'
+
+type ResumeDiagnosticRunStatus = 'missing' | 'other' | 'queued' | 'running' | 'failed' | 'interrupted' | 'cancelled' | 'succeeded' | 'idle'
+
+interface ResumeDiagnosticRecord {
+  stage: ResumeDiagnosticStage
+  runStatus?: ResumeDiagnosticRunStatus
+  resumeAvailable?: boolean
+  provider?: Provider | 'other'
+  catalogPresent?: boolean
+}
+
+type ResumeDiagnosticWindow = Window & {
+  __cairnTestResumeDiagnostic?: (record: ResumeDiagnosticRecord) => void
+}
+
+const resumeDiagnosticEnabled = import.meta.env.VITE_CAIRN_TEST_RESUME_DIAGNOSTICS === 'true'
+let resumeDiagnosticCount = 0
+
+function reportResumeDiagnostic(record: ResumeDiagnosticRecord) {
+  if (!resumeDiagnosticEnabled || resumeDiagnosticCount >= 16)
+    return
+  resumeDiagnosticCount++
+  try {
+    (window as ResumeDiagnosticWindow).__cairnTestResumeDiagnostic?.(record)
+  }
+  catch {
+    // The optional test probe must never affect the resume action.
+  }
+}
+
+function resumeDiagnosticRunStatus(status?: string): ResumeDiagnosticRunStatus {
+  switch (status) {
+    case 'queued':
+    case 'running':
+    case 'failed':
+    case 'interrupted':
+    case 'cancelled':
+    case 'succeeded':
+    case 'idle':
+      return status
+    default:
+      return status ? 'other' : 'missing'
+  }
+}
+
+function resumeDiagnosticProvider(provider: string): Provider | 'other' {
+  if (provider === 'codex' || provider === 'claude' || provider === 'opencode')
+    return provider
+  return 'other'
+}
+
 const router = useRouter()
 const route = useRoute()
-const detail = ref<(ChatDetail & { error?: string }) | null>(null)
+const detail = ref<ChatDetail | null>(null)
 const recoverable = computed(() => detail.value?.lifecycle === 'trash' && (detail.value?.purgeAt ?? 0) > Date.now())
 const inactive = computed(() => !!detail.value?.lifecycle && detail.value.lifecycle !== 'active')
 const chatId = computed(() => typeof route.params.id === 'string' ? route.params.id : undefined)
@@ -149,16 +242,50 @@ const live = useLiveRun(() => streamPath.value, {
   // Also saved under its slug when a link by identifier opened it: the Fil links to slugs.
   savedAs: state => state.chat ? `/chats/${state.chat.slug || state.chat.id}/stream` : undefined,
 })
-// Its stream carries the list while available; a failed open or a finite relay read
-// releases it to the shell, so the Fil keeps working even when the conversation cannot.
+// Its stream carries the list while available; a failed open releases it to the shell,
+// so the Fil keeps working even when the conversation cannot.
 watch(live.carriesList, value => chatListCarried.value = value, { immediate: true, flush: 'sync' })
 onBeforeUnmount(() => chatListCarried.value = false)
-const { events, connectionNotice, catchingUp } = live
+const {
+  events,
+  timeline,
+  connectionNotice,
+  catchingUp,
+} = live
 const deliverables = computed(() => live.snapshot.value?.artifacts ?? [])
 const draft = ref('')
 const model = ref('')
 const reasoning = ref('')
+const speed = ref('')
+const resumeReasoningIntent = ref<ResumeReasoningIntent>({ kind: 'untouched' })
+const resumeReasoningContext = computed(() => {
+  const chat = detail.value
+  const run = chat?.run
+  const agent = run?.snapshot.agent
+  return JSON.stringify([
+    chat?.id ?? '',
+    run?.id ?? '',
+    run?.chatExecution?.messageId ?? '',
+    agent?.id ?? '',
+    agent?.provider ?? '',
+    agent?.model ?? '',
+    agent?.reasoning ?? '',
+    agent?.speed ?? '',
+  ])
+})
+watch(resumeReasoningContext, () => {
+  resumeReasoningIntent.value = { kind: 'untouched' }
+}, { flush: 'sync' })
+
+function setResumeReasoningIntent(intent: ResumeReasoningIntent) {
+  resumeReasoningIntent.value = intent
+}
+
+// Names queued messages' speeds; the composer's picker keeps this catalog current.
+const codexModels = computed(() => modelCatalogs.codex.catalog.models)
 const provider = ref<'' | Provider>('')
+// The next messages are plan turns until the user turns it off or implements a plan.
+const planning = ref(false)
 const history = ref(false)
 const deletingConversation = ref<ChatDetail>()
 const detailsOpen = ref(false)
@@ -229,7 +356,7 @@ function switcherAnchor() {
 
 const error = ref('')
 const dismissedError = ref(false)
-const quota = computed(() => chatQuota(detail.value?.run, events.value))
+const quota = computed(() => chatQuota(detail.value?.run, timeline.value))
 const visibleError = computed(() => {
   if (error.value)
     return error.value
@@ -246,9 +373,8 @@ const errorShown = computed(() => {
   const reason = run?.status === 'failed' ? run.error : undefined
   if (error.value || detail.value?.error || !reason)
     return false
-  // Quota bookkeeping hides some failures from the conversation: they show nothing.
-  const hidden = quotaHiddenEvents(events.value)
-  return events.value.some(event => event.runId === run?.id && !hidden.has(`${event.runId}:${event.id}`) && sameReason(failureReason(event) ?? '', reason) && !stopEcho(event))
+  // The server hides usage-limit bookkeeping and the adapter's stop echoes: they show nothing.
+  return timeline.value.some(card => card.runId === run?.id && card.content.kind === 'notice' && card.content.notice.code === 'failure' && card.content.notice.prominent && sameReason(card.content.notice.detail ?? '', reason))
 })
 watch(() => [visibleError.value, detail.value?.id, detail.value?.run?.finishedAt], () => {
   dismissedError.value = false
@@ -268,7 +394,6 @@ const dragging = ref(0)
 const hasDraft = computed(() => !!draft.value.trim() || attachments.value.length > 0)
 // Rejected files must be removed before sending; nothing is sent while a file uploads.
 const attachmentsBlocked = computed(() => Object.values(attachmentStates.value).some(item => item.status === 'rejected' || item.status === 'uploading'))
-const canSend = computed(() => !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
 
 function removeAttachment(id: string) {
   if (previews.value[id])
@@ -304,6 +429,8 @@ function addFiles(selected: File[]) {
       kind: ['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type) ? 'image' : 'file',
       mediaType: file.type,
       chatId: '',
+      digest: '',
+      createdAt: 0,
     }
     const rejected = selection.rejected[index]
     // A rejected file is shown with its reason but never uploaded.
@@ -360,12 +487,10 @@ const active = computed(() => !!detail.value?.run && ['queued', 'running'].inclu
 const suspended = computed(() => isExclusivelySuspended(detail.value?.run))
 // The plan of the current request stays in sight beside the composer while the agent follows it.
 const currentPlan = computed(() => runActive.value && !suspended.value ? activity.value?.plan : undefined)
-const retryNotice = useRetryNotice(() => detail.value?.run)
+const recovery = useRetryState(() => detail.value?.run)
 const scheduled = computed(() => scheduledWakeup(detail.value))
 // The scheduled wait shows as a card in the conversation; these notices explain a run that cannot start.
-const waitNotice = computed(() => retryNotice.value
-  ? { account: null, message: retryNotice.value }
-  : chatWaitNotice(detail.value?.run))
+const waitNotice = computed(() => recovery.value ? null : chatWaitNotice(detail.value?.run))
 const waitNow = ref(Date.now())
 let waitClock: ReturnType<typeof setInterval> | undefined
 watch(() => !!scheduled.value, (waiting) => {
@@ -390,7 +515,7 @@ const liveWait = computed<LiveWait | undefined>(() => detail.value
       busy: busy.value,
     }
   : undefined)
-const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(events.value)?.tasks.length ?? 0 : 0)
+const backgroundTasks = computed(() => detail.value?.run?.status === 'running' ? backgroundWait(timeline.value)?.tasks.length ?? 0 : 0)
 const chatStatus = computed(() => {
   if (quota.value && !detail.value?.paused)
     return 'Waiting for quota'
@@ -418,11 +543,11 @@ const chatStatus = computed(() => {
   return 'Ready'
 })
 const outgoing = ref<ChatMessage | null>(null)
-const delivery = computed(() => chatDelivery(detail.value, events.value, outgoing.value))
+const delivery = computed(() => chatDelivery(detail.value, timeline.value, outgoing.value))
 const pending = computed(() => delivery.value.queued)
 const responding = computed(() => active.value || delivery.value.sending.length > 0)
-watch(events, (items) => {
-  if (outgoing.value && items.some(event => event.type === 'chat.user' && event.payload?.messageId === outgoing.value?.id))
+watch(timeline, (cards) => {
+  if (outgoing.value && cards.some(card => card.content.kind === 'userMessage' && card.content.messageId === outgoing.value?.id))
     outgoing.value = null
 })
 const selectedAgent = computed(() => state.agents.find(agent => agent.id === (detail.value?.agentId || agentId.value)))
@@ -436,18 +561,35 @@ const currentProvider = computed(() => detail.value?.run?.snapshot.agent.provide
 const chosenProvider = computed({
   get: () => provider.value || currentProvider.value,
   set: (value: Provider) => {
+    resumeReasoningIntent.value = { kind: 'untouched' }
     provider.value = value
     model.value = ''
     reasoning.value = ''
+    speed.value = ''
   },
 })
 const switchingProvider = computed(() => !!detail.value?.run && chosenProvider.value !== currentProvider.value)
+const planAvailable = computed(() => providers[chosenProvider.value].planTurns)
+// Availability can block submission, but must not erase the requested boundary.
+const planRequested = computed(() => planning.value)
+const planBlocked = computed(() => planRequested.value && !planAvailable.value)
+const planUnavailableMessage = 'Plan requires Codex or Claude Code. Choose a compatible agent, or turn Plan off to send an ordinary request.'
+const canSend = computed(() => !planBlocked.value && !inactive.value && (!route.params.id || (detail.value?.id === route.params.id || detail.value?.slug === route.params.id)) && !live.error.value && (!!draft.value.trim() || attachments.value.length > 0) && !attachmentsBlocked.value)
+// A plan request cannot join a turn that can already change files.
+const steerBlocked = computed(() => planRequested.value && !detail.value?.run?.chatExecution?.plan)
 const conversationAssistant = computed(() => detail.value?.run?.snapshot.agent)
 const inheritConversation = computed(() => chosenProvider.value === conversationAssistant.value?.provider)
 const inheritedAssistant = computed(() => {
   if (inheritConversation.value)
-    return conversationAssistant.value
-  return chosenProvider.value === selectedAgent.value?.provider ? selectedAgent.value : undefined
+    return detail.value?.nextSelection || conversationAssistant.value
+  const defaults = selectedAgent.value?.codingAgentDefaults?.[chosenProvider.value]
+  if (chosenProvider.value !== selectedAgent.value?.provider)
+    return defaults
+  return {
+    model: selectedAgent.value.model || defaults?.model || '',
+    reasoning: selectedAgent.value.reasoning || defaults?.reasoning || '',
+    speed: selectedAgent.value.speed || defaults?.speed || '',
+  }
 })
 const skills = computed(() => chatSkills(state.skills, selectedAgent.value, detail.value ? detail.value.projectId : projectId.value))
 const skillNames = computed(() => skills.value.map(skill => skill.name))
@@ -458,21 +600,52 @@ const projects = computed(() => [{
   icon: FolderGit2,
 }, ...state.projects.filter(project => selectedAgent.value?.access.projects === null || selectedAgent.value?.access.projects.includes(project.id)).map(project => ({ value: project.id, label: project.name, icon: FolderGit2 }))])
 const draftScope = state.installationId ? `${state.installationId}:` : ''
+let createdChat: Chat | undefined
 let draftKey = ''
+let restoringDraft = false
 
-function loadDraft() {
-  draftKey = `cairn-chat-draft:${draftScope}${selectedChatId.value || `new:${agentId.value}:${projectId.value}`}`
-  draft.value = sessionStorage.getItem(draftKey) ?? (typeof route.query.draft === 'string' ? route.query.draft : '')
+function saveDraft(key = draftKey, text = draft.value, plan = planning.value) {
+  if (!key)
+    return
+  sessionStorage.setItem(key, text)
+  sessionStorage.setItem(`${key}:plan`, String(plan))
+}
+
+function loadDraft(keepPlanning = false) {
+  restoringDraft = true
+  try {
+    draftKey = `cairn-chat-draft:${draftScope}${selectedChatId.value || `new:${agentId.value}:${projectId.value}`}`
+    draft.value = sessionStorage.getItem(draftKey) ?? (typeof route.query.draft === 'string' ? route.query.draft : '')
+    const savedPlan = sessionStorage.getItem(`${draftKey}:plan`)
+    if (savedPlan !== null || !keepPlanning)
+      planning.value = savedPlan === 'true'
+  }
+  finally {
+    restoringDraft = false
+  }
 }
 
 loadDraft()
 watch(selectedChatId, (id, previous) => {
-  // A user can type while a bookmarked slug is still resolving to its UUID.
-  if (id && previous === chatId.value && id !== previous && draft.value)
-    sessionStorage.setItem(`cairn-chat-draft:${draftScope}${id}`, draft.value)
-  loadDraft()
+  // Text or an explicit Plan choice can arrive before a slug resolves to its UUID.
+  if (id && previous === chatId.value && id !== previous) {
+    const previousKey = `cairn-chat-draft:${draftScope}${previous}`
+    const destinationKey = `cairn-chat-draft:${draftScope}${id}`
+    const text = sessionStorage.getItem(previousKey) ?? draft.value
+    const plan = sessionStorage.getItem(`${previousKey}:plan`)
+    if (text)
+      saveDraft(destinationKey, text, plan === 'true')
+    else if (plan !== null)
+      sessionStorage.setItem(`${destinationKey}:plan`, plan)
+  }
+
+  loadDraft(!!createdChat && (id === createdChat.id || chatId.value === createdChat.slug))
 })
-watch(draft, value => sessionStorage.setItem(draftKey, value))
+watch([draft, planning], () => {
+  // Save user changes before a navigation can change the destination key.
+  if (!restoringDraft)
+    saveDraft()
+}, { flush: 'sync' })
 watch(agentId, () => {
   if (!projects.value.some(project => project.value === projectId.value))
     projectId.value = ''
@@ -485,10 +658,10 @@ watch(live.snapshot, (value) => {
 // The open conversation's finished turns are read while the page is visible.
 useReadWhileOpen(() => {
   const chat = detail.value
-  const run = chat?.run
-  if (!chat || !live.synced.value || catchingUp.value || chat.id !== selectedChatId.value || run?.status !== 'succeeded' || !run.finishedAt)
+  const readAt = chat?.readAt ?? chat?.run?.finishedAt
+  if (!chat || !live.synced.value || catchingUp.value || chat.id !== selectedChatId.value || !readAt)
     return null
-  return { key: `chat:${chat.id}`, at: run.finishedAt }
+  return { key: `chat:${chat.id}`, at: readAt }
 })
 // A stream error leaves on its own once the stream recovers; the connection pill covers the outage.
 watch(live.error, (value, previous) => {
@@ -507,12 +680,19 @@ let submission: {
     provider: Provider
     model: string
     reasoning: string
+    plan: boolean
+    speed: string
     attachmentIds: string[]
   }
 } | undefined
-let createdChat: Chat | undefined
 
 function newConversation() {
+  if (chatId.value)
+    saveDraft()
+  else
+    saveDraft(draftKey, '', false)
+  // The composer resets belong to the destination, not the previous draft.
+  draftKey = ''
   outgoing.value = null
   history.value = false
   detailsOpen.value = false
@@ -521,30 +701,47 @@ function newConversation() {
   provider.value = ''
   model.value = ''
   reasoning.value = ''
+  planning.value = false
+  resumeReasoningIntent.value = { kind: 'untouched' }
+  speed.value = ''
   agentId.value = MAIN_AGENT_ID
   projectId.value = ''
   createdChat = undefined
   submission = undefined
   editing.value = null
   error.value = ''
-  void router.push('/chats')
+  void router.push('/chats').finally(() => loadDraft())
 }
 
-async function send(mode: 'queue' | 'steer' = 'queue') {
+async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId: string, revision: string }) {
   const originalDraft = draft.value
-  const text = originalDraft.trim()
-  if (!canSend.value || busy.value)
+  const text = planApproval ? 'Implement the plan you proposed.' : originalDraft.trim()
+  if ((!planApproval && !canSend.value) || busy.value)
     return
+  // Submission authority belongs to the originating draft, never the draft
+  // navigation might load while creation or attachment uploads are outstanding.
+  const requestedPlan = !planApproval && planRequested.value
+  const selectedProvider = chosenProvider.value
+  const selectedModel = model.value
+  const selectedReasoning = reasoning.value
+  const selectedSpeed = speed.value
+  const selectedAttachments = [...attachments.value]
+  const editingMessage = editing.value
+  const target = detail.value ?? createdChat
+  const targetAgent = agentId.value
+  const targetProject = projectId.value || null
   submitting.value = true
   const origin = chatId.value
   const direct = !editing.value && ((mode === 'steer' && !detail.value?.paused) || (!responding.value && !detail.value?.paused && !pending.value.length))
   busy.value = true
   error.value = ''
   try {
-    const chat = detail.value ?? createdChat ?? await api<Chat>('/chats', { method: 'POST', body: JSON.stringify({ agentId: agentId.value, projectId: projectId.value || null }) })
+    const chat = target ?? await createChat(api, { agentId: targetAgent, projectId: targetProject })
+    if (chatId.value !== origin)
+      return
     createdChat = chat
     // Items without a local file (reused or already sent records) are never uploaded again.
-    const pendingUploads = attachments.value.filter(attachment => files.has(attachment.id) && !uploaded.has(attachment.id))
+    const pendingUploads = selectedAttachments.filter(attachment => files.has(attachment.id) && !uploaded.has(attachment.id))
     for (const attachment of pendingUploads)
       attachmentStates.value[attachment.id] = { status: 'uploading' }
     const results = await Promise.allSettled(pendingUploads.map(async (attachment) => {
@@ -572,20 +769,21 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
     if (results.some(result => result.status === 'rejected'))
       return
 
-    const attachmentIds = attachments.value.map(attachment => attachment.id)
-    // A chat can use a different model from its saved agent. Keep the displayed
-    // conversation selection explicit on the wire, including after a reload.
-    const selectedModel = model.value || inheritedAssistant.value?.model || ''
-    const selectedReasoning = reasoning.value || (!model.value ? inheritedAssistant.value?.reasoning : '') || ''
+    if (chatId.value !== origin)
+      return
+    const attachmentIds = selectedAttachments.map(attachment => attachment.id)
     const content = {
       text,
       mode,
-      provider: chosenProvider.value,
+      provider: selectedProvider,
       model: selectedModel,
       reasoning: selectedReasoning,
+      plan: requestedPlan,
+      speed: selectedSpeed,
       attachmentIds,
+      ...(planApproval ? { planApproval } : {}),
     }
-    const submissionKey = JSON.stringify({ chatId: chat.id, editing: editing.value, ...content })
+    const submissionKey = JSON.stringify({ chatId: chat.id, editing: editingMessage, ...content })
     // Retain the id after a network failure only for the same target and content.
     if (submission?.key !== submissionKey) {
       submission = {
@@ -598,13 +796,17 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
       outgoing.value = {
         ...submission.message,
         chatId: chat.id,
+        revision: '',
         status: 'queued',
         createdAt: Date.now(),
-        attachments: [...attachments.value],
+        attachments: selectedAttachments,
       }
     }
 
-    await api(`/chats/${chat.id}/messages${editing.value ? `/${editing.value}` : ''}`, { method: editing.value ? 'PUT' : 'POST', body: JSON.stringify(submission.message) })
+    if (editingMessage)
+      await editChatMessage(api, { chatId: chat.id, messageId: editingMessage, message: submission.message })
+    else
+      await sendChatMessage(api, { chatId: chat.id, message: submission.message })
     // Another conversation was opened meanwhile; its composer is not this message's.
     if (chatId.value !== origin) {
       submission = undefined
@@ -617,7 +819,7 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
     clearAttachments()
     submission = undefined
     if (!detail.value) {
-      sessionStorage.setItem(`cairn-chat-draft:${draftScope}${chat.id}`, draft.value)
+      saveDraft(`cairn-chat-draft:${draftScope}${chat.id}`)
       await router.push(chatPath(chat))
     }
 
@@ -626,6 +828,14 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
   catch (e) {
     outgoing.value = null
     error.value = (e as Error).message
+    if (planApproval) {
+      // Reconnect for a current snapshot after a refused stale approval. Keep the
+      // original request ID for an uncertain response, never silently approve anew.
+      if (e instanceof ApiError && e.status === 409)
+        submission = undefined
+
+      live.reconnect()
+    }
   }
   finally {
     busy.value = false
@@ -634,14 +844,26 @@ async function send(mode: 'queue' | 'steer' = 'queue') {
 }
 
 const newSession = ref(false)
+const compacting = ref(false)
+const context = computed(() => contextSummary(detail.value?.contextUsage))
 
-async function action(name: 'pause' | 'stop' | 'restore' | 'new-session', body?: object) {
+async function action(name: 'pause' | 'stop' | 'restore' | 'new-session' | 'compact', body?: { paused?: boolean, confirm?: boolean }) {
   if (!detail.value || busy.value)
     return false
   busy.value = true
   error.value = ''
   try {
-    await api(`/chats/${detail.value.id}/${name}`, { method: 'POST', ...(body ? { body: JSON.stringify(body) } : {}) })
+    const chatId = detail.value.id
+    if (name === 'pause')
+      await setChatPaused(api, { chatId, paused: body?.paused ?? false })
+    else if (name === 'stop')
+      await stopChat(api, { chatId })
+    else if (name === 'restore')
+      await restoreChat(api, { chatId })
+    else if (name === 'new-session')
+      await restartChatSession(api, { chatId, confirm: body?.confirm ?? false })
+    else
+      await compactChat(api, { chatId })
     return true
   }
   catch (e) {
@@ -652,17 +874,97 @@ async function action(name: 'pause' | 'stop' | 'restore' | 'new-session', body?:
 }
 
 async function resumeQuota() {
+  reportResumeDiagnostic({ stage: 'handler-entered' })
   const chat = detail.value
-  if (!chat || busy.value)
+  if (!chat) {
+    reportResumeDiagnostic({ stage: 'guard-no-detail' })
     return
+  }
+
+  if (busy.value) {
+    reportResumeDiagnostic({ stage: 'guard-busy' })
+    return
+  }
+
   busy.value = true
   error.value = ''
   try {
-    if (chat.run?.status === 'failed')
-      await api(`/runs/${chat.run.id}/resume`, { method: 'POST' })
-    await api(`/chats/${chat.id}/pause`, { method: 'POST', body: JSON.stringify({ paused: false }) })
+    const run = chat.run
+    const diagnosticProvider = chosenProvider.value
+    reportResumeDiagnostic({
+      stage: 'run-state',
+      runStatus: resumeDiagnosticRunStatus(run?.status),
+      resumeAvailable: run?.resumeAvailable === true,
+      provider: resumeDiagnosticProvider(diagnosticProvider),
+    })
+    if (run && ['failed', 'interrupted', 'cancelled'].includes(run.status)) {
+      const turnId = run.chatExecution?.messageId
+      let selection: ResumeExecutionSelection | undefined
+      if (run.resumeAvailable) {
+        reportResumeDiagnostic({ stage: 'selection-start' })
+        const savedAgent = run.snapshot?.agent
+        const catalog = modelCatalogs[chosenProvider.value].catalog.models
+        reportResumeDiagnostic({
+          stage: 'catalog-state',
+          catalogPresent: catalog.length > 0,
+        })
+        const selectedModel = model.value || savedAgent?.model || catalog.find(item => item.isDefault)?.model || ''
+        const modelRow = (name: string) => catalog.find(item => item.model === name || item.routes?.some(route => route.model === name))
+          || (!name ? catalog.find(item => item.isDefault) : undefined)
+        // A catalog default stays display-only until the picker changes the model draft.
+        const selectedModelChanged = !!model.value && model.value !== (savedAgent?.model || '')
+        const selectedReasoning = resumeSelectionReasoning(
+          resumeReasoningIntent.value,
+          reasoning.value,
+          savedAgent?.reasoning || '',
+          selectedModelChanged,
+          modelRow(selectedModel)?.defaultReasoningEffort || '',
+        )
+        const selectedDisplayedSpeed = savedAgent
+          ? pickerAppliedSpeed(chosenProvider.value, modelRow(selectedModel), speed.value, savedAgent.speed)
+          : ''
+        const selectedSpeed = savedAgent
+          ? resumeSelectionSpeed(chosenProvider.value, modelRow(selectedModel), speed.value, savedAgent.speed)
+          : ''
+        const preserveModel = savedAgent?.model === '' && !model.value
+        const selectionModel = preserveModel ? savedAgent.model : selectedModel
+        selection = savedAgent
+          && chosenProvider.value === savedAgent.provider
+          && !!turnId
+          && needsResumeSelection(
+            selectionModel,
+            selectedReasoning,
+            selectedDisplayedSpeed,
+            savedAgent.model,
+            savedAgent.reasoning,
+            savedAgent.speed,
+          )
+          ? {
+              model: selectionModel,
+              reasoning: selectedReasoning,
+              speed: selectedSpeed,
+              ...(preserveModel ? { preserveModel: true } : {}),
+            }
+          : undefined
+        reportResumeDiagnostic({ stage: 'selection-ready' })
+      }
+
+      reportResumeDiagnostic({ stage: 'resume-attempt' })
+      await resumeChat(api, {
+        chatId: chat.id,
+        runId: run.id,
+        turnId,
+        selection,
+      })
+      reportResumeDiagnostic({ stage: 'resume-returned' })
+    }
+
+    reportResumeDiagnostic({ stage: 'pause-attempt' })
+    await setChatPaused(api, { chatId: chat.id, paused: false })
+    reportResumeDiagnostic({ stage: 'pause-returned' })
   }
   catch (e) {
+    reportResumeDiagnostic({ stage: 'caught' })
     error.value = (e as Error).message
   }
   finally { busy.value = false }
@@ -671,7 +973,11 @@ async function resumeQuota() {
 async function update(message: ChatMessage, mode?: 'steer') {
   error.value = ''
   try {
-    await api(`/chats/${detail.value!.id}/messages/${message.id}`, { method: mode ? 'PUT' : 'DELETE', ...(mode ? { body: JSON.stringify({ ...message, mode, attachmentIds: message.attachments?.map(attachment => attachment.id) ?? [] }) } : {}) })
+    const reference = { chatId: detail.value!.id, messageId: message.id }
+    if (mode)
+      await editChatMessage(api, { ...reference, message: { ...message, mode, attachmentIds: message.attachments.map(attachment => attachment.id) } })
+    else
+      await deleteChatMessage(api, reference)
   }
   catch (e) { error.value = (e as Error).message }
 }
@@ -683,13 +989,25 @@ function edit(message: ChatMessage) {
   }
 
   editing.value = message.id
+  resumeReasoningIntent.value = { kind: 'untouched' }
   clearAttachments()
   attachments.value = [...(message.attachments ?? [])]
   draft.value = message.text
   provider.value = message.provider || currentProvider.value
   model.value = message.model
   reasoning.value = message.reasoning || ''
+  planning.value = message.plan === true
+  speed.value = message.speed || ''
   textarea.value?.focus()
+}
+
+// Leaving plan mode is explicit: this queues an ordinary turn in the same conversation,
+// with the agent's usual permissions.
+async function implementPlan(sourceId: string) {
+  if (hasDraft.value || editing.value || active.value || pending.value.length || delivery.value.sending.length)
+    return
+  planning.value = false
+  await send('queue', { sourceId, revision: detail.value!.revision })
 }
 
 // The view stays mounted across conversations: reset what belongs to the previous one.
@@ -705,8 +1023,11 @@ watch(chatId, (id) => {
   provider.value = ''
   model.value = ''
   reasoning.value = ''
+  resumeReasoningIntent.value = { kind: 'untouched' }
+  const opening = !!createdChat && createdChat.slug === id
+  speed.value = ''
   submission = undefined
-  const destinationId = createdChat && createdChat.slug === id ? createdChat.id : selectedChatId.value
+  const destinationId = opening ? createdChat!.id : selectedChatId.value
   createdChat = undefined
   // A first message keeps its optimistic bubble while the new chat opens.
   if (outgoing.value?.chatId !== destinationId)
@@ -716,7 +1037,8 @@ watch(chatId, (id) => {
     projectId.value = typeof route.query.project === 'string' ? route.query.project : ''
   }
 
-  loadDraft()
+  // Plan mode follows the first message into the conversation it created.
+  loadDraft(opening)
 })
 
 function key(event: KeyboardEvent) {
@@ -731,6 +1053,15 @@ function key(event: KeyboardEvent) {
 </script>
 
 <template>
+  <Modal v-if="compacting" title="Compact the agent context?" @close="compacting = false">
+    <div class="p-6">
+      <p>The coding agent summarizes its earlier context to free space in its window. This uses the agent's model, like a short turn.</p>
+      <p>Every message stays visible in this conversation. Messages you send meanwhile wait for the compaction to finish.</p>
+      <UiButton :disabled="busy || !detail?.compaction?.available" @click="action('compact').then((succeeded) => { if (succeeded) compacting = false })">
+        Compact context
+      </UiButton>
+    </div>
+  </Modal>
   <Modal v-if="newSession" title="Start a fresh agent session?" @close="newSession = false">
     <div class="p-6">
       <p>The conversation history and working files will be preserved. The next message will use a new native agent session.</p>
@@ -775,6 +1106,14 @@ function key(event: KeyboardEvent) {
         </dt><dd class="m-0 flex items-center gap-2">
           <span class="size-1.5 rounded-full bg-accent" />{{ chatStatus }}
         </dd>
+        <template v-if="detail?.run">
+          <dt class="text-muted">
+            Context
+          </dt><dd class="m-0" data-testid="context-usage">
+            <span class="block">{{ context.label }}</span>
+            <span v-for="line in context.details" :key="line" class="block text-muted">{{ line }}</span>
+          </dd>
+        </template>
       </dl>
       <button class="chat-detail-action" @click="detailAction(newConversation)">
         <Icon :name="Plus" :size="18" />New chat
@@ -787,6 +1126,20 @@ function key(event: KeyboardEvent) {
       >
         <Icon :name="FileText" :size="18" />Files <span class="ml-auto text-muted">{{ fileCount }}</span>
       </button>
+      <template v-if="detail?.compaction?.supported && !inactive">
+        <button
+          class="chat-detail-action"
+          aria-haspopup="dialog"
+          :disabled="!detail.compaction.available"
+          :aria-describedby="detail.compaction.reason ? 'compaction-reason' : undefined"
+          @click="detailAction(() => { compacting = true })"
+        >
+          <Icon :name="Layers" :size="18" />{{ detail.compaction.running ? 'Compacting context…' : 'Compact context' }}
+        </button>
+        <p v-if="detail.compaction.reason && !detail.compaction.running" id="compaction-reason" class="m-0! mb-1! px-3 text-2xs text-muted">
+          {{ detail.compaction.reason }}
+        </p>
+      </template>
       <button class="chat-detail-action" @click="detailAction(() => { history = true })">
         <Icon :name="Search" :size="18" />Search conversations
       </button>
@@ -927,6 +1280,13 @@ function key(event: KeyboardEvent) {
                 <Icon :name="CornerDownRight" :size="13" /><span class="truncate max-w-56">Delegated by {{ heading.requester.title || 'New conversation' }}</span>
               </RouterLink>
               <span v-if="detail" class="flex items-center gap-1.5 font-semibold" :class="chatStatus === 'Working' ? 'text-accent' : chatStatus === 'Failed' || chatStatus === 'Interrupted' ? 'text-coral' : ''"><span v-if="chatStatus !== 'Working'" class="size-1 shrink-0 rounded-full" :class="active ? 'bg-accent' : 'bg-muted'" />{{ chatStatus }}<span v-if="chatStatus === 'Working'" class="working-wave"><i /><i /><i /></span></span>
+              <span
+                v-if="context.percent !== null || detail?.contextUsage"
+                class="tabular-nums"
+                :class="(context.percent ?? 0) >= 85 ? 'text-coral' : ''"
+                :title="[context.label, ...context.details].join('\n')"
+                data-testid="context-indicator"
+              >Context {{ context.short }}</span>
               <NodeExecution v-if="detail?.run && state.installationRole === 'owner'" :key="detail.run.id" :run="detail.run" />
             </div>
           </div>
@@ -1041,7 +1401,10 @@ function key(event: KeyboardEvent) {
             :outcome="detail?.run?.status === 'succeeded' ? detail.run.outcome : null"
             :sending="delivery.sending"
             :events="events"
+            :timeline="timeline"
             :quota="quota"
+            :chat-id="detail?.id"
+            :coding-agent-switch="detail?.codingAgentSwitch"
             :can-manage-accounts="state.installationRole === 'owner'"
             :busy="busy"
             :wakeup="liveWait"
@@ -1059,12 +1422,30 @@ function key(event: KeyboardEvent) {
             :subagent-bar="subagentBar"
             compact-toolbar
             chat
+            :can-implement="!hasDraft && !editing && !busy && !inactive && !active && !pending.length && !delivery.sending.length"
             @resume-quota="resumeQuota"
+            @coding-agent-switched="chosenProvider = $event"
             @load="live.loadOlder"
             @position="live.savePosition"
+            @implement="implementPlan"
             @pause-wait="busy || action('pause', { paused: true })"
           />
           <div v-if="!inactive" class="mx-auto w-full max-w-205 shrink-0 px-5 pb-1 pt-3 phone:px-0 phone:pt-2">
+            <UiNotice
+              v-if="detail?.environmentState"
+              role="status"
+              class="mb-3"
+              tone="info"
+              title="Working environment expired"
+            >
+              <p>
+                {{ detail.environmentState === 'cleaning' ? 'Removing the working environment after inactivity. Please wait before sending another message.' : 'The working environment was removed after inactivity. Your next message starts a fresh environment using the conversation history.' }}
+                History, uploaded attachments, published files and shared links are retained. Unpushed changes and other working files are no longer available.
+              </p>
+              <p v-if="detail.environmentError">
+                Cleanup will retry: {{ detail.environmentError }}
+              </p>
+            </UiNotice>
             <ChatQuestions
               v-if="detail"
               :questions="detail.questions || []"
@@ -1133,8 +1514,14 @@ function key(event: KeyboardEvent) {
                 </button>
               </template>
             </UiNotice>
+            <RecoveryNotice
+              v-if="recovery && !quota"
+              :recovery="recovery"
+              :busy="busy"
+              @cancel="action('stop')"
+            />
             <UiNotice
-              v-if="waitNotice && !quota"
+              v-else-if="waitNotice && !quota"
               role="status"
               class="mb-3"
               :tone="waitNotice.account ? 'warning' : 'info'"
@@ -1192,6 +1579,7 @@ function key(event: KeyboardEvent) {
               <template v-if="pending.length || detail?.paused">
                 <QueueStrip
                   :pending="pending"
+                  :models="codexModels"
                   :paused="!!detail?.paused"
                   :working="active"
                   :busy="busy"
@@ -1244,15 +1632,24 @@ function key(event: KeyboardEvent) {
                   class="mb-1.5"
                   @remove="removeAttachment"
                 />
+                <p
+                  v-if="planBlocked"
+                  role="status"
+                  class="px-2 text-sm text-danger"
+                  data-testid="plan-unavailable"
+                >
+                  {{ planUnavailableMessage }}
+                </p>
                 <SkillTextarea
                   ref="textarea"
                   v-model="draft"
                   :skills="skills"
                   aria-label="Message"
-                  :placeholder="liveWait?.wakeup ? (detail?.paused ? 'Add to the queue — this cancels the wait' : 'Reply now — this cancels the wait') : responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
+                  :placeholder="planRequested ? 'Describe what to plan… The agent proposes without changing anything' : liveWait?.wakeup ? (detail?.paused ? 'Add to the queue — this cancels the wait' : 'Reply now — this cancels the wait') : responding ? 'Add a follow-up…' : skills.length ? 'Message your agent… Type $ for skills' : 'Message your agent…'"
                   rows="2"
                   maxlength="50000"
                   @keydown="key"
+                  @skills-open="refreshSkills().catch(() => {})"
                 />
                 <div class="flex items-center justify-between gap-2 pt-2">
                   <div class="flex min-w-0 flex-1 items-center gap-1">
@@ -1265,13 +1662,29 @@ function key(event: KeyboardEvent) {
                       v-model:provider="chosenProvider"
                       v-model:model="model"
                       v-model:reasoning="reasoning"
+                      v-model:speed="speed"
                       :inherit="!!inheritedAssistant"
                       :default-model="inheritedAssistant?.model || ''"
                       :default-reasoning="inheritedAssistant?.reasoning || ''"
+                      :default-speed="inheritedAssistant?.speed || ''"
                       :default-source="inheritConversation ? 'conversation' : 'agent'"
                       :switching="switchingProvider"
                       :disabled="busy"
+                      @reasoning-choice="setResumeReasoningIntent"
                     />
+                    <button
+                      type="button"
+                      class="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full px-3 text-sm font-medium disabled:opacity-50"
+                      :class="planRequested ? 'bg-soft text-accent' : 'text-muted hover:bg-hover'"
+                      :aria-pressed="planRequested"
+                      aria-label="Plan first"
+                      :title="planAvailable ? 'Plan first: the agent explores and proposes an approach without changing files, using the network from its shell or calling tools with external effects. Implement it afterwards in this conversation.' : planUnavailableMessage"
+                      :disabled="busy || (!planAvailable && !planRequested)"
+                      data-testid="plan-toggle"
+                      @click="planning = !planning"
+                    >
+                      <Icon :name="NotebookPen" :size="15" />Plan
+                    </button>
                   </div>
                   <!-- As on Android: steer while typing during a reply, stop when the field is empty, otherwise send. -->
                   <div class="flex shrink-0 items-center gap-1">
@@ -1281,7 +1694,7 @@ function key(event: KeyboardEvent) {
                       class="round-action bg-soft text-accent"
                       aria-label="Steer now"
                       title="Send into the current turn (Alt + Enter)"
-                      :disabled="busy || !canSend || switchingProvider"
+                      :disabled="busy || !canSend || switchingProvider || steerBlocked"
                       @click="send('steer')"
                     >
                       <Icon :name="Zap" :size="16" />

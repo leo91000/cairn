@@ -1,24 +1,27 @@
 //! Host-mounted ext4 over the same journal, remote source and clean cache as VMs.
+mod closing;
+
 use super::{atomic_write, workspace};
 use crate::{
     error::{Error, Result},
     skills::private_dir,
-    storage::{self, environment, runtime::Volume},
+    storage::{self, Disk, environment, runtime::Volume},
     validation::text,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    future::Future,
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use tokio_util::sync::CancellationToken;
 
 pub(crate) const KIND: &str = "native-ext4-v1";
-
-/// Mount points of a conversation's filesystems, and their block attachments.
-/// A paired VM disk keeps its larger workspace view in a second filesystem.
-const FILESYSTEMS: [(&str, &str); 2] = [("data", "disk.blk"), ("conversation", "workspace.blk")];
+pub(crate) const STORAGE: &str = "ublk-rootless-v1";
 
 /// Whether a native controller mounts this checkpoint as a block journal: a
 /// disk created natively, or a VM disk that native nodes mount in place.
@@ -42,9 +45,6 @@ pub(crate) struct View {
     pub output: PathBuf,
     /// Mounted filesystem roots, in mount order.
     pub filesystems: Vec<PathBuf>,
-    /// Home directories a paired VM disk keeps on its workspace filesystem,
-    /// with the guest path each one is bound over.
-    pub caches: Vec<(PathBuf, PathBuf)>,
     /// Whether file owners are translated from the VM agent identity.
     pub mapped: bool,
 }
@@ -57,16 +57,13 @@ impl View {
             workspace: data.join("workspaces"),
             output: data.join("output"),
             filesystems: vec![data],
-            caches: Vec::new(),
             mapped: false,
         }
     }
 
-    /// Mirrors the guest mounts: the system filesystem holds the overlay's
-    /// upper layer and a paired workspace filesystem is mounted at `/data`.
-    fn vm(root: &Path, plan: &Value, paired: bool) -> Result<Self> {
+    /// Current VM disks keep their writable guest overlay in `upper`.
+    fn vm(root: &Path, plan: &Value) -> Result<Self> {
         let data = root.join("data");
-        let conversation = root.join("conversation");
         let locate = |guest: &Path| -> Result<PathBuf> {
             if !guest.is_absolute()
                 || guest
@@ -74,9 +71,6 @@ impl View {
                     .any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
             {
                 return Err(Error::bad("Invalid saved guest path."));
-            }
-            if paired && let Ok(rest) = guest.strip_prefix("/data") {
-                return Ok(conversation.join(rest));
             }
             Ok(data.join("upper").join(guest.strip_prefix("/").unwrap()))
         };
@@ -88,31 +82,11 @@ impl View {
         .join("runs")
         .join(text(plan, "runId"))
         .join("output");
-        let caches = if paired {
-            [
-                ("home-cache", "/home/node/.cache"),
-                ("home-share", "/home/node/.local/share"),
-                ("android", "/home/node/.android"),
-            ]
-            .into_iter()
-            .map(|(name, target)| (conversation.join(".cairn-system").join(name), target.into()))
-            .collect()
-        } else {
-            Vec::new()
-        };
-        let home = locate(Path::new("/home/node"))?;
-        let workspace = locate(Path::new(text(plan, "projectRoot")))?;
-        let output = locate(&output)?;
-        let mut filesystems = vec![data.clone()];
-        if paired {
-            filesystems.push(conversation.clone());
-        }
         Ok(Self {
-            home,
-            workspace,
-            output,
-            filesystems,
-            caches,
+            home: locate(Path::new("/home/node"))?,
+            workspace: locate(Path::new(text(plan, "projectRoot")))?,
+            output: locate(&output)?,
+            filesystems: vec![data],
             mapped: true,
         })
     }
@@ -127,42 +101,28 @@ impl View {
             .ok_or_else(|| Error::bad("Path is outside the conversation's filesystems."))
     }
 
-    /// Creates missing user directories and refuses any redirected component:
-    /// a VM disk was written by its guest, and these paths become host bind
-    /// sources. Returns the paired cache bindings that exist.
-    pub(crate) async fn prepare(&self, uid: u32, gid: u32) -> Result<Vec<super::home::Binding>> {
-        for path in [&self.home, &self.workspace, &self.output] {
-            let root = self.filesystem_of(path)?;
-            directory_beneath(root, path, Some((uid, gid))).await?;
+    /// Validate every guest-written bind source before the controller writes it.
+    pub(super) async fn prepare(&self, uid: u32, gid: u32) -> Result<()> {
+        for path in [
+            &self.home,
+            &self.workspace,
+            &self.output,
+            &self.home.join(".local"),
+        ] {
+            directory_beneath(self.filesystem_of(path)?, path, Some((uid, gid))).await?;
         }
-        // A VM may have inherited .local from its read-only base image rather
-        // than copied it into the upper layer. It remains a user-owned parent
-        // for local installs as well as for the paired share binding.
-        directory_beneath(&self.home, &self.home.join(".local"), Some((uid, gid))).await?;
-        let mut bindings = Vec::new();
-        for (source, target) in &self.caches {
-            let root = self.filesystem_of(source)?;
-            if !directory_beneath(root, source, None).await? {
-                continue;
-            }
-            let relative = target
-                .strip_prefix("/home/node")
-                .map_err(|_| Error::bad("Invalid cache binding."))?;
-            directory_beneath(&self.home, &self.home.join(relative), Some((uid, gid))).await?;
-            bindings.push(super::home::Binding {
-                source: source.clone(),
-                target: target.clone(),
-                read_only: false,
-            });
-        }
-        Ok(bindings)
+        Ok(())
     }
 }
 
 /// Walks from `root` to `path` without following links. Missing components
 /// are created when `owner` is given; the final one is owned by it. Returns
 /// whether `path` exists as a directory afterwards.
-async fn directory_beneath(root: &Path, path: &Path, owner: Option<(u32, u32)>) -> Result<bool> {
+pub(super) async fn directory_beneath(
+    root: &Path,
+    path: &Path,
+    owner: Option<(u32, u32)>,
+) -> Result<bool> {
     let relative = path
         .strip_prefix(root)
         .map_err(|_| Error::bad("Path is outside its filesystem."))?;
@@ -207,18 +167,91 @@ pub(crate) async fn view(state: &Path, run: &str) -> Result<View> {
 
 pub(crate) const DISK_BUSY: &str = "Native disk is active.";
 
-pub fn exists(state: &Path, run: &str) -> Result<bool> {
-    Ok(storage::runtime::exists(&environment::directory(
-        state, run,
-    )?))
+pub async fn exists(state: &Path, run: &str) -> Result<bool> {
+    let path = environment::directory(state, run)?.join("lazy/journal-v2.sqlite");
+    exists_from_metadata(tokio::fs::metadata(path)).await
+}
+
+pub(super) async fn exists_from_metadata(
+    metadata: impl Future<Output = std::io::Result<std::fs::Metadata>>,
+) -> Result<bool> {
+    match metadata.await {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Resume the retained journal as-is even if a manager grant arrived before a
+/// stop. The supervision path applies any outstanding allowance lazily after
+/// mount, without bootstrap's legacy whole-image materialization.
+fn preparation_size(directory: &Path, requested: u64) -> Result<u64> {
+    if storage::runtime::exists(directory) {
+        return Ok(storage::LazyDisk::geometry(&directory.join("lazy"))?);
+    }
+    Ok(requested)
+}
+
+async fn record_runtime(directory: &Path, plan: &Value) -> Result<()> {
+    let mut runtime = json!({
+        "backend": "native",
+        "storage": STORAGE,
+        "os": "linux",
+        "arch": "x86_64",
+        "runtimeId": plan["runtimeId"],
+    });
+    if directory.join("runtime.json").exists() {
+        let previous: Value =
+            serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
+        for field in ["disk", "vmRuntimeId"] {
+            if let Some(value) = previous.get(field) {
+                runtime[field] = value.clone();
+            }
+        }
+        if ["backend", "os", "arch"]
+            .iter()
+            .any(|field| previous[*field] != runtime[*field])
+            || !matches!(previous["storage"].as_str(), Some("ublk") | Some(STORAGE))
+        {
+            return Err(Error::conflict("Native disk platform changed."));
+        }
+    }
+    // Older controllers require storage="ublk" before mounting/reconciling.
+    // Commit the isolation fence while preserving current tool-bundle updates.
+    atomic_write(
+        &directory.join("runtime.json"),
+        &serde_json::to_vec(&runtime)?,
+    )
+    .await?;
+    Ok(())
+}
+
+fn ext4_bytes(superblock: &[u8; 1024]) -> Result<u64> {
+    if u16::from_le_bytes(superblock[56..58].try_into().unwrap()) != 0xef53 {
+        return Err(Error::conflict("Invalid native ext4 geometry."));
+    }
+    let low = u64::from(u32::from_le_bytes(superblock[4..8].try_into().unwrap()));
+    let features = u32::from_le_bytes(superblock[96..100].try_into().unwrap());
+    let high = if features & 0x80 != 0 {
+        u64::from(u32::from_le_bytes(
+            superblock[0x150..0x154].try_into().unwrap(),
+        ))
+    } else {
+        0
+    };
+    let shift = u32::from_le_bytes(superblock[24..28].try_into().unwrap());
+    let size = 1024u64
+        .checked_shl(shift)
+        .and_then(|block| ((high << 32) | low).checked_mul(block))
+        .filter(|bytes| *bytes > 0 && *bytes <= 1 << 40)
+        .ok_or_else(|| Error::conflict("Invalid native ext4 size."))?;
+    Ok(size)
 }
 
 struct HostMount {
     path: PathBuf,
     run: String,
     device: String,
-    /// The block attachment this filesystem must be mounted from.
-    attachment: &'static str,
 }
 
 fn host_mounts(state: &Path, mountinfo: &str) -> Result<Vec<HostMount>> {
@@ -243,15 +276,14 @@ fn host_mounts(state: &Path, mountinfo: &str) -> Result<Vec<HostMount>> {
         let components = relative.components().collect::<Vec<_>>();
         let [
             std::path::Component::Normal(run),
-            std::path::Component::Normal(name),
+            std::path::Component::Normal(data),
         ] = components.as_slice()
         else {
             continue;
         };
-        let Some((_, attachment)) = FILESYSTEMS.iter().find(|(mounted, _)| *name == *mounted)
-        else {
+        if *data != "data" {
             continue;
-        };
+        }
         let run = run
             .to_str()
             .ok_or_else(|| Error::conflict("Invalid native mount identity."))?
@@ -269,7 +301,6 @@ fn host_mounts(state: &Path, mountinfo: &str) -> Result<Vec<HostMount>> {
             path,
             run,
             device: fields[2].into(),
-            attachment,
         });
     }
     Ok(mounts)
@@ -285,8 +316,7 @@ fn verify_host_mount(state: &Path, mounted: &HostMount) -> Result<()> {
     let attachment = state
         .join("native-block")
         .join(&mounted.run)
-        .join("root")
-        .join(mounted.attachment);
+        .join("root/disk.blk");
     let device = std::fs::symlink_metadata(attachment)?;
     let identity = format!(
         "{}:{}",
@@ -306,39 +336,34 @@ fn verify_host_mount(state: &Path, mounted: &HostMount) -> Result<()> {
 /// verified private attachments before the existing nonce-safe device cleanup.
 pub async fn recover_host_mounts(state: &Path) -> Result<()> {
     let mounts = host_mounts(state, &std::fs::read_to_string("/proc/self/mountinfo")?)?;
-    let mut runs: Vec<(String, Vec<HostMount>)> = Vec::new();
     for mounted in mounts {
-        match runs.iter_mut().find(|(run, _)| *run == mounted.run) {
-            Some((_, group)) => group.push(mounted),
-            None => runs.push((mounted.run.clone(), vec![mounted])),
-        }
-    }
-    for (run, mut group) in runs {
-        let root = workspace::directory(state, &run)?;
-        let _workspace =
-            crate::file_lock::exclusive(&root.join("owner.lock"), "Native workspace is active.")?;
-        let owner = environment::lock(state, &run, "Native disk is still owned.").await?;
+        let root = workspace::directory(state, &mounted.run)?;
+        let _workspace = crate::file_lock::exclusive(
+            &root.join("owner.lock"),
+            "Native workspace is still active.",
+        )?;
+        let owner = environment::lock(state, &mounted.run, "Native disk is still owned.").await?;
         if !storage::runtime::exists(&owner.directory) {
             return Err(Error::conflict("Mounted native journal is missing."));
         }
-        for mounted in &group {
-            verify_host_mount(state, mounted)?;
-        }
+        verify_host_mount(state, &mounted)?;
         let identity: Value =
             serde_json::from_slice(&tokio::fs::read(owner.directory.join("runtime.json")).await?)?;
-        if identity["backend"] != "native" || identity["storage"] != "ublk" {
+        if identity["backend"] != "native"
+            || !matches!(identity["storage"].as_str(), Some("ublk") | Some(STORAGE))
+        {
             return Err(Error::conflict("Mounted disk is not a native journal."));
         }
         let attempt = tokio::fs::read_to_string(root.join("attempt")).await?;
         crate::validation::uuid(&attempt)?;
         super::systemd::request_stop(&attempt).await?;
         let state = state.to_owned();
-        let quiesced = run.clone();
+        let run = mounted.run.clone();
         let ownership = tokio::task::spawn_blocking(move || -> Result<_> {
             // Keep both leases with kernel operations if startup is cancelled.
             let ownership = (_workspace, owner);
 
-            storage::ublk::quiesce_stale_host_disk(&state, &quiesced)?;
+            storage::ublk::quiesce_stale_host_disk(&state, &run)?;
             Ok(ownership)
         })
         .await
@@ -346,13 +371,9 @@ pub async fn recover_host_mounts(state: &Path) -> Result<()> {
         // A dead backend can leave blocked D-state consumers. Abort its I/O
         // before waiting for their cgroup fence, but never delete it yet.
         super::systemd::stop(&attempt).await?;
-        // Unmount the workspace filesystem before the system filesystem.
-        group.reverse();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let _ownership = ownership;
-            for mounted in group {
-                unmount_sync(&mounted.path)?;
-            }
+            unmount_sync(&mounted.path)?;
             Ok(())
         })
         .await
@@ -383,6 +404,7 @@ async fn unmount(path: &Path) -> Result<()> {
 /// filesystem flush holds its lifecycle lock waiting for journal headroom.
 pub struct Handle {
     pub volume: Arc<Volume>,
+    pub filesystem: Arc<AtomicU64>,
     pub mount: tokio::sync::Mutex<Mounted>,
 }
 
@@ -390,6 +412,7 @@ impl Handle {
     pub fn new(mount: Mounted) -> Self {
         Self {
             volume: mount.volume.clone(),
+            filesystem: mount.filesystem.clone(),
             mount: tokio::sync::Mutex::new(mount),
         }
     }
@@ -403,81 +426,38 @@ impl Handle {
 
 pub struct Mounted {
     pub volume: Arc<Volume>,
-    /// Filesystems still mounted, removed in reverse order after each success.
-    targets: Vec<PathBuf>,
-    root: PathBuf,
+    filesystem: Arc<AtomicU64>,
+    quota_directory: PathBuf,
+    target: PathBuf,
     jail: PathBuf,
-    mounted: bool,
-    completed: bool,
-    aborted: bool,
+    closing: closing::State,
 
-    devices: Vec<Arc<std::sync::Mutex<storage::ublk::MountedDisk>>>,
-    _owner: Option<environment::OwnerLease>,
-    _physical: Option<crate::file_lock::Guard>,
+    device: Arc<std::sync::Mutex<storage::ublk::MountedDisk>>,
 }
 
-/// The block views a disk exposes: one flat filesystem, or a paired VM
-/// disk's system and workspace filesystems over the same journal.
-fn block_views(
-    volume: &Arc<Volume>,
-    layout: storage::layout::Layout,
-) -> Result<Vec<(&'static str, Arc<dyn storage::Disk>)>> {
-    let storage::layout::Layout::Paired { system_bytes } = layout else {
-        return Ok(vec![(
-            FILESYSTEMS[0].1,
-            volume.clone() as Arc<dyn storage::Disk>,
-        )]);
-    };
-    let total = storage::Disk::size(volume.as_ref());
-    let system = storage::DiskView::new(volume.clone(), 0, system_bytes)?;
-    let workspace = storage::DiskView::new(volume.clone(), system_bytes, total - system_bytes)?;
-    Ok(vec![
-        (FILESYSTEMS[0].1, Arc::new(system) as Arc<dyn storage::Disk>),
-        (
-            FILESYSTEMS[1].1,
-            Arc::new(workspace) as Arc<dyn storage::Disk>,
-        ),
-    ])
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Completion {
+    Flushed,
+    Aborted,
+    FailedFlush,
 }
 
-async fn close_devices(devices: Vec<Arc<std::sync::Mutex<storage::ublk::MountedDisk>>>) {
-    for device in devices {
-        let _ = tokio::task::spawn_blocking(move || {
-            device
-                .lock()
-                .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
-                .close_in_place()
-        })
-        .await;
+impl Completion {
+    pub fn exit_code(self, previous: i32) -> i32 {
+        if self == Self::FailedFlush {
+            return crate::runner::CONTROLLER_FAILED;
+        }
+        previous
     }
 }
 
-async fn abort_devices(
-    devices: &[Arc<std::sync::Mutex<storage::ublk::MountedDisk>>],
-) -> Result<()> {
-    for device in devices {
-        let device = device.clone();
-        tokio::task::spawn_blocking(move || {
-            device
-                .lock()
-                .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
-                .abort_io()
-        })
-        .await
-        .map_err(Error::internal)??;
-    }
-    Ok(())
-}
-
-/// Mounts the conversation's disk for `workload`. A disk created natively is
-/// mounted as is; a VM disk is mounted in place through idmapped mounts and
-/// keeps its VM runtime identity for a later move back.
-pub async fn mount(
+pub(super) async fn mount(
     state: &Path,
     run: &str,
     plan: &Value,
-    workload: (u32, u32),
     stop: &CancellationToken,
+    namespace: &storage::ublk::BackendNamespace,
+    identity: Option<&super::identity::Identity>,
 ) -> Result<Mounted> {
     {
         let owner = environment::ownership(state, run, DISK_BUSY).await?;
@@ -494,16 +474,16 @@ pub async fn mount(
                 "Native journal restore must finish before execution resumes.",
             ));
         }
-        // A later execution invalidates restore idempotence, just as the native
-        // file backend invalidates restored.json when it acquires its writer.
+        // A later execution invalidates restore idempotence.
         remove(&directory.join("recovery.json")).await?;
         tokio::fs::File::open(directory).await?.sync_all().await?;
+        let requested = plan["resources"]["diskMiB"]
+            .as_u64()
+            .ok_or_else(|| Error::bad("Missing native disk size."))?
+            .saturating_mul(super::disk::MIB);
         storage::bootstrap::prepare_native(
             directory,
-            plan["resources"]["diskMiB"]
-                .as_u64()
-                .ok_or_else(|| Error::bad("Missing native disk size."))?
-                .saturating_mul(super::disk::MIB),
+            preparation_size(directory, requested)?,
             &plan["storage"],
             stop,
         )
@@ -516,252 +496,368 @@ pub async fn mount(
             }
         })?;
         let physical = crate::file_lock::exclusive(&directory.join("lock"), DISK_BUSY)?;
-        let runtime = json!({
-            "backend": "native", "storage": "ublk", "os": "linux", "arch": "x86_64",
-            "runtimeId": plan["runtimeId"],
-        });
-        let mut vm = false;
-        if directory.join("runtime.json").exists() {
-            let previous: Value =
-                serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
-            // A VM disk also records its VM image; only the native fields must match.
-            let current = runtime.as_object().unwrap();
-            if current.iter().any(|(key, value)| previous[key] != *value) {
-                return Err(Error::conflict("Native disk runtime changed."));
-            }
-            vm = vm_disk(&previous);
-        } else {
-            atomic_write(
-                &directory.join("runtime.json"),
-                &serde_json::to_vec(&runtime)?,
-            )
-            .await?;
-        }
+        record_runtime(directory, plan).await?;
         let volume = storage::runtime::load(directory).await?;
-        let layout = volume.disk.layout()?;
-        if !vm && layout != storage::layout::Layout::Flat {
-            return Err(Error::conflict(
-                "Native workspaces require a flat ext4 layout.",
-            ));
-        }
+        let runtime: Value =
+            serde_json::from_slice(&tokio::fs::read(directory.join("runtime.json")).await?)?;
+        let vm = vm_disk(&runtime);
         if vm && !root.join("block-initialized").exists() {
             return Err(Error::conflict(
                 "A VM disk must be restored before it runs natively.",
             ));
         }
         let view = if vm {
-            View::vm(&root, plan, layout != storage::layout::Layout::Flat)?
+            View::vm(&root, plan)?
         } else {
             View::native(&root)
         };
+        atomic_write(&root.join("view.json"), &serde_json::to_vec(&view)?).await?;
         let target = root.join("data");
         if !root.join("block-initialized").exists() && !root.join("block-seeding").exists() {
-            if target.exists() && !root.join("initialized").exists() {
-                let mut entries = tokio::fs::read_dir(&target).await?;
-                if entries.next_entry().await?.is_some() {
-                    return Err(Error::conflict(
-                        "Incomplete legacy native preparation requires review before migration.",
-                    ));
-                }
-            }
-            // Existing stopped file workspaces are retained until the new disk
-            // has been published. A failed migration never erases its source.
-            if target.exists() {
-                if root.join("legacy-data").exists() {
-                    return Err(Error::conflict("Ambiguous native migration sources."));
-                }
-                tokio::fs::rename(&target, root.join("legacy-data")).await?;
-            }
             atomic_write(&root.join("block-seeding"), b"1").await?;
         }
-        for filesystem in &view.filesystems {
-            private_dir(filesystem).await?;
-        }
-        atomic_write(&root.join("view.json"), &serde_json::to_vec(&view)?).await?;
+        private_dir(&target).await?;
         let jail = state.join("native-block").join(run).join("root");
         private_dir(&jail).await?;
         retire_attachment(&jail).await?;
-        // The controller's global disk lock keeps this inventory stable until
-        // every backend has cloned its namespace. Verify all inherited native
-        // filesystems before handing their paths to the storage transport.
-        let inherited = host_mounts(
-            state,
-            &std::fs::read_to_string("/proc/thread-self/mountinfo")?,
-        )?;
-        for mounted in &inherited {
-            verify_host_mount(state, mounted)?;
-        }
-        let inherited: Vec<PathBuf> = inherited.into_iter().map(|mounted| mounted.path).collect();
-        let mut devices = Vec::new();
-        for (name, disk) in block_views(&volume, layout)? {
-            let (backend_state, backend_jail, inherited) =
-                (state.to_owned(), jail.clone(), inherited.clone());
-            let created = tokio::task::spawn_blocking(move || {
-                storage::ublk::mount_host_named(
-                    disk,
-                    &backend_state,
-                    &backend_jail,
-                    inherited,
-                    name,
-                )
-            })
-            .await
-            .map_err(Error::internal)?;
-            match created {
-                Ok(device) => devices.push(Arc::new(std::sync::Mutex::new(device))),
-                Err(error) => {
-                    close_devices(devices).await;
-                    return Err(error.into());
-                }
-            }
-        }
-        let mut aborted = false;
-        let mut targets: Vec<PathBuf> = Vec::new();
-        for (filesystem, (_, attachment)) in view.filesystems.iter().zip(FILESYSTEMS) {
-            let source = jail.join(attachment);
-            let destination = filesystem.clone();
-            let mut mounting = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-                use std::os::unix::ffi::OsStrExt;
-                if vm {
-                    return super::idmap::mount_ext4(&source, &destination, workload);
-                }
-                let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
-                let target = std::ffi::CString::new(destination.as_os_str().as_bytes())?;
-                if unsafe {
-                    libc::mount(
-                        source.as_ptr(),
-                        target.as_ptr(),
-                        c"ext4".as_ptr(),
-                        libc::MS_NODEV | libc::MS_NOSUID | libc::MS_NOATIME,
-                        std::ptr::null(),
-                    )
-                } != 0
-                {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-            let mounted = tokio::select! {
-                biased;
-                result = &mut mounting => result.map_err(Error::internal)?,
-                () = stop.cancelled() => {
-                    aborted = true;
-                    volume.stop.cancel();
-                    abort_devices(&devices).await?;
-                    mounting.await.map_err(Error::internal)?
-                }
-            };
-            if let Err(error) = mounted {
-                for target in targets.iter().rev() {
-                    let _ = unmount(target).await;
-                }
-                close_devices(devices).await;
-                return Err(error.into());
-            }
-            targets.push(filesystem.clone());
-        }
-        Ok(Mounted {
-            volume,
-            targets,
-            root,
-            jail,
-            mounted: true,
-            completed: false,
-            aborted,
-            devices,
-            _owner: Some(owner),
-            _physical: Some(physical),
+        let (backend_volume, backend_state, backend_jail) =
+            (volume.clone(), state.to_owned(), jail.clone());
+        let namespace = namespace.clone();
+        let backend_directory = directory.to_owned();
+        let device = tokio::task::spawn_blocking(move || {
+            storage::ublk::mount_host_disk(
+                backend_volume,
+                &backend_state,
+                &backend_jail,
+                &namespace,
+                &backend_directory,
+            )
         })
+        .await
+        .map_err(Error::internal)??;
+        let device = Arc::new(std::sync::Mutex::new(device));
+        let source = jail.join("disk.blk");
+        let destination = target.clone();
+        let identity = identity.cloned();
+        let mut mounting = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            use std::os::unix::ffi::OsStrExt;
+            if vm {
+                return super::idmap::mount_ext4(
+                    &source,
+                    &destination,
+                    identity
+                        .as_ref()
+                        .ok_or_else(|| std::io::Error::other("Missing VM mount identity"))?,
+                );
+            }
+            let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
+            let target = std::ffi::CString::new(destination.as_os_str().as_bytes())?;
+            if unsafe {
+                libc::mount(
+                    source.as_ptr(),
+                    target.as_ptr(),
+                    c"ext4".as_ptr(),
+                    libc::MS_NODEV | libc::MS_NOSUID | libc::MS_NOATIME,
+                    std::ptr::null(),
+                )
+            } != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+        let mut aborted = false;
+        let mounted = tokio::select! {
+            biased;
+            result = &mut mounting => result.map_err(Error::internal)?,
+            () = stop.cancelled() => {
+                aborted = true;
+                volume.stop.cancel();
+                let device = device.clone();
+                tokio::task::spawn_blocking(move || device.lock().map_err(|_| std::io::Error::other("Native device lock poisoned"))?.abort_io()).await.map_err(Error::internal)??;
+                mounting.await.map_err(Error::internal)?
+            }
+        };
+        if let Err(error) = mounted {
+            let _ = tokio::task::spawn_blocking(move || {
+                device
+                    .lock()
+                    .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
+                    .close_in_place()
+            })
+            .await;
+            return Err(error.into());
+        }
+        let mut result = Mounted {
+            volume,
+            target,
+            jail,
+            filesystem: Arc::new(AtomicU64::new(0)),
+            quota_directory: directory.join("lazy"),
+            device,
+            closing: closing::State::new(owner, physical, aborted),
+        };
+        // The durable journal size is also the resize intent. A crash after
+        // growing the journal/device, or a restored older filesystem image,
+        // resumes resize2fs on the next owned mount without a separate marker.
+        let resized = async {
+            let filesystem = result.filesystem_bytes().await?;
+            result.filesystem.store(filesystem, Ordering::Release);
+            if filesystem > result.volume.disk.size() {
+                return Err(Error::conflict(
+                    "Native filesystem exceeds its journal geometry.",
+                ));
+            }
+            if filesystem < result.volume.disk.size() {
+                result.finish_growth().await?;
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = resized {
+            result.close().await?;
+            return Err(error);
+        }
+        Ok(result)
     }
 }
 
 impl Mounted {
+    /// Journal -> kernel geometry -> ext4. A crash after either geometry change
+    /// leaves the journal geometry as intent for the next owned mount.
+    pub(crate) async fn grow(&mut self, bytes: u64) -> Result<bool> {
+        if self.closing.aborted || !self.closing.mounted || !storage::ublk::supports_growth() {
+            return Err(Error::unavailable(
+                "Online native disk growth is unavailable.",
+            ));
+        }
+        if bytes < self.volume.disk.size() {
+            return Err(Error::conflict(
+                "Native disk allowance cannot shrink retained geometry.",
+            ));
+        }
+        let filesystem = self.filesystem_bytes().await?;
+        if filesystem > bytes {
+            return Err(Error::conflict(
+                "Native filesystem exceeds its journal geometry.",
+            ));
+        }
+        if bytes == self.volume.disk.size() && filesystem == bytes {
+            return Ok(true);
+        }
+        if bytes > self.volume.disk.size() {
+            // Keep the mount and its leases alive through an uncancellable
+            // metadata commit; the caller owns the native lifecycle lock.
+            let disk = self.volume.disk.clone();
+            let result = tokio::task::spawn_blocking(move || disk.grow(bytes))
+                .await
+                .map_err(Error::internal)?;
+            match result {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
+                result => result?,
+            }
+        }
+        let device = self.device.clone();
+        tokio::task::spawn_blocking(move || {
+            device
+                .lock()
+                .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
+                .grow(bytes)
+        })
+        .await
+        .map_err(Error::internal)??;
+        self.finish_growth().await?;
+        Ok(true)
+    }
+
+    async fn filesystem_bytes(&self) -> Result<u64> {
+        let disk = self.volume.disk.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut bytes = [0; 1024];
+            storage::Disk::read_at(disk.as_ref(), 1024, &mut bytes)?;
+            ext4_bytes(&bytes)
+        })
+        .await
+        .map_err(Error::internal)?
+    }
+
+    async fn finish_growth(&mut self) -> Result<()> {
+        let mut command = tokio::process::Command::new("resize2fs");
+        command.arg(self.jail.join("disk.blk")).kill_on_drop(true);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(120), command.output())
+            .await
+            .map_err(|_| {
+                Error::unavailable("Native filesystem growth timed out; it will retry.")
+            })??;
+        if !output.status.success() {
+            return Err(Error::unavailable(
+                "Native filesystem growth failed; the journal and growth intent are retained.",
+            ));
+        }
+        sync(&self.target).await?;
+        let bytes = self.filesystem_bytes().await?;
+        self.filesystem.store(bytes, Ordering::Release);
+        if bytes != self.volume.disk.size() {
+            return Err(Error::unavailable(
+                "Native filesystem growth is incomplete; it will retry.",
+            ));
+        }
+        Ok(())
+    }
+
     /// Keep this object owned on every error: an uncertain flush/unmount cannot
     /// release its physical lease or terminate a backend still serving a mount.
     pub async fn abort_io(&mut self) -> Result<()> {
-        // Abort only after cancellation during preparation or a failed systemd
-        // fence. A later non-lazy unmount remains mandatory. The retained journal
-        // then represents a crash prefix, like a forcibly stopped guest.
-        self.aborted = true;
+        // Abort after cancellation during preparation, a failed systemd fence,
+        // or a fenced filesystem's terminal read-only flush failure. A later
+        // non-lazy unmount remains mandatory. The journal is a crash prefix.
+        self.closing.aborted = true;
         self.volume.stop.cancel();
-        abort_devices(&self.devices).await
-    }
-
-    pub async fn close(&mut self) -> Result<()> {
-        if self.mounted {
-            unmount_remaining(&mut self.targets, self.aborted).await?;
-            self.mounted = false;
-        }
-        if !self.completed && self.root.join("block-initialized").exists() {
-            self.volume.seal_completed().await?;
-            self.completed = true;
-        }
 
         {
-            self.volume.stop.cancel();
-            for device in &self.devices {
-                let device = device.clone();
-                tokio::task::spawn_blocking(move || {
-                    device
-                        .lock()
-                        .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
-                        .close_in_place()
-                })
-                .await
-                .map_err(Error::internal)??;
-            }
+            let device = self.device.clone();
+            tokio::task::spawn_blocking(move || {
+                device
+                    .lock()
+                    .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
+                    .abort_io()
+            })
+            .await
+            .map_err(Error::internal)??;
         }
-        // No mount or backend can still use this controller-private attachment.
-        retire_attachment(&self.jail).await?;
         Ok(())
+    }
+
+    pub async fn close(&mut self) -> Result<Completion> {
+        let operations = CloseOperations {
+            target: &self.target,
+            quota_directory: &self.quota_directory,
+            jail: &self.jail,
+            volume: &self.volume,
+            device: &self.device,
+        };
+        self.closing.close(&operations).await
     }
 }
 
-/// Remember partial progress so a later flush/unmount failure can be retried
-/// without attempting to detach an already unmounted filesystem.
-async fn unmount_remaining(targets: &mut Vec<PathBuf>, aborted: bool) -> Result<()> {
-    while let Some(target) = targets.last() {
-        if !aborted {
-            sync(target).await?;
-        }
-        unmount(target).await?;
-        targets.pop();
+struct CloseOperations<'a> {
+    target: &'a Path,
+    quota_directory: &'a Path,
+    jail: &'a Path,
+    volume: &'a Arc<Volume>,
+    device: &'a Arc<std::sync::Mutex<storage::ublk::MountedDisk>>,
+}
+
+#[async_trait::async_trait]
+impl closing::Operations for CloseOperations<'_> {
+    async fn flush(&self) -> std::io::Result<Option<u64>> {
+        sync_io(self.target).await?;
+        Ok(used_bytes(self.target).ok())
     }
-    Ok(())
+
+    async fn abort(&self) -> Result<()> {
+        self.volume.stop.cancel();
+        let device = self.device.clone();
+        tokio::task::spawn_blocking(move || {
+            device
+                .lock()
+                .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
+                .abort_io()
+        })
+        .await
+        .map_err(Error::internal)??;
+        Ok(())
+    }
+
+    async fn unmount(&self) -> Result<()> {
+        unmount(self.target).await
+    }
+
+    async fn record_usage(&self, used: u64) -> Result<()> {
+        let attempt =
+            tokio::fs::read_to_string(self.target.parent().unwrap().join("attempt")).await?;
+        super::capacity::record_retained(self.quota_directory, &attempt, used).await
+    }
+
+    fn initialized(&self) -> bool {
+        self.target
+            .parent()
+            .unwrap()
+            .join("block-initialized")
+            .exists()
+    }
+
+    async fn seal(&self) -> Result<()> {
+        self.volume.seal_completed().await?;
+        Ok(())
+    }
+
+    async fn retire(&self) -> Result<()> {
+        self.volume.stop.cancel();
+        let device = self.device.clone();
+        tokio::task::spawn_blocking(move || {
+            device
+                .lock()
+                .map_err(|_| std::io::Error::other("Native device lock poisoned"))?
+                .close_in_place()
+        })
+        .await
+        .map_err(Error::internal)??;
+        retire_attachment(self.jail).await
+    }
 }
 
 /// Removing the private path never retires a kernel device by its numeric ID.
 /// Caller owns both conversation leases and has no mounted consumer here.
 async fn retire_attachment(jail: &Path) -> Result<()> {
     use std::os::unix::fs::FileTypeExt;
-    for (_, name) in FILESYSTEMS {
-        let path = jail.join(name);
-        match tokio::fs::symlink_metadata(&path).await {
-            Ok(metadata) if metadata.file_type().is_block_device() => {
-                tokio::fs::remove_file(&path).await?;
-                tokio::fs::File::open(jail).await?.sync_all().await?;
-            }
-            Ok(_) => return Err(Error::conflict("Native block attachment path is occupied.")),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+    let path = jail.join("disk.blk");
+    match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata) if metadata.file_type().is_block_device() => {
+            tokio::fs::remove_file(&path).await?;
+            tokio::fs::File::open(jail).await?.sync_all().await?;
         }
+        Ok(_) => return Err(Error::conflict("Native block attachment path is occupied.")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     Ok(())
 }
 
 pub async fn sync(path: &Path) -> Result<()> {
+    sync_io(path).await.map_err(Into::into)
+}
+
+async fn sync_io(path: &Path) -> std::io::Result<()> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         use std::os::fd::AsRawFd;
         let directory = std::fs::File::open(path)?;
+        require_writable(&directory)?;
         if unsafe { libc::syncfs(directory.as_raw_fd()) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(())
+        // An error can remount ext4 during this very flush, while syncfs still
+        // returns success. Check both sides before claiming completion.
+        require_writable(&directory)
     })
     .await
-    .map_err(Error::internal)?
-    .map_err(Into::into)
+    .map_err(std::io::Error::other)?
+}
+
+fn require_writable(directory: &std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    // Native workspaces are mounted writable. ext4 can return success from
+    // syncfs after shutdown, so a read-only mount is also a terminal failure.
+    let mut status = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    if unsafe { libc::fstatvfs(directory.as_raw_fd(), status.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { status.assume_init() }.f_flag & libc::ST_RDONLY != 0 {
+        return Err(std::io::Error::from_raw_os_error(libc::EROFS));
+    }
+    Ok(())
 }
 
 pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> Result<()> {
@@ -777,9 +873,7 @@ pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> R
         if staged.exists() {
             tokio::fs::remove_dir_all(&staged).await?;
         }
-        if root.join("legacy-data").exists() {
-            workspace::copy_durable(&root.join("legacy-data"), &staged, budget).await?;
-        } else {
+        {
             private_dir(&staged).await?;
             let seed = crate::microvm::plan::Plan::new(plan.clone());
             let source = seed
@@ -839,27 +933,32 @@ pub async fn initialize(state: &Path, run: &str, plan: &Value, budget: u64) -> R
 
 impl Drop for Mounted {
     fn drop(&mut self) {
-        if self.mounted {
-            // An unexpected unwind must not release an open filesystem to a
-            // second writer. Keep its leases/backend until controller restart.
-            tracing::error!(target = ?self.targets, "Native mount abandoned; ownership retained until controller recovery");
-            if let Some(owner) = self._owner.take() {
-                std::mem::forget(owner);
-            }
-            if let Some(physical) = self._physical.take() {
-                std::mem::forget(physical);
-            }
+        if !self.closing.retired {
+            // Neither unmount nor sealing proves backend retirement. Preserve
+            // the journal, backend and leases through any uncertain close.
+            tracing::error!(target = %self.target.display(), "Native mount abandoned; ownership retained until controller recovery");
 
-            for device in &self.devices {
-                std::mem::forget(device.clone());
-            }
+            std::mem::forget(self.device.clone());
             std::mem::forget(self.volume.clone());
         }
     }
 }
 
 pub async fn status(state: &Path, run: &str) -> Result<Value> {
-    let volume = storage::runtime::load(&environment::directory(state, run)?).await?;
+    let directory = environment::directory(state, run)?;
+    match tokio::fs::metadata(directory.join("lazy/journal-v2.sqlite")).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(json!({
+                "mode": "native",
+                "availability": "unavailable",
+                "reason": crate::native::MISSING_NATIVE_JOURNAL_CODE
+            }));
+        }
+        Err(error) => return Err(error.into()),
+    }
+
+    let volume = storage::runtime::load(&directory).await?;
     let mut status = volume.inspect().await?;
     status["paused"] = volume.paused().into();
     Ok(status)
@@ -878,9 +977,14 @@ pub async fn published(state: &Path, run: &str, receipt: &Value) -> Result<Value
     let backup = text(receipt, "backupId").to_owned();
     crate::validation::uuid(&backup)?;
     let disk = volume.disk.clone();
-    tokio::task::spawn_blocking(move || disk.commit_published(generation, &backup))
-        .await
-        .map_err(Error::internal)??;
+    let state = state.to_owned();
+    tokio::task::spawn_blocking(move || {
+        volume
+            .source
+            .acknowledge(&state, &disk, generation, &backup)
+    })
+    .await
+    .map_err(Error::internal)??;
     Ok(json!({ "committed": true }))
 }
 
@@ -899,7 +1003,7 @@ pub async fn capture_active(
     } else {
         None
     };
-    if mount.as_ref().is_some_and(|mount| !mount.mounted)
+    if mount.as_ref().is_some_and(|mount| !mount.closing.mounted)
         || !workspace::directory(state, run)?
             .join("block-initialized")
             .exists()
@@ -910,25 +1014,18 @@ pub async fn capture_active(
     }
     let volume = mounted.volume.clone();
     let waiting = volume.inspect().await?["waitingFor"].is_string();
-    // Every filesystem of a paired disk shares the journal: freeze them all
-    // before sealing, and thaw in reverse order once the seal is durable.
-    let mut frozen = Vec::new();
-    if let Some(mount) = mount.as_ref().filter(|_| !waiting) {
-        for target in &mount.targets {
-            match freeze(target, stop.clone()).await? {
-                Some(guard) => frozen.push(guard),
-                None => {
-                    frozen.clear();
-                    break;
-                }
-            }
-        }
-    }
-    let crash_consistent = frozen.is_empty();
+    let freeze = if filesystem && !waiting {
+        freeze(
+            &workspace::directory(state, run)?.join("data"),
+            stop.clone(),
+        )
+        .await?
+    } else {
+        None
+    };
+    let crash_consistent = freeze.is_none();
     let sealed = storage::checkpoint::seal_host(state, run, volume, crash_consistent, stop).await?;
-    while let Some(guard) = frozen.pop() {
-        drop(guard);
-    }
+    drop(freeze);
     drop(mount);
     sealed.finish(state, run).await
 }
@@ -976,38 +1073,26 @@ async fn freeze(target: &Path, stop: CancellationToken) -> Result<Option<Frozen>
 
 pub async fn restore(state: &Path, run: &str, request: Value) -> Result<Value> {
     let manifest = &request["manifest"];
-    // VM disks keep their flat or paired guest layout and are mounted in place.
-    let vm = vm_disk(&manifest["runtime"]);
-    let flat = storage::layout::Layout::from_manifest(manifest)? == storage::layout::Layout::Flat;
     if !mounts_block(manifest)
         || manifest["runtime"]["backend"] != "native"
-        || manifest["runtime"]["storage"] != "ublk"
+        || !matches!(
+            manifest["runtime"]["storage"].as_str(),
+            Some("ublk") | Some(STORAGE)
+        )
         || manifest["runtime"]["os"] != "linux"
         || manifest["runtime"]["arch"] != "x86_64"
-        || !(vm || flat)
-        || vm
-            && !manifest["runtime"]["vmRuntimeId"]
-                .as_str()
-                .is_some_and(crate::nodes::valid_runtime)
     {
         return Err(Error::conflict(
-            "Native block checkpoints require native Linux x86-64 and a flat native or VM ext4 disk.",
+            "Native block checkpoints require native Linux x86-64 and flat ext4.",
         ));
     }
     crate::nodes::snapshots::validate(manifest)?;
-    super::systemd::tools(text(&manifest["runtime"], "runtimeId"))?;
+    super::systemd::tools(&crate::nodes::component_runtime())?;
     crate::validation::uuid(text(&request, "backupId"))?;
     let root = workspace::directory(state, run)?;
     private_dir(&root).await?;
     let _owner =
         crate::file_lock::exclusive(&root.join("owner.lock"), "Native workspace is active.")?;
-    if root.join("legacy-block-restore.pending.json").exists()
-        || root.join("restore.pending.json").exists()
-    {
-        return Err(Error::conflict(
-            "Finish the pending native file restore first.",
-        ));
-    }
     let pending = root.join("block-restore.pending.json");
     if pending.exists() {
         let current: Value = serde_json::from_slice(&tokio::fs::read(&pending).await?)?;
@@ -1024,7 +1109,7 @@ pub async fn restore(state: &Path, run: &str, request: Value) -> Result<Value> {
         .await?;
     }
     let runtime = manifest["runtime"].clone();
-    let result = crate::nodes::restore::restore_journal(state, run, request, false).await?;
+    let result = crate::nodes::restore::restore_journal(state, run, request).await?;
     let data = root.join("data");
     if data.exists() {
         let mut entries = tokio::fs::read_dir(&data).await?;
@@ -1037,20 +1122,8 @@ pub async fn restore(state: &Path, run: &str, request: Value) -> Result<Value> {
         }
     }
     private_dir(&data).await?;
-    let conversation = root.join("conversation");
-    if conversation.exists() {
-        let mut entries = tokio::fs::read_dir(&conversation).await?;
-        if entries.next_entry().await?.is_some() {
-            tokio::fs::rename(
-                &conversation,
-                root.join(format!("stale-native-{}", crate::config::id())),
-            )
-            .await?;
-        }
-    }
     atomic_write(&root.join("runtime.json"), &serde_json::to_vec(&runtime)?).await?;
     remove(&root.join("file-owner.json")).await?;
-    remove(&root.join("view.json")).await?;
     atomic_write(&root.join("block-initialized"), b"1").await?;
     atomic_write(&root.join("initialized"), b"1").await?;
     tokio::fs::remove_file(pending).await?;
@@ -1075,8 +1148,6 @@ pub async fn evict(data: &Path, state: &Path, run: &str, expected: &Value) -> Re
         crate::file_lock::exclusive(&root.join("owner.lock"), "Native workspace is active.")?;
     let lease = environment::lock(state, run, DISK_BUSY).await?;
     if root.join("block-restore.pending.json").exists()
-        || root.join("restore.pending.json").exists()
-        || root.join("legacy-block-restore.pending.json").exists()
         || lease.directory.join("restore.pending").exists()
         || !root.join("block-initialized").exists()
     {
@@ -1104,12 +1175,8 @@ pub async fn evict(data: &Path, state: &Path, run: &str, expected: &Value) -> Re
         tokio::task::spawn_blocking(move || storage::cache::evict_clean(&state, &directory))
             .await
             .map_err(Error::internal)??;
-    // Legacy migration is complete and its replacement is acknowledged. Other
-    // stale recovery trees still need explicit prune; no S3 reference is removed.
-    remove(&root.join("legacy-data")).await?;
     remove(&root.join("tmp")).await?;
     cleanup_attempt_files(data, state_path(&lease.directory)?, run).await?;
-    workspace::collect_archives(state_path(&lease.directory)?, run, None).await?;
     let mut status = volume.inspect().await?;
     status["evictedBytes"] = evicted.into();
     Ok(status)
@@ -1191,8 +1258,7 @@ pub async fn action(state: &Path, run: &str, delete: bool) -> Result<Vec<String>
         }
         if entry.file_type().await?.is_dir()
             && name.to_string_lossy().starts_with("stale-")
-            && (entry.path().join("journal-v2.sqlite").exists()
-                || entry.path().join("journal.sqlite").exists())
+            && entry.path().join("journal-v2.sqlite").exists()
         {
             let context = storage::LazyDisk::context(&entry.path())?;
             grants.push(crate::auth::digest(text(&context, "grant")));
@@ -1207,7 +1273,7 @@ pub async fn action(state: &Path, run: &str, delete: bool) -> Result<Vec<String>
 /// prefix so a final request cannot accidentally acknowledge an older turn.
 pub async fn recover_completed(state: &Path, run: &str, attempt: &str) -> Result<()> {
     let root = workspace::directory(state, run)?;
-    if !root.join("block-initialized").exists() || !exists(state, run)? {
+    if !root.join("block-initialized").exists() || !exists(state, run).await? {
         return Ok(());
     }
     let lease = environment::lock(state, run, "Native journal recovery is still owned.").await?;
@@ -1215,89 +1281,6 @@ pub async fn recover_completed(state: &Path, run: &str, attempt: &str) -> Result
     volume.seal_completed().await?;
     atomic_write(&root.join("attempt"), attempt.as_bytes()).await?;
     Ok(())
-}
-
-pub async fn restore_files(
-    state: &Path,
-    run: &str,
-    request: &Value,
-    budget: u64,
-    growth: u64,
-) -> Result<Value> {
-    let root = workspace::directory(state, run)?;
-    private_dir(&root).await?;
-    let pending = root.join("legacy-block-restore.pending.json");
-    crate::validation::uuid(text(request, "backupId"))?;
-    {
-        let _owner =
-            crate::file_lock::exclusive(&root.join("owner.lock"), "Native workspace is active.")?;
-        if root.join("block-restore.pending.json").exists() {
-            return Err(Error::conflict(
-                "Finish the pending native block restore first.",
-            ));
-        }
-        if pending.exists() {
-            let current: Value = serde_json::from_slice(&tokio::fs::read(&pending).await?)?;
-            if current["backupId"] != request["backupId"] {
-                return Err(Error::conflict(
-                    "Another native file restore must finish first.",
-                ));
-            }
-        } else {
-            atomic_write(
-                &pending,
-                &serde_json::to_vec(&json!({ "backupId": request["backupId"] }))?,
-            )
-            .await?;
-        }
-        let lease = environment::lock(state, run, DISK_BUSY).await?;
-        let _replacement = storage::runtime::replacement(&lease.directory).await?;
-        if lease.directory.join("restore.pending").exists() {
-            return Err(Error::conflict(
-                "Finish the pending native journal restore first.",
-            ));
-        }
-        if lease.directory.join("lazy").exists() {
-            tokio::fs::rename(
-                lease.directory.join("lazy"),
-                lease
-                    .directory
-                    .join(format!("stale-native-{}", crate::config::id())),
-            )
-            .await?;
-        }
-        for name in ["runtime.json", "recovery.json", "restore.pending"] {
-            let source = lease.directory.join(name);
-            if source.exists() {
-                tokio::fs::rename(
-                    &source,
-                    lease
-                        .directory
-                        .join(format!("stale-native-{}-{name}", crate::config::id())),
-                )
-                .await?;
-            }
-        }
-        if root.join("legacy-data").exists() {
-            tokio::fs::rename(
-                root.join("legacy-data"),
-                root.join(format!("stale-native-{}", crate::config::id())),
-            )
-            .await?;
-        }
-        tokio::fs::File::open(&lease.directory)
-            .await?
-            .sync_all()
-            .await?;
-        tokio::fs::File::open(&root).await?.sync_all().await?;
-    }
-    let result = workspace::restore(state, run, request, budget, growth).await?;
-    for name in ["block-initialized", "block-seeding", "file-owner.json"] {
-        remove(&root.join(name)).await?;
-    }
-    remove(&pending).await?;
-    tokio::fs::File::open(&root).await?.sync_all().await?;
-    Ok(result)
 }
 
 pub fn used_bytes(path: &Path) -> Result<u64> {
@@ -1318,47 +1301,175 @@ pub fn used_bytes(path: &Path) -> Result<u64> {
 mod tests {
     use super::*;
 
-    /// Run inside `unshare -Urm`: a nested mount holds the system filesystem
-    /// busy after the paired workspace has already been detached.
     #[tokio::test]
-    #[ignore = "requires a private user and mount namespace"]
-    async fn paired_unmount_retries_only_filesystems_still_attached() {
-        use std::os::unix::ffi::OsStrExt;
-
-        fn tmpfs(path: &Path) {
-            std::fs::create_dir(path).unwrap();
-            let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-            assert_eq!(
-                unsafe {
-                    libc::mount(
-                        c"tmpfs".as_ptr(),
-                        path.as_ptr(),
-                        c"tmpfs".as_ptr(),
-                        libc::MS_NODEV | libc::MS_NOSUID,
-                        std::ptr::null(),
-                    )
-                },
-                0,
-                "{}",
-                std::io::Error::last_os_error(),
-            );
-        }
-
+    async fn vm_views_reject_redirected_bind_and_runtime_directories() {
         let root = tempfile::tempdir().unwrap();
-        let system = root.path().join("data");
-        let workspace = root.path().join("conversation");
-        let busy = system.join("busy");
-        tmpfs(&system);
-        tmpfs(&workspace);
-        tmpfs(&busy);
-        let mut targets = vec![system.clone(), workspace];
+        let run = crate::config::id();
+        let plan =
+            json!({ "runId": run, "guestDataRoot": "/data", "projectRoot": "/data/workspace" });
+        let view = View::vm(root.path(), &plan).unwrap();
+        assert_eq!(
+            view.workspace,
+            root.path().join("data/upper/data/workspace")
+        );
+        assert_eq!(view.home, root.path().join("data/upper/home/node"));
+        std::fs::create_dir_all(root.path().join("data/upper/home")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("data/upper/home/node"))
+            .unwrap();
+        assert!(view.prepare(1000, 1000).await.is_err());
+        std::os::unix::fs::symlink(outside.path(), root.path().join("data/docker")).unwrap();
+        assert!(
+            directory_beneath(
+                &root.path().join("data"),
+                &root.path().join("data/docker"),
+                Some((1000, 1000))
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
 
-        assert!(unmount_remaining(&mut targets, false).await.is_err());
-        assert_eq!(targets, vec![system]);
-        unmount(&busy).await.unwrap();
-        unmount_remaining(&mut targets, false).await.unwrap();
-        assert!(targets.is_empty());
-        unmount_remaining(&mut targets, false).await.unwrap();
+    #[test]
+    fn completed_close_preserves_cancellation_without_a_flush_failure() {
+        for (completion, previous, expected) in [
+            (Completion::Flushed, 0, 0),
+            (Completion::Flushed, 143, 143),
+            (Completion::Aborted, 143, 143),
+            (Completion::Aborted, 70, 70),
+            (Completion::FailedFlush, 0, 70),
+            (Completion::FailedFlush, 143, 70),
+        ] {
+            assert_eq!(completion.exit_code(previous), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_native_journal_status_is_typed_without_opening_sqlite() {
+        let state = tempfile::tempdir().unwrap();
+        let run = crate::config::id();
+        let journal = environment::directory(state.path(), &run)
+            .unwrap()
+            .join("lazy/journal-v2.sqlite");
+
+        let first_status = status(state.path(), &run).await.unwrap();
+        let repeated = status(state.path(), &run).await.unwrap();
+
+        assert_eq!(first_status["mode"], "native");
+        assert_eq!(first_status["availability"], "unavailable");
+        assert_eq!(first_status["reason"], "missing_native_journal");
+        assert_eq!(repeated, first_status);
+        assert!(!journal.exists());
+    }
+
+    #[tokio::test]
+    async fn malformed_native_journal_is_not_reported_as_missing() {
+        let state = tempfile::tempdir().unwrap();
+        let run = crate::config::id();
+        let directory = environment::directory(state.path(), &run).unwrap();
+        tokio::fs::create_dir_all(directory.join("lazy"))
+            .await
+            .unwrap();
+        tokio::fs::write(directory.join("lazy/journal-v2.sqlite"), b"not sqlite")
+            .await
+            .unwrap();
+
+        let error = status(state.path(), &run).await.unwrap_err();
+
+        assert_eq!(error.status, 500);
+    }
+
+    #[tokio::test]
+    async fn native_disks_resume_with_current_tools_and_keep_the_platform_boundary() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("runtime.json");
+        let previous = json!({
+            "backend": "native", "storage": "ublk", "os": "linux", "arch": "x86_64",
+            "runtimeId": "previous-release",
+        });
+        atomic_write(&path, &serde_json::to_vec(&previous).unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(root.path().join("workspace"), b"retained")
+            .await
+            .unwrap();
+        record_runtime(root.path(), &json!({ "runtimeId": "current-release" }))
+            .await
+            .unwrap();
+        let current: Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(current["runtimeId"], "current-release");
+        assert_eq!(current["storage"], STORAGE);
+        assert_eq!(
+            tokio::fs::read(root.path().join("workspace"))
+                .await
+                .unwrap(),
+            b"retained"
+        );
+        // A future isolation/storage implementation must never be downgraded
+        // by rewriting its marker or touching the retained payload.
+        let mut future = current.clone();
+        future["storage"] = "ublk-rootless-v2".into();
+        atomic_write(&path, &serde_json::to_vec(&future).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            record_runtime(root.path(), &json!({ "runtimeId": "next-release" }))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&tokio::fs::read(&path).await.unwrap()).unwrap(),
+            future
+        );
+        let mut incompatible = current.clone();
+        incompatible["arch"] = "aarch64".into();
+        atomic_write(&path, &serde_json::to_vec(&incompatible).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            record_runtime(root.path(), &json!({ "runtimeId": "next-release" }))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&tokio::fs::read(path).await.unwrap()).unwrap(),
+            incompatible
+        );
+    }
+
+    #[tokio::test]
+    async fn unapplied_grant_resumes_retained_journal_without_materializing_it() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join(crate::config::id());
+        let size = 4 * 1024 * 1024;
+        let manifest = json!({ "version": 1, "size": size, "blockSize": size,
+            "blocks": [{ "offset": 0, "size": size, "hash": null }] });
+        let context = json!({ "master": "http://127.0.0.1:1/", "grant": "synthetic", "policy": storage::policy::Policy::default() });
+        let disk = storage::runtime::create(&directory.join("lazy"), &manifest, &context)
+            .await
+            .unwrap();
+        disk.write_at(0, b"retained").unwrap();
+        disk.sync().unwrap();
+        drop(disk);
+        let requested = 2 * size;
+        let prepare = preparation_size(&directory, requested).unwrap();
+        assert_eq!(prepare, size);
+        storage::bootstrap::prepare_native(
+            &directory,
+            prepare,
+            &context,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            storage::LazyDisk::geometry(&directory.join("lazy")).unwrap(),
+            size
+        );
+        assert!(!directory.join("data.ext4").exists());
+        assert!(!directory.join("bootstrap.pending").exists());
     }
 
     #[test]
@@ -1385,19 +1496,6 @@ mod tests {
         assert_eq!(mounts[0].run, run);
         assert_eq!(mounts[0].device, "259:3");
         assert!(host_mounts(state, &format!("{owned}{owned}")).is_err());
-        // A paired VM disk mounts its workspace view from a second attachment.
-        let paired = format!(
-            "45 1 259:5 / {} rw - ext4 /owned/workspace.blk rw\n",
-            state
-                .join("native")
-                .join(&run)
-                .join("conversation")
-                .display()
-        );
-        let mounts = host_mounts(state, &format!("{owned}{paired}")).unwrap();
-        assert_eq!(mounts.len(), 2);
-        assert_eq!(mounts[1].attachment, "workspace.blk");
-        assert_eq!(mounts[0].attachment, "disk.blk");
         assert!(host_mounts(state, &owned.replace("- ext4", "- tmpfs")).is_err());
         assert!(host_mounts(state, &owned.replace("259:3 / ", "259:3 /subdirectory ")).is_err());
     }
@@ -1413,7 +1511,6 @@ mod tests {
             path: workspace.join("data"),
             run: run.clone(),
             device: "0:0".into(),
-            attachment: "disk.blk",
         };
         assert!(verify_host_mount(state, &mounted).is_err());
         atomic_write(&workspace.join("block-initialized"), b"1")
@@ -1452,90 +1549,5 @@ mod tests {
         std::os::unix::fs::symlink(&outside, &node).unwrap();
         assert!(retire_attachment(&jail).await.is_err());
         assert_eq!(tokio::fs::read(&outside).await.unwrap(), b"owner file");
-    }
-
-    fn plan(run: &str) -> Value {
-        json!({
-            "runId": run,
-            "projectRoot": format!("/data/runs/{run}/workspace"),
-            "guestDataRoot": "/data",
-        })
-    }
-
-    #[test]
-    fn vm_disks_keep_the_guest_layout_of_both_filesystems() {
-        let root = Path::new("/state/native/run");
-        let flat = View::vm(root, &plan("run"), false).unwrap();
-        assert_eq!(flat.home, root.join("data/upper/home/node"));
-        assert_eq!(
-            flat.workspace,
-            root.join("data/upper/data/runs/run/workspace")
-        );
-        assert_eq!(flat.output, root.join("data/upper/data/runs/run/output"));
-        assert_eq!(flat.filesystems, vec![root.join("data")]);
-        assert!(flat.caches.is_empty() && flat.mapped);
-
-        let paired = View::vm(root, &plan("run"), true).unwrap();
-        assert_eq!(paired.home, root.join("data/upper/home/node"));
-        assert_eq!(
-            paired.workspace,
-            root.join("conversation/runs/run/workspace")
-        );
-        assert_eq!(paired.output, root.join("conversation/runs/run/output"));
-        assert_eq!(
-            paired.filesystem_of(&paired.workspace).unwrap(),
-            root.join("conversation")
-        );
-        assert_eq!(
-            paired.filesystem_of(&paired.home).unwrap(),
-            root.join("data")
-        );
-        assert_eq!(
-            paired.caches[1],
-            (
-                root.join("conversation/.cairn-system/home-share"),
-                PathBuf::from("/home/node/.local/share")
-            )
-        );
-
-        let mut escaping = plan("run");
-        escaping["projectRoot"] = "/data/runs/../../etc".into();
-        assert!(View::vm(root, &escaping, true).is_err());
-        assert_eq!(View::native(root).workspace, root.join("data/workspaces"));
-    }
-
-    #[tokio::test]
-    async fn guest_written_directories_never_redirect_host_bind_sources() {
-        use std::os::unix::fs::MetadataExt;
-
-        let root = tempfile::tempdir().unwrap();
-        let data = root.path().join("data");
-        let owner = std::fs::metadata(root.path()).unwrap();
-        let view = View::vm(root.path(), &plan("run"), true).unwrap();
-        std::fs::create_dir_all(&data).unwrap();
-        std::fs::create_dir_all(root.path().join("conversation/.cairn-system/home-cache")).unwrap();
-
-        let bindings = view.prepare(owner.uid(), owner.gid()).await.unwrap();
-        for path in [
-            &view.home,
-            &view.workspace,
-            &view.output,
-            &view.home.join(".cache"),
-        ] {
-            assert!(std::fs::symlink_metadata(path).unwrap().is_dir());
-        }
-        assert_eq!(bindings.len(), 1);
-        assert_eq!(bindings[0].target, Path::new("/home/node/.cache"));
-
-        let outside = tempfile::tempdir().unwrap();
-        std::fs::remove_dir(&view.output).unwrap();
-        std::os::unix::fs::symlink(outside.path(), &view.output).unwrap();
-        assert!(view.prepare(owner.uid(), owner.gid()).await.is_err());
-        std::fs::remove_file(&view.output).unwrap();
-        std::fs::remove_dir_all(data.join("upper/home")).unwrap();
-        std::fs::create_dir_all(data.join("upper")).unwrap();
-        std::os::unix::fs::symlink(outside.path(), data.join("upper/home")).unwrap();
-        assert!(view.prepare(owner.uid(), owner.gid()).await.is_err());
-        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 }

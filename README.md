@@ -46,19 +46,18 @@ See [microVM requirements and architecture](docs/MICROVMS.md).
 ```sh
 cp .env.example .env
 # Configure CAIRN_BEACON_ORIGIN for Beacon.
-codex_version=$(npm view @openai/codex version)
-gh_version=$(gh api repos/cli/cli/releases/latest --jq '.tag_name | ltrimstr("v")')
-docker compose build --build-arg CODEX_VERSION="$codex_version" --build-arg GH_VERSION="$gh_version"
-docker compose up -d
+versions=$(node scripts/cli-updates.mjs build-versions) \
+  && node -e 'for (const [tool, version] of Object.entries(JSON.parse(process.argv[1]))) console.log(`--build-arg=${tool.toUpperCase()}_VERSION=${version}`)' "$versions" \
+  | xargs docker compose build \
+  && docker compose up -d
 # Approve the printed device code in the beacon app.
 docker compose exec manager cairn claim
 docker compose restart manager
 ```
 
 Open the beacon app, sign in to your Cairn account, and claim the installation.
-The manager port is private machine traffic; local passwords, pages and sessions
-no longer grant access. Existing deployments must follow the explicit migration
-in [DEPLOYMENT.md](docs/DEPLOYMENT.md) before upgrading.
+The manager port is private machine traffic. Installation access requires
+a signed-in Cairn account.
 
 [Deployment, CLI login, project setup, backups, and Coolify](docs/DEPLOYMENT.md)
 
@@ -109,8 +108,7 @@ Build the web bundle after edits, and claim a separately running installation
 with `cairn claim`. `pnpm dev` runs the beacon binary and Vite; configure its database, email
 delivery and `CAIRN_BEACON_ORIGIN=http://localhost:5178` as described in that
 guide. Browser journeys use both production binaries and the real account and
-installation relay, with synthetic email delivery. Local password sign-in and
-its historical Rust fixtures have been retired.
+installation relay, with synthetic email delivery.
 The UI uses Tailwind CSS and Egoist's Iconify plugin. See the
 [styling conventions](docs/UI-STYLING.md) for shared controls, theme tokens, icons,
 and responsive layout rules.
@@ -123,11 +121,10 @@ runs (`.env` is used by Compose, not loaded automatically by the development ser
 pnpm check                       # ESLint, rustfmt, types, JS tests and frontend build
 pnpm test:backend                # Native backend integration and migration tests
 cargo clippy --all-targets -- -D warnings
-cargo build --locked --workspace --bin cairn --bin cairn-beacon --example worker_fixture # Browser and worker test binaries
+cargo build --locked --workspace --bin cairn --bin cairn-beacon --example worker_fixture --example browser_fixture # Browser and worker test binaries
 pnpm exec playwright install chromium
 pnpm test:e2e                    # Real beacon + installation binaries (disposable Postgres URL required)
 pnpm build:backend               # Optimized native production binary
-node --import tsx scripts/benchmark-backend.mjs # Node/Rust comparison
 pnpm lint:fix                    # ESLint fixes and Rust formatting
 pnpm format:android              # Kotlin and Gradle Kotlin formatting (requires JDK)
 ```
@@ -140,9 +137,6 @@ Browser tests start a separate application, isolated home, and fixture project;
 they never use your Codex credentials. The fixture runner is only in the test suite
 and is absent from the production image.
 
-[Rust backend architecture and migration](docs/RUST-BACKEND.md) describes the
-runtime, database compatibility, execution supervision and performance evidence.
-
 ## Operations and boundaries
 
 - Run **one application process per data volume**. SQLite persists the queue and sessions.
@@ -154,14 +148,14 @@ runtime, database compatibility, execution supervision and performance evidence.
 - Tasks choose an agent. The built-in Main agent sees all registered resources; other agents can restrict projects, skills, MCP connections and plugin grants such as GitHub accounts. YOLO remains the default, with optional workspace-write and read-only execution. See [agent access](docs/AGENT-ACCESS.md) for isolation and setup. MCP `run` grants can trigger task-authorized external actions.
 - Providers other than Codex and Claude Code, multi-owner tenancy, stateful MCP sessions, and standalone HTTP+SSE transports are outside this version.
 
-[Detailed delivery plan](docs/PLAN.md) · [Validation record](docs/QA.md) ·
-[Performance measurements](docs/PERFORMANCE.md) · [Security](SECURITY.md)
+[Security](SECURITY.md) · [Architecture decisions](docs/adr/README.md) ·
+[Agent diagnostics](docs/AGENT-PERFORMANCE.md)
 
 CI runs quality checks and isolated browser suites alongside a container build and
 non-root smoke test. Image tags are published only after all checks pass. Main and
 release tags reuse the exact image already validated for the same source tree, on
 main or on a pull request from this repository, then verify the deployed commit.
-See the [CI measurements and release paths](docs/CI-PERFORMANCE.md).
+See the [production release runbook](docs/PRODUCTION-CAIRN.md).
 
 ## Chats
 
@@ -219,13 +213,10 @@ The API represents unlimited execution as `timeoutMinutes: 0`. Waiting for tools
 account capacity counts toward an optional finite budget; a worker restart preserves
 the remaining budget and an explicit resume starts a fresh budget.
 
-On upgrade, the main agent's former default of 120 minutes becomes unlimited once.
-Other configured limits are preserved, as are settings captured by existing runs.
 Manual cancellation and tool-access revocation still apply to unlimited runs.
 
-Codex transport messages have no fixed byte-size limit. Large tool results and
-conversation history no longer fail at 32 MB per message; reading and decoding
-each message still require memory proportional to its size. MCP server responses
+Codex transport messages have no fixed byte-size limit. Reading and decoding
+each message require memory proportional to its size. MCP server responses
 retain their separate 2 MB limit.
 
 ## Agent portraits

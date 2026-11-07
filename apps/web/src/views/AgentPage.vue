@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import type { Agent } from '../../../../packages/contracts/contracts'
+import type { CreateAgentInput } from '../../../../packages/contracts/generated/typescript/CreateAgentInput'
+import type { ReplaceAgentInput } from '../../../../packages/contracts/generated/typescript/ReplaceAgentInput'
 import type { ExecutionNode } from '../../../../packages/contracts/nodes'
 import type {
   AgentDraft,
@@ -23,9 +25,16 @@ import {
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { providers as codingAgents } from '../../../../packages/contracts/accounts'
 import { MAIN_AGENT_ID } from '../../../../packages/contracts/constants'
+import { createAgent } from '../../../../packages/contracts/generated/createAgent'
+import { deleteAgent } from '../../../../packages/contracts/generated/deleteAgent'
+import { listAgents } from '../../../../packages/contracts/generated/listAgents'
+import { listPluginPackages } from '../../../../packages/contracts/generated/listPluginPackages'
+import { previewAgent } from '../../../../packages/contracts/generated/previewAgent'
+import { replaceAgent } from '../../../../packages/contracts/generated/replaceAgent'
 import { LOCAL_NODE_ID } from '../../../../packages/contracts/nodes'
 import {
   alwaysAvailable,
+  backendOf,
   changes,
   draftOf,
   effectiveExclusive,
@@ -37,20 +46,15 @@ import {
   nativeReviewNodes,
   needsReview,
   newAgentDraft,
-  nodeBackend,
   nodeName,
   nodesFor,
-  olderInstallation,
   rebaseDraft,
   reviewLines,
-  sandboxOptions,
+  sandboxOptionsFor,
   savedDraft,
   selectionSummary,
-  sentDraft,
   skillKey,
   skillLabel,
-  updateForGrants,
-  withResourceGrants,
 } from '../agent-access'
 import {
   api,
@@ -131,8 +135,6 @@ const catalogError = ref('')
 const nodesError = ref('')
 const nodesLoading = ref(false)
 const catalogLoading = ref(false)
-// An installation older than agent revisions keeps live grants on its resources: shown read-only.
-const legacy = ref(false)
 const suspended = ref<string[]>([])
 const busy = ref(false)
 const serverError = ref('')
@@ -159,10 +161,9 @@ const context = computed<Context>(() => ({
   workspaceUnavailable: !state.workspaceLoaded,
 }))
 const access = computed(() => draft.value.access)
-// VM and native nodes alike: each conversation keeps the backend it started on.
-const availableNodes = computed(() => nodesFor(nodes.value))
-// Native nodes the agent may run on: conversations moved there run as host processes.
-const native = computed(() => availableNodes.value.some(node => nodeBackend(node) === 'native' && (access.value.nodes === null || access.value.nodes.includes(node.id))))
+const backend = computed(() => backendOf(access.value))
+// Nodes of the agent's execution backend, the only ones it can be granted.
+const availableNodes = computed(() => nodesFor(nodes.value, backend.value))
 const changed = computed(() => changes(saved.value, draft.value))
 const dirty = computed(() => loaded.value && !notFound.value && changed.value.length > 0)
 const issues = computed(() => loaded.value ? findIssues(draft.value, context.value, isMain.value, isNew.value ? null : id.value) : [])
@@ -205,7 +206,7 @@ function chip(value: string[] | null): { tone: ChipTone, label: string } {
 const projectName = (project: string) => state.projects.find(item => item.id === project)?.name ?? 'Removed project'
 const connectionName = (connection: string) => catalog.value.connections.find(item => item.id === connection)?.name ?? 'Removed instance'
 const provider = computed(() => codingAgents[draft.value.provider] ?? codingAgents.codex)
-const modes = computed(() => sandboxOptions)
+const modes = computed(() => sandboxOptionsFor(backendOf(access.value)))
 const sandbox = computed(() => modes.value.find(option => option.value === access.value.sandbox) ?? modes.value[0]!)
 // Only grants that take effect: the agent may run there and the runtime supports exclusive reservations.
 const exclusiveNodes = computed(() => effectiveExclusive(draft.value, nodes.value))
@@ -238,7 +239,7 @@ const summaries = computed<Record<SectionId, { short: string, long: string }>>((
     : { short: draft.value.plugins.length ? String(draft.value.plugins.length) : 'None', long: pluginSummary.value || 'None' },
   nodes: nodesError.value
     ? { short: 'Unavailable', long: 'Not loaded' }
-    : { short: short(access.value.nodes, availableNodes.value.length), long: `${selectionSummary(access.value.nodes, availableNodes.value.length)}${native.value ? ' · native nodes' : ''}${exclusiveNodes.value.length ? ` · exclusive on ${exclusiveNodes.value.length}` : ''}` },
+    : { short: `${backend.value === 'native' ? 'Native · ' : ''}${short(access.value.nodes, availableNodes.value.length)}`, long: `${backend.value === 'native' ? 'Native process · ' : ''}${selectionSummary(access.value.nodes, availableNodes.value.length)}${exclusiveNodes.value.length ? ` · exclusive on ${exclusiveNodes.value.length}` : ''}` },
   sandbox: { short: sandbox.value.label, long: sandbox.value.label },
   powers: { short: powers.value ? String(powers.value) : nodesError.value ? 'Unavailable' : 'None', long: [nodesError.value ? 'Exclusive reservation not loaded' : exclusiveNodes.value.length ? 'Exclusive reservation' : '', access.value.installation ? 'Installation management' : '', access.value.delegation ? 'Task delegation' : ''].filter(Boolean).join(' · ') || 'None' },
   advanced: { short: draft.value.timeoutMinutes ? `${draft.value.timeoutMinutes} min` : '', long: draft.value.timeoutMinutes ? `Time limit: ${draft.value.timeoutMinutes} minutes` : 'No time limit' },
@@ -289,12 +290,12 @@ const overview = computed(() => [
         id: 'nodes',
         section: 'nodes' as const,
         title: 'Execution',
-        summary: nodesError.value ? 'Not loaded' : `${access.value.nodes === null ? 'All nodes, including future' : `${access.value.nodes.length} of ${availableNodes.value.length} ${availableNodes.value.length === 1 ? 'node' : 'nodes'}`}`,
+        summary: nodesError.value ? 'Not loaded' : `${backend.value === 'native' ? 'Native process · ' : ''}${access.value.nodes === null ? 'All nodes, including future' : `${access.value.nodes.length} of ${availableNodes.value.length} ${availableNodes.value.length === 1 ? 'node' : 'nodes'}`}`,
         detail: nodesError.value ? 'Nodes could not be loaded' : access.value.nodes === null ? `${availableNodes.value.length} today` : names(access.value.nodes, node => nodeName(nodes.value.find(item => item.id === node), node)) || 'Cannot run anywhere',
         chip: nodesError.value
           ? { tone: 'unavailable' as const, label: 'Unavailable' }
-          : native.value
-            ? { tone: 'power' as const, label: 'Native nodes' }
+          : backend.value === 'native'
+            ? { tone: 'power' as const, label: 'Native process' }
             : access.value.nodes?.length === 0 ? { tone: 'none' as const, label: 'None' } : { tone: 'granted' as const, label: 'Granted' },
       },
       {
@@ -365,16 +366,10 @@ const overviewShown = computed(() => isMain.value || state.workspaceLoaded
         : card),
     })))
 
-/** The agent as the page edits it; on an older installation, with grants from its resources. */
-function loadedDraft(found: Agent) {
-  const loadedAgent = draftOf(found)
-  return legacy.value ? withResourceGrants(loadedAgent, found.id, catalog.value.connections, nodes.value) : loadedAgent
-}
-
 function apply(found: Agent) {
   agent.value = found
-  saved.value = loadedDraft(found)
-  draft.value = loadedDraft(found)
+  saved.value = draftOf(found)
+  draft.value = draftOf(found)
   fieldErrors.value = {}
   attempted.value = false
 }
@@ -383,7 +378,12 @@ async function loadSuspension() {
   if (!delegations.value.length || !agent.value)
     return
   try {
-    const preview = await api<Preview>(`/agents/${id.value}/preview`, { method: 'POST', body: JSON.stringify(saved.value) })
+    const preview = await previewAgent(api, {
+      agentId: id.value,
+      revision: agent.value!.revision,
+      settings: saved.value,
+      review: { nativeNodeReviews: [], reapproveDelegations: [] },
+    })
     suspended.value = preview.delegations.filter(item => item.suspended).map(item => item.id)
   }
   catch {}
@@ -409,7 +409,7 @@ async function retryWorkspace() {
 // An installation without plugins still edits every other permission.
 async function loadCatalog() {
   try {
-    const loadedCatalog = await api<Catalog>('/plugins')
+    const loadedCatalog = await listPluginPackages(api, {})
     catalogError.value = ''
     return loadedCatalog
   }
@@ -419,25 +419,12 @@ async function loadCatalog() {
   }
 }
 
-/**
- * On an older installation, the live grants are read from resources: once `part` loads, the saved
- * and edited agent take them from there (they are read-only, never edited here).
- */
-function regrant(part: 'plugins' | 'exclusiveNodes') {
-  if (!legacy.value || !agent.value)
-    return
-  const fromResources = withResourceGrants(saved.value, agent.value.id, catalog.value.connections, nodes.value)[part]
-  saved.value = { ...saved.value, [part]: fromResources }
-  draft.value = { ...draft.value, [part]: [...fromResources] }
-}
-
 async function retryCatalog() {
   catalogLoading.value = true
   try {
     const plugins = await loadCatalog()
     if (plugins) {
       catalog.value = plugins
-      regrant('plugins')
       void loadSuspension()
     }
   }
@@ -465,7 +452,6 @@ async function retryNodes() {
     const nodeList = await loadNodes()
     if (nodeList) {
       nodes.value = nodeList
-      regrant('exclusiveNodes')
     }
   }
   finally {
@@ -478,7 +464,7 @@ async function load() {
   loaded.value = false
   try {
     const [agents, nodeList, plugins] = await Promise.all([
-      api<Agent[]>('/agents'),
+      listAgents(api, {}).then(output => output.agents),
       loadNodes(),
       // An installation without plugins still edits every other permission.
       loadCatalog(),
@@ -489,7 +475,6 @@ async function load() {
       nodes.value = nodeList
     if (plugins)
       catalog.value = plugins
-    legacy.value = olderInstallation(agents)
     if (isNew.value) {
       saved.value = newAgentDraft()
       draft.value = newAgentDraft()
@@ -529,17 +514,16 @@ watch(draft, () => {
     validate()
 }, { deep: true })
 
-function body(reapprove: string[] = [], nativeNodes: string[] = []) {
+function body(reapprove: string[] = [], nativeNodes: string[] = []): ReplaceAgentInput {
   // Also set once a new agent exists: a recovery update must not overwrite another client's change.
   const revision = agent.value?.revision
   // Only a loaded connection list says which ones were deleted.
-  const { exclusiveNodes: _nodes, plugins: _plugins, ...profile } = savedDraft(draft.value, state.workspaceLoaded && state.installationRole === 'owner' ? state.mcps.map(connection => connection.id) : undefined)
+  const profile = savedDraft(draft.value, state.workspaceLoaded && state.installationRole === 'owner' ? state.mcps.map(connection => connection.id) : undefined)
   return {
-    // An older installation has no live grants on agents nor revisions: they are not sent.
-    ...(legacy.value ? profile : { ...profile, exclusiveNodes: draft.value.exclusiveNodes, plugins: draft.value.plugins }),
-    ...(revision && !legacy.value ? { revision } : {}),
-    ...(reapprove.length ? { reapproveDelegations: reapprove } : {}),
-    ...(nativeNodes.length ? { nativeNodeReviews: nativeNodes } : {}),
+    agentId: agent.value?.id ?? id.value,
+    revision: revision ?? '',
+    settings: profile,
+    review: { reapproveDelegations: reapprove, nativeNodeReviews: nativeNodes },
   }
 }
 
@@ -556,24 +540,21 @@ async function requestSave() {
     return
   }
 
-  let lines = reviewLines(saved.value, sentDraft(saved.value, draft.value, legacy.value), context.value)
+  let lines = reviewLines(saved.value, draft.value, context.value)
   let effects: DelegationEffect[] = []
   let current: Preview | null = null
   if (!isNew.value && changes(saved.value, draft.value).length) {
     busy.value = true
     try {
       // The server says which queued or running work and which delegations the change affects.
-      const preview = await api<Preview>(`/agents/${id.value}/preview`, { method: 'POST', body: JSON.stringify(body()) })
-      lines = reviewLines(saved.value, sentDraft(saved.value, draft.value, legacy.value), context.value, preview.runs)
+      const preview = await previewAgent(api, body())
+      lines = reviewLines(saved.value, draft.value, context.value, preview.runs)
       effects = preview.delegations.filter(item => item.suspended)
       current = preview
     }
     catch (e) {
-      // An older installation has no preview: the review is computed here only.
-      if (!(e instanceof ApiError && (e.status === 404 || e.status === 405))) {
-        failed(e)
-        return
-      }
+      failed(e)
+      return
     }
     finally {
       busy.value = false
@@ -607,6 +588,13 @@ function failed(e: unknown) {
     fieldErrors.value = { ...fieldErrors.value, [target]: message }
 }
 
+async function agentRequest<T>(_path: string, options: RequestInit): Promise<T> {
+  const payload = JSON.parse(options.body as string)
+  return (options.method === 'POST'
+    ? await createAgent(api, payload as CreateAgentInput)
+    : await replaceAgent(api, payload as ReplaceAgentInput)) as T
+}
+
 async function commit(reapprove: string[]) {
   const nativeNodes = review.value?.nativeNodes ?? []
   busy.value = true
@@ -619,15 +607,14 @@ async function commit(reapprove: string[]) {
     if (isNew.value) {
       result = await creation.save<Agent>('/agents', {
         body: () => body(reapprove, nativeNodes),
+        request: agentRequest,
+        createBody: creationId => ({ creationId, settings: body(reapprove, nativeNodes).settings, review: body(reapprove, nativeNodes).review }),
         // A replayed creation updates the agent it created, at that agent's revision.
         onCreated: (created) => { agent.value = created },
       })
     }
     else if (profileChanged) {
-      result = await api<Agent>(`/agents/${id.value}`, {
-        method: 'PUT',
-        body: JSON.stringify(body(reapprove, nativeNodes)),
-      })
+      result = await replaceAgent(api, body(reapprove, nativeNodes))
     }
     else {
       result = agent.value!
@@ -659,8 +646,8 @@ async function commit(reapprove: string[]) {
   // workspace is reloaded too: retrying then updates the same agent instead of creating another one.
   agent.value = result
   if (profileChanged) {
-    saved.value = loadedDraft(result)
-    draft.value = loadedDraft(result)
+    saved.value = draftOf(result)
+    draft.value = draftOf(result)
     fieldErrors.value = {}
     attempted.value = false
   }
@@ -700,7 +687,7 @@ async function reloadAgent() {
     // Nodes, plugins and MCP connections may have changed too, as the agent did.
     // The workspace refresh brings the agents too; they are only fetched alone if it fails.
     const [refreshed, nodeList, plugins] = await Promise.all([refresh().then(() => true, () => false), loadNodes(), loadCatalog()])
-    const agents = refreshed ? state.agents : await api<Agent[]>('/agents')
+    const agents = refreshed ? state.agents : await listAgents(api, {}).then(output => output.agents)
     if (nodeList)
       nodes.value = nodeList
     if (plugins)
@@ -715,8 +702,6 @@ async function reloadAgent() {
     const mine = draft.value
     agent.value = found
     saved.value = draftOf(found)
-    legacy.value = olderInstallation(agents)
-    saved.value = loadedDraft(found)
     const rebased = rebaseDraft(base, mine, saved.value)
     // Tool choices of deleted MCP connections are dropped.
     if (state.workspaceLoaded && state.installationRole === 'owner')
@@ -745,7 +730,7 @@ function discard() {
 async function remove() {
   busy.value = true
   try {
-    await api(`/agents/${id.value}`, { method: 'DELETE' })
+    await deleteAgent(api, { agentId: id.value })
     await refresh()
     leaving.value = true
     notify('Agent removed')
@@ -981,11 +966,25 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               v-model:provider="draft.provider"
               v-model:model="draft.model"
               v-model:reasoning="draft.reasoning"
+              v-model:speed="draft.speed"
               variant="field"
               :disabled="busy"
+              :inherit="!!agent"
+              :default-model="agent?.codingAgentDefaults?.[draft.provider]?.model || ''"
+              :default-reasoning="agent?.codingAgentDefaults?.[draft.provider]?.reasoning || ''"
+              :default-speed="agent?.codingAgentDefaults?.[draft.provider]?.speed || ''"
             />
             <p class="flex items-start gap-2 rounded-xl bg-soft px-4 py-3 text-xs leading-relaxed">
               <Icon :name="Info" :size="15" class="mt-px shrink-0" />Uses the shared {{ provider.label }} account pool from Connections. Choosing a model grants no permission.
+            </p>
+            <RouterLink v-if="!isNew && !dirty" :to="`/agents/${id}/configuration/${draft.provider}`" class="flex min-h-12 items-center justify-between gap-3 rounded-xl border border-line bg-surface px-4 py-3 text-sm font-semibold hover:bg-soft">
+              Native configuration <Icon :name="ChevronRight" :size="16" />
+            </RouterLink>
+            <UiButton v-else-if="!isNew" disabled>
+              Save the agent to open native configuration
+            </UiButton>
+            <p v-if="!isNew" class="text-xs text-muted">
+              Context, native features and advanced options. Installation defaults apply until personalized.
             </p>
           </template>
 
@@ -1109,7 +1108,6 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               :packages="catalog.packages"
               :connections="catalog.connections"
               :suspended="suspended"
-              :read-only-grants="legacy ? updateForGrants : ''"
             />
             <p v-if="!catalogError && !grantablePackages(catalog.packages).length && !catalog.packages.length" class="text-xs text-muted">
               Plugins add secrets and tools that you grant per agent.
@@ -1145,9 +1143,9 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               v-else
               v-model:access="draft.access"
               v-model:exclusive-nodes="draft.exclusiveNodes"
+              v-model:node-priorities="draft.nodePriorities"
               :nodes="nodes"
               :agent-id="agent?.id"
-              :read-only-grants="legacy ? updateForGrants : ''"
             />
           </template>
 
@@ -1172,7 +1170,7 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               </label>
             </fieldset>
             <p class="text-xs text-muted">
-              {{ isolationNote }}
+              {{ isolationNote(backend) }}
             </p>
           </template>
 

@@ -107,7 +107,9 @@ internal fun ActivityCard(
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
                             )
-                        if (p.kind != ActivityKind.NOTICE || p.failed)
+                        // A notice shows its outcome when it failed, or recovered like an engine
+                        // retry.
+                        if (p.kind != ActivityKind.NOTICE || p.failed || p.state == RECOVERED_STATE)
                             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Outcome(p.state, p.failed)
                                 p.exitCode?.let {

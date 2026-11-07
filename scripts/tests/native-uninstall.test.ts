@@ -23,7 +23,11 @@ function uninstall(scenario: string, policies: Record<string, string> = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'cairn-uninstall-policies-'))
   for (const [name, contents] of Object.entries(policies))
     writeFileSync(join(directory, name), contents)
+  const nodeUnit = join(directory, 'firecracker-node-root')
+  if (scenario === 'vm-installed')
+    writeFileSync(nodeUnit, 'fixture')
   const isolatedScript = script.replaceAll('/etc/sudoers.d', '"$CAIRN_TEST_POLICY_DIR"')
+    .replaceAll('/var/lib/cairn-node', '"$CAIRN_TEST_NODE_UNIT"')
   try {
     return spawnSync('sh', ['-c', `
 systemctl() { echo "SYSTEMCTL $*"; [ "$scenario" != reload-failure ]; }
@@ -52,7 +56,15 @@ rm() {
 userdel() { echo "USERDEL $*"; [ "$scenario" != userdel-failure ]; }
 id() { [ "$scenario" = userdel-failure ]; }
 ${isolatedScript}
-`], { env: { PATH: '/usr/bin:/bin', scenario, CAIRN_TEST_POLICY_DIR: directory }, encoding: 'utf8' })
+`], {
+      env: {
+        PATH: '/usr/bin:/bin',
+        scenario,
+        CAIRN_TEST_POLICY_DIR: directory,
+        CAIRN_TEST_NODE_UNIT: nodeUnit,
+      },
+      encoding: 'utf8',
+    })
   }
   finally {
     rmSync(directory, { recursive: true, force: true })
@@ -80,7 +92,15 @@ it.each(['rm-failure', 'userdel-failure'])('keeps the unit when cleanup fails: %
 it('finishes an unmounted uninstall and reports a failed daemon reload', () => {
   expect(uninstall('success').status).toBe(0)
   expect(uninstall('success').stdout).toContain('REMOVE -f /etc/systemd/system/cairn-native-node.service')
+  // Without a Firecracker node left on the machine, the shared gateway goes too.
+  expect(uninstall('success').stdout).toContain('REMOVE -rf /etc/systemd/system/cairn-node-gateway.service /opt/cairn-gateway /var/lib/cairn-gateway')
   expect(uninstall('reload-failure').status).not.toBe(0)
+})
+
+it('keeps the shared gateway while a VM runtime is still installed', () => {
+  const result = uninstall('vm-installed')
+  expect(result.status).toBe(0)
+  expect(result.stdout).not.toContain('REMOVE -rf /etc/systemd/system/cairn-node-gateway.service')
 })
 
 it('removes owned sudo grants across UID changes before deleting their account', () => {

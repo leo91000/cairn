@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "changed": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "credentialFlow": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "instance": {
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "revision": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "secrets": {
+      "additionalProperties": true,
+      "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+      "type": "object",
+      "x-cairn-json-object": true
+    },
+    "settings": {
+      "additionalProperties": true,
+      "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+      "type": "object",
+      "x-cairn-json-object": true
+    },
+    "sharedFrom": {
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "token": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "settings",
+    "secrets"
+  ],
+  "title": "PluginFormInput",
+  "type": "object"
+}

@@ -48,6 +48,10 @@ abstract class ResourceSaveCases {
         saveAfterFailure("projects", true)
 
     @Test
+    fun lateProjectCatalogKeepsTheUncertainCreationSourceDisabled() =
+        saveAfterFailure("projects", true, delayCatalog = true)
+
+    @Test
     fun rejectedReplayStillAppliesTheLatestMissionEdits() =
         saveAfterFailure("tasks", true, rejectReplay = true)
 
@@ -67,13 +71,19 @@ abstract class ResourceSaveCases {
     fun restoredTaskEditorReplaysItsUncertainCreation() =
         saveAfterFailure("tasks", true, restore = true)
 
+    @Test
+    fun projectBaseBranchCanBeReplaced() = saveAfterFailure("projects", false, editBranch = true)
+
     private fun saveAfterFailure(
         kind: String,
         loseResponse: Boolean,
         rejectReplay: Boolean = false,
         restore: Boolean = false,
         malformedResponse: Boolean = false,
+        editBranch: Boolean = false,
+        delayCatalog: Boolean = false,
     ) {
+        val savedId = "00000000-0000-4000-8000-000000000005"
         val uncertainResponse = loseResponse || malformedResponse
         val resourceKind = if (kind == "import") "projects" else kind
         val mutations = CopyOnWriteArrayList<Pair<String, JsonObject>>()
@@ -89,6 +99,8 @@ abstract class ResourceSaveCases {
             recoveryTimeline += "$elapsedMillis ms: $message"
         }
 
+        val catalogRequested = CountDownLatch(1)
+        val allowCatalog = CountDownLatch(if (delayCatalog) 1 else 0)
         val allowRecoveryProbe = CountDownLatch(1)
         val recoveryRefreshStarted = CountDownLatch(1)
         val allowRecoveryRefresh = CountDownLatch(1)
@@ -101,7 +113,7 @@ abstract class ResourceSaveCases {
                         if (
                             request.method in listOf("POST", "PUT") &&
                                 (path == resourcePath ||
-                                    path == "$resourcePath/saved" ||
+                                    path == "$resourcePath/$savedId" ||
                                     path == "$resourcePath/import")
                         ) {
                             val value =
@@ -124,10 +136,59 @@ abstract class ResourceSaveCases {
                                 if (kind == "import")
                                     mapOf("path" to JsonPrimitive("/fixtures/imported"))
                                 else emptyMap()
-                            return json(
-                                JsonObject(stored + projectPath + ("id" to JsonPrimitive("saved")))
-                                    .toString()
-                            )
+                            val settings =
+                                if (
+                                    kind == "projects" ||
+                                        kind == "tasks" ||
+                                        request.method == "PUT" && resourceKind == "projects"
+                                )
+                                    stored["settings"]!!.jsonObject
+                                else stored
+                            val output =
+                                if (resourceKind == "projects")
+                                    JsonObject(
+                                        settings.filterKeys {
+                                            it in
+                                                setOf(
+                                                    "name",
+                                                    "path",
+                                                    "description",
+                                                    "baseBranch",
+                                                    "sourceMode",
+                                                )
+                                        } +
+                                            projectPath +
+                                            mapOf(
+                                                "id" to JsonPrimitive(savedId),
+                                                "origin" to JsonPrimitive(""),
+                                                "revision" to
+                                                    JsonPrimitive("revision-${mutations.size}"),
+                                                "createdAt" to JsonPrimitive(0L),
+                                                "sourceMode" to
+                                                    (settings["sourceMode"]
+                                                        ?: JsonPrimitive("remote")),
+                                            )
+                                    )
+                                else
+                                    JsonObject(
+                                        wireJson
+                                            .encodeToJsonElement(
+                                                Task(
+                                                    id = savedId,
+                                                    name = "Fixture",
+                                                    agentId =
+                                                        "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                                                )
+                                            )
+                                            .jsonObject +
+                                            settings +
+                                            mapOf(
+                                                "id" to JsonPrimitive(savedId),
+                                                "revision" to
+                                                    JsonPrimitive("revision-${mutations.size}"),
+                                            )
+                                    )
+                            return json(output.toString())
                         }
                         if (loseResponse && created.get() && request.method == "GET") {
                             if (path.endsWith("/overview")) {
@@ -146,19 +207,50 @@ abstract class ResourceSaveCases {
                             return MockResponse()
                                 .setResponseCode(409)
                                 .setBody("""{"error":"Lecture refusée"}""")
+                        if (path.endsWith("/api/plugins") && delayCatalog) {
+                            traceRecovery("Project catalogue waiting for uncertain save")
+                            catalogRequested.countDown()
+                            check(allowCatalog.await(20, TimeUnit.SECONDS))
+                            traceRecovery("Project catalogue released")
+                        }
                         return json(
                             when {
                                 path == "/api/account/session" -> beaconAccountFixture("fixture")
                                 path == "/api/installations" -> beaconInstallationsFixture()
                                 // A plugin with a project source and one enabled account.
                                 path.endsWith("/api/plugins") ->
-                                    """{"packages":[{"id":"github","status":"active","active":"1.0.0","manifest":{"id":"github","name":"GitHub","projectSources":[{"name":"repositories","title":"GitHub repository"}]}}],"connections":[{"id":"acct","pluginId":"github","name":"octo","enabled":true}]}"""
+                                    """{"packages":[{"id":"github","status":"active","active":"1.0.0","manifest":{"id":"github","name":"GitHub","projectSources":[{"name":"repositories","title":"GitHub repository"}],"version":"1.0.0","apiVersion":2,"capabilities":[]},"builtin":true,"versions":[],"setup":null}],"connections":[{"id":"acct","pluginId":"github","name":"octo","enabled":true,"settings":{},"status":{"state":"disconnected","message":null},"usage":{"hour":0}}],"capabilities":[]}"""
                                 path.endsWith("/plugins/github/projects") ->
                                     """{"items":[{"id":"owner/repository","name":"owner/repository","description":"","defaultBranch":"main","badges":["Private"],"imported":false}],"nextPage":null}"""
-                                path.endsWith("/overview") || path.endsWith("/models") -> "{}"
-                                path.endsWith("/agents") -> """[{"id":"agent","name":"Agent"}]"""
-                                else -> "[]"
-                            }
+                                path.endsWith("/overview") -> installationOverviewFixture()
+                                path.endsWith("/models") -> "{}"
+                                path.endsWith("/agents") ->
+                                    """{"agents":[{"access":{"backend":"firecracker","delegation":false,"installation":false,"mcpTools":{},"mcps":null,"nodes":["00000000-0000-4000-8000-000000000002"],"projects":null,"sandbox":"yolo","skills":null},"createdAt":0,"description":"","exclusiveNodes":[],"id":"d3153f9f-724b-59c3-9614-ab78f231c4d3","instructions":"","model":"","name":"Agent","plugins":[],"provider":"codex","reasoning":"high","revision":"fixture-revision","timeoutMinutes":0}]}"""
+                                else ->
+                                    if (
+                                        request.requestUrl
+                                            ?.encodedPath
+                                            ?.endsWith("/api/projects") == true
+                                    )
+                                        """{"projects":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/agents") ==
+                                            true
+                                    )
+                                        """{"agents":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/tasks") ==
+                                            true
+                                    )
+                                        """{"tasks":[]}"""
+                                    else if (
+                                        request.requestUrl?.encodedPath?.endsWith("/api/mcps") ==
+                                            true
+                                    )
+                                        """{"mcps":[]}"""
+                                    else "[]"
+                            },
+                            delayBody = path.endsWith("/api/plugins") && delayCatalog,
                         )
                     }
                 }
@@ -190,7 +282,14 @@ abstract class ResourceSaveCases {
                                 TaskEditor(
                                     vm,
                                     state,
-                                    Task(name = "Original", prompt = "Brief", agentId = "agent"),
+                                    null,
+                                    draft =
+                                        build.cairn.contracts.MissionSettings(
+                                            name = "Original",
+                                            prompt = "Brief",
+                                            agentId = "d3153f9f-724b-59c3-9614-ab78f231c4d3",
+                                            skills = null,
+                                        ),
                                     close = { closed.set(true) },
                                 )
                             "projects",
@@ -234,6 +333,22 @@ abstract class ResourceSaveCases {
                     }
                     compose.onNodeWithText("owner/repository").performScrollTo().performClick()
                 }
+                if (editBranch) {
+                    compose
+                        .onNodeWithText("Branche de base")
+                        .performScrollTo()
+                        .performTextReplacement("")
+                    compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                    compose
+                        .onNodeWithText("Branche de base")
+                        .performTextReplacement("invalid branch")
+                    compose.onNodeWithText("Enregistrer").performClick()
+                    compose
+                        .onNodeWithText("Saisissez un nom de branche de base valide.")
+                        .assertExists()
+                    assertTrue(mutations.isEmpty())
+                    compose.onNodeWithText("Branche de base").performTextReplacement("develop")
+                }
                 compose
                     .onNode(hasScrollAction() and hasAnyDescendant(hasText("Nom")))
                     .performTouchInput { swipeUp() }
@@ -251,8 +366,22 @@ abstract class ResourceSaveCases {
                 if (uncertainResponse)
                     compose.onNodeWithText("Sauvegarde", substring = true).assertIsDisplayed()
                 captureFailure("$kind-${if (uncertainResponse) "uncertain" else "reload"}")
-                if (uncertainResponse && kind == "projects")
+                if (uncertainResponse && kind == "projects") {
+                    if (delayCatalog) {
+                        waitFor { catalogRequested.count == 0L }
+                        compose.onNodeWithText("Dossier sur le serveur").assertDoesNotExist()
+                        allowCatalog.countDown()
+                    }
+                    // The optional source catalogue loads independently of the save. A failed
+                    // creation can return before the source selector has entered composition.
+                    waitFor {
+                        compose
+                            .onAllNodesWithText("Dossier sur le serveur")
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                    }
                     compose.onNodeWithText("Dossier sur le serveur").assertIsNotEnabled()
+                }
                 if (loseResponse) {
                     // A lost response also starts background recovery. Hold its refresh so this
                     // test exercises the disabled Save, then retry only after recovery completes.
@@ -313,7 +442,34 @@ abstract class ResourceSaveCases {
                         else -> listOf("POST", "PUT")
                     }
                 assertEquals(expected, mutations.map { it.first })
-                assertEquals("Modifié", mutations.last().second["name"]!!.jsonPrimitive.content)
+                assertEquals(
+                    "Modifié",
+                    (if (resourceKind == "projects" || resourceKind == "tasks")
+                            mutations.last().second["settings"]!!.jsonObject
+                        else mutations.last().second)["name"]!!
+                        .jsonPrimitive
+                        .content,
+                )
+                if (editBranch) {
+                    assertEquals(
+                        "develop",
+                        mutations
+                            .first()
+                            .second["settings"]!!
+                            .jsonObject["baseBranch"]!!
+                            .jsonPrimitive
+                            .content,
+                    )
+                    assertEquals(
+                        "develop",
+                        mutations
+                            .last()
+                            .second["settings"]!!
+                            .jsonObject["baseBranch"]!!
+                            .jsonPrimitive
+                            .content,
+                    )
+                }
                 if (kind == "import") {
                     val import = mutations.first().second
                     assertEquals("github", import["pluginId"]!!.jsonPrimitive.content)
@@ -323,18 +479,31 @@ abstract class ResourceSaveCases {
                     assertEquals("main", import["baseBranch"]!!.jsonPrimitive.content)
                     assertEquals(
                         "/fixtures/imported",
-                        mutations.last().second["path"]!!.jsonPrimitive.content,
+                        mutations
+                            .last()
+                            .second["settings"]!!
+                            .jsonObject["path"]!!
+                            .jsonPrimitive
+                            .content,
                     )
                     assertEquals(
                         "remote",
-                        mutations.last().second["sourceMode"]!!.jsonPrimitive.content,
+                        mutations
+                            .last()
+                            .second["settings"]!!
+                            .jsonObject["sourceMode"]!!
+                            .jsonPrimitive
+                            .content,
                     )
                 }
-                assertTrue(
-                    mutations.first().second["creationId"]!!.jsonPrimitive.content.isNotBlank()
-                )
+                if (kind == "import") assertFalse("creationId" in mutations.first().second)
+                else
+                    assertTrue(
+                        mutations.first().second["creationId"]!!.jsonPrimitive.content.isNotBlank()
+                    )
                 if (loseResponse) assertEquals(mutations[0].second, mutations[1].second)
             } finally {
+                allowCatalog.countDown()
                 allowRecoveryProbe.countDown()
                 allowRecoveryRefresh.countDown()
                 models.clear()
@@ -343,6 +512,9 @@ abstract class ResourceSaveCases {
         }
     }
 
-    private fun json(value: String) =
-        MockResponse().setHeader("Content-Type", "application/json").setBody(value)
+    private fun json(value: String, delayBody: Boolean = false) =
+        MockResponse().setHeader("Content-Type", "application/json").setBody(value).apply {
+            // Keep delivery asynchronous after the latch release to expose a missing UI wait.
+            if (delayBody) setBodyDelay(1, TimeUnit.SECONDS)
+        }
 }

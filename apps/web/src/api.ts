@@ -6,7 +6,21 @@ import type {
 } from '../../../packages/contracts/contracts'
 import type { McpView } from '../../../packages/contracts/mcp'
 import { reactive, watch } from 'vue'
+import { getInstallationOverview } from '../../../packages/contracts/generated/getInstallationOverview'
+import { listAgents } from '../../../packages/contracts/generated/listAgents'
+import { listMcps } from '../../../packages/contracts/generated/listMcps'
+import { listMissions } from '../../../packages/contracts/generated/listMissions'
+import { listProjects } from '../../../packages/contracts/generated/listProjects'
+import { listSkills } from '../../../packages/contracts/generated/listSkills'
 import { beaconOrigin, installationHost } from './beacon-location'
+import { clientPerformance } from './client-performance'
+import { ProtocolMismatch } from './direct-channel'
+import {
+  departDocument,
+  documentLifetime,
+  documentSignal,
+  resumeDocument,
+} from './document-lifetime'
 import { clearHistoryCache } from './history-cache'
 import { InstallationTransport } from './installation-transport'
 import { observeTransport } from './transport-observation'
@@ -17,6 +31,7 @@ export const installationRoute = beaconEntry ? installationHost || /^\/installat
 
 export const state = reactive({
   transportRoute: 'relay' as 'direct' | 'relay',
+  protocolError: '',
   connectionLost: false,
   ready: false,
   authenticated: false,
@@ -38,14 +53,17 @@ export const state = reactive({
   toast: '',
   error: '',
 })
+watch(connectionScope, () => {
+  state.protocolError = ''
+}, { flush: 'sync' })
 watch(() => state.signingOut || (state.ready && !state.authenticated), (clear) => {
   if (clear)
     void clearHistoryCache()
 }, { flush: 'sync' })
 export const installationTransport = new InstallationTransport(state)
-watch(() => [state.ready, state.authenticated, state.installationId, state.signingOut, state.installationOnline], () => {
+watch(() => [state.ready, state.authenticated, state.installationId, state.signingOut, state.redirecting, state.installationOnline, documentLifetime.value.signal.aborted], () => {
   installationTransport.availabilityChanged(state.installationOnline)
-  if (beaconEntry && state.ready && state.authenticated && !state.signingOut)
+  if (beaconEntry && state.ready && state.authenticated && !state.signingOut && !state.redirecting && !documentLifetime.value.signal.aborted)
     installationTransport.start()
   else if (typeof window !== 'undefined')
     installationTransport.stop()
@@ -89,9 +107,9 @@ const recoveries = new Map<string, {
   reconcile: boolean
 }>()
 
-watch(() => [connectionScope(), state.authenticated, state.signingOut], () => {
+watch(() => [connectionScope(), state.authenticated, state.signingOut, documentLifetime.value.signal.aborted], () => {
   for (const [probe, recovery] of recoveries) {
-    if (recovery.scope !== connectionScope() || !state.authenticated || state.signingOut) {
+    if (documentLifetime.value.signal.aborted || recovery.scope !== connectionScope() || !state.authenticated || state.signingOut) {
       recoveries.delete(probe)
       recovery.controller.abort()
     }
@@ -140,7 +158,14 @@ function awaitRecovery(pending: Promise<void>, signal?: AbortSignal | null) {
   })
 }
 
-function recoverConnection(scope: string, reconcile: boolean, probe: string) {
+/** Probes a lost connection: the Beacon session, or the installation's generated overview. */
+function connectionProbe(account: boolean): [string, (signal: AbortSignal) => Promise<unknown>] {
+  if (account)
+    return ['/api/account/session', signal => requestOnce('/api/account/session', { signal })]
+  return [apiUrl('/overview'), signal => getInstallationOverview((path, options) => requestOnce(apiUrl(path), { ...options, signal }), {})]
+}
+
+function recoverConnection(scope: string, reconcile: boolean, [probe, request]: ReturnType<typeof connectionProbe>) {
   const recovery = recoveries.get(probe)
   if (recovery?.scope === scope) {
     recovery.reconcile ||= reconcile
@@ -148,13 +173,14 @@ function recoverConnection(scope: string, reconcile: boolean, probe: string) {
   }
 
   const controller = new AbortController()
+  const signal = documentSignal(controller.signal)
   state.connectionLost = true
   const promise = (async () => {
     let delay = 1000
     while (true) {
-      await recoveryDelay(delay, controller.signal)
+      await recoveryDelay(delay, signal)
       try {
-        await requestOnce(probe, { signal: controller.signal })
+        await request(signal)
         return
       }
       catch (error) {
@@ -179,10 +205,10 @@ function recoverConnection(scope: string, reconcile: boolean, probe: string) {
   recoveries.set(probe, attempt)
   // Mutations are never replayed; reload lists to reconcile an uncertain result.
   void promise.then(async () => {
-    if (attempt.reconcile && connectionScope() === scope && state.authenticated && !state.signingOut)
+    if (!signal.aborted && attempt.reconcile && connectionScope() === scope && state.authenticated && !state.signingOut)
       await refresh()
   }).catch((error) => {
-    if (connectionScope() === scope && state.authenticated && !state.signingOut)
+    if (!signal.aborted && connectionScope() === scope && state.authenticated && !state.signingOut)
       state.error = (error as Error).message
   })
   return promise
@@ -190,9 +216,11 @@ function recoverConnection(scope: string, reconcile: boolean, probe: string) {
 
 export function redirect(url: string) {
   const resume = () => {
+    resumeDocument()
     state.redirecting = false
   }
 
+  departDocument()
   state.redirecting = true
   // Restore polling if Back returns this document from the browser's page cache.
   window.addEventListener('pageshow', resume, { once: true })
@@ -223,11 +251,13 @@ function transportPath(url: string) {
 }
 
 async function apiResponse(url: string, options: RequestInit) {
-  const requestOptions = { ...options, headers: apiHeaders(options) }
+  const requestOptions = { ...options, signal: documentSignal(options.signal), headers: apiHeaders(options) }
   const path = transportPath(url)
-  return path
+  const response = path
     ? await installationTransport.request(path, url, requestOptions)
     : await fetch(url, requestOptions)
+  requestOptions.signal.throwIfAborted()
+  return response
 }
 
 function failure(status: number, data: any) {
@@ -239,22 +269,27 @@ function failure(status: number, data: any) {
 async function requestOnce<T = any>(
   url: string,
   options: RequestInit = {},
+  measurement = clientPerformance.capture(),
 ): Promise<T> {
   let response: Response
   let text: string
   try {
     response = await apiResponse(url, options)
     text = await response.text()
+    options.signal?.throwIfAborted()
   }
   catch (error) {
     if (options.signal?.aborted)
       throw error
+    if (error instanceof ProtocolMismatch)
+      throw new ApiError(error.message, 426)
     throw new ConnectionError(error)
   }
 
   let data: any
   try {
-    data = JSON.parse(text)
+    clientPerformance.probe('API')
+    data = clientPerformance.measure('JSON_DECODE', () => JSON.parse(text), measurement)
   }
   catch (error) {
     if (response.status >= 502 && response.status <= 504)
@@ -276,10 +311,27 @@ async function requestOnce<T = any>(
 }
 
 async function requestApi<T = any>(url: string, options: RequestInit = {}, account = false): Promise<T> {
+  options = { ...options, signal: documentSignal(options.signal) }
+  const measurement = clientPerformance.capture()
+  const method = (options.method || 'GET').toUpperCase()
+  const finish = clientPerformance.begin(method === 'GET' || method === 'HEAD' ? 'API_READ' : 'API_WRITE', measurement)
+  try {
+    const result = await recoverableRequest<T>(url, options, account, measurement)
+    options.signal?.throwIfAborted()
+    finish?.('ok')
+    return result
+  }
+  catch (error) {
+    finish?.(options.signal?.aborted ? 'cancelled' : 'error')
+    throw error
+  }
+}
+
+async function recoverableRequest<T = any>(url: string, options: RequestInit, account: boolean, measurement: ReturnType<typeof clientPerformance.capture>): Promise<T> {
   const scope = connectionScope()
   while (true) {
     try {
-      return await requestOnce<T>(url, options)
+      return await requestOnce<T>(url, options, measurement)
     }
     catch (error) {
       const active = !!state.installationId && connectionScope() === scope && state.authenticated && !state.signingOut
@@ -290,8 +342,7 @@ async function requestApi<T = any>(url: string, options: RequestInit = {}, accou
 
       const method = (options.method || 'GET').toUpperCase()
       const mutation = method !== 'GET' && method !== 'HEAD'
-      const probe = account ? '/api/account/session' : apiUrl('/overview')
-      const pending = recoverConnection(scope, mutation && !account, probe)
+      const pending = recoverConnection(scope, mutation && !account, connectionProbe(account))
       if (mutation) {
         notify('Connection unavailable. Please try again.')
         throw new ApiError('', 0)
@@ -308,10 +359,17 @@ async function requestApi<T = any>(url: string, options: RequestInit = {}, accou
 
 /** A binary installation resource, through the same transport and credentials as `api()`. */
 export async function apiBlob(url: string, options: RequestInit = {}): Promise<Blob> {
-  const response = await apiResponse(apiUrl(url), options)
-  if (!response.ok)
-    throw failure(response.status, await response.json().catch(() => null))
-  return response.blob()
+  const signal = documentSignal(options.signal)
+  const response = await apiResponse(apiUrl(url), { ...options, signal })
+  if (!response.ok) {
+    const data = await response.json().catch(() => null)
+    signal.throwIfAborted()
+    throw failure(response.status, data)
+  }
+
+  const blob = await response.blob()
+  signal.throwIfAborted()
+  return blob
 }
 
 /**
@@ -319,6 +377,7 @@ export async function apiBlob(url: string, options: RequestInit = {}): Promise<B
  * (it only carries string bodies), so `api()` would use `fetch` with these same headers.
  */
 export function apiUpload<T = any>(url: string, body: Blob, options: { method?: string, headers?: Record<string, string>, onProgress?: (fraction: number) => void } = {}): Promise<T> {
+  const signal = documentSignal()
   const target = apiUrl(url)
   const method = options.method ?? 'PUT'
   const headers = apiHeaders({ body, headers: options.headers })
@@ -334,9 +393,17 @@ export function apiUpload<T = any>(url: string, body: Blob, options: { method?: 
         options.onProgress?.(event.loaded / event.total)
     }
 
+    const abort = () => request.abort()
+    signal.addEventListener('abort', abort, { once: true })
+    request.onloadend = () => signal.removeEventListener('abort', abort)
     request.onerror = () => reject(new TypeError('Upload failed. Check your connection and try again.'))
     request.onabort = () => reject(new DOMException('Upload cancelled.', 'AbortError'))
     request.onload = () => {
+      if (signal.aborted) {
+        reject(signal.reason)
+        return
+      }
+
       let data: any = null
       try {
         data = JSON.parse(request.responseText)
@@ -396,16 +463,32 @@ export function ownerPage(path: string) {
   return ['/plugins', '/mcps', '/connections', '/nodes', '/authorize'].includes(path) || path.startsWith('/plugins/') || path.startsWith('/agents/')
 }
 
+export async function refreshSkills() {
+  const scope = connectionScope()
+  const skills = await listSkills(api, {})
+  if (connectionScope() === scope && state.authenticated && !state.signingOut)
+    state.skills = skills
+}
+
+let mcpRefresh = 0
+export async function refreshMcps() {
+  const request = ++mcpRefresh
+  const scope = connectionScope()
+  const mcps = state.installationRole === 'owner' ? (await listMcps(api, {})).mcps : []
+  if (request === mcpRefresh && connectionScope() === scope && state.authenticated && !state.signingOut)
+    state.mcps = mcps
+}
+
 export async function refresh() {
   const scope = connectionScope()
-  let lists: [Agent[], Project[], Task[], Skill[], McpView[]]
+  let lists: [Agent[], Project[], Task[], Skill[], void]
   try {
     lists = await Promise.all([
-      api<Agent[]>('/agents'),
-      api<Project[]>('/projects'),
-      api<Task[]>('/tasks'),
-      api<Skill[]>('/skills'),
-      state.installationRole === 'owner' ? api<McpView[]>('/mcps') : Promise.resolve([]),
+      listAgents(api, {}).then(output => output.agents),
+      listProjects(api, {}).then(output => output.projects),
+      listMissions(api, {}).then(output => output.tasks),
+      listSkills(api, {}),
+      refreshMcps(),
     ])
   }
   catch (error) {
@@ -416,13 +499,12 @@ export async function refresh() {
 
   if (connectionScope() !== scope || !state.authenticated || state.signingOut)
     return
-  const [agents, projects, tasks, skills, mcps] = lists
+  const [agents, projects, tasks, skills] = lists
   Object.assign(state, {
     agents,
     projects,
     tasks,
     skills,
-    mcps,
     workspaceLoaded: true,
   })
 }

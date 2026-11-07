@@ -1,97 +1,88 @@
-# Automatic conversation deletion
+# Automatic working environment expiration
 
-The installation owner can set **Days of inactivity** under web **Settings →
-Installation → Automatic conversation deletion**, or **Jours d’inactivité** in
-Android **Paramètres → Suppression automatique des conversations**. The setting
-applies to every conversation in the installation and is saved server-side.
-The default is **7 days**. Choose a whole number from 0 to 36500; **0 disables
-future automatic deletion**. Both apps ask for confirmation before saving and
-explain that existing conversations are included.
+The installation owner sets **Days of inactivity** under web **Settings →
+Installation → Automatic environment cleanup**, or **Jours d’inactivité** in
+Android **Paramètres → Nettoyage automatique des environnements**. The setting
+applies to every conversation, including existing conversations, and is saved
+server-side. The default remains **7 days**; whole numbers from 0 to 36500 are
+accepted. **0 disables future automatic expiration**. Both apps confirm the
+irreversible loss of working files before saving.
 
-Inactivity starts at the last conversation activity (`lastActivityAt`, falling
-back to `updatedAt`, then `createdAt` for older records), or the last run's
-`finishedAt`, whichever is later. Merely reading a conversation does not extend
-its life. A queued/running agent, pending message, open question (including a
-nonblocking question), scheduled wakeup, run preparation or worker finalization
-protects the conversation. Pausing a conversation does not exempt it once its
-pending work is resolved.
+Expiration removes the conversation's working environment: local run files,
+managed worktrees (including unpushed changes), tools stored in the environment, native provider
+session, node disks and published disk references. It retains the conversation,
+messages, activity, uploaded attachments, all published artifact versions and
+public artifact links. These remain readable without starting an environment.
+Explicit conversation deletion still removes all of them and revokes shared links.
+Previously deleted conversations cannot be recovered by this policy change.
 
-The worker checks every 15 seconds and removes at most one eligible conversation
-per pass. It rechecks the current policy, activity and pending work atomically
-before claiming deletion; a concurrent message or disabling the policy wins if
-it commits first. Existing process, storage, preparation and worker locks prevent
-cleanup from racing run setup or finalization.
+Inactivity starts at `lastActivityAt` or the last run's `finishedAt`, whichever is
+later. Reading does not extend the delay. New empty chats and converted missions
+initialize their activity at creation. Queued/running agents, pending input,
+open questions (including nonblocking questions), scheduled wakeups, recovery,
+node movement, backend migration, coding-agent switches, run preparation and
+worker finalization protect the environment. Pausing alone does not protect it.
 
-Deletion uses the existing permanent deletion path: immediately hide the
-conversation, revoke public artifact links and grants, then remove its history,
-attachments, artifacts, workspaces and published disks. Unavailable nodes/storage
-leave durable cleanup state and retry after one minute. Logical deletion is
-irreversible; physical erasure can finish later. Disabling or increasing the
-delay cannot recover a conversation already claimed for deletion. Existing trash
-keeps its promised recovery deadline.
+The worker checks every 15 seconds and processes at most one eligible conversation
+per pass. It rechecks policy, activity and pending work atomically before claiming
+expiration, under the existing process, storage, preparation and worker locks.
+Once claimed, expiration is irreversible. `environmentState` is `cleaning` until
+physical retirement succeeds, then `expired`. Unavailable nodes/storage leave
+cleanup pending with a visible `environmentError`; retries start after one minute,
+even if future expiration is disabled. New messages are refused during cleanup.
+Manual deletion remains available during cleanup.
 
-`GET /api/settings/conversations` returns `{ "inactivityDays": 7 }` by default.
-`PUT` at the same owner-only endpoint accepts the same shape and records an audit
-entry. The additive `conversation-expiration` KV record deliberately differs
-from the retired archive policy (`conversation-retention`), which stays ignored.
-No database schema, disk encoding or object format changes are required; the
-existing installation data compatibility version is unchanged. Rolling the code
-back stops future expiration but cannot restore deleted conversations.
+After expiration, send a new message (and resume the queue if paused) to recreate
+the environment. The same conversation and run retain their history and artifacts;
+the old checkpoint, session and disk pointers are not reused. The fresh native
+session receives the bounded visible transcript, and uploaded attachments are
+copied back into its input directory. Every subsequent agent turn carries the
+expiration date and warns that older files and unpushed changes were removed.
+The agent must inspect current files and verify external effects before repeating
+actions; environment expiration does not undo commits, messages or deployments.
+Web and Android show the expiration and pending cleanup in the conversation.
+
+If the agent's execution backend changed after expiration, use the existing
+explicit backend migration confirmation in its execution-node details. It checks
+current management, destination and provenance grants, then selects the new backend
+without reading or converting the deleted disk. The next message creates an empty
+environment on that backend. The selected destination is pinned for fresh admission;
+its node preference can still be changed before starting. History, uploads and
+published artifacts remain; other
+reduced resource permissions still prevent continuation under the existing policy.
+The same confirmed action is available through public MCP and `cairn_installation`;
+its preview reports `environmentExpired`. Cleanup must finish before it is allowed.
+
+`GET /api/settings/conversations` returns `{ "inactivityDays": 7 }` by default;
+`PUT` accepts the same shape and records an audit entry. Existing owner-only HTTP
+authorization is unchanged. Public MCP and `cairn_installation` expose
+`get_conversation_retention` (`read`) and `set_conversation_retention` (`manage`),
+with revocable installation grants rechecked at the database boundary.
+`list_chats` / `get_chat` expose `environmentState`, `environmentExpiredAt` and
+`environmentError`; normal chat and artifact tools keep their authorization.
+
+Remote retirement queues exact old manifest keys rather than a run-wide prefix:
+a delayed cleanup must never erase a newly created environment's publications.
+Shared immutable blocks keep their existing ownership-aware collection.
 
 ## Validation
 
-Backend lifecycle tests cover default/configured/disabled retention, invalid
-values, owner permissions, policy persistence, the legacy activity fallback,
-recent run completion, pending work, finalization, concurrency and physical
-cleanup including public links. The settings browser journey covers confirmation,
-cancellation, persistence and disabling; shared Android Compose cases cover the
-same actions, input validation and failed-save retry on JVM and device.
+Backend lifecycle tests cover policy validation and persistence, protected work,
+atomic rechecks, bounded passes, retry after interruption, preserved history,
+uploads/artifacts, explicit deletion and fresh-session continuation. MCP tests
+exercise equivalent retention settings and artifact access through both interfaces.
+Browser and shared Android Compose tests cover settings and expiration notices.
 
-## Local storage measurements
-
-Run the ignored benchmark against the actual `Service` / `Store` interfaces:
+Local storage measurements can be reproduced with the isolated backend launcher:
 
 ```sh
-pnpm test:backend -p cairn-installation --test conversation_lifecycle \
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 \
+  pnpm test:backend -p cairn-installation --test conversation_lifecycle \
   measure_retention_storage -- --ignored --nocapture --test-threads=1
 ```
 
-Reference: retention disabled (`0`), followed by enabled (`7`), using the same
-100 synthetic conversations, all 8 days old, with no runs, attachments or remote
-storage. Each setting measures 50 warm reads, 50 first reads through newly opened
-SQLite connections, 50 writes of the same unchanged chat document, and 20 cleanup
-passes. CPU is process user + system time across those operations, including
-connection creation. Setup and compilation are excluded. Cold connection reads
-exclude opening the store itself; they **do not** mean a cold host page cache.
-
-Local sample, 2026-10-17: Linux 6.12.109 x86-64 KVM VM, 12 Intel Xeon vCPUs,
-30 GiB RAM, local container overlay filesystem, Rust 1.97.1 unoptimized test
-profile. The targeted Android JVM rerun ended about five seconds before the
-sample; no exclusive CPU reservation was held. These are descriptive samples,
-not a latency guarantee. The Android emulator was stopped. No production
-conversation data or network I/O is involved.
-
-| Measurement | Disabled reference | 7-day retention |
-| --- | ---: | ---: |
-| Encoded chat JSON bytes | 269 | 269 |
-| Warm read median | 0.061 ms | 0.062 ms |
-| Cold connection read median | 0.280 ms | 0.279 ms |
-| Write median | 0.170 ms | 0.166 ms |
-| Cleanup pass median | 0.678 ms | 1.163 ms |
-| Process CPU for the workload | 0.074 s | 0.088 s |
-| Conversations remaining after 20 passes | 100 | 80 |
-
-Read/write representation stays unchanged. The enabled workload additionally
-claims and removes one conversation per pass. Node disk deletion and object-store
-publication cleanup still use the existing retry path; this local measurement
-must not be interpreted as production network or remote erasure latency.
-
-The full local Android JVM run completed 424 tests with two initial failures
-(`CairnAccountJourneyTest.installationSelectionAndMemberRole` and
-`ConnectionLostTest.theNoticeClearsItselfAndReloadsTheWorkspaceOnceTheInstallationAnswers`).
-A targeted rerun of those two and both new retention tests passed 4/4. Both new
-retention tests also passed on the API 36 AOSP emulator with KVM. Android lint and
-Spotless passed. The Chromium settings journey passed against real local Beacon
-and installation processes. Backend checks passed 19 lifecycle integration tests,
-388 unit tests, the storage lock test and workspace Clippy; `pnpm check` passed
-536 tests, lint, typechecking and production build.
+The synthetic workload measures 100 inactive chats, 50 warm/fresh-connection reads
+and writes, and 20 cleanup passes. A fresh connection still has a warm OS page
+cache. Record reference/candidate SHAs, encoded bytes, median latency, CPU and host
+conditions in the PR; commit no measurement artifacts. These are local SQLite and
+filesystem measurements, not production node/S3 network latency.

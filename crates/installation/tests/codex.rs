@@ -1,8 +1,10 @@
+use common::account_fixture::AccountFixtures;
+
 mod common;
 
 use cairn_installation::{
     accounts::{
-        KIND, Lease, broker,
+        Lease, broker,
         codex::{Client, normalize},
         usage::{blocked, recovered, remaining},
     },
@@ -244,11 +246,14 @@ async fn acquire(service: &Service, run: &str, model: &str) -> Lease {
 
 /// Creates a Codex account holding synthetic credentials and refreshes its usage.
 async fn refreshed_account(service: &Service, name: &str, tokens: Value) -> String {
-    let account = service
-        .accounts
-        .create(service, Provider::Codex, name)
-        .await
-        .unwrap();
+    let account = serde_json::to_value(
+        service
+            .accounts
+            .create(service, Provider::Codex, name)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let id = account["id"].as_str().unwrap().to_owned();
     service
         .vault
@@ -288,6 +293,33 @@ async fn codex_sessions_keep_managed_mcp_configuration_without_cloning_native_pl
     );
 }
 
+/// Uses no account and starts no inference; inspect the real app-server configuration.
+#[tokio::test]
+#[ignore = "requires CODEX_NATIVE_BIN"]
+async fn native_codex_loads_the_requested_context_window_and_compaction_threshold() {
+    let root = TempDir::new().unwrap();
+    let mut config = config(&root);
+    config.codex_bin = std::env::var("CODEX_NATIVE_BIN")
+        .expect("Set CODEX_NATIVE_BIN to a native Codex executable");
+    let home = codex_home(&config);
+    let args = vec![
+        "-c".into(),
+        "model_context_window=1000000".into(),
+        "-c".into(),
+        "model_auto_compact_token_limit=900000".into(),
+    ];
+    let mut session = Session::codex(&config, &home, &args, Some(root.path()))
+        .await
+        .unwrap();
+    let read = session
+        .request("config/read", json!({ "includeLayers": false }))
+        .await;
+    session.close().await;
+    let result = read.unwrap();
+    assert_eq!(result["config"]["model_context_window"], 1000000);
+    assert_eq!(result["config"]["model_auto_compact_token_limit"], 900000);
+}
+
 #[tokio::test]
 async fn failed_initialization_waits_for_the_codex_process_to_exit() {
     let root = TempDir::new().unwrap();
@@ -306,6 +338,267 @@ async fn failed_initialization_waits_for_the_codex_process_to_exit() {
         }
     }
     assert!(!alive, "failed initialization returned before Codex exited");
+}
+
+fn termination_fields(value: &Value, fields: &[&str]) {
+    let actual = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    assert_eq!(actual, fields.iter().copied().collect::<HashSet<_>>());
+}
+
+/// Exercise the shipped chat -> Session -> initialize RPC path, not an injected
+/// Error or an in-memory Rpc. The receipt is a proposed closed diagnostic contract;
+/// main currently drops it, so these tests must fail before the implementation.
+async fn startup_termination(scenario: &str, attempt: &str) -> Value {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+
+    let root = TempDir::new().unwrap();
+    let config = config(&root);
+    let config_file = root.path().join("config.json");
+    std::fs::write(&config_file, serde_json::to_vec(&config).unwrap()).unwrap();
+    let home = codex_home(&config);
+    std::fs::write(home.join("fixture-termination-case"), scenario).unwrap();
+    let plan = json!({
+        "provider": "codex",
+        "runId": FIRST_RUN,
+        "attemptId": attempt,
+        "sessionId": "PRIVATE_RETAINED_THREAD_MARKER",
+        "cwd": root.path(),
+        "model": "fixture",
+        "reasoning": "medium",
+        "sandbox": "yolo",
+        "output": root.path().join("result.md"),
+        "inputDirectory": root.path(),
+        "writableRoots": [],
+        "execution": {
+            "messageId": "fixture-message",
+            "text": "PRIVATE_STARTUP_PROMPT_MARKER",
+            "attachments": [],
+        },
+    });
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_cairn"))
+        .args(["chat", &common::fixture("codex-startup-termination.mjs")])
+        .env_remove("CAIRN_CODEX_SERVICE")
+        .env("CAIRN_CONFIG", &config_file)
+        .env("CODEX_HOME", &home)
+        .env("RUST_LOG", "warn,cairn_performance=info")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(plan.to_string().as_bytes()).await.unwrap();
+    drop(stdin);
+    let output = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
+        .await
+        .expect("startup fixture must close promptly, before the 120-second RPC deadline")
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+
+    let journal = std::fs::read_to_string(home.join("fixture-termination-events.jsonl"))
+        .expect("the real child must reach initialize before the diagnostic assertion");
+    let lifecycle = journal
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let requests = lifecycle
+        .iter()
+        .filter(|event| event["event"] == "request")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        requests.len(),
+        1,
+        "no thread or turn request may follow initialize"
+    );
+    assert_eq!(requests[0]["method"], "initialize");
+    assert_eq!(requests[0]["request_id"], 1);
+    let pid = requests[0]["pid"].as_i64().unwrap() as i32;
+    let alive = unsafe { libc::kill(pid, 0) };
+    let pid_error = std::io::Error::last_os_error().raw_os_error();
+    assert_eq!(alive, -1, "the child must be reaped");
+    assert_eq!(pid_error, Some(libc::ESRCH));
+    match scenario {
+        "exit" => assert!(
+            lifecycle
+                .iter()
+                .any(|event| event["event"] == "self_exit" && event["code"] == 23)
+        ),
+        "signal" => assert!(
+            lifecycle
+                .iter()
+                .any(|event| event["event"] == "self_signal" && event["signal"] == 9)
+        ),
+        "reader_eof" => {
+            assert_eq!(lifecycle[1]["event"], "stdout_closed");
+            assert_eq!(lifecycle[2]["event"], "cleanup_signal");
+            assert_eq!(lifecycle[2]["code"], 43);
+        }
+        _ => unreachable!(),
+    }
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let events = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 1, "startup must not submit or deliver a turn");
+    assert_eq!(events[0]["type"], "turn.failed");
+    assert_eq!(events[0]["error"]["code"], "cairn_startup_connection");
+    assert_eq!(events[0]["error"]["recoveryPhase"], "startup");
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    for private in [
+        "PRIVATE_STARTUP_STDERR_MARKER",
+        "PRIVATE_STARTUP_PROMPT_MARKER",
+        "PRIVATE_RETAINED_THREAD_MARKER",
+        &root.path().to_string_lossy(),
+    ] {
+        assert!(
+            !stderr.contains(private),
+            "diagnostics must remain content-free"
+        );
+        assert!(!stdout.contains(private));
+    }
+    let receipts = stderr
+        .lines()
+        .filter_map(|line| {
+            line.split_once(" termination=")
+                .map(|(_, receipt)| (line, receipt))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        receipts.len(),
+        1,
+        "missing exactly one real Session termination receipt"
+    );
+    let (line, encoded) = receipts[0];
+    assert!(line.contains("cairn_performance:"));
+    assert!(line.contains("operation=\"codex_session\""));
+    assert!(line.contains("event=\"terminated\""));
+    assert!(
+        line.contains(&format!(
+            "agent_attempt{{run_id=\"{FIRST_RUN}\" attempt_id=\"{attempt}\"}}"
+        )),
+        "receipt must retain the exact labeled run/attempt span"
+    );
+    assert!(
+        encoded.len() <= 4096,
+        "termination metadata must be bounded"
+    );
+    let receipt: Value = serde_json::from_str(encoded).expect("closed JSON termination record");
+    termination_fields(
+        &receipt,
+        &[
+            "schema_version",
+            "session_id",
+            "initiator",
+            "child",
+            "reader",
+            "writer",
+            "cleanup",
+            "stderr",
+            "startup_rpc",
+        ],
+    );
+    termination_fields(
+        &receipt["child"],
+        &["observation", "exit_code", "signal", "wait_error_kind"],
+    );
+    termination_fields(&receipt["reader"], &["outcome", "io_kind"]);
+    termination_fields(&receipt["writer"], &["outcome", "io_kind"]);
+    termination_fields(&receipt["cleanup"], &["action"]);
+    termination_fields(&receipt["stderr"], &["availability", "bytes", "io_kind"]);
+    termination_fields(
+        &receipt["startup_rpc"],
+        &[
+            "method",
+            "request_id",
+            "elapsed_ms",
+            "timeout_ms",
+            "disposition",
+        ],
+    );
+    assert_eq!(receipt["schema_version"], 1);
+    uuid::Uuid::parse_str(receipt["session_id"].as_str().unwrap()).unwrap();
+    assert_eq!(receipt["startup_rpc"]["method"], "initialize");
+    assert_eq!(receipt["startup_rpc"]["request_id"], 1);
+    assert_eq!(receipt["startup_rpc"]["timeout_ms"], 120_000);
+    assert!(receipt["startup_rpc"]["elapsed_ms"].as_u64().unwrap() < 15_000);
+    assert!(matches!(
+        receipt["startup_rpc"]["disposition"].as_str(),
+        Some("failed" | "cancelled")
+    ));
+    assert!(matches!(
+        receipt["child"]["observation"].as_str(),
+        Some("before_cleanup" | "after_cleanup")
+    ));
+    assert!(receipt["child"]["wait_error_kind"].is_null());
+    assert!(matches!(
+        receipt["reader"]["outcome"].as_str(),
+        Some("not_observed" | "eof")
+    ));
+    assert!(receipt["reader"]["io_kind"].is_null());
+    assert_eq!(receipt["writer"]["outcome"], "not_observed");
+    assert!(receipt["writer"]["io_kind"].is_null());
+    assert!(matches!(
+        receipt["cleanup"]["action"].as_str(),
+        Some("none" | "term")
+    ));
+    assert!(
+        receipt["stderr"]["bytes"].as_u64().unwrap()
+            <= "PRIVATE_STARTUP_STDERR_MARKER\n".len() as u64
+    );
+    assert!(matches!(
+        receipt["stderr"]["availability"].as_str(),
+        Some("partial" | "eof")
+    ));
+    assert!(receipt["stderr"]["io_kind"].is_null());
+    receipt
+}
+
+#[tokio::test]
+async fn startup_child_exit_has_an_attempt_bound_termination_receipt() {
+    let mut sessions = HashSet::new();
+    for attempt in [SECOND_RUN, "33333333-3333-4333-8333-333333333333"] {
+        let receipt = startup_termination("exit", attempt).await;
+        assert!(matches!(
+            receipt["initiator"].as_str(),
+            Some("child_exit" | "reader_eof")
+        ));
+        assert_eq!(receipt["child"]["exit_code"], 23);
+        assert!(receipt["child"]["signal"].is_null());
+        assert!(sessions.insert(receipt["session_id"].as_str().unwrap().to_owned()));
+    }
+}
+
+#[tokio::test]
+async fn startup_child_signal_is_observed_without_inventing_an_exit_code() {
+    let receipt = startup_termination("signal", SECOND_RUN).await;
+    assert!(matches!(
+        receipt["initiator"].as_str(),
+        Some("child_exit" | "reader_eof")
+    ));
+    assert_eq!(receipt["child"]["signal"], libc::SIGKILL);
+    assert!(receipt["child"]["exit_code"].is_null());
+}
+
+#[tokio::test]
+async fn startup_reader_eof_is_not_replaced_by_the_cleanup_exit() {
+    let receipt = startup_termination("reader_eof", SECOND_RUN).await;
+    assert_eq!(receipt["initiator"], "reader_eof");
+    assert_eq!(receipt["reader"]["outcome"], "eof");
+    assert!(receipt["reader"]["io_kind"].is_null());
+    assert_eq!(receipt["child"]["observation"], "after_cleanup");
+    assert_eq!(receipt["child"]["exit_code"], 43);
+    assert!(receipt["child"]["signal"].is_null());
+    assert_eq!(receipt["cleanup"]["action"], "term");
 }
 
 #[tokio::test]
@@ -503,11 +796,14 @@ async fn sign_in(mode: &str) -> (TempDir, Arc<Service>, String) {
     let root = TempDir::new().unwrap();
     let service = Service::new(config(&root)).await.unwrap();
     service.accounts.initialize(&service).await.unwrap();
-    let account = service
-        .accounts
-        .create(&service, Provider::Codex, "Personal")
-        .await
-        .unwrap();
+    let account = serde_json::to_value(
+        service
+            .accounts
+            .create(&service, Provider::Codex, "Personal")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let id = account["id"].as_str().unwrap().to_owned();
     let home = service
         .config
@@ -521,7 +817,8 @@ async fn sign_in(mode: &str) -> (TempDir, Arc<Service>, String) {
         json!({ "mode": mode }).to_string(),
     )
     .unwrap();
-    let view = service.accounts.reconnect(&service, &id).await.unwrap();
+    let view =
+        serde_json::to_value(service.accounts.reconnect(&service, &id).await.unwrap()).unwrap();
     assert_eq!(view["provider"], "codex");
     (root, service, id)
 }
@@ -532,7 +829,7 @@ async fn sign_in_until(service: &Service, condition: impl Fn(&Value) -> bool) ->
         Duration::from_secs(10),
         Duration::from_millis(20),
         async || {
-            let view = service.accounts.sign_in().await;
+            let view = serde_json::to_value(service.accounts.sign_in().await).unwrap();
             condition(&view).then_some(view)
         },
     )
@@ -599,8 +896,12 @@ async fn structured_sign_in_displays_the_code_and_cancelling_removes_the_unfinis
     assert_eq!(view["accountId"], id.as_str());
     assert!(view["expiresAt"].as_i64().unwrap() > now());
     service.accounts.cancel(&service).await.unwrap();
-    assert!(service.accounts.sign_in().await.is_null());
-    assert!(service.store.get(KIND, &id).await.unwrap().is_none());
+    assert!(
+        serde_json::to_value(service.accounts.sign_in().await)
+            .unwrap()
+            .is_null()
+    );
+    assert!(service.store.account_fixture(&id).await.unwrap().is_none());
     assert!(
         service
             .vault
@@ -626,7 +927,7 @@ async fn structured_sign_in_handles_completion_before_the_start_reply() {
     assert_eq!(view["state"], "complete", "{view}");
     assert!(view["code"].is_null());
     assert_eq!(
-        service.accounts.get(&service, &id).await.unwrap()["state"],
+        serde_json::to_value(service.accounts.account(&service, &id).await.unwrap()).unwrap()["state"],
         "ready"
     );
 }
@@ -645,7 +946,7 @@ async fn structured_sign_in_reports_errors_without_exposing_provider_details() {
         }
         // A failed sign-in keeps the account so it can be retried.
         assert_eq!(
-            service.accounts.get(&service, &id).await.unwrap()["state"],
+            serde_json::to_value(service.accounts.account(&service, &id).await.unwrap()).unwrap()["state"],
             "pending"
         );
     }
@@ -655,18 +956,21 @@ async fn structured_sign_in_reports_errors_without_exposing_provider_details() {
 async fn completed_sign_in_is_already_cleaned_up_and_available() {
     let root = TempDir::new().unwrap();
     let service = Service::new(config(&root)).await.unwrap();
-    let flow = service
-        .accounts
-        .add(&service, Provider::Codex, "Personal")
-        .await
-        .unwrap();
+    let flow = serde_json::to_value(
+        service
+            .accounts
+            .add(&service, Provider::Codex, "Personal")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let id = flow["accountId"].as_str().unwrap();
 
     // Observe the publication boundary, rather than allowing a polling delay to
     // hide work that still happens after the UI is told sign-in is complete.
     tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            let view = service.accounts.sign_in().await;
+            let view = serde_json::to_value(service.accounts.sign_in().await).unwrap();
             if is_settled(&view) {
                 assert_eq!(view["state"], "complete", "{view}");
                 break;
@@ -687,11 +991,12 @@ async fn completed_sign_in_is_already_cleaned_up_and_available() {
     );
     assert!(!service.accounts.busy(&service, id).await.unwrap());
     assert_eq!(
-        service.accounts.list(&service).await.unwrap()[0]["status"],
+        common::account_fixture::account_values(service.accounts.list(&service).await.unwrap())[0]
+            ["status"],
         "next"
     );
 
-    service.accounts.reconnect(&service, id).await.unwrap();
+    serde_json::to_value(service.accounts.reconnect(&service, id).await.unwrap()).unwrap();
     service.accounts.cancel(&service).await.unwrap();
 }
 
@@ -699,18 +1004,21 @@ async fn completed_sign_in_is_already_cleaned_up_and_available() {
 async fn account_sign_in_verifies_identity_captures_credentials_and_cleans_up() {
     let root = TempDir::new().unwrap();
     let service = Service::new(config(&root)).await.unwrap();
-    let view = service
-        .accounts
-        .add(&service, Provider::Codex, "Personal")
-        .await
-        .unwrap();
+    let view = serde_json::to_value(
+        service
+            .accounts
+            .add(&service, Provider::Codex, "Personal")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let id = view["accountId"].as_str().unwrap().to_owned();
     assert_eq!(
         sign_in_until(&service, is_settled).await["state"],
         "complete"
     );
     assert_eq!(
-        service.accounts.get(&service, &id).await.unwrap()["state"],
+        serde_json::to_value(service.accounts.account(&service, &id).await.unwrap()).unwrap()["state"],
         "ready"
     );
     assert!(
@@ -768,7 +1076,15 @@ async fn models_are_paginated_cached_and_keep_last_known_options_when_codex_is_d
         .await
         .unwrap();
     let stale = service.models.list(&service).await.unwrap();
-    assert_eq!(stale["models"], catalog["models"]);
+    // The last known options stay, but an outdated catalog no longer confirms their speeds.
+    let mut unconfirmed = stale["models"].clone();
+    for model in unconfirmed.as_array_mut().unwrap() {
+        for tier in model["serviceTiers"].as_array_mut().unwrap() {
+            assert_eq!(tier["limited"], true, "{tier}");
+            tier.as_object_mut().unwrap().remove("limited");
+        }
+    }
+    assert_eq!(unconfirmed, catalog["models"]);
     assert_eq!(stale["stale"], true);
     assert!(!stale["error"].as_str().unwrap().is_empty());
 }
@@ -813,12 +1129,14 @@ async fn model_catalog_respects_enabled_accounts_and_routes_to_an_account_with_t
     }
     let lease = acquire(&service, FIRST_RUN, "fixture-deep").await;
     assert_eq!(lease.account_id, ids[1]);
-    service.accounts.release(&lease).await.unwrap();
-    service
-        .accounts
-        .update(&service, &ids[1], &json!({ "enabled": false }))
-        .await
-        .unwrap();
+    service.accounts.release(&service, &lease).await.unwrap();
+    common::account_fixture::update_account_fixture(
+        &service,
+        &ids[1],
+        &json!({ "enabled": false }),
+    )
+    .await
+    .unwrap();
     let catalog = service.models.list(&service).await.unwrap();
     assert!(
         !catalog["models"]
@@ -834,6 +1152,405 @@ async fn model_catalog_respects_enabled_accounts_and_routes_to_an_account_with_t
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn speeds_come_from_each_account_and_route_runs_to_an_account_offering_them() {
+    let root = TempDir::new().unwrap();
+    let service = Service::new(config(&root)).await.unwrap();
+    service.accounts.initialize(&service).await.unwrap();
+    let mut ids = Vec::new();
+    for name in ["fast-only", "all-models"] {
+        let tokens = json!({ "access_token": "synthetic", "account_id": name });
+        ids.push(refreshed_account(&service, name, tokens).await);
+    }
+
+    // Any account's speed is offered; one missing from some accounts is marked limited.
+    let catalog = service.models.list(&service).await.unwrap();
+    let models = catalog["models"].as_array().unwrap();
+    let fast = models
+        .iter()
+        .find(|m| m["model"] == "fixture-fast")
+        .unwrap();
+    assert_eq!(fast["serviceTiers"][0]["id"], "priority");
+    assert_eq!(fast["serviceTiers"][0]["name"], "Fast");
+    assert_eq!(
+        fast["serviceTiers"][0]["description"],
+        "1.5x speed, increased usage"
+    );
+    assert!(fast["serviceTiers"][0].get("limited").is_none());
+    assert_eq!(fast["serviceTiers"][1]["id"], "ultrafast");
+    assert_eq!(fast["serviceTiers"][1]["limited"], true);
+    let deep = models
+        .iter()
+        .find(|m| m["model"] == "fixture-deep")
+        .unwrap();
+    assert_eq!(deep["serviceTiers"], json!([]));
+
+    // A speed both accounts offer uses either of them.
+    let first = service
+        .accounts
+        .acquire_for(
+            &service,
+            FIRST_RUN,
+            Provider::Codex,
+            "fixture-fast",
+            "priority",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let second = service
+        .accounts
+        .acquire_for(
+            &service,
+            SECOND_RUN,
+            Provider::Codex,
+            "fixture-fast",
+            "priority",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(first.account_id, second.account_id);
+    service.accounts.release(&service, &first).await.unwrap();
+    service.accounts.release(&service, &second).await.unwrap();
+
+    // A speed one account lacks goes to the account offering it, every time.
+    for run in [FIRST_RUN, SECOND_RUN] {
+        let lease = service
+            .accounts
+            .acquire_for(&service, run, Provider::Codex, "fixture-fast", "ultrafast")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.account_id, ids[1]);
+        service.accounts.release(&service, &lease).await.unwrap();
+    }
+
+    // The speed is only preferred: while the account offering it cannot take another run,
+    // the run goes to an available account at Standard instead of waiting.
+    common::account_fixture::update_account_fixture(
+        &service,
+        &ids[1],
+        &json!({ "maxConcurrentRuns": 1 }),
+    )
+    .await
+    .unwrap();
+    let busy = service
+        .accounts
+        .acquire_for(
+            &service,
+            FIRST_RUN,
+            Provider::Codex,
+            "fixture-fast",
+            "ultrafast",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(busy.account_id, ids[1]);
+    let fallback = service
+        .accounts
+        .acquire_for(
+            &service,
+            SECOND_RUN,
+            Provider::Codex,
+            "fixture-fast",
+            "ultrafast",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(fallback.account_id, ids[0]);
+    service.accounts.release(&service, &busy).await.unwrap();
+    service.accounts.release(&service, &fallback).await.unwrap();
+
+    // An account whose catalog confirms the speed comes before one that cannot tell, which
+    // Codex could run at Standard without notice.
+    for (unknown, confirmed) in [(0, 1), (1, 0)] {
+        let key = format!("codex-models:{}", ids[unknown]);
+        let catalog = service.store.kv(&key).await.unwrap().unwrap();
+        let mut outdated = catalog.clone();
+        outdated["checkedAt"] = (now() - 3_600_000).into();
+        service.store.set(&key, outdated, None).await.unwrap();
+        // Twice, so the least recently used account is the unknown one at least once.
+        for _ in 0..2 {
+            let lease = service
+                .accounts
+                .acquire_for(
+                    &service,
+                    FIRST_RUN,
+                    Provider::Codex,
+                    "fixture-fast",
+                    "priority",
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(lease.account_id, ids[confirmed]);
+            service.accounts.release(&service, &lease).await.unwrap();
+        }
+        service.store.set(&key, catalog, None).await.unwrap();
+    }
+
+    // The combined catalog offers Fast, but the account a run lands on cannot confirm it: the
+    // picker marks it limited, and the turn itself checks Codex's own list before starting.
+    let key = format!("codex-models:{}", ids[0]);
+    let catalog = service.store.kv(&key).await.unwrap().unwrap();
+    let mut unknown = catalog.clone();
+    unknown["checkedAt"] = (now() - 3_600_000).into();
+    unknown["attemptedAt"] = now().into();
+    service.store.set(&key, unknown, None).await.unwrap();
+    let listed = service.models.list(&service).await.unwrap();
+    let fast = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"] == "fixture-fast")
+        .unwrap();
+    assert_eq!(fast["serviceTiers"][0]["id"], "priority");
+    assert_eq!(fast["serviceTiers"][0]["limited"], true, "{fast}");
+    let confirming = service
+        .accounts
+        .acquire_for(
+            &service,
+            FIRST_RUN,
+            Provider::Codex,
+            "fixture-fast",
+            "ultrafast",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(confirming.account_id, ids[1]);
+    let landed = service
+        .accounts
+        .acquire_for(
+            &service,
+            SECOND_RUN,
+            Provider::Codex,
+            "fixture-fast",
+            "priority",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(landed.account_id, ids[0]);
+    service
+        .accounts
+        .release(&service, &confirming)
+        .await
+        .unwrap();
+    service.accounts.release(&service, &landed).await.unwrap();
+    // An account that needs reconnecting takes no run, so its unknown catalog confirms nothing.
+    let record = service
+        .store
+        .account_fixture(&ids[0])
+        .await
+        .unwrap()
+        .unwrap();
+    let mut reconnect = record.clone();
+    reconnect["state"] = "error".into();
+    service.store.save_account_fixture(reconnect).await.unwrap();
+    let listed = service.models.list(&service).await.unwrap();
+    let fast = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"] == "fixture-fast")
+        .unwrap();
+    assert!(fast["serviceTiers"][0].get("limited").is_none(), "{fast}");
+    // Nor does a signed-out account lacking a speed make it limited: Ultrafast, which only
+    // the other account lists, is then confirmed by every account a run can land on.
+    let mut restored = record.clone();
+    restored["state"] = "error".into();
+    service
+        .store
+        .set(&key, catalog.clone(), None)
+        .await
+        .unwrap();
+    service.store.save_account_fixture(restored).await.unwrap();
+    let listed = service.models.list(&service).await.unwrap();
+    let fast = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"] == "fixture-fast")
+        .unwrap();
+    assert_eq!(fast["serviceTiers"][1]["id"], "ultrafast");
+    assert!(fast["serviceTiers"][1].get("limited").is_none(), "{fast}");
+    service.store.save_account_fixture(record).await.unwrap();
+    service.store.set(&key, catalog, None).await.unwrap();
+    let listed = service.models.list(&service).await.unwrap();
+    let fast = listed["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"] == "fixture-fast")
+        .unwrap();
+    assert!(fast["serviceTiers"][0].get("limited").is_none(), "{fast}");
+
+    // Without an enabled account offering it, the run is not held back: it goes to an
+    // available account, and the turn's own check says how it runs there.
+    common::account_fixture::update_account_fixture(
+        &service,
+        &ids[1],
+        &json!({ "enabled": false }),
+    )
+    .await
+    .unwrap();
+    let lease = service
+        .accounts
+        .acquire_for(
+            &service,
+            FIRST_RUN,
+            Provider::Codex,
+            "fixture-fast",
+            "ultrafast",
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(lease.account_id, ids[0]);
+    service.accounts.release(&service, &lease).await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_speed_is_kept_and_planned_as_asked() {
+    let root = TempDir::new().unwrap();
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let service = Service::new(config(&root)).await.unwrap();
+    let chat = service.chat_create(json!({})).await.unwrap();
+    let chat_id = chat["id"].as_str().unwrap();
+    let message_id = id();
+    let mut message = json!({
+        "id": message_id,
+        "text": "Review this",
+        "model": "fixture-deep",
+        "speed": "priority",
+    });
+    let first = service.chat_send(chat_id, message.clone()).await.unwrap();
+    assert_eq!(first["speed"], "priority");
+    assert_eq!(
+        service.chat_send(chat_id, message.clone()).await.unwrap(),
+        first
+    );
+    message["speed"] = "standard".into();
+    assert_eq!(
+        service
+            .chat_send(chat_id, message.clone())
+            .await
+            .unwrap_err()
+            .status,
+        409
+    );
+    let claude =
+        json!({ "id": id(), "text": "Review this", "provider": "claude", "speed": "priority" });
+    assert_eq!(
+        service.chat_send(chat_id, claude).await.unwrap_err().status,
+        400
+    );
+
+    service.chat_tick(&HashSet::new()).await.unwrap();
+    let detail = service.chat_detail(chat_id).await.unwrap();
+    let run = detail["run"].clone();
+    assert_eq!(run["snapshot"]["agent"]["speed"], "priority");
+    assert_eq!(run["snapshot"]["agent"]["model"], "fixture-deep");
+    let steer = json!({ "id": id(), "text": "Faster", "mode": "steer", "speed": "standard" });
+    assert_eq!(
+        service.chat_send(chat_id, steer).await.unwrap_err().status,
+        409
+    );
+
+    // Planning asks for the chosen tier; the turn checks it with the Codex process that runs
+    // it. Without a chosen speed the turn asks for Standard: Codex's app server neither applies
+    // the model's catalog default nor resets a thread that ran at another speed.
+    let run_id = run["id"].as_str().unwrap().to_owned();
+    let configure = async |model: &str, speed: &str| {
+        let mut plan = json!({
+            "runId": run_id,
+            "model": model,
+            "reasoning": "medium",
+            "speed": speed,
+        });
+        Provider::Codex
+            .adapter()
+            .configure_plan(&service, &mut plan, None)
+            .await
+            .unwrap();
+        plan
+    };
+    for (model, speed, tier) in [
+        ("fixture-deep", "priority", "priority"),
+        ("fixture-fast", "priority", "priority"),
+        ("fixture-deep", "standard", "default"),
+        ("fixture-deep", "", "default"),
+        ("fixture-fast", "", "default"),
+    ] {
+        assert_eq!(configure(model, speed).await["serviceTier"], tier);
+    }
+    // The account's recent catalog goes with a faster plan, so a fallback list in the Codex
+    // process cannot confirm a tier on its own, whichever model the turn runs.
+    assert!(
+        configure("fixture-fast", "priority")
+            .await
+            .get("accountTiers")
+            .is_none()
+    );
+    service.models.list(&service).await.unwrap();
+    let planned = configure("", "priority").await;
+    assert_eq!(planned["accountTiers"]["fixture-fast"], json!(["priority"]));
+    assert_eq!(planned["accountTiers"]["fixture-deep"], json!([]));
+    assert!(
+        configure("fixture-fast", "standard")
+            .await
+            .get("accountTiers")
+            .is_none()
+    );
+
+    // An edit from an editor predating speeds keeps the queued speed, unless it moves the
+    // message to another coding agent.
+    let queued_id = id();
+    let queued =
+        json!({ "id": queued_id, "text": "Next", "provider": "codex", "speed": "priority" });
+    service.chat_send(chat_id, queued).await.unwrap();
+    let edited = service
+        .chat_edit(
+            chat_id,
+            &queued_id,
+            Some(json!({ "text": "Next, reworded", "provider": "codex" })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(edited["speed"], "priority");
+    let moved = service
+        .chat_edit(
+            chat_id,
+            &queued_id,
+            Some(json!({ "text": "Next", "provider": "claude" })),
+        )
+        .await
+        .unwrap();
+    assert!(
+        moved.get("speed").is_none_or(|speed| speed == ""),
+        "{moved}"
+    );
+
+    // Turning a queued message into a steer keeps its stored speed, which the running turn's
+    // speed must match.
+    let slower_id = id();
+    let slower =
+        json!({ "id": slower_id, "text": "Slower", "provider": "codex", "speed": "standard" });
+    service.chat_send(chat_id, slower).await.unwrap();
+    let steered = service
+        .chat_edit(
+            chat_id,
+            &slower_id,
+            Some(json!({ "text": "Slower", "provider": "codex", "mode": "steer" })),
+        )
+        .await;
+    assert_eq!(steered.unwrap_err().status, 409);
 }
 
 #[tokio::test]
@@ -942,15 +1659,19 @@ async fn queued_reasoning_is_idempotent_editable_and_part_of_the_run_snapshot() 
 async fn device_login_verifies_identity_then_leases_private_credentials() {
     let root = TempDir::new().unwrap();
     let service = Service::new(config(&root)).await.unwrap();
-    let flow = service
-        .accounts
-        .add(&service, Provider::Codex, "Test account")
-        .await
-        .unwrap();
+    let flow = serde_json::to_value(
+        service
+            .accounts
+            .add(&service, Provider::Codex, "Test account")
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     let id = flow["accountId"].as_str().unwrap();
     let view = sign_in_until(&service, is_settled).await;
     assert_eq!(view["state"], "complete", "{view}");
-    let accounts = service.accounts.list(&service).await.unwrap();
+    let accounts =
+        common::account_fixture::account_values(service.accounts.list(&service).await.unwrap());
     assert_eq!(accounts.len(), 1);
     assert_eq!(accounts[0]["remainingPercent"], 60.0);
     assert_eq!(accounts[0]["provider"], "codex");
@@ -963,13 +1684,19 @@ async fn device_login_verifies_identity_then_leases_private_credentials() {
     assert!(service.accounts.remove(&service, id).await.is_err());
     let second = acquire(&service, SECOND_RUN, "").await;
     assert_eq!(second.account_id, lease.account_id);
-    service.accounts.release(&lease).await.unwrap();
-    assert_eq!(service.accounts.active(id).await.len(), 1);
+    service.accounts.release(&service, &lease).await.unwrap();
+    assert_eq!(
+        service.accounts.active(&service, id).await.unwrap().len(),
+        1
+    );
     assert!(service.accounts.remove(&service, id).await.is_err());
-    service.accounts.release(&second).await.unwrap();
+    service.accounts.release(&service, &second).await.unwrap();
     assert!(!lease.home.join("auth.json").exists());
     service.accounts.remove(&service, id).await.unwrap();
-    assert!(service.accounts.list(&service).await.unwrap().is_empty());
+    assert!(
+        common::account_fixture::account_values(service.accounts.list(&service).await.unwrap())
+            .is_empty()
+    );
 }
 
 #[test]
@@ -1063,7 +1790,7 @@ async fn assert_refreshes_are_shared(
         json!({ "tokens": { "access_token": "stale", "account_id": "intruder" } }).to_string(),
     )
     .unwrap();
-    service.accounts.release(first).await.unwrap();
+    service.accounts.release(service, first).await.unwrap();
     assert!(a.tokens(false).await.is_err());
     assert!(
         b.tokens(false).await.unwrap()["accessToken"] == "synthetic-refreshed",
@@ -1088,7 +1815,10 @@ async fn parallel_runs_share_one_refresh_and_cannot_overwrite_or_reuse_released_
     let _first_broker = broker::serve(&service, &first).await.unwrap();
     let _second_broker = broker::serve(&service, &second).await.unwrap();
     assert_refreshes_are_shared(&service, &id, &first, &second).await;
-    assert_eq!(service.accounts.active(&id).await.len(), 1);
+    assert_eq!(
+        service.accounts.active(&service, &id).await.unwrap().len(),
+        1
+    );
     assert!(service.accounts.reconnect(&service, &id).await.is_err());
     assert!(!second.home.join("auth.json").exists());
     let (events, mut receiver) = tokio::sync::mpsc::channel(32);
@@ -1118,7 +1848,7 @@ async fn parallel_runs_share_one_refresh_and_cannot_overwrite_or_reuse_released_
         assert!(!event.to_string().contains("synthetic-refreshed"));
     }
     assert!(root.path().join("reply.md").exists());
-    service.accounts.release(&second).await.unwrap();
+    service.accounts.release(&service, &second).await.unwrap();
     assert_eq!(
         service
             .vault
@@ -1147,6 +1877,8 @@ async fn resident_logs_in_and_releases_managed_account_for_each_native_turn() {
     let _broker = broker::serve(&service, &lease).await.unwrap();
     let record = lease.home.join("fixture-lifecycle.jsonl");
     std::fs::write(&record, "").unwrap();
+    let launch_record = lease.home.join("fixture-launch-args.json");
+    std::fs::write(&launch_record, "[]").unwrap();
     let socket = root.path().join("resident/codex.sock");
     let endpoint = socket.clone();
     let stop = CancellationToken::new();
@@ -1174,13 +1906,14 @@ async fn resident_logs_in_and_releases_managed_account_for_each_native_turn() {
             .contains("account/login/start"),
         "Anonymous initialization never acquires an account"
     );
-    for index in 0..2 {
+    for index in 0..4 {
         let plan = json!({
             "args": [], "codexConfig": { "mcp_servers": {} },
+            "nativeSettings": if index >= 2 { json!({ "model_context_window": 1000000 }) } else { json!({}) },
             "cwd": root.path(), "sandbox": "yolo", "reasoning": "low",
             "output": root.path().join("reply.md"), "inputDirectory": root.path(),
             "writableRoots": [],
-            "execution": { "messageId": format!("message-{index}"), "text": "fixture:auth-refresh", "attachments": [], },
+            "execution": { "messageId": format!("message-{index}"), "text": "fixture:auth-refresh", "attachments": [] },
         });
         let (events, mut received) = tokio::sync::mpsc::channel::<Value>(64);
         let output = tokio::spawn(async move {
@@ -1193,20 +1926,26 @@ async fn resident_logs_in_and_releases_managed_account_for_each_native_turn() {
             .unwrap();
         output.await.unwrap();
         assert!(!lease.home.join("auth.json").exists());
+        let args: Vec<String> =
+            serde_json::from_slice(&std::fs::read(&launch_record).unwrap()).unwrap();
+        assert_eq!(
+            args.iter().any(|arg| arg == "model_context_window=1000000"),
+            index >= 2
+        );
     }
     stop.cancel();
     native.await.unwrap().unwrap();
-    service.accounts.release(&lease).await.unwrap();
+    service.accounts.release(&service, &lease).await.unwrap();
     let log: Vec<Value> = std::fs::read_to_string(&record)
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     for (method, expected) in [
-        ("initialize", 1),
-        ("account/login/start", 2),
-        ("account/logout", 2),
-        ("thread/unsubscribe", 2),
+        ("initialize", 2),
+        ("account/login/start", 4),
+        ("account/logout", 4),
+        ("thread/unsubscribe", 4),
     ] {
         assert_eq!(
             log.iter().filter(|entry| entry["method"] == method).count(),
@@ -1226,9 +1965,11 @@ async fn parallel_capacity_prefers_usage_and_lowering_limits_does_not_stop_runs(
         let tokens = json!({ "access_token": "synthetic", "account_id": name });
         let id = refreshed_account(&service, name, tokens).await;
         if name == "less" {
-            let mut account = service.accounts.get(&service, &id).await.unwrap();
+            let mut account =
+                serde_json::to_value(service.accounts.account(&service, &id).await.unwrap())
+                    .unwrap();
             account["usage"]["windows"][0]["usedPercent"] = 90.into();
-            service.store.put(KIND, account).await.unwrap();
+            service.store.save_account_fixture(account).await.unwrap();
         }
         ids.push(id);
     }
@@ -1237,9 +1978,7 @@ async fn parallel_capacity_prefers_usage_and_lowering_limits_does_not_stop_runs(
     assert_eq!(first.account_id, ids[0]);
     assert_eq!(second.account_id, ids[0]);
     let limit = |runs: Value| json!({ "maxConcurrentRuns": runs });
-    let view = service
-        .accounts
-        .update(&service, &ids[0], &limit(json!(1)))
+    let view = common::account_fixture::update_account_fixture(&service, &ids[0], &limit(json!(1)))
         .await
         .unwrap();
     assert_eq!(view["activeRunIds"].as_array().unwrap().len(), 2);
@@ -1247,19 +1986,15 @@ async fn parallel_capacity_prefers_usage_and_lowering_limits_does_not_stop_runs(
     assert_eq!(third.account_id, ids[1]);
     for invalid in [json!(0), json!(-1), json!(1.5), json!("2"), Value::Null] {
         assert!(
-            service
-                .accounts
-                .update(&service, &ids[0], &limit(invalid))
+            common::account_fixture::update_account_fixture(&service, &ids[0], &limit(invalid))
                 .await
                 .is_err()
         );
     }
     for lease in [first, second, third] {
-        service.accounts.release(&lease).await.unwrap();
+        service.accounts.release(&service, &lease).await.unwrap();
     }
-    service
-        .accounts
-        .update(&service, &ids[0], &limit(json!(12)))
+    common::account_fixture::update_account_fixture(&service, &ids[0], &limit(json!(12)))
         .await
         .unwrap();
     let mut leases = Vec::new();
@@ -1272,6 +2007,6 @@ async fn parallel_capacity_prefers_usage_and_lowering_limits_does_not_stop_runs(
     assert_eq!(overflow.account_id, ids[1]);
     leases.push(overflow);
     for lease in leases {
-        service.accounts.release(&lease).await.unwrap();
+        service.accounts.release(&service, &lease).await.unwrap();
     }
 }

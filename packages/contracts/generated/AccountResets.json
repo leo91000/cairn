@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "available": {
+      "default": 0,
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "credits": {
+      "default": [],
+      "description": "Codex's own credit objects, kept verbatim.",
+      "items": {
+        "additionalProperties": true,
+        "description": "Validated against the selected package's manifest, never used for Cairn policy.",
+        "type": "object",
+        "x-cairn-json-object": true
+      },
+      "type": "array"
+    }
+  },
+  "title": "AccountResets",
+  "type": "object"
+}

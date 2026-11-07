@@ -22,7 +22,10 @@ use std::{
     net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex},
 };
-use tower_http::compression::CompressionLayer;
+use tower_http::compression::{
+    CompressionLayer, CompressionLevel,
+    predicate::{DefaultPredicate, Predicate},
+};
 
 #[derive(Clone)]
 pub struct App {
@@ -125,10 +128,34 @@ pub async fn router(service: Arc<Service>) -> Result<Router> {
         .route("/mcp-gateway/{id}", any(crate::mcp_server::handle))
         .route("/api/{*path}", any(api))
         .fallback(|| async { Error::unauthorized("Access this installation through the Beacon.") })
-        .layer(CompressionLayer::new())
+        .layer(
+            CompressionLayer::new()
+                .quality(CompressionLevel::Fastest)
+                .compress_when(DefaultPredicate::new().and(compressible)),
+        )
         .merge(internal)
         .layer(middleware::from_fn_with_state(app.clone(), security))
         .with_state(app))
+}
+
+/// Marks a response whose bytes must reach the client as stored: a deliverable
+/// file keeps its Content-Length and byte ranges, so a download can resume and a
+/// transfer that ends early is detected as incomplete.
+#[derive(Clone, Copy)]
+pub(crate) struct Uncompressed;
+
+/// Marks a private deliverable that fits one relay frame, so the relay keeps it
+/// finite even when compression removes its Content-Length.
+#[derive(Clone, Copy)]
+pub(crate) struct FiniteFile;
+
+fn compressible(
+    _: StatusCode,
+    _: axum::http::Version,
+    _: &HeaderMap,
+    extensions: &axum::http::Extensions,
+) -> bool {
+    extensions.get::<Uncompressed>().is_none()
 }
 
 fn header<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
@@ -295,11 +322,6 @@ fn rate_limit(app: &App, subject: &RateLimitSubject, method: &str, path: &str) -
     Ok(())
 }
 
-fn development_origin(origin: &str) -> bool {
-    std::env::var("NODE_ENV").unwrap_or_default() != "production"
-        && ["http://localhost:5178", "http://127.0.0.1:5178"].contains(&origin)
-}
-
 fn check_security(
     app: &App,
     headers: &HeaderMap,
@@ -327,10 +349,7 @@ fn check_security(
         return Err(Error::forbidden("Unexpected host."));
     }
     let requested = header(headers, "origin");
-    if !requested.is_empty()
-        && requested != app.service.config.public_url
-        && !development_origin(requested)
-    {
+    if !requested.is_empty() && requested != app.service.config.public_url {
         return Err(Error::forbidden("Unexpected origin."));
     }
     rate_limit(app, subject, method, path)?;
@@ -427,8 +446,14 @@ impl Input {
             );
         let limit = if path.starts_with("/internal/node-workspace/") && large {
             2_000_000
-        } else if skill_batch {
-            // A folder move can carry hundreds of paths even when all file contents are staged.
+        } else if path == "/api/plugins/packages" && parts.method == "POST" {
+            cairn_plugin_api::MAX_FRAME_BYTES
+        } else if skill_batch
+            || path == "/api/skills/stage"
+            || path.ends_with("/avatar/upload")
+            || matches!(path, "/mcp" | "/api/mcp" | "/mcp-installation")
+        {
+            // Batch skill moves and base64 avatar uploads use the existing bounded transport limit.
             cairn_protocol::MAX_BODY
         } else {
             150000
@@ -503,6 +528,8 @@ struct Execution {
 struct Tools {
     codex: Option<String>,
     gh: Option<String>,
+    claude: Option<String>,
+    opencode: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -575,6 +602,8 @@ async fn health(State(app): State<App>, request: Request) -> Result<Response> {
         tools: Tools {
             codex: env("APP_CODEX_VERSION"),
             gh: env("APP_GH_VERSION"),
+            claude: env("APP_CLAUDE_VERSION"),
+            opencode: env("APP_OPENCODE_VERSION"),
         },
         toolkit: &app.toolkit,
         execution,
@@ -645,6 +674,11 @@ async fn raw_route(app: &App, path: &str, request: Request) -> Result<Route> {
             if request.method() != "POST" {
                 return Err(Error::method_not_allowed("Method not allowed."));
             }
+            let identity = request
+                .extensions()
+                .get::<InstallationIdentity>()
+                .ok_or_else(|| Error::unauthorized("A verified identity is required."))?;
+            let context = crate::capabilities::ResumeContext::identity(identity);
             let limit = crate::skills::bundle::UPLOAD_BYTES;
             let bytes = tokio::time::timeout(
                 std::time::Duration::from_secs(60),
@@ -655,7 +689,10 @@ async fn raw_route(app: &App, path: &str, request: Request) -> Result<Route> {
             .map_err(|_| {
                 Error::too_large(format!("Uploads are limited to {} MiB.", limit >> 20))
             })?;
-            axum::Json(s.skills.stage(&bytes).await?).into_response()
+            let authority =
+                crate::skills::lifecycle::Authority::new(s, context, "manage", false).await?;
+            axum::Json(crate::capabilities::stage_resource_upload(s, &bytes, authority).await?)
+                .into_response()
         }
         ["", "api", "chats", chat, "attachments", id] => {
             let chat = resolve_chat_id(s, chat).await?;

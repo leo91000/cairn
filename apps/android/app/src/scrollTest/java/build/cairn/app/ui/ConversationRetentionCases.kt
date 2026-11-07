@@ -12,6 +12,29 @@ abstract class ConversationRetentionCases {
     @get:Rule val compose = createComposeRule()
 
     @Test
+    fun expiredEnvironmentExplainsWhatSurvivesAndHowToResume() {
+        compose.setContent {
+            MaterialTheme { EnvironmentExpirationNotice("expired", null) }
+        }
+        compose.onNodeWithText("Environnement de travail expiré").assertExists()
+        compose
+            .onNodeWithText("Votre prochain message crée un nouvel environnement", substring = true)
+            .assertExists()
+        compose
+            .onNodeWithText("les livrables et les liens partagés sont conservés", substring = true)
+            .assertExists()
+    }
+
+    @Test
+    fun interruptedCleanupExplainsTheWaitAndRetry() {
+        compose.setContent {
+            MaterialTheme { EnvironmentExpirationNotice("cleaning", "Node indisponible") }
+        }
+        compose.onNodeWithText("Attendez la fin du nettoyage", substring = true).assertExists()
+        compose.onNodeWithText("Le nettoyage réessaiera : Node indisponible").assertExists()
+    }
+
+    @Test
     fun retentionLoadsConfirmsCustomDaysAndCanBeDisabled() {
         val saves = CopyOnWriteArrayList<Int>()
         compose.setContent {
@@ -25,6 +48,12 @@ abstract class ConversationRetentionCases {
         compose.onNodeWithText("Jours d’inactivité").performTextReplacement("14")
         compose.onNodeWithText("Enregistrer le délai").performScrollTo().performClick()
         compose.onNodeWithText("Enregistrer le délai ?").assertExists()
+        compose
+            .onNodeWithText(
+                "L’historique, les pièces jointes et les livrables sont conservés",
+                substring = true,
+            )
+            .assertExists()
         assertEquals(emptyList<Int>(), saves.toList())
         compose.onNodeWithText("Annuler").performClick()
         assertEquals(emptyList<Int>(), saves.toList())

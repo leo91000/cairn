@@ -19,11 +19,16 @@ class FilesTest {
         val full =
             (1..4).map {
                 DraftAttachment(
-                    ChatAttachment("file-$it", "chat", "file-$it.zip", MAX_ATTACHMENT_BYTES)
+                    ChatAttachment(
+                        id = "file-$it",
+                        chatId = "chat",
+                        name = "file-$it.zip",
+                        size = MAX_ATTACHMENT_BYTES.toInt(),
+                    )
                 )
             }
         assertSame(full, reuseAttachment(full, full.first().attachment))
-        val extra = ChatAttachment("extra", "chat", "extra.zip", 1)
+        val extra = ChatAttachment(id = "extra", chatId = "chat", name = "extra.zip", size = 1)
         val sizeFailure =
             assertThrows(IllegalArgumentException::class.java) {
                 reuseAttachment(full, extra)

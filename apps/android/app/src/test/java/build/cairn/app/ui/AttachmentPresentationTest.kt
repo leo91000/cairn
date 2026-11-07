@@ -9,7 +9,15 @@ class AttachmentPresentationTest {
         name: String,
         size: Long = 1024,
         mediaType: String = "application/octet-stream",
-    ) = ChatAttachment(name, "chat", name, size, mediaType, "file")
+    ) =
+        ChatAttachment(
+            id = name,
+            chatId = "chat",
+            name = name,
+            size = size.toInt(),
+            mediaType = mediaType,
+            kind = "file",
+        )
 
     @Test
     fun `files are classified by extension because the server only recognizes images`() {
@@ -27,7 +35,7 @@ class AttachmentPresentationTest {
         assertEquals(AttachmentFamily.IMAGE, file("logo.svg").family)
         assertEquals(
             AttachmentFamily.IMAGE,
-            ChatAttachment("i", name = "capture", kind = "image").family,
+            ChatAttachment(id = "i", name = "capture", kind = "image").family,
         )
         assertEquals(AttachmentFamily.OTHER, file("data.bin").family)
         // Without a known extension, the media type decides.
@@ -88,7 +96,7 @@ class AttachmentPresentationTest {
         assertEquals(Mosaic(4, 3), mosaic(7))
         val zip = file("backup.zip")
         val pdf = file("brief.pdf")
-        val photo = ChatAttachment("p", "chat", "photo.jpg", kind = "image")
+        val photo = ChatAttachment(id = "p", chatId = "chat", name = "photo.jpg", kind = "image")
         assertEquals(listOf(photo, pdf, zip), displayOrder(listOf(zip, pdf, photo)))
     }
 }

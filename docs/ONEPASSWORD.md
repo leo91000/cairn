@@ -41,8 +41,14 @@ AES-GCM credential vault. They are never returned by the management API, given t
 the package's script, copied into a run/VM environment, or included in audit
 records. Back up `mcp-encryption-key` together with the application database. The
 manager runs the plugin’s locked official CLI as the package's declared program: an empty
-environment with only the token and a disabled cache, a temporary home, the
-package's fixed read-only arguments and a 30-second timeout. CLI error output is not
+environment with the token and `OP_CACHE=true`, the package's fixed read-only
+arguments and a 30-second timeout. Cairn supervises the official CLI's encrypted
+in-memory cache daemon with a private home/socket per connection, shared only by
+its authorized agents. It starts lazily, expires after ten idle minutes and is
+invalidated on settings/token changes, disable/delete/disconnect or shutdown.
+Draft/disabled connection tests use a transient daemon. Each read still checks
+its grant before and after execution; Cairn keeps no plaintext secret cache.
+The CLI owns cache refresh behavior, and upstream quotas still apply. CLI error output is not
 exposed. Accounts saved before plugin API v2 were moved into instances with the same
 IDs, grants and tokens. The plugin installs its own CLI on first use, on Linux
 x86_64 or aarch64, from the official 1Password HTTPS hosts. It selects a stable

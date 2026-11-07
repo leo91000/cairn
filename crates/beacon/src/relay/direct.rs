@@ -1,7 +1,7 @@
 use super::*;
 use axum::{
     Json,
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, rejection::JsonRejection},
     response::sse::{Event, Sse},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -29,7 +29,7 @@ pub(super) struct Connection {
 #[serde(deny_unknown_fields)]
 pub(crate) struct AuthorizationRequest {
     fingerprint: String,
-    versions: Vec<u16>,
+    version: u16,
 }
 
 pub(crate) fn body_limit() -> DefaultBodyLimit {
@@ -40,7 +40,7 @@ pub(crate) async fn authorize(
     State(service): State<Service>,
     Path(installation): Path<String>,
     headers: HeaderMap,
-    Json(input): Json<AuthorizationRequest>,
+    input: Result<Json<AuthorizationRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     issue(&service, &installation, &headers, input, None).await
 }
@@ -49,7 +49,7 @@ pub(crate) async fn renew(
     State(service): State<Service>,
     Path((installation, id)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(input): Json<AuthorizationRequest>,
+    input: Result<Json<AuthorizationRequest>, JsonRejection>,
 ) -> Result<Json<Value>, ApiError> {
     issue(&service, &installation, &headers, input, Some(&id)).await
 }
@@ -58,7 +58,7 @@ async fn issue(
     service: &Service,
     installation: &str,
     headers: &HeaderMap,
-    input: AuthorizationRequest,
+    input: Result<Json<AuthorizationRequest>, JsonRejection>,
     renew: Option<&str>,
 ) -> Result<Json<Value>, ApiError> {
     let account = installations::account(service, headers, &axum::http::Method::POST).await?;
@@ -87,18 +87,33 @@ async fn issue(
     });
 
     let role = installations::role(service, installation, &account).await?;
-    if input.versions.len() > 4 || !valid_fingerprint(&input.fingerprint) {
+    let Json(input) = input.map_err(|error| {
+        if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            return ApiError::Http(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Direct authorization request too large",
+            );
+        }
+        ApiError::Http(
+            StatusCode::UPGRADE_REQUIRED,
+            "Invalid direct protocol request. Update required: update the app and Beacon.",
+        )
+    })?;
+    if !valid_fingerprint(&input.fingerprint) {
         return Err(ApiError::Http(
             StatusCode::BAD_REQUEST,
             "Invalid direct authorization request",
         ));
     }
+    if input.version != DIRECT_VERSION {
+        return Err(ApiError::Http(
+            StatusCode::UPGRADE_REQUIRED,
+            "Direct protocol mismatch. Update required: update the app and Beacon.",
+        ));
+    }
     let Some(tunnel) = tunnel else {
         return Ok(Json(json!({ "available": false })));
     };
-    if tunnel.version < DIRECT_VERSION || !input.versions.contains(&DIRECT_VERSION) {
-        return Ok(Json(json!({ "available": false })));
-    }
 
     let session_digest = digest(super::super::session_token(headers));
     let row: Option<(String, i64)> = query_as("SELECT id, floor(extract(epoch FROM expires_at))::bigint FROM web_sessions WHERE digest = $1 AND expires_at > clock_timestamp()")

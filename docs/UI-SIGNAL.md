@@ -47,10 +47,11 @@ For you header clear it without opening. The rail badge stays coral while someth
 answer and turns to the accent when work only waits to be read.
 
 Read marks live on the installation, per account (`crates/installation/src/reads.rs`): opening work
-on the phone clears it on the web, and each member reads on their own. `POST /api/reads` records
-`{ key: "chat:<id>" | "task:<id>", finishedAt }` items for the completion actually displayed,
-with monotonic marks. Older string-key requests remain accepted. Bulk actions use batches of at most
-200 items. Reading an older mission run leaves newer work unread. The conversation list, its live stream and `/api/tasks/activity`
+on the phone clears it on the web, and each member reads on their own. The generated `mark_read`
+command (`POST /api/reads`) records `{ target: { kind: "chat", chatId } | { kind: "mission", taskId },
+finishedAt }` items for the completion actually displayed, with monotonic marks. Bulk actions use
+batches of at most 200 items. A public MCP grant reads and marks for the account that authorized
+it; an execution has no account delegation, so it is refused and its listings carry no personal state. Reading an older mission run leaves newer work unread. The conversation list, its live stream and `/api/tasks/activity`
 carry `unread` and `preview` for the caller. An account's first read starts its history, so earlier
 work is not unread. Failed, stopped and paused work is never unread, nor are plugin
 conversations, which answer in their own channel; a turn that finishes while its conversation is

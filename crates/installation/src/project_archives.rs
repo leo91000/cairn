@@ -6,7 +6,9 @@ mod node;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use manager::{catalog, checkout, maintain, run_archives, serve_cached, serve_run};
+pub(crate) use manager::{
+    catalog, checkout, checkout_authorized, maintain, run_archives, serve_cached, serve_run,
+};
 pub(crate) use node::{abandon_stage, foreground_waiter, prefetch, stage};
 
 use crate::error::{Error, Result};

@@ -1,7 +1,7 @@
 //! The VM-local MCP origin. A guest loopback port is relayed over vsock to the
 //! run's MCP channel on the host, so agents never need the manager's network.
 use super::{listener, wire};
-use std::path::PathBuf;
+use std::{os::fd::AsRawFd, path::PathBuf};
 use tokio::{net::UnixListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -68,6 +68,17 @@ pub(super) fn relay(
             stop,
         )
         .await;
+
+        // A concurrently forked child can retain the listener until exec.
+        // Shut down the socket itself before completing, so dropping only our
+        // descriptor cannot leave an ended attempt accepting connections.
+        // SAFETY: the listener owns this descriptor throughout the syscall;
+        // shutdown does not close it or transfer ownership.
+        if unsafe { libc::shutdown(listener.as_raw_fd(), libc::SHUT_RDWR) } != 0 {
+            let error = std::io::Error::last_os_error();
+            tracing::warn!(%error, "VM MCP listener shutdown failed");
+        }
+
         if let Err(error) = result {
             tracing::warn!(%error, "VM MCP relay stopped");
         }
@@ -130,5 +141,45 @@ mod tests {
         assert!(reply.is_empty());
         stop.cancel();
         relay.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopping_a_relay_disables_inherited_listener_descriptors() {
+        let directory = tempfile::tempdir().unwrap();
+        let guest = directory.path().join("v.sock_5202");
+        let listener = std::os::unix::net::UnixListener::bind(&guest).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        // A concurrently forked child retains this descriptor until exec,
+        // even though the socket has close-on-exec set.
+        let inherited = listener.try_clone().unwrap();
+        let stop = CancellationToken::new();
+        let relay = relay(
+            UnixListener::from_std(listener).unwrap(),
+            None,
+            stop.clone(),
+        );
+
+        stop.cancel();
+        relay.await.unwrap();
+
+        assert!(tokio::net::UnixStream::connect(&guest).await.is_err());
+        drop(inherited);
+    }
+
+    #[tokio::test]
+    async fn stopping_a_relay_preserves_a_rebound_socket() {
+        let directory = tempfile::tempdir().unwrap();
+        let guest = directory.path().join("v.sock_5202");
+        let stop = CancellationToken::new();
+        let relay = relay(UnixListener::bind(&guest).unwrap(), None, stop.clone());
+        std::fs::remove_file(&guest).unwrap();
+        let resumed = UnixListener::bind(&guest).unwrap();
+
+        stop.cancel();
+        relay.await.unwrap();
+
+        let agent = tokio::net::UnixStream::connect(&guest).await.unwrap();
+        let _ = resumed.accept().await.unwrap();
+        drop(agent);
     }
 }

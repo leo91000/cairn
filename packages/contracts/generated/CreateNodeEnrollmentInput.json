@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "backend": {
+      "default": "firecracker",
+      "pattern": "^(firecracker|native)$",
+      "type": "string"
+    },
+    "managerUrl": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "name": {
+      "maxLength": 100,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "name"
+  ],
+  "title": "CreateNodeEnrollmentInput",
+  "type": "object"
+}

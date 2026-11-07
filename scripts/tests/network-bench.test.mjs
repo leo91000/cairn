@@ -1,6 +1,350 @@
 import { execFileSync } from 'node:child_process'
 import { it } from 'vitest'
 
+it('android process failure evidence keeps crash categories and frames without raw messages or credentials', () => {
+  execFileSync('python3', ['-B', '-c', `
+import importlib.util
+import json
+spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+bench = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bench)
+raw = '''E/AndroidRuntime(123): FATAL EXCEPTION: main
+E/AndroidRuntime(123): Process: build.cairn.app, PID: 123
+E/AndroidRuntime(123): java.lang.IllegalStateException: private-fixture-cookie body=secret
+E/AndroidRuntime(123): private.payload.Value
+E/AndroidRuntime(123):     at org.webrtc.PeerConnection.dispose(PeerConnection.java:546)
+E/AndroidRuntime(123): Caused by: java.lang.ExceptionInInitializerError: private-fixture-cookie
+E/AndroidRuntime(123):     at org.webrtc.PeerConnection.<clinit>(PeerConnection.java:44)
+E/AndroidRuntime(123):     at org.webrtc.PeerConnection.<init>(PeerConnection.java:45)
+E/AndroidRuntime(123): Caused by: java.lang.Throwable: private-fixture-cookie
+E/AndroidRuntime(123): Caused by: build.cairn.app.data.DirectRequestTimeout: private-fixture-cookie
+E/AndroidRuntime(123): Caused by: private.payload.Secret: private-fixture-cookie
+E/AndroidRuntime(123):     at private.payload.Value.method(PrivateFile.java:42)
+F/DEBUG(321): Cmdline: build.cairn.app
+F/DEBUG(321): signal 6 (SIGABRT), code -1 (SI_QUEUE)
+F/DEBUG(321): Abort message: 'private-fixture-cookie SDP=secret'
+F/DEBUG(321): #00 pc 0000000000052450  /apex/com.android.runtime/lib64/bionic/libc.so (abort+152)
+F/DEBUG(321): #01 pc 0000000000052451  /data/app/private-path/base.apk (offset 0x12000) (webrtc::Dispose()+42) (BuildId: abcd)
+F/DEBUG(321): #02 pc 0000000000052452  /data/private/private-module.so (private-symbol+42)
+F/DEBUG(321): signal 9 (SIGPRIVATE), code 0
+'''
+exit_info = '''ApplicationExitInfo #0:
+ process=build.cairn.app reason=5 (APP CRASH(NATIVE)) subreason=0 (UNKNOWN) status=6
+ description=private-fixture-cookie
+ApplicationExitInfo #1:
+ process=build.cairn.app
+ reason=4 (APP CRASH(EXCEPTION))
+ subreason=0 (UNKNOWN)
+ status=0
+'''
+evidence = bench.android_crash_summary(raw, exit_info)
+assert evidence['exceptions'] == ['java.lang.IllegalStateException', 'java.lang.ExceptionInInitializerError', 'java.lang.Throwable', 'build.cairn.app.data.DirectRequestTimeout', 'other'], evidence
+assert evidence['javaFrames'] == [{'source': 'PeerConnection.java', 'line': 546}, {'source': 'PeerConnection.java', 'line': 44}, {'source': 'PeerConnection.java', 'line': 45}, {'source': 'other', 'line': 42}], evidence
+assert evidence['signals'] == ['SIGABRT', 'other'], evidence
+assert evidence['nativeFrames'] == [{'pc': 0x52450, 'library': 'libc.so'}, {'pc': 0x52451, 'library': 'base.apk'}, {'pc': 0x52452, 'library': 'other'}], evidence
+assert evidence['exitReasons'] == [{'reason': 5, 'category': 'CRASH_NATIVE', 'status': 6}, {'reason': 4, 'category': 'CRASH', 'status': 0}], evidence
+encoded = json.dumps(evidence)
+assert 'private' not in encoded and 'secret' not in encoded and '/apex/' not in encoded and 'Dispose' not in encoded, encoded
+bounded = bench.android_crash_summary(raw * 1000, exit_info * 1000)
+assert len(bounded['javaFrames']) <= 32 and len(bounded['nativeFrames']) <= 32
+assert len(bounded['exitReasons']) <= 8
+`], { stdio: 'pipe' })
+})
+
+it('android instrumentation keeps the first process crash and collects diagnostics without masking ADB failures', () => {
+  execFileSync('python3', ['-B', '-c', `
+import importlib.util
+import json
+import subprocess
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+bench = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bench)
+first = 'INSTRUMENTATION_RESULT: shortMsg=Process crashed.\\nINSTRUMENTATION_CODE: 0\\n'
+calls = []
+def adb(*args, **options):
+    calls.append(args)
+    if args == ('logcat', '-b', 'crash', '-b', 'main', '-c'):
+        assert options.get('timeout') == 5, options
+    if args[:3] == ('shell', 'am', 'instrument'):
+        return SimpleNamespace(stdout=first)
+    if args[:3] == ('logcat', '-b', 'crash') and '-d' in args:
+        assert '-m' in args and '-t' not in args, args
+        return SimpleNamespace(stdout='E/AndroidRuntime(1): Process: build.cairn.app, PID: 1\\nE/AndroidRuntime(1): java.lang.IllegalStateException: secret')
+    if args[:3] == ('logcat', '-b', 'main'):
+        assert args == ('logcat', '-b', 'main', '-d', '-m', '256', '-v', 'brief', 'rtc:E', '*:F'), args
+        assert options.get('timeout') == 5, options
+        return SimpleNamespace(stdout='E/rtc(1): # Fatal error in: ../../rtc_base/thread.cc, line 503')
+    if 'exit-info' in args:
+        raise subprocess.TimeoutExpired('adb', 5)
+    return SimpleNamespace(stdout='')
+with tempfile.TemporaryDirectory() as directory:
+    output = Path(directory) / 'same-lan.json'
+    try:
+        bench.android_instrumentation(adb, 'same-lan', output)
+    except RuntimeError as error:
+        assert str(error) == 'Native Android transport scenario failed; see instrumentation result'
+    else:
+        raise AssertionError('Process crash must fail the qualification')
+    assert output.with_suffix('.instrumentation.txt').read_text() == first
+    evidence = json.loads(output.with_suffix('.crash.json').read_text())
+    assert evidence['exceptions'] == ['java.lang.IllegalStateException'], evidence
+    assert evidence['nativeAssertions'] == [{'source': 'thread.cc', 'line': 503}], evidence
+    assert evidence['collectionErrors'] == ['exit-info-unavailable'], evidence
+    assert 'secret' not in json.dumps(evidence)
+    assert calls[0] == ('logcat', '-b', 'crash', '-b', 'main', '-c'), calls
+    def offline(*args, **options):
+        raise subprocess.CalledProcessError(1, ['adb'], stderr='secret')
+    try:
+        bench.android_instrumentation(offline, 'same-lan', output)
+    except subprocess.CalledProcessError:
+        pass
+    else:
+        raise AssertionError('ADB failure must propagate')
+    evidence = json.loads(output.with_suffix('.crash.json').read_text())
+    assert evidence['collectionErrors'] == ['crash-log-unavailable', 'native-log-unavailable', 'exit-info-unavailable'], evidence
+`], { stdio: 'pipe' })
+})
+
+it('android crash evidence preserves the attribution and first frames of a long native dump', () => {
+  execFileSync('python3', ['-B', '-c', `
+import importlib.util
+spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+bench = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bench)
+header = '''F/DEBUG(321): Cmdline: build.cairn.app
+F/DEBUG(321): signal 6 (SIGABRT), code -1 (SI_QUEUE)
+F/DEBUG(321): #00 pc 0000000000052450 /data/app/private/libjingle_peerconnection_so.so (private-symbol)
+'''
+raw = header + 'F/DEBUG(321): private-memory-map-padding\\n' * 2200
+assert len(raw) > 65536
+evidence = bench.android_crash_summary(raw, '')
+assert evidence['targetProcessObserved'], evidence
+assert evidence['signals'] == ['SIGABRT'], evidence
+assert evidence['nativeFrames'] == [{'pc': 0x52450, 'library': 'libjingle_peerconnection_so.so'}], evidence
+import json
+assert 'private' not in json.dumps(evidence), evidence
+`], { stdio: 'pipe' })
+})
+
+it('android native assertion evidence uses only the crashed process and closed source metadata', () => {
+  execFileSync('python3', ['-B', '-c', `
+import importlib.util
+import json
+spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+bench = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bench)
+crash = '''F/DEBUG(321): Cmdline: build.cairn.app
+F/DEBUG(321): pid: 123, tid: 124, name: private-thread >>> build.cairn.app <<<
+F/DEBUG(321): signal 6 (SIGABRT), code -1 (SI_QUEUE)
+'''
+rtc = '''E/rtc(123): # Fatal error in: ../../rtc_base/thread.cc, line 503
+E/rtc(123): # Check failed: private-fixture-cookie
+E/rtc(123): # Fatal error in: ../../private/private-file.cc, line 42
+E/rtc(321): # Fatal error in: ../../sdk/android/src/jni/jni_helpers.cc, line 23
+E/rtc(999): # Fatal error in: ../../rtc_base/checks.cc, line 72
+'''
+evidence = bench.android_crash_summary(crash, '', rtc)
+assert evidence['nativeAssertions'] == [{'source': 'thread.cc', 'line': 503}, {'source': 'other', 'line': 42}], evidence
+assert 'private' not in json.dumps(evidence) and 'Check failed' not in json.dumps(evidence), evidence
+assert bench.android_crash_summary('', '', rtc)['nativeAssertions'] == []
+assert bench.android_crash_summary('F/DEBUG(321): Cmdline: build.cairn.app', '', rtc)['nativeAssertions'] == []
+assert len(bench.android_crash_summary(crash, '', ''.join('E/rtc(123): # Fatal error in: thread.cc, line %d\\n' % value for value in range(100)))['nativeAssertions']) == 8
+`], { stdio: 'pipe' })
+})
+
+it('android ART abort evidence retains only fixed categories, numeric opcodes and bounded build IDs', () => {
+  execFileSync('python3', ['-B', '-c', `
+import importlib.util
+import json
+spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+bench = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bench)
+crash = '''F/DEBUG(321): Cmdline: build.cairn.app
+F/DEBUG(321): pid: 123, tid: 124, name: private-thread >>> build.cairn.app <<<
+F/DEBUG(321): Abort message: 'Unexpected instruction: unused-73 private-fixture-cookie'
+F/DEBUG(321): #00 pc 00000000005fd29a /apex/com.android.art/lib64/libart.so (private-symbol) (BuildId: 108A321DC93C20580E74B855C407E975)
+F/DEBUG(321): #01 pc 00000000005fd29b /apex/com.android.art/lib64/libart.so (BuildId: private-fixture-cookie)
+F/DEBUG(321): #02 pc 00000000005fd29c /private/private-module.so (BuildId: aaaaaaaaaaaaaaaa)
+F/art(123): interpreter_common.cc:201] Unexpected instruction: unused-79
+F/art(999): Unexpected instruction: unused-ff
+'''
+main = '''F/build.cairn.app(123): interpreter_common.cc:201] Unexpected instruction: unused-7a private-fixture-cookie
+F/art(123): JNI DETECTED ERROR IN APPLICATION: private-fixture-cookie
+F/art(999): Unexpected instruction: unused-ff
+E/private-tag(123): Unexpected instruction: unused-ff
+'''
+evidence = bench.android_crash_summary(crash, '', main)
+assert evidence['abortCategories'] == ['ART_UNEXPECTED_INSTRUCTION', 'JNI_ERROR'], evidence
+assert evidence['unexpectedOpcodes'] == [0x73, 0x79, 0x7a], evidence
+assert evidence['nativeFrames'] == [{'pc': 0x5fd29a, 'library': 'libart.so', 'buildId': '108a321dc93c20580e74b855c407e975'}, {'pc': 0x5fd29b, 'library': 'libart.so'}, {'pc': 0x5fd29c, 'library': 'other'}], evidence
+assert 'private' not in json.dumps(evidence), evidence
+assert bench.android_crash_summary('', '', main)['abortCategories'] == []
+header = crash.split('F/DEBUG(321): Abort message', 1)[0]
+large_main = 'F/art(123): Unexpected instruction: unused-3e\\n' + 'F/art(123): ' + 'private-fixture-cookie' * 10000
+bounded = bench.android_crash_summary(header, '', large_main)
+assert bounded['abortCategories'] == ['ART_UNEXPECTED_INSTRUCTION'], bounded
+assert bounded['unexpectedOpcodes'] == [0x3e], bounded
+assert 'private' not in json.dumps(bounded), bounded
+`], { stdio: 'pipe' })
+})
+
+it('android runtime fatal evidence keeps approved source coordinates without assertion text', () => {
+  execFileSync('python3', ['-B', '-c', `
+import importlib.util
+import json
+spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+bench = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bench)
+crash = '''F/DEBUG(321): Cmdline: build.cairn.app
+F/DEBUG(321): pid: 123, tid: 124, name: private-thread >>> build.cairn.app <<<
+'''
+main = '''F/build.cairn.app(123): art/runtime/thread.cc:1234] private-fixture-cookie
+F/art(123): interpreter_common.cc:201] Unexpected instruction: private-fixture-cookie
+F/art(123): thread.cc:1234] private-fixture-cookie
+F/art(999): runtime.cc:999] private-fixture-cookie
+E/art(123): runtime.cc:998] private-fixture-cookie
+F/art(123): private-file.cc:42] private-fixture-cookie
+F/art(123): runtime.cc:12345678901] private-fixture-cookie
+F/art(123): private-prefix thread.cc:123] private-fixture-cookie
+'''
+evidence = bench.android_crash_summary(crash, '', main)
+assert evidence['runtimeAssertions'] == [{'source': 'thread.cc', 'line': 1234}, {'source': 'interpreter_common.cc', 'line': 201}], evidence
+assert 'private' not in json.dumps(evidence), evidence
+assert bench.android_crash_summary('', '', main)['runtimeAssertions'] == []
+many = ''.join('F/art(123): thread.cc:%d] private-fixture-cookie\\n' % line for line in range(100))
+assert len(bench.android_crash_summary(crash, '', many)['runtimeAssertions']) == 8
+`], { stdio: 'pipe' })
+})
+
+it('diagnostic artifact write failures never replace the initial instrumentation failure', () => {
+  execFileSync('python3', ['-B', '-c', `
+import importlib.util
+import subprocess
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+bench = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bench)
+primary = subprocess.TimeoutExpired('instrumentation', 360)
+def adb(*args, **options):
+    if args[:3] == ('shell', 'am', 'instrument'):
+        raise primary
+    return SimpleNamespace(stdout='')
+original_write = Path.write_text
+def write(self, *args, **options):
+    if self.name.endswith('.crash.json'):
+        raise OSError('synthetic evidence disk full')
+    return original_write(self, *args, **options)
+with tempfile.TemporaryDirectory() as directory, patch.object(Path, 'write_text', write):
+    output = Path(directory) / 'same-lan.json'
+    try:
+        bench.android_instrumentation(adb, 'same-lan', output)
+    except BaseException as error:
+        assert error is primary, type(error)
+    else:
+        raise AssertionError('The original timeout must propagate')
+    def crashed(*args, **options):
+        return SimpleNamespace(stdout='shortMsg=Process crashed.')
+    try:
+        bench.android_instrumentation(crashed, 'same-lan', output)
+    except RuntimeError as error:
+        assert str(error) == 'Native Android transport scenario failed; see instrumentation result'
+    else:
+        raise AssertionError('The original process crash must fail the qualification')
+    storage_error = OSError('synthetic evidence disk full')
+    with patch.object(Path, 'write_text', side_effect=storage_error), patch.object(bench, 'android_failure_evidence', wraps=bench.android_failure_evidence) as collect:
+        try:
+            bench.android_instrumentation(crashed, 'same-lan', output)
+        except RuntimeError as error:
+            assert str(error) == 'Native Android transport scenario failed; see instrumentation result'
+        else:
+            raise AssertionError('Transcript failure must not replace the process crash')
+        collect.assert_called_once()
+        def passed(*args, **options):
+            return SimpleNamespace(stdout='OK (1 test)')
+        try:
+            bench.android_instrumentation(passed, 'same-lan', output)
+        except OSError as error:
+            assert error is storage_error
+        else:
+            raise AssertionError('Missing success evidence must still fail qualification')
+        collect.assert_called_once()
+`], { stdio: 'pipe' })
+})
+
+it('android cleanup remains bounded, attempts every resource and preserves the primary failure', () => {
+  execFileSync('python3', ['-B', '-c', `
+import importlib.util
+import subprocess
+spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+bench = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bench)
+calls = []
+cleanup_error = subprocess.TimeoutExpired('adb cleanup', 5)
+def adb(*args, **options):
+    calls.append(args)
+    assert options.get('timeout') == 5, options
+    raise cleanup_error
+primary = AssertionError('original instrumentation failure')
+try:
+    try:
+        raise primary
+    finally:
+        bench.android_cleanup(adb, failed=True)
+except AssertionError as error:
+    assert error is primary
+assert len(calls) == 3, calls
+calls.clear()
+try:
+    bench.android_cleanup(adb, failed=False)
+except subprocess.TimeoutExpired as error:
+    assert error is cleanup_error
+else:
+    raise AssertionError('Cleanup failure must fail an otherwise successful qualification')
+assert len(calls) == 3, calls
+`], { stdio: 'pipe' })
+})
+
+it('malformed native log bytes do not replace the instrumentation failure or skip OS exit evidence', () => {
+  execFileSync('python3', ['-B', '-c', `
+import importlib.util
+import json
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location("network_bench", "tests/network-bench.py")
+bench = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bench)
+primary = subprocess.TimeoutExpired('instrumentation', 360)
+def adb(*args, **options):
+    if args[:3] == ('shell', 'am', 'instrument'):
+        raise primary
+    if args[:3] == ('logcat', '-b', 'crash') and '-d' in args:
+        return subprocess.run([sys.executable, '-c', 'import sys; sys.stdout.buffer.write(bytes([255]))'], capture_output=True, check=True, **options)
+    if 'exit-info' in args:
+        return SimpleNamespace(stdout='ApplicationExitInfo #0: reason=5 (APP CRASH(NATIVE)) subreason=0 (UNKNOWN) status=6')
+    return SimpleNamespace(stdout='')
+with tempfile.TemporaryDirectory() as directory:
+    output = Path(directory) / 'same-lan.json'
+    try:
+        bench.android_instrumentation(adb, 'same-lan', output)
+    except BaseException as error:
+        assert error is primary, type(error)
+    else:
+        raise AssertionError('Malformed diagnostics must not replace the original failure')
+    evidence = json.loads(output.with_suffix('.crash.json').read_text())
+    assert evidence['exitReasons'] == [{'reason': 5, 'category': 'CRASH_NATIVE', 'status': 6}], evidence
+    assert evidence['collectionErrors'] == [], evidence
+`], { stdio: 'pipe' })
+})
+
 it('network bench stops its writers before removing their temporary directory, including on failure', () => {
   execFileSync('python3', ['-B', '-c', `
 import importlib.util

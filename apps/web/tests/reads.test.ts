@@ -35,7 +35,8 @@ it('sends the observed completion and batches bulk reads within the API limit', 
   await markRead(items)
   const batches = mocked.api.mock.calls.map(([, options]) => JSON.parse(options.body).items)
   expect(batches.map(batch => batch.length)).toEqual([200, 200, 1])
-  expect(batches[0][0]).toEqual({ key: 'chat:0', finishedAt: 1 })
+  expect(batches[0][0]).toEqual({ target: { kind: 'chat', chatId: '0' }, finishedAt: 1 })
+  expect(mocked.api.mock.calls[0][0]).toBe('/reads')
   expect(Object.keys(localReads)).toHaveLength(401)
 })
 

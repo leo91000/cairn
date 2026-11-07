@@ -53,31 +53,31 @@ if not parsed.hostname or not secure_transport or not origin_only:
 print(value.rstrip('/'))
 PY
 )
-[[ $(id -u) == 0 ]] || { echo 'Run this installer with sudo.' >&2; exit 1; }
-[[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || { echo 'Linux x86-64 is required.' >&2; exit 1; }
+fail() { echo "Cairn node installer: $*" >&2; exit 1; }
+[[ $(id -u) == 0 ]] || fail 'Run this installer with sudo.'
+[[ $(uname -s) == Linux && $(uname -m) == x86_64 ]] || fail 'Linux x86-64 is required.'
 for command in docker python3 curl systemctl; do
-  command -v "$command" >/dev/null || { echo "Install $command before installing the node." >&2; exit 1; }
+  command -v "$command" >/dev/null || fail "Install $command before installing the node."
 done
-[[ -c /dev/kvm && -c /dev/net/tun ]] || { echo 'KVM and /dev/net/tun must be enabled.' >&2; exit 1; }
-[[ ! -f /var/lib/cairn-node/data/node/identity.json ]] || { echo 'Node already installed; use systemctl restart cairn-node to restart it.' >&2; exit 1; }
-install -d -m 0700 /var/lib/cairn-node /var/lib/cairn-node/data /var/lib/cairn-node/state
-CAIRN_FREE_KB=$(df -Pk /var/lib/cairn-node | awk 'NR==2 {print $4}')
-[[ "$CAIRN_FREE_KB" -ge 16777216 ]] || { echo 'At least 16 GiB free is required for the runtime and recovery staging.' >&2; exit 1; }
-docker info >/dev/null
-ensure_compressed_swap
+[[ -c /dev/kvm ]] || fail 'KVM is missing. Enable hardware virtualization in the firmware and load the kvm module.'
+[[ -c /dev/net/tun ]] || fail 'TUN is missing. Load the tun module (sudo modprobe tun).'
+docker info >/dev/null 2>&1 || fail 'Docker is unavailable. Install Docker Engine and start its daemon.'
 install -d -m 0755 /opt/cairn-node
 CAIRN_INSTALL_TEMP=$(mktemp /opt/cairn-node/install.XXXXXX)
 trap 'rm -f "$CAIRN_INSTALL_TEMP"' EXIT
-curl --fail --silent --show-error --proto '=https,http' --max-time 30 "${CAIRN_MASTER%/}/internal/nodes/host.py" > "$CAIRN_INSTALL_TEMP"
-python3 -m py_compile "$CAIRN_INSTALL_TEMP"
-install -m 0755 "$CAIRN_INSTALL_TEMP" /opt/cairn-node/host.py
-python3 /opt/cairn-node/host.py install "$CAIRN_MASTER"
-cat > /etc/systemd/system/cairn-node.service <<'UNIT'
+download_supervisor() {
+  curl --fail --silent --show-error --proto '=https,http' --max-time 30 "${CAIRN_MASTER%/}/internal/nodes/host.py" > "$CAIRN_INSTALL_TEMP" \
+    || fail "Cannot download the node supervisor from $CAIRN_MASTER."
+  python3 -m py_compile "$CAIRN_INSTALL_TEMP"
+  install -m 0755 "$CAIRN_INSTALL_TEMP" /opt/cairn-node/host.py
+}
+write_unit() {
+  cat > /etc/systemd/system/cairn-node.service <<'UNIT'
 [Unit]
 Description=Cairn trusted execution node
 Requires=docker.service
-After=network-online.target docker.service
-Wants=network-online.target
+After=network-online.target docker.service cairn-node-gateway.service
+Wants=network-online.target cairn-node-gateway.service
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /opt/cairn-node/host.py run
@@ -88,6 +88,23 @@ KillMode=mixed
 [Install]
 WantedBy=multi-user.target
 UNIT
-systemctl daemon-reload
+  systemctl daemon-reload
+}
+# A rerun refreshes the supervisor without re-enrolling. Restarting it would stop
+# running VMs, so it only starts a stopped service.
+if [[ -f /var/lib/cairn-node/data/node/identity.json ]]; then
+  download_supervisor
+  write_unit
+  systemctl enable --now cairn-node.service
+  echo 'Node already enrolled; its supervisor was refreshed. Restart cairn-node when it is idle to load it: sudo systemctl restart cairn-node'
+  exit 0
+fi
+install -d -m 0700 /var/lib/cairn-node /var/lib/cairn-node/data /var/lib/cairn-node/state
+CAIRN_FREE_KB=$(df -Pk /var/lib/cairn-node | awk 'NR==2 {print $4}')
+[[ "$CAIRN_FREE_KB" -ge 16777216 ]] || fail 'At least 16 GiB free disk space is required for the runtime and recovery staging.'
+ensure_compressed_swap
+download_supervisor
+python3 /opt/cairn-node/host.py install "$CAIRN_MASTER"
+write_unit
 systemctl enable --now cairn-node.service
 echo 'Node installed. Open Cairn → Nodes to choose which agents may use it and to adjust its resource ceilings.'

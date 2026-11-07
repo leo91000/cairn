@@ -67,6 +67,12 @@ test('typing $ suggests skills, inserts one with the keyboard and invokes it for
   await expect(sent.getByTitle('Skill review')).toHaveText('$review')
   await sent.screenshot({ path: test.info().outputPath('skill-message-mobile.png'), animations: 'disabled' })
   await expect(sent).not.toContainText('invoked_skills')
+  // Reopening the menu refreshes server usage without reloading the page.
+  await composer.fill('$')
+  await expect(menu.getByRole('option').first()).toContainText('$review')
+  await expect(menu.getByRole('option').first()).toHaveAttribute('aria-selected', 'true')
+  await composer.fill('$deploy')
+  await expect(menu.getByRole('option').first()).toContainText('$deploy-app')
 })
 
 test('an empty skill catalog explains why $ has no suggestions without trapping the keyboard', async ({ page, workspace, hasTouch }) => {

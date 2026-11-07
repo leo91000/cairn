@@ -1,0 +1,193 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "McpTool": {
+      "description": "Public projection of a third-party tool. Schemas remain opaque JSON.",
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "inputSchema": true,
+        "name": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "description",
+        "inputSchema"
+      ],
+      "type": "object"
+    },
+    "McpView": {
+      "description": "Current connection state. Tool descriptors are third-party protocol JSON.",
+      "properties": {
+        "allowPrivateNetwork": {
+          "default": false,
+          "type": "boolean"
+        },
+        "args": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "auth": {
+          "default": "none",
+          "pattern": "^(none|bearer|oauth)$",
+          "type": "string"
+        },
+        "callbackUrl": {
+          "default": "",
+          "type": "string"
+        },
+        "checkedAt": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "clientId": {
+          "default": "",
+          "type": "string"
+        },
+        "command": {
+          "default": "",
+          "type": "string"
+        },
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "enabled": {
+          "default": false,
+          "type": "boolean"
+        },
+        "enabledTools": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "envKeys": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "error": {
+          "default": "",
+          "type": "string"
+        },
+        "hasClientSecret": {
+          "default": false,
+          "type": "boolean"
+        },
+        "hasToken": {
+          "default": false,
+          "type": "boolean"
+        },
+        "id": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "revision": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scopes": {
+          "default": "",
+          "type": "string"
+        },
+        "state": {
+          "default": "untested",
+          "pattern": "^(untested|connected|needs-auth|error)$",
+          "type": "string"
+        },
+        "tools": {
+          "default": [],
+          "description": "Tool catalog as returned by the server.",
+          "items": {
+            "$ref": "#/definitions/McpTool"
+          },
+          "type": "array"
+        },
+        "transport": {
+          "default": "http",
+          "pattern": "^(http|stdio)$",
+          "type": "string"
+        },
+        "url": {
+          "default": "",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "transport",
+        "url",
+        "command",
+        "args",
+        "auth",
+        "clientId",
+        "scopes",
+        "allowPrivateNetwork",
+        "enabled",
+        "enabledTools",
+        "createdAt",
+        "revision",
+        "state",
+        "tools",
+        "checkedAt",
+        "error",
+        "hasToken",
+        "hasClientSecret",
+        "envKeys",
+        "callbackUrl"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "mcps": {
+      "items": {
+        "$ref": "#/definitions/McpView"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "mcps"
+  ],
+  "title": "ListMcpsOutput",
+  "type": "object"
+}

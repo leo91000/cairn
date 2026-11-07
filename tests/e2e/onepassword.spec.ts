@@ -102,10 +102,10 @@ test('1Password service accounts are plugin instances with private tokens, grant
   await expect(dialog.getByRole('region', { name: 'Agents' })).toContainText('Authorized agents: Main agent')
   await expect(dialog.getByRole('link', { name: 'Manage on agent pages ›' })).toBeVisible()
   await expect(dialog.getByRole('checkbox', { name: 'Main agent', exact: true })).toHaveCount(0)
-  const editing = page.waitForRequest(request => request.method() === 'PUT' && request.url().includes('/plugins/onepassword/connections/'))
+  const editing = page.waitForRequest(request => request.url().endsWith('/plugins/manage') && request.postDataJSON()?.kind === 'save' && request.postDataJSON()?.pluginId === 'onepassword')
   await dialog.getByRole('checkbox', { name: 'Active', exact: true }).uncheck()
   await dialog.getByRole('button', { name: 'Save service account' }).click()
-  expect((await editing).postDataJSON()).not.toHaveProperty('agentIds')
+  expect((await editing).postDataJSON().data).not.toHaveProperty('agentIds')
   await expect(account.getByRole('status').filter({ hasText: 'Paused' })).toBeVisible()
   saved = await accounts()
   // Saving the instance keeps the grants made on agent pages.

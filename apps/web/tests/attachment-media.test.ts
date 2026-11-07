@@ -39,6 +39,8 @@ it('retries a temporary preview failure after expiry even while its card remains
   const attachment = {
     id: 'temporary',
     chatId: 'chat',
+    digest: '',
+    createdAt: 0,
     name: 'brief.pdf',
     size: 10,
     kind: 'file' as const,
@@ -62,6 +64,8 @@ it('retries temporary summary failures but keeps unsupported previews missing', 
   const attachment = {
     id: 'summary',
     chatId: 'chat',
+    digest: '',
+    createdAt: 0,
     name: 'notes.txt',
     size: 10,
     kind: 'file' as const,
@@ -85,6 +89,8 @@ it('revokes a pending preview after it is evicted and finishes loading', async (
   const attachment = {
     id: 'evicted-pending',
     chatId: 'chat',
+    digest: '',
+    createdAt: 0,
     name: 'image.png',
     size: 10,
     kind: 'image' as const,
@@ -111,6 +117,8 @@ it('downloads full originals through the binary stream route', async () => {
   const attachment = {
     id: 'original',
     chatId: 'chat',
+    digest: '',
+    createdAt: 0,
     name: 'archive.zip',
     size: 10 * 1024 * 1024,
     kind: 'file' as const,
@@ -124,28 +132,12 @@ it('downloads full originals through the binary stream route', async () => {
   expect(attachmentUrl(attachment)).toBe('/chats/chat/attachments/original')
 })
 
-it.each([404, 501])('reads originals from supported older installations when streaming returns %s', async (status) => {
-  const attachment = {
-    id: `legacy-${status}`,
-    chatId: 'chat',
-    name: 'notes.txt',
-    size: 6,
-    kind: 'file' as const,
-    mediaType: 'text/plain',
-  }
-  blob.mockRejectedValueOnce(new ApiError('Not supported', status))
-    .mockResolvedValueOnce(new Blob(['legacy'], { type: 'text/plain' }))
-  expect(await (await attachmentFile(attachment)).text()).toBe('legacy')
-  expect(blob.mock.calls.map(([path]) => path)).toEqual([
-    `/chats/chat/attachments/legacy-${status}/stream`,
-    `/chats/chat/attachments/legacy-${status}`,
-  ])
-})
-
-it('does not retry a legacy download in a newly selected installation', async () => {
+it('does not retry a failed download in a newly selected installation', async () => {
   const attachment = {
     id: 'switched-download',
     chatId: 'chat',
+    digest: '',
+    createdAt: 0,
     name: 'notes.txt',
     size: 6,
     kind: 'file' as const,
@@ -164,6 +156,8 @@ it('isolates previews and summaries between installations, accounts and sessions
   const attachment = {
     id: 'restored-id',
     chatId: 'restored-chat',
+    digest: '',
+    createdAt: 0,
     name: 'brief.pdf',
     size: 100,
     kind: 'file' as const,
@@ -194,6 +188,8 @@ it('types downloaded SVGs for image decoding without changing the server respons
   const attachment = {
     id: 'vector',
     chatId: 'chat',
+    digest: '',
+    createdAt: 0,
     name: 'logo.svg',
     size: 100,
     kind: 'file' as const,

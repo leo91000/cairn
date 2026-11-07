@@ -2,6 +2,9 @@
 //! A caller closes only after fencing its VMM. Drop stops I/O but leaves the
 //! registration for verified startup cleanup; it never guesses that a VM died.
 mod io;
+mod namespace;
+
+pub(crate) use namespace::BackendNamespace;
 
 use super::Disk;
 use libublk::{UblkError, UblkFlags, ctrl::UblkCtrlBuilder};
@@ -432,7 +435,32 @@ pub struct MountedDisk {
     thread: Option<JoinHandle<stdio::Result<()>>>,
 }
 
+pub(crate) fn supports_growth() -> bool {
+    libublk::ctrl::UblkCtrl::get_features().unwrap_or_default()
+        & u64::from(libublk::sys::UBLK_F_UPDATE_SIZE)
+        != 0
+}
+
 impl MountedDisk {
+    /// Serialize with close/abort through the handle's lifecycle mutex. Some
+    /// kernels cannot safely accept UPDATE_SIZE concurrently with STOP_DEV.
+    pub(crate) fn grow(&mut self, size: u64) -> stdio::Result<()> {
+        if self.stopped.load(Ordering::Acquire) || self.failed() || !supports_growth() {
+            return Err(stdio::Error::other("Live ublk growth is unavailable"));
+        }
+        let control = UblkCtrlBuilder::default()
+            .id(self.record.device_id()?)
+            .build()
+            .map_err(error)?;
+        if control.dev_info().ublksrv_flags != self.record.token
+            || self.record.boot_id != boot_id()?
+        {
+            return Err(stdio::Error::other("ublk ownership changed"));
+        }
+        control.update_size(size).map_err(error)?;
+        Ok(())
+    }
+
     pub fn failed(&self) -> bool {
         self.failed.load(Ordering::Acquire)
             || self.thread.as_ref().is_some_and(JoinHandle::is_finished)
@@ -499,34 +527,25 @@ pub fn mount_disk(
     jail: &Path,
     uid: u32,
 ) -> stdio::Result<MountedDisk> {
-    mount_named_disk(disk, state, jail, uid, "disk.blk")
-}
-
-pub(crate) fn mount_named_disk(
-    disk: Arc<dyn Disk>,
-    state: &Path,
-    jail: &Path,
-    uid: u32,
-    name: &str,
-) -> stdio::Result<MountedDisk> {
-    mount_named(disk, state, jail, uid, name, None)
+    mount(disk, state, jail, uid, None)
 }
 
 /// Host consumers must not share the backend's mount namespace: namespace exit
 /// could otherwise flush a filesystem through the very backend that is exiting.
-/// The backend unshares before the caller mounts its new block device.
-/// Each attachment `name` is one filesystem: a whole native disk, or a view of
-/// a paired VM disk.
-pub(crate) fn mount_host_named(
+/// Every backend enters the clean startup namespace before adding its device;
+/// it never copies an existing or concurrently closing host consumer.
+pub(crate) fn mount_host_disk(
     disk: Arc<dyn Disk>,
     state: &Path,
     jail: &Path,
-    inherited_mounts: Vec<PathBuf>,
-    name: &str,
+    namespace: &BackendNamespace,
+    directory: &Path,
 ) -> stdio::Result<MountedDisk> {
-    mount_named(disk, state, jail, 0, name, Some(inherited_mounts))
+    let entry = namespace.prepare(state, &[state, directory, &directory.join("lazy"), jail])?;
+    mount(disk, state, jail, 0, Some(entry))
 }
 
+#[cfg(test)]
 pub(crate) fn private_mount_namespace(inherited_mounts: &[PathBuf]) -> stdio::Result<()> {
     if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
         return Err(stdio::Error::last_os_error());
@@ -555,17 +574,13 @@ pub(crate) fn private_mount_namespace(inherited_mounts: &[PathBuf]) -> stdio::Re
     Ok(())
 }
 
-fn mount_named(
+fn mount(
     disk: Arc<dyn Disk>,
     state: &Path,
     jail: &Path,
     uid: u32,
-    name: &str,
-    private_namespace: Option<Vec<PathBuf>>,
+    private_namespace: Option<namespace::Entry>,
 ) -> stdio::Result<MountedDisk> {
-    if !matches!(name, "disk.blk" | "workspace.blk") {
-        return Err(stdio::Error::other("Invalid VM block node name"));
-    }
     if disk.size() == 0 || !disk.size().is_multiple_of(512) {
         return Err(stdio::Error::other("Invalid ublk disk size"));
     }
@@ -590,8 +605,8 @@ fn mount_named(
             // Fail before ADD without the required capability. All newly
             // created I/O threads inherit the validated flusher state.
             io::enable_io_flusher()?;
-            if let Some(inherited_mounts) = private_namespace {
-                private_mount_namespace(&inherited_mounts)?;
+            if let Some(namespace) = private_namespace {
+                namespace.enter()?;
             }
             let token = (uuid::Uuid::new_v4().as_u128() as u64).max(1);
             let mut record = Record {
@@ -687,7 +702,7 @@ fn mount_named(
             _ => return Err(stdio::Error::other("ublk startup did not complete")),
         }
         node(
-            &jail.join(name),
+            &jail.join("disk.blk"),
             &PathBuf::from(format!(
                 "/sys/class/block/ublkb{}",
                 mounted.record.device_id()?

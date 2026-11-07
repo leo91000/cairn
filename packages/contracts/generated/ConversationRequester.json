@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "chatId": {
+      "type": "string"
+    },
+    "requestId": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "runId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "runId",
+    "chatId"
+  ],
+  "title": "ConversationRequester",
+  "type": "object"
+}
