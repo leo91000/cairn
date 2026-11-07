@@ -1,7 +1,7 @@
 import type { ContextUsage } from '../../../packages/contracts/chats'
 
 export interface ContextSummary {
-  /** Short form for the header: `42K / 200K · 21%`, or `Unavailable`. */
+  /** Short form for the conversation menu: `42K / 200K · 21%`, or `Unavailable`. */
   short: string
   /** The occupancy, or why it is unknown. */
   label: string

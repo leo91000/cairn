@@ -276,7 +276,15 @@ class ContextCompactionJourneyTest {
                     .assertExists()
                 screenshot("context-compaction")
 
+                // The menu holds this conversation's options only, starting with its context.
                 compose.onNodeWithContentDescription("Options de la conversation").performClick()
+                compose
+                    .onNodeWithTag("menu-context")
+                    .assertTextEquals("Contexte · 150 k / 200 k · 75 %")
+                compose.onNodeWithText("Compacter le contexte").assertIsEnabled()
+                compose.onNodeWithText("Avancé").assertExists()
+                compose.onNodeWithText("Connexion").assertExists()
+                compose.onNodeWithText("Nouvelle conversation").assertDoesNotExist()
                 compose.onNodeWithText("Détails de la conversation").performClick()
                 waitText("Contexte : 150 000 sur 200 000 jetons (75 %)")
                 compose.onNodeWithText("120 000 jetons lus depuis le cache").assertExists()

@@ -415,6 +415,15 @@ test('a durable condition wait follows a dependency across restart and queue pau
     await authenticateWorkspace(page)
     await expect(page.locator('.chat-wait')).toContainText(/Waiting for another run to finish.*Join dependency.*up to \d+ min/)
     await expect(headerStatus(page, /^Awaiting result · up to \d+ min$/)).toBeVisible()
+    // A crowded row truncates its status rather than covering the header's actions.
+    for (const width of [1440, 1000, 700]) {
+      await page.setViewportSize({ width, height: 800 })
+      const status = (await headerStatus(page, /^Awaiting result/).boundingBox())!
+      const menu = (await page.getByRole('button', { name: 'Chat details', exact: true }).boundingBox())!
+      expect(status.x + status.width).toBeLessThanOrEqual(menu.x)
+    }
+
+    await page.setViewportSize({ width: 1280, height: 720 })
     await page.getByRole('tab', { name: /^En cours/ }).click()
     await expect(page.getByRole('region', { name: 'En cours', exact: true }).locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('Another run')
     await expect(page.locator('.agent-waiting')).toHaveCount(0)
@@ -1062,6 +1071,9 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
   await details.click()
   const menu = page.getByRole('menu', { name: 'Chat details', exact: true })
   await expect(menu.getByText('Ready', { exact: true })).toBeVisible()
+  // Screen readers hear the agent, its status and context with the menu, not only its actions.
+  await expect(menu).toHaveAccessibleDescription(/Main agent.*Ready.*Context/)
+  await expect(menu.getByRole('group', { name: 'Advanced', exact: true }).getByRole('menuitem', { name: 'Connection', exact: true })).toBeVisible()
   await expect(menu.getByRole('menuitem').first()).toBeFocused()
   await expect(menu.getByRole('menuitem', { name: 'Open activity fullscreen', exact: true })).toBeVisible()
   await page.keyboard.press('End')
@@ -1115,7 +1127,7 @@ test('phone headers carry the installation, its route and the conversation conne
   await page.goto(workspacePath(`/chats/${chat.id}`))
   const header = page.locator('.chat-header')
   await expect(header.getByRole('button', { name: 'Conversations', exact: true }).getByTitle(/^Browser workspace · /)).toBeVisible()
-  await expect(header.getByRole('button', { name: 'Conversations', exact: true })).toHaveAccessibleDescription('Latest harness: Codex')
+  await expect(header.getByRole('button', { name: 'Conversations', exact: true })).toHaveAccessibleDescription(/^Latest harness: Codex · Browser workspace · Online · (Direct|Relais)$/)
   expect(Math.round((await header.boundingBox())!.height)).toBeLessThanOrEqual(60)
   await expect(header.getByRole('button', { name: /^Files: \d+$/ })).toBeVisible()
   await expect(page.getByRole('link', { name: 'New chat', exact: true })).toBeHidden()
@@ -1899,7 +1911,7 @@ test('starts project chats, steers, edits the queue and preserves a compact mobi
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page).toHaveURL(/\/chats\/[a-z]+-[a-z]+-[a-f0-9]{8}$/)
   // The header stays quiet while the agent works: the avatar's ring says it.
-  await expect(page.locator('.chat-header .avatar-orbit')).toHaveCount(1)
+  await expect(page.locator('.chat-header .avatar-orbit').filter({ visible: true })).toHaveCount(1)
   await expect(page.getByTestId('agent-actions').filter({ hasText: 'Followed the run' })).toHaveCount(0)
   await expect(page.locator('.activity-message').filter({ hasText: 'Review our component architecture' })).toBeVisible()
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Add a regression test for the composer')
@@ -1914,6 +1926,8 @@ test('starts project chats, steers, edits the queue and preserves a compact mobi
   await expect(page.locator('.activity-message').filter({ hasText: 'Focus on accessibility first.' }).first()).toBeVisible()
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Consider the mobile experience too')
   await page.setViewportSize({ width: 390, height: 844 })
+  // Phones show work the same way: the ring on the header's avatar.
+  await expect(page.locator('.chat-header .avatar-orbit').filter({ visible: true })).toHaveCount(1)
   await page.emulateMedia({ colorScheme: 'dark' })
   await expect(page.getByRole('navigation', { name: 'Workspace navigation' })).toBeHidden()
   await expectSingleScroll(page)
@@ -2349,6 +2363,25 @@ test('context usage shows the latest request and an explicit compaction keeps th
   await expect(details.getByTestId('context-usage')).toContainText('Estimated by the coding agent')
   await expect(action('Compact context')).toBeEnabled()
   await page.screenshot({ path: testInfo.outputPath('context-details-phone.png'), animations: 'disabled' })
+  await closeChatDetails(page)
+
+  // A nearly full window reaches the desktop header, and compaction is one click away.
+  workspace.service.store.updateRun(after.run.id, {
+    contextUsage: {
+      contextTokens: 227400,
+      contextWindow: 258400,
+      cachedTokens: null,
+      estimated: false,
+    },
+  } as any)
+  await page.setViewportSize({ width: 1280, height: 844 })
+  await page.reload()
+  const indicator = page.getByTestId('context-indicator')
+  await expect(indicator).toHaveText('Context 88%')
+  await expect(indicator).toHaveAttribute('title', /227,400 of 258,400 tokens \(88%\)/)
+  await page.screenshot({ path: testInfo.outputPath('context-header-full.png'), animations: 'disabled' })
+  await indicator.click()
+  await expect(page.getByRole('dialog', { name: 'Compact the agent context?', exact: true })).toBeVisible()
 })
 
 test('compaction is unavailable while a turn runs and explains why', async ({ page, workspace }) => {
@@ -2361,6 +2394,7 @@ test('compaction is unavailable while a turn runs and explains why', async ({ pa
   await expect(action('Compact context')).toBeDisabled()
   await expect(action('Compact context')).toHaveAccessibleDescription('Wait for the current turn to finish before compacting.')
   await expect(details).toContainText('Wait for the current turn to finish before compacting.')
+  await expect(details).toHaveAccessibleDescription(/Wait for the current turn to finish before compacting\.$/)
   await expect(workspace.api(`/api/chats/${chat.id}/compact`, 'POST', {})).rejects.toThrow(/Wait for the current turn to finish/)
   await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
 })

@@ -605,9 +605,10 @@ class ConversationPresentationTest {
                 "Site",
             ),
         )
+        // A pause stops the ring even while its execution winds down.
         assertEquals(
-            "En pause",
-            conversationState(chat.copy(paused = true), "Cairn", null, "Site").status,
+            ConversationState("En pause", working = false),
+            conversationState(chat.copy(paused = true), "Cairn", null, "Site"),
         )
         assertEquals(
             ConversationState("En attente", working = false),

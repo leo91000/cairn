@@ -90,7 +90,7 @@ const open = ref(false)
 const moving = ref(false)
 const chip = ref<HTMLButtonElement>()
 // Where focus returns when the panel was opened from elsewhere, such as the conversation menu.
-let opener: HTMLElement | undefined
+const opener = ref<HTMLElement>()
 const panel = ref<HTMLDialogElement>()
 const position = ref<Record<string, string>>({ left: '16px', top: '80px', maxHeight: 'calc(100dvh - 96px)' })
 const sheet = ref(false)
@@ -143,12 +143,13 @@ const status = computed((): { tone: 'bad' | 'warn' | 'busy' | 'ok' | 'idle', lab
   return { tone: 'idle', label: 'No sync yet' }
 })
 // Failures, waits and moves interrupt the work; saving, unsaved bytes and sync age are routine.
+// An exclusive suspension is the conversation's own status, which the header already names.
 const attention = computed(() => {
   const run = props.run
-  return !!(run.movementError || run.backup?.error || run.storage?.waitingFor || run.storage?.backupDegraded || run.capacityWaitUntil || run.nodeState
-    || (run.status === 'running' && run.suspendedByExclusive))
+  return !!(run.movementError || run.backup?.error || run.storage?.waitingFor || run.storage?.backupDegraded || run.capacityWaitUntil || run.nodeState)
 })
-const showChip = computed(() => props.variant === 'chip' || attention.value)
+// A chip whose panel is open stays until it closes, so focus can return to it.
+const showChip = computed(() => props.variant === 'chip' || attention.value || (open.value && !opener.value))
 const chipTone = {
   bad: 'border-coral/40 bg-coral-soft text-coral',
   warn: 'border-warning/40 bg-warning-surface text-warning',
@@ -256,8 +257,8 @@ function close(returnFocus = false) {
   panel.value?.close()
   open.value = false
   if (returnFocus)
-    (opener?.isConnected && opener.getClientRects().length ? opener : chip.value)?.focus()
-  opener = undefined
+    (opener.value?.isConnected && opener.value.getClientRects().length ? opener.value : chip.value)?.focus()
+  opener.value = undefined
 }
 
 function toggle() {
@@ -271,7 +272,7 @@ function toggle() {
 async function show(anchor?: HTMLElement) {
   if (open.value)
     return
-  opener = anchor
+  opener.value = anchor
   open.value = true
   await nextTick()
   // Phones open the details as a bottom sheet: the chip can sit low (in the Connection sheet),
@@ -334,7 +335,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div v-if="relevant" :class="showChip ? 'relative inline-flex max-w-full' : 'hidden'" @keydown.esc.stop="close(true)">
+  <div v-if="relevant" :class="showChip ? 'relative inline-flex min-w-0 max-w-full' : 'hidden'" @keydown.esc.stop="close(true)">
     <button
       v-if="showChip"
       ref="chip"
@@ -368,7 +369,7 @@ onUnmounted(() => {
           :size="12"
           class="shrink-0"
         />
-        <span role="status" class="whitespace-nowrap">{{ status.label }}</span>
+        <span role="status" :class="variant === 'chip' ? 'whitespace-nowrap' : 'truncate'">{{ status.label }}</span>
       </template>
     </button>
     <Teleport to="body">

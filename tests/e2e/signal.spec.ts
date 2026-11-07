@@ -423,7 +423,7 @@ test('the Fil, rail and shortcuts lead through the workspace', async ({ page, wo
   const working = page.locator('.agent-working')
   await expect(working).toBeVisible()
   await expect(working).toHaveAttribute('aria-live', 'polite')
-  await expect(page.locator('.chat-page .avatar-orbit')).toHaveCount(1)
+  await expect(page.locator('.chat-page .avatar-orbit').filter({ visible: true })).toHaveCount(1)
   await expectSingleScroll(page)
   await capture(page, testInfo, 'signal-conversation-desktop')
 

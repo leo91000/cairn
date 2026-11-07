@@ -299,6 +299,7 @@ const textarea = ref<InstanceType<typeof SkillTextarea>>()
 const installation = inject(installationKey, null)
 const currentInstallation = computed(() => installation?.current.value ?? null)
 const connectionOpen = ref(false)
+const connectionOpener = ref<HTMLElement>()
 const fileCount = computed(() => latestArtifacts(deliverables.value).length)
 
 // A subagent's full activity opens beside the conversation on wide screens, in a drawer otherwise.
@@ -546,6 +547,16 @@ const chatStatus = computed(() => {
   return 'Ready'
 })
 const headerState = computed(() => detail.value ? headerStatus(chatStatus.value) : null)
+// The avatar's ring is the header's only sign of work, on every width.
+const working = computed(() => detail.value?.run?.status === 'running' && !detail.value.paused && !suspended.value && !quota.value)
+// Phones name the installation and its route with the connection dot, not in words.
+const connectionDescription = computed(() => currentInstallation.value
+  ? `${currentInstallation.value.name} · ${currentInstallation.value.status} · ${routeLabel(state.transportRoute)}`
+  : '')
+const phoneDescription = computed(() => [
+  heading.value?.provider ? `Latest harness: ${providers[heading.value.provider].label}` : '',
+  connectionDescription.value,
+].filter(Boolean).join(' · '))
 const outgoing = ref<ChatMessage | null>(null)
 const delivery = computed(() => chatDelivery(detail.value, timeline.value, outgoing.value))
 const pending = computed(() => delivery.value.queued)
@@ -854,6 +865,7 @@ const newSession = ref(false)
 const compacting = ref(false)
 const context = computed(() => contextSummary(detail.value?.contextUsage))
 const contextAlert = computed(() => contextNeedsAttention(context.value))
+const canCompact = computed(() => !!detail.value?.compaction?.supported && !inactive.value)
 const nodeExecution = ref<InstanceType<typeof NodeExecution>>()
 const menuButton = ref<InstanceType<typeof MenuButton>>()
 
@@ -910,7 +922,10 @@ const conversationActions = computed(() => {
     label: 'Connection',
     icon: Plug,
     advanced: true,
-    run: () => { connectionOpen.value = true },
+    run: (anchor) => {
+      connectionOpener.value = anchor
+      connectionOpen.value = true
+    },
   })
   if (chat && !inactive.value) {
     actions.push({
@@ -924,6 +939,10 @@ const conversationActions = computed(() => {
 
   return actions
 })
+// A disabled action cannot take focus: the menu itself announces why compaction waits.
+const compactionHint = computed(() => conversationActions.value.some(action => action.id === 'compact' && action.disabled && action.hint)
+  ? 'conversation-action-compact'
+  : '')
 const actionGroups = computed(() => [
   { id: 'conversation', label: '', actions: conversationActions.value.filter(action => !action.advanced && !action.danger) },
   { id: 'advanced', label: 'Advanced', actions: conversationActions.value.filter(action => action.advanced) },
@@ -1181,9 +1200,14 @@ function key(event: KeyboardEvent) {
       >
         <Icon :name="CornerDownRight" :size="18" />Delegated by {{ detail.requester.title || 'New conversation' }}
       </RouterLink>
-      <template v-for="group in actionGroups" :key="group.id">
+      <div
+        v-for="group in actionGroups"
+        :key="group.id"
+        role="group"
+        :aria-label="group.label || undefined"
+      >
         <div v-if="group.id === 'danger'" class="my-1 border-t border-line" />
-        <p v-if="group.label" class="m-0! px-3 pt-3 pb-1 text-[10.5px] font-semibold uppercase tracking-wider text-muted">
+        <p v-if="group.label" aria-hidden="true" class="m-0! px-3 pt-3 pb-1 text-[10.5px] font-semibold uppercase tracking-wider text-muted">
           {{ group.label }}
         </p>
         <button
@@ -1200,7 +1224,7 @@ function key(event: KeyboardEvent) {
             <span class="block">{{ item.label }}</span><span v-if="item.hint" :id="`conversation-action-${item.id}`" class="block text-2xs leading-snug text-muted">{{ item.hint }}</span>
           </span>
         </button>
-      </template>
+      </div>
     </div>
   </Modal>
   <ConversationDeletion
@@ -1214,7 +1238,7 @@ function key(event: KeyboardEvent) {
     :run="detail?.run"
     :agent="detail?.agentName || selectedAgent?.name || 'Main agent'"
     :project="detail ? detail.projectName : state.projects.find(project => project.id === projectId)?.name"
-    :return-focus="detailsButton"
+    :return-focus="connectionOpener ?? detailsButton"
     @close="connectionOpen = false"
   />
   <div class="flex h-full min-h-0 min-w-0 flex-1">
@@ -1241,7 +1265,7 @@ function key(event: KeyboardEvent) {
           ref="historyButton"
           class="hidden min-w-0 flex-1 items-center justify-start px-0.5 py-1 phone:flex"
           aria-label="Conversations"
-          :aria-description="heading?.provider ? `Latest harness: ${providers[heading.provider].label}` : undefined"
+          :aria-description="phoneDescription || undefined"
           aria-haspopup="dialog"
           :aria-expanded="history"
           @click="history = true"
@@ -1252,12 +1276,13 @@ function key(event: KeyboardEvent) {
               :identity="heading?.agentId || selectedAgent?.id"
               :size="34"
               :harness="heading?.provider"
+              :working="working"
             />
             <span class="min-w-0 text-left">
               <span class="flex min-w-0 items-center gap-1 text-[14px] font-semibold leading-tight text-ink">
                 <span class="truncate">{{ heading?.title || 'New conversation' }}</span><Icon :name="ChevronDown" :size="14" class="shrink-0 text-muted" />
               </span>
-              <span class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11.5px] font-normal leading-tight" :class="headerState?.failed ? 'text-coral' : 'text-muted'" :title="currentInstallation ? `${currentInstallation.name} · ${currentInstallation.status} · ${routeLabel(state.transportRoute)}` : undefined">
+              <span class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11.5px] font-normal leading-tight" :class="headerState?.failed ? 'text-coral' : 'text-muted'" :title="connectionDescription || undefined">
                 <span class="size-1.5 shrink-0 rounded-full" :class="connectionTone(currentInstallation, state.transportRoute)" />
                 <span class="truncate" :role="headerState ? 'status' : undefined">{{ headerState?.label || heading?.projectName || heading?.agentName || selectedAgent?.name || 'Main agent' }}</span>
               </span>
@@ -1271,10 +1296,10 @@ function key(event: KeyboardEvent) {
             :identity="heading.agentId"
             :size="36"
             :harness="heading.provider"
-            :working="detail?.run?.status === 'running' && !detail.paused && !suspended && !quota"
+            :working="working"
           />
           <div class="flex min-w-0 flex-1 items-center gap-2.5 text-xs text-muted">
-            <h1 class="min-w-0 truncate text-base! font-semibold! leading-snug! tracking-tight! text-ink">
+            <h1 class="min-w-28 truncate text-base! font-semibold! leading-snug! tracking-tight! text-ink">
               {{ heading?.title || 'New conversation' }}
             </h1>
             <button
@@ -1297,23 +1322,31 @@ function key(event: KeyboardEvent) {
             >
               <Icon :name="CornerDownRight" :size="13" class="shrink-0" /><span class="truncate max-w-56">Delegated by {{ heading.requester.title || 'New conversation' }}</span>
             </RouterLink>
+            <!-- A crowded row truncates these rather than pushing into the actions. -->
             <span
               v-if="headerState"
               role="status"
-              class="flex shrink-0 items-center gap-1.5 rounded-full px-2.5 leading-6 font-medium whitespace-nowrap"
+              class="flex min-w-0 items-center gap-1.5 rounded-full px-2.5 leading-6 font-medium"
               :class="headerState.failed ? 'bg-coral-soft text-coral' : 'bg-hover'"
-            ><Icon v-if="headerState.failed" :name="TriangleAlert" :size="12" />{{ headerState.label }}</span>
-            <button
+              :title="headerState.label"
+            ><Icon
+              v-if="headerState.failed"
+              :name="TriangleAlert"
+              :size="12"
+              class="shrink-0"
+            /><span class="truncate">{{ headerState.label }}</span></span>
+            <component
+              :is="canCompact ? 'button' : 'span'"
               v-if="contextAlert"
               class="flex shrink-0 items-center gap-1.5 rounded-full px-2.5 leading-6 font-medium tabular-nums whitespace-nowrap"
               :class="(context.percent ?? 0) >= 85 ? 'bg-coral-soft text-coral' : 'bg-warning-surface text-warning'"
               :title="[context.label, ...context.details].join('\n')"
-              aria-haspopup="dialog"
+              :aria-haspopup="canCompact ? 'dialog' : undefined"
               data-testid="context-indicator"
-              @click="compacting = true"
+              @click="canCompact && (compacting = true)"
             >
               Context {{ context.percent }}%
-            </button>
+            </component>
             <NodeExecution
               v-if="detail?.run && state.installationRole === 'owner'"
               ref="nodeExecution"
@@ -1349,12 +1382,14 @@ function key(event: KeyboardEvent) {
             label="Chat details"
             :width="300"
             :trigger-class="[iconButton, 'phone:hidden!']"
+            :describedby="['conversation-summary', compactionHint].filter(Boolean).join(' ')"
           >
             <template #trigger>
               <Icon :name="MoreHorizontal" :size="20" />
             </template>
             <template #default="{ select }">
               <ConversationSummary
+                id="conversation-summary"
                 :agent-name="heading?.agentName || selectedAgent?.name || 'Main agent'"
                 :agent-id="heading?.agentId || selectedAgent?.id"
                 :provider="heading?.provider"
@@ -1363,9 +1398,14 @@ function key(event: KeyboardEvent) {
                 :failed="headerState?.failed"
                 :context="detail?.run ? context : undefined"
               />
-              <template v-for="group in actionGroups" :key="group.id">
+              <div
+                v-for="group in actionGroups"
+                :key="group.id"
+                role="group"
+                :aria-label="group.label || undefined"
+              >
                 <div v-if="group.id === 'danger'" role="separator" class="my-1 h-px bg-line" />
-                <p v-if="group.label" role="presentation" class="m-0! px-2.5 pt-2.5 pb-1 text-[10.5px] font-semibold uppercase tracking-wider text-muted">
+                <p v-if="group.label" aria-hidden="true" class="m-0! px-2.5 pt-2.5 pb-1 text-[10.5px] font-semibold uppercase tracking-wider text-muted">
                   {{ group.label }}
                 </p>
                 <button
@@ -1384,7 +1424,7 @@ function key(event: KeyboardEvent) {
                     <span class="block">{{ item.label }}</span><span v-if="item.hint" :id="`conversation-action-${item.id}`" class="block text-2xs leading-snug text-muted">{{ item.hint }}</span>
                   </span>
                 </button>
-              </template>
+              </div>
             </template>
           </MenuButton>
           <button

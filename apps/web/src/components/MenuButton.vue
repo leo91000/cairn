@@ -20,6 +20,8 @@ const props = withDefaults(defineProps<{
   /** Which trigger edge the menu lines up with. */
   align?: 'start' | 'end'
   width?: number
+  /** Ids of non-interactive content in the menu that screen readers announce with it. */
+  describedby?: string
 }>(), { placement: 'below', align: 'end', width: 224 })
 const emit = defineEmits<{ open: [], close: [] }>()
 const trigger = ref<HTMLButtonElement>()
@@ -166,6 +168,7 @@ defineExpose({ show, hide, trigger })
     popover="manual"
     role="menu"
     :aria-label="menuLabel ?? label"
+    :aria-describedby="open ? describedby : undefined"
     :style="position"
     class="fixed inset-auto m-0 rounded-xl border border-line bg-raised p-1.5 text-ink shadow-[0_9px_25px_#0003]"
     @keydown="menuKeydown"

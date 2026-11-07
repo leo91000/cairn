@@ -77,7 +77,7 @@ internal fun conversationState(
 
     val run = chat.run?.status.orEmpty()
     val quota = chatQuota(chat.run, emptyList())
-    val working = run == "running" && !chat.exclusiveSuspended && quota == null
+    val working = run == "running" && !chat.paused && !chat.exclusiveSuspended && quota == null
     val tasks = wait?.tasks?.size ?: 0
     val status =
         when {
