@@ -622,3 +622,13 @@ Public MCP and `cairn_installation` add `list_run_artifacts`, `read_run_artifact
 and `set_run_artifact_visibility` without a conversation ID or conversion. Reads
 retain bounded chunks and checksums; execution grants remain revocable. No visual
 redesign or Beacon account capability is added.
+
+## Fil avatar activity badge
+
+Android rotates the bottom-right progress glyph only while the agent is actually
+working. Queued and exclusively suspended work stays still, and finished work has
+no badge. The Compose animation follows the system animation scale. Web already
+animates the working avatar's orbit (with its reduced-motion fallback). Status
+labels and all action/tool interfaces are unchanged. Shared JVM/device
+`FilAttentionCases.avatarLoaderAnimatesOnlyWhileWorking` compares rendered frames
+and checks that queuing stops the animation and completion removes the badge.
