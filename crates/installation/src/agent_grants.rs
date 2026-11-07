@@ -141,6 +141,9 @@ pub(crate) fn set_instance_agents(db: &Db<'_>, instance: &str, agents: &[String]
         }
         agent.revision = crate::config::id();
         db.save_agent(&agent)?;
+        if granted {
+            db.choose_setup_credential_supplier(&agent.id.to_string(), instance)?;
+        }
     }
     Ok(())
 }
@@ -214,10 +217,11 @@ pub(crate) fn save_profile(
         owner_review,
         native_reviews,
     )?;
+    crate::coding_agent_configuration::synchronize_profile(db, &agent)?;
     agent.revision = crate::config::id();
     db.save_agent(&agent)?;
     db.audit("agent.saved", &json!({ "id": agent.id }))?;
-    Ok(agent)
+    required(db.agent(&agent.id.to_string())?, "Agent not found")
 }
 
 /// Whether a current typed permission set still covers the saved run policy.
@@ -597,6 +601,7 @@ impl Db<'_> {
                 statement.execute(rusqlite::params![id, value, position as i64])?;
             }
         }
+        self.sync_full_plugin_grants(&id, &agent.settings.plugins)?;
         self.0
             .prepare_cached("DELETE FROM agent_mcp_selections WHERE agent_id=?")?
             .execute([&id])?;

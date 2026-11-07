@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Safe display defaults. These are inherited preferences, never profile overrides.",
+  "properties": {
+    "model": {
+      "type": "string"
+    },
+    "reasoning": {
+      "type": "string"
+    },
+    "speed": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "model",
+    "reasoning",
+    "speed"
+  ],
+  "title": "CodingAgentPreferences",
+  "type": "object"
+}

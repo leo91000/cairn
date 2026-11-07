@@ -9,6 +9,8 @@ data class Agent(
     val access: AccessPolicy,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val avatar: AgentAvatar? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val codingAgentDefaults: CodingAgentDefaults? = null,
     val createdAt: Long,
     val description: String = "",
     val exclusiveNodes: List<String>,
@@ -36,3 +38,18 @@ data class Agent(
         require(timeoutMinutes in 0..720)
     }
 }
+
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+@Serializable
+@JvmInline
+value class CodingAgentDefaults(
+    val value:
+        Map<
+            String,
+            CodingAgentPreferences,
+        >
+) :
+    Map<
+        String,
+        CodingAgentPreferences,
+    > by value

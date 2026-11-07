@@ -37,7 +37,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
         "ALTER TABLE runs DROP COLUMN data;
 ALTER TABLE runs DROP COLUMN summary_data;",
     )?;
-    transaction.execute_batch(super::PROJECTION_SCHEMA)?;
+    transaction.execute_batch(include_str!("projections/v19.sql"))?;
     transaction.pragma_update(None, "user_version", 19)?;
     transaction.commit()?;
     Ok(())

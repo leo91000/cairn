@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
 pub enum Scope {
+    Contributions(Box<Scope>, Vec<(String, super::management::Authority)>),
     Managed(Box<Scope>, super::management::Authority),
     /// The owner, through one instance: views, actions and tests.
     Instance(Box<Connection>),
@@ -32,12 +33,33 @@ impl Scope {
     /// What the script receives about the instances it may use. Never secret values.
     pub fn instances(&self) -> Vec<Value> {
         match self {
-            Scope::Managed(scope, _) => scope.instances(),
+            Scope::Managed(scope, _) | Scope::Contributions(scope, _) => scope.instances(),
             Scope::Instance(connection) | Scope::Draft(connection, _) => {
                 vec![summary(connection)]
             }
             Scope::Agent { instances, .. } => instances.iter().map(summary).collect(),
         }
+    }
+}
+
+fn inner<'a>(
+    scope: &'a Scope,
+    args: &Value,
+) -> Result<(&'a Scope, Option<&'a super::management::Authority>)> {
+    match scope {
+        Scope::Managed(inner, authority) => Ok((inner, Some(authority))),
+        Scope::Contributions(inner, authorities) => {
+            let authority = match args["instance"].as_str() {
+                Some(id) => authorities.iter().find(|(instance, _)| instance == id),
+                None if authorities.len() == 1 => authorities.first(),
+                None => return Err(Error::bad("Name the instance to use.")),
+            }
+            .ok_or_else(|| {
+                Error::forbidden("This instance is not granted for the contribution.")
+            })?;
+            Ok((inner, Some(&authority.1)))
+        }
+        _ => Ok((scope, None)),
     }
 }
 
@@ -54,12 +76,10 @@ pub fn summary(connection: &Connection) -> Value {
 /// Rereads the target instance. Owner scopes need it unchanged; agent scopes also need
 /// it enabled and still granting the agent.
 async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection> {
-    let scope = if let Scope::Managed(inner, authority) = scope {
+    let (scope, authority) = inner(scope, args)?;
+    if let Some(authority) = authority {
         authority.recheck(s).await?;
-        inner.as_ref()
-    } else {
-        scope
-    };
+    }
     let requested = args["instance"].as_str();
     if let Scope::Draft(connection, draft) = scope {
         let draft = draft.clone();
@@ -70,7 +90,7 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
         return Ok((**connection).clone());
     }
     let expected = match scope {
-        Scope::Managed(..) => unreachable!(),
+        Scope::Managed(..) | Scope::Contributions(..) => unreachable!(),
         Scope::Draft(..) => unreachable!(),
         Scope::Instance(connection) => {
             if requested.is_some_and(|id| id != connection.id) {
@@ -95,9 +115,15 @@ async fn current(s: &Service, scope: &Scope, args: &Value) -> Result<Connection>
     let connection = value;
     let unchanged = connection.revision == expected.revision;
     let granted = match scope {
-        Scope::Managed(..) => unreachable!(),
+        Scope::Managed(..) | Scope::Contributions(..) => unreachable!(),
         Scope::Instance(_) | Scope::Draft(..) => true,
-        Scope::Agent { agent_id, .. } => connection.grants(agent_id),
+        Scope::Agent { agent_id, .. } => {
+            let (agent, id) = (agent_id.clone(), connection.id.clone());
+            connection.enabled
+                && s.store
+                    .read(move |db| db.has_plugin_grant(&agent, &id))
+                    .await?
+        }
     };
     if !unchanged || !granted {
         return Err(Error::forbidden(
@@ -118,6 +144,12 @@ pub(crate) async fn authorize(s: &Service, scope: &Scope) -> Result<()> {
 /// Take the local grant/revision snapshot after all remote authorization.
 pub(crate) fn authorize_in(db: &crate::store::Db<'_>, scope: &Scope) -> Result<()> {
     match scope {
+        Scope::Contributions(inner, authorities) => {
+            for (_, authority) in authorities {
+                authority.authorize(db)?;
+            }
+            return authorize_in(db, inner);
+        }
         Scope::Managed(inner, authority) => {
             authority.authorize(db)?;
             return authorize_in(db, inner);
@@ -134,7 +166,7 @@ pub(crate) fn authorize_in(db: &crate::store::Db<'_>, scope: &Scope) -> Result<(
             agent_id,
             instances,
         } => (instances, Some(agent_id)),
-        Scope::Managed(..) | Scope::Draft(..) => unreachable!(),
+        Scope::Managed(..) | Scope::Contributions(..) | Scope::Draft(..) => unreachable!(),
     };
     for expected in instances {
         let current = db
@@ -142,7 +174,10 @@ pub(crate) fn authorize_in(db: &crate::store::Db<'_>, scope: &Scope) -> Result<(
             .ok_or_else(|| Error::forbidden("The instance was removed."))?;
         if current.revision != expected.revision
             || !current.enabled
-            || agent.is_some_and(|agent| !current.grants(agent))
+            || match agent {
+                Some(agent) => !db.has_plugin_grant(agent, &current.id)?,
+                None => false,
+            }
         {
             return Err(Error::forbidden(
                 "The instance or its grants changed. Retry the operation.",
@@ -161,10 +196,8 @@ pub async fn call(
     args: &Value,
 ) -> Result<Value> {
     let connection = current(s, scope, args).await?;
-    let (scope, management) = match scope {
-        Scope::Managed(inner, authority) => (inner.as_ref(), Some(authority.clone())),
-        _ => (scope, None),
-    };
+    let (scope, management) = inner(scope, args)?;
+    let management = management.cloned();
     let draft = match scope {
         Scope::Draft(_, draft) => Some(draft.clone()),
         _ => None,
@@ -219,6 +252,7 @@ pub async fn invoke(
     payload: Value,
     scope: &Scope,
 ) -> Result<Value> {
+    authorize(s, scope).await?;
     let refused = Mutex::new(None::<Error>);
     let refused_ref = &refused;
     let preparing = super::program_installation::needs_preparation(s, package).then(|| {

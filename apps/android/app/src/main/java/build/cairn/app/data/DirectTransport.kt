@@ -107,10 +107,10 @@ class DirectTransport(private val installationId: String?, private val switched:
         val selection = request.tag(Selection::class.java)
         val channel = if (selection != null) selection.channel else channelFor(request)
         val clientMessage = hasClientMessageId(request, prefix)
-        val snapshotRead =
+        val immutableContentRead =
             request.method == "POST" &&
                 request.url.encodedPath.startsWith(prefix) &&
-                Regex("(chats|runs)/[^/]+/timeline-content")
+                Regex("(chats|runs)/[^/]+/(timeline|event)-content")
                     .matches(request.url.encodedPath.removePrefix(prefix))
         var replayedMessage = false
         if (channel != null) {
@@ -128,7 +128,7 @@ class DirectTransport(private val installationId: String?, private val switched:
                         (error !is DirectNotSent &&
                             request.method !in setOf("GET", "HEAD") &&
                             !clientMessage &&
-                            !snapshotRead)
+                            !immutableContentRead)
                 )
                     throw error
                 replayedMessage = clientMessage && error !is DirectNotSent
@@ -206,6 +206,32 @@ class DirectChannel(
         const val MAX_FRAME = ((MAX_BODY + 2) / 3) * 4 + 65_536
         const val MAX_PACKET = 16_384
         const val HEADER = 13
+
+        /**
+         * Mirrors cairn-protocol `stream_path`: live subscriptions and file downloads use credited
+         * streams. Private artifact metadata and bounded preview thumbnails remain finite
+         * responses.
+         */
+        fun streamedRoute(path: String): Boolean {
+            val route = path.substringBefore('?')
+            val query = path.substringAfter('?', "")
+            val segments = route.split('/')
+            val artifactFile =
+                segments.size == 6 &&
+                    segments[0].isEmpty() &&
+                    segments[1] == "api" &&
+                    segments[2] == "runs" &&
+                    segments[3].isNotEmpty() &&
+                    segments[4] == "artifacts" &&
+                    segments[5].isNotEmpty()
+            val finite =
+                query.split('&').any {
+                    it == "metadata=1" || it.substringBefore('=') == "preview"
+                }
+            return route.endsWith("/stream") ||
+                route.startsWith("/api/shared-artifacts/") ||
+                (artifactFile && !finite)
+        }
     }
 
     private class Exchange {
@@ -398,8 +424,7 @@ class DirectChannel(
             "/api/" +
                 request.url.encodedPath.removePrefix(prefix) +
                 (request.url.encodedQuery?.let { "?$it" } ?: "")
-        val route = path.substringBefore('?')
-        val streamedRoute = route.endsWith("/stream") || route.startsWith("/api/shared-artifacts/")
+        val streamedRoute = streamedRoute(path)
         val frame = buildJsonObject {
             put("type", "request")
             put("id", id)

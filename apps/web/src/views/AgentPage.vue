@@ -969,9 +969,22 @@ const errorCount = computed(() => Object.keys(fieldErrors.value).length)
               v-model:speed="draft.speed"
               variant="field"
               :disabled="busy"
+              :inherit="!!agent"
+              :default-model="agent?.codingAgentDefaults?.[draft.provider]?.model || ''"
+              :default-reasoning="agent?.codingAgentDefaults?.[draft.provider]?.reasoning || ''"
+              :default-speed="agent?.codingAgentDefaults?.[draft.provider]?.speed || ''"
             />
             <p class="flex items-start gap-2 rounded-xl bg-soft px-4 py-3 text-xs leading-relaxed">
               <Icon :name="Info" :size="15" class="mt-px shrink-0" />Uses the shared {{ provider.label }} account pool from Connections. Choosing a model grants no permission.
+            </p>
+            <RouterLink v-if="!isNew && !dirty" :to="`/agents/${id}/configuration/${draft.provider}`" class="flex min-h-12 items-center justify-between gap-3 rounded-xl border border-line bg-surface px-4 py-3 text-sm font-semibold hover:bg-soft">
+              Native configuration <Icon :name="ChevronRight" :size="16" />
+            </RouterLink>
+            <UiButton v-else-if="!isNew" disabled>
+              Save the agent to open native configuration
+            </UiButton>
+            <p v-if="!isNew" class="text-xs text-muted">
+              Context, native features and advanced options. Installation defaults apply until personalized.
             </p>
           </template>
 

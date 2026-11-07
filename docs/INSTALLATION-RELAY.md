@@ -189,10 +189,30 @@ There is no negotiation: any different or missing version is rejected before the
 installation becomes online, with an update-required WebSocket close reason.
 All peers support credited streams, notifications, direct control and node channels.
 
+Routes ending in `/stream`, public shared files and private run-artifact originals
+(`/api/runs/{run}/artifacts/{id}` without `metadata=1` or `preview`) are streams;
+`cairn_protocol::stream_path` defines this set and the web and Android direct
+clients mirror it. The direct DataChannel always serves streams in identity
+encoding, because its clients read stream chunks without an HTTP decoder.
+
+File streams (`cairn_protocol::file_path`) carry one finite file. A private file
+that fits one frame, like any error on a file route, is answered with a finite
+response, which every peer accepts on a streamed route, and may be compressed; a
+larger or unknown-length one streams uncompressed, with its length and byte
+ranges. Public files always stream and are compressed as before when the reader
+accepts it. Like public files, private files have their own pool on both ends of
+the tunnel (`MAX_FILE_IN_FLIGHT`, eight). The Beacon gives each account four of an
+installation's file slots; a further file request queues for up to 30 seconds,
+after which the usual 30-second response deadline applies. The Beacon cancels a
+file stream after 30 seconds without installation progress and ends an interrupted
+file body with an error. The direct DataChannel, which has no idle deadline,
+counts file streams as streams.
+
 Each stream gets one credit per downstream body read. Installation body polling
 pauses until credit arrives, chunks are limited to 64 KiB, and each beacon HTTP
-body has a one-chunk queue. Streams can use 24 of the 32 request slots;
-eight slots remain available to finite API requests.
+body has a one-chunk queue. Live streams can use 24 of the 32 request slots;
+eight slots remain available to finite API requests. File streams use neither
+pool.
 A slow reader, failed stream or failed handler affects only its own request.
 Closing the browser response records cancellation and wakes the socket loop,
 which cancels the remote subscription and releases its slot. Cancellation is

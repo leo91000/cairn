@@ -197,7 +197,13 @@ pub(crate) struct PublishedPointer<'a> {
 }
 
 pub async fn capture(s: &Service, run: &Value) -> Result<Value> {
-    capture_with(s, run, CaptureProtocol::Direct).await
+    capture_with(
+        s,
+        run,
+        CaptureProtocol::Direct,
+        crate::authorization::Authorization::default(),
+    )
+    .await
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -243,20 +249,44 @@ pub(crate) async fn capture_for_update(s: &Service, run: &Value, node: &str) -> 
             ));
         }
     };
-    capture_with(s, run, protocol).await
+    capture_with(
+        s,
+        run,
+        protocol,
+        crate::authorization::Authorization::default(),
+    )
+    .await
 }
 
-async fn capture_with(s: &Service, run: &Value, protocol: CaptureProtocol) -> Result<Value> {
+pub(crate) async fn capture_authorized(
+    s: &Service,
+    run: &Value,
+    authorize: crate::authorization::Authorization,
+) -> Result<Value> {
+    capture_with(s, run, CaptureProtocol::Direct, authorize).await
+}
+
+async fn capture_with(
+    s: &Service,
+    run: &Value,
+    protocol: CaptureProtocol,
+    authorize: crate::authorization::Authorization,
+) -> Result<Value> {
     // Cancellation of an HTTP caller must not drop the operation lock while its
     // PUTs are still executing. The owned task finishes publication or recovery
     // bookkeeping; process death leaves durable reservations for the next boot.
     let (s, run) = (s.clone(), run.clone());
-    tokio::spawn(async move { capture_owned(&s, &run, protocol).await })
+    tokio::spawn(async move { capture_owned(&s, &run, protocol, authorize).await })
         .await
         .map_err(Error::internal)?
 }
 
-async fn capture_owned(s: &Service, run: &Value, protocol: CaptureProtocol) -> Result<Value> {
+async fn capture_owned(
+    s: &Service,
+    run: &Value,
+    protocol: CaptureProtocol,
+    authorize: crate::authorization::Authorization,
+) -> Result<Value> {
     let publication_attempt = id();
     let span = tracing::info_span!(
         target: "cairn_performance",
@@ -264,7 +294,7 @@ async fn capture_owned(s: &Service, run: &Value, protocol: CaptureProtocol) -> R
         publication_attempt,
         run_id = crate::performance::identity(text(run, "id"))
     );
-    let result = Box::pin(publish(s, run, &publication_attempt, protocol))
+    let result = Box::pin(publish(s, run, &publication_attempt, protocol, &authorize))
         .instrument(span)
         .await;
     tracing::info!(
@@ -279,8 +309,11 @@ async fn capture_owned(s: &Service, run: &Value, protocol: CaptureProtocol) -> R
 
     // A capture continuing from a baseline may rely on blocks the master no longer
     // holds: forget the baseline so the next capture copies the whole disk. A VM that
-    // is not ready yet (425) keeps its baseline.
-    let failed = result.as_ref().is_err_and(|error| error.status != 425);
+    // is not ready yet (425) or has no journal keeps its last good baseline.
+    let failed = result.as_ref().is_err_and(|error| {
+        error.status != 425
+            && error.code.as_deref() != Some(crate::native::MISSING_NATIVE_JOURNAL_CODE)
+    });
     if failed
         && run["backup"]["snapshotId"].is_string()
         && let Err(error) = forget_baseline(s, text(run, "id")).await
@@ -296,6 +329,7 @@ pub(crate) async fn forget_baseline(s: &Service, run_id: &str) -> Result<()> {
 
 /// One publication of a node snapshot, from block upload to the run's new pointer.
 struct Publication<'a> {
+    authorize: crate::authorization::Authorization,
     s: &'a Service,
     run: &'a Value,
     run_id: &'a str,
@@ -314,6 +348,7 @@ struct Publication<'a> {
 /// Revalidated in the same transaction as capability issuance, object promotion
 /// or pointer publication; async checks alone leave a revocation race.
 struct PublicationOwner {
+    authorize: crate::authorization::Authorization,
     run: String,
     attempt: String,
     node: Value,
@@ -323,6 +358,7 @@ struct PublicationOwner {
 
 impl PublicationOwner {
     fn validate(&self, db: &crate::store::Db<'_>) -> Result<Value> {
+        self.authorize.check_local(db)?;
         let current = super::db_checkpoint(db, &self.run)?;
         if current["nodeId"] != self.node
             || (!self.on_demand && current["runnerId"] != self.attempt)
@@ -367,11 +403,13 @@ async fn publish(
     run: &Value,
     publication_attempt: &str,
     protocol: CaptureProtocol,
+    authorize: &crate::authorization::Authorization,
 ) -> Result<Value> {
     let run_id = text(run, "id");
     let mut timing = Operation::new("disk_publication", run_id, "queue");
     crate::validation::uuid(run_id)?;
     let _operation = s.node_backup_operation.lock(run_id).await;
+    authorize.recheck().await?;
     super::journal_acknowledgements::recover(s, run_id).await?;
     // A queued demand may have outlived its originating turn. Capture the live
     // attempt, not a stale stopped-run endpoint or publication revision.
@@ -399,7 +437,10 @@ async fn publish(
     timing.next("snapshot");
     let base = super::transport::url(s, run_id).await?;
     let credential = super::runner_secret(s).await?;
-    let snapshot = request_snapshot(s, run, &base, attempt, &credential, protocol).await?;
+    authorize.recheck().await?;
+    let snapshot =
+        request_snapshot(s, run, &base, attempt, &credential, protocol, authorize).await?;
+    authorize.recheck().await?;
 
     if snapshot["alreadyPublished"] == true {
         let point = s
@@ -437,6 +478,7 @@ async fn publish(
     let snapshot_id = text(&snapshot, "id");
     crate::validation::uuid(snapshot_id)?;
     let publication = Publication {
+        authorize: authorize.clone(),
         s,
         run,
         run_id,
@@ -481,6 +523,7 @@ async fn request_snapshot(
     attempt: &str,
     credential: &str,
     protocol: CaptureProtocol,
+    authorize: &crate::authorization::Authorization,
 ) -> Result<Value> {
     let run_id = text(run, "id");
     let changing_envelope = match protocol {
@@ -488,6 +531,7 @@ async fn request_snapshot(
         CaptureProtocol::LegacyControllerDrain => run["backup"]["blockEnvelope"] == 3,
     };
     if requested(run) && !changing_envelope {
+        authorize.recheck().await?;
         let response = s
             .http
             .post(format!("{base}/disks/{run_id}/snapshot-completed"))
@@ -501,7 +545,9 @@ async fn request_snapshot(
             return response.json().await.map_err(Error::internal);
         }
         if response.status() == reqwest::StatusCode::CONFLICT {
-            return Err(Error::new(425, "Waiting for completed generation capture."));
+            return Err(
+                snapshot_conflict(response, "Waiting for completed generation capture.").await,
+            );
         }
         if response.status().as_u16() != 412 {
             return Err(Error::unavailable(
@@ -527,6 +573,7 @@ async fn request_snapshot(
     } else {
         format!("{base}/runs/{attempt}/snapshot")
     };
+    authorize.recheck().await?;
     let response = s
         .http
         .post(capture_path)
@@ -540,10 +587,11 @@ async fn request_snapshot(
     if response.status() == reqwest::StatusCode::CONFLICT {
         // Startup, shutdown and an overlapping capture are temporary ownership
         // conflicts. Keep them distinct from broken storage or S3 configuration.
-        return Err(Error::new(
-            425,
+        return Err(snapshot_conflict(
+            response,
             "Waiting for the VM to be ready for synchronization.",
-        ));
+        )
+        .await);
     }
     if !response.status().is_success() {
         return Err(Error::unavailable(
@@ -551,6 +599,18 @@ async fn request_snapshot(
         ));
     }
     response.json().await.map_err(Error::internal)
+}
+
+async fn snapshot_conflict(response: reqwest::Response, waiting_message: &str) -> Error {
+    let body = response.json::<Value>().await.unwrap_or_default();
+    if body["code"] == crate::native::MISSING_NATIVE_JOURNAL_CODE {
+        let message = body["error"]
+            .as_str()
+            .filter(|message| !message.is_empty())
+            .unwrap_or("Native journal is unavailable.");
+        return Error::coded(409, crate::native::MISSING_NATIVE_JOURNAL_CODE, message);
+    }
+    Error::new(425, waiting_message)
 }
 
 fn snapshot_request(run: &Value, stopped: bool) -> Value {
@@ -564,6 +624,7 @@ fn snapshot_request(run: &Value, stopped: bool) -> Value {
 impl Publication<'_> {
     fn owner(&self) -> PublicationOwner {
         PublicationOwner {
+            authorize: self.authorize.clone(),
             run: self.run_id.to_owned(),
             attempt: self.attempt.to_owned(),
             node: self.node.clone(),
@@ -610,6 +671,7 @@ impl Publication<'_> {
     async fn write_intent(&self, directory: &Path, mut manifest: Value) -> Result<Intent> {
         let s = self.s;
         let admission = s.node_backup_lock.lock().await;
+        self.authorize.recheck().await?;
         let occupied = used(s).await?;
         let backup_id = id();
         let mut value = json!({
@@ -639,9 +701,12 @@ impl Publication<'_> {
         }
 
         let point = value.clone();
+        self.authorize.recheck().await?;
+        let authorize = self.authorize.clone();
         let (manifest, objects) = s
             .store
             .transaction(move |db| {
+                authorize.check_local(db)?;
                 let objects = shared_blocks::reserve(db, &point, &mut manifest)?;
                 Ok((manifest, objects))
             })
@@ -736,6 +801,7 @@ impl Publication<'_> {
         let mut file = tokio::fs::File::open(disk).await?;
         let mut uploaded = 0;
         for object in objects.iter().filter(|object| !object.ready) {
+            self.authorize.recheck().await?;
             let read = diagnostic::start(Stage::ConvertedRead);
             let block = snapshots::find_block(manifest, &object.hash)
                 .ok_or_else(|| Error::bad("Converted block missing."))?;
@@ -749,7 +815,11 @@ impl Publication<'_> {
             }
             let scope = shared_blocks::key(&object.hash, &object.id);
             self.storage
-                .upload_bytes(encrypt_block(self.s, scope.clone(), bytes).await?, &scope)
+                .upload_bytes_authorized(
+                    encrypt_block(self.s, scope.clone(), bytes).await?,
+                    &scope,
+                    &self.authorize,
+                )
                 .await?;
             uploaded += object.size;
         }
@@ -765,6 +835,7 @@ impl Publication<'_> {
             return self.transfer_direct(objects).await;
         }
         let _legacy_transfer = self.s.node_backup_operation.transfer().await;
+        self.authorize.recheck().await?;
         // The common all-reused path never loads other manifests. Incremental
         // snapshots may omit old blocks, which migrate directly from S3.
         let inventory = diagnostic::start(Stage::Inventory);
@@ -841,7 +912,10 @@ impl Publication<'_> {
         if missing.is_empty() {
             return Ok(0);
         }
-        self.storage.require_direct().await?;
+        self.storage
+            .require_direct_authorized(&self.authorize)
+            .await?;
+        self.authorize.recheck().await?;
         let mut reader = direct_reader::Lease::open(self).await?;
         let mut uploaded = 0;
         let mut uploads = JoinSet::<Result<u64>>::new();
@@ -912,13 +986,17 @@ impl Publication<'_> {
     ) -> Result<u64> {
         let mut uploaded = 0u64;
         for object in objects.iter().filter(|object| !object.ready) {
+            self.authorize.recheck().await?;
             let bytes = source_block(self.s, object, sources, reads).await?;
             let scope = shared_blocks::key(&object.hash, &object.id);
             let encoded = encrypt_block(self.s, scope.clone(), bytes).await?;
             let destination = self.storage.clone();
             let metrics = diagnostic::current();
+            let authorize = self.authorize.clone();
             uploads.spawn(diagnostic::scope(metrics, async move {
-                destination.upload_bytes(encoded, &scope).await
+                destination
+                    .upload_bytes_authorized(encoded, &scope, &authorize)
+                    .await
             }));
             uploaded += object.size;
             if uploads.len() >= crate::object_storage::HOT_WRITE_CONCURRENCY {
@@ -937,6 +1015,8 @@ impl Publication<'_> {
     /// Settles duplicate uploads, then writes the final manifest locally and to S3.
     async fn publish_manifest(&self, intent: &mut Intent, uploaded: u64) -> Result<()> {
         let s = self.s;
+        self.authorize.recheck().await?;
+        let authorize = self.authorize.clone();
         let publication = intent.backup_id.clone();
         // Offline backend conversions have their own migration ownership fence.
         let owner = (!self.base.is_empty()).then(|| self.owner());
@@ -944,6 +1024,7 @@ impl Publication<'_> {
         intent.manifest = s
             .store
             .transaction(move |db| {
+                authorize.check_local(db)?;
                 if let Some(owner) = owner {
                     owner.validate(db)?;
                 }
@@ -957,12 +1038,17 @@ impl Publication<'_> {
         intent.value["uploadedBytes"] = uploaded.into();
         crate::skills::atomic_write(&intent.path, &serde_json::to_vec(&intent.value)?).await?;
         self.storage
-            .upload_file_verified(&intent.path, &manifest_key(self.run_id, &intent.backup_id))
+            .upload_file_verified_authorized(
+                &intent.path,
+                &manifest_key(self.run_id, &intent.backup_id),
+                &self.authorize,
+            )
             .await
     }
 
     /// Records the point and moves the run's pointer, unless the disk changed owner meanwhile.
     async fn commit(&self, intent: &Intent, uploaded: u64) -> Result<()> {
+        self.authorize.recheck().await?;
         let pointer = PublishedPointer {
             id: &intent.value["id"],
             snapshot_id: &intent.value["snapshotId"],
@@ -1075,12 +1161,32 @@ async fn encrypt_block(s: &Service, scope: String, bytes: Vec<u8>) -> Result<Vec
 
 /// Publish a converted, offline environment without replacing the source pointer.
 /// The migration commits its checkpoint and this point together after restoration.
+#[cfg(test)]
 pub(crate) async fn converted_environment(
     s: &Service,
     run: &Value,
     node: &Value,
     disk: &Path,
     manifest: Value,
+) -> Result<Value> {
+    converted_environment_authorized(
+        s,
+        run,
+        node,
+        disk,
+        manifest,
+        crate::authorization::Authorization::default(),
+    )
+    .await
+}
+
+pub(crate) async fn converted_environment_authorized(
+    s: &Service,
+    run: &Value,
+    node: &Value,
+    disk: &Path,
+    manifest: Value,
+    authorize: crate::authorization::Authorization,
 ) -> Result<Value> {
     let publication_attempt = id();
     let span = tracing::info_span!(
@@ -1097,6 +1203,7 @@ pub(crate) async fn converted_environment(
         disk,
         manifest,
         &publication_attempt,
+        authorize,
     ))
     .instrument(span)
     .await
@@ -1109,6 +1216,7 @@ async fn converted_environment_owned(
     disk: &Path,
     manifest: Value,
     publication_attempt: &str,
+    authorize: crate::authorization::Authorization,
 ) -> Result<Value> {
     let run_id = text(run, "id");
     let mut timing = Operation::new(
@@ -1117,11 +1225,13 @@ async fn converted_environment_owned(
         "queue",
     );
     let _operation = s.node_backup_operation.lock(run_id).await;
+    authorize.recheck().await?;
     timing.next("prepare_upload");
     let storage = Storage::configured(s)?;
     let snapshot_id = id();
     let snapshot = json!({ "manifest": manifest });
     let publication = Publication {
+        authorize: authorize.clone(),
         s,
         run,
         run_id,
@@ -1157,8 +1267,10 @@ async fn converted_environment_owned(
         run["backendMigration"]["id"].clone(),
         intent.value.clone(),
     );
+    authorize.recheck().await?;
     s.store
         .transaction(move |db| {
+            authorize.check_local(db)?;
             let current = db
                 .run(&owner)?
                 .ok_or_else(|| Error::not_found("Conversation removed."))?;
@@ -1259,56 +1371,78 @@ pub(crate) async fn read_manifest_block(
     backup: &Value,
     block: &Value,
 ) -> Result<Vec<u8>> {
-    let hash = text(block, "hash");
-    let object = text(block, "object");
-    crate::validation::uuid(object)?;
-    if !snapshots::valid_hash(hash) {
-        return Err(Error::bad("Invalid backup block."));
-    }
+    read_manifest_block_authorized(
+        s,
+        backup,
+        block,
+        &crate::authorization::Authorization::default(),
+    )
+    .await
+}
 
-    let envelope = block["envelope"].as_u64().unwrap_or(2);
-    let scope = shared_blocks::object_key(envelope, hash, object);
-    let storage = storage_for(s, backup)?;
-    let result = async {
-        let permit = s.hot_s3.block_codec.read_permit().await?;
-        let encoded = storage
-            .download_bytes(&scope, crate::storage::block_codec::MAX_ENCODED_BYTES)
-            .await?;
-        let size = block["size"]
-            .as_u64()
-            .ok_or_else(|| Error::conflict("Recovery block size mismatch."))?;
-        let bytes = if envelope == 3 {
-            // Explicit compatibility/conversion callers only. Ordinary node reads
-            // receive a direct ticket in restore::handle, never these payloads.
-            let key = s.vault.storage_object_key(&scope);
-            let (scope, hash) = (scope.clone(), hash.to_owned());
-            diagnostic::blocking(move || {
-                let _permit = permit;
-                crate::storage::block_codec::decode_direct(&key, &scope, &hash, size, &encoded)
-                    .map_err(|_| Error::conflict("Recovery block integrity check failed."))
-            })
-            .await
-            .map_err(Error::internal)??
-        } else {
-            decode_scoped_block(s, &scope, hash, Some(size), encoded, permit).await?
-        };
-        Ok(bytes)
-    }
-    .await;
-    if result
-        .as_ref()
-        .is_err_and(|error: &Error| matches!(error.status, 400 | 409))
-    {
-        if envelope == 3 {
-            // Conversion readers observe the same shared v3 dependency as a
-            // direct node. Fence every ambiguous ACK before invalidating it.
-            super::journal_acknowledgements::quarantine(s, object).await?;
-        } else {
-            shared_blocks::invalidate(s, object).await?;
-            forget_baseline(s, text(backup, "runId")).await?;
+// Keep SDK and codec future frames off nested restore callers' layouts.
+pub(crate) fn read_manifest_block_authorized<'a>(
+    s: &'a Service,
+    backup: &'a Value,
+    block: &'a Value,
+    authorize: &'a crate::authorization::Authorization,
+) -> futures_util::future::BoxFuture<'a, Result<Vec<u8>>> {
+    Box::pin(async move {
+        let hash = text(block, "hash");
+        let object = text(block, "object");
+        crate::validation::uuid(object)?;
+        if !snapshots::valid_hash(hash) {
+            return Err(Error::bad("Invalid backup block."));
         }
-    }
-    result
+
+        let envelope = block["envelope"].as_u64().unwrap_or(2);
+        let scope = shared_blocks::object_key(envelope, hash, object);
+        let storage = storage_for(s, backup)?;
+        let result = async {
+            let permit = s.hot_s3.block_codec.read_permit().await?;
+            let encoded = storage
+                .download_bytes_authorized(
+                    &scope,
+                    crate::storage::block_codec::MAX_ENCODED_BYTES,
+                    authorize,
+                )
+                .await?;
+            let size = block["size"]
+                .as_u64()
+                .ok_or_else(|| Error::conflict("Recovery block size mismatch."))?;
+            let bytes = if envelope == 3 {
+                // Explicit compatibility/conversion callers only. Ordinary node reads
+                // receive a direct ticket in restore::handle, never these payloads.
+                let key = s.vault.storage_object_key(&scope);
+                let (scope, hash) = (scope.clone(), hash.to_owned());
+                diagnostic::blocking(move || {
+                    let _permit = permit;
+                    crate::storage::block_codec::decode_direct(&key, &scope, &hash, size, &encoded)
+                        .map_err(|_| Error::conflict("Recovery block integrity check failed."))
+                })
+                .await
+                .map_err(Error::internal)??
+            } else {
+                decode_scoped_block(s, &scope, hash, Some(size), encoded, permit).await?
+            };
+            Ok(bytes)
+        }
+        .await;
+        if result
+            .as_ref()
+            .is_err_and(|error: &Error| matches!(error.status, 400 | 409))
+        {
+            if envelope == 3 {
+                // Conversion readers observe the same shared v3 dependency as a
+                // direct node. Fence every ambiguous ACK before invalidating it.
+                super::journal_acknowledgements::quarantine(s, object).await?;
+            } else {
+                shared_blocks::invalidate(s, object).await?;
+                forget_baseline(s, text(backup, "runId")).await?;
+            }
+        }
+        result
+    })
 }
 
 async fn decode_scoped_block(
@@ -1626,6 +1760,8 @@ pub async fn attempt(s: &Service, run: &Value) {
         return;
     }
 
+    let last_failure_context = failure_context(run, &error);
+
     // Nothing to save yet.
     if error.status != 409 && error.status != 412 {
         let body = format!(
@@ -1647,14 +1783,41 @@ pub async fn attempt(s: &Service, run: &Value) {
 
     // Publication may have committed before its controller acknowledgement failed.
     // Patch the current state transactionally, never overwrite it with the caller's old pointer.
-    let failure = json!({
+    // This records the historical latest failure. Success and 425 clear the active
+    // error but intentionally leave this context intact; only a later failure replaces it.
+    let mut failure = json!({
         "status": BackupStatus::Error,
         "error": error.message,
-        "snapshotId": null
+        "lastFailureContext": last_failure_context
     });
+    if error.code.as_deref() != Some(crate::native::MISSING_NATIVE_JOURNAL_CODE) {
+        failure["snapshotId"] = Value::Null;
+    }
     if let Err(error) = update_status(s, run_id, failure).await {
         tracing::warn!(error = %error, "failed to record synchronization failure");
     }
+}
+
+// `attempt` observes the whole publication operation; its errors have no typed
+// inner phase or failure cause, so status alone must not narrow either field.
+fn failure_context(run: &Value, error: &Error) -> Value {
+    let mut context = json!({
+        "observedAtMs": now(),
+        "phase": "publication",
+        "category": if error.code.as_deref()
+            == Some(crate::native::MISSING_NATIVE_JOURNAL_CODE)
+        {
+            crate::native::MISSING_NATIVE_JOURNAL_CODE
+        } else {
+            "unknown"
+        },
+        "managerStatus": error.status
+    });
+    // Label this as the attempt input; capture may read a newer live revision.
+    if let Some(revision) = run["backup"]["requestedRevision"].as_u64() {
+        context["inputRequestedRevision"] = revision.into();
+    }
+    context
 }
 
 /// Durable, coalesced demand. The scheduler owns uploads, independently of the
@@ -2146,6 +2309,7 @@ mod capture_policy_tests {
             let snapshot = json!({ "manifest": { "onDemand": on_demand }, "grantId": grant });
             let node_value = json!(node);
             let publication = Publication {
+                authorize: crate::authorization::Authorization::default(),
                 publication_attempt: &snapshot_id,
                 s: &service,
                 run: &run,

@@ -17,6 +17,8 @@ function fixture({ legacy = false } = {}) {
   // Extract the actual writer schemas, rather than approximating their constraints.
   const runs = readFileSync(new URL('../../crates/installation/src/runs/mod.rs', import.meta.url), 'utf8')
   db.exec(runs.match(/r#"(CREATE TABLE runs\([\s\S]*?)"#,\n {4}projection_schema/)[1])
+  const attempts = readFileSync(new URL('../../crates/installation/src/nodes/attempts.rs', import.meta.url), 'utf8')
+  db.exec(attempts.match(/SCHEMA: &str = "([\s\S]*?)";/)[1])
   const store = readFileSync(new URL('../../crates/installation/src/store.rs', import.meta.url), 'utf8')
   db.exec(store.match(/CREATE TABLE run_checkpoints\([^;]+;/)[0])
   if (!legacy) {

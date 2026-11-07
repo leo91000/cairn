@@ -36,7 +36,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 22;
+pub(crate) const DATABASE_VERSION: i64 = 27;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -187,17 +187,53 @@ impl Store {
         }
         if !fresh && version == 21 {
             crate::timeline::migration::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 22 {
+            crate::nodes::attempts_migration::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 23 {
+            let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            if tx.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))? == 23 {
+                crate::plugins::grants::migrate(&Db(&tx), directory)?;
+                tx.pragma_update(None, "user_version", 24)?;
+            }
+            tx.commit()?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 24 {
+            let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let current_version =
+                tx.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))?;
+            if current_version == 24 {
+                tx.execute_batch(crate::coding_agent_configuration::SCHEMA)?;
+                tx.pragma_update(None, "user_version", 25)?;
+            } else if !(25..=DATABASE_VERSION).contains(&current_version) {
+                return Err(Error::bad(
+                    "Unexpected installation database version during coding-agent configuration upgrade.",
+                ));
+            }
+            tx.commit()?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 25 {
+            crate::artifacts::migration::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 26 {
+            crate::chats::migration::plan_requests(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;
             tx.execute_batch(
-            "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('agentAccounts','chats','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
+            "CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('node-attempts','node-exclusive-requests','agentAccounts','chats','nodes','projects','agents','tasks','mcps','plugin-connections','plugin-packages','plugin-requests','plugin-activity','plugin-timers','plugin-events','plugin-deliveries','plugin-storage','plugin-http-receipts')),data TEXT NOT NULL,updated_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS records_kind ON records(kind,updated_at DESC);
 CREATE INDEX IF NOT EXISTS records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),type TEXT NOT NULL CHECK(length(type)>0),text TEXT NOT NULL,payload TEXT CHECK(payload IS NULL OR json_valid(payload)));
 CREATE TABLE run_checkpoints(run_id TEXT PRIMARY KEY NOT NULL REFERENCES runs(id) ON DELETE CASCADE,state TEXT NOT NULL CHECK(json_valid(state) AND json_type(state)='object'));
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id,id);
-CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%' AND key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key NOT LIKE 'chat-question:%' AND key NOT LIKE 'chat-attachment:%' AND key!='conversation-expiration' AND key NOT LIKE 'read-since:%' AND key NOT LIKE 'read:%' AND key NOT LIKE 'dismissed:%'),data TEXT NOT NULL,expires INTEGER);
+CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY CHECK(key NOT LIKE 'run-checkpoint:%' AND key NOT LIKE 'chat-coding-agent:%' AND key NOT LIKE 'chat-coding-agent-request:%' AND key NOT LIKE 'chat-question:%' AND key NOT LIKE 'chat-attachment:%' AND key!='conversation-expiration' AND key NOT LIKE 'read-since:%' AND key NOT LIKE 'read:%' AND key NOT LIKE 'dismissed:%' AND key NOT GLOB 'artifact:*' AND key NOT GLOB 'artifact-share:*' AND key NOT GLOB 'skill-source:*'),data TEXT NOT NULL,expires INTEGER);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,created_at INTEGER NOT NULL,action TEXT NOT NULL,detail TEXT NOT NULL);",
         )?;
             tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
@@ -213,7 +249,10 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::nodes::journal_acknowledgements::SCHEMA)?;
             tx.execute_batch(crate::projects::SCHEMA)?;
             tx.execute_batch(crate::nodes::inventory::SCHEMA)?;
+            tx.execute_batch(crate::nodes::attempts::SCHEMA)?;
+            tx.execute_batch(crate::nodes::exclusive_state::SCHEMA)?;
             tx.execute_batch(crate::agents::SCHEMA)?;
+            tx.execute_batch(crate::coding_agent_configuration::SCHEMA)?;
             tx.execute_batch(crate::mcps::sql::SCHEMA)?;
             tx.execute_batch(crate::plugins::instances::SCHEMA)?;
             tx.execute_batch(crate::plugins::state::SCHEMA)?;
@@ -221,11 +260,14 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::plugins::hooks::SCHEMA)?;
             crate::plugins::registry::initialize(&Db(&tx))?;
             tx.execute_batch(crate::agent_grants::SCHEMA)?;
+            tx.execute_batch(crate::plugins::grants::SCHEMA)?;
             tx.execute_batch(crate::missions::SCHEMA)?;
             tx.execute_batch(crate::chats::storage::SCHEMA)?;
             tx.execute_batch(crate::chats::question_storage::SCHEMA)?;
             tx.execute_batch(crate::attachments::sql::SCHEMA)?;
             tx.execute_batch(crate::reads::sql::SCHEMA)?;
+            tx.execute_batch(crate::artifacts::sql::SCHEMA)?;
+            tx.execute_batch(crate::skills::sql::SCHEMA)?;
             tx.execute_batch(crate::waits::sql::SCHEMA)?;
             tx.execute_batch(crate::chats::engine_switch::SCHEMA)?;
             tx.execute_batch(crate::timeline::SCHEMA)?;
@@ -270,15 +312,18 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
         let queued_at = std::time::Instant::now();
         let (reply, rx) = oneshot::channel();
         tx.send(Box::new(move |connection| {
+            let cpu = performance::CpuTime::start();
             let started = std::time::Instant::now();
             let result = f(&mut Db(connection));
             let execution = started.elapsed();
+            let cpu = cpu.elapsed();
             let failed = result.is_err();
             let abandoned_reply = reply.send(result).is_err();
             performance::Completed {
                 caller,
                 queue: started.duration_since(queued_at),
                 execution,
+                cpu,
                 failed,
                 abandoned_reply,
             }
@@ -579,6 +624,8 @@ impl Db<'_> {
             kind,
             "agentAccounts"
                 | "chats"
+                | "node-attempts"
+                | "node-exclusive-requests"
                 | "nodes"
                 | "projects"
                 | "agents"
@@ -974,7 +1021,9 @@ impl Db<'_> {
             AND id>? ORDER BY id LIMIT ?";
         let mut stmt = self.0.prepare_cached(sql)?;
         let rows = stmt.query_map(params![run, after, limit], event_row)?;
-        Ok(within_budget(rows, limit, EventBudget::Raw(max_bytes), false)?.0)
+        let mut events = within_budget(rows, limit, EventBudget::Raw(max_bytes), false)?.0;
+        self.mark_legacy_plan_approvals(run, &mut events)?;
+        Ok(events)
     }
 
     pub fn events_before(&self, run: &str, before: i64) -> Result<(Vec<Event>, bool)> {
@@ -1033,7 +1082,43 @@ WHERE e.run_id=? AND e.id>? AND e.id<? AND (
         let (mut events, trimmed) = within_budget(&mut rows, limit, budget, true)?;
         let more = trimmed || rows.next().transpose()?.is_some();
         events.reverse();
+        self.mark_legacy_plan_approvals(run, &mut events)?;
         Ok((events, more))
+    }
+
+    /// Legacy receipts have no request ID. Derive their approval state from the full
+    /// run rather than the bounded event page, while leaving authored payloads intact.
+    fn mark_legacy_plan_approvals(&self, run: &str, events: &mut [Event]) -> Result<()> {
+        if !events.iter().any(is_legacy_root_plan) {
+            return Ok(());
+        }
+
+        let (request_count, latest_request, latest_proposal): (i64, Option<i64>, Option<i64>) =
+            self.0.query_row(
+                "SELECT (SELECT COUNT(DISTINCT CASE
+                     WHEN json_type(payload,'$.messageId')='text'
+                       AND json_extract(payload,'$.messageId')!=''
+                     THEN 'message:' || json_extract(payload,'$.messageId')
+                     ELSE 'source:' || id
+                 END) FROM events WHERE run_id=? AND type='chat.user'),
+                 (SELECT MAX(id) FROM events WHERE run_id=? AND type='chat.user'),
+                 (SELECT MAX(id) FROM events WHERE run_id=?
+                   AND type IN ('item.started','item.updated','item.completed')
+                   AND json_extract(payload,'$.item.type')='proposed_plan'
+                   AND COALESCE(json_extract(payload,'$.item.parent_id'),'')='')",
+                rusqlite::params![run, run, run],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+
+        for event in events.iter_mut().filter(|event| is_legacy_root_plan(event)) {
+            event.legacy_plan_approval = Some(
+                request_count == 1
+                    && latest_request.is_some_and(|request| request < event.id)
+                    && latest_proposal == Some(event.id),
+            );
+        }
+
+        Ok(())
     }
 
     pub fn has_run(&self, id: &str) -> Result<bool> {
@@ -1082,6 +1167,31 @@ fn event_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
     ))
 }
 
+fn is_legacy_root_plan(event: &Event) -> bool {
+    if !matches!(
+        event.kind.as_str(),
+        "item.started" | "item.updated" | "item.completed"
+    ) {
+        return false;
+    }
+
+    let Some(payload) = &event.payload else {
+        return false;
+    };
+    let Ok(payload) = serde_json::from_str::<Value>(payload.get()) else {
+        return false;
+    };
+    let Some(item) = payload.get("item") else {
+        return false;
+    };
+
+    item.get("type").and_then(Value::as_str) == Some("proposed_plan")
+        && item
+            .get("parent_id")
+            .is_none_or(|parent| parent.is_null() || parent.as_str() == Some(""))
+        && item.get("request_id").is_none()
+}
+
 /// Serialize each candidate once and probe geometrically increasing byte batches.
 /// Large/noisy rows stop early instead of reading and compressing 1,000 rows.
 /// Backwards reads measure chronological order, as delivered to the clients.
@@ -1115,6 +1225,7 @@ fn within_budget(
             text,
             display_id: None,
             timeline: false,
+            legacy_plan_approval: None,
             payload: payload
                 .map(serde_json::value::RawValue::from_string)
                 .transpose()?,
@@ -1417,13 +1528,30 @@ mod schema_tests {
         }
     }
 
+    // Reconstruct the released layout from a real previous writer's database,
+    // rather than changing the version of today's placement tables.
+    fn version_nineteen_database(root: &Path) -> Connection {
+        let mut db = Connection::open(root.join("manager.db")).unwrap();
+        db.execute_batch(include_str!("../tests/fixtures/placements-v15.sql"))
+            .unwrap();
+        db.pragma_update(None, "foreign_keys", true).unwrap();
+        crate::chats::question_migration::upgrade(&mut db).unwrap();
+        crate::attachments::migration::upgrade(&mut db).unwrap();
+        crate::reads::migration::upgrade(&mut db).unwrap();
+        crate::runs::projections::upgrade(&mut db).unwrap();
+        db
+    }
+
     #[test]
     fn version_nineteen_upgrade_adds_hook_queues_without_touching_existing_work() {
         let root = tempfile::tempdir().unwrap();
-        drop(Store::open(root.path()).unwrap());
         let file = root.path().join("manager.db");
-        let db = Connection::open(&file).unwrap();
-        db.execute_batch("DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; DROP TABLE plugin_hook_receipts; DROP TABLE plugin_hook_events; PRAGMA user_version=19; INSERT INTO kv(key,data) VALUES('hook-upgrade-fixture','true');").unwrap();
+        let db = version_nineteen_database(root.path());
+        db.execute(
+            "INSERT INTO kv(key,data) VALUES('hook-upgrade-fixture','true')",
+            [],
+        )
+        .unwrap();
         drop(db);
         drop(Store::open(root.path()).unwrap());
         drop(Store::open(root.path()).unwrap());
@@ -1449,9 +1577,10 @@ mod schema_tests {
     #[test]
     fn version_twenty_upgrade_preserves_hook_schema_and_persisted_work() {
         let root = tempfile::tempdir().unwrap();
-        drop(Store::open(root.path()).unwrap());
         let file = root.path().join("manager.db");
-        let db = Connection::open(&file).unwrap();
+        let db = version_nineteen_database(root.path());
+        db.execute_batch(crate::plugins::hooks::SCHEMA).unwrap();
+        db.pragma_update(None, "user_version", 20).unwrap();
         let hook_schema = |db: &Connection| -> Vec<String> {
             db.prepare(
                 "SELECT sql FROM sqlite_schema WHERE name LIKE 'plugin_hook_%' ORDER BY name",
@@ -1463,7 +1592,11 @@ mod schema_tests {
             .unwrap()
         };
         let retained = hook_schema(&db);
-        db.execute_batch("DROP TABLE timeline_entries; DROP TABLE timeline_state; DROP TABLE run_progress; PRAGMA user_version=20; INSERT INTO kv(key,data) VALUES('progress-upgrade-fixture','true');").unwrap();
+        db.execute(
+            "INSERT INTO kv(key,data) VALUES('progress-upgrade-fixture','true')",
+            [],
+        )
+        .unwrap();
         drop(db);
         drop(Store::open(root.path()).unwrap());
         drop(Store::open(root.path()).unwrap());
@@ -1538,8 +1671,61 @@ mod schema_tests {
     }
 
     #[test]
+    fn startup_steps_accept_a_database_upgraded_by_another_startup() {
+        type Upgrade = fn(&mut Connection) -> Result<()>;
+        let steps: [(&str, Upgrade); 9] = [
+            ("accounts", crate::accounts::migration::upgrade),
+            ("conversations", crate::chats::migration::upgrade),
+            ("questions", crate::chats::question_migration::upgrade),
+            ("attachments", crate::attachments::migration::upgrade),
+            ("personal state", crate::reads::migration::upgrade),
+            ("progress", crate::worker::progress::upgrade),
+            ("timeline", crate::timeline::migration::upgrade),
+            ("placement", crate::nodes::attempts_migration::upgrade),
+            ("deliverables", crate::artifacts::migration::upgrade),
+        ];
+        let root = tempfile::tempdir().unwrap();
+        drop(Store::open(root.path()).unwrap());
+        let mut db = Connection::open(root.path().join("manager.db")).unwrap();
+        db.execute("INSERT INTO kv VALUES('startup-sentinel','true',NULL)", [])
+            .unwrap();
+        let schema = |db: &Connection| {
+            db.prepare("SELECT name,sql FROM sqlite_schema ORDER BY name")
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let before = schema(&db);
+        // A startup may have observed an earlier version before it waited for
+        // another startup's immediate transaction. Completed steps must be no-ops.
+        for (name, upgrade) in steps {
+            upgrade(&mut db).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(
+                db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                DATABASE_VERSION
+            );
+            assert_eq!(schema(&db), before, "{name}");
+            assert_eq!(
+                db.query_row(
+                    "SELECT data FROM kv WHERE key='startup-sentinel'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+                "true"
+            );
+        }
+    }
+
+    #[test]
     fn existing_other_versions_fail_without_changing_the_database() {
-        for version in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 23, 99] {
+        let unsupported_versions = (0..=10).chain([DATABASE_VERSION + 1, 99]);
+        for version in unsupported_versions {
             let root = tempfile::tempdir().unwrap();
             let db = Connection::open(root.path().join("manager.db")).unwrap();
             db.pragma_update(None, "user_version", version).unwrap();

@@ -1,0 +1,349 @@
+{
+  "views": [
+    {
+      "id": "00000000-0000-4000-8000-000000000094",
+      "nodeId": "00000000-0000-4000-8000-000000000091",
+      "ownerRunId": "00000000-0000-4000-8000-000000000092",
+      "reason": "Build",
+      "state": "queued",
+      "createdAt": 123,
+      "expiresAt": null,
+      "renewalPending": false,
+      "waitUntil": 300123,
+      "pausedRunIds": [],
+      "minimumAvailableMemoryMiB": 0,
+      "error": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000094",
+      "nodeId": "00000000-0000-4000-8000-000000000091",
+      "ownerRunId": "00000000-0000-4000-8000-000000000092",
+      "reason": "Build",
+      "state": "acquiring",
+      "createdAt": 123,
+      "expiresAt": null,
+      "renewalPending": false,
+      "waitUntil": 300123,
+      "pausedRunIds": [],
+      "minimumAvailableMemoryMiB": 0,
+      "error": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000094",
+      "nodeId": "00000000-0000-4000-8000-000000000091",
+      "ownerRunId": "00000000-0000-4000-8000-000000000092",
+      "reason": "Build",
+      "state": "acquired",
+      "createdAt": 123,
+      "expiresAt": null,
+      "renewalPending": false,
+      "waitUntil": 300123,
+      "pausedRunIds": [],
+      "minimumAvailableMemoryMiB": 0,
+      "error": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000094",
+      "nodeId": "00000000-0000-4000-8000-000000000091",
+      "ownerRunId": "00000000-0000-4000-8000-000000000092",
+      "reason": "Build",
+      "state": "releasing",
+      "createdAt": 123,
+      "expiresAt": null,
+      "renewalPending": false,
+      "waitUntil": 300123,
+      "pausedRunIds": [],
+      "minimumAvailableMemoryMiB": 0,
+      "error": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000094",
+      "nodeId": "00000000-0000-4000-8000-000000000091",
+      "ownerRunId": "00000000-0000-4000-8000-000000000092",
+      "reason": "Build",
+      "state": "released",
+      "createdAt": 123,
+      "expiresAt": null,
+      "renewalPending": false,
+      "waitUntil": 300123,
+      "pausedRunIds": [],
+      "minimumAvailableMemoryMiB": 0,
+      "error": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000094",
+      "nodeId": "00000000-0000-4000-8000-000000000091",
+      "ownerRunId": "00000000-0000-4000-8000-000000000092",
+      "reason": "Build",
+      "state": "failed",
+      "createdAt": 123,
+      "expiresAt": null,
+      "renewalPending": false,
+      "waitUntil": 300123,
+      "pausedRunIds": [],
+      "minimumAvailableMemoryMiB": 0,
+      "error": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000094",
+      "nodeId": "00000000-0000-4000-8000-000000000091",
+      "ownerRunId": "00000000-0000-4000-8000-000000000092",
+      "reason": "Build",
+      "state": "expired",
+      "createdAt": 123,
+      "expiresAt": null,
+      "renewalPending": false,
+      "waitUntil": 300123,
+      "pausedRunIds": [],
+      "minimumAvailableMemoryMiB": 0,
+      "error": null
+    }
+  ],
+  "moves": [
+    {
+      "runId": "00000000-0000-4000-8000-000000000092",
+      "nodeId": "00000000-0000-4000-8000-000000000091"
+    },
+    {
+      "runId": "00000000-0000-4000-8000-000000000092",
+      "nodeId": "00000000-0000-4000-8000-000000000091",
+      "requiredTags": [
+        "first",
+        "native"
+      ],
+      "waitSeconds": 3600
+    },
+    {
+      "runId": "00000000-0000-4000-8000-000000000092",
+      "nodeId": "00000000-0000-4000-8000-000000000091",
+      "requiredTags": [
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "AZaz09_:-./"
+      ]
+    }
+  ],
+  "invalidMoves": [
+    {
+      "runId": "00000000-0000-4000-8000-000000000092",
+      "nodeId": "invalid"
+    },
+    {
+      "runId": "00000000-0000-4000-8000-000000000092",
+      "nodeId": "00000000-0000-4000-8000-000000000091",
+      "waitSeconds": 3601
+    },
+    {
+      "runId": "00000000-0000-4000-8000-000000000092",
+      "nodeId": "00000000-0000-4000-8000-000000000091",
+      "cpu": 2
+    },
+    {
+      "runId": "00000000-0000-4000-8000-000000000092",
+      "nodeId": "00000000-0000-4000-8000-000000000091",
+      "requiredTags": [
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      ]
+    },
+    {
+      "runId": "00000000-0000-4000-8000-000000000092",
+      "nodeId": "00000000-0000-4000-8000-000000000091",
+      "requiredTags": [
+        ""
+      ]
+    },
+    {
+      "runId": "00000000-0000-4000-8000-000000000092",
+      "nodeId": "00000000-0000-4000-8000-000000000091",
+      "requiredTags": [
+        "not a tag"
+      ]
+    },
+    {
+      "runId": "00000000-0000-4000-8000-000000000092",
+      "nodeId": "00000000-0000-4000-8000-000000000091",
+      "requiredTags": [
+        "tag\n"
+      ]
+    },
+    {
+      "runId": "00000000-0000-4000-8000-000000000092",
+      "nodeId": "00000000-0000-4000-8000-000000000091",
+      "requiredTags": [
+        "\u00e9"
+      ]
+    },
+    {
+      "runId": "00000000-0000-4000-8000-000000000092",
+      "nodeId": "00000000-0000-4000-8000-000000000091",
+      "requiredTags": [
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid",
+        "valid"
+      ]
+    }
+  ],
+  "acquisitions": [
+    {
+      "durationSeconds": 300,
+      "reason": "Build"
+    },
+    {
+      "durationSeconds": 900,
+      "reason": "Bounded build",
+      "waitSeconds": 0,
+      "acquisitionTimeoutSeconds": 3600,
+      "memberRunIds": [
+        "00000000-0000-4000-8000-000000000092"
+      ],
+      "minimumAvailableMemoryMiB": 1073741824
+    }
+  ],
+  "invalidAcquisitions": [
+    {
+      "durationSeconds": 0,
+      "reason": "Build"
+    },
+    {
+      "durationSeconds": 901,
+      "reason": "Build"
+    },
+    {
+      "durationSeconds": 300,
+      "reason": ""
+    },
+    {
+      "durationSeconds": 300,
+      "reason": "Build",
+      "memberRunIds": [
+        "invalid"
+      ]
+    },
+    {
+      "durationSeconds": 300,
+      "reason": "Build",
+      "memberRunIds": [
+        "00000000-0000-4000-8000-000000000092",
+        "00000000-0000-4000-8000-000000000092"
+      ]
+    },
+    {
+      "durationSeconds": 300,
+      "reason": "Build",
+      "memberRunIds": [
+        "00000000-0000-4000-8000-000000000000",
+        "00000000-0000-4000-8000-000000000001",
+        "00000000-0000-4000-8000-000000000002",
+        "00000000-0000-4000-8000-000000000003",
+        "00000000-0000-4000-8000-000000000004",
+        "00000000-0000-4000-8000-000000000005",
+        "00000000-0000-4000-8000-000000000006",
+        "00000000-0000-4000-8000-000000000007",
+        "00000000-0000-4000-8000-000000000008",
+        "00000000-0000-4000-8000-000000000009",
+        "00000000-0000-4000-8000-000000000010",
+        "00000000-0000-4000-8000-000000000011",
+        "00000000-0000-4000-8000-000000000012",
+        "00000000-0000-4000-8000-000000000013",
+        "00000000-0000-4000-8000-000000000014",
+        "00000000-0000-4000-8000-000000000015",
+        "00000000-0000-4000-8000-000000000016"
+      ]
+    }
+  ],
+  "allocations": [
+    {
+      "cpu": 1,
+      "memoryMiB": 128,
+      "diskMiB": 0
+    },
+    {
+      "cpu": 1,
+      "memoryMiB": 128,
+      "diskMiB": 116
+    },
+    {
+      "cpu": 1,
+      "memoryMiB": 128,
+      "diskMiB": 120
+    }
+  ],
+  "moveOperations": [
+    {
+      "id": "00000000-0000-4000-8000-000000000101",
+      "state": "running",
+      "result": null,
+      "error": null,
+      "errorStatus": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000101",
+      "state": "completed",
+      "result": {
+        "status": "moving",
+        "nodeId": "00000000-0000-4000-8000-000000000102"
+      },
+      "error": null,
+      "errorStatus": null
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000101",
+      "state": "failed",
+      "result": null,
+      "error": "Destination capacity unavailable.",
+      "errorStatus": 503
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000101",
+      "state": "cancelled",
+      "result": null,
+      "error": null,
+      "errorStatus": null
+    }
+  ],
+  "invalidMoveOperations": [
+    {
+      "id": "00000000-0000-4000-8000-000000000101",
+      "state": "unknown",
+      "result": null,
+      "error": null,
+      "errorStatus": null
+    },
+    {
+      "id": "not-a-uuid",
+      "state": "running",
+      "result": null,
+      "error": null,
+      "errorStatus": null
+    }
+  ]
+}

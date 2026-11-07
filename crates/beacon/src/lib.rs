@@ -390,6 +390,10 @@ pub async fn router_with_installation_hosts(
                     post(mcp::plugin_authorization),
                 )
                 .route(
+                    "/api/relay/{installation}/mcp-authorization",
+                    post(mcp::plugin_authorization),
+                )
+                .route(
                     "/api/relay/{installation}/rotate-token",
                     post(installations::rotate_token),
                 )

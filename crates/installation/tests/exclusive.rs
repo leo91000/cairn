@@ -116,7 +116,14 @@ impl Fixture {
                 &run_id,
                 cairn_installation::runs::RunChanges {
                     status: Some(cairn_contracts::RunStatus::Running),
-                    boundary: Some(serde_json::json!({"nodeId": LOCAL_NODE_ID})),
+                    placement: Some(Box::new(
+                        cairn_installation::nodes::run_placement::PlacementChanges {
+                            node_id: Some(
+                                serde_json::from_value(serde_json::json!(LOCAL_NODE_ID)).unwrap(),
+                            ),
+                            ..Default::default()
+                        },
+                    )),
                     ..Default::default()
                 },
             )
@@ -134,7 +141,12 @@ impl Fixture {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             let status = exclusive::status(&self.s, &self.token).await.unwrap();
-            if status.as_array().unwrap().iter().any(&predicate) {
+            if status["reservations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(&predicate)
+            {
                 return status;
             }
             assert!(
@@ -166,7 +178,11 @@ async fn backup_without_requests_releases_an_orphaned_controller_reservation() {
     });
     assert!(
         f.s.store
-            .list("node-exclusive-requests")
+            .read(|db| Ok(db
+                .exclusive_reservations()?
+                .into_iter()
+                .map(|record| serde_json::to_value(record).unwrap())
+                .collect::<Vec<_>>()))
             .await
             .unwrap()
             .is_empty()
@@ -189,15 +205,32 @@ async fn backup_without_requests_releases_an_orphaned_controller_reservation() {
 #[tokio::test]
 async fn manager_acquisition_is_idempotent_fenced_and_released_before_waiting() {
     let f = Fixture::new().await;
-    let acquired = exclusive::acquire(&f.s, &f.token, &request())
-        .await
-        .unwrap();
+    let mut input = request();
+    input["reason"] = format!("{}Bearer x", "x".repeat(492)).into();
+    let reason = format!("{}Bearer [redacted]", "x".repeat(492));
+    let acquired = exclusive::acquire(&f.s, &f.token, &input).await.unwrap();
     assert_eq!(acquired["state"], "acquired");
+    assert_eq!(acquired["reason"], reason);
+    let stored =
+        f.s.store
+            .exclusive_reservation(text(&acquired, "id"))
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(stored.reason, reason);
+    assert_eq!(stored.input.reason, reason);
+    assert_eq!(f.remote.lock().await["reservation"]["reason"], reason);
+    assert_eq!(
+        f.s.store
+            .node_boundary(LOCAL_NODE_ID)
+            .await
+            .unwrap()
+            .unwrap()["exclusiveReservation"]["reason"],
+        reason
+    );
     assert_eq!(f.remote.lock().await["reservation"]["epoch"], 43);
     assert_eq!(
-        exclusive::acquire(&f.s, &f.token, &request())
-            .await
-            .unwrap()["expiresAt"],
+        exclusive::acquire(&f.s, &f.token, &input).await.unwrap()["expiresAt"],
         acquired["expiresAt"]
     );
     let renewed = exclusive::renew(
@@ -285,7 +318,13 @@ async fn another_run_cannot_release_and_the_next_request_waits_in_order() {
     while f
         .s
         .store
-        .list("node-exclusive-requests")
+        .read(|db| {
+            Ok(db
+                .exclusive_reservations()?
+                .into_iter()
+                .map(|record| serde_json::to_value(record).unwrap())
+                .collect::<Vec<_>>())
+        })
         .await
         .unwrap()
         .len()

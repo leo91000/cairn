@@ -12,6 +12,57 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 
 #[tokio::test]
+async fn explicit_refresh_waits_for_an_in_progress_poll() {
+    use cairn_installation::accounts::AccountState;
+
+    let root = TempDir::new().unwrap();
+    let s = Service::new(config(&root)).await.unwrap();
+    s.accounts.initialize(&s).await.unwrap();
+    let mut account = s
+        .accounts
+        .create(&s, Provider::Codex, "Overlap")
+        .await
+        .unwrap();
+    account.state = AccountState::Ready;
+    s.store.save_coding_account(&account).await.unwrap();
+
+    // The recent attempt keeps this account out of the periodic poll. Restore
+    // its ready state so the explicit poll must change it back to an error.
+    let mut recent = s
+        .accounts
+        .create(&s, Provider::Codex, "Recent")
+        .await
+        .unwrap();
+    recent.state = AccountState::Ready;
+    s.store.save_coding_account(&recent).await.unwrap();
+    s.accounts.refresh(&s, &recent.id).await.unwrap();
+    assert_eq!(
+        s.accounts.account(&s, &recent.id).await.unwrap().state,
+        AccountState::Error
+    );
+    s.store.save_coding_account(&recent).await.unwrap();
+
+    let account_guard = s.accounts.lock(&account.id).await;
+    let mut background = Box::pin(s.accounts.poll(&s, true));
+    assert!(futures_util::poll!(&mut background).is_pending());
+    let mut explicit = Box::pin(s.accounts.poll(&s, false));
+    assert!(futures_util::poll!(&mut explicit).is_pending());
+    s.accounts.poll(&s, true).await.unwrap();
+
+    drop(account_guard);
+    background.await.unwrap();
+    assert_eq!(
+        s.accounts.account(&s, &recent.id).await.unwrap().state,
+        AccountState::Ready
+    );
+    explicit.await.unwrap();
+    assert_eq!(
+        s.accounts.account(&s, &recent.id).await.unwrap().state,
+        AccountState::Error
+    );
+}
+
+#[tokio::test]
 async fn waiting_refresh_does_not_deadlock_multi_account_locking() {
     let accounts = cairn_installation::accounts::Accounts::default();
     // Reordering retains the first account while acquiring the next. A refresh

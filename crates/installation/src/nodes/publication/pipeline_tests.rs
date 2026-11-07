@@ -339,6 +339,7 @@ impl ObjectServer {
 }
 
 struct Fixture {
+    authorize: crate::authorization::Authorization,
     root: tempfile::TempDir,
     service: Arc<Service>,
     run: Value,
@@ -540,6 +541,7 @@ impl Fixture {
         let (controller, controller_task) = diagnostic_tests::peer(controller_app).await;
         let run = service.store.run(&run_id).await.unwrap();
         Self {
+            authorize: crate::authorization::Authorization::default(),
             root,
             service,
             run,
@@ -562,6 +564,7 @@ impl Fixture {
     async fn transfer_measured(&self, window: Option<usize>) -> Result<(u64, Value)> {
         let attempt = id();
         let publication = Publication {
+            authorize: self.authorize.clone(),
             s: &self.service,
             run: &self.run,
             run_id: text(&self.run, "id"),

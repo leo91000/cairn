@@ -3,9 +3,11 @@ import type { AccessPolicy } from './AccessPolicy'
 import type { AgentAvatar } from './AgentAvatar'
 import type { AgentId } from './AgentId'
 import type { AgentProvider } from './AgentProvider'
+import type { CodingAgentPreferences } from './CodingAgentPreferences'
 
 export interface Agent {
   id: AgentId
+  codingAgentDefaults?: { [key in string]: CodingAgentPreferences }
   revision: string
   avatar?: AgentAvatar
   createdAt: number

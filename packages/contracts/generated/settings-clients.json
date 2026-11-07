@@ -1,5 +1,54 @@
 [
   {
+    "input": "GetChatPlanSettingsInput",
+    "method": "GET",
+    "name": "getChatPlanSettings",
+    "output": "ChatPlanSettings",
+    "path": "/settings/chat-plan"
+  },
+  {
+    "input": "ChatPlanSettings",
+    "method": "PUT",
+    "name": "saveChatPlanSettings",
+    "output": "ChatPlanSettings",
+    "path": "/settings/chat-plan"
+  },
+  {
+    "input": "GetTaskStorageLimitsInput",
+    "method": "GET",
+    "name": "getTaskStorageLimits",
+    "output": "TaskStorageLimits",
+    "path": "/settings/task-storage"
+  },
+  {
+    "input": "TaskStorageLimits",
+    "method": "PUT",
+    "name": "saveTaskStorageLimits",
+    "output": "TaskStorageLimits",
+    "path": "/settings/task-storage"
+  },
+  {
+    "input": "CodingAgentConfigurationInput",
+    "method": "POST",
+    "name": "getCodingAgentConfiguration",
+    "output": "CodingAgentConfiguration",
+    "path": "/settings/coding-agents/read"
+  },
+  {
+    "input": "EditCodingAgentConfigurationInput",
+    "method": "POST",
+    "name": "previewCodingAgentConfiguration",
+    "output": "CodingAgentConfiguration",
+    "path": "/settings/coding-agents/preview"
+  },
+  {
+    "input": "EditCodingAgentConfigurationInput",
+    "method": "PUT",
+    "name": "saveCodingAgentConfiguration",
+    "output": "CodingAgentConfiguration",
+    "path": "/settings/coding-agents"
+  },
+  {
     "input": "MarkReadInput",
     "method": "POST",
     "name": "markRead",

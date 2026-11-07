@@ -248,12 +248,13 @@ lead-in, so a brief that starts with `/clear` is not run as a Claude Code
 command; a resumed run sends its resume prompt instead. Codex also lists the skills
 installed under `~/.agents/skills` itself.
 
-Claude Code and OpenCode apply the instructions again at every launch. Codex
-keeps the instructions a thread started with, even when it is resumed with new
-ones. A Codex mission continued in chat therefore receives the interactive rule
-at the start of every chat turn on the mission's thread, since compaction can
-drop earlier messages. A new session started by the chat gets it in its
-instructions.
+Claude Code and OpenCode apply the instructions again at every launch.
+[Codex 0.166.0](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/app-server/src/request_processors/thread_processor.rs)
+reloads an idle unsubscribed thread when resumed with instruction overrides;
+older versions can retain its initial instructions. For compatibility, a Codex
+mission continued in chat receives the interactive rule at the start of every chat
+turn on the mission's thread, since compaction can drop earlier messages. A new
+session started by the chat gets it in its instructions.
 
 ## Screens
 

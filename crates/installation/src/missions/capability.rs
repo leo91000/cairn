@@ -111,8 +111,9 @@ impl MissionOperation {
                 Actor::Public
             }
             ResumeContext::Installation(bearer) => {
-                crate::installation_mcp::authorize(s, &bearer).await?;
-                Actor::Installation(bearer)
+                let authorize =
+                    crate::installation_mcp::management_authorization(s, Some(&bearer)).await?;
+                Actor::Installation(bearer, authorize)
             }
         };
         self.invoke_as(s, input, actor).await
@@ -122,6 +123,7 @@ impl MissionOperation {
         fn decode<T: serde::de::DeserializeOwned>(input: Value) -> Result<T> {
             serde_json::from_value(input).map_err(|e| Error::bad(e.to_string()))
         }
+        actor.recheck().await?;
         match self.name {
             "create_task" => Ok(serde_json::to_value(
                 s.missions
@@ -149,6 +151,7 @@ impl MissionOperation {
                 }
                 let occurrences = next_occurrences(&input.cron, &input.timezone, now(), 3)?;
                 // Even a preparation-only operation rechecks an execution grant before returning.
+                actor.recheck().await?;
                 s.store
                     .read(move |db| {
                         actor.authorize(db)?;
@@ -163,11 +166,12 @@ impl MissionOperation {
                 let account = match &actor {
                     Actor::Human(identity) => Some(identity.account_id.clone()),
                     Actor::Public => crate::native::policy::caller(),
-                    Actor::Installation(_) => None,
+                    Actor::Installation(_, _) => None,
                 };
                 if let Some(account) = &account {
                     crate::reads::begin(s, account).await?;
                 }
+                actor.recheck().await?;
                 s.store
                     .read(move |db| {
                         let transaction = rusqlite::Transaction::new_unchecked(
@@ -195,6 +199,7 @@ impl MissionOperation {
             }
             "list_tasks" => {
                 let _: ListMissionsInput = decode(input)?;
+                actor.recheck().await?;
                 s.store
                     .read(move |db| {
                         let tx = rusqlite::Transaction::new_unchecked(
@@ -213,6 +218,7 @@ impl MissionOperation {
             }
             _ => {
                 let input: MissionInput = decode(input)?;
+                actor.recheck().await?;
                 s.store
                     .read(move |db| {
                         let tx = rusqlite::Transaction::new_unchecked(

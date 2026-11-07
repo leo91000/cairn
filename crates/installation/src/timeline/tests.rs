@@ -34,19 +34,40 @@ fn previous(root: &std::path::Path) -> Connection {
     db
 }
 
-/// Every row of every table, except the projection this version adds.
+/// Retained rows outside timeline/A10 layouts, plus exact retained run columns
+/// and both complete wire projections. A10's own migration tests qualify the
+/// converted attempt/reservation rows and counters.
 fn tables(db: &Connection) -> BTreeMap<String, Vec<String>> {
     let names = db
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'timeline_%' ORDER BY name")
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'timeline_%' AND name NOT IN ('runs','placements','attempts','exclusive_reservations','exclusive_members','exclusive_paused_runs','exclusive_sequence') ORDER BY name")
         .unwrap()
         .query_map([], |row| row.get::<_, String>(0))
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
-    names
+    let mut snapshot: BTreeMap<String, Vec<String>> = names
         .into_iter()
         .map(|name| {
-            let mut statement = db.prepare(&format!("SELECT * FROM \"{name}\"")).unwrap();
+            // Compare retained columns across both placement23 and Plan26 migrations.
+            let projection =
+                if matches!(name.as_str(), "chat_messages" | "chat_questions" | "nodes") {
+                    db.prepare(&format!("PRAGMA table_info({name})"))
+                        .unwrap()
+                        .query_map([], |row| row.get::<_, String>(1))
+                        .unwrap()
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .unwrap()
+                        .into_iter()
+                        .filter(|column| column != "plan" && column != "exclusive_reservation")
+                        .map(|column| format!("\"{column}\""))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                } else {
+                    "*".to_owned()
+                };
+            let mut statement = db
+                .prepare(&format!("SELECT {projection} FROM \"{name}\""))
+                .unwrap();
             let columns = statement.column_count();
             let mut rows = statement
                 .query_map([], |row| {
@@ -66,7 +87,43 @@ fn tables(db: &Connection) -> BTreeMap<String, Vec<String>> {
             rows.sort();
             (name, rows)
         })
-        .collect()
+        .collect();
+    snapshot.insert(
+        "retained run columns".into(),
+        vec![format!(
+            "{:?}",
+            crate::placement_migration_fixture::retained_run_columns(db)
+        )],
+    );
+    snapshot.insert(
+        "complete run projections".into(),
+        crate::placement_migration_fixture::run_views(db)
+            .into_iter()
+            .map(|value| value.to_string())
+            .collect(),
+    );
+    snapshot
+}
+
+// Later startup steps may add tables; every previously existing row must remain.
+fn assert_preserved_tables(db: &Connection, before: &BTreeMap<String, Vec<String>>) {
+    let mut after = tables(db);
+    assert_eq!(after.remove("coding_agent_configurations"), Some(vec![]));
+
+    for table in [
+        "plugin_contribution_grants",
+        "plugin_grant_resources",
+        "plugin_credential_suppliers",
+    ] {
+        assert!(
+            after.remove(table).is_some(),
+            "missing grant migration table {table}"
+        );
+    }
+
+    for (table, rows) in before {
+        assert_eq!(after.get(table), Some(rows), "{table}");
+    }
 }
 
 fn version(db: &Connection) -> i64 {
@@ -272,8 +329,8 @@ async fn long_engine_item_ids_survive_migration_and_live_updates() {
     }
     let before = tables(&db);
     let store = Store::open(root.path()).unwrap();
-    assert_eq!(version(&db), 22);
-    assert_eq!(tables(&db), before);
+    assert_eq!(version(&db), crate::store::DATABASE_VERSION);
+    assert_preserved_tables(&db, &before);
     let old = cards(&store, CODEX).await;
     let first_card = old.iter().find(|card| matches!(&card.content, TimelineContent::AgentMessage { item_id, .. } if item_id == &first)).unwrap();
     let second_card = old.iter().find(|card| matches!(&card.content, TimelineContent::AgentMessage { item_id, .. } if item_id == &second)).unwrap();
@@ -408,8 +465,8 @@ async fn upgrade_builds_the_timeline_from_retained_events_and_changes_nothing_el
     assert!(before["events"].len() >= 48);
 
     let store = Store::open(root.path()).unwrap();
-    assert_eq!(version(&db), 22);
-    assert_eq!(tables(&db), before);
+    assert_eq!(version(&db), crate::store::DATABASE_VERSION);
+    assert_preserved_tables(&db, &before);
     assert_eq!(
         db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
             .unwrap(),
@@ -692,6 +749,7 @@ async fn live_batches_full_replay_and_checkpoint_restart_build_the_same_timeline
                         .get::<_, Option<String>>(5)?
                         .map(|p| serde_json::value::RawValue::from_string(p).unwrap()),
                     display_id: None,
+                    legacy_plan_approval: None,
                     timeline: false,
                 })
             })
@@ -805,6 +863,7 @@ fn replay(events: &[(EventKind, &str, Value)]) -> Vec<TimelineEntry> {
             payload: (!payload.is_null())
                 .then(|| serde_json::value::RawValue::from_string(payload.to_string()).unwrap()),
             display_id: None,
+            legacy_plan_approval: None,
             timeline: false,
         })
         .collect::<Vec<_>>();
@@ -1070,7 +1129,7 @@ fn version_18_upgrades_through_both_projections() {
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .unwrap();
     Store::open(root.path()).unwrap();
-    assert_eq!(version(&db), 22);
+    assert_eq!(version(&db), crate::store::DATABASE_VERSION);
     assert_eq!(
         db.query_row("SELECT COUNT(*) FROM events", [], |row| row
             .get::<_, i64>(0))
@@ -1234,4 +1293,159 @@ async fn empty_wait_ends_the_interval_and_a_new_wait_gets_a_new_start() {
     assert!(cards(&store, CODEX).await.into_iter().all(|entry| !matches!(entry.content,
         TimelineContent::Notice { notice } if notice.code == NoticeCode::BackgroundTasks && notice.waiting_since.is_some()
     )));
+}
+
+#[tokio::test]
+async fn plan_delivery_flag_is_hydrated_without_changing_the_stored_card_or_private_answer() {
+    let root = tempfile::tempdir().unwrap();
+    drop(previous(root.path()));
+    let store = Store::open(root.path()).unwrap();
+    store
+        .event(
+            CODEX,
+            &EventKind::ChatUser,
+            "",
+            Some(serde_json::json!({
+                "messageId": "protected-attachment", "text": "", "plan": true,
+                "attachments": [{ "id": "attachment", "name": "design.txt", "kind": "file" }]
+            })),
+        )
+        .await
+        .unwrap();
+    let shown = cards(&store, CODEX).await;
+    let entry = shown.iter().find(|entry| matches!(&entry.content, TimelineContent::UserMessage { message_id, .. } if message_id.as_deref() == Some("protected-attachment"))).unwrap();
+    assert!(
+        matches!(&entry.content, TimelineContent::UserMessage { plan: true, text, attachments, .. } if text.is_empty() && attachments.len() == 1)
+    );
+    let source = entry.source;
+    assert_eq!(
+        store
+            .read(move |db| Ok(db.0.query_row(
+                "SELECT content FROM timeline_entries WHERE run_id=? AND source=?",
+                rusqlite::params![CODEX, source],
+                |row| row.get::<_, String>(0)
+            )?))
+            .await
+            .unwrap(),
+        "{}"
+    );
+    drop(store);
+    let reopened = Store::open(root.path()).unwrap();
+    assert!(cards(&reopened, CODEX).await.iter().any(|entry| matches!(&entry.content, TimelineContent::UserMessage { plan: true, message_id, .. } if message_id.as_deref() == Some("protected-attachment"))));
+}
+
+#[tokio::test]
+async fn legacy_plan_approval_uses_run_wide_request_state_in_live_and_history_pages() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(root.path()).unwrap();
+    let run = "00000000-0000-4000-8000-0000000000a5";
+    store
+        .transaction(move |db| {
+            let state: cairn_contracts::RunState = serde_json::from_value(serde_json::json!({
+                "id": run,
+                "taskId": "legacy-plan-approval",
+                "status": "succeeded",
+            }))?;
+            db.admit_run(&state, None, &serde_json::json!({}), None)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let request = serde_json::json!({
+        "messageId": "request-a",
+        "text": "Plan this",
+    });
+    for _ in 0..2 {
+        store
+            .event(
+                run,
+                &EventKind::ChatUser,
+                "Plan this",
+                Some(request.clone()),
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .event(
+            run,
+            &EventKind::ItemCompleted,
+            "Approach",
+            Some(serde_json::json!({
+                "item": {
+                    "id": "plan-a",
+                    "type": "proposed_plan",
+                    "text": "Approach",
+                },
+            })),
+        )
+        .await
+        .unwrap();
+
+    let first = store
+        .read(move |db| db.event_page(run, 0, 10))
+        .await
+        .unwrap();
+    let request_boundary = first[1].id;
+    let single_request_plan = first.last().unwrap();
+    assert_eq!(single_request_plan.legacy_plan_approval, Some(true));
+
+    store
+        .event(
+            run,
+            &EventKind::ChatUser,
+            "Another request",
+            Some(serde_json::json!({
+                "messageId": "request-b",
+                "text": "Another request",
+            })),
+        )
+        .await
+        .unwrap();
+    store
+        .event(
+            run,
+            &EventKind::ItemCompleted,
+            "Revised approach",
+            Some(serde_json::json!({
+                "item": {
+                    "id": "plan-b",
+                    "type": "proposed_plan",
+                    "text": "Revised approach",
+                },
+            })),
+        )
+        .await
+        .unwrap();
+
+    let live = store
+        .read(move |db| Ok(db.live_events_between(run, request_boundary, i64::MAX)?.0))
+        .await
+        .unwrap();
+    let paged_plan = live.last().unwrap();
+    assert_eq!(paged_plan.kind, EventKind::ItemCompleted);
+    assert_eq!(paged_plan.legacy_plan_approval, Some(false));
+
+    let event_page = store
+        .read(move |db| db.event_page(run, request_boundary, 10))
+        .await
+        .unwrap();
+    assert_eq!(event_page.last().unwrap().legacy_plan_approval, Some(false));
+
+    let history = store
+        .read(move |db| Ok(db.events_before(run, i64::MAX)?.0))
+        .await
+        .unwrap();
+    let historical_plan = history
+        .iter()
+        .find(|event| {
+            event.payload.as_ref().is_some_and(|payload| {
+                serde_json::from_str::<serde_json::Value>(payload.get())
+                    .ok()
+                    .and_then(|payload| payload.pointer("/item/id").cloned())
+                    == Some(serde_json::json!("plan-b"))
+            })
+        })
+        .unwrap();
+    assert_eq!(historical_plan.legacy_plan_approval, Some(false));
 }

@@ -8,6 +8,7 @@ use common::relay_fixture::router;
 
 use axum::http::StatusCode;
 use cairn_installation::{
+    auth::hex_digest,
     config::{Config, MAIN_AGENT_ID, id},
     error::Error,
     run_status::RunStatus,
@@ -1065,26 +1066,28 @@ async fn chat_state_questions_and_artifacts_update_without_text_events() {
         stream.batch().await.1["state"]["chat"]["pendingQuestions"],
         1
     );
+    let artifact = common::deliverable(
+        &f.run,
+        "file",
+        &json!({
+            "previewStatus": "pending",
+        }),
+    );
+    let stored = artifact.clone();
     f.service
         .store
-        .set(
-            &format!("artifact:{}:file", f.run),
-            json!({ "id": "file", "previewStatus": "pending" }),
-            None,
-        )
+        .transaction(move |db| db.insert_artifact(&stored))
         .await
         .unwrap();
     assert_eq!(
         stream.batch().await.1["state"]["artifacts"][0]["previewStatus"],
         "pending"
     );
+    let mut artifact = artifact;
+    artifact.preview_status = "ready".to_owned();
     f.service
         .store
-        .set(
-            &format!("artifact:{}:file", f.run),
-            json!({ "id": "file", "previewStatus": "ready" }),
-            None,
-        )
+        .transaction(move |db| db.save_artifact_preview(&artifact))
         .await
         .unwrap();
     assert_eq!(
@@ -2039,5 +2042,252 @@ async fn conversation_streams_mask_queued_and_sending_private_answers() {
             assert_eq!(messages[0]["text"], "Private answer");
             assert!(messages[0].get("answers").is_none());
         }
+    }
+}
+
+#[tokio::test]
+async fn large_plan_proposals_use_bounded_stream_and_history_references() {
+    let f = Fixture::new().await;
+    // The canonical native-sized item exceeds the ordinary frame budget even
+    // though the separate generic event summary is capped at 16000 characters.
+    let text = format!("{}🦊 final decision", "x".repeat(9 * 1024 * 1024));
+    let payload = json!({
+        "parent_tool_use_id": "child-plan", "request_id": "reviewed-request",
+        "item": {"id": "proposal", "type": "proposed_plan", "text": text}
+    });
+    f.service
+        .store
+        .event(&f.run, &EventKind::ItemCompleted, &text, Some(payload))
+        .await
+        .unwrap();
+    let event_id = *ids(&f).await.last().unwrap();
+    let mut stream = f.open(0).await;
+    let (history, preview) = loop {
+        let (_, batch) = stream.batch().await;
+        assert!(serde_json::to_vec(&batch).unwrap().len() < 256 * 1024);
+        if let Some(preview) = batch["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == event_id)
+        {
+            break (
+                batch["history"].as_str().unwrap().to_owned(),
+                preview.clone(),
+            );
+        }
+    };
+    assert_eq!(preview["text"], "");
+    assert_eq!(preview["payload"], json!({"_cairnEventContent": true}));
+    let page: Value = f
+        .history(&format!("before={}&history={history}", event_id + 1))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(serde_json::to_vec(&page).unwrap().len() < 256 * 1024);
+    assert_eq!(
+        page["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == event_id)
+            .unwrap(),
+        &preview
+    );
+
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/runs/{}/event-content", f.url, f.run);
+    let mut restored = String::new();
+    let mut offset = 0;
+    let mut sha = Value::Null;
+    let mut total_bytes = None;
+    loop {
+        let response = client
+            .post(&url)
+            .header("x-test-relay-token", &f.token)
+            .json(&json!({"runId": f.run, "eventId": event_id, "offset": offset, "sha256": sha}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.bytes().await.unwrap();
+        assert!(bytes.len() < 256 * 1024);
+        let part: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(part["runId"], f.run);
+        assert_eq!(part["encoding"], "utf-8");
+        assert_eq!(part["format"], "json");
+        let total = part["totalBytes"].as_u64().unwrap();
+        if let Some(previous) = total_bytes {
+            assert_eq!(total, previous);
+        }
+        total_bytes = Some(total);
+        if !sha.is_null() {
+            assert_eq!(part["sha256"], sha);
+        }
+        sha = part["sha256"].clone();
+        assert_eq!(part["eventId"], event_id);
+        assert_eq!(part["offset"], offset);
+        restored.push_str(part["data"].as_str().unwrap());
+        if part["nextOffset"].is_null() {
+            break;
+        }
+        let next = part["nextOffset"].as_u64().unwrap();
+        assert!(next > offset);
+        assert_eq!(next, restored.len() as u64);
+        offset = next;
+    }
+    assert_eq!(Some(restored.len() as u64), total_bytes);
+    assert_eq!(sha.as_str().unwrap(), hex_digest(&restored));
+    let restored: Value = serde_json::from_str(&restored).unwrap();
+    assert_eq!(restored["id"], event_id);
+    let canonical = restored["payload"]["item"]["text"].as_str().unwrap();
+    // Compare every byte without printing a multi-megabyte diff on failure.
+    assert!(
+        canonical == text,
+        "canonical proposal differs: expected {} UTF-8 bytes, received {}",
+        text.len(),
+        canonical.len()
+    );
+    assert_eq!(restored["payload"]["item"]["id"], "proposal");
+    assert_eq!(restored["payload"]["item"]["type"], "proposed_plan");
+    assert_eq!(restored["payload"]["parent_tool_use_id"], "child-plan");
+    assert_eq!(restored["payload"]["request_id"], "reviewed-request");
+    let summary = restored["text"].as_str().unwrap();
+    assert_eq!(summary.chars().count(), 16000);
+    assert!(
+        text.starts_with(summary),
+        "generic event text must retain only its bounded summary"
+    );
+    let wrong_run = client
+        .post(&url)
+        .header("x-test-relay-token", &f.token)
+        .json(&json!({"runId": id(), "eventId": event_id, "offset": 0}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_run.status(), StatusCode::CONFLICT);
+    let wrong_digest = client
+        .post(&url)
+        .header("x-test-relay-token", &f.token)
+        .json(&json!({"runId": f.run, "eventId": event_id, "offset": 1, "sha256": "0".repeat(64)}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_digest.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn member_can_hydrate_native_proposals_without_execution_authority_or_retained_agent() {
+    use common::{AgentFixture, run_fixture::RunFixture};
+    for deleted in [false, true] {
+        let f = Fixture::new().await;
+        let agent_id = if deleted {
+            id()
+        } else {
+            let agent = f.service.agent_fixture(json!({
+                "name": "Native history only", "access": { "backend": "native", "nodes": [] }
+            }), None).await.unwrap();
+            text(&agent, "id").to_owned()
+        };
+        f.service
+            .store
+            .change_run_fixture(
+                &f.run,
+                json!({
+                    "snapshot": {
+                        "task": { "agentId": agent_id },
+                        "agent": { "id": agent_id, "access": { "backend": "native" } }
+                    }
+                }),
+            )
+            .await
+            .unwrap();
+        let mut chat = f.service.chat_create(json!({})).await.unwrap();
+        let chat_id = text(&chat, "id").to_owned();
+        chat["agentId"] = agent_id.clone().into();
+        chat["runId"] = f.run.clone().into();
+        f.service
+            .store
+            .save_conversation_boundary(chat)
+            .await
+            .unwrap();
+        let approach = "reviewed design ".repeat(20000);
+        f.service
+            .store
+            .event(
+                &f.run,
+                &EventKind::ItemCompleted,
+                &approach,
+                Some(json!({
+                    "item": { "id": "large-native-plan", "type": "proposed_plan", "text": approach }
+                })),
+            )
+            .await
+            .unwrap();
+        let event_id = *ids(&f).await.last().unwrap();
+        let token = common::relay_fixture::member_context(&f.service, "history-only-member").await;
+        for (kind, target) in [("runs", &f.run), ("chats", &chat_id)] {
+            let url = format!("{}/api/{kind}/{target}/event-content", f.url);
+            let client = reqwest::Client::new();
+            let mut offset = 0;
+            let mut sha = Value::Null;
+            let mut restored = String::new();
+            loop {
+                let response = client.post(&url)
+                    .header("x-test-relay-token", text(&token, "value"))
+                    .json(&json!({ "runId": f.run, "eventId": event_id, "offset": offset, "sha256": sha }))
+                    .send().await.unwrap();
+                let status = response.status();
+                let part: Value = response.json().await.unwrap();
+                assert_eq!(status, StatusCode::OK, "deleted={deleted} {kind}: {part}");
+                restored.push_str(part["data"].as_str().unwrap());
+                sha = part["sha256"].clone();
+                if part["nextOffset"].is_null() {
+                    break;
+                }
+                offset = part["nextOffset"].as_u64().unwrap();
+            }
+            let restored: Value = serde_json::from_str(&restored).unwrap();
+            assert_eq!(restored["id"], event_id);
+            assert_eq!(restored["payload"]["item"]["text"], approach);
+            let response = client
+                .post(&url)
+                .header("x-test-relay-token", text(&token, "value"))
+                .json(&json!({ "runId": id(), "eventId": event_id, "offset": 0 }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+    }
+}
+
+#[tokio::test]
+async fn installation_plan_policy_reaches_open_chat_streams_without_text_events() {
+    let f = Fixture::new().await;
+    let mut stream = f.open_path("/api/chats/stream", None).await;
+    let (_, initial) = stream.batch().await;
+    assert_eq!(initial["state"]["planTurnsEnabled"], false);
+    for enabled in [true, false] {
+        let response = reqwest::Client::new()
+            .get(format!("{}/api/settings/chat-plan", f.url))
+            .header("x-test-relay-token", &f.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let settings: Value = response.json().await.unwrap();
+        let response = reqwest::Client::new()
+            .put(format!("{}/api/settings/chat-plan", f.url))
+            .header("x-test-relay-token", &f.token)
+            .json(&json!({ "enabled": enabled, "revision": settings["revision"] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let (_, batch) = stream.batch().await;
+        assert_eq!(batch["state"]["planTurnsEnabled"], enabled);
+        assert!(batch["events"].as_array().unwrap().is_empty());
     }
 }

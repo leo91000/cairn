@@ -35,12 +35,13 @@ buffers, codec workspaces and other publications also consume memory.
 ## Reproduce in isolated CI
 
 Use the pinned Rust toolchain and the safe backend launcher. Measurement mode
-runs all-target Clippy and this fixture only, then preserves the log as
+runs this fixture alongside the separate all-target Clippy job, then preserves the log as
 `direct-publication-measurement`. Its job is named `publication measurement`,
 so its success does not stand for the full backend suite. Run ordinary backend
 or complete qualification separately on the same commit. This keeps independent
-checks from duplicating the full workspace suite ahead of the benchmark in one
-job budget. Existing deadlines and full/default qualification remain unchanged.
+checks from duplicating the full workspace suite or Clippy build in the benchmark
+job budget. Both selected jobs must succeed; the measurement artifact alone is
+not qualification. Existing deadlines and full/default qualification remain unchanged.
 The fixture contacts only a loopback object server with synthetic credentials,
 not a real provider or live disk.
 

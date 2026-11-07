@@ -98,8 +98,11 @@ See [Android validation](../apps/android/VALIDATION.md) for device commands.
 Compare completed workflow and job durations from their GitHub Actions timestamps.
 Elapsed time includes queues and dependency waits; aggregate runner time measures
 a different cost. Separate cold cache initialization from warm runs and record
-both before claiming an improvement. PR caches cannot populate another PR’s cache;
-only the backend job saves the shared compiled Rust cache.
+both before claiming an improvement. The four standard Rust jobs (`build`,
+`rust-check`, `backend` and `node-checks`) compile cold without restoring or saving
+a shared `target/debug` cache. Native qualification retains its separate exact
+reference-binary cache, keyed by revision, host image and toolchain; the separate
+Firecracker discard workflow also retains its specialized build cache.
 
 Nightly image reuse requires successful validation of the exact Git tree, paired Beacon
 and installation digests, matching freshly resolved CLI versions, served engine

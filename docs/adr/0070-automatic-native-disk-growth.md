@@ -46,7 +46,36 @@ allowance leaves the pool reserve and 128 MiB journal preparation margin. This
 partially supersedes [shared node budgets](0012-shared-node-budgets.md): CPU and RAM
 remain pooled; negotiated native disk admission now protects unused allowances.
 It reduces overcommit in exchange for fewer admitted simultaneous conversations.
-There is no new per-conversation sizing control or billing reservation.
+There is no per-conversation sizing control or billing reservation.
+
+## Installation-wide task limit (2026-11-04)
+
+Automatic growth is bounded by an installation setting, initially **150 GiB per
+conversation or mission run**, including its workspace and managed temporary files.
+The owner edits it in Settings → Installation on web and Android, from 32 to
+1,024 GiB. The policy is stored on that installation with a revision; stale saves
+are refused. HTTP, public MCP and `cairn_installation` use the same authorized read
+and save operations. Task agents may read or reduce the policy, but cannot increase
+their own installation's limit. Owner-authorized public management can change it.
+
+The heartbeat transaction reads the current policy before every new grant. Its
+last increment can be smaller than 8 GiB: 144 GiB grows to 150 GiB. Shared node and
+host reserves still apply to the actual increment. Reaching this task limit does
+not request eviction of other conversations' caches. The configured maximum is
+included in the authenticated growth reply so the native controller stops further
+requests and gives the agent a specific cleanup notice. Owner changes update the
+notice and the future growth ceiling without restarting an active turn.
+
+Each grant also includes `previousAllowanceMiB`, the manager's durable allowance
+before handling that request. A replay whose allowance equals that recorded value
+can reconcile a lost reply even after the owner lowers the cap. A new grant above
+the current cap is refused; node-budget and no-shrink checks still apply to replays.
+
+Already issued allowances, including workspaces larger than the new setting, keep
+their recorded size and conservative admission accounting. They receive no further
+growth while at or above the current setting. Changing the policy never shrinks an
+ext4 filesystem, deletes files, or silently makes an oversized saved workspace fit
+the new limit. Such workspaces still require deliberate cleanup and recovery.
 
 A native flat journal appends zero extents without downloading or rewriting its
 base. Growth takes the existing write/publication locks and waits for sealed older
@@ -54,8 +83,8 @@ generations to be acknowledged. It commits the new manifest geometry durably, th
 updates its owned live ublk device and runs online `resize2fs`. The committed journal
 size is the recovery intent: an incomplete device/filesystem resize retries, including
 on the next owned mount. No shrink is supported. Existing journal and publication
-formats remain unchanged. The maximum remains 1 TiB and increments stop earlier
-when shared capacity is unavailable. Resize runs outside the supervision loop;
+formats remain unchanged. The format maximum remains 1 TiB; the installation's
+task limit and shared capacity can stop increments earlier. Resize runs outside the supervision loop;
 lease, cancellation, node-budget and combined-allowance enforcement continue.
 
 This supersedes the temporary-image growth restriction in

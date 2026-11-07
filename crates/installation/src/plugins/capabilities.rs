@@ -109,7 +109,40 @@ pub async fn effect(s: &Service, context: &Context, method: &str, args: Value) -
         }
         "http.request" => http(s, context, &args).await,
         "files.create" | "files.append" | "files.read" | "files.delete" | "files.composeMime" => {
-            s.plugins.files.call(&context.connection, method, &args)
+            let mut attachments = std::collections::BTreeMap::new();
+            let access = if method == "files.composeMime" {
+                for attachment in args["attachments"].as_array().into_iter().flatten() {
+                    let id = text(attachment, "id");
+                    let access = s.plugins.files.authorize(s, context, id).await?;
+                    attachments.insert(id.to_owned(), access);
+                }
+                None
+            } else if method != "files.create" {
+                Some(
+                    s.plugins
+                        .files
+                        .authorize(s, context, text(&args, "id"))
+                        .await?,
+                )
+            } else {
+                None
+            };
+            let result = if method == "files.composeMime" {
+                super::mime::compose_authorized(
+                    &s.plugins.files,
+                    &context.connection,
+                    &args,
+                    &attachments,
+                )?
+            } else {
+                s.plugins
+                    .files
+                    .call_authorized(context, method, &args, access.as_ref())?
+            };
+            if matches!(method, "files.create" | "files.composeMime") {
+                s.plugins.files.bind_new(context, &result)?;
+            }
+            Ok(result)
         }
         "timers.after" | "timers.cancel" => timers(s, context, method, &args).await,
         "exec.run" => super::programs::run(s, context, &args).await,
@@ -377,10 +410,15 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
         if !context.manifest.permits_capability("files") {
             return Err(Error::forbidden("File transfers are not approved."));
         }
-        let bytes = s
+        let access = s
             .plugins
             .files
-            .bytes(&context.connection, text(spec, "id"))?;
+            .authorize(s, context, text(spec, "id"))
+            .await?;
+        let bytes =
+            s.plugins
+                .files
+                .bytes_authorized(&context.connection, text(spec, "id"), &access)?;
         match text(spec, "format") {
             "base64url" => {
                 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -435,6 +473,9 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
     let claim =
         super::idempotency::claim(s, &context.connection, args, context.management.as_ref())
             .await?;
+    // Claiming a durable receipt can wait behind another writer. Resolve the
+    // live resource ceiling again before a send or a cached result leaves Cairn.
+    authorize_management(s, context).await?;
     if let Some(super::idempotency::Claim::Cached(response)) = &claim {
         return Ok(response.clone());
     }
@@ -480,6 +521,7 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
             .plugins
             .files
             .response(&context.connection, spec, &body, media_type)?;
+        s.plugins.files.bind_new(context, &file)?;
         return Ok(json!({ "status": status, "headers": headers, "file": file }));
     }
     let json = serde_json::from_slice::<Value>(&body).ok();
@@ -562,4 +604,357 @@ pub(crate) async fn authorize_management(s: &Service, context: &Context) -> Resu
         authority.recheck(s).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod authorization_tests {
+    use super::*;
+    use crate::plugin_grant_fixture::{Fixture, contribution, support};
+    use cairn_contracts::PluginContributionKind;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn http_rechecks_resource_coverage_after_claiming_its_receipt() {
+        let f = Fixture::new().await;
+        f.marker("live-parent").await;
+        f.set(json!([contribution("tool", "grant_probe_post", support())]))
+            .await;
+        let package = super::super::registry::active(&f.s, "grant-probe")
+            .await
+            .unwrap();
+        let instance =
+            f.s.store
+                .plugin_instance(&f.instance)
+                .await
+                .unwrap()
+                .unwrap();
+        let snapshot = super::super::grant_authorization::Snapshot::capture(
+            &f.s,
+            crate::config::MAIN_AGENT_ID,
+            None,
+            &package,
+        )
+        .await
+        .unwrap();
+        let invocation = super::super::grant_authorization::Invocation::prepare(
+            &f.s,
+            snapshot.clone(),
+            instance.clone(),
+            PluginContributionKind::Tool,
+            "grant_probe_post",
+            &json!({ "thread": "support-thread" }),
+        )
+        .await
+        .unwrap();
+        let moved = f.moved_parent.clone();
+        let preparation =
+            crate::capabilities::plugin_packages::Authority::default().with_guard(move |db| {
+                // Change only the external service's ancestry at the receipt's
+                // transaction boundary; all local revisions stay unchanged.
+                if !db.0.is_autocommit() {
+                    moved.store(true, Ordering::SeqCst);
+                }
+                Ok(())
+            });
+        let management = super::super::management::Authority::agent_action(
+            instance.clone(),
+            snapshot,
+            Some(invocation),
+        )
+        .with_preparation(Some(preparation));
+        let context = Context {
+            management: Some(management),
+            connection: instance,
+            manifest: package.manifest.clone(),
+            package_digest: Some(package.digest.clone()),
+            event: Value::Null,
+            link: None,
+            draft: None,
+        };
+        let result = http(
+            &f.s,
+            &context,
+            &json!({
+                "method": "POST",
+                "url": "https://service.example.test/upload",
+                "idempotencyKey": "resource-move-at-claim",
+            }),
+        )
+        .await;
+        assert!(
+            f.moved_parent.load(Ordering::SeqCst),
+            "receipt did not execute"
+        );
+        assert_eq!(
+            f.uploads.load(Ordering::SeqCst),
+            0,
+            "HTTP mutation escaped revoked resource coverage"
+        );
+        assert_eq!(result.unwrap_err().status, 403);
+        f.s.shutdown.cancel();
+    }
+
+    async fn transfer_context(f: &Fixture, agent: &str, scoped: bool) -> Context {
+        let package = super::super::registry::active(&f.s, "grant-probe")
+            .await
+            .unwrap();
+        let connection =
+            f.s.store
+                .plugin_instance(&f.instance)
+                .await
+                .unwrap()
+                .unwrap();
+        let snapshot =
+            super::super::grant_authorization::Snapshot::capture(&f.s, agent, None, &package)
+                .await
+                .unwrap();
+        let invocation = if scoped {
+            Some(
+                super::super::grant_authorization::Invocation::prepare(
+                    &f.s,
+                    snapshot.clone(),
+                    connection.clone(),
+                    PluginContributionKind::Tool,
+                    "grant_probe_post",
+                    &json!({"channel":"support"}),
+                )
+                .await
+                .unwrap(),
+            )
+        } else {
+            None
+        };
+        Context {
+            management: Some(super::super::management::Authority::agent_action(
+                connection.clone(),
+                snapshot,
+                invocation,
+            )),
+            connection,
+            manifest: package.manifest.clone(),
+            package_digest: Some(package.digest),
+            event: Value::Null,
+            link: None,
+            draft: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn appends_preserve_raw_uploader_boundaries_even_when_adding_a_contribution_origin() {
+        use crate::{agent_fixture::AgentFixture, config::MAIN_AGENT_ID};
+
+        for scoped in [false, true] {
+            for original in ["owner", "other_agent", "caller"] {
+                let f = Fixture::new().await;
+                f.s.agent_fixture(json!({ "plugins": [f.instance] }), Some(MAIN_AGENT_ID))
+                    .await
+                    .unwrap();
+                let context = transfer_context(&f, MAIN_AGENT_ID, false).await;
+                let bytes = json!({
+                    "data": "synthetic original bytes",
+                    "encoding": "text",
+                });
+                let file = match original {
+                    "owner" => {
+                        f.s.plugins
+                            .files
+                            .create(
+                                &context.connection,
+                                "owner.txt",
+                                "text/plain",
+                                b"synthetic original bytes",
+                            )
+                            .unwrap()
+                    }
+                    "other_agent" => {
+                        let other =
+                            f.s.agent_fixture(json!({ "name": "Other uploader" }), None)
+                                .await
+                                .unwrap();
+                        let agent = text(&other, "id");
+                        f.set_for(agent, json!([contribution("instructions", "", json!([]))]))
+                            .await;
+                        let other = transfer_context(&f, agent, false).await;
+                        effect(&f.s, &other, "files.create", bytes).await.unwrap()
+                    }
+                    _ => effect(&f.s, &context, "files.create", bytes).await.unwrap(),
+                };
+                let append_context = transfer_context(&f, MAIN_AGENT_ID, scoped).await;
+                effect(
+                    &f.s,
+                    &append_context,
+                    "files.append",
+                    json!({
+                        "id": file["id"], "offset": file["size"], "data": "", "encoding": "text",
+                    }),
+                )
+                .await
+                .unwrap();
+                let mut contributions = vec![contribution("instructions", "", json!([]))];
+                if scoped {
+                    contributions.push(contribution("tool", "grant_probe_post", support()));
+                }
+                f.set(json!(contributions)).await;
+                let reader = transfer_context(&f, MAIN_AGENT_ID, false).await;
+                let result = effect(&f.s, &reader, "files.read", json!({ "id": file["id"] })).await;
+                if original == "caller" {
+                    result.expect("a raw uploader lost access to its own bytes");
+                    if scoped {
+                        f.set(json!([contribution("instructions", "", json!([]))]))
+                            .await;
+                        let reader = transfer_context(&f, MAIN_AGENT_ID, false).await;
+                        assert_eq!(
+                            effect(&f.s, &reader, "files.read", json!({ "id": file["id"] }))
+                                .await
+                                .unwrap_err()
+                                .status,
+                            403,
+                            "own-upload access bypassed the appended contribution's revocation"
+                        );
+                    }
+                } else {
+                    assert_eq!(
+                        result.unwrap_err().status,
+                        403,
+                        "an append laundered {original} bytes (scoped={scoped})"
+                    );
+                }
+                f.s.shutdown.cancel();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_appends_keep_all_origins_and_refuse_stale_reads_and_mime_inputs() {
+        use crate::{agent_fixture::AgentFixture, config::MAIN_AGENT_ID};
+        let f = Fixture::new().await;
+        f.s.agent_fixture(json!({ "plugins": [f.instance] }), Some(MAIN_AGENT_ID))
+            .await
+            .unwrap();
+        let first = transfer_context(&f, MAIN_AGENT_ID, true).await;
+        let mut second = transfer_context(&f, MAIN_AGENT_ID, false).await;
+        let snapshot = second.management.as_ref().unwrap().snapshot().unwrap();
+        let invocation = super::super::grant_authorization::Invocation::prepare(
+            &f.s,
+            snapshot.clone(),
+            second.connection.clone(),
+            PluginContributionKind::Tool,
+            "grant_probe_other",
+            &json!({}),
+        )
+        .await
+        .unwrap();
+        second.management = Some(super::super::management::Authority::agent_action(
+            second.connection.clone(),
+            snapshot,
+            Some(invocation),
+        ));
+        let file = effect(&f.s, &first, "files.create", json!({ "data": "" }))
+            .await
+            .unwrap();
+        let id = text(&file, "id");
+        // Both callers authorize the same version. The first changes its bytes
+        // and origin before the second consumes its proof at a known new offset.
+        let access_first = f.s.plugins.files.authorize(&f.s, &first, id).await.unwrap();
+        let stale_second =
+            f.s.plugins
+                .files
+                .authorize(&f.s, &second, id)
+                .await
+                .unwrap();
+        f.s.plugins
+            .files
+            .call_authorized(
+                &first,
+                "files.append",
+                &json!({
+                    "id": id,
+                    "offset": 0,
+                    "data": "A",
+                }),
+                Some(&access_first),
+            )
+            .unwrap();
+        assert_eq!(
+            f.s.plugins
+                .files
+                .call_authorized(
+                    &second,
+                    "files.append",
+                    &json!({
+                        "id": id,
+                        "offset": 1,
+                        "data": "B",
+                    }),
+                    Some(&stale_second)
+                )
+                .unwrap_err()
+                .status,
+            409
+        );
+        assert_eq!(
+            f.s.plugins.files.bytes(&first.connection, id).unwrap(),
+            b"A"
+        );
+        assert_eq!(
+            f.s.plugins
+                .files
+                .bytes_authorized(&second.connection, id, &stale_second)
+                .unwrap_err()
+                .status,
+            409
+        );
+        assert_eq!(
+            super::super::mime::compose_authorized(
+                &f.s.plugins.files,
+                &second.connection,
+                &json!({
+                    "from": "sender@example.test", "to": ["recipient@example.test"], "text": "Body",
+                    "attachments": [{ "id": id, "name": "part.txt", "mediaType": "text/plain" }],
+                }),
+                &std::collections::BTreeMap::from([(id.to_owned(), stale_second)])
+            )
+            .unwrap_err()
+            .status,
+            409
+        );
+        let access_second =
+            f.s.plugins
+                .files
+                .authorize(&f.s, &second, id)
+                .await
+                .unwrap();
+        f.s.plugins
+            .files
+            .call_authorized(
+                &second,
+                "files.append",
+                &json!({
+                    "id": id,
+                    "offset": 1,
+                    "data": "B",
+                }),
+                Some(&access_second),
+            )
+            .unwrap();
+        assert_eq!(
+            f.s.plugins.files.bytes(&second.connection, id).unwrap(),
+            b"AB"
+        );
+        f.set(json!([
+            contribution("instructions", "", json!([])),
+            contribution("tool", "grant_probe_other", json!([])),
+        ]))
+        .await;
+        let reader = transfer_context(&f, MAIN_AGENT_ID, false).await;
+        assert_eq!(
+            effect(&f.s, &reader, "files.read", json!({ "id": id }))
+                .await
+                .unwrap_err()
+                .status,
+            403,
+            "the surviving contribution dropped the first origin"
+        );
+        f.s.shutdown.cancel();
+    }
 }

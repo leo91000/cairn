@@ -20,6 +20,7 @@ async function remove() {
     await deleteChat(api, { chatId: props.chat.id, confirm: true })
     const draftScope = state.installationId ? `${state.installationId}:` : ''
     sessionStorage.removeItem(`cairn-chat-draft:${draftScope}${props.chat.id}`)
+    sessionStorage.removeItem(`cairn-chat-draft:${draftScope}${props.chat.id}:plan`)
     emit('deleted', props.chat.id)
   }
   catch (e) {

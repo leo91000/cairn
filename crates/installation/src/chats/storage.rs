@@ -200,7 +200,8 @@ CREATE TABLE chat_messages(
     mode TEXT NOT NULL CHECK(mode IN ('queue','steer')),
     status TEXT NOT NULL CHECK(status IN ('queued','sending','delivered','cancelled')),
     created_at INTEGER NOT NULL CHECK(created_at BETWEEN 0 AND 9007199254740991),
-    question_id TEXT
+    question_id TEXT,
+    plan INTEGER NOT NULL DEFAULT 0 CHECK(plan IN (0,1))
 );
 CREATE INDEX chat_messages_chat ON chat_messages(chat_id,created_at);
 CREATE INDEX chat_messages_pending ON chat_messages(chat_id,status,created_at);
@@ -581,7 +582,7 @@ impl Db<'_> {
         } else {
             "chat_id=?1 AND ?2 IS NULL"
         };
-        let mut statement = self.0.prepare_cached(&format!("SELECT id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id,NULL FROM chat_messages WHERE {filter} ORDER BY created_at,rowid"))?;
+        let mut statement = self.0.prepare_cached(&format!("SELECT id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id,NULL,plan FROM chat_messages WHERE {filter} ORDER BY created_at,rowid"))?;
         let rows = statement
             .query_map(params![chat, message], |r| {
                 Ok((
@@ -599,6 +600,7 @@ impl Db<'_> {
                         created_at: r.get(10)?,
                         question_id: r.get(11)?,
                         attachments: Vec::new(),
+                        plan: r.get(13)?,
                     },
                     decode::<std::collections::BTreeMap<String, MessageAnswer>>(r, 12)?,
                 ))
@@ -693,7 +695,7 @@ impl Db<'_> {
     fn write_message(&self, message: &Message) -> Result<Message> {
         let mut m = message.clone();
         m.revision = id();
-        self.0.prepare_cached("INSERT INTO chat_messages(id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,text=excluded.text,provider=excluded.provider,model=excluded.model,reasoning=excluded.reasoning,speed=excluded.speed,mode=excluded.mode,status=excluded.status,question_id=excluded.question_id")?.execute(params![m.id,m.chat_id,m.revision,if m.answers.is_some() {"Questionnaire response"} else {&m.text},m.provider,m.model,m.reasoning,m.speed,m.mode.as_str(),m.status.as_str(),m.created_at,m.question_id])?;
+        self.0.prepare_cached("INSERT INTO chat_messages(id,chat_id,revision,text,provider,model,reasoning,speed,mode,status,created_at,question_id,plan) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,text=excluded.text,provider=excluded.provider,model=excluded.model,reasoning=excluded.reasoning,speed=excluded.speed,mode=excluded.mode,status=excluded.status,question_id=excluded.question_id,plan=excluded.plan")?.execute(params![m.id,m.chat_id,m.revision,if m.answers.is_some() {"Questionnaire response"} else {&m.text},m.provider,m.model,m.reasoning,m.speed,m.mode.as_str(),m.status.as_str(),m.created_at,m.question_id,m.plan])?;
         self.save_message_answers(&m.id, m.answers.as_ref(), &m.text)?;
         self.0
             .prepare_cached("DELETE FROM message_attachments WHERE message_id=?")?

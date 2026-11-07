@@ -130,7 +130,7 @@ pub async fn read_all(directory: &Path) -> Result<(String, Vec<(Entry, Vec<u8>)>
     read_all_locked(directory).await
 }
 
-async fn read_all_locked(directory: &Path) -> Result<(String, Vec<(Entry, Vec<u8>)>)> {
+pub(super) async fn read_all_locked(directory: &Path) -> Result<(String, Vec<(Entry, Vec<u8>)>)> {
     let entries = scan(directory).await?;
     let mut hasher = blake3::Hasher::new();
     let mut files = Vec::with_capacity(entries.len());
@@ -617,6 +617,43 @@ mod publication_tests {
         Arc,
         atomic::{AtomicBool, Ordering},
     };
+
+    #[tokio::test]
+    async fn archive_of_nested_alias_waits_for_the_skills_root_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".agents/skills");
+        let nested = root.join("real/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("SKILL.md"), b"content").unwrap();
+        std::os::unix::fs::symlink("real/nested", root.join("alias")).unwrap();
+        let config = serde_json::from_value(json!({
+            "dataDir": temp.path().join("data"),
+            "home": temp.path(),
+            "workspaceRoots": [],
+            "publicUrl": "http://localhost",
+            "host": "127.0.0.1",
+            "port": 4310,
+            "codexBin": "codex",
+            "concurrency": 1,
+            "logger": false,
+            "workerEnabled": false,
+            "runnerUrl": ""
+        }))
+        .unwrap();
+        let skills = super::super::Skills {
+            config,
+            mutations: Arc::default(),
+        };
+        let lock = access(&root).await.write_owned().await;
+        let mut archive = Box::pin(skills.archive("alias", None, 0, None));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut archive)
+                .await
+                .is_err()
+        );
+        drop(lock);
+        archive.await.unwrap();
+    }
 
     #[tokio::test]
     async fn revoked_external_proof_after_lock_wait_leaves_the_bundle_and_metadata_intact() {

@@ -23,6 +23,7 @@ impl Prepared {
         if objects.is_empty() || objects.len() > BATCH {
             return Err(Error::bad("Invalid direct publication batch."));
         }
+        publication.authorize.recheck().await?;
         if publication.snapshot["manifest"]["onDemand"] == true {
             // Preserve the external policy check and revalidate its authoritative
             // run/node/grant view in the durable capability transaction below.
@@ -57,6 +58,7 @@ impl Prepared {
             }
             Ok(())
         }).await?;
+        publication.authorize.recheck().await?;
         let publication_id = publication.snapshot_id.to_owned();
         let request = publication
             .s

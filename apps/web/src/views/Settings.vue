@@ -22,10 +22,12 @@ import {
 } from '../api'
 import { accountSettingsUrl, beaconOrigin, installationHost } from '../beacon-location'
 import AccountConfirmation from '../components/AccountConfirmation.vue'
+import ChatPlanSettings from '../components/ChatPlanSettings.vue'
 import ConversationRetentionSettings from '../components/ConversationRetentionSettings.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
 import StorageSettings from '../components/StorageSettings.vue'
+import TaskStorageSettings from '../components/TaskStorageSettings.vue'
 import ThemeControl from '../components/ThemeControl.vue'
 import UiAlert from '../components/UiAlert.vue'
 import UiButton from '../components/UiButton.vue'
@@ -197,6 +199,24 @@ async function copy(value: string) {
         <slot name="installation" />
         <template v-if="settings && installationSettingsAvailable">
           <StorageSettings />
+          <section class="border-b border-line py-7">
+            <h2 class="text-lg font-heading">
+              Coding agent defaults
+            </h2>
+            <p class="mt-2 text-sm text-muted">
+              Native settings shared by this installation. Agents can personalize their own configuration.
+            </p>
+            <div class="mt-5 grid grid-cols-3 gap-3 phone:grid-cols-1">
+              <RouterLink
+                v-for="engine in [{ id: 'codex', name: 'Codex', file: 'config.toml' }, { id: 'claude', name: 'Claude Code', file: 'settings.json' }, { id: 'opencode', name: 'OpenCode', file: 'opencode.jsonc' }]"
+                :key="engine.id"
+                :to="`/settings/coding-agents/${engine.id}`"
+                class="rounded-xl border border-line bg-surface p-4 transition-colors hover:border-accent hover:bg-soft"
+              >
+                <span class="block text-sm font-semibold">{{ engine.name }}</span><span class="mt-2 block font-mono text-2xs text-muted">{{ engine.file }}</span>
+              </RouterLink>
+            </div>
+          </section>
           <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 px-0 py-7 phone:py-5">
             <div class="section-intro flex gap-[17px] items-center mb-6 phone:items-start phone:gap-[13px]">
               <span class="resource-avatar w-11.5 h-11.5 bg-soft text-accent grid place-items-center rounded-xl border border-line"><Icon :name="ExternalLink" :size="22" /></span>
@@ -268,6 +288,8 @@ async function copy(value: string) {
               No external clients have access yet.
             </p>
           </section>
+          <TaskStorageSettings />
+          <ChatPlanSettings />
           <ConversationRetentionSettings />
           <section class="panel border-b border-line overflow-hidden settings-section mb-5.5 px-0 py-7 phone:py-5">
             <h2>Worker environment</h2>

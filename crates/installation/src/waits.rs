@@ -594,6 +594,7 @@ fn check_dependencies(db: &Db<'_>, caller: &str, targets: Vec<String>) -> Result
 }
 
 pub(crate) fn access(db: &Db<'_>, run: &Value, condition: &Value) -> Result<()> {
+    crate::delegation::authorize_run(db, run)?;
     access_typed(db, run, &condition_from_wire(condition)?)
 }
 

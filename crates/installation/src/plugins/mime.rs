@@ -78,6 +78,29 @@ fn message_ids(value: &Value) -> Result<Vec<String>> {
 }
 
 pub fn compose(files: &Files, connection: &Connection, args: &Value) -> Result<Value> {
+    compose_with(files, connection, args, |id| files.bytes(connection, id))
+}
+
+pub(crate) fn compose_authorized(
+    files: &Files,
+    connection: &Connection,
+    args: &Value,
+    accesses: &std::collections::BTreeMap<String, super::files::Access>,
+) -> Result<Value> {
+    compose_with(files, connection, args, |id| {
+        let access = accesses
+            .get(id)
+            .ok_or_else(|| Error::forbidden("The attachment was not authorized."))?;
+        files.bytes_authorized(connection, id, access)
+    })
+}
+
+fn compose_with(
+    files: &Files,
+    connection: &Connection,
+    args: &Value,
+    read: impl Fn(&str) -> Result<Vec<u8>>,
+) -> Result<Value> {
     let mut builder = MessageBuilder::new().from(address(&args["from"])?);
     let mut recipients = 0;
     for field in ["to", "cc", "bcc", "replyTo"] {
@@ -147,7 +170,7 @@ pub fn compose(files: &Files, connection: &Connection, args: &Value) -> Result<V
     }
     let mut attachment_intents = Vec::new();
     for attachment in attachments {
-        let bytes = files.bytes(connection, text(&attachment, "id"))?;
+        let bytes = read(text(&attachment, "id"))?;
         let mut part = attachment.clone();
         part.as_object_mut()
             .ok_or_else(|| Error::bad("Attachments must be objects."))?

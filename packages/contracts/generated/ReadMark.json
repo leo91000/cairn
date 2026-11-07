@@ -46,7 +46,7 @@
   },
   "properties": {
     "finishedAt": {
-      "description": "When the work the account saw finished. Later work stays unread.",
+      "description": "Observed Chat.readAt or mission finish time, including questions and errors. Later work stays unread.",
       "format": "int64",
       "maximum": 9007199254740991,
       "minimum": 1,

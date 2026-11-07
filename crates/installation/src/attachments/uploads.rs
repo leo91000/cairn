@@ -38,6 +38,7 @@ impl Attachments {
         state
     }
 
+    #[cfg(test)]
     pub(crate) async fn upload<F>(
         self: &Arc<Self>,
         store: Store,
@@ -49,6 +50,25 @@ impl Attachments {
     where
         F: Fn(&Db<'_>) -> Result<()> + Send + Sync + 'static,
     {
+        self.upload_live(
+            store,
+            root,
+            attachment,
+            bytes,
+            crate::authorization::Authorization::local(authorize),
+        )
+        .await
+    }
+
+    pub(crate) async fn upload_live(
+        self: &Arc<Self>,
+        store: Store,
+        root: PathBuf,
+        attachment: ChatAttachment,
+        bytes: Vec<u8>,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<ChatAttachment> {
+        authorize.recheck().await?;
         // Preserve the caller's preparation cancellation explicitly across spawn.
         // Cancelling this upload never cancels its parent preparation or siblings.
         let cancelled = crate::plugins::operations::publication_cancellation()
@@ -72,6 +92,7 @@ impl Attachments {
                 file
             };
             let _file = file.lock().await;
+            authorize.recheck().await?;
             let token = crate::config::id();
             let a = attachment.clone();
             let claim = token.clone();
@@ -80,11 +101,12 @@ impl Attachments {
             let check = authorize.clone();
             let reservation = store
                 .transaction(move |db| {
-                    ensure_live(db, &a.chat_id, &cancelled_check, &*check)?;
+                    ensure_live(db, &a.chat_id, &cancelled_check, &check)?;
                     db.reserve_attachment(&a, &claim, now() + LEASE_MS)
                 })
                 .await?;
             if let Reservation::Existing(existing) = reservation {
+                authorize.recheck().await?;
                 return Ok(existing);
             }
             let directory = root.join(&attachment.chat_id);
@@ -92,6 +114,7 @@ impl Attachments {
             let publication = async {
                 #[cfg(test)]
                 wait_at(&domain.preparation, &attachment.id, &cancelled).await?;
+                authorize.recheck().await?;
                 private_dir(&directory).await?;
                 let mut file = tokio::fs::OpenOptions::new()
                     .write(true)
@@ -113,9 +136,10 @@ impl Attachments {
                 tokio::fs::File::open(&root).await?.sync_all().await?;
                 let a = attachment.clone();
                 let claim = token.clone();
+                authorize.recheck().await?;
                 store
                     .transaction(move |db| {
-                        ensure_live(db, &a.chat_id, &cancelled, &*authorize)?;
+                        ensure_live(db, &a.chat_id, &cancelled, &authorize)?;
                         db.commit_attachment(&a, &claim)
                     })
                     .await
@@ -161,19 +185,16 @@ impl Attachments {
     }
 }
 
-fn ensure_live<F>(
+fn ensure_live(
     db: &Db<'_>,
     chat: &str,
     cancelled: &CancellationToken,
-    authorize: &F,
-) -> Result<()>
-where
-    F: Fn(&Db<'_>) -> Result<()> + ?Sized,
-{
+    authorize: &crate::authorization::Authorization,
+) -> Result<()> {
     if cancelled.is_cancelled() {
         return Err(Error::conflict("Attachment upload cancelled."));
     }
-    authorize(db)?;
+    authorize.authorize(db)?;
     let lifecycle = required(
         db.0.prepare_cached("SELECT lifecycle FROM conversations WHERE id=?")?
             .query_row([chat], |row| row.get::<_, String>(0))

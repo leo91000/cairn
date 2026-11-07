@@ -47,6 +47,7 @@ it('keeps path identity, flat message bodies and explicit deletion confirmation 
     provider: '',
     model: '',
     reasoning: '',
+    plan: false,
     speed: '',
   }
   await sendChatMessage(request, { chatId, message })

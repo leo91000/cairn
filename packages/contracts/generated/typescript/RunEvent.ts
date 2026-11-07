@@ -18,6 +18,11 @@ export interface RunEvent {
   displayId?: number
   runId: string
   /**
+   * Run-wide legacy approval eligibility, derived when an old root plan is read.
+   * This is absent for authored request boundaries and non-plan events.
+   */
+  legacyPlanApproval?: boolean
+  /**
    * The timeline presents this event. Clients render it only through its
    * card and read it as a boundary of families that are not converted yet.
    */

@@ -141,16 +141,24 @@ export async function beaconRelayFixture(port = 4395, listen = '127.0.0.1', dire
 }
 
 export function executeBeaconSql(database: URL, sql: string) {
-  execFileSync('psql', ['-v', 'ON_ERROR_STOP=1', '-c', sql], {
-    env: {
-      ...process.env,
-      PGHOST: database.hostname,
-      PGPORT: database.port || '5432',
-      PGUSER: decodeURIComponent(database.username),
-      PGPASSWORD: decodeURIComponent(database.password),
-      PGDATABASE: decodeURIComponent(database.pathname.slice(1)),
-      PGOPTIONS: database.searchParams.get('options') || '',
-    },
+  const connection = new URL(database)
+  // The previous psql helper forwarded only the URL's PGOPTIONS query field.
+  connection.search = ''
+  const options = database.searchParams.get('options')
+  if (options)
+    connection.searchParams.set('options', options)
+
+  const env: NodeJS.ProcessEnv = {}
+  // Keep runtime/TLS settings, without forwarding credential environment fields
+  // (including the parent fixture URL) alongside the private stdin request.
+  for (const key of ['PATH', 'HOME', 'LANG', 'LC_ALL', 'LC_CTYPE', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'PGSSLMODE', 'PGSSLROOTCERT', 'PGSSLCERT', 'PGSSLKEY', 'PGAPPNAME']) {
+    if (process.env[key] !== undefined)
+      env[key] = process.env[key]
+  }
+
+  execFileSync('target/debug/examples/beacon_sql_fixture', [], {
+    input: JSON.stringify({ database_url: connection.toString(), sql }),
+    env,
     stdio: 'pipe',
   })
 }

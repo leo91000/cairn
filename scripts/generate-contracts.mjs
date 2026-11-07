@@ -19,7 +19,7 @@ import type { ResumeRunOutput } from './typescript/ResumeRunOutput'
 export const resumeRunId = '${definition.id}' as const
 
 export function resumeRun(request: <T>(path: string, options: RequestInit) => Promise<T>, input: ResumeRunInput): Promise<ResumeRunOutput> {
-  return request<ResumeRunOutput>(\`${definition.path.replace('{runId}', `\${encodeURIComponent(input.runId)}`)}\`, { method: 'POST' })
+  return request<ResumeRunOutput>(\`${definition.path.replace('{runId}', `\${encodeURIComponent(input.runId)}`)}\`, { method: 'POST', body: JSON.stringify(input) })
 }
 `)
 run(path.join(root, 'apps/android/gradlew'), ['-p', 'scripts/contracts-kotlin', 'run', `--args=${path.join(generated, 'models.json')} ${path.join(root, 'apps/android/app/src/main/java')}`, '--no-daemon'])
@@ -28,11 +28,12 @@ package build.cairn.contracts
 
 import build.cairn.app.data.CairnApi
 import build.cairn.app.data.segment
+import kotlinx.serialization.json.encodeToJsonElement
 
 const val resumeRunId = "${definition.id}"
 
 suspend fun CairnApi.resumeRun(input: ResumeRunInput): ResumeRunOutput =
-    send("POST", "${definition.path.replace('{runId}', `\${segment(input.runId)}`)}")
+    send("POST", "${definition.path.replace('{runId}', `\${segment(input.runId)}`)}", contractJson.encodeToJsonElement(input))
 `)
 const accountMethods = JSON.parse(readFileSync(path.join(generated, 'list-account-methods.json'), 'utf8'))
 const accountMethodsRoute = accountMethods.path.slice('/api/account/'.length)

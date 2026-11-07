@@ -126,6 +126,7 @@ impl Fixture {
 
 #[derive(Clone, Copy)]
 enum Revocation {
+    InitiatingAuthority,
     Grant,
     Node,
     Checkpoint,
@@ -139,8 +140,22 @@ async fn candidate_revalidates_before_refill_and_preserves_admitted_work() {
 #[tokio::test]
 #[ignore = "isolated process-global PUT budget child"]
 async fn revocation_child() {
-    for revoke in [Revocation::Grant, Revocation::Node, Revocation::Checkpoint] {
-        let fixture = Fixture::demand(17).await;
+    for revoke in [
+        Revocation::InitiatingAuthority,
+        Revocation::Grant,
+        Revocation::Node,
+        Revocation::Checkpoint,
+    ] {
+        let mut fixture = Fixture::demand(17).await;
+        let allowed = Arc::new(AtomicBool::new(true));
+        let guard = allowed.clone();
+        fixture.authorize = crate::authorization::Authorization::new(&fixture.service, move |_| {
+            if guard.load(Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err(Error::forbidden("Initiating authority revoked."))
+            }
+        });
         *fixture.effects.hold_reply.lock().unwrap() = Some(2);
         let returned = AtomicBool::new(false);
         let (result, (returned_early, physical_held)) =
@@ -160,6 +175,9 @@ async fn revocation_child() {
                             .unwrap()
                             .forget();
                         match revoke {
+                            Revocation::InitiatingAuthority => {
+                                allowed.store(false, Ordering::SeqCst);
+                            }
                             Revocation::Grant => {
                                 let grant = text(&fixture.snapshot, "grantId").to_owned();
                                 fixture

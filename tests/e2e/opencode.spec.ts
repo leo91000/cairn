@@ -278,7 +278,8 @@ test('OpenCode keeps an explicitly selected model and reasoning after opening an
   await menu.getByRole('button', { name: 'Close', exact: true }).click()
   await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Continue with the same model.')
   await page.getByRole('button', { name: 'Send', exact: true }).click()
-  await expect.poll(async () => (await workspace.api(`/api/chats/${slug}`)).messages.at(-1)).toMatchObject({ provider: 'opencode', model: 'auto/cat-jam-free', reasoning: 'high' })
+  // A follow-up inherits the displayed selection without pinning future defaults.
+  await expect.poll(async () => (await workspace.api(`/api/chats/${slug}`)).messages.at(-1)).toMatchObject({ provider: 'opencode', model: '', reasoning: '' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${slug}`)).run?.status, { timeout: 30000 }).toBe('succeeded')
   expect((await workspace.api(`/api/chats/${slug}`)).run.snapshot.agent).toMatchObject({ model: 'auto/cat-jam-free', reasoning: 'high' })
 })

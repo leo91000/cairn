@@ -1,6 +1,5 @@
--- Historical v18 run wire projections, unchanged from the frozen v17 fixture.
--- Used only to restore truthful legacy layouts in migration fixtures.
-ALTER TABLE runs ADD COLUMN data TEXT GENERATED ALWAYS AS (json_set(boundary,'$.snapshot',json(snapshot),'$.summary',summary,
+CREATE VIEW run_views AS SELECT runs.*,
+  json_set(boundary,'$.snapshot',json(snapshot),'$.summary',summary,
 
   '$.id',id,
   '$.taskId',task_id,
@@ -25,8 +24,8 @@ ALTER TABLE runs ADD COLUMN data TEXT GENERATED ALWAYS AS (json_set(boundary,'$.
   '$.capacityWaitUntil',capacity_wait_until,
   '$.requestedBy',json(requested_by),
   '$.retry',json(CASE WHEN retry_attempt IS NULL THEN NULL ELSE json_object('attempt',retry_attempt,'limit',retry_limit,'nextAttemptAt',retry_next_at,'startedAt',retry_started_at,'deadlineAt',retry_deadline_at,'cause',json(retry_cause)) END)
-)) VIRTUAL;
-ALTER TABLE runs ADD COLUMN summary_data TEXT GENERATED ALWAYS AS (json_set(boundary,
+) AS data,
+  json_set(boundary,
 
   '$.id',id,
   '$.taskId',task_id,
@@ -51,4 +50,5 @@ ALTER TABLE runs ADD COLUMN summary_data TEXT GENERATED ALWAYS AS (json_set(boun
   '$.capacityWaitUntil',capacity_wait_until,
   '$.requestedBy',json(requested_by),
   '$.retry',json(CASE WHEN retry_attempt IS NULL THEN NULL ELSE json_object('attempt',retry_attempt,'limit',retry_limit,'nextAttemptAt',retry_next_at,'startedAt',retry_started_at,'deadlineAt',retry_deadline_at,'cause',json(retry_cause)) END)
-,'$.taskName',task_name,'$.agentName',agent_name,'$.provider',provider)) VIRTUAL;
+,'$.taskName',task_name,'$.agentName',agent_name,'$.provider',provider) AS summary_data
+FROM runs;

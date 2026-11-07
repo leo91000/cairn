@@ -317,6 +317,49 @@ fn anonymous_get(path: &str) -> Request<Body> {
 }
 
 #[tokio::test]
+async fn publication_preserves_legal_control_characters_and_utf8_byte_bounds() {
+    let f = Fixture::new().await;
+    let longest = format!("\0{}a", "é".repeat(79));
+    assert_eq!(longest.len(), 160);
+    for (key, title, group) in [
+        ("\0report", "NUL key", "\0Release"),
+        ("nul-title", "\0report", "\0Release"),
+        (longest.as_str(), longest.as_str(), longest.as_str()),
+    ] {
+        let artifact = f
+            .publish(&json!({
+                "path": "/tmp/report.md",
+                "title": title,
+                "key": key,
+                "group": group,
+            }))
+            .await
+            .unwrap();
+        assert_eq!(artifact["key"], key);
+        assert_eq!(artifact["title"], title);
+        assert_eq!(artifact["group"], group);
+        assert_eq!(
+            body(download(&f.s, &f.run, &artifact, None).await).await,
+            "# First revision\n"
+        );
+    }
+    let too_long = format!("\0{}", "é".repeat(80));
+    assert_eq!(too_long.len(), 161);
+    for field in ["key", "title", "group"] {
+        let mut args = json!({
+            "path": "/tmp/report.md",
+            "title": "Bounds",
+            "key": "bounds",
+            "group": "",
+        });
+        args[field] = too_long.clone().into();
+        assert_eq!(f.publish(&args).await.unwrap_err().status, 400);
+    }
+    assert_eq!(f.listed().await.len(), 3);
+    f.server.abort();
+}
+
+#[tokio::test]
 async fn publication_is_idempotent_versioned_and_readable_after_restart_without_a_vm() {
     let f = Fixture::new().await;
     let s = &f.s;
@@ -592,8 +635,7 @@ async fn rejected_metadata_commit_removes_the_durable_unpublished_file() {
     let database = rusqlite::Connection::open(f.s.config.data_dir.join("manager.db")).unwrap();
     database
         .execute_batch(
-            "CREATE TRIGGER reject_artifact BEFORE INSERT ON kv
-             WHEN NEW.key LIKE 'artifact:%'
+            "CREATE TRIGGER reject_artifact BEFORE INSERT ON artifact_versions
              BEGIN SELECT RAISE(ABORT, 'rejected artifact commit'); END;",
         )
         .unwrap();
@@ -622,12 +664,19 @@ async fn preview_is_prepared_asynchronously_or_reports_missing_optional_tools_wi
         .publish(&json!({ "path": "/tmp/preview.png", "title": "Preview", "key": "preview" }))
         .await
         .unwrap();
-    let key = format!("artifact:{}:{}", f.run, text(&artifact, "id"));
+    let artifact_id = text(&artifact, "id");
     let completed = eventually(
         Duration::from_secs(30),
         Duration::from_millis(50),
         async || {
-            let item = s.store.kv(&key).await.unwrap().unwrap();
+            let item = serde_json::to_value(
+                s.store
+                    .artifact(&f.run, artifact_id)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
             (item["previewStatus"] != "pending").then_some(item)
         },
     )

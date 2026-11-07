@@ -15,6 +15,17 @@ export default defineConfig({
   reporter: [['list'], ['html', { open: 'never' }]],
   use: { trace: 'retain-on-failure', screenshot: 'only-on-failure', ...devices['Desktop Chrome'] },
   projects: [
+    { name: 'journeys-web-update', testMatch: 'web-update.spec.ts' },
+    {
+      name: 'layout-webkit-web-update',
+      testMatch: 'web-update.spec.ts',
+      use: {
+        browserName: 'webkit',
+        isMobile: true,
+        hasTouch: true,
+        viewport: { width: 390, height: 844 },
+      },
+    },
     { name: 'journeys-beacon-account', testMatch: ['beacon-account.spec.ts', 'beacon-oauth.spec.ts'] },
     { name: 'journeys-beacon-notifications', testMatch: 'beacon-notifications.spec.ts' },
     { name: 'journeys-beacon-relay', testMatch: ['beacon-relay.spec.ts', 'beacon-installations.spec.ts', 'beacon-claim.spec.ts', 'beacon-sharing.spec.ts', 'beacon-sensitive-access.spec.ts', 'direct-capacity.spec.ts', 'beacon-settings.spec.ts'] },
@@ -70,6 +81,18 @@ export default defineConfig({
     { name: 'journeys-task-focus', testMatch: 'task-focus.spec.ts' },
     { name: 'layout-webkit-task-focus', testMatch: 'task-focus.spec.ts', use: { browserName: 'webkit' } },
     { name: 'journeys-agent-access', testMatch: 'agent-access.spec.ts' },
+    { name: 'journeys-coding-agent-configuration', testMatch: 'coding-agent-configuration.spec.ts' },
+    {
+      name: 'layout-webkit-coding-agent-configuration',
+      testMatch: 'coding-agent-configuration.spec.ts',
+      use: {
+        browserName: 'webkit',
+        isMobile: true,
+        hasTouch: true,
+        viewport: { width: 390, height: 844 },
+        colorScheme: 'dark',
+      },
+    },
     {
       name: 'layout-webkit-agent-priorities',
       testMatch: 'agent-access.spec.ts',

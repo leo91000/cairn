@@ -36,7 +36,7 @@ import {
 import { useMissionRuns } from './mission-runs'
 import { localReads } from './reads'
 import { modifier, typingTarget } from './shortcuts'
-import { filOf, isUnread } from './signal'
+import { filOf, filViews } from './signal'
 import { workspaceActionsKey } from './workspace-actions'
 
 useAgentPortraits()
@@ -109,8 +109,8 @@ const selectedChatId = computed(() => {
 })
 const runs = useMissionRuns({ eager: false })
 const fil = computed(() => filOf(chats.value, state.tasks, runs.value, localReads))
-const toRead = computed(() => fil.value.forYou.filter(isUnread).length)
-const needsYou = computed(() => fil.value.forYou.length - toRead.value)
+const toRead = computed(() => filViews(fil.value).unread.length)
+const needsYou = computed(() => 0)
 // The Fil's badge: coral when something needs the user, the accent when work only waits to be read.
 const filBadge = computed(() => needsYou.value || toRead.value)
 const filBadgeLabel = computed(() => [needsYou.value ? `${needsYou.value} need you` : '', toRead.value ? `${toRead.value} to read` : ''].filter(Boolean).join(' · '))
@@ -307,8 +307,8 @@ function openShortcuts() {
         'flex overflow-hidden': filWorkspace,
         'page-chat': route.path.startsWith('/chats'),
         'page-default': !filPage && !route.path.startsWith('/chats'),
-        // The agent page ends with its sticky save bar.
-        'page-flush': route.path.startsWith('/agents/'),
+        // These editors own the spacing around their sticky save bar.
+        'page-flush': route.path.startsWith('/agents/') || route.path.startsWith('/settings/coding-agents/'),
       }"
     >
       <!-- Keep the Fil's filter, scroll and selection while its reading pane changes. -->

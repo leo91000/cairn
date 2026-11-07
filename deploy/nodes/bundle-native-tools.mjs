@@ -15,6 +15,125 @@ import path from 'node:path'
 import process from 'node:process'
 import { pathToFileURL } from 'node:url'
 
+// These are the admission limits of already installed native supervisors.
+// A newer image must remain installable before its supervisor can be updated.
+export function validateNativeToolBundleBudget({ extractedBytes, manifestBytes, compressedBytes }) {
+  const sizes = [extractedBytes, manifestBytes, ...(compressedBytes === undefined ? [] : [compressedBytes])]
+  if (sizes.some(size => !Number.isSafeInteger(size) || size <= 0))
+    throw new Error('Invalid native tool bundle sizes.')
+  if (extractedBytes > 1024 ** 3)
+    throw new Error('Native tools exceed extracted size budget.')
+  if (manifestBytes > 65536)
+    throw new Error('Native tool manifest exceeds limit.')
+  if (compressedBytes > 512 * 1024 ** 2)
+    throw new Error('Native tools exceed download size budget.')
+}
+
+function nodeElf(bytes) {
+  if (bytes.length < 64 || !bytes.subarray(0, 7).equals(Buffer.from([0x7F, 0x45, 0x4C, 0x46, 2, 1, 1]))
+    || bytes.readUInt16LE(18) !== 62 || bytes.readUInt16LE(52) !== 64
+    || bytes.readUInt16LE(54) !== 56 || bytes.readUInt16LE(58) !== 64) {
+    throw new Error('Unsupported Node ELF layout.')
+  }
+
+  const headersOffset = Number(bytes.readBigUInt64LE(32))
+  const headersSize = bytes.readUInt16LE(56) * 56
+  const sectionsOffset = Number(bytes.readBigUInt64LE(40))
+  const sectionsSize = bytes.readUInt16LE(60) * 64
+  if (!Number.isSafeInteger(headersOffset) || headersOffset < 64 || !headersSize || headersOffset + headersSize > bytes.length
+    || !Number.isSafeInteger(sectionsOffset) || sectionsOffset < 64 || !sectionsSize || sectionsOffset + sectionsSize !== bytes.length) {
+    throw new Error('Unsupported Node ELF layout.')
+  }
+
+  const header = Buffer.from(bytes.subarray(0, 64))
+  // Only the section table's location/count/string index may change. The loader
+  // does not use them; all other ELF header and program-header bytes must match.
+  header.fill(0, 40, 48)
+  header.fill(0, 58, 64)
+  const segments = []
+  for (let offset = headersOffset; offset < headersOffset + headersSize; offset += 56) {
+    if (bytes.readUInt32LE(offset) !== 1)
+      continue
+    const start = Number(bytes.readBigUInt64LE(offset + 8))
+    const size = Number(bytes.readBigUInt64LE(offset + 32))
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(size) || start + size > bytes.length)
+      throw new Error('Unsupported Node ELF layout.')
+    segments.push(bytes.subarray(Math.max(start, 64), start + size))
+  }
+
+  if (!segments.length)
+    throw new Error('Unsupported Node ELF layout.')
+  return { header, programHeaders: bytes.subarray(headersOffset, headersOffset + headersSize), segments }
+}
+
+export function assertSameNodeRuntime(original, stripped) {
+  const before = nodeElf(original)
+  const after = nodeElf(stripped)
+  if (!before.header.equals(after.header) || !before.programHeaders.equals(after.programHeaders)
+    || before.segments.length !== after.segments.length
+    || before.segments.some((segment, index) => !segment.equals(after.segments[index]))) {
+    throw new Error('Node runtime image changed while removing debug data.')
+  }
+}
+
+export async function copyNativeTool(name, source, destination) {
+  await copyFile(source, destination)
+  if (name === 'node') {
+    // Official Node releases retain non-loaded DWARF data. Remove only that
+    // data; never strip the coding engines or their embedded vendor payloads.
+    const original = await readFile(source)
+    nodeElf(original)
+    execFileSync('/usr/bin/strip', ['--strip-debug', destination])
+    assertSameNodeRuntime(original, await readFile(destination))
+    if (!execFileSync(source, ['--version']).equals(execFileSync(destination, ['--version'])))
+      throw new Error('Node version changed while removing debug data.')
+  }
+
+  await chmod(destination, 0o555)
+  const bytes = await readFile(destination)
+  return { path: `bin/${name}`, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') }
+}
+
+export async function createNativeToolsArchive(target, files) {
+  const manifest = `${JSON.stringify({
+    version: 1,
+    os: 'linux',
+    arch: 'x86_64',
+    files,
+  })}\n`
+  const manifestBytes = Buffer.byteLength(manifest)
+  const extractedBytes = files.reduce((total, entry) => total + entry.size, manifestBytes)
+  validateNativeToolBundleBudget({ extractedBytes, manifestBytes })
+  const archive = path.resolve(`${target}.zip`)
+  try {
+    await stat(archive)
+    throw new Error('Native tool archive already exists.')
+  }
+  catch (error) {
+    if (error.code !== 'ENOENT')
+      throw error
+  }
+
+  await writeFile(`${target}/manifest.json`, manifest)
+  execFileSync('/usr/bin/zip', ['-q', '-r', archive, 'bin', 'manifest.json'], { cwd: target })
+  // Inspect the resulting ZIP, rather than trusting source sizes or compression
+  // ratios. This also refuses stale/extra files from a reused output directory.
+  const metadata = JSON.parse(execFileSync('/usr/bin/python3', ['-c', `
+import json,pathlib,sys,zipfile
+p=pathlib.Path(sys.argv[1])
+with zipfile.ZipFile(p) as z:
+ print(json.dumps(dict(extractedBytes=sum(x.file_size for x in z.infolist()),manifestBytes=z.getinfo('manifest.json').file_size,compressedBytes=p.stat().st_size,names=z.namelist())))
+`, archive], { encoding: 'utf8' }))
+  validateNativeToolBundleBudget(metadata)
+  const expected = new Set(['bin/', 'manifest.json', ...files.map(entry => entry.path)])
+  if (metadata.extractedBytes !== extractedBytes || metadata.manifestBytes !== manifestBytes
+    || metadata.names.length !== expected.size || metadata.names.some(name => !expected.has(name))) {
+    throw new Error('Native tool archive differs from its manifest.')
+  }
+
+  return archive
+}
+
 export async function selectPinnedBinaries(packageRoot, versions) {
   // Runs in the reviewed runtime image after its pinned coding engines are installed.
   // Ship their actual ELF executables, not npm launchers referring to /pnpm paths.
@@ -97,19 +216,10 @@ async function main() {
   const files = []
   for (const [name, source] of binaries) {
     const destination = `${target}/bin/${name}`
-    await copyFile(source, destination)
-    await chmod(destination, 0o555)
-    const bytes = await readFile(destination)
-    files.push({ path: `bin/${name}`, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') })
+    files.push(await copyNativeTool(name, source, destination))
   }
 
-  await writeFile(`${target}/manifest.json`, `${JSON.stringify({
-    version: 1,
-    os: 'linux',
-    arch: 'x86_64',
-    files,
-  })}\n`)
-  execFileSync('/usr/bin/zip', ['-q', '-r', `${target}.zip`, 'bin', 'manifest.json'], { cwd: target })
+  await createNativeToolsArchive(target, files)
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

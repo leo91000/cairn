@@ -49,8 +49,14 @@ impl Github {
     /// Routes a service's plugin HTTP here and runs its workers from the built binary.
     pub fn attach(&self, s: &Service) {
         s.plugins.route_http_to(Some(self.origin.clone()));
-        s.plugins
-            .use_worker(PathBuf::from(env!("CARGO_BIN_EXE_cairn")));
+        s.plugins.use_worker(
+            option_env!("CARGO_BIN_EXE_cairn")
+                .map(PathBuf::from)
+                .or_else(|| std::env::var_os("CAIRN_TEST_CODE_WORKER").map(PathBuf::from))
+                .unwrap_or_else(|| {
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/cairn")
+                }),
+        );
     }
 
     pub fn calls(&self) -> Vec<Value> {

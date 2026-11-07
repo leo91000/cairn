@@ -34,6 +34,7 @@ pub fn environment(config: &Config, directory: &Path) -> Environment {
 /// updates, browser launches or native background tasks.
 pub fn configure(env: &mut Environment, directory: &Path) {
     sanitize(env);
+    env.insert("CLAUDE_CODE_ENTRYPOINT".into(), "cairn".into());
     env.insert(
         "CLAUDE_CONFIG_DIR".into(),
         directory.to_string_lossy().into_owned(),
@@ -526,6 +527,7 @@ pub async fn model_catalog(s: &Service) -> Result<Value> {
     };
     present(&mut catalog, &cached);
     let view = cairn_contracts::ModelCatalog {
+        native_defaults: None,
         models: catalog
             .models
             .into_iter()

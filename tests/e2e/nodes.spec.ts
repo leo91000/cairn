@@ -124,6 +124,8 @@ test('shows disk accounting and keeps the storage draft revision through invento
     ownerRunId: randomUUID(),
     reason: 'GPU benchmark',
     state: 'acquired',
+    renewalPending: false,
+    error: null,
     createdAt: Date.now(),
     expiresAt: null,
     waitUntil: Date.now(),
@@ -132,7 +134,7 @@ test('shows disk accounting and keeps the storage draft revision through invento
   }
   await page.route('**/api/nodes', route => route.fulfill({ json: [node] }))
   const releases: string[] = []
-  await page.route(`**/api/nodes/${node.id}/exclusive/reservation/release`, async (route) => {
+  await page.route(`**/api/nodes/reservations/exclusive/${node.exclusiveReservation.id}/release`, async (route) => {
     releases.push(route.request().method())
     await route.fulfill({ status: 503, json: { error: 'The node is unreachable.' } })
   })
@@ -519,8 +521,15 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await expect(move.getByRole('combobox', { name: 'Destination', exact: true })).toHaveValue('Destination server')
   await expect(move.getByRole('button', { name: 'Move now' })).toBeEnabled()
   await expect(move.getByRole('spinbutton')).toHaveCount(0)
-  await page.keyboard.press('Escape')
+  // Omission preserves existing tag constraints; an explicit [] would clear them.
+  const movePath = `**/nodes/placement/${detail.run.id}/move`
+  await page.route(movePath, async (route) => {
+    expect(route.request().postDataJSON()).not.toHaveProperty('requiredTags')
+    await route.fulfill({ json: { status: 'moving', nodeId: destinationNode.nodeId } })
+  })
+  await move.getByRole('button', { name: 'Move now' }).click()
   await expect(move).toHaveCount(0)
+  await page.unroute(movePath)
   await page.screenshot({ path: 'test-results/execution-phone.png' })
   await page.mouse.click(5, 5)
   await expect(panel).toHaveCount(0)
@@ -785,7 +794,7 @@ test('switching a machine to native enrolls it again and retires the previous no
   const vm = await enroll((await workspace.api('/api/nodes/enrollments', 'POST', { name: 'Workstation' })).code, { ...machine, kvm: true })
   const main = (await workspace.api('/api/agents')).find((agent: { id: string }) => agent.id === MAIN_AGENT_ID)
   await workspace.api(`/api/agents/${MAIN_AGENT_ID}`, 'PUT', { ...main, access: { ...main.access, nodes: [...main.access.nodes, vm] } })
-  await workspace.api(`/api/nodes/placement/${detail.run.id}`, 'PUT', { pinnedNodeId: vm, preferredNodeId: null })
+  await workspace.api(`/api/nodes/placement/${detail.run.id}`, 'PUT', { selection: { pinnedNodeId: vm, preferredNodeId: null } })
 
   await useRelayForHttpMocks(page)
   await page.goto(workspacePath('/nodes'))

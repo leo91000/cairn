@@ -515,6 +515,63 @@
       },
       "type": "object"
     },
+    "AcquireExclusiveInput": {
+      "additionalProperties": false,
+      "properties": {
+        "acquisitionTimeoutSeconds": {
+          "default": 300,
+          "format": "uint64",
+          "maximum": 3600,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "durationSeconds": {
+          "format": "uint64",
+          "maximum": 900,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "memberRunIds": {
+          "default": [],
+          "items": {
+            "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 16,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "minimumAvailableMemoryMiB": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 1073741824,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        "waitSeconds": {
+          "default": 300,
+          "format": "uint64",
+          "maximum": 3600,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "durationSeconds",
+        "waitSeconds",
+        "acquisitionTimeoutSeconds",
+        "reason",
+        "memberRunIds",
+        "minimumAvailableMemoryMiB"
+      ],
+      "type": "object"
+    },
     "ActivatePluginPackageInput": {
       "additionalProperties": false,
       "properties": {
@@ -544,6 +601,15 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "codingAgentDefaults": {
+          "additionalProperties": {
+            "$ref": "#/definitions/CodingAgentPreferences"
+          },
+          "type": [
+            "object",
+            "null"
           ]
         },
         "createdAt": {
@@ -728,6 +794,40 @@
       },
       "required": [
         "agentId"
+      ],
+      "type": "object"
+    },
+    "AgentPluginGrants": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "grants": {
+          "items": {
+            "$ref": "#/definitions/PluginInstanceGrant"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "description": "Shares the agent profile revision, so old profile editors cannot overwrite a change.",
+          "type": "string"
+        },
+        "runCredentialInstances": {
+          "description": "At most one supplying instance per package. A full grant alone is insufficient.",
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "agentId",
+        "revision",
+        "grants",
+        "runCredentialInstances"
       ],
       "type": "object"
     },
@@ -1276,6 +1376,17 @@
           },
           "type": "array"
         },
+        "nextSelection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CodingAgentPreferences"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Resolved selection for the next implicit message, including changed defaults."
+        },
         "paused": {
           "default": false,
           "type": "boolean"
@@ -1331,6 +1442,17 @@
             "$ref": "#/definitions/ChatQuestion"
           },
           "type": "array"
+        },
+        "readAt": {
+          "default": null,
+          "description": "Latest visible question or finished turn to acknowledge, independently of its status.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "requestedBy": {
           "anyOf": [
@@ -1400,13 +1522,15 @@
           "type": "string"
         },
         "suspendedByExclusive": {
-          "additionalProperties": true,
-          "default": null,
-          "type": [
-            "object",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExclusiveReservation"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "x-kotlin-type": "ExclusiveReservation"
+          "default": null
         },
         "title": {
           "default": "",
@@ -1584,6 +1708,10 @@
     },
     "ChatExecution": {
       "properties": {
+        "afterPlan": {
+          "description": "The previous turn of this run was a plan turn, whose engine mode may persist.",
+          "type": "boolean"
+        },
         "attachments": {
           "default": [],
           "items": {
@@ -1606,6 +1734,10 @@
             "string",
             "null"
           ]
+        },
+        "plan": {
+          "description": "A plan turn: the agent explores and proposes without changing anything.",
+          "type": "boolean"
         },
         "previous": {
           "anyOf": [
@@ -1679,6 +1811,10 @@
           "default": "",
           "type": "string"
         },
+        "plan": {
+          "description": "A plan turn request. Absent on messages saved before plan turns, which never were.",
+          "type": "boolean"
+        },
         "provider": {
           "default": "",
           "pattern": "^(|codex|claude|opencode)$",
@@ -1743,6 +1879,21 @@
           "pattern": "^[\\w./:\\[\\]-]*$",
           "type": "string"
         },
+        "plan": {
+          "default": false,
+          "description": "Plan turn: the agent explores and proposes an approach without changing files, using\nshell network access or calling tools with external effects. Send a later message\nwithout plan to implement it. Unavailable with OpenCode.",
+          "type": "boolean"
+        },
+        "planApproval": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PlanApproval"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "provider": {
           "default": "",
           "pattern": "^(|codex|claude|opencode)$",
@@ -1774,6 +1925,7 @@
         "provider",
         "model",
         "reasoning",
+        "plan",
         "speed"
       ],
       "type": "object"
@@ -1862,6 +2014,25 @@
       "required": [
         "chatId",
         "messageId"
+      ],
+      "type": "object"
+    },
+    "ChatPlanSettings": {
+      "additionalProperties": false,
+      "description": "Installation opt-in for new chat plan requests. Missing policy means disabled.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "revision": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "enabled",
+        "revision"
       ],
       "type": "object"
     },
@@ -2267,6 +2438,100 @@
       ],
       "type": "object"
     },
+    "CodingAgentConfiguration": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agentName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "customizedPaths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "document": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "inheritedDocument": {
+          "type": "string"
+        },
+        "managed": {
+          "items": {
+            "$ref": "#/definitions/ManagedCodingAgentSetting"
+          },
+          "type": "array"
+        },
+        "notices": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "settings": {
+          "items": {
+            "$ref": "#/definitions/CodingAgentSetting"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "provider",
+        "agentId",
+        "agentName",
+        "revision",
+        "filename",
+        "document",
+        "inheritedDocument",
+        "customizedPaths",
+        "settings",
+        "managed",
+        "notices"
+      ],
+      "type": "object"
+    },
+    "CodingAgentConfigurationInput": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "agentId"
+      ],
+      "type": "object"
+    },
     "CodingAgentModel": {
       "properties": {
         "defaultReasoningEffort": {
@@ -2388,6 +2653,95 @@
       ],
       "type": "object"
     },
+    "CodingAgentPreferences": {
+      "description": "Safe display defaults. These are inherited preferences, never profile overrides.",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "reasoning": {
+          "type": "string"
+        },
+        "speed": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "reasoning",
+        "speed"
+      ],
+      "type": "object"
+    },
+    "CodingAgentSetting": {
+      "additionalProperties": false,
+      "properties": {
+        "choices": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": "string"
+        },
+        "group": {
+          "type": "string"
+        },
+        "inherited": {
+          "type": "boolean"
+        },
+        "kind": {
+          "description": "text, integer, boolean or select.",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "value": {
+          "description": "Serialized JSON, or null when the engine chooses its own default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "label",
+        "description",
+        "group",
+        "kind",
+        "choices",
+        "value",
+        "inherited"
+      ],
+      "type": "object"
+    },
+    "CodingAgentSettingChange": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "JSON pointer, including for TOML documents.",
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        "value": {
+          "description": "A JSON value; null removes the setting and restores the inherited value.",
+          "maxLength": 200000,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "value"
+      ],
+      "type": "object"
+    },
     "CodingAgentSwitch": {
       "properties": {
         "error": {
@@ -2436,6 +2790,24 @@
         "summary",
         "finishedAt",
         "outcome"
+      ],
+      "type": "object"
+    },
+    "ConfigurePlacementInput": {
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        },
+        "selection": {
+          "$ref": "#/definitions/PlacementSelection"
+        }
+      },
+      "required": [
+        "runId",
+        "selection"
       ],
       "type": "object"
     },
@@ -2607,6 +2979,35 @@
           "type": "boolean"
         }
       },
+      "type": "object"
+    },
+    "ConversationPlacement": {
+      "additionalProperties": false,
+      "properties": {
+        "nodes": {
+          "items": {
+            "$ref": "#/definitions/ExecutionNode"
+          },
+          "type": "array"
+        },
+        "pinnedNodeId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preferredNodeId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "nodes"
+      ],
       "type": "object"
     },
     "ConversationRequester": {
@@ -3047,6 +3448,139 @@
       ],
       "type": "object"
     },
+    "Deliverable": {
+      "additionalProperties": false,
+      "properties": {
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "digest": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "duration": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "excerpt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "group": {
+          "default": "",
+          "type": "string"
+        },
+        "height": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "default": "file",
+          "pattern": "^(image|video|audio|pdf|markdown|code|file)$",
+          "type": "string"
+        },
+        "mediaType": {
+          "default": "application/octet-stream",
+          "type": "string"
+        },
+        "messageId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "default": "",
+          "type": "string"
+        },
+        "previewStatus": {
+          "default": "none",
+          "pattern": "^(pending|ready|unavailable|none)$",
+          "type": "string"
+        },
+        "publicToken": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "publicUrl": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runId": {
+          "type": "string"
+        },
+        "size": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "title": {
+          "default": "",
+          "type": "string"
+        },
+        "url": {
+          "default": "",
+          "type": "string"
+        },
+        "version": {
+          "default": 1,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "visibility": {
+          "pattern": "^(private|public)$",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "runId",
+        "key"
+      ],
+      "type": "object"
+    },
     "EditChatMessage": {
       "additionalProperties": false,
       "properties": {
@@ -3069,6 +3603,13 @@
           "maxLength": 120,
           "pattern": "^[\\w./:\\[\\]-]*$",
           "type": "string"
+        },
+        "plan": {
+          "description": "Plan turn request; an edit without it keeps the stored one.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "provider": {
           "default": "",
@@ -3121,6 +3662,63 @@
         "chatId",
         "messageId",
         "message"
+      ],
+      "type": "object"
+    },
+    "EditCodingAgentConfigurationInput": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "default": null,
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "changes": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/CodingAgentSettingChange"
+          },
+          "maxItems": 200,
+          "type": "array"
+        },
+        "document": {
+          "maxLength": 200000,
+          "type": "string"
+        },
+        "inheritPaths": {
+          "default": [],
+          "description": "Explicitly restore inheritance even when its value equals a customization.",
+          "items": {
+            "maxLength": 500,
+            "type": "string"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        },
+        "reset": {
+          "default": false,
+          "type": "boolean"
+        },
+        "revision": {
+          "maxLength": 200,
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "agentId",
+        "revision",
+        "document",
+        "changes",
+        "inheritPaths",
+        "reset"
       ],
       "type": "object"
     },
@@ -3249,6 +3847,92 @@
       ],
       "type": "object"
     },
+    "ExclusiveReservation": {
+      "additionalProperties": false,
+      "properties": {
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expiresAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "minimumAvailableMemoryMiB": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "nodeId": {
+          "type": "string"
+        },
+        "ownerRunId": {
+          "type": "string"
+        },
+        "pausedRunIds": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "renewalPending": {
+          "default": false,
+          "type": "boolean"
+        },
+        "state": {
+          "pattern": "^(queued|acquiring|acquired|releasing|released|failed|expired)$",
+          "type": "string"
+        },
+        "waitUntil": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "nodeId",
+        "ownerRunId",
+        "reason",
+        "state"
+      ],
+      "type": "object"
+    },
+    "ExclusiveStatusOutput": {
+      "additionalProperties": false,
+      "description": "An object result is accepted by both legacy and current MCP tool codecs.",
+      "properties": {
+        "reservations": {
+          "items": {
+            "$ref": "#/definitions/ExclusiveReservation"
+          },
+          "maxItems": 20,
+          "type": "array"
+        }
+      },
+      "required": [
+        "reservations"
+      ],
+      "type": "object"
+    },
     "ExecutionNode": {
       "additionalProperties": false,
       "properties": {
@@ -3322,13 +4006,15 @@
           "type": "array"
         },
         "exclusiveReservation": {
-          "additionalProperties": true,
-          "default": null,
-          "type": [
-            "object",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExclusiveReservation"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "x-kotlin-type": "ExclusiveReservation"
+          "default": null
         },
         "exclusiveReservations": {
           "default": false,
@@ -3562,6 +4248,36 @@
       ],
       "type": "object"
     },
+    "ExecutionResources": {
+      "additionalProperties": false,
+      "description": "Execution allowances after node reserves are deducted. Configured node\nbudgets retain NodeResources' separate 128 MiB disk minimum.",
+      "properties": {
+        "cpu": {
+          "format": "uint32",
+          "maximum": 4096,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "diskMiB": {
+          "format": "uint64",
+          "maximum": 1099511627776,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "memoryMiB": {
+          "format": "uint64",
+          "maximum": 1073741824,
+          "minimum": 128,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpu",
+        "memoryMiB",
+        "diskMiB"
+      ],
+      "type": "object"
+    },
     "ExportSkillArchiveInput": {
       "additionalProperties": false,
       "properties": {
@@ -3663,6 +4379,10 @@
       ],
       "type": "object"
     },
+    "GetChatPlanSettingsInput": {
+      "additionalProperties": false,
+      "type": "object"
+    },
     "GetConversationRetentionInput": {
       "additionalProperties": false,
       "type": "object"
@@ -3673,6 +4393,20 @@
     },
     "GetInstallationSettingsInput": {
       "additionalProperties": false,
+      "type": "object"
+    },
+    "GetPlacementInput": {
+      "additionalProperties": false,
+      "properties": {
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId"
+      ],
       "type": "object"
     },
     "GetRunInput": {
@@ -3698,6 +4432,10 @@
       "type": "object"
     },
     "GetStorageSettingsInput": {
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "GetTaskStorageLimitsInput": {
       "additionalProperties": false,
       "type": "object"
     },
@@ -4346,6 +5084,64 @@
       },
       "required": [
         "projects"
+      ],
+      "type": "object"
+    },
+    "ListRunArtifactsInput": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "default": 50,
+          "format": "uint32",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "offset",
+        "limit"
+      ],
+      "type": "object"
+    },
+    "ListRunArtifactsOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "artifacts": {
+          "items": {
+            "$ref": "#/definitions/Deliverable"
+          },
+          "type": "array"
+        },
+        "hasMore": {
+          "type": "boolean"
+        },
+        "nextOffset": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "artifacts",
+        "nextOffset",
+        "hasMore"
       ],
       "type": "object"
     },
@@ -5001,6 +5797,22 @@
           "type": "object"
         }
       ]
+    },
+    "ManagedCodingAgentSetting": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "reason"
+      ],
+      "type": "object"
     },
     "MarkReadInput": {
       "additionalProperties": false,
@@ -5898,6 +6710,16 @@
           },
           "type": "array"
         },
+        "nativeDefaults": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CodingAgentPreferences"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "stale": {
           "default": false,
           "type": "boolean"
@@ -5936,6 +6758,63 @@
           "type": "array"
         }
       },
+      "type": "object"
+    },
+    "MoveToNodeInput": {
+      "additionalProperties": false,
+      "properties": {
+        "nodeId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "requiredTags": {
+          "items": {
+            "maxLength": 40,
+            "minLength": 1,
+            "pattern": "^(?!.*[^A-Za-z0-9_:./-]).+$",
+            "type": "string"
+          },
+          "maxItems": 32,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        },
+        "waitSeconds": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 3600,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "runId",
+        "nodeId",
+        "waitSeconds"
+      ],
+      "type": "object"
+    },
+    "MoveToNodeOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "nodeId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "nodeId"
+      ],
       "type": "object"
     },
     "NativeAffectedAgent": {
@@ -5988,6 +6867,44 @@
       "required": [
         "id",
         "email"
+      ],
+      "type": "object"
+    },
+    "NativeConfigurationSnapshot": {
+      "additionalProperties": false,
+      "description": "Frozen per message. Contains editable settings only, never credentials.",
+      "properties": {
+        "agentId": {
+          "description": "Profile that supplied these defaults, even if the conversation is later transferred.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "configuredPaths": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "document": {
+          "type": "string"
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "document",
+        "revision",
+        "configuredPaths"
       ],
       "type": "object"
     },
@@ -6588,6 +7505,78 @@
       ],
       "type": "object"
     },
+    "NodeMoveOperation": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "errorStatus": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MoveToNodeOutput"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "pattern": "^(running|completed|failed|cancelled)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "state",
+        "result",
+        "error",
+        "errorStatus"
+      ],
+      "type": "object"
+    },
+    "NodeMoveOperationInput": {
+      "additionalProperties": false,
+      "properties": {
+        "operationId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operationId"
+      ],
+      "type": "object"
+    },
+    "NodeMoveStarted": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "type": "object"
+    },
     "NodeResources": {
       "additionalProperties": false,
       "properties": {
@@ -6947,6 +7936,49 @@
       },
       "required": [
         "questions"
+      ],
+      "type": "object"
+    },
+    "PlacementSelection": {
+      "additionalProperties": false,
+      "properties": {
+        "pinnedNodeId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preferredNodeId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "pinnedNodeId",
+        "preferredNodeId"
+      ],
+      "type": "object"
+    },
+    "PlanApproval": {
+      "additionalProperties": false,
+      "description": "A transient acceptance precondition for the explicit Implement action.\nRetried accepted message IDs return their original result before checking freshness.",
+      "properties": {
+        "revision": {
+          "maxLength": 120,
+          "type": "string"
+        },
+        "sourceId": {
+          "maxLength": 200,
+          "type": "string"
+        }
+      },
+      "required": [
+        "sourceId",
+        "revision"
       ],
       "type": "object"
     },
@@ -7470,6 +8502,34 @@
       ],
       "type": "object"
     },
+    "PluginContributionGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "pattern": "^(tool|command|hook|runCredentials|instructions|condition|projectSource|skillSource)$",
+          "type": "string"
+        },
+        "name": {
+          "description": "Empty for instructions and runCredentials, which are single contributions.",
+          "maxLength": 200,
+          "type": "string"
+        },
+        "resources": {
+          "description": "Empty means unrestricted. Each listed type restricts that type and descendants.",
+          "items": {
+            "$ref": "#/definitions/PluginResourceRef"
+          },
+          "maxItems": 100,
+          "type": "array"
+        }
+      },
+      "required": [
+        "kind",
+        "name",
+        "resources"
+      ],
+      "type": "object"
+    },
     "PluginCredential": {
       "additionalProperties": false,
       "description": "How the host injects a connection's secret into authorized HTTP requests.\nPlugin code never receives the secret itself.",
@@ -7769,6 +8829,45 @@
       ],
       "type": "object"
     },
+    "PluginGrantAccess": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "const": "full",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "contributions": {
+              "items": {
+                "$ref": "#/definitions/PluginContributionGrant"
+              },
+              "maxItems": 500,
+              "minItems": 1,
+              "type": "array"
+            },
+            "type": {
+              "const": "selected",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "contributions"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "PluginHook": {
       "additionalProperties": false,
       "properties": {
@@ -7791,6 +8890,23 @@
         "name",
         "description",
         "payloadSchema"
+      ],
+      "type": "object"
+    },
+    "PluginInstanceGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "access": {
+          "$ref": "#/definitions/PluginGrantAccess"
+        },
+        "instanceId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "instanceId",
+        "access"
       ],
       "type": "object"
     },
@@ -9541,7 +10657,7 @@
       "additionalProperties": false,
       "properties": {
         "finishedAt": {
-          "description": "When the work the account saw finished. Later work stays unread.",
+          "description": "Observed Chat.readAt or mission finish time, including questions and errors. Later work stays unread.",
           "format": "int64",
           "maximum": 9007199254740991,
           "minimum": 1,
@@ -9554,6 +10670,74 @@
       "required": [
         "target",
         "finishedAt"
+      ],
+      "type": "object"
+    },
+    "ReadRunArtifactInput": {
+      "additionalProperties": false,
+      "properties": {
+        "artifactId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "offset": {
+          "default": 0,
+          "format": "uint64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "artifactId",
+        "offset"
+      ],
+      "type": "object"
+    },
+    "ReadRunArtifactOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "type": "string"
+        },
+        "encoding": {
+          "type": "string"
+        },
+        "file": {
+          "$ref": "#/definitions/Deliverable"
+        },
+        "nextOffset": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "totalBytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "file",
+        "encoding",
+        "offset",
+        "totalBytes",
+        "data",
+        "nextOffset"
       ],
       "type": "object"
     },
@@ -9832,6 +11016,19 @@
         }
       ]
     },
+    "ReleaseExclusiveInput": {
+      "additionalProperties": false,
+      "properties": {
+        "reservationId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reservationId"
+      ],
+      "type": "object"
+    },
     "RenameChatInput": {
       "additionalProperties": false,
       "properties": {
@@ -9922,6 +11119,40 @@
       ],
       "type": "object"
     },
+    "ReplaceAgentPluginGrantsInput": {
+      "additionalProperties": false,
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "grants": {
+          "items": {
+            "$ref": "#/definitions/PluginInstanceGrant"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "runCredentialInstances": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "type": "array"
+        }
+      },
+      "required": [
+        "agentId",
+        "revision",
+        "grants",
+        "runCredentialInstances"
+      ],
+      "type": "object"
+    },
     "ReplaceMissionInput": {
       "additionalProperties": false,
       "properties": {
@@ -10009,6 +11240,74 @@
       ],
       "type": "object"
     },
+    "ResumeChatInput": {
+      "additionalProperties": false,
+      "properties": {
+        "chatId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ResumeExecutionSelection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "turnId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "chatId"
+      ],
+      "type": "object"
+    },
+    "ResumeExecutionSelection": {
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "maxLength": 120,
+          "type": "string"
+        },
+        "preserveModel": {
+          "default": false,
+          "type": "boolean"
+        },
+        "reasoning": {
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        },
+        "speed": {
+          "maxLength": 40,
+          "pattern": "^(?:[a-z][a-z0-9_-]*)?$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "reasoning",
+        "speed"
+      ],
+      "type": "object"
+    },
     "ResumeRunError": {
       "additionalProperties": false,
       "properties": {
@@ -10028,6 +11327,24 @@
           "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
           "format": "uuid",
           "type": "string"
+        },
+        "selection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ResumeExecutionSelection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "turnId": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -10338,7 +11655,7 @@
         "resources": {
           "anyOf": [
             {
-              "$ref": "#/definitions/NodeResources"
+              "$ref": "#/definitions/ExecutionResources"
             },
             {
               "type": "null"
@@ -10426,13 +11743,15 @@
           "type": "string"
         },
         "suspendedByExclusive": {
-          "additionalProperties": true,
-          "default": null,
-          "type": [
-            "object",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExclusiveReservation"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "x-kotlin-type": "ExclusiveReservation"
+          "default": null
         },
         "taskId": {
           "type": "string"
@@ -10583,6 +11902,13 @@
           "maximum": 9007199254740991,
           "minimum": -9007199254740991,
           "type": "integer"
+        },
+        "legacyPlanApproval": {
+          "description": "Run-wide legacy approval eligibility, derived when an old root plan is read.\nThis is absent for authored request boundaries and non-plan events.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "payload": {
           "additionalProperties": true,
@@ -10918,6 +12244,16 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "nativeConfiguration": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NativeConfigurationSnapshot"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "project": {
@@ -11639,6 +12975,30 @@
       "required": [
         "taskId",
         "dismissal"
+      ],
+      "type": "object"
+    },
+    "SetRunArtifactVisibilityInput": {
+      "additionalProperties": false,
+      "properties": {
+        "artifactId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "runId": {
+          "description": "Wire UUID for an existing run; distinct from a mission/task identifier.",
+          "format": "uuid",
+          "type": "string"
+        },
+        "visibility": {
+          "pattern": "^(private|public)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "runId",
+        "artifactId",
+        "visibility"
       ],
       "type": "object"
     },
@@ -12560,6 +13920,28 @@
       ],
       "type": "object"
     },
+    "TaskStorageLimits": {
+      "additionalProperties": false,
+      "description": "Installation policy for future native workspace growth. Existing grants never shrink.",
+      "properties": {
+        "maxDiskGiB": {
+          "format": "uint16",
+          "maximum": 1024,
+          "minimum": 32,
+          "type": "integer"
+        },
+        "revision": {
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "maxDiskGiB",
+        "revision"
+      ],
+      "type": "object"
+    },
     "TimeCondition": {
       "oneOf": [
         {
@@ -12679,6 +14061,10 @@
                 "string",
                 "null"
               ]
+            },
+            "plan": {
+              "description": "The delivered request asks for a protected Plan turn.",
+              "type": "boolean"
             },
             "questionId": {
               "type": [

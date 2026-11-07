@@ -4,7 +4,10 @@ use super::{
     output,
 };
 use crate::{
-    accounts::{Lease, broker},
+    accounts::{
+        Lease, broker,
+        output_redactions::{History, Observation},
+    },
     config::now,
     error::{Error, Result},
     execution,
@@ -29,7 +32,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::Instrument;
 
 /// Exit code reported for processes the worker had to stop.
@@ -37,6 +40,10 @@ const STOPPED: i32 = 143;
 const SUMMARY_LIMIT: usize = 100_000;
 const HISTORY_LIMIT: usize = 16_000;
 const RESUME_PROMPT: &str = "Continue the same task from the saved conversation and current workspace. Execution was interrupted. Resume the original task from its last completed step. Preserve completed work and verify external effects before repeating any action.";
+
+#[cfg(test)]
+#[path = "launch_stream_tests.rs"]
+mod stream_tests;
 
 /// Runs `run` until it finishes, retrying on another account when usage runs out.
 pub(super) async fn execute(
@@ -46,7 +53,7 @@ pub(super) async fn execute(
     cancel: &CancellationToken,
     checkpoint: &Checkpoint,
     existing: bool,
-    sensitive: &mut Vec<String>,
+    sensitive: &History,
 ) -> Result<()> {
     let span = tracing::info_span!(target: "cairn_performance", "agent_execution", run_id = text(run, "id"));
     execute_inner(s, run, admission, cancel, checkpoint, existing, sensitive)
@@ -61,7 +68,7 @@ async fn execute_inner(
     cancel: &CancellationToken,
     checkpoint: &Checkpoint,
     existing: bool,
-    sensitive: &mut Vec<String>,
+    sensitive: &History,
 ) -> Result<()> {
     let id = text(run, "id").to_owned();
     let mut timing = Operation::new("agent_prepare", &id, "mark_running");
@@ -76,8 +83,11 @@ async fn execute_inner(
         cancel,
         checkpoint,
         sensitive,
+        observation: None,
         attempt_id: String::new(),
         reservation: None,
+        #[cfg(test)]
+        output_probe: None,
     };
     execution.mark_running().await?;
     timing.next("access");
@@ -131,11 +141,14 @@ struct Execution<'a> {
     preparation: Option<tokio::sync::OwnedMutexGuard<()>>,
     cancel: &'a CancellationToken,
     checkpoint: &'a Checkpoint,
-    sensitive: &'a mut Vec<String>,
+    sensitive: &'a History,
+    observation: Option<Observation>,
     provider: Provider,
     directory: PathBuf,
     attempt_id: String,
     reservation: Option<(String, Value)>,
+    #[cfg(test)]
+    output_probe: Option<stream_tests::OutputProbe>,
 }
 
 /// The prepared execution environment shared by every launch attempt.
@@ -144,6 +157,7 @@ struct Workspace {
     state_home: PathBuf,
     env: Environment,
     mcp: Value,
+    authorization: crate::plugins::run_credentials::Authorization,
 }
 
 impl Workspace {
@@ -317,6 +331,7 @@ impl Execution<'_> {
                 "Agent access was reduced after this run was queued. Run the task again with the current policy.",
             ));
         }
+        crate::delegation::authorize_async(s, self.run).await?;
         let current_policy = policy(&current);
         self.run["snapshot"]["agent"]["access"]["nodes"] = current_policy["nodes"].clone();
         let snapshot = serde_json::from_value(self.run["snapshot"].clone())?;
@@ -335,22 +350,23 @@ impl Execution<'_> {
     async fn prepare(&mut self, existing: bool) -> Result<Workspace> {
         let s = self.s;
         let mut timing = Operation::new("workspace_prepare", &self.id, "execution");
-        let (prepared, credentials) = self.prepare_execution(existing).await?;
+        let (prepared, credentials, authorization) = self.prepare_execution(existing).await?;
         // Plugin credentials written into the run are masked wherever they appear.
-        for secret in &credentials.secrets {
-            if !self.sensitive.contains(secret) {
-                self.sensitive.push(secret.clone());
-            }
-        }
+        self.sensitive.extend(credentials.secrets.iter().cloned());
         timing.next("account_home");
+        authorization.recheck().await?;
         let state_home = self.prepare_state_home(&prepared).await?;
         let patch = crate::runs::RunChanges {
             workspace: Some(serde_json::from_value(prepared["cwd"].clone())?),
-            boundary: Some(serde_json::json!({
-                "workspaces": prepared["workspaces"],
-                "isolated": prepared["isolated"],
-                "executionBackend": prepared["backend"],
+            placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                execution_backend: Some(serde_json::from_value(serde_json::json!(
+                    prepared["backend"]
+                ))?),
+                ..Default::default()
             })),
+            boundary: Some(
+                serde_json::json!({"workspaces": prepared["workspaces"],"isolated": prepared["isolated"]}),
+            ),
             ..Default::default()
         };
         s.store.change_run(&self.id, patch).await?;
@@ -376,12 +392,16 @@ impl Execution<'_> {
         for (key, value) in mcp["env"].as_object().unwrap() {
             env.insert(key.clone(), value.as_str().unwrap_or("").into());
         }
+        crate::delegation::authorize_async(s, self.run).await?;
+        credentials.authorize(s).await?;
+        authorization.recheck().await?;
         timing.finish();
         Ok(Workspace {
             prepared,
             state_home,
             env,
             mcp,
+            authorization,
         })
     }
 
@@ -389,7 +409,11 @@ impl Execution<'_> {
     async fn prepare_execution(
         &self,
         existing: bool,
-    ) -> Result<(Value, crate::plugins::run_credentials::RunCredentials)> {
+    ) -> Result<(
+        Value,
+        crate::plugins::run_credentials::RunCredentials,
+        crate::plugins::run_credentials::Authorization,
+    )> {
         let s = self.s;
         if existing && self.checkpoint.read(|c| c.prepared().is_none()).await {
             // A fresh generation keeps a half-prepared workspace from being reused.
@@ -399,30 +423,52 @@ impl Execution<'_> {
                 .await?;
         }
         let saved = self.checkpoint.snapshot().await;
-        let agent_id = text(&self.run["snapshot"]["agent"], "id");
         let projects = crate::project_workspaces::catalog(self.run);
-        let credentials = crate::plugins::run_credentials::for_run(s, agent_id, &projects).await?;
+        let authority =
+            crate::capabilities::plugin_packages::Authority::for_run(s, self.run).await?;
+        let credentials = crate::plugins::run_credentials::for_execution_authorized(
+            s,
+            self.run,
+            &projects,
+            authority.clone(),
+        )
+        .await?;
+        let authorization =
+            crate::plugins::run_credentials::Authorization::new(s, authority, &credentials);
         let prepared = match saved.prepared() {
             Some(prepared) => {
-                execution::restore(self.run, prepared.clone(), &s.config, &credentials).await?
+                execution::restore_authorized(
+                    self.run,
+                    prepared.clone(),
+                    &s.config,
+                    &credentials,
+                    &authorization,
+                )
+                .await?
             }
             None => {
                 let account_home = self.account.as_ref().map(|a| a.home.as_path());
-                execution::prepare(
+                execution::prepare_authorized(
                     self.run,
                     &s.config,
                     &credentials,
                     account_home,
                     saved.generation.as_deref(),
+                    &authorization,
                 )
                 .await?
             }
         };
         let saved_prepared = prepared.clone();
+        let publication = authorization.clone();
         self.checkpoint
-            .update(|c| c.prepared = Some(Some(saved_prepared)))
+            .update_and_publish(
+                |c| c.prepared = Some(Some(saved_prepared)),
+                move |db| publication.authorize_in(db),
+            )
             .await?;
-        Ok((prepared, credentials))
+        authorization.recheck().await?;
+        Ok((prepared, credentials, authorization))
     }
 
     async fn prepare_state_home(&mut self, prepared: &Value) -> Result<PathBuf> {
@@ -545,6 +591,7 @@ impl Execution<'_> {
         if self.checkpoint.expired() {
             return Err(Error::conflict("Run exceeded its time limit."));
         }
+        workspace.authorization.recheck().await?;
         let output = workspace.output().to_owned();
         match tokio::fs::remove_file(&output).await {
             Ok(()) => {}
@@ -568,48 +615,81 @@ impl Execution<'_> {
             args: Vec::new(),
             prompt: self.prompt(resume).await?,
         };
-        let auth_broker = match self.account.as_ref() {
-            Some(account) => Some(broker::serve(s, account).await?),
+        self.observation = match self.account.as_ref() {
+            Some(account) => {
+                s.accounts
+                    .observe_output_credentials(
+                        s,
+                        account,
+                        &self.attempt_id,
+                        self.sensitive.clone(),
+                    )
+                    .await?
+            }
             None => None,
         };
-        // A VM reaches its run-scoped MCP only through this channel.
-        let granted = workspace.mcp["env"]
-            .get(crate::mcps::RUN_TOKEN_ENV)
-            .is_some();
-        let mcp_channel = if workspace.isolated() && granted {
-            let home = self.directory.join("home");
-            Some(crate::mcps::channel::serve(s, &home, &self.id).await?)
-        } else {
-            None
+        let broker_result = match self.account.as_ref() {
+            Some(account) => match &self.observation {
+                Some(observation) => broker::serve_observed(s, account, observation.handle())
+                    .await
+                    .map(Some),
+                None => broker::serve(s, account).await.map(Some),
+            },
+            None => Ok(None),
         };
-        let chat = self.chat_plan(workspace, resume, &mut launch).await?;
-        if workspace.isolated() {
-            self.prepare_runner(workspace, resume, chat, &mut launch)
-                .await?;
-        }
-        let mut exit = self.supervise(workspace, launch, log_total).await?;
-        self.checkpoint
-            .update(|c| {
-                c.process = Some(None);
-                // The runner client can return zero only after parsing a healthy
-                // controller result. Nonzero process statuses are ambiguous: local
-                // errors, panics, signals and worker stops share the same channel.
-                // Only a read of this attempt can establish their provenance.
-                c.terminal_code = (exit.code == Some(0)).then_some(Some(0));
-            })
-            .await?;
-        if exit.code != Some(0) && !exit.timed_out {
-            super::execution::reconcile(s, self.checkpoint, self.cancel).await?;
-            if let Some(code) = self.checkpoint.snapshot().await.terminal_code() {
-                exit.code = Some(if code == STOPPED && !self.cancel.is_cancelled() {
-                    crate::runner::CONTROLLER_INTERRUPTED
-                } else {
-                    code
-                });
+        let auth_broker = match broker_result {
+            Ok(broker) => broker,
+            Err(error) => {
+                self.observation.take();
+                return Err(error);
             }
+        };
+        // Capture every result, including preparation/wait/reconcile failures,
+        // before completing the account-scope and broker cleanup barrier.
+        let result = async {
+            // A VM reaches its run-scoped MCP only through this channel.
+            let granted = workspace.mcp["env"]
+                .get(crate::mcps::RUN_TOKEN_ENV)
+                .is_some();
+            let mcp_channel = if workspace.isolated() && granted {
+                let home = self.directory.join("home");
+                Some(crate::mcps::channel::serve(s, &home, &self.id).await?)
+            } else {
+                None
+            };
+            let chat = self.chat_plan(workspace, resume, &mut launch).await?;
+            workspace.authorization.recheck().await?;
+            if workspace.isolated() {
+                self.prepare_runner(workspace, resume, chat, &mut launch)
+                    .await?;
+            }
+            let mut exit = self.supervise(workspace, launch, log_total).await?;
+            self.checkpoint
+                .update(|c| {
+                    c.process = Some(None);
+                    // The runner client can return zero only after parsing a healthy
+                    // controller result. Nonzero process statuses are ambiguous: local
+                    // errors, panics, signals and worker stops share the same channel.
+                    // Only a read of this attempt can establish their provenance.
+                    c.terminal_code = (exit.code == Some(0)).then_some(Some(0));
+                })
+                .await?;
+            if exit.code != Some(0) && !exit.timed_out {
+                super::execution::reconcile(s, self.checkpoint, self.cancel).await?;
+                if let Some(code) = self.checkpoint.snapshot().await.terminal_code() {
+                    exit.code = Some(if code == STOPPED && !self.cancel.is_cancelled() {
+                        crate::runner::CONTROLLER_INTERRUPTED
+                    } else {
+                        code
+                    });
+                }
+            }
+            drop(mcp_channel);
+            Ok::<_, Error>(exit)
         }
-        drop(auth_broker);
-        drop(mcp_channel);
+        .await;
+        self.close_account_output(auth_broker).await;
+        let exit = result?;
         let saved = self.checkpoint.snapshot().await;
         let observation_pending = saved.managed() && saved.terminal_code.is_none();
         if s.shutdown.is_cancelled()
@@ -811,20 +891,25 @@ impl Execution<'_> {
             }
         };
         timing.next("materialize");
+        workspace.authorization.recheck().await?;
         placement::materialize(s, &runner).await?;
         let node_id = placement["nodeId"].as_str().map(str::to_owned);
         let runtime_id = placement["runtimeId"].clone();
         let state = s.store.run_state(&self.id).await?;
+        let publication = workspace.authorization.clone();
         self.checkpoint
-            .update(|c| {
-                c.bind_paid_admission(&runner, &state);
-                c.turn_pending = None;
-                c.recovery_deadline_ms = None;
-                c.terminal_code = None;
-                c.provider_failed = None;
-                c.node_id = Some(node_id);
-                c.runtime_id = Some(Some(runtime_id));
-            })
+            .update_and_publish(
+                |c| {
+                    c.bind_paid_admission(&runner, &state);
+                    c.turn_pending = None;
+                    c.recovery_deadline_ms = None;
+                    c.terminal_code = None;
+                    c.provider_failed = None;
+                    c.node_id = Some(node_id);
+                    c.runtime_id = Some(Some(runtime_id));
+                },
+                move |db| publication.authorize_in(db),
+            )
             .await?;
         drop(self.preparation.take());
         s.worker.notify();
@@ -834,17 +919,31 @@ impl Execution<'_> {
         timing.next("remote_prepare");
         let runner_url = nodes::transport::url(s, &self.id).await?;
         if placement["nodeId"] != nodes::LOCAL_NODE_ID {
-            self.prepare_remote(&runner_url, &runner, text(&placement, "nodeId"))
-                .await?;
+            self.prepare_remote(
+                &runner_url,
+                &runner,
+                text(&placement, "nodeId"),
+                &workspace.authorization,
+            )
+            .await?;
         }
+        workspace.authorization.recheck().await?;
         timing.next("placement_commit");
-        let patch = json!({
-            "nodeId": placement["nodeId"],
-            "resources": placement["resources"],
-            "nodeState": null,
-            "movementError": null,
-        });
-        s.store.update_run_boundary(&self.id, patch).await?;
+        let publication = workspace.authorization.clone();
+        let run_id = self.id.clone();
+        let changes = crate::nodes::run_placement::PlacementChanges {
+            node_id: Some(serde_json::from_value(placement["nodeId"].clone())?),
+            resources: Some(serde_json::from_value(placement["resources"].clone())?),
+            node_state: Some(None),
+            movement_error: Some(None),
+            ..Default::default()
+        };
+        s.store
+            .transaction(move |db| {
+                publication.authorize_in(db)?;
+                db.update_run_placement(&run_id, changes)
+            })
+            .await?;
         let runner_token = execution::secret(&s.config.data_dir, "runner-secret").await?;
         workspace.env.insert("RUNNER_URL".into(), runner_url);
         workspace.env.insert("RUNNER_TOKEN".into(), runner_token);
@@ -942,6 +1041,7 @@ impl Execution<'_> {
             },
             chat,
         };
+        workspace.authorization.recheck().await?;
         atomic_write(
             &plans.join(format!("{runner}.json")),
             &serde_json::to_vec(&plan)?,
@@ -949,16 +1049,25 @@ impl Execution<'_> {
         .await
     }
 
-    async fn prepare_remote(&self, runner_url: &str, runner: &str, node_id: &str) -> Result<()> {
+    async fn prepare_remote(
+        &self,
+        runner_url: &str,
+        runner: &str,
+        node_id: &str,
+        authorization: &crate::plugins::run_credentials::Authorization,
+    ) -> Result<()> {
         let s = self.s;
+        let secret = execution::secret(&s.config.data_dir, "runner-secret").await?;
+        authorization.recheck().await?;
         let response = s
             .http
             .post(format!("{runner_url}/prepare/{runner}"))
-            .bearer_auth(execution::secret(&s.config.data_dir, "runner-secret").await?)
+            .bearer_auth(secret)
             .timeout(Duration::from_secs(300))
             .send()
             .await
             .map_err(|_| Error::unavailable("Remote workspace preparation interrupted."))?;
+        authorization.recheck().await?;
         if !response.status().is_success() {
             let status = response.status().as_u16();
             if status == 504 {
@@ -988,6 +1097,7 @@ impl Execution<'_> {
     ) -> Result<Exit> {
         let s = self.s;
         let previously_launched = self.checkpoint.read(RunCheckpoint::launched).await;
+        workspace.authorization.recheck().await?;
         let mut child = Supervised::spawn(
             &launch.binary,
             &launch.args,
@@ -1030,30 +1140,65 @@ impl Execution<'_> {
             child.stop().await;
             return Err(Error::conflict("Execution stopped before launch."));
         }
+        if let Err(error) = workspace.authorization.recheck().await {
+            child.stop().await;
+            return Err(error);
+        }
         let stdout = child.child.stdout.take().unwrap();
         let stderr = child.child.stderr.take().unwrap();
+        let (telemetry, reports) = output::Publisher::channel(&self.id, &self.attempt_id);
         let (tx, mut events) = mpsc::channel(32);
-        let out = tokio::spawn(output::read_output(
+        let out = AbortOnDropHandle::new(tokio::spawn(output::read_output(
             stdout,
             false,
             tx.clone(),
-            self.sensitive.to_vec(),
-        ));
-        let err = tokio::spawn(output::read_output(stderr, true, tx, Vec::new()));
+            self.sensitive.snapshot().as_ref().clone(),
+        )));
+        let observed = self.observation.as_ref().is_some_and(Observation::active);
+        let err = AbortOnDropHandle::new(tokio::spawn(async move {
+            if observed {
+                output::read_agent_diagnostics(stderr, tx, telemetry).await;
+            } else {
+                output::read_output(stderr, true, tx, Vec::new()).await;
+            }
+        }));
         if let Err(error) = child.start(launch.prompt).await {
+            self.revoke_output_scope();
             child.stop().await;
-            out.abort();
-            err.abort();
+            close_output_readers(out, err, true).await;
             return Err(error);
         }
         let span = tracing::info_span!(target: "cairn_performance", "agent_attempt", run_id = self.id, attempt_id = self.attempt_id);
-        let exit = self
-            .wait(&mut child, &mut events, log_total, previously_launched)
+        let result = self
+            .wait(
+                &mut child,
+                &mut events,
+                log_total,
+                previously_launched,
+                observed.then_some(reports),
+            )
             .instrument(span)
-            .await?;
-        let _ = out.await;
-        let _ = err.await;
-        Ok(exit)
+            .await;
+        if result.is_err() {
+            self.revoke_output_scope();
+            child.stop().await;
+        }
+        close_output_readers(out, err, result.is_err()).await;
+        result
+    }
+
+    async fn close_account_output(&mut self, broker: Option<broker::Broker>) {
+        self.revoke_output_scope();
+        if let Some(broker) = broker {
+            broker.close().await;
+        }
+        self.observation.take();
+    }
+
+    fn revoke_output_scope(&self) {
+        if let Some(observation) = &self.observation {
+            observation.revoke();
+        }
     }
 
     async fn wait(
@@ -1062,6 +1207,7 @@ impl Execution<'_> {
         events: &mut mpsc::Receiver<output::Output>,
         log_total: &mut usize,
         previously_launched: bool,
+        mut reports: Option<output::Reports>,
     ) -> Result<Exit> {
         let s = self.s;
         let cancel = self.cancel;
@@ -1071,14 +1217,16 @@ impl Execution<'_> {
         let mut heartbeat = crate::performance::heartbeat();
         let mut timeout = tokio::time::interval(Duration::from_millis(250));
         timeout.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        while exit.code.is_none() || open {
+        while exit.code.is_none() || open || reports.is_some() {
             let running = exit.code.is_none();
             tokio::select! {
                 () = cancel.cancelled(), if running => {
+                    self.revoke_output_scope();
                     child.stop().await;
                     exit.code = Some(STOPPED);
                 }
                 () = s.shutdown.cancelled(), if running => {
+                    self.revoke_output_scope();
                     child.stop().await;
                     exit.code = Some(STOPPED);
                 }
@@ -1090,6 +1238,7 @@ impl Execution<'_> {
                         && self.checkpoint.expired()
                     {
                         exit.timed_out = true;
+                        self.revoke_output_scope();
                         child.stop().await;
                         exit.code = Some(STOPPED);
                     }
@@ -1098,6 +1247,14 @@ impl Execution<'_> {
                     exit.code = Some(code?.code().unwrap_or(STOPPED));
                 }
                 _ = heartbeat.tick() => activity.heartbeat("receive_output"),
+                changed = async { reports.as_mut().unwrap().changed().await }, if reports.is_some() => {
+                    if changed {
+                        // Credential generations already join the shared history
+                        // synchronously before persistence/delivery. There is no
+                        // per-metric Store lookup, output slot or detached reporter.
+                        reports.as_mut().unwrap().publish_latest();
+                    } else { reports = None; }
+                }
                 event = events.recv(), if open => match event {
                     Some(output) => {
                         let queue_ms = output.received.elapsed().as_millis() as u64;
@@ -1106,17 +1263,29 @@ impl Execution<'_> {
                         }
                         if output.kind == output::OutputKind::Stdout {
                             activity.output();
+                            #[cfg(test)]
+                            if let Some(probe) = &self.output_probe {
+                                probe.canonical();
+                            }
                         }
                         crate::performance::wait("refresh_redactions", self.refresh_redactions()).await?;
+                        #[cfg(test)]
+                        if let Some(probe) = &self.output_probe {
+                            probe.before_record(&output)?;
+                        }
                         exit.exhausted |= crate::performance::wait("persist_output", output::record(
                             s,
                             &output,
                             self.checkpoint,
                             previously_launched,
-                            self.sensitive,
+                            &self.sensitive.snapshot(),
                             log_total,
                             &mut activity,
                         )).await?;
+                        #[cfg(test)]
+                        if let Some(probe) = &self.output_probe {
+                            probe.recorded(&output);
+                        }
                     }
                     None => open = false,
                 },
@@ -1128,14 +1297,18 @@ impl Execution<'_> {
 
     /// Account credentials may rotate while the process runs.
     async fn refresh_redactions(&mut self) -> Result<()> {
+        #[cfg(test)]
+        if let Some(probe) = &self.output_probe {
+            probe.refresh().await;
+            if probe.supplies_flood_marker() {
+                self.sensitive.extend(["rotated-test-secret".into()]);
+            }
+        }
         let Some(account) = self.account.as_ref() else {
             return Ok(());
         };
-        for secret in self.s.accounts.redactions(self.s, account).await? {
-            if !self.sensitive.contains(&secret) {
-                self.sensitive.push(secret);
-            }
-        }
+        self.sensitive
+            .extend(self.s.accounts.redactions(self.s, account).await?);
         Ok(())
     }
 
@@ -1273,14 +1446,15 @@ impl Execution<'_> {
         } else {
             saved.last_message()
         };
-        let summary = run_output::redact(summary, self.sensitive)
+        let summary = run_output::redact(summary, &self.sensitive.snapshot())
             .chars()
             .take(SUMMARY_LIMIT)
             .collect::<String>();
         let resume_available = (status != RunStatus::Succeeded
             || self.run["chatExecution"].is_object())
             && has_session;
-        let error = (!error.is_empty()).then(|| run_output::redact(&error, self.sensitive));
+        let error =
+            (!error.is_empty()).then(|| run_output::redact(&error, &self.sensitive.snapshot()));
         // A failed run's final status says why it ended when no earlier event did.
         let details = error
             .as_ref()
@@ -1371,6 +1545,17 @@ impl Execution<'_> {
     }
 }
 
+/// Join on ordinary EOF; abort AND join on failure. Abort-on-drop ownership also
+/// covers cancellation of this cleanup future itself, unlike bare JoinHandles.
+async fn close_output_readers(out: AbortOnDropHandle<()>, err: AbortOnDropHandle<()>, abort: bool) {
+    if abort {
+        out.abort();
+        err.abort();
+    }
+    let _ = out.await;
+    let _ = err.await;
+}
+
 fn controller_name(run: &Value) -> &'static str {
     if crate::native::policy::native(&run["snapshot"]["agent"]) {
         "Native controller"
@@ -1386,6 +1571,241 @@ fn current_exe() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        capabilities::plugin_packages::Authority, plugins::run_credentials::RunCredentials,
+    };
+
+    async fn preparation_fixture(root: &Path) -> (Arc<Service>, Value) {
+        use crate::run_fixture::DbRunFixture;
+        let config = serde_json::from_value(json!({
+            "dataDir": root.join("data"),
+            "home": root.join("home"),
+            "workspaceRoots": [root],
+            "publicUrl": "http://localhost:4310",
+            "host": "127.0.0.1",
+            "port": 0,
+            "codexBin": "false",
+            "concurrency": 1,
+            "logger": false,
+            "workerEnabled": false,
+            "runnerUrl": "http://runner.invalid",
+        }))
+        .unwrap();
+        let service = Service::new(config).await.unwrap();
+        let agent = service
+            .agent_snapshot(crate::config::MAIN_AGENT_ID)
+            .await
+            .unwrap();
+        let id = crate::config::id();
+        let record = json!({
+            "id": id, "taskId": id, "status": "running",
+            "snapshot": { "agent": agent, "task": { "id": id }, "projects": [] },
+        });
+        let run = service
+            .store
+            .transaction(move |db| db.add_run_fixture(&record, None))
+            .await
+            .unwrap();
+        (service, run)
+    }
+
+    #[tokio::test]
+    async fn initial_preparation_rechecks_revocation_between_remote_lookup_and_clone() {
+        use axum::{Router, routing::get};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut run) = preparation_fixture(root.path()).await;
+        let authority = crate::capabilities::plugin_packages::Authority::for_run(&service, &run)
+            .await
+            .unwrap();
+        let authorization = crate::plugins::run_credentials::Authorization::new(
+            &service,
+            authority,
+            &RunCredentials::default(),
+        );
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        let revoked = service.clone();
+        let run_id = text(&run, "id").to_owned();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route(
+                "/repo/info/refs",
+                get(move || {
+                    let (s, id, count) = (revoked.clone(), run_id.clone(), count.clone());
+                    async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        s.store
+                            .change_run(
+                                &id,
+                                crate::runs::RunChanges {
+                                    cancel_requested_at: Some(Some(now())),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .unwrap();
+                        "0123456789012345678901234567890123456789\trefs/heads/main\n"
+                    }
+                }),
+            )
+            .route("/repo/HEAD", get(|| async { "ref: refs/heads/main\n" }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let source = root.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        for args in [
+            vec!["init".to_owned(), "-q".into()],
+            vec![
+                "remote".into(),
+                "add".into(),
+                "origin".into(),
+                format!("http://{address}/repo"),
+            ],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let project = crate::config::id();
+        run["snapshot"]["task"]["projectId"] = project.clone().into();
+        run["snapshot"]["projects"] = json!([{
+            "id": project, "name": "Revoked project", "path": source,
+            "sourceMode": "remote", "baseBranch": "main",
+        }]);
+        let error = execution::prepare_authorized(
+            &run,
+            &service.config,
+            &RunCredentials::default(),
+            None,
+            None,
+            &authorization,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.status, 403, "{error:?}");
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "no clone may contact the remote after ls-remote revokes the run"
+        );
+        assert!(
+            !service
+                .config
+                .data_dir
+                .join("runs")
+                .join(text(&run, "id"))
+                .join("workspace")
+                .join(project)
+                .exists()
+        );
+        server.abort();
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn remote_preparation_revocation_blocks_publication_and_every_launch() {
+        use axum::{Router, routing::post};
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut run) = preparation_fixture(root.path()).await;
+        let authority = crate::capabilities::plugin_packages::Authority::for_run(&service, &run)
+            .await
+            .unwrap();
+        let authorization = crate::plugins::run_credentials::Authorization::new(
+            &service,
+            authority,
+            &RunCredentials::default(),
+        );
+        let revoked = service.clone();
+        let run_id = text(&run, "id").to_owned();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/prepare/attempt",
+            post(move || {
+                let (s, id) = (revoked.clone(), run_id.clone());
+                async move {
+                    s.store
+                        .change_run(
+                            &id,
+                            crate::runs::RunChanges {
+                                cancel_requested_at: Some(Some(now())),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    axum::Json(json!({}))
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let id = text(&run, "id").to_owned();
+        let checkpoint = Checkpoint::new(
+            service.store.clone(),
+            id.clone(),
+            RunCheckpoint::fresh(Some(60_000)),
+        );
+        let cancel = CancellationToken::new();
+        let mut account = None;
+        let sensitive = History::default();
+        let mut execution = Execution {
+            s: &service,
+            id,
+            run: &mut run,
+            account: &mut account,
+            preparation: None,
+            cancel: &cancel,
+            checkpoint: &checkpoint,
+            sensitive: &sensitive,
+            observation: None,
+            provider: Provider::Codex,
+            directory: root.path().into(),
+            attempt_id: String::new(),
+            reservation: None,
+            output_probe: None,
+        };
+        let error = execution
+            .prepare_remote(
+                &format!("http://{address}"),
+                "attempt",
+                "remote",
+                &authorization,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 403);
+        let workspace = Workspace {
+            prepared: json!({ "cwd": root.path() }),
+            state_home: root.path().into(),
+            env: Environment::new(),
+            mcp: json!({}),
+            authorization,
+        };
+        // A separate/retried launch must also recheck, even if a caller already
+        // prepared a workspace. The nonexistent binary must never be spawned.
+        for _ in 0..2 {
+            let launch = Launch {
+                binary: "/nonexistent-revoked-agent".into(),
+                args: vec![],
+                prompt: String::new(),
+            };
+            let error = execution
+                .supervise(&workspace, launch, &mut 0)
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(error.status, 403);
+            assert!(!checkpoint.read(RunCheckpoint::launched).await);
+        }
+        server.abort();
+        service.shutdown.cancel();
+    }
 
     #[tokio::test]
     async fn active_clean_exit_requires_managed_provider_completion() {
@@ -1427,7 +1847,7 @@ mod tests {
                 let mut run = service.store.run(&id).await.unwrap();
                 let mut account = None;
                 let cancel = CancellationToken::new();
-                let mut sensitive = Vec::new();
+                let sensitive = History::default();
                 let execution = Execution {
                     s: &service,
                     id: id.clone(),
@@ -1436,17 +1856,24 @@ mod tests {
                     preparation: None,
                     cancel: &cancel,
                     checkpoint: &checkpoint,
-                    sensitive: &mut sensitive,
+                    sensitive: &sensitive,
+                    observation: None,
                     provider: Provider::Codex,
                     directory: root.path().into(),
                     attempt_id: String::new(),
                     reservation: None,
+                    output_probe: None,
                 };
                 let workspace = Workspace {
                     prepared: json!({ "output": root.path().join("missing-result").to_string_lossy() }),
                     state_home: root.path().into(),
                     env: Environment::new(),
                     mcp: json!({}),
+                    authorization: crate::plugins::run_credentials::Authorization::new(
+                        &service,
+                        Authority::default(),
+                        &RunCredentials::default(),
+                    ),
                 };
                 execution
                     .finish(

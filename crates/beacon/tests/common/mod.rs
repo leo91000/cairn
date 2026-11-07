@@ -501,6 +501,50 @@ impl RelayedInstallation {
     }
 }
 
+/// A private run deliverable stored directly in the installation, with no preview.
+pub async fn seeded_artifact(
+    relay: &RelayedInstallation,
+    bytes: &[u8],
+    media_type: &str,
+) -> (String, String) {
+    let installation = &relay.installation;
+    let task = installation
+        .task_fixture(
+            json!({
+                "name": "Report",
+                "prompt": "Make a report",
+                "agentId": cairn_installation::config::MAIN_AGENT_ID,
+            }),
+            None,
+        )
+        .await
+        .unwrap();
+    let run = installation
+        .enqueue(task["id"].as_str().unwrap(), "manual", None)
+        .await
+        .unwrap();
+    let run = run["id"].as_str().unwrap().to_owned();
+    let artifact = uuid::Uuid::new_v4().to_string();
+    let directory = installation.config.data_dir.join("artifacts");
+    tokio::fs::create_dir_all(&directory).await.unwrap();
+    tokio::fs::write(directory.join(&artifact), bytes)
+        .await
+        .unwrap();
+    let record: cairn_contracts::Deliverable = serde_json::from_value(json!({
+        "id": artifact, "runId": run, "messageId": null,
+        "key": "report", "version": 1, "group": "", "kind": "file", "size": bytes.len(), "createdAt": 1,
+        "name": "report.html", "title": "Report", "mediaType": media_type,
+        "visibility": "private", "previewStatus": "none",
+        "url": format!("/api/runs/{run}/artifacts/{artifact}"),
+    })).unwrap();
+    installation
+        .store
+        .transaction(move |db| db.insert_artifact(&record))
+        .await
+        .unwrap();
+    (run, artifact)
+}
+
 /// Three independent accounts can fill all 24 installation stream slots while
 /// respecting the eight-stream allowance per account. Reuse across cancellation
 /// cycles so the tests still exercise the full tunnel capacity, not only one quota.
