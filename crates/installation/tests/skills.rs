@@ -1176,10 +1176,10 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
         .await
         .unwrap();
     let service = api.service.clone();
-    let snapshot = tokio::spawn(async move { service.snapshot(task, "manual").await.unwrap() });
+    let mut snapshot = tokio::spawn(async move { service.snapshot(task, "manual").await.unwrap() });
     // Hold the project listing inside its read lock after the global listing.
-    // A FIFO writer opens only once the listing has reached the blocked read.
-    let listing = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    // A nonblocking writer succeeds once the listing has opened the FIFO.
+    let opened = async {
         loop {
             match std::fs::OpenOptions::new()
                 .write(true)
@@ -1188,14 +1188,24 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
             {
                 Ok(writer) => break writer,
                 Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
                 Err(error) => panic!("Unable to open listing gate: {error}"),
             }
         }
-    })
-    .await
-    .unwrap();
+    };
+    tokio::pin!(opened);
+    let listing = tokio::select! {
+        opened = &mut opened => opened,
+        finished = &mut snapshot => {
+            close_failed_gate(&gate, &snapshot);
+            panic!("The snapshot finished before listing the project: {finished:?}");
+        }
+        () = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+            close_failed_gate(&gate, &snapshot);
+            panic!("The snapshot never reached the project listing");
+        }
+    };
     let content = SKILL.replace(
         "Review the current changes",
         "Use the latest branch conventions",
@@ -1206,18 +1216,20 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
         bytes: content.as_bytes().to_vec(),
         executable: None,
     }];
+    // The global skills root has its own lock, which the blocked project
+    // listing does not hold: the writer commits between listing and freezing.
+    // A shared lock would wait for the listing forever.
     let update = bundle::save(
         directory.parent().unwrap(),
         "review",
         Base::Edit(text(&saved, "revision")),
         &changes,
     );
-    tokio::pin!(update);
-    // Poll once to queue the writer before releasing the read lock. Tokio's
-    // fair lock puts the later freeze read behind this already queued writer.
-    assert!(futures_util::poll!(&mut update).is_pending());
+    tokio::time::timeout(std::time::Duration::from_secs(60), update)
+        .await
+        .expect("A global skill save waited for a project listing")
+        .unwrap();
     drop(listing);
-    update.await.unwrap();
     let run = snapshot.await.unwrap();
     let selected = &run["snapshot"]["skills"][0];
     assert_eq!(
@@ -1225,6 +1237,51 @@ async fn snapshots_describe_the_manifest_version_that_was_frozen() {
         "writer must commit between listing and freezing"
     );
     assert_eq!(selected["description"], "Use the latest branch conventions");
+}
+
+/// Release an in-flight FIFO read and prevent a queued open from blocking later.
+fn close_failed_gate<T>(gate: &Path, snapshot: &tokio::task::JoinHandle<T>) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let guard = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(gate)
+        .expect("Unable to release listing gate");
+    std::fs::remove_file(gate).expect("Unable to remove listing gate");
+    snapshot.abort();
+    drop(guard);
+}
+
+#[tokio::test]
+async fn failed_listing_gate_releases_started_and_queued_readers() {
+    for reader_started in [false, true] {
+        let root = TempDir::new().unwrap();
+        let gate = root.path().join("gate");
+        let path = std::ffi::CString::new(gate.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let reader = if reader_started {
+            let path = gate.clone();
+            Some(tokio::task::spawn_blocking(move || std::fs::read(path)))
+        } else {
+            None
+        };
+        if reader_started {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let snapshot = tokio::spawn(std::future::pending::<()>());
+        close_failed_gate(&gate, &snapshot);
+        let reader = reader.unwrap_or_else(|| {
+            let path = gate.clone();
+            tokio::task::spawn_blocking(move || std::fs::read(path))
+        });
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), reader)
+            .await
+            .expect("FIFO reader remained blocked")
+            .unwrap()
+            .ok();
+    }
 }
 
 /// A local GitHub serving `fixture/skills` through the bundled package and one instance.
@@ -1587,11 +1644,8 @@ async fn pending_github_updates_cannot_restore_detached_or_reimported_sources() 
         let before = api.ok("GET", "/skills/global/review/bundle", None).await;
         std::fs::write(released, "release").unwrap();
         let result = updater.await.unwrap();
-        assert!(
-            result.is_err(),
-            "a stale update succeeded after the source changed"
-        );
-        assert_eq!(result.unwrap_err().status, 409);
+        let error = result.expect_err("a stale update succeeded after the source changed");
+        assert_eq!(error.status, 409, "{error}");
         let after = api.ok("GET", "/skills/global/review/bundle", None).await;
         assert_eq!(after["revision"], before["revision"]);
         assert_eq!(after["source"], before["source"]);
@@ -1775,8 +1829,8 @@ async fn owner_mcp_clients_read_and_edit_multi_file_skills() {
 
     let listed = mcp("read_skill", json!({ "name": "release" })).await;
     assert_eq!(
-        listed["structuredContent"]["result"]["revision"],
-        created["revision"]
+        listed["structuredContent"]["result"]["revision"], created["revision"],
+        "{listed}"
     );
     let script = mcp(
         "read_skill",
@@ -1784,8 +1838,8 @@ async fn owner_mcp_clients_read_and_edit_multi_file_skills() {
     )
     .await;
     assert_eq!(
-        script["structuredContent"]["result"]["content"],
-        "#!/bin/sh\necho release\n"
+        script["structuredContent"]["result"]["content"], "#!/bin/sh\necho release\n",
+        "{script}"
     );
     let stale = mcp(
         "edit_skill_files",

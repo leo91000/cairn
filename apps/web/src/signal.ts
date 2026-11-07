@@ -1,6 +1,7 @@
 import type { Provider } from '../../../packages/contracts/accounts'
 import type { ChatView } from '../../../packages/contracts/chats'
-import type { RunEvent, RunListItem, Task } from '../../../packages/contracts/contracts'
+import type { RunListItem, Task } from '../../../packages/contracts/contracts'
+import type { TimelineEntry } from '../../../packages/contracts/live'
 import type { ActivityEntry } from './activity'
 import { isQuotaWait } from './chat-quota'
 import { waitTarget } from './chat-wait'
@@ -39,6 +40,10 @@ export interface FilItem {
   project: string | null
   at: number
   to: string
+  /** Read state is independent of the execution/action kind. */
+  unread?: boolean
+  /** Observed question/turn timestamp to acknowledge. */
+  readAt?: number
   /** The opening of the agent's final message, for finished work not read yet. */
   preview?: string
   chatId?: string
@@ -55,7 +60,14 @@ export interface FilItem {
   /** Why a blocked mission sits in Recent rather than For you. */
   setAside?: SetAside
   /** The conversation or mission that started this one, while it still exists. */
-  requester?: { title: string, to: string }
+  requester?: {
+    title: string
+    to: string
+    chatId?: string
+    runId?: string
+  }
+  /** It finished as expected: its row shows no status label, only a quiet mark. */
+  finished?: boolean
 }
 export interface Fil {
   forYou: FilItem[]
@@ -81,7 +93,7 @@ export function tomorrowMorning(now = Date.now()) {
 }
 
 /** Finished work waiting to be read, as opposed to what needs an answer or a decision. */
-export const isUnread = (item: FilItem) => item.kind === 'unread'
+export const isUnread = (item: FilItem) => item.unread ?? item.kind === 'unread'
 
 /**
  * What needs the user first (questions, failures, missions to review, then finished work they
@@ -112,8 +124,11 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
       at: chat.updatedAt,
       to: chatPath(chat),
       chatId: chat.id,
+      readAt: chat.readAt ?? chat.finishedAt ?? chat.updatedAt,
+      unread: !!chat.unread && unreadNow(`chat:${chat.id}`, chat.readAt ?? chat.finishedAt)
+        && (!chat.requestedBy || chat.pendingQuestions > 0),
       // A delegated conversation names the conversation that delegated it.
-      requester: chat.requester ? { title: chat.requester.title || 'New conversation', to: chatPath({ id: chat.requester.chatId }) } : undefined,
+      requester: chat.requester ? { title: chat.requester.title || 'New conversation', to: chatPath({ id: chat.requester.chatId }), chatId: chat.requester.chatId } : undefined,
     }
     if (chat.pendingQuestions > 0) {
       forYou.push({ ...base, kind: 'question', subtitle: chat.pendingQuestions > 1 ? `${chat.pendingQuestions} questions need your answer` : 'Needs your answer' })
@@ -147,17 +162,23 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
         resolved: !!chat.wakeup.observation,
       })
     }
-    else if (chat.unread && unreadNow(base.key, chat.finishedAt)) {
+    else if (base.unread) {
       forYou.push({
         ...base,
         kind: 'unread',
         at: chat.finishedAt ?? chat.updatedAt,
         subtitle: 'Finished',
+        finished: true,
         preview: chat.preview || undefined,
       })
     }
     else {
-      recent.push({ ...base, kind: 'recent', subtitle: [chat.agentName, chat.projectName].filter(Boolean).join(' · ') })
+      recent.push({
+        ...base,
+        kind: 'recent',
+        finished: chat.status === 'succeeded',
+        subtitle: chat.status === 'succeeded' ? 'Finished' : chat.paused ? 'Paused' : [chat.agentName, chat.projectName].filter(Boolean).join(' · '),
+      })
     }
   }
 
@@ -175,11 +196,11 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
     const { chatId, taskId } = run.requestedBy ?? {}
     const chat = chatId ? chats.find(chat => chat.id === chatId && (!chat.lifecycle || chat.lifecycle === 'active')) : undefined
     if (chat)
-      return { title: chat.title || 'New conversation', to: chatPath(chat) }
+      return { title: chat.title || 'New conversation', to: chatPath(chat), chatId: chat.id }
     const mission = taskId ? tasks.find(task => task.id === taskId && !task.archived) : undefined
     const missionRun = mission && latest.get(mission.id)
     if (mission && missionRun)
-      return { title: mission.name, to: filRunPath(missionRun.id) }
+      return { title: mission.name, to: filRunPath(missionRun.id), runId: missionRun.id }
     return undefined
   }
 
@@ -198,6 +219,8 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
       to: filRunPath(run.id),
       taskId: task.id,
       runId: run.id,
+      readAt: run.finishedAt ?? undefined,
+      unread: !!run.unread && unreadNow(`task:${task.id}`, run.finishedAt),
     }
     if (isExclusivelySuspended(run)) {
       live.push({ ...base, kind: 'suspended', subtitle: exclusiveSuspensionLabel })
@@ -274,19 +297,28 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
         })
       }
     }
-    else if (run.status === 'succeeded' && run.unread && unreadNow(base.key, run.finishedAt)) {
+    else if (run.status === 'succeeded' && base.unread) {
       forYou.push({
         ...base,
         kind: 'unread',
         subtitle: 'Mission finished',
+        finished: true,
         preview: run.preview || undefined,
+      })
+    }
+    else {
+      recent.push({
+        ...base,
+        kind: 'recent',
+        finished: run.status === 'succeeded',
+        subtitle: run.status === 'succeeded' ? 'Mission finished' : run.status,
       })
     }
   }
 
   const newest = (a: FilItem, b: FilItem) => b.at - a.at
   // What asks for an answer or a decision stays above what only waits to be read.
-  const urgency = (a: FilItem, b: FilItem) => Number(isUnread(a)) - Number(isUnread(b)) || newest(a, b)
+  const urgency = (a: FilItem, b: FilItem) => Number(a.kind === 'unread') - Number(b.kind === 'unread') || newest(a, b)
   // A wait whose result arrived resumes first, before any deadline.
   const soonest = (a: FilItem, b: FilItem) => Number(!!b.resolved) - Number(!!a.resolved) || (a.wakeAt ?? Infinity) - (b.wakeAt ?? Infinity)
   return {
@@ -295,6 +327,83 @@ export function filOf(chats: ChatView[], tasks: Task[], runs: RunListItem[], rea
     waiting: waiting.sort(soonest),
     recent: recent.sort(newest),
   }
+}
+
+/** Compact reception views: acknowledging a notification never changes its execution status. */
+export function filViews(fil: Fil) {
+  const all = [...fil.forYou, ...fil.live, ...fil.waiting, ...fil.recent].sort((a, b) => b.at - a.at)
+  const ongoing = all.filter(item => ['question', 'running', 'queued', 'waiting', 'snoozed', 'suspended', 'review'].includes(item.kind)
+    || (item.kind === 'set-aside' && item.setAside !== 'dismissed'))
+  return { unread: all.filter(isUnread), ongoing, all }
+}
+
+/**
+ * Rows in reading order, each delegated conversation or mission right below the work that
+ * started it when both are listed. One that started without its requester in the list stays
+ * in place and names it instead.
+ */
+export function filThread(items: FilItem[]): { item: FilItem, nested: boolean }[] {
+  const byChat = new Map(items.filter(item => item.chatId).map(item => [item.chatId, item]))
+  const byRun = new Map(items.filter(item => item.runId).map(item => [item.runId, item]))
+  const childrenOf = new Map<FilItem, FilItem[]>()
+  const roots: FilItem[] = []
+  for (const item of items) {
+    const { chatId, runId } = item.requester ?? {}
+    const parent = (chatId && byChat.get(chatId)) || (runId && byRun.get(runId)) || undefined
+    if (parent && parent !== item)
+      childrenOf.set(parent, [...childrenOf.get(parent) ?? [], item])
+    else
+      roots.push(item)
+  }
+
+  const rows: { item: FilItem, nested: boolean }[] = []
+  const placed = new Set<FilItem>()
+  const place = (item: FilItem, nested: boolean) => {
+    if (placed.has(item))
+      return
+    placed.add(item)
+    rows.push({ item, nested })
+    for (const child of childrenOf.get(item) ?? [])
+      place(child, true)
+  }
+
+  roots.forEach(item => place(item, false))
+  // A requester cycle has no root: keep those rows rather than losing them.
+  items.forEach(item => place(item, false))
+  return rows
+}
+
+/** A Fil row, or a run of quiet missions folded into one. */
+export type FilEntry = { item: FilItem, nested: boolean, folded?: undefined } | { item: FilItem, nested: false, folded: FilItem[] }
+
+/**
+ * Folds consecutive missions that finished as expected and were read into one row, so that
+ * scheduled checks stop crowding the work worth reading. A lone one, a mission with delegated
+ * work below it, and nested rows stay as they are.
+ */
+export function filFolds(rows: { item: FilItem, nested: boolean }[]): FilEntry[] {
+  const quiet = (index: number) => {
+    const { item, nested } = rows[index]
+    return !nested && !!item.taskId && !!item.finished && !isUnread(item) && !rows[index + 1]?.nested
+  }
+
+  const entries: FilEntry[] = []
+  for (let index = 0; index < rows.length;) {
+    let end = index
+    while (end < rows.length && quiet(end))
+      end++
+    if (end - index >= 2) {
+      const folded = rows.slice(index, end).map(row => row.item)
+      entries.push({ item: folded[0], nested: false, folded })
+      index = end
+    }
+    else {
+      entries.push(rows[index])
+      index++
+    }
+  }
+
+  return entries
 }
 
 /**
@@ -310,41 +419,16 @@ export interface WorkingStep {
   subagents?: boolean
 }
 
-/**
- * Events that show the agent active again after it announced a background wait. Its subagents
- * working in the background are what it waits for.
- */
-function resumesWork(event: RunEvent) {
-  const item = event.payload?.item && typeof event.payload.item === 'object' ? event.payload.item as Record<string, unknown> : {}
-  const subagent = item.type === 'subagent' || typeof item.parent_id === 'string'
-  return event.type === 'chat.user' || event.type === 'thread.started' || event.type.startsWith('turn.') || (event.type.startsWith('item.') && !subagent)
-}
-
-/**
- * The background tasks the agent waits for, when its latest announcement still holds: the agent
- * finished responding and its run stays open until those tasks notify it.
- */
-export function backgroundWait(events: RunEvent[]): { tasks: string[], since: number } | null {
-  const index = events.findLastIndex(event => event.type === 'turn.waiting')
-  if (index < 0 || events.slice(index + 1).some(resumesWork))
+/** The server's current background wait, presented with local fallback labels. */
+export function backgroundWait(cards: TimelineEntry[]): { tasks: string[], taskIds: string[], since: number } | null {
+  const card = cards.findLast(entry => entry.content.kind === 'notice'
+    && entry.content.notice.code === 'backgroundTasks'
+    && entry.content.notice.waitingSince !== undefined)
+  if (!card || card.content.kind !== 'notice')
     return null
-  const announcement = events[index]!
-  const tasks = Array.isArray(announcement.payload?.tasks) ? announcement.payload.tasks : []
-  const descriptions = tasks.map((task) => {
-    const description = task && typeof task === 'object' ? (task as Record<string, unknown>).description : ''
-    return typeof description === 'string' && description.trim() ? description.trim() : 'Background task'
-  })
-
-  let since = announcement.createdAt
-  for (let previous = index - 1; previous >= 0; previous--) {
-    const event = events[previous]!
-    if (event.type === 'turn.waiting' && Array.isArray(event.payload?.tasks) && event.payload.tasks.length)
-      since = event.createdAt
-    else if (resumesWork(event))
-      break
-  }
-
-  return descriptions.length ? { tasks: descriptions, since } : null
+  const notice = card.content.notice
+  const tasks = (notice.tasks ?? []).map(task => task.trim() || 'Background task')
+  return tasks.length ? { tasks, taskIds: notice.taskIds ?? [], since: notice.waitingSince! } : null
 }
 
 /** The indicator for an agent that only waits for its background tasks. */

@@ -8,8 +8,8 @@ pub(crate) mod logs;
 mod routes;
 
 pub(crate) use broker::validate as validate_plan;
-pub use client::client;
 pub(crate) use client::{ControllerResult, wait_for_exit};
+pub use client::{TerminalReason, client};
 
 use crate::{
     error::{Error, Result},

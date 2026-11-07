@@ -293,6 +293,33 @@ async fn codex_sessions_keep_managed_mcp_configuration_without_cloning_native_pl
     );
 }
 
+/// Uses no account and starts no inference; inspect the real app-server configuration.
+#[tokio::test]
+#[ignore = "requires CODEX_NATIVE_BIN"]
+async fn native_codex_loads_the_requested_context_window_and_compaction_threshold() {
+    let root = TempDir::new().unwrap();
+    let mut config = config(&root);
+    config.codex_bin = std::env::var("CODEX_NATIVE_BIN")
+        .expect("Set CODEX_NATIVE_BIN to a native Codex executable");
+    let home = codex_home(&config);
+    let args = vec![
+        "-c".into(),
+        "model_context_window=1000000".into(),
+        "-c".into(),
+        "model_auto_compact_token_limit=900000".into(),
+    ];
+    let mut session = Session::codex(&config, &home, &args, Some(root.path()))
+        .await
+        .unwrap();
+    let read = session
+        .request("config/read", json!({ "includeLayers": false }))
+        .await;
+    session.close().await;
+    let result = read.unwrap();
+    assert_eq!(result["config"]["model_context_window"], 1000000);
+    assert_eq!(result["config"]["model_auto_compact_token_limit"], 900000);
+}
+
 #[tokio::test]
 async fn failed_initialization_waits_for_the_codex_process_to_exit() {
     let root = TempDir::new().unwrap();
@@ -311,6 +338,267 @@ async fn failed_initialization_waits_for_the_codex_process_to_exit() {
         }
     }
     assert!(!alive, "failed initialization returned before Codex exited");
+}
+
+fn termination_fields(value: &Value, fields: &[&str]) {
+    let actual = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    assert_eq!(actual, fields.iter().copied().collect::<HashSet<_>>());
+}
+
+/// Exercise the shipped chat -> Session -> initialize RPC path, not an injected
+/// Error or an in-memory Rpc. The receipt is a proposed closed diagnostic contract;
+/// main currently drops it, so these tests must fail before the implementation.
+async fn startup_termination(scenario: &str, attempt: &str) -> Value {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+
+    let root = TempDir::new().unwrap();
+    let config = config(&root);
+    let config_file = root.path().join("config.json");
+    std::fs::write(&config_file, serde_json::to_vec(&config).unwrap()).unwrap();
+    let home = codex_home(&config);
+    std::fs::write(home.join("fixture-termination-case"), scenario).unwrap();
+    let plan = json!({
+        "provider": "codex",
+        "runId": FIRST_RUN,
+        "attemptId": attempt,
+        "sessionId": "PRIVATE_RETAINED_THREAD_MARKER",
+        "cwd": root.path(),
+        "model": "fixture",
+        "reasoning": "medium",
+        "sandbox": "yolo",
+        "output": root.path().join("result.md"),
+        "inputDirectory": root.path(),
+        "writableRoots": [],
+        "execution": {
+            "messageId": "fixture-message",
+            "text": "PRIVATE_STARTUP_PROMPT_MARKER",
+            "attachments": [],
+        },
+    });
+    let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_cairn"))
+        .args(["chat", &common::fixture("codex-startup-termination.mjs")])
+        .env_remove("CAIRN_CODEX_SERVICE")
+        .env("CAIRN_CONFIG", &config_file)
+        .env("CODEX_HOME", &home)
+        .env("RUST_LOG", "warn,cairn_performance=info")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(plan.to_string().as_bytes()).await.unwrap();
+    drop(stdin);
+    let output = tokio::time::timeout(Duration::from_secs(15), child.wait_with_output())
+        .await
+        .expect("startup fixture must close promptly, before the 120-second RPC deadline")
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+
+    let journal = std::fs::read_to_string(home.join("fixture-termination-events.jsonl"))
+        .expect("the real child must reach initialize before the diagnostic assertion");
+    let lifecycle = journal
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let requests = lifecycle
+        .iter()
+        .filter(|event| event["event"] == "request")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        requests.len(),
+        1,
+        "no thread or turn request may follow initialize"
+    );
+    assert_eq!(requests[0]["method"], "initialize");
+    assert_eq!(requests[0]["request_id"], 1);
+    let pid = requests[0]["pid"].as_i64().unwrap() as i32;
+    let alive = unsafe { libc::kill(pid, 0) };
+    let pid_error = std::io::Error::last_os_error().raw_os_error();
+    assert_eq!(alive, -1, "the child must be reaped");
+    assert_eq!(pid_error, Some(libc::ESRCH));
+    match scenario {
+        "exit" => assert!(
+            lifecycle
+                .iter()
+                .any(|event| event["event"] == "self_exit" && event["code"] == 23)
+        ),
+        "signal" => assert!(
+            lifecycle
+                .iter()
+                .any(|event| event["event"] == "self_signal" && event["signal"] == 9)
+        ),
+        "reader_eof" => {
+            assert_eq!(lifecycle[1]["event"], "stdout_closed");
+            assert_eq!(lifecycle[2]["event"], "cleanup_signal");
+            assert_eq!(lifecycle[2]["code"], 43);
+        }
+        _ => unreachable!(),
+    }
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let events = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(events.len(), 1, "startup must not submit or deliver a turn");
+    assert_eq!(events[0]["type"], "turn.failed");
+    assert_eq!(events[0]["error"]["code"], "cairn_startup_connection");
+    assert_eq!(events[0]["error"]["recoveryPhase"], "startup");
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    for private in [
+        "PRIVATE_STARTUP_STDERR_MARKER",
+        "PRIVATE_STARTUP_PROMPT_MARKER",
+        "PRIVATE_RETAINED_THREAD_MARKER",
+        &root.path().to_string_lossy(),
+    ] {
+        assert!(
+            !stderr.contains(private),
+            "diagnostics must remain content-free"
+        );
+        assert!(!stdout.contains(private));
+    }
+    let receipts = stderr
+        .lines()
+        .filter_map(|line| {
+            line.split_once(" termination=")
+                .map(|(_, receipt)| (line, receipt))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        receipts.len(),
+        1,
+        "missing exactly one real Session termination receipt"
+    );
+    let (line, encoded) = receipts[0];
+    assert!(line.contains("cairn_performance:"));
+    assert!(line.contains("operation=\"codex_session\""));
+    assert!(line.contains("event=\"terminated\""));
+    assert!(
+        line.contains(&format!(
+            "agent_attempt{{run_id=\"{FIRST_RUN}\" attempt_id=\"{attempt}\"}}"
+        )),
+        "receipt must retain the exact labeled run/attempt span"
+    );
+    assert!(
+        encoded.len() <= 4096,
+        "termination metadata must be bounded"
+    );
+    let receipt: Value = serde_json::from_str(encoded).expect("closed JSON termination record");
+    termination_fields(
+        &receipt,
+        &[
+            "schema_version",
+            "session_id",
+            "initiator",
+            "child",
+            "reader",
+            "writer",
+            "cleanup",
+            "stderr",
+            "startup_rpc",
+        ],
+    );
+    termination_fields(
+        &receipt["child"],
+        &["observation", "exit_code", "signal", "wait_error_kind"],
+    );
+    termination_fields(&receipt["reader"], &["outcome", "io_kind"]);
+    termination_fields(&receipt["writer"], &["outcome", "io_kind"]);
+    termination_fields(&receipt["cleanup"], &["action"]);
+    termination_fields(&receipt["stderr"], &["availability", "bytes", "io_kind"]);
+    termination_fields(
+        &receipt["startup_rpc"],
+        &[
+            "method",
+            "request_id",
+            "elapsed_ms",
+            "timeout_ms",
+            "disposition",
+        ],
+    );
+    assert_eq!(receipt["schema_version"], 1);
+    uuid::Uuid::parse_str(receipt["session_id"].as_str().unwrap()).unwrap();
+    assert_eq!(receipt["startup_rpc"]["method"], "initialize");
+    assert_eq!(receipt["startup_rpc"]["request_id"], 1);
+    assert_eq!(receipt["startup_rpc"]["timeout_ms"], 120_000);
+    assert!(receipt["startup_rpc"]["elapsed_ms"].as_u64().unwrap() < 15_000);
+    assert!(matches!(
+        receipt["startup_rpc"]["disposition"].as_str(),
+        Some("failed" | "cancelled")
+    ));
+    assert!(matches!(
+        receipt["child"]["observation"].as_str(),
+        Some("before_cleanup" | "after_cleanup")
+    ));
+    assert!(receipt["child"]["wait_error_kind"].is_null());
+    assert!(matches!(
+        receipt["reader"]["outcome"].as_str(),
+        Some("not_observed" | "eof")
+    ));
+    assert!(receipt["reader"]["io_kind"].is_null());
+    assert_eq!(receipt["writer"]["outcome"], "not_observed");
+    assert!(receipt["writer"]["io_kind"].is_null());
+    assert!(matches!(
+        receipt["cleanup"]["action"].as_str(),
+        Some("none" | "term")
+    ));
+    assert!(
+        receipt["stderr"]["bytes"].as_u64().unwrap()
+            <= "PRIVATE_STARTUP_STDERR_MARKER\n".len() as u64
+    );
+    assert!(matches!(
+        receipt["stderr"]["availability"].as_str(),
+        Some("partial" | "eof")
+    ));
+    assert!(receipt["stderr"]["io_kind"].is_null());
+    receipt
+}
+
+#[tokio::test]
+async fn startup_child_exit_has_an_attempt_bound_termination_receipt() {
+    let mut sessions = HashSet::new();
+    for attempt in [SECOND_RUN, "33333333-3333-4333-8333-333333333333"] {
+        let receipt = startup_termination("exit", attempt).await;
+        assert!(matches!(
+            receipt["initiator"].as_str(),
+            Some("child_exit" | "reader_eof")
+        ));
+        assert_eq!(receipt["child"]["exit_code"], 23);
+        assert!(receipt["child"]["signal"].is_null());
+        assert!(sessions.insert(receipt["session_id"].as_str().unwrap().to_owned()));
+    }
+}
+
+#[tokio::test]
+async fn startup_child_signal_is_observed_without_inventing_an_exit_code() {
+    let receipt = startup_termination("signal", SECOND_RUN).await;
+    assert!(matches!(
+        receipt["initiator"].as_str(),
+        Some("child_exit" | "reader_eof")
+    ));
+    assert_eq!(receipt["child"]["signal"], libc::SIGKILL);
+    assert!(receipt["child"]["exit_code"].is_null());
+}
+
+#[tokio::test]
+async fn startup_reader_eof_is_not_replaced_by_the_cleanup_exit() {
+    let receipt = startup_termination("reader_eof", SECOND_RUN).await;
+    assert_eq!(receipt["initiator"], "reader_eof");
+    assert_eq!(receipt["reader"]["outcome"], "eof");
+    assert!(receipt["reader"]["io_kind"].is_null());
+    assert_eq!(receipt["child"]["observation"], "after_cleanup");
+    assert_eq!(receipt["child"]["exit_code"], 43);
+    assert!(receipt["child"]["signal"].is_null());
+    assert_eq!(receipt["cleanup"]["action"], "term");
 }
 
 #[tokio::test]
@@ -1589,6 +1877,8 @@ async fn resident_logs_in_and_releases_managed_account_for_each_native_turn() {
     let _broker = broker::serve(&service, &lease).await.unwrap();
     let record = lease.home.join("fixture-lifecycle.jsonl");
     std::fs::write(&record, "").unwrap();
+    let launch_record = lease.home.join("fixture-launch-args.json");
+    std::fs::write(&launch_record, "[]").unwrap();
     let socket = root.path().join("resident/codex.sock");
     let endpoint = socket.clone();
     let stop = CancellationToken::new();
@@ -1616,9 +1906,10 @@ async fn resident_logs_in_and_releases_managed_account_for_each_native_turn() {
             .contains("account/login/start"),
         "Anonymous initialization never acquires an account"
     );
-    for index in 0..2 {
+    for index in 0..4 {
         let plan = json!({
             "args": [], "codexConfig": { "mcp_servers": {} },
+            "nativeSettings": if index >= 2 { json!({ "model_context_window": 1000000 }) } else { json!({}) },
             "cwd": root.path(), "sandbox": "yolo", "reasoning": "low",
             "output": root.path().join("reply.md"), "inputDirectory": root.path(),
             "writableRoots": [],
@@ -1635,6 +1926,12 @@ async fn resident_logs_in_and_releases_managed_account_for_each_native_turn() {
             .unwrap();
         output.await.unwrap();
         assert!(!lease.home.join("auth.json").exists());
+        let args: Vec<String> =
+            serde_json::from_slice(&std::fs::read(&launch_record).unwrap()).unwrap();
+        assert_eq!(
+            args.iter().any(|arg| arg == "model_context_window=1000000"),
+            index >= 2
+        );
     }
     stop.cancel();
     native.await.unwrap().unwrap();
@@ -1645,10 +1942,10 @@ async fn resident_logs_in_and_releases_managed_account_for_each_native_turn() {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     for (method, expected) in [
-        ("initialize", 1),
-        ("account/login/start", 2),
-        ("account/logout", 2),
-        ("thread/unsubscribe", 2),
+        ("initialize", 2),
+        ("account/login/start", 4),
+        ("account/logout", 4),
+        ("thread/unsubscribe", 4),
     ] {
         assert_eq!(
             log.iter().filter(|entry| entry["method"] == method).count(),

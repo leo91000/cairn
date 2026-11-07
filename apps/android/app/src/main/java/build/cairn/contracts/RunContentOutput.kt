@@ -8,6 +8,8 @@ import kotlinx.serialization.Serializable
 data class RunContentOutput(
     val data: String,
     val encoding: String,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val entryId: String? = null,
     val eventId: Long?,
     val format: String,
     val nextOffset: Long?,

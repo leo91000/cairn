@@ -78,16 +78,246 @@ class SubagentsTest {
     private fun turn(type: String) = event(type, buildJsonObject { put("type", type) })
 
     private fun teams(events: List<RunEvent>) =
-        timelineEntries(events, chat = true).filter { it.agents.isNotEmpty() }.map { it.agents }
+        fixtureEntries(events, chat = true).filter { it.agents.isNotEmpty() }.map { it.agents }
 
     private fun Subagent.commands() = steps.map {
         (it as SubagentStep.Action).activity.command to it.activity.state
     }
 
     @Test
+    fun `proposal approval keeps the completed source separate from its presentation key`() {
+        fun proposed(kind: String, text: String, parent: String? = null) =
+            item(kind) {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", text)
+                if (parent != null) put("parent_id", parent)
+            }
+        val started = proposed("item.started", "Draft approach")
+        val completed =
+            proposed("item.completed", "Reviewed approach").copy(legacyPlanApproval = true)
+        val replay = completed.copy(id = ++serial)
+        val child = proposed("item.completed", "Child approach", "Research")
+        val initial = timelineEntries(listOf(started), chat = true).single { it.proposal }
+        assertNull(initial.proposalSourceId)
+        val paired = timelineEntries(listOf(started, completed), chat = true).single { it.proposal }
+        assertEquals(initial.key, paired.key)
+        assertEquals(started.id, paired.events.single().id)
+        assertEquals("run:${completed.id}", paired.proposalSourceId)
+        assertEquals(listOf(started.id, completed.id), paired.sourceIds.getValue(started.id))
+        // Reopened history may start at the completion; a receipt can replay it later.
+        val reopened = timelineEntries(listOf(completed), chat = true).single { it.proposal }
+        assertEquals(paired.proposalSourceId, reopened.proposalSourceId)
+        val replayed =
+            timelineEntries(listOf(started, completed, replay, child), chat = true).single {
+                it.proposal
+            }
+        assertEquals(initial.key, replayed.key)
+        assertEquals("run:${replay.id}", replayed.proposalSourceId)
+        assertEquals(
+            listOf(started.id, completed.id, replay.id),
+            replayed.sourceIds.getValue(started.id),
+        )
+    }
+
+    @Test
+    fun `proposal replay preserves its authored request boundary`() {
+        val initial = user("request-a")
+        fun proposal(request: String?) =
+            item("item.completed") {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", "Approach")
+                put("request_id", request?.let(::JsonPrimitive) ?: JsonNull)
+            }
+        val start = turn("turn.started")
+        val completed = proposal("request-a")
+        val end = turn("turn.completed")
+        val before = listOf(initial, start, completed, end)
+        val original = timelineEntries(before, chat = true).single { it.proposal }
+        assertEquals("run:${completed.id}", proposedPlanApproval(before))
+        val clarification = user("request-b")
+        val replay = proposal("request-a")
+        val restored = before + listOf(clarification, replay)
+        val folded = timelineEntries(restored, chat = true).single { it.proposal }
+        assertEquals(original.key, folded.key)
+        assertEquals(completed.id, folded.events.single().id)
+        assertEquals(listOf(completed.id, replay.id), folded.sourceIds.getValue(completed.id))
+        assertEquals("run:${replay.id}", folded.proposalSourceId)
+        assertNull(proposedPlanApproval(restored))
+        assertNull(proposedPlanApproval(listOf(clarification, replay)))
+        assertNull(proposedPlanApproval(listOf(proposal(null))))
+        val revised = proposal("request-b")
+        assertEquals("run:${revised.id}", proposedPlanApproval(listOf(clarification, revised)))
+        assertEquals("run:${revised.id}", proposedPlanApproval(listOf(revised)))
+    }
+
+    @Test
+    fun `proposal folding separates authored requests runs and child parents`() {
+        fun proposal(request: String, run: String = "run", parent: String? = null) =
+            item("item.completed", run) {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", request)
+                put("request_id", request)
+                if (parent != null) put("parent_id", parent)
+            }
+        val first = proposal("request-a")
+        val second = proposal("request-b")
+        val otherRun = proposal("request-a", "other-run")
+        val child = proposal("request-a", parent = "Research")
+        val otherChild = proposal("request-a", parent = "Review")
+        val replay = proposal("request-a")
+        val timeline =
+            timelineEntries(listOf(first, second, otherRun, child, otherChild, replay), chat = true)
+        val proposals = timeline.filter { it.proposal }
+        assertEquals(3, proposals.size)
+        assertEquals(
+            listOf(first.id, second.id, otherRun.id),
+            proposals.map { it.events.single().id },
+        )
+        assertEquals("run:${replay.id}", proposals.first().proposalSourceId)
+        assertEquals(
+            listOf(child, otherChild),
+            timeline.filterNot { it.proposal }.flatMap { it.events },
+        )
+    }
+
+    @Test
+    fun `legacy proposal folding stays within its turn and completed requests bind their starts`() {
+        fun proposal(type: String, request: String? = null) =
+            item(type) {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", "Approach")
+                if (request != null) put("request_id", request)
+            }
+        val started = proposal("item.started")
+        val completed = proposal("item.completed", "request-a")
+        val end = turn("turn.completed")
+        val nextLegacy = proposal("item.completed")
+        val failed = turn("turn.failed")
+        val followingLegacy = proposal("item.completed")
+        val replay = proposal("item.completed", "request-a")
+        val proposals =
+            timelineEntries(
+                    listOf(started, completed, end, nextLegacy, failed, followingLegacy, replay),
+                    chat = true,
+                )
+                .filter { it.proposal }
+        assertEquals(3, proposals.size)
+        assertEquals(
+            listOf(started.id, nextLegacy.id, followingLegacy.id),
+            proposals.map { it.events.single().id },
+        )
+        assertEquals(
+            listOf(started.id, completed.id, replay.id),
+            proposals.first().sourceIds.getValue(started.id),
+        )
+        assertEquals("run:${replay.id}", proposals.first().proposalSourceId)
+    }
+
+    @Test
+    fun `legacy proposal approval requires one unambiguous request`() {
+        fun legacyProposal() =
+            item("item.completed") {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", "Reviewed approach")
+            }
+        val second = user("request-b")
+        val ambiguous = legacyProposal().copy(legacyPlanApproval = false)
+        assertNull(proposedPlanApproval(listOf(second, ambiguous)))
+        val unambiguous = legacyProposal().copy(legacyPlanApproval = true)
+        assertEquals(
+            "run:${unambiguous.id}",
+            proposedPlanApproval(listOf(unambiguous)),
+        )
+    }
+
+    @Test
+    fun `proposal approval follows completed event order across steering and older pages`() {
+        val started =
+            item("item.started") {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", "Draft")
+            }
+        val steering = user("Clarify the approach")
+        val completed =
+            item("item.completed") {
+                    put("id", "plan")
+                    put("type", "proposed_plan")
+                    put("text", "Clarified approach")
+                }
+                .copy(legacyPlanApproval = true)
+        assertEquals("run:${completed.id}", proposedPlanApproval(listOf(steering, completed)))
+        assertEquals(
+            "run:${completed.id}",
+            proposedPlanApproval(listOf(started, steering, completed)),
+        )
+        assertEquals(
+            started.id,
+            timelineEntries(listOf(started, steering, completed), chat = true)
+                .first { it.proposal }
+                .events
+                .single()
+                .id,
+        )
+        val empty =
+            item("item.started") {
+                put("id", "new-plan")
+                put("type", "proposed_plan")
+                put("text", "")
+            }
+        assertNull(proposedPlanApproval(listOf(started, steering, completed, empty)))
+        assertNull(
+            proposedPlanApproval(listOf(started, steering, completed, user("Later request")))
+        )
+    }
+
+    @Test
+    fun `child proposals remain activity rather than conversation approval`() {
+        fun proposal(parent: String?) =
+            item("item.completed") {
+                put("id", "plan")
+                put("type", "proposed_plan")
+                put("text", if (parent == null) "Parent approach" else "Partial child approach")
+                if (parent != null) put("parent_id", parent)
+            }
+        for (childLast in listOf(false, true)) {
+            val own = proposal(null)
+            val child = proposal("Research")
+            val timeline =
+                timelineEntries(
+                    listOf(
+                        subagent("item.started", "Research"),
+                        if (childLast) own else child,
+                        if (childLast) child else own,
+                    ),
+                    chat = true,
+                )
+            assertEquals(listOf(own), timeline.filter { it.proposal }.flatMap { it.events })
+            val step = timeline.flatMap { it.agents }.single().steps.single() as SubagentStep.Action
+            assertEquals("Partial child approach", step.activity.output)
+            // Pagination may omit the spawning event, but cannot promote a child.
+            val orphan = timelineEntries(listOf(child), chat = true)
+            assertFalse(orphan.any { it.proposal })
+            assertEquals("Partial child approach", presentActivity(child).output)
+            val paginated =
+                timelineEntries(
+                    if (childLast) listOf(own, child) else listOf(child, own),
+                    chat = true,
+                )
+            assertEquals(listOf(own), paginated.filter { it.proposal }.flatMap { it.events })
+            assertEquals(listOf(child), paginated.filterNot { it.proposal }.flatMap { it.events })
+        }
+    }
+
+    @Test
     fun `groups subagents started together and keeps their steps and messages out of the reply`() {
         val timeline =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     user("Audit the webhooks"),
                     message("intro", "Starting two subagents."),
@@ -129,7 +359,7 @@ class SubagentsTest {
     @Test
     fun `keeps the agent steps around a team in their order`() {
         val timeline =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     command("read", "cat README.md"),
                     subagent("item.started", "Review"),
@@ -201,7 +431,7 @@ class SubagentsTest {
     @Test
     fun `folds early lifecycle activity into its spawn without losing metadata or steps`() {
         val timeline =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     subagent("item.started", "spawn"),
                     item("item.started") {
@@ -309,7 +539,7 @@ class SubagentsTest {
     @Test
     fun `names Codex subagent tools and keeps orphaned messages readable`() {
         val timeline =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     item("item.completed") {
                         put("id", "close")
@@ -330,7 +560,7 @@ class SubagentsTest {
     @Test
     fun `finds the subagents of the current request and what each one does`() {
         val timeline =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     user("First"),
                     subagent("item.completed", "Earlier") {
@@ -355,7 +585,7 @@ class SubagentsTest {
     @Test
     fun `keeps earlier workers and nested children reachable after another user message`() {
         val timeline =
-            timelineEntries(
+            fixtureEntries(
                 listOf(
                     user("First"),
                     subagent("item.started", "Earlier"),
@@ -399,71 +629,23 @@ class SubagentsTest {
     }
 
     @Test
-    fun `keeps waiting for background work while a background subagent reports progress`() {
-        val waiting =
-            event(
-                "turn.waiting",
-                buildJsonObject {
-                    put("type", "turn.waiting")
-                    putJsonArray("tasks") {
-                        addJsonObject {
-                            put("id", "task")
-                            put("description", "List files")
-                        }
-                    }
-                },
-            )
-        val events =
-            listOf(
-                user("List"),
-                subagent("item.completed", "List files") { put("background", true) },
-                waiting,
-            )
-        val progress =
-            events +
-                command("ls", "ls", parent = "List files") +
-                subagent("item.updated", "List files") {
-                    put("background", true)
-                    put("activity", "Running ls")
-                }
-        assertEquals(listOf("List files"), backgroundWait(progress)?.tasks)
-        assertNull(backgroundWait(events + message("msg", "")))
-    }
-
-    @Test
     fun `replaces an explicit wait only when every awaited task is represented in the bar`() {
-        fun waiting(vararg tasks: Pair<String, String>) =
-            event(
-                "turn.waiting",
-                buildJsonObject {
-                    put("type", "turn.waiting")
-                    putJsonArray("tasks") {
-                        tasks.forEach { (id, description) ->
-                            addJsonObject {
-                                put("id", id)
-                                put("description", description)
-                            }
-                        }
-                    }
-                },
-            )
         val events =
             listOf(
                 subagent("item.completed", "Worker") {
                     put("background", true)
                     put("task_id", "worker-task")
-                },
-                waiting("worker-task" to "Worker"),
+                }
             )
-        val agents = currentSubagents(timelineEntries(events, chat = true))
-        assertTrue(waitingForSubagents(events, agents))
+        val agents = currentSubagents(fixtureEntries(events, chat = true))
+        assertTrue(waitingForSubagents(listOf("worker-task"), agents))
         assertFalse(
             waitingForSubagents(
-                events + waiting("worker-task" to "Worker", "build-task" to "Build"),
+                listOf("worker-task", "build-task"),
                 agents,
             )
         )
-        assertFalse(waitingForSubagents(listOf(waiting()), agents))
+        assertFalse(waitingForSubagents(emptyList(), agents))
     }
 
     @Test
@@ -474,8 +656,8 @@ class SubagentsTest {
                 command("grep", "rg -n TODO", parent = "Review") +
                 subagent("item.completed", "Review") { put("status", "completed") }
         val keys = TimelineKeys()
-        val first = keys.stabilize("h", timelineEntries(start, chat = true))
-        val second = keys.stabilize("h", timelineEntries(later, chat = true))
+        val first = keys.stabilize("h", fixtureEntries(start, chat = true))
+        val second = keys.stabilize("h", fixtureEntries(later, chat = true))
         assertEquals(first.map { it.key }, second.map { it.key })
         assertEquals(SubagentState.DONE, second.single().agents.single().state)
     }
@@ -490,8 +672,8 @@ class SubagentsTest {
                 subagent("item.started", "Nested") { put("parent_id", "Review") },
             )
         val keys = TimelineKeys()
-        val first = keys.stabilize("h", timelineEntries(recent, chat = true))
-        val paged = keys.stabilize("h", timelineEntries(older + recent, chat = true))
+        val first = keys.stabilize("h", fixtureEntries(recent, chat = true))
+        val paged = keys.stabilize("h", fixtureEntries(older + recent, chat = true))
 
         assertEquals(
             subagentTeams(first).flatten().map { it.id },
@@ -508,16 +690,16 @@ class SubagentsTest {
         val older = listOf(message("older", "Earlier reply"), subagent("item.started", "Earlier"))
         val recent = listOf(subagent("item.started", "Review"))
         val keys = TimelineKeys()
-        val first = keys.stabilize("h", timelineEntries(recent, chat = true)).single()
+        val first = keys.stabilize("h", fixtureEntries(recent, chat = true)).single()
         val paged =
-            keys.stabilize("h", timelineEntries(older + recent, chat = true)).single {
+            keys.stabilize("h", fixtureEntries(older + recent, chat = true)).single {
                 it.agents.isNotEmpty()
             }
 
         assertEquals(first.key, paged.key)
         assertEquals(listOf("Earlier", "Review"), paged.agents.map { it.name })
         val reset =
-            keys.stabilize("new-history", timelineEntries(older + recent, chat = true)).single {
+            keys.stabilize("new-history", fixtureEntries(older + recent, chat = true)).single {
                 it.agents.isNotEmpty()
             }
         assertFalse(first.key == reset.key)
@@ -649,11 +831,11 @@ class SubagentsTest {
                 delegated("b"),
                 call("item.completed", "call-b", false, "completed"),
             )
-        val timeline = timelineEntries(events, chat = true)
+        val timeline = fixtureEntries(events, chat = true)
         assertEquals(2, timeline.size)
         assertEquals(listOf("a", "b"), timeline.last().agents.map { it.delegation?.chatId })
         val failed = call("item.completed", "call-c", true, "failed")
-        val withFailure = timelineEntries(events + failed, chat = true)
+        val withFailure = fixtureEntries(events + failed, chat = true)
         assertTrue(withFailure.last().events.contains(failed))
         assertTrue(presentActivity(failed).failed)
     }
@@ -661,7 +843,7 @@ class SubagentsTest {
     @Test
     fun `earlier delegated tasks stay with the request that started them`() {
         val timeline =
-            timelineEntries(listOf(user("First"), delegated("a"), user("Second")), chat = true)
+            fixtureEntries(listOf(user("First"), delegated("a"), user("Second")), chat = true)
         assertTrue(currentSubagents(timeline).isEmpty())
         val followed = timeline.followingDelegations(listOf(Chat(id = "a", status = "succeeded")))
         assertEquals(

@@ -435,11 +435,17 @@ pub(super) async fn list(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let (account, _) = methods::authenticated(&service, &headers, false).await?;
-    let rows: Vec<(String,)> = query_as("SELECT report::text FROM client_performance WHERE account_id = $1 AND updated_at > now() - interval '14 days' ORDER BY updated_at DESC LIMIT 20")
+    let rows: Vec<(String, i64)> = query_as("SELECT report::text, floor(extract(epoch FROM updated_at) * 1000)::bigint FROM client_performance WHERE account_id = $1 AND updated_at > now() - interval '14 days' ORDER BY updated_at DESC LIMIT 20")
         .bind(account).fetch_all(&service.pool).await?;
     let reports: Vec<Value> = rows
         .into_iter()
-        .filter_map(|(report,)| serde_json::from_str(&report).ok())
+        .filter_map(|(report, received_at)| {
+            let mut report: Value = serde_json::from_str(&report).ok()?;
+            report
+                .as_object_mut()?
+                .insert("receivedAt".into(), received_at.into());
+            Some(report)
+        })
         .collect();
     Ok((
         [(header::CACHE_CONTROL, "no-store")],

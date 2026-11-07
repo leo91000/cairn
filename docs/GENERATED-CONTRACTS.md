@@ -702,7 +702,9 @@ owning domain adapters until A10/A11/A18. These adapters read the typed SQL writ
 never `records`, and do not accept another persisted format.
 
 SQLite v15 upgrades version 14 atomically at startup; see
-[the preserving migration](migrations/0015-typed-conversations.md). Fresh installs use `conversations`, `chat_messages`, `message_attachments`,
+[the preserving migration](migrations/0015-typed-conversations.md); v27 adds the
+message and question plan flags ([migration](migrations/0027-plan-requests.md)).
+Fresh installs use `conversations`, `chat_messages`, `message_attachments`,
 `conversation_engine_switches` and the singleton `conversation_retention` policy.
 Conversation and message revisions rotate with writes. Slugs are unique and never
 change on rename. The unique partial run index replaces `chat_for_run`'s collection
@@ -866,3 +868,118 @@ for revision-conflict handling. The operation catalogue/results are in memory,
 with no SQL or persistent-format change. Bundle publication refreshes external
 owner/public proofs after staging and lock waits, then checks local execution,
 project and source revisions in the writer transaction.
+
+## Timeline: messages, cycle, errors and retries (C1)
+
+Rust owns `TimelineEntry` (identity, run, position, change revision, source event,
+turn, attempt, timestamps and a `kind` union of `userMessage`, `agentMessage` and
+`notice`), `TimelineNotice` (a semantic code with its state, `prominent` flag and
+typed arguments: failure origin, Cairn retry, retries before a repeated failure,
+recovery, engine retry, usage limit, quota failure, speed, account, token usage and
+background tasks, their task IDs and the start of an active uninterrupted wait), `TimelineChange` (`upsert` or `append`) and the tool page
+`RunTimelineOutput`. Both apps delete their message, failure, retry, reconnect,
+engine-retry, usage-limit and quota folding and consume the generated models; their
+titles stay native (English on web, French on Android). `detail` only carries words
+reported by the work. See [ADR-0078](adr/0078-cairn-timeline.md).
+
+`crates/installation/src/timeline` holds the pure reducer and its SQL projection.
+`Db::event` applies each event in a savepoint with its insert, so a caller that
+catches a failure never keeps half of an event. Fresh installs create the schema;
+version 21 upgrades through [migration 0022](migrations/0022-timeline-projection.md).
+An opening window includes an older active background wait once, so diagnostics or subagent progress cannot hide it.
+Message text, notice details, background task descriptions and IDs, and quota messages are read from the source event:
+the projection stores no copy of them. Pruned events take their cards along.
+
+Live batches carry `entries`: the window's snapshot (cards that appeared in it or
+changed within it) or the cards changed by the batch's events, with the event
+cursor as change cursor. Reply snapshots no longer cross the UI wire as events;
+`append` sends only the text a stream adds to a reply it already delivered. UI
+history pages carry the cards that first appeared in them. Events the timeline
+presents carry `timeline: true`; clients read them only as boundaries of unconverted
+families. History revisions become `v2:` so saved `v1:` histories reload with cards.
+
+Card hydration is byte-budgeted in revision/ID or position/ID order. A stream keeps
+its event cursor until all card batches have been sent, so reconnecting replays any
+unaccepted batches. Backwards pages retain whole event-position groups and advance
+their boundary only after including them. Oversized individual cards are referenced
+in `largeEntries` instead of being partially rendered: both apps fetch their complete
+JSON through the conversation or run's read-only `timeline-content` operation in
+UTF-8 chunks, before accepting the page or cursor. A reference carries a small
+card snapshot whose source-backed fields are reconstructed from the immutable
+source event; later streaming updates therefore cannot invalidate those chunks.
+An event-position group remains together even if its combined references exceed the
+page budget. A single database read still hydrates a complete card to create a
+reference or verify a chunk; client transfer is bounded, not peak per-card memory.
+The current checksum implementation reserializes the complete card for each chunk,
+so very large cards take proportionally more CPU to fetch; this is a known limit.
+
+`read_run_timeline` (`read` scope) gives public MCP and `cairn_installation` the
+same cards, newest page first, with `complete`/`truncated` pages bounded like the
+other run windows; pass a truncated card's `entryId` and `preview.snapshot` as
+`timelineSnapshot` to `read_run_content`. The immutable source-backed reference
+keeps chunks consistent even while the live reply changes.
+Save the first page's `changeCursor` and pass it as `snapshot` while loading older
+pages; they may reflect updates received after that cursor. After paging, pass
+the saved cursor as `changes` and follow returned cursors until
+`hasMoreChanges` is false. Replace cards by their latest revision. A changed
+retained-history revision also requires a restart.
+Installation grants are rechecked in the read transaction, like `read_run_history`.
+
+`timeline-contracts.json` qualifies the DTOs in Rust, JSON Schema/TS and Kotlin.
+`timeline-corpus.json` is generated by the Rust test from the real v18 corpus and
+the shared tool-activity sample: both apps render it in their unit tests.
+`project_measurement::timeline_measurement` extends the A1/A2 harness.
+
+## Placement, attempts and exclusive reservations (A10)
+
+Tool movements return generated `NodeMoveStarted` and are observed through
+`get_node_move_operation` (`NodeMoveOperationInput`/`NodeMoveOperation`). Results
+belong to the initiating public credential or installation execution bearer;
+polling and cancellation recheck its current authority. The bounded in-memory
+preparation uses the existing movement admission and preserves native provenance.
+An admitted move keeps its durable placement/fencing state. Pending preparations
+and their recent results are transient; after manager interruption, refresh
+placement before retrying. The HTTP and workspace movement response remains
+`MoveToNodeOutput`. Each tool poll finishes independently of the code worker's
+unchanged 30-second limit; capacity waits keep their configured bound.
+
+`placement.rs` owns placement selection, movement inputs and exclusive reservation
+views/commands. The existing registry exposes `get_conversation_placement`,
+`configure_conversation_placement`, `move_to_node` and
+`release_node_reservation` through HTTP, public MCP and `cairn_installation`.
+Placement reads require `read`, configuration/release use `manage`, and movement
+uses `run`. Installation grants are checked again when committing changes;
+installation native work retains its calling run's bounded provenance. Selecting a
+node never grants access or exclusivity. Execution-scoped acquisition, renewal and
+release keep their current owner-attempt checks and use these same Rust schemas.
+
+Both apps remove their manual placement and exclusive-reservation models and use
+generated clients. Required tags omitted from a move inherit the conversation's
+existing selection; an explicit empty list remains distinct. UI presentation and
+backend selection do not change. The shared placement corpus qualifies defaults,
+all exclusive lifecycle states and command bounds in Rust, JSON Schema/TypeScript
+and Kotlin; server validation remains authoritative.
+
+The [automatic migration](migrations/0023-typed-placement.md) replaces attempt and
+reservation records with constrained placement/attempt/reservation tables, ordered
+relations and named run placement columns. It preserves controller fencing and
+sequence high-water marks. Node inventory and run public views are projections,
+without an inventory reservation mirror or a second placement document. Remaining
+volume/publication and disk-checkpoint adapters belong to A11/A18.
+
+The A1/A2 `project_measurement` harness includes `attempt_storage_layouts` and
+`exclusive_storage_layouts` and `run_placement_storage_layouts` against the version-12 mappings at `4af96bbe`, with identical
+complete deterministic values, support rows outside timing, alternating repetitions,
+warmups, connection-cold/warm reads, writes, CPU and DB/WAL/pages. Results belong in
+the PR description; no raw measurement artifact is committed. Local SQLite timings
+exclude production network latency.
+
+`ExecutionResources` describes an admitted run allowance, including a zero disk
+allowance after native reserves. `NodeResources` still describes configured budgets
+with their 128 MiB disk minimum. The placement corpus checks these same values
+through Rust, JSON Schema and Kotlin, including the generated `Run` decoder.
+
+The run-scoped `exclusive_status` tool uses the generated `ExclusiveStatusOutput`
+object (`reservations`, up to 20 entries) for both its advertised output schema
+and structured result. This preserves ordered public reservation views while
+keeping the tool catalogue compatible with object-root MCP2025 output schemas.

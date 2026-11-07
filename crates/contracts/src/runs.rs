@@ -113,6 +113,9 @@ pub struct RunRequester {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct RunSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub native_configuration: Option<NativeConfigurationSnapshot>,
     pub task: RunTaskSnapshot,
     pub agent: Agent,
     pub project: Option<Project>,
@@ -192,20 +195,16 @@ pub struct Run {
     #[ts(optional = nullable)]
     pub dismissal: Option<crate::OutcomeDismissal>,
     #[serde(default)]
-    #[schemars(with = "Option<crate::NodeResources>")]
     #[ts(optional = nullable)]
-    #[ts(type = "import('../../nodes').NodeResources | null")]
-    pub resources: Option<serde_json::Value>,
+    pub resources: Option<crate::ExecutionResources>,
     #[serde(default)]
     #[schemars(with = "Option<crate::NativeModeRequest>")]
     #[ts(optional = nullable)]
     #[ts(type = "import('../../nodes').NativeModeRequest | null")]
     pub native_mode: Option<serde_json::Value>,
     #[serde(default)]
-    #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "ExclusiveReservation"))]
     #[ts(optional = nullable)]
-    #[ts(type = "import('../../nodes').ExclusiveReservation | null")]
-    pub suspended_by_exclusive: Option<serde_json::Value>,
+    pub suspended_by_exclusive: Option<crate::ExclusiveReservation>,
     #[serde(default)]
     #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "NodeBackup"))]
     #[ts(optional = nullable)]
@@ -294,6 +293,13 @@ pub struct ReadRunContentInput {
     #[schemars(range(min = 1_i64, max = 9007199254740991_i64))]
     #[ts(type = "number | null")]
     pub event_id: Option<i64>,
+    /// Read a complete interpreted timeline card instead of a raw event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1, max = 1024))]
+    pub entry_id: Option<String>,
+    /// Immutable card reference returned with a truncated timeline preview.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline_snapshot: Option<Box<crate::TimelineEntry>>,
     #[serde(default, deserialize_with = "wire_integer")]
     #[schemars(range(min = 0_i64, max = 9007199254740991_i64))]
     #[ts(type = "number")]
@@ -322,6 +328,8 @@ pub struct RunContentOutput {
     pub run_id: String,
     #[ts(type = "number | null")]
     pub event_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_id: Option<String>,
     pub encoding: String,
     pub format: String,
     #[ts(type = "number")]

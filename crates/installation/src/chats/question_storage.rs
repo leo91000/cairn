@@ -20,7 +20,8 @@ CREATE TABLE chat_questions(
     source TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('pending','answering','answered','cancelled')),
     created_at INTEGER CHECK(created_at BETWEEN 0 AND 9007199254740991),
-    message_id TEXT
+    message_id TEXT,
+    plan INTEGER NOT NULL DEFAULT 0 CHECK(plan IN (0,1))
 );
 CREATE INDEX chat_questions_chat ON chat_questions(chat_id,created_at,id);
 CREATE INDEX chat_questions_run ON chat_questions(run_id,status);
@@ -126,14 +127,31 @@ impl Db<'_> {
             .query_row([message], |row| row.get(0))?)
     }
 
+    /// Marks a question asked by a plan turn, whose answer stays a plan request.
+    pub(super) fn mark_plan_question(&self, chat: &str, id: &str) -> Result<()> {
+        self.0
+            .prepare_cached("UPDATE chat_questions SET plan=1 WHERE chat_id=? AND id=?")?
+            .execute(params![chat, id])?;
+        Ok(())
+    }
+
+    pub(super) fn plan_question(&self, chat: &str, id: &str) -> Result<bool> {
+        Ok(self
+            .0
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM chat_questions WHERE chat_id=? AND id=? AND plan=1)",
+            )?
+            .query_row(params![chat, id], |row| row.get(0))?)
+    }
+
     pub fn questions(&self, chat: &str) -> Result<Vec<ChatQuestion>> {
         self.load_questions(chat)
     }
 
     /// Card metadata needs the visible pending count, without definition children.
-    pub(super) fn pending_question_count(&self, chat: &str) -> Result<u32> {
-        Ok(self.0.prepare_cached("SELECT count(*) FROM chat_questions q WHERE q.chat_id=?1 AND q.status='pending' AND NOT EXISTS(SELECT 1 FROM question_import_metadata m WHERE m.question_id=q.id AND m.expires<=?2)")?
-            .query_row(params![chat, crate::config::now()], |row| row.get(0))?)
+    pub(super) fn pending_question_summary(&self, chat: &str) -> Result<(u32, Option<i64>)> {
+        Ok(self.0.prepare_cached("SELECT count(*),max(q.created_at) FROM chat_questions q WHERE q.chat_id=?1 AND q.status='pending' AND NOT EXISTS(SELECT 1 FROM question_import_metadata m WHERE m.question_id=q.id AND m.expires<=?2)")?
+            .query_row(params![chat, crate::config::now()], |row| Ok((row.get(0)?, row.get(1)?)))?)
     }
 
     pub fn question(&self, chat: &str, id: &str) -> Result<Option<ChatQuestion>> {

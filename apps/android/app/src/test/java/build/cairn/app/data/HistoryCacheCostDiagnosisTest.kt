@@ -45,7 +45,7 @@ class HistoryCacheCostDiagnosisTest {
                     runId = "fixture",
                 )
             }
-        return CachedHistory(count.toLong(), "v1:fixture:1", LiveState(), events)
+        return CachedHistory(count.toLong(), "v2:fixture:1", LiveState(), events)
     }
 
     @Test

@@ -8,6 +8,7 @@ use axum::{
     http::{Request, StatusCode},
     routing::post,
 };
+use futures_util::FutureExt;
 use tempfile::TempDir;
 use tokio::sync::{mpsc, oneshot};
 use tower::ServiceExt;
@@ -51,6 +52,10 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new(configured: bool) -> Self {
+        Self::with_service(configured, None).await
+    }
+
+    async fn with_service(configured: bool, service: Option<Arc<Service>>) -> Self {
         let root = TempDir::new().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/images", listener.local_addr().unwrap());
@@ -83,7 +88,14 @@ impl Fixture {
             "runnerUrl": "",
         }))
         .unwrap();
-        let s = Service::new(config).await.unwrap();
+        let s = match service {
+            Some(service) => {
+                let mut service = (*service).clone();
+                service.config.codex_bin = config.codex_bin;
+                Arc::new(service)
+            }
+            None => Service::new(config).await.unwrap(),
+        };
         s.accounts.initialize(&s).await.unwrap();
         if configured {
             let account = serde_json::to_value(
@@ -180,11 +192,126 @@ impl Fixture {
         .unwrap()
     }
 
+    // Closed diagnostic projection only: never format the agent, run, provider
+    // request, credentials, or arbitrary errors into a failure message.
+    async fn case_snapshot(&self, id: &str, posts: &std::sync::atomic::AtomicUsize) -> Value {
+        let id = id.to_owned();
+        let state = self.s.store.read(move |db| {
+            let avatar = db.agent(&id)?.and_then(|agent| agent.avatar);
+            let status = match avatar.as_ref().map(|avatar| avatar.status.as_str()) {
+                Some("generating") => "generating",
+                Some("failed") => "failed",
+                Some("ready") => "ready",
+                None => "missing",
+                _ => "other",
+            };
+            let error = match avatar.as_ref().and_then(|avatar| avatar.error.as_deref()) {
+                None => "none",
+                Some(ACCESS_CHANGED) => "access_changed",
+                Some(INTERRUPTED) => "interrupted",
+                Some(TIMED_OUT) => "timed_out",
+                Some(codex_background::UNAVAILABLE) => "account_unavailable",
+                Some("Portrait generation yielded to a conversation or server maintenance. You can try again.") => "yielded",
+                Some("Codex could not generate a portrait. Check the account and image quota in Connections, then try again or upload an image.") => "provider_failed",
+                Some(_) => "other_public_error",
+            };
+            let queued = db.0.query_row(
+                "SELECT COUNT(*) FROM runs WHERE status='queued' AND provider='codex'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?;
+            Ok(json!({
+                "avatarStatus": status,
+                "publicError": error,
+                "activeLeases": db.account_leases()?.len(),
+                "queuedCodex": queued,
+                "maintenance": db.kv("deployment-lease")?.is_some(),
+            }))
+        }).await;
+        let mut state = state.unwrap_or_else(|error| {
+            json!({
+                "avatarStatus": "snapshot_unavailable",
+                "snapshotErrorStatus": error.status,
+            })
+        });
+        state["resolverCount"] = json!(posts.load(std::sync::atomic::Ordering::SeqCst));
+        state["shutdown"] = json!(self.s.shutdown.is_cancelled());
+        state["portraitStop"] = json!(self.s.avatars.stop.is_cancelled());
+        state
+    }
+
+    async fn next_case(
+        &mut self,
+        id: &str,
+        case: &str,
+        posts: &std::sync::atomic::AtomicUsize,
+        started: std::time::Instant,
+    ) -> (Value, Reply) {
+        let waiting = std::time::Instant::now();
+        // Use the upstream request-versus-generation lifecycle, including its
+        // original failure. Case observations must not add a startup deadline.
+        let result = std::panic::AssertUnwindSafe(self.next())
+            .catch_unwind()
+            .await;
+        match result {
+            Ok(request) => request,
+            Err(failure) => {
+                let state = std::panic::AssertUnwindSafe(self.case_snapshot(id, posts))
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| json!({ "avatarStatus": "diagnostic_unavailable" }));
+                eprintln!(
+                    "AVATAR_CASE case={case} phase=provider_wait_failed elapsed_ms={} wait_ms={} state={state}",
+                    started.elapsed().as_millis(),
+                    waiting.elapsed().as_millis(),
+                );
+                std::panic::resume_unwind(failure)
+            }
+        }
+    }
+
+    async fn wait_case(
+        &self,
+        id: &str,
+        status: &str,
+        case: &str,
+        posts: &std::sync::atomic::AtomicUsize,
+        started: std::time::Instant,
+    ) -> Value {
+        let mut last = json!({ "avatarStatus": "not_sampled" });
+        let waiting = std::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let agent = self.s.agent_snapshot(id).await.unwrap();
+                if agent["avatar"]["status"] == status {
+                    return agent;
+                }
+                last = self.case_snapshot(id, posts).await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        result.unwrap_or_else(|_| {
+            panic!(
+                "AVATAR_CASE case={case} phase=publication_wait elapsed_ms={} wait_ms={} expected={status} state={last}",
+                started.elapsed().as_millis(),
+                waiting.elapsed().as_millis(),
+            )
+        })
+    }
+
     async fn next(&mut self) -> (Value, Reply) {
-        tokio::time::timeout(Duration::from_secs(5), self.requests.recv())
-            .await
-            .unwrap()
-            .unwrap()
+        let tasks = self.s.avatars.tasks.lock().await.clone();
+        // Closing permits observation of an empty tracker; later generations may
+        // still register tasks. Production RPC deadlines continue to bound startup.
+        tasks.close();
+        tokio::select! {
+            biased;
+            request = self.requests.recv() => request.expect("Portrait provider stopped"),
+            () = tasks.wait() => {
+                panic!("Portrait generation completed without a provider request")
+            }
+        }
     }
 }
 
@@ -210,6 +337,48 @@ fn generated(bytes: Vec<u8>) -> (StatusCode, Json<Value>) {
             "result": STANDARD.encode(bytes),
         })),
     )
+}
+
+#[tokio::test]
+async fn fixture_waits_for_a_queued_portrait_without_a_separate_startup_deadline() {
+    let mut f = Fixture::new(true).await;
+    let service = f.s.clone();
+    let permits = service.avatars.slots.acquire_many(2).await.unwrap();
+    let agent = f.create().await;
+    let id = text(&agent, "id");
+
+    let (_, reply) = {
+        let request = f.next();
+        tokio::pin!(request);
+        // Only advance the queue wait: no external Codex process has started yet.
+        tokio::time::pause();
+        assert!(futures_util::poll!(request.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_secs(6)).await;
+        assert!(futures_util::poll!(request.as_mut()).is_pending());
+        tokio::time::resume();
+
+        drop(permits);
+        request.await
+    };
+    reply.send(generated(png([51, 63, 81]))).unwrap();
+    f.wait(id, "ready").await;
+    f.s.avatars.close().await;
+}
+
+#[tokio::test]
+#[should_panic(expected = "Portrait generation completed without a provider request")]
+async fn fixture_reports_stopped_generation_without_waiting_for_a_provider_request() {
+    let mut f = Fixture::new(true).await;
+    let service = f.s.clone();
+    let permits = service.avatars.slots.acquire_many(2).await.unwrap();
+    let agent = f.create().await;
+    f.s.avatars.close().await;
+    let stopped = f.s.agent_snapshot(text(&agent, "id")).await.unwrap();
+    assert_eq!(stopped["avatar"]["status"], "failed");
+    assert_eq!(stopped["avatar"]["error"], INTERRUPTED);
+    drop(permits);
+
+    f.next().await;
 }
 
 #[tokio::test]
@@ -717,5 +886,237 @@ async fn foreground_queue_and_deployment_prevent_starting_a_portrait() {
                     .is_empty()
             );
         }
+    }
+}
+
+#[tokio::test]
+async fn accepted_portraits_survive_normal_completion_but_not_revocation_before_publication() {
+    use crate::plugin_grant_fixture::Fixture as Grants;
+    use crate::run_status::RunStatus;
+    use std::sync::atomic::Ordering;
+
+    for change in ["complete", "ancestry", "grant", "delete", "stop"] {
+        let started = std::time::Instant::now();
+        eprintln!("AVATAR_CASE case={change} phase=grant_setup elapsed_ms=0");
+        let (grants, bearer) = Grants::delegated_manager().await;
+        eprintln!(
+            "AVATAR_CASE case={change} phase=account_setup elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+        let mut f = Fixture::with_service(true, Some(grants.s.clone())).await;
+        eprintln!(
+            "AVATAR_CASE case={change} phase=authority_setup elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+        let caller = crate::installation_mcp::authorize(&f.s, &bearer)
+            .await
+            .unwrap();
+        let source = text(&caller, "id").to_owned();
+        let chat =
+            f.s.store
+                .read({
+                    let source = source.clone();
+                    move |db| db.conversation_for_run(&source)
+                })
+                .await
+                .unwrap()
+                .unwrap();
+        let authority = crate::installation_mcp::management_authorization(&f.s, Some(&bearer))
+            .await
+            .unwrap();
+        let target = crate::config::MAIN_AGENT_ID;
+        eprintln!(
+            "AVATAR_CASE case={change} phase=generate_live elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+        f.s.avatars
+            .generate_live(&f.s, target, authority)
+            .await
+            .unwrap();
+        eprintln!(
+            "AVATAR_CASE case={change} phase=provider_wait elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+        let (_, reply) = f.next_case(target, change, &grants.posts, started).await;
+        eprintln!(
+            "AVATAR_CASE case={change} phase=case_mutation elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+        f.s.store
+            .change_run(
+                &source,
+                crate::runs::RunChanges {
+                    status: Some(RunStatus::Succeeded),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        f.s.mcps.revoke_run(&f.s, &source).await.unwrap();
+        match change {
+            "ancestry" => grants.moved_parent.store(true, Ordering::SeqCst),
+            "grant" => {
+                grants
+                    .remove_for(text(&caller["snapshot"]["agent"], "id"))
+                    .await;
+            }
+            "delete" => {
+                f.s.chat_trash_live(
+                    &chat.requested_by.unwrap().chat_id,
+                    true,
+                    crate::authorization::Authorization::default(),
+                )
+                .await
+                .unwrap();
+            }
+            "stop" => {
+                f.s.worker
+                    .stop_chat_live(
+                        &f.s,
+                        &chat.id,
+                        crate::authorization::Authorization::default(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+        // A cancelled RPC may already have dropped its receiver; useful bytes
+        // must never be published even if the provider completed the work.
+        let _ = reply.send(generated(png([17, 31, 47])));
+        let expected = if change == "complete" {
+            "ready"
+        } else {
+            "failed"
+        };
+        let finished = f
+            .wait_case(target, expected, change, &grants.posts, started)
+            .await;
+        assert_eq!(
+            finished["avatar"]["url"].is_string(),
+            change == "complete",
+            "{change}"
+        );
+        assert_eq!(
+            f.s.store
+                .read(move |db| Ok(db.kv(&format!("agent-avatar:{target}"))?.is_some()))
+                .await
+                .unwrap(),
+            change == "complete",
+            "{change}"
+        );
+        eprintln!(
+            "AVATAR_CASE case={change} phase=cleanup elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+        f.s.avatars.close().await;
+    }
+}
+
+#[tokio::test]
+async fn revoked_portrait_waiting_for_a_slot_consumes_no_provider_quota() {
+    let (grants, bearer) = crate::plugin_grant_fixture::Fixture::delegated_manager().await;
+    let mut f = Fixture::with_service(true, Some(grants.s.clone())).await;
+    let permits = f.s.avatars.slots.acquire_many(2).await.unwrap();
+    let caller = crate::installation_mcp::authorize(&f.s, &bearer)
+        .await
+        .unwrap();
+    let source = text(&caller, "id").to_owned();
+    let chat =
+        f.s.store
+            .read(move |db| db.conversation_for_run(&source))
+            .await
+            .unwrap()
+            .unwrap();
+    let authority = crate::installation_mcp::management_authorization(&f.s, Some(&bearer))
+        .await
+        .unwrap();
+    f.s.avatars
+        .generate_live(&f.s, crate::config::MAIN_AGENT_ID, authority)
+        .await
+        .unwrap();
+    f.s.worker
+        .stop_chat_live(
+            &f.s,
+            &chat.id,
+            crate::authorization::Authorization::default(),
+        )
+        .await
+        .unwrap();
+    drop(permits);
+    f.wait(crate::config::MAIN_AGENT_ID, "failed").await;
+    f.s.avatars.close().await;
+    assert!(f.requests.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn automatic_creation_portrait_keeps_its_initiating_ceiling_after_the_request_returns() {
+    for revoked in [false, true] {
+        let (grants, bearer) = crate::plugin_grant_fixture::Fixture::delegated_manager().await;
+        let mut f = Fixture::with_service(true, Some(grants.s.clone())).await;
+        let caller = crate::installation_mcp::authorize(&f.s, &bearer)
+            .await
+            .unwrap();
+        let authority = crate::installation_mcp::management_authorization(&f.s, Some(&bearer))
+            .await
+            .unwrap();
+        let mut settings =
+            f.s.store
+                .agent(crate::config::MAIN_AGENT_ID)
+                .await
+                .unwrap()
+                .unwrap()
+                .settings;
+        settings.name = "Accepted automatic portrait".into();
+        settings.plugins.clear();
+        settings.exclusive_nodes.clear();
+        settings.access = cairn_contracts::AccessPolicy {
+            projects: Some(Vec::new()),
+            skills: Some(Vec::new()),
+            mcps: Some(Vec::new()),
+            nodes: Some(Vec::new()),
+            ..Default::default()
+        };
+        let agent =
+            f.s.save_profile_live(
+                crate::agents::SaveProfile::Create(cairn_contracts::CreateAgentInput {
+                    creation_id: None,
+                    settings,
+                    review: cairn_contracts::AgentReview::default(),
+                }),
+                crate::service::AgentEditor::Installation,
+                authority,
+            )
+            .await
+            .unwrap();
+        let (_, reply) = f.next().await;
+        f.s.store
+            .change_run(
+                text(&caller, "id"),
+                crate::runs::RunChanges {
+                    status: Some(crate::run_status::RunStatus::Succeeded),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        f.s.mcps
+            .revoke_run(&f.s, text(&caller, "id"))
+            .await
+            .unwrap();
+        if revoked {
+            grants
+                .remove_for(text(&caller["snapshot"]["agent"], "id"))
+                .await;
+        }
+        let _ = reply.send(generated(png([51, 63, 81])));
+        let finished = f
+            .wait(
+                &agent.id.to_string(),
+                if revoked { "failed" } else { "ready" },
+            )
+            .await;
+        assert_eq!(finished["avatar"]["url"].is_string(), !revoked);
+        f.s.avatars.close().await;
     }
 }

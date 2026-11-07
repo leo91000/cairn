@@ -113,6 +113,90 @@ async fn web_and_android_reports_share_private_account_storage_and_limits() {
 }
 
 #[tokio::test]
+async fn report_receipt_time_advances_only_with_new_web_or_android_measurements() {
+    let app = Fixture::new().await;
+    let (cookie, session) = login(&app, "receipt-time@example.test").await;
+    for mut data in [report(), web_report()] {
+        let response = app
+            .authenticated(&cookie, &session, Method::POST, PATH)
+            .json(&data)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let window = data["measurements"]["windowId"].as_str().unwrap();
+        let (received_at,): (i64,) = query_as(
+            "UPDATE client_performance
+             SET updated_at = date_trunc('second',now()) - interval '1 day' + interval '123 milliseconds'
+             WHERE account_id = $1 AND window_id = $2
+             RETURNING floor(extract(epoch FROM updated_at) * 1000)::bigint",
+        )
+        .bind(session["account"]["id"].as_str().unwrap())
+        .bind(window)
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+
+        let duplicate = app
+            .authenticated(&cookie, &session, Method::POST, PATH)
+            .json(&data)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(duplicate.status(), StatusCode::NO_CONTENT);
+        let stored: Value = app
+            .authenticated(&cookie, &session, Method::GET, PATH)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let mut saved = stored["reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["measurements"]["windowId"] == window)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            saved.as_object_mut().unwrap().remove("receivedAt"),
+            Some(json!(received_at)),
+            "Report reads must expose the server receipt time without refreshing duplicates"
+        );
+        assert_eq!(saved, data);
+
+        data["measurements"]["sequence"] =
+            json!(data["measurements"]["sequence"].as_i64().unwrap() + 1);
+        let newer = app
+            .authenticated(&cookie, &session, Method::POST, PATH)
+            .json(&data)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(newer.status(), StatusCode::NO_CONTENT);
+        let stored: Value = app
+            .authenticated(&cookie, &session, Method::GET, PATH)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let saved = stored["reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["measurements"]["windowId"] == data["measurements"]["windowId"])
+            .unwrap();
+        assert!(saved["receivedAt"].as_i64().unwrap() > received_at);
+        assert_eq!(saved["measurements"], data["measurements"]);
+    }
+    app.close().await;
+}
+
+#[tokio::test]
 async fn web_schema_rejects_unbounded_labels_content_and_inconsistent_aggregates() {
     let app = Fixture::new().await;
     let (cookie, session) = login(&app, "web-schema@example.test").await;

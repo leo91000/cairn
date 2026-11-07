@@ -1,5 +1,5 @@
 import type { ChatQuestion } from '../../packages/contracts/chats'
-import type { RunEvent } from '../../packages/contracts/contracts'
+import type { TimelineEntry } from '../../packages/contracts/live'
 import Ajv from 'ajv'
 import addFormats from 'ajv-formats'
 import { createApp, h, shallowRef } from 'vue'
@@ -12,15 +12,26 @@ const ajv = new Ajv({ strict: false, useDefaults: true })
 addFormats(ajv)
 const validate = ajv.compile<ChatQuestion>(questionSchema)
 const questions = shallowRef<ChatQuestion[]>([])
-const history = shallowRef<RunEvent[]>([])
+const history = shallowRef<TimelineEntry[]>([])
 window.questionnaireHistory = (text: string) => {
+  // The server's card for the person's answer, as the conversation receives it.
   history.value = [{
-    id: 1,
+    id: 'user:1',
     runId: 'run',
+    position: 1,
+    revision: 1,
+    source: 1,
+    turn: 0,
+    attempt: 0,
     createdAt: 1,
-    type: 'chat.user',
-    text,
-    payload: { text, questionId: 'question' },
+    updatedAt: 1,
+    content: {
+      kind: 'userMessage',
+      text,
+      questionId: 'question',
+      sentAt: 1,
+      attachments: [],
+    },
   }]
 }
 
@@ -61,7 +72,8 @@ createApp({
       questions.value = []
     },
   }), h(ActivityFeed, {
-    events: history.value,
+    events: [],
+    timeline: history.value,
     active: false,
     agent: 'Cairn',
     task: 'Questionnaire',

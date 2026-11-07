@@ -193,7 +193,13 @@ it('starts new agents restricted until the owner widens their access', () => {
     delegation: false,
     sandbox: 'yolo',
   })
-  expect(newAgentDraft()).toMatchObject({ exclusiveNodes: [], plugins: [] })
+  expect(newAgentDraft()).toMatchObject({
+    model: '',
+    reasoning: '',
+    speed: '',
+    exclusiveNodes: [],
+    plugins: [],
+  })
   expect(issues(newAgentDraft(), context, false)).toEqual([])
   expect(reviewLines(newAgentDraft(), newAgentDraft(), context)).toEqual([])
 })

@@ -1,3 +1,4 @@
+use common::attempt_fixture::*;
 use common::node_fixture::*;
 #[allow(unused_imports)]
 use common::{PluginServiceFixture as _, PluginStoreFixture as _};
@@ -10,6 +11,8 @@ use common::StoreAgentFixture;
 use common::StoreMissionFixture;
 
 mod common;
+#[path = "native_nodes/lineage_cycles.rs"]
+mod lineage_cycles;
 
 use axum::{
     Router,
@@ -750,14 +753,11 @@ async fn automatic_placement_uses_agent_priorities_and_falls_back_without_conver
             "full" => {
                 f.service
                     .store
-                    .put(
-                        "node-attempts",
-                        json!({
-                            "id": id(), "runId": id(), "nodeId": f.node["id"], "role": "execution",
-                            "released": false, "leaseExpiresAt": now() + 60_000,
-                            "resources": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 32768 },
-                        }),
-                    )
+                    .put_attempt_fixture(json!({
+                        "id": id(), "runId": id(), "nodeId": f.node["id"], "role": "execution",
+                        "released": false, "leaseExpiresAt": now() + 60_000,
+                        "resources": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 32768 },
+                    }))
                     .await
                     .unwrap();
             }
@@ -804,7 +804,7 @@ async fn automatic_placement_uses_agent_priorities_and_falls_back_without_conver
         if scenario == "existing-vm" {
             f.service
                 .store
-                .update_run_boundary(text(&saved, "id"), json!({ "nodeId": vm_id }))
+                .update_run_boundary_fixture(text(&saved, "id"), json!({ "nodeId": vm_id }))
                 .await
                 .unwrap();
             let grant = cairn_installation::nodes::disk_grants::new_disk(&f.service, &saved, vm_id)
@@ -952,12 +952,7 @@ async fn expired_conversations_explicitly_change_backend_without_recovering_dele
                         status: Some(cairn_installation::run_status::RunStatus::Succeeded),
                         snapshot: Some(serde_json::from_value(snapshot).unwrap()),
                         recovery_pending: Some(false),
-                        boundary: Some(json!({
-                            "environmentState": "expired",
-                            "environmentExpiredAt": now(),
-                            "isolated": false,
-                            "nodeId": null,
-                        })),
+                        placement: Some(Box::new(cairn_installation::nodes::run_placement::PlacementChanges {node_id: Some(None), ..Default::default() })), boundary: Some(serde_json::json!({"environmentState": "expired","environmentExpiredAt": now(),"isolated": false})),
                         ..Default::default()
                     },
                 )?;
@@ -1075,10 +1070,10 @@ async fn expired_conversations_explicitly_change_backend_without_recovering_dele
                 .owner_call(
                     "PUT",
                     &placement_path,
-                    json!({
+                    json!({"selection":{
                         "pinnedNodeId": selected["id"],
                         "preferredNodeId": null,
-                    }),
+                    }}),
                 )
                 .await;
             assert_eq!(status, StatusCode::OK, "{selection}");
@@ -1282,9 +1277,20 @@ impl Fixture {
     }
 
     async fn with_workspace(workspace: bool) -> Self {
+        Self::with_workspace_and_codex(workspace, false).await
+    }
+
+    async fn with_codex_fixture() -> Self {
+        Self::with_workspace_and_codex(false, true).await
+    }
+
+    async fn with_workspace_and_codex(workspace: bool, fixture_codex: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("home")).unwrap();
         let mut config = common::config(root.path());
+        if fixture_codex {
+            config.codex_bin = common::fixture("codex.mjs");
+        }
         if workspace {
             config.runner_url = "http://unused-runner:4311".into();
         }
@@ -1496,7 +1502,14 @@ async fn delegated_native_administration_requires_the_requesters_current_review(
             text(&parent, "id"),
             cairn_installation::runs::RunChanges {
                 status: Some(cairn_contracts::RunStatus::Running),
-                boundary: Some(serde_json::json!({"nodeId": f.node["id"]})),
+                placement: Some(Box::new(
+                    cairn_installation::nodes::run_placement::PlacementChanges {
+                        node_id: Some(
+                            serde_json::from_value(serde_json::json!(f.node["id"])).unwrap(),
+                        ),
+                        ..Default::default()
+                    },
+                )),
                 ..Default::default()
             },
         )
@@ -1650,7 +1663,7 @@ async fn task_delegation_has_its_own_revocable_native_authority() {
     assert!(check(child.clone()).await.unwrap());
     f.service
         .store
-        .update_run_boundary(text(&parent, "id"), json!({ "nativeAuthorityNodes": [] }))
+        .update_run_boundary_fixture(text(&parent, "id"), json!({ "nativeAuthorityNodes": [] }))
         .await
         .unwrap();
     assert!(
@@ -2079,7 +2092,7 @@ async fn accepted_native_run_controls_retain_the_director_on_the_chat_and_run() 
             (
                 "PUT",
                 format!("/api/nodes/placement/{run_id}"),
-                json!({ "pinnedNodeId": node["id"] }),
+                json!({ "selection":{ "pinnedNodeId": node["id"] } }),
             )
         };
         let (status, response) = f.owner_call(method, &path, body).await;
@@ -2216,7 +2229,7 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         let held = f
             .service
             .store
-            .get("node-attempts", &reservation)
+            .attempt_fixture(&reservation)
             .await
             .unwrap()
             .unwrap();
@@ -2231,13 +2244,22 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
                 cairn_installation::runs::RunChanges {
                     recovery_pending: Some(true),
                     status: Some(cairn_contracts::RunStatus::Queued),
-                    boundary: Some(serde_json::json!({
-                        "placementTransition": false,
-                        "targetNodeId": null,
-                        "moveReservation": reservation,
-                        "nodeId": node["id"],
-                        "nodeState": "resuming",
-                    })),
+                    placement: Some(Box::new(
+                        cairn_installation::nodes::run_placement::PlacementChanges {
+                            target_node_id: Some(None),
+                            move_reservation: Some(
+                                serde_json::from_value(serde_json::json!(reservation)).unwrap(),
+                            ),
+                            node_id: Some(
+                                serde_json::from_value(serde_json::json!(node["id"])).unwrap(),
+                            ),
+                            node_state: Some(
+                                serde_json::from_value(serde_json::json!("resuming")).unwrap(),
+                            ),
+                            ..Default::default()
+                        },
+                    )),
+                    boundary: Some(serde_json::json!({"placementTransition": false})),
                     ..Default::default()
                 },
             )
@@ -2267,7 +2289,7 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
             let execution = f
                 .service
                 .store
-                .get("node-attempts", &attempt)
+                .attempt_fixture(&attempt)
                 .await
                 .unwrap()
                 .unwrap();
@@ -2280,7 +2302,7 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
             assert!(
                 f.service
                     .store
-                    .get("node-attempts", &attempt)
+                    .attempt_fixture(&attempt)
                     .await
                     .unwrap()
                     .is_none()
@@ -2289,7 +2311,7 @@ async fn moved_conversations_claim_reservations_for_their_execution_backend() {
         let previous = f
             .service
             .store
-            .get("node-attempts", &reservation)
+            .attempt_fixture(&reservation)
             .await
             .unwrap()
             .unwrap();
@@ -2326,6 +2348,49 @@ async fn retained_conversations_exhaust_the_shared_native_admission_budget() {
     let next = f.run();
     common::add_run(&f.service.store, &next).await;
     assert!(placement::reserve(&f.service, &next, &id()).await.is_err());
+}
+
+#[tokio::test]
+async fn native_admission_retains_allowances_below_the_configured_budget_minimum() {
+    for (budget, allowance) in [(256, 116), (264, 120)] {
+        let f = Fixture::new().await;
+        let mut node = f.node.clone();
+        node["limits"]["diskMiB"] = budget.into();
+        node["diskGrowthProtocol"] = 1.into();
+        node["diskCapacity"] = json!({
+            "protocol": 1,
+            "capturedAt": now(),
+            "usedBytes": 0,
+            "freeBytes": 900 * 1024 * 1024 * 1024u64,
+            "ownedBytes": {},
+            "retainedBytes": {},
+            "requests": [],
+        });
+        f.service.store.put_node_fixture(node).await.unwrap();
+        let run = f.run();
+        common::add_run(&f.service.store, &run).await;
+        let attempt = id();
+
+        let selected = placement::reserve(&f.service, &run, &attempt)
+            .await
+            .unwrap();
+        assert_eq!(selected["resources"]["diskMiB"], allowance);
+        assert_eq!(
+            f.service
+                .store
+                .attempt(&attempt)
+                .await
+                .unwrap()
+                .unwrap()
+                .resources
+                .disk_mi_b,
+            allowance
+        );
+        placement::release(&f.service, &attempt).await.unwrap();
+        let retained = f.service.store.attempt(&attempt).await.unwrap().unwrap();
+        assert!(retained.released);
+        assert_eq!(retained.resources.disk_mi_b, allowance);
+    }
 }
 
 #[tokio::test]
@@ -2493,6 +2558,169 @@ async fn native_disk_growth_is_idempotent_and_competes_atomically_with_admission
             .await
             .is_ok()
     );
+}
+
+#[tokio::test]
+async fn native_disk_growth_stops_at_the_task_limit_and_preserves_older_allowances() {
+    let gib = 1024 * 1024 * 1024u64;
+    for (limit_gib, initial_gib, pool_gib) in [
+        (150u64, 144u64, 158u64),
+        (150, 150, 1024),
+        (150, 504, 1024),
+        (75, 72, 80),
+        (300, 296, 1024),
+        (200, 144, 1024),
+    ] {
+        let f = Fixture::new().await;
+        let owner_token = common::relay_fixture::grant(&f.service, &["read", "manage"]).await;
+        let read = common::request("GET", "/api/settings/task-storage")
+            .header("x-test-relay-token", &owner_token)
+            .body(Body::empty())
+            .unwrap();
+        let response = common::send(&f.router, read).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let current = read_json(response).await;
+        let save = common::request("PUT", "/api/settings/task-storage")
+            .header("x-test-relay-token", &owner_token)
+            .body(Body::from(
+                json!({
+                    "maxDiskGiB": limit_gib, "revision": current["revision"],
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        assert_eq!(common::send(&f.router, save).await.status(), StatusCode::OK);
+        let mut node = f.node.clone();
+        node["slots"] = 4.into();
+        // Only the final 6 GiB increment fits this pool, rather than a full 8 GiB.
+        node["limits"]["diskMiB"] = (pool_gib * 1024).into();
+        node["capabilities"]["diskTotalMiB"] = (2048 * 1024).into();
+        node["capabilities"]["diskMiB"] = (1800 * 1024).into();
+        f.service
+            .store
+            .put_node_fixture(node.clone())
+            .await
+            .unwrap();
+        let token = auth::token();
+        f.service
+            .store
+            .set(
+                &format!("node-token:{}", auth::digest(&token)),
+                node["id"].clone(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let mut run = f.run();
+        run["status"] = "running".into();
+        run["resources"] = json!({
+            "cpu": 2, "memoryMiB": 4096, "diskMiB": initial_gib * 1024,
+        });
+        common::add_run(&f.service.store, &run).await;
+        let attempt = id();
+        placement::reserve(&f.service, &run, &attempt)
+            .await
+            .unwrap();
+        common::set_checkpoint(
+            &f.service.store,
+            text(&run, "id"),
+            json!({
+                "nodeId": node["id"], "runnerId": attempt,
+            }),
+        )
+        .await;
+
+        let expected_mib = initial_gib.max((initial_gib + 8).min(limit_gib)) * 1024;
+        let mut active_limit_gib = limit_gib;
+        // Replaying a lost response must not grant a second increment.
+        for (index, current_mib) in [initial_gib * 1024, initial_gib * 1024, expected_mib]
+            .into_iter()
+            .enumerate()
+        {
+            if limit_gib == 200 && index == 1 {
+                // The first grant was persisted, but its response was lost. The
+                // owner lowers the cap before the controller retries at 144 GiB.
+                let current = f
+                    .service
+                    .store
+                    .kv("task-storage-limits")
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let save = common::request("PUT", "/api/settings/task-storage")
+                    .header("x-test-relay-token", &owner_token)
+                    .body(Body::from(
+                        json!({
+                            "maxDiskGiB": 150, "revision": current["revision"],
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+                assert_eq!(common::send(&f.router, save).await.status(), StatusCode::OK);
+                active_limit_gib = 150;
+            }
+            let body = json!({
+                "backend": "native", "nodeProtocol": 2, "executionReady": true,
+                "dataRoot": "/fixture", "runtimeId": "development",
+                "capabilities": node["capabilities"], "pool": { "capacity": 4 },
+                "sharedResources": true, "budget": { "slots": 4, "limits": node["limits"] },
+                "nativeMode": { "mode": "protected", "generation": null, "status": "applied" },
+                "usage": { "diskMiB": 0, "diskBytes": 0 },
+                "diskGrowth": {
+                    "protocol": 1, "capturedAt": now(), "usedBytes": 0,
+                    "freeBytes": 1800 * gib, "ownedBytes": {},
+                    "requests": [{ "attemptId": attempt, "currentMiB": current_mib }],
+                },
+            });
+            let request = Request::builder()
+                .method("POST")
+                .uri("/internal/nodes/heartbeat")
+                .header("host", common::HOST)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            let response = common::send(&f.router, request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let reply = read_json(response).await;
+            let grant = &reply["diskGrowth"]["grants"][0];
+            assert_eq!(
+                reply["diskGrowth"]["maxTaskDiskMiB"],
+                active_limit_gib * 1024
+            );
+            assert_eq!(grant["allowanceMiB"], expected_mib, "{reply}");
+            assert_eq!(
+                grant["previousAllowanceMiB"],
+                if index == 0 {
+                    initial_gib * 1024
+                } else {
+                    expected_mib
+                }
+            );
+            assert_eq!(
+                grant["reason"],
+                if current_mib < expected_mib {
+                    "granted"
+                } else {
+                    "task-limit"
+                }
+            );
+            assert_eq!(
+                f.service.store.run(text(&run, "id")).await.unwrap()["resources"]["diskMiB"],
+                expected_mib,
+            );
+            assert_eq!(
+                f.service
+                    .store
+                    .kv(&format!("native-capacity-pressure:{}", text(&node, "id")))
+                    .await
+                    .unwrap(),
+                None,
+                "Reaching the task limit must not evict other conversations' caches",
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -2761,16 +2989,13 @@ async fn revoking_a_native_person_stops_lease_renewals_and_workspace_access() {
     .await;
     f.service
         .store
-        .put(
-            "node-attempts",
-            json!({
-                "id": attempt,
-                "runId": run["id"],
-                "nodeId": f.node["id"],
-                "released": false,
-                "leaseExpiresAt": now() + 60000,
-            }),
-        )
+        .put_attempt_fixture(json!({
+            "id": attempt,
+            "runId": run["id"],
+            "nodeId": f.node["id"],
+            "released": false,
+            "leaseExpiresAt": now() + 60000,
+        }))
         .await
         .unwrap();
     let token = auth::token();
@@ -3266,7 +3491,7 @@ async fn changing_the_parent_permission_or_node_ceiling_revokes_descendants() {
     child["nativeParentRunId"] = parent["id"].clone();
     f.service
         .store
-        .update_run_boundary(
+        .update_run_boundary_fixture(
             parent["id"].as_str().unwrap(),
             json!({ "nativeAuthorityNodes": [] }),
         )
@@ -3282,7 +3507,7 @@ async fn changing_the_parent_permission_or_node_ceiling_revokes_descendants() {
     );
     f.service
         .store
-        .update_run_boundary(
+        .update_run_boundary_fixture(
             parent["id"].as_str().unwrap(),
             json!({ "nativeAuthorityNodes": [f.node["id"]] }),
         )
@@ -3714,12 +3939,9 @@ async fn native_mode_confirmation_covers_incoming_moves_and_reservations() {
         if selection == "reservation" {
             f.service
                 .store
-                .put(
-                    "node-attempts",
-                    json!({
-                        "id": id(), "runId": run["id"], "nodeId": node_id, "released": false,
-                    }),
-                )
+                .put_attempt_fixture(json!({
+                    "id": id(), "runId": run["id"], "nodeId": node_id, "released": false,
+                }))
                 .await
                 .unwrap();
         }
@@ -3737,7 +3959,7 @@ async fn native_mode_confirmation_covers_incoming_moves_and_reservations() {
     }
     f.service
         .store
-        .update_run_boundary(
+        .update_run_boundary_fixture(
             text(&incoming[2], "id"),
             json!({
                 "moveRequest": { "nodeId": node_id, "reservation": id() },
@@ -3773,12 +3995,9 @@ async fn native_mode_confirmation_covers_incoming_moves_and_reservations() {
     // interruption snapshot, even though the conversation count stays the same.
     f.service
         .store
-        .put(
-            "node-attempts",
-            json!({
-                "id": id(), "runId": incoming[0]["id"], "nodeId": node_id, "released": false,
-            }),
-        )
+        .put_attempt_fixture(json!({
+            "id": id(), "runId": incoming[0]["id"], "nodeId": node_id, "released": false,
+        }))
         .await
         .unwrap();
     let (status, _) = f
@@ -3863,14 +4082,7 @@ async fn native_mode_transition_keeps_automatic_recovery_and_capacity_moves_on_t
         assert!(!moves::advance(&f.service, &run).await.unwrap());
         assert!(!moves::queue_capacity_move(&f.service, &run).await.unwrap());
         assert!(f.service.store.run(&run_id).await.unwrap()["moveRequest"].is_null());
-        assert!(
-            f.service
-                .store
-                .list("node-attempts")
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(f.service.store.attempts_fixture().await.unwrap().is_empty());
         assert_eq!(
             f.service
                 .store
@@ -3960,6 +4172,112 @@ async fn saved_native_mission(f: &Fixture) -> Value {
     )
     .await;
     f.service.store.run(text(&run, "id")).await.unwrap()
+}
+
+#[tokio::test]
+async fn run_resume_selection_authorizes_before_catalog_discovery_over_http_and_public_mcp() {
+    let f = Fixture::with_codex_fixture().await;
+    let (chat, queued_run) = f.conversation().await;
+    let (chat_id, run_id) = (
+        text(&chat, "id").to_owned(),
+        text(&queued_run, "id").to_owned(),
+    );
+    let turn_id = text(&queued_run["chatExecution"], "messageId").to_owned();
+    let discovery_log = f.service.config.home.join(".codex/fixture-lifecycle.jsonl");
+    std::fs::create_dir_all(discovery_log.parent().unwrap()).unwrap();
+    std::fs::write(&discovery_log, "").unwrap();
+    assert!(f.service.store.kv("codex-models:").await.unwrap().is_none());
+    f.service
+        .store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(cairn_contracts::RunStatus::Cancelled),
+                resume_available: Some(true),
+                session_id: Some(Some("retained-session".into())),
+                workspace: Some(Some("/saved/native/workspace".into())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    common::set_checkpoint(
+        &f.service.store,
+        &run_id,
+        json!({
+            "launched": true,
+            "prepared": { "cwd": "/saved/native/workspace" },
+            "generation": "retained-generation",
+        }),
+    )
+    .await;
+    let before = f.service.store.run(&run_id).await.unwrap();
+    let path = format!("/api/runs/{run_id}/resume");
+    let body = json!({
+        "turnId": turn_id,
+        "selection": {
+            "model": "fixture-fast",
+            "reasoning": "high",
+            "speed": "priority",
+        },
+    });
+
+    let missing_turn = f
+        .call(
+            &f.trusted,
+            "POST",
+            &path,
+            json!({ "selection": body["selection"] }),
+        )
+        .await;
+    assert_eq!(
+        missing_turn.0,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        missing_turn.1
+    );
+    assert_eq!(f.service.store.run(&run_id).await.unwrap(), before);
+    assert!(std::fs::read_to_string(&discovery_log).unwrap().is_empty());
+    assert!(f.service.store.kv("codex-models:").await.unwrap().is_none());
+
+    let (status, denied) = f.call(&f.other, "POST", &path, body.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{denied}");
+    assert_eq!(f.service.store.run(&run_id).await.unwrap(), before);
+    assert!(std::fs::read_to_string(&discovery_log).unwrap().is_empty());
+    assert!(f.service.store.kv("codex-models:").await.unwrap().is_none());
+
+    let denied_public = public_mcp_call(
+        &f,
+        OTHER,
+        &["run"],
+        "resume_run",
+        json!({
+            "runId": run_id,
+            "turnId": turn_id,
+            "selection": body["selection"],
+        }),
+    )
+    .await;
+    assert_eq!(denied_public["result"]["isError"], true, "{denied_public}");
+    assert_eq!(f.service.store.run(&run_id).await.unwrap(), before);
+    assert!(std::fs::read_to_string(&discovery_log).unwrap().is_empty());
+    assert!(f.service.store.kv("codex-models:").await.unwrap().is_none());
+
+    let (status, resumed) = f.call(&f.trusted, "POST", &path, body).await;
+    assert_eq!(status, StatusCode::OK, "{resumed}");
+    let after = f.service.store.run(&run_id).await.unwrap();
+    assert_eq!(after["status"], "queued");
+    assert_eq!(after["snapshot"]["agent"]["model"], "fixture-fast");
+    assert_eq!(after["snapshot"]["agent"]["reasoning"], "high");
+    assert_eq!(after["snapshot"]["agent"]["speed"], "priority");
+    assert_eq!(after["id"], before["id"]);
+    assert_eq!(after["chatExecution"]["messageId"], turn_id);
+    assert!(
+        std::fs::read_to_string(&discovery_log)
+            .unwrap()
+            .contains("model/list")
+    );
+    assert!(f.service.conversation_boundary(&chat_id).await.is_ok());
 }
 
 #[tokio::test]
@@ -4190,8 +4508,7 @@ async fn enrolled_native_backend_refreshes_authority_when_health_telemetry_is_mi
     .await;
     f.service
         .store
-        .put(
-            "node-attempts",
+        .put_attempt_fixture(
             json!({"id":attempt,"runId":run["id"],"nodeId":f.node["id"],"released":false}),
         )
         .await
@@ -4248,4 +4565,153 @@ async fn enrolled_native_backend_refreshes_authority_when_health_telemetry_is_mi
         "a changed desired generation must still stop old grants"
     );
     server.abort();
+}
+
+async fn delegated_move_result(
+    fixture: &Fixture,
+    configuration: &Value,
+    input: Value,
+) -> cairn_contracts::NodeMoveOperation {
+    let response = delegated_call(fixture, configuration, "move_to_node", input).await;
+    assert_ne!(response["result"]["isError"], true, "{response}");
+    let started: cairn_contracts::NodeMoveStarted =
+        serde_json::from_value(response["result"]["structuredContent"]["result"].clone()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let response = delegated_call(
+                fixture,
+                configuration,
+                "get_node_move_operation",
+                json!({"operationId":started.operation}),
+            )
+            .await;
+            assert_ne!(response["result"]["isError"], true, "{response}");
+            let operation: cairn_contracts::NodeMoveOperation =
+                serde_json::from_value(response["result"]["structuredContent"]["result"].clone())
+                    .unwrap();
+            if operation.state != cairn_contracts::NodeMoveOperationState::Running {
+                return operation;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("Native directing operation did not finish")
+}
+
+#[tokio::test]
+async fn installation_can_direct_its_own_native_run_without_widening_authority_or_parent_cycle() {
+    let mut f = Fixture::new().await;
+    f.agent["access"]["installation"] = true.into();
+    f.service
+        .store
+        .put_agent_fixture(f.agent.clone())
+        .await
+        .unwrap();
+    let mut run = f.run();
+    run["status"] = "running".into();
+    run["requiredTags"] = json!([]);
+    common::add_run(&f.service.store, &run).await;
+    let configuration = f
+        .service
+        .mcps
+        .run_configuration(&f.service, &run)
+        .await
+        .unwrap();
+    // A new node becomes trusted after this run received its original ceiling.
+    // An agent's own directing action cannot supply new human authorization.
+    let mut additional = f.node.clone();
+    additional["id"] = id().into();
+    f.service
+        .store
+        .put_node_fixture(additional.clone())
+        .await
+        .unwrap();
+    f.agent["access"]["nodes"] = json!([f.node["id"], additional["id"]]);
+    f.service
+        .store
+        .put_agent_fixture(f.agent.clone())
+        .await
+        .unwrap();
+    let saved = delegated_call(
+        &f,
+        &configuration,
+        "configure_conversation_placement",
+        json!({
+            "runId":run["id"], "selection":{"pinnedNodeId":null,"preferredNodeId":f.node["id"]}
+        }),
+    )
+    .await;
+    assert_ne!(saved["result"]["isError"], true, "{saved}");
+    let current = f.service.store.run(text(&run, "id")).await.unwrap();
+    assert!(current["nativeParentRunId"].is_null(), "{current}");
+    assert_eq!(current["nativeAuthorityNodes"], json!([f.node["id"]]));
+    let checked = current.clone();
+    let node = f.node.clone();
+    assert!(
+        f.service
+            .store
+            .read(move |db| policy::allows(db, &checked, &node))
+            .await
+            .unwrap()
+    );
+    let checked = current.clone();
+    let outside_ceiling = additional.clone();
+    assert!(
+        !f.service
+            .store
+            .read(move |db| policy::allows(db, &checked, &outside_ceiling))
+            .await
+            .unwrap()
+    );
+    let denied = delegated_move_result(
+        &f,
+        &configuration,
+        json!({ "runId": run["id"], "nodeId": additional["id"] }),
+    )
+    .await;
+    assert_eq!(
+        denied.state,
+        cairn_contracts::NodeMoveOperationState::Failed
+    );
+    // Placement filters nodes outside the native ceiling before selection;
+    // its established no-authorized-node result is 503, not a grant mutation.
+    assert_eq!(denied.error_status, Some(503), "{denied:?}");
+    assert!(
+        denied
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with(placement::NO_CAPACITY),
+        "{denied:?}"
+    );
+    assert!(f.service.store.run(text(&run, "id")).await.unwrap()["moveRequest"].is_null());
+    let moved = delegated_move_result(
+        &f,
+        &configuration,
+        json!({
+            "runId":run["id"], "nodeId":f.node["id"]
+        }),
+    )
+    .await;
+    assert_eq!(
+        moved.state,
+        cairn_contracts::NodeMoveOperationState::Completed
+    );
+    assert_eq!(
+        serde_json::to_value(moved.result.unwrap()).unwrap()["nodeId"],
+        f.node["id"]
+    );
+    let current = f.service.store.run(text(&run, "id")).await.unwrap();
+    assert!(current["nativeParentRunId"].is_null());
+    assert_eq!(current["nativeAuthorityNodes"], json!([f.node["id"]]));
+    assert_eq!(current["moveRequest"]["nodeId"], f.node["id"]);
+    let node = f.node.clone();
+    assert!(
+        f.service
+            .store
+            .read(move |db| policy::allows(db, &current, &node))
+            .await
+            .unwrap()
+    );
 }

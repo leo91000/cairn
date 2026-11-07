@@ -12,7 +12,7 @@ pub(crate) mod side_questions;
 
 pub use crate::waits as wait_for;
 
-pub use handoff::{execution_text, with_invoked_skills};
+pub use handoff::{PLAN_TURN, execution_text, with_invoked_skills};
 pub use questions::{Question, QuestionField, QuestionStatus};
 pub use side_questions::side_question_prefixes;
 
@@ -90,6 +90,20 @@ struct UserMessageEvent<'a> {
     text: &'a str,
     attachments: &'a [cairn_contracts::ChatAttachment],
     created_at: i64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    plan: bool,
+}
+
+/// Whether the run's current turn is a plan turn. Run grants are tied to that turn,
+/// so its tools keep this restriction until the next turn replaces the grant.
+pub(crate) fn planning(run: &Value) -> bool {
+    run["chatExecution"]["plan"] == true
+}
+
+/// Whether the next turn of this run follows a plan turn, whose engine mode may persist.
+/// A compaction in between starts no turn, so it carries the mark forward.
+fn follows_plan(run: &Value) -> bool {
+    planning(run) || (is_compaction(run) && run["chatExecution"]["afterPlan"] == true)
 }
 
 fn chat(db: &Db<'_>, id: &str) -> Result<Value> {
@@ -144,6 +158,7 @@ fn same_content(a: &Message, b: &Message) -> bool {
         && a.provider == b.provider
         && a.model == b.model
         && a.reasoning == b.reasoning
+        && a.plan == b.plan
         && a.speed == b.speed
         && a.attachments == b.attachments
 }
@@ -169,7 +184,7 @@ fn conversation_view_with_run(
 ) -> Result<cairn_contracts::Chat> {
     use cairn_contracts::{Chat, ChatRequester, ConversationLifecycle, ConversationStatus};
     let active = chat.lifecycle == ConversationLifecycle::Active;
-    let pending_questions = db.pending_question_count(&chat.id)?;
+    let (pending_questions, question_at) = db.pending_question_summary(&chat.id)?;
     let agent_name =
         db.0.query_row(
             "SELECT name FROM agents WHERE id=?",
@@ -247,8 +262,10 @@ fn conversation_view_with_run(
         .map(|provider| serde_json::from_value(Value::from(provider.as_str())))
         .transpose()?;
     let mut view = Chat {
+        next_selection: None,
         can_request_new_session: crate::conversation_lifecycle::can_request_new_session(&chat, run),
         finished_at: serde_json::from_value(run_field("finishedAt"))?,
+        read_at: question_at.max(run_field("finishedAt").as_i64()),
         context_usage: serde_json::from_value(run_field("contextUsage"))?,
         account_wait_reason: serde_json::from_value(run_field("accountWaitReason"))?,
         account_required: serde_json::from_value(run_field("accountRequired"))?,
@@ -417,6 +434,9 @@ fn compact(db: &Db<'_>, chat_id: &str, origin: &crate::native::policy::Origin) -
         attachments: Vec::new(),
         recovery: false,
         context: None,
+        plan: false,
+        // Compacting delivers no turn: the turn after it still follows the plan turn.
+        after_plan: follows_plan(&run),
         operation: Some(COMPACT.into()),
         previous: Some(serde_json::from_value(json!({
             "summary": run["summary"],
@@ -458,7 +478,15 @@ pub(crate) fn detail(db: &Db<'_>, id: &str) -> Result<Value> {
 fn detail_messages(db: &Db<'_>, id: &str, undelivered: bool) -> Result<Value> {
     let chat = conversation(db, id)?;
     let run = db.run(chat.run_id.as_deref().unwrap_or(""))?;
+    let next_selection = if chat.lifecycle == cairn_contracts::ConversationLifecycle::Active {
+        crate::coding_agent_configuration::next_selection(db, &chat.agent_id, run.as_ref())?
+    } else {
+        None
+    };
     let mut result = serde_json::to_value(conversation_view_with_run(db, chat, run.as_ref())?)?;
+    if let Some(selection) = next_selection {
+        result["nextSelection"] = serde_json::to_value(selection)?;
+    }
     if !is_active(&result) {
         result["questions"] = json!([]);
         result["sideQuestions"] = json!([]);
@@ -613,7 +641,32 @@ fn validate_steer(db: &Db<'_>, chat: &Conversation, message: &Message) -> Result
             "Queue this message to change provider, model, reasoning or speed on the next turn.",
         ));
     }
+    // Steering joins the running turn with its permissions: a plan request cannot
+    // restrict a turn that may already change files.
+    if run_is_active(&run) && message.plan && !planning(&run) {
+        return Err(Error::conflict(
+            "Queue this message to plan on the next turn: the running turn can change files.",
+        ));
+    }
     Ok(())
+}
+
+/// Plan turns need a coding agent whose read-only boundary Cairn enforces.
+fn require_plan_support(db: &Db<'_>, chat: &Conversation, message: &Message) -> Result<()> {
+    if !message.plan {
+        return Ok(());
+    }
+    require_plan_turns(Provider::parse(&message_provider(db, chat, message)?)?)
+}
+
+pub(crate) fn require_plan_turns(provider: Provider) -> Result<()> {
+    if provider.adapter().plan_turns() {
+        return Ok(());
+    }
+    Err(Error::bad(format!(
+        "{} does not support plan turns: Cairn cannot enforce a read-only boundary for it.",
+        provider.label()
+    )))
 }
 
 /// A new chat is named after its first message, or its first attachment.
@@ -678,6 +731,111 @@ fn require_sendable(
     Ok(())
 }
 
+/// Called inside the same manager write transaction as queue insertion. A delayed client
+/// cannot approve a proposal after another writer accepted a revision or implementation.
+fn require_current_proposal(
+    db: &Db<'_>,
+    chat: &Conversation,
+    messages: &[Message],
+    message: &Message,
+    approval: &cairn_contracts::PlanApproval,
+) -> Result<()> {
+    struct Proposal {
+        event_id: i64,
+        kind: String,
+        has_content: bool,
+        request_kind: Option<String>,
+        request_id: Option<String>,
+    }
+    let stale = || {
+        Error::conflict(
+            "The proposed plan changed. Refresh the conversation and review it before implementing.",
+        )
+    };
+    if message.plan
+        || message.mode != MessageMode::Queue
+        || chat.revision != approval.revision
+        || messages
+            .iter()
+            .any(|m| matches!(m.status, MessageStatus::Queued | MessageStatus::Sending))
+    {
+        return Err(stale());
+    }
+    let run_id = chat.run_id.as_deref().ok_or_else(stale)?;
+    let run = db.run(run_id)?.ok_or_else(stale)?;
+    if run_is_active(&run) || run["recoveryPending"] == true {
+        return Err(stale());
+    }
+    let event: Option<Proposal> =
+        db.0.query_row(
+            "SELECT id,type,CASE WHEN json_type(payload,'$.item.text')='text'
+         THEN length(trim(json_extract(payload,'$.item.text'),char(9)||char(10)||char(13)||' '))>0
+         ELSE 0 END,json_type(payload,'$.item.request_id'),json_extract(payload,'$.item.request_id')
+         FROM events WHERE run_id=?
+         AND type IN ('item.started','item.updated','item.completed')
+         AND json_extract(payload,'$.item.type')='proposed_plan'
+         AND COALESCE(json_extract(payload,'$.item.parent_id'),'')=''
+         ORDER BY id DESC LIMIT 1",
+            [run_id],
+            |row| {
+                Ok(Proposal {
+                    event_id: row.get(0)?,
+                    kind: row.get(1)?,
+                    has_content: row.get(2)?,
+                    request_kind: row.get(3)?,
+                    request_id: row.get(4)?,
+                })
+            },
+        )
+        .optional()?;
+    let Proposal {
+        event_id,
+        kind,
+        has_content,
+        request_kind,
+        request_id,
+    } = event.ok_or_else(stale)?;
+    if kind != "item.completed"
+        || !has_content
+        || approval.source_id != format!("{run_id}:{event_id}")
+    {
+        return Err(stale());
+    }
+    let (request_count, latest_request): (i64, Option<String>) = db.0.query_row(
+        "SELECT COUNT(DISTINCT CASE
+             WHEN json_type(payload,'$.messageId')='text'
+               AND json_extract(payload,'$.messageId')!=''
+             THEN 'message:' || json_extract(payload,'$.messageId')
+             ELSE 'source:' || id
+         END), (SELECT json_extract(payload,'$.messageId') FROM events
+         WHERE run_id=? AND type='chat.user' ORDER BY id DESC LIMIT 1)
+         FROM events WHERE run_id=? AND type='chat.user'",
+        rusqlite::params![run_id, run_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if let Some(request_kind) = request_kind {
+        if request_kind != "text"
+            || request_id.as_deref().unwrap_or("").is_empty()
+            || request_id != latest_request
+        {
+            return Err(stale());
+        }
+    } else if request_count != 1 {
+        // Older receipts had no request_id. Their proposal is still attributable only
+        // when the run contains exactly one human request.
+        return Err(stale());
+    }
+    let later_request: bool = db.0.query_row(
+        "SELECT EXISTS(SELECT 1 FROM events WHERE run_id=? AND id>? AND type='chat.user')",
+        rusqlite::params![run_id, event_id],
+        |row| row.get(0),
+    )?;
+    if later_request {
+        return Err(stale());
+    }
+    Ok(())
+}
+
 pub(crate) fn send(
     db: &Db<'_>,
     chat_id: &str,
@@ -689,6 +847,11 @@ pub(crate) fn send(
     authorize_conversation(db, &mut chat, origin)?;
     require_live(&chat)?;
     crate::attachments::message(db, chat_id, &mut values)?;
+    let approval: Option<cairn_contracts::PlanApproval> = values
+        .get("planApproval")
+        .filter(|value| !value.is_null())
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()?;
     let mut values: Message = serde_json::from_value(values)?;
     let messages = db.conversation_messages(chat_id)?;
     // Retried submissions are idempotent; a reused identifier with other content is not.
@@ -703,9 +866,13 @@ pub(crate) fn send(
         }
         return Ok(serde_json::to_value(existing)?);
     }
+    if let Some(approval) = approval {
+        require_current_proposal(db, &chat, &messages, &values, &approval)?;
+    }
     require_sendable(db, &chat, &messages, &values.id)?;
     validate_speed(db, &chat, &values)?;
     validate_steer(db, &chat, &values)?;
+    require_plan_support(db, &chat, &values)?;
     if messages.is_empty() {
         let private_answer = answer
             .as_ref()
@@ -754,12 +921,17 @@ pub(crate) fn parse_message(input: Value) -> Result<Value> {
     Ok(serde_json::to_value(input)?)
 }
 
-/// Parses an edited message. A speed the editor did not send stays as stored.
+/// Parses an edited message. A speed or plan request the editor did not send stays as
+/// stored: an editor predating them never turns a plan request into an ordinary turn.
 pub(crate) fn parse_edit(input: Value) -> Result<Value> {
-    let sends_speed = input.get("speed").is_some();
+    let kept = ["speed", "plan"].map(|field| input.get(field).is_none());
     let mut values = parse_message(input)?;
-    if !sends_speed && let Some(values) = values.as_object_mut() {
-        values.remove("speed");
+    if let Some(values) = values.as_object_mut() {
+        for (field, kept) in ["speed", "plan"].into_iter().zip(kept) {
+            if kept {
+                values.remove(field);
+            }
+        }
     }
     Ok(values)
 }
@@ -806,6 +978,7 @@ pub(crate) fn edit_as(
     // An edit without a speed, from an editor predating speeds, keeps the stored one while the
     // message still goes to Codex.
     let kept_speed = values.get("speed").is_none();
+    let kept_plan = values.get("plan").is_none();
     let next: cairn_contracts::ChatMessage = serde_json::from_value(values)?;
     current.text = next.text;
     current.provider = next.provider;
@@ -816,12 +989,16 @@ pub(crate) fn edit_as(
     if !kept_speed {
         current.speed = next.speed;
     }
+    if !kept_plan {
+        current.plan = next.plan;
+    }
     if kept_speed && message_provider(db, &chat, &current)? != Provider::Codex.as_str() {
         current.speed.clear();
     }
     // Steering joins the running turn with the message as edited, including a kept speed.
     validate_steer(db, &chat, &current)?;
     validate_speed(db, &chat, &current)?;
+    require_plan_support(db, &chat, &current)?;
     Ok(serde_json::to_value(db.save_message(&current)?)?)
 }
 
@@ -859,6 +1036,7 @@ fn acknowledge(db: &Db<'_>, run_id: &str, message_id: &str) -> Result<()> {
         text,
         attachments: &message.attachments,
         created_at: message.created_at,
+        plan: message.plan,
     })?;
     db.event(run_id, &EventKind::ChatUser, text, Some(&payload))?;
     touch(&mut chat);
@@ -866,13 +1044,11 @@ fn acknowledge(db: &Db<'_>, run_id: &str, message_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Marks steering messages as sending so the running turn picks them up.
-fn claim_steering(
-    db: &Db<'_>,
-    chat_id: &str,
-    paused: bool,
-    delivering: &Value,
-) -> Result<Vec<Value>> {
+/// Marks steering messages as sending so the running turn picks them up. A plan request
+/// only joins a plan turn: one admitted while no turn ran stays queued for its own turn
+/// rather than joining a later turn that can change files.
+fn claim_steering(db: &Db<'_>, chat_id: &str, paused: bool, run: &Value) -> Result<Vec<Value>> {
+    let delivering = &run["chatExecution"]["messageId"];
     if conversation(db, chat_id)
         .is_ok_and(|chat| chat.lifecycle != cairn_contracts::ConversationLifecycle::Active)
     {
@@ -884,8 +1060,10 @@ fn claim_steering(
             message.status == MessageStatus::Queued || message.status == MessageStatus::Sending;
         // Answers to questions still flow while the chat is paused.
         let deliverable = !paused || message.question_id.is_some();
+        let joins = !message.plan || planning(run);
         if deliverable
             && pending
+            && joins
             && message.mode == MessageMode::Steer
             && message.id.as_str() != delivering.as_str().unwrap_or("")
         {
@@ -965,34 +1143,22 @@ pub(crate) fn select_agent(
     {
         agent["access"]["backend"] = backend.into();
     }
-    if implicit_provider || switched {
-        // An implicit follow-up keeps the conversation's qualified selection,
-        // even when its profile changed or now has different defaults.
-        agent["model"] = if implicit_provider {
+    if continues || switched {
+        // Naming the same engine still follows the conversation's selection.
+        // Changed native/profile defaults are resolved atomically before launch.
+        agent["model"] = if continues {
             inherited_model
         } else {
             String::new()
         }
         .into();
-        agent["reasoning"] = if implicit_provider {
+        agent["reasoning"] = if continues {
             inherited_reasoning
         } else {
             String::new()
         }
         .into();
-        set_speed(
-            agent,
-            if implicit_provider {
-                &inherited_speed
-            } else {
-                ""
-            },
-        );
-    }
-    // Naming the coding agent of the latest turn keeps that turn's speed, as both clients
-    // show it, rather than a default the agent's profile gained since.
-    if !implicit_provider && continues {
-        set_speed(agent, &inherited_speed);
+        set_speed(agent, if continues { &inherited_speed } else { "" });
     }
     if !text(message, "model").is_empty() {
         agent["model"] = message["model"].clone();
@@ -1078,9 +1244,8 @@ fn continue_run(
         };
         db.event(run_id, &EventKind::Status, &status, None)?;
     } else if provider == Provider::Codex && resumes_mission_thread(run) {
-        // Codex keeps the developer instructions a thread started with, so the
-        // mission's thread would stay unattended. Every turn repeats the rule
-        // because compaction can drop earlier user messages.
+        // Keep the interactive rule explicit across native versions; compaction
+        // can drop earlier user messages.
         execution.text = format!(
             "{CONTINUED_MISSION} {}\n\n{}",
             crate::run_output::INTERACTIVE,
@@ -1175,12 +1340,18 @@ fn launch_turn(
         return Ok(());
     }
     crate::conversation_lifecycle::require_environment_state_ready(chat.environment_state)?;
+    crate::coding_agent_configuration::freeze_message(db, &mut snapshot, run.as_ref(), &message)?;
+    Provider::of_run(&snapshot)?
+        .adapter()
+        .validate_agent(&snapshot["snapshot"]["agent"])?;
     let execution = ChatExecution {
         message_id: text(&message, "id").to_owned(),
         text: with_invoked_skills(text(&message, "text"), &snapshot["snapshot"]["skills"]),
         attachments: serde_json::from_value(message["attachments"].clone())?,
         recovery: false,
         context: None,
+        plan: message["plan"] == true,
+        after_plan: run.as_ref().is_some_and(follows_plan),
         operation: None,
         previous: None,
     };
@@ -1390,6 +1561,16 @@ impl Service {
     where
         F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
     {
+        self.chat_from_run_live(run_id, crate::authorization::Authorization::once(authorize))
+            .await
+    }
+
+    pub(crate) async fn chat_from_run_live(
+        &self,
+        run_id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let origin = crate::native::policy::origin();
         if origin.known() {
             let run = self.store.run(run_id).await?;
@@ -1397,6 +1578,7 @@ impl Service {
         }
 
         let active = self.worker.active.lock().await;
+        authorize.recheck().await?;
         if active.contains_key(run_id) {
             return Err(Error::conflict(
                 "Wait for this run to finish stopping before continuing in chat.",
@@ -1405,7 +1587,7 @@ impl Service {
         let run_id = run_id.to_owned();
         self.store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 from_run(db, &run_id, &origin)
             })
             .await
@@ -1472,10 +1654,12 @@ impl Service {
     }
 
     /// Compacts the conversation's native context while it is idle.
-    pub(crate) async fn chat_compact_authorized<F>(&self, id: &str, authorize: F) -> Result<Value>
-    where
-        F: FnOnce(&Db<'_>) -> Result<()> + Send + 'static,
-    {
+    pub(crate) async fn chat_compact_live(
+        &self,
+        id: &str,
+        authorize: crate::authorization::Authorization,
+    ) -> Result<Value> {
+        authorize.recheck().await?;
         let origin = crate::native::policy::origin();
         if origin.known() {
             crate::native::policy::refresh_chat(self, id).await?;
@@ -1485,6 +1669,7 @@ impl Service {
         // A succeeded run's worker may still be saving its checkpoint: the compaction resets
         // it, so it waits for that worker to release the run, like resuming does.
         let active = self.worker.active.lock().await;
+        authorize.recheck().await?;
         let run_id = self
             .store
             .read({
@@ -1497,10 +1682,11 @@ impl Service {
                 "Wait for the current turn to finish before compacting.",
             ));
         }
+        authorize.recheck().await?;
         let result = self
             .store
             .transaction(move |db| {
-                authorize(db)?;
+                authorize.authorize(db)?;
                 compact(db, &id, &origin)
             })
             .await?;
@@ -1648,7 +1834,7 @@ impl Service {
     ) -> Result<()> {
         let chat_id = chat.id.clone();
         let paused = chat.paused;
-        let delivering = run["chatExecution"]["messageId"].clone();
+        let claiming = run.clone();
         let run_id = text(run, "id").to_owned();
         // Only a reply that announced side questions, with some to receive, reads them; a
         // later tick sees an announcement or a question made since this one read them.
@@ -1656,7 +1842,7 @@ impl Service {
         let (mut steering, side_turn) = self
             .store
             .transaction(move |db| {
-                let mut steering = claim_steering(db, &chat_id, paused, &delivering)?;
+                let mut steering = claim_steering(db, &chat_id, paused, &claiming)?;
                 // Side questions are not chat messages: the queue, pause and steering never
                 // hold them, and the adapter answers them beside the turn. The run is read
                 // again here: a launch since the tick read it withdrew its announcement.
@@ -1740,9 +1926,13 @@ impl Service {
             &snapshot["snapshot"]["agent"],
         );
         select_agent(&mut snapshot, run.as_ref(), &message)?;
-        Provider::of_run(&snapshot)?
+        let provider = Provider::of_run(&snapshot)?;
+        provider
             .adapter()
             .validate_agent(&snapshot["snapshot"]["agent"])?;
+        if message["plan"] == true {
+            require_plan_turns(provider)?;
+        }
         let chat_id = chat.id.clone();
         self.store
             .transaction(move |db| launch_turn(db, &chat_id, run, message, snapshot))
@@ -1777,6 +1967,14 @@ mod tests {
 
     fn validate_speed(db: &Db<'_>, chat: &Value, message: &Value) -> Result<()> {
         super::validate_speed(
+            db,
+            &fixture_chat(chat),
+            &serde_json::from_value(message.clone())?,
+        )
+    }
+
+    fn require_plan_support(db: &Db<'_>, chat: &Value, message: &Value) -> Result<()> {
+        super::require_plan_support(
             db,
             &fixture_chat(chat),
             &serde_json::from_value(message.clone())?,
@@ -1836,7 +2034,7 @@ mod tests {
             .execute_batch(
                 "ALTER TABLE chat_messages RENAME TO retained_messages;
 CREATE VIEW chat_messages AS SELECT rowid AS rowid,id,chat_id,revision,purge_marker(text) AS text,
-provider,model,reasoning,speed,mode,status,created_at,question_id FROM retained_messages;",
+provider,model,reasoning,speed,mode,status,created_at,question_id,plan FROM retained_messages;",
             )
             .unwrap();
         connection
@@ -2118,6 +2316,8 @@ provider,model,reasoning,speed,mode,status,created_at,question_id FROM retained_
                             "snapshot": { "agent": { "provider": "codex" } },
                         });
                         let run = db.add_run_fixture(&run, None)?;
+                        let profile = serde_json::from_value(run["snapshot"]["agent"].clone())?;
+                        db.save_agent(&profile)?;
                         db.event("run", &EventKind::ChatUser, "Context to preserve", None)?;
                         let chat = json!({
                             "id": "chat",
@@ -2200,6 +2400,8 @@ provider,model,reasoning,speed,mode,status,created_at,question_id FROM retained_
                                 attachments: Vec::new(),
                                 recovery: false,
                                 context: None,
+                                plan: false,
+                                after_plan: false,
                                 operation: None,
                                 previous: None,
                             },
@@ -2256,6 +2458,8 @@ provider,model,reasoning,speed,mode,status,created_at,question_id FROM retained_
                             attachments: Vec::new(),
                             recovery: false,
                             context: None,
+                            plan: false,
+                            after_plan: false,
                             operation: None,
                             previous: None,
                         };
@@ -2306,14 +2510,17 @@ provider,model,reasoning,speed,mode,status,created_at,question_id FROM retained_
             &json!({ "provider": "opencode" }),
         )
         .unwrap();
-        assert_eq!(explicit["snapshot"]["agent"]["model"], "");
-        assert_eq!(explicit["snapshot"]["agent"]["reasoning"], "");
+        assert_eq!(
+            explicit["snapshot"]["agent"]["model"],
+            "opencode/ling-3.1-flash-free"
+        );
+        assert_eq!(explicit["snapshot"]["agent"]["reasoning"], "medium");
     }
 
     #[test]
     fn provider_changes_must_wait_for_the_next_turn_and_model_aliases_are_valid() {
         let root = tempfile::tempdir().unwrap();
-        let _store = crate::store::Store::open(root.path()).unwrap();
+        drop(crate::store::Store::open(root.path()).unwrap());
         let connection = rusqlite::Connection::open(root.path().join("manager.db")).unwrap();
         let run = json!({
             "status": "running",
@@ -2365,6 +2572,168 @@ provider,model,reasoning,speed,mode,status,created_at,question_id FROM retained_
             "provider": "unknown"
         });
         assert!(parse_message(unknown).is_err());
+    }
+
+    #[tokio::test]
+    async fn plan_requests_cannot_steer_a_working_turn_or_run_on_opencode() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                let claude = cairn_contracts::AgentId(uuid::Uuid::new_v4());
+                let settings = serde_json::from_value(json!({
+                    "name": "claude",
+                    "provider": "claude",
+                    "access": cairn_contracts::AccessPolicy::default(),
+                    "exclusiveNodes": [],
+                    "plugins": [],
+                }))?;
+                db.save_agent(&crate::agents::new_agent(settings, Some(claude)))?;
+                for (id, provider, status, chat_execution) in [
+                    (
+                        "working",
+                        "claude",
+                        "running",
+                        json!({ "messageId": "first" }),
+                    ),
+                    (
+                        "planning",
+                        "claude",
+                        "running",
+                        json!({ "messageId": "first", "plan": true }),
+                    ),
+                    ("legacy", "opencode", "succeeded", Value::Null),
+                ] {
+                    db.add_run_fixture(
+                        &json!({
+                            "id": id,
+                            "taskId": id,
+                            "createdAt": 0,
+                            "status": status,
+                            "snapshot": { "agent": { "provider": provider } },
+                            "chatExecution": chat_execution,
+                        }),
+                        None,
+                    )?;
+                }
+                let chat = |id: &str| json!({ "id": id, "runId": id, "agentId": claude });
+                let (working, planning_chat, opencode) =
+                    (chat("working"), chat("planning"), chat("legacy"));
+                let mut message = parse_message(
+                    json!({ "id": id(), "text": "Plan instead", "mode": "steer", "plan": true }),
+                )?;
+
+                // A plan request never joins a turn that can already change files.
+                assert_eq!(
+                    validate_steer(db, &working, &message).unwrap_err().status,
+                    409
+                );
+                validate_steer(db, &planning_chat, &message)?;
+                // Ordinary steering of a plan turn stays restricted by that turn.
+                message["plan"] = false.into();
+                validate_steer(db, &planning_chat, &message)?;
+
+                message["plan"] = true.into();
+                message["mode"] = "queue".into();
+                validate_steer(db, &working, &message)?;
+                require_plan_support(db, &working, &message)?;
+                // The inherited engine and an explicit choice are both checked.
+                assert_eq!(
+                    require_plan_support(db, &opencode, &message)
+                        .unwrap_err()
+                        .status,
+                    400
+                );
+                message["provider"] = "codex".into();
+                require_plan_support(db, &opencode, &message)?;
+                message["provider"] = "opencode".into();
+                assert!(require_plan_support(db, &working, &message).is_err());
+
+                // A queued message switching to OpenCode decides for the plan request after it.
+                db.save_conversation_boundary(&working)?;
+                db.put_message(&json!({
+                    "id": "ahead",
+                    "chatId": "working",
+                    "createdAt": 1,
+                    "status": "queued",
+                    "provider": "opencode",
+                }))?;
+                message["provider"] = "".into();
+                assert!(require_plan_support(db, &working, &message).is_err());
+
+                // Older clients omit the field: their messages are never plan turns.
+                let older = parse_message(json!({ "id": id(), "text": "Go" }))?;
+                assert_eq!(older["plan"], false);
+                require_plan_support(db, &opencode, &older)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn an_edit_without_a_plan_request_keeps_the_stored_one() {
+        let kept = parse_edit(json!({ "id": id(), "text": "Revised" })).unwrap();
+        assert!(kept.get("plan").is_none());
+        let mut stored = json!({ "text": "Plan it", "plan": true });
+        crate::store::merge(&mut stored, &kept);
+        assert_eq!(stored["plan"], true);
+        let ordinary = parse_edit(json!({ "id": id(), "text": "Do it", "plan": false })).unwrap();
+        assert_eq!(ordinary["plan"], false);
+    }
+
+    #[test]
+    fn plan_turns_mark_the_execution_and_the_turn_that_follows() {
+        let run = |plan: bool| json!({ "chatExecution": { "plan": plan } });
+        assert!(planning(&run(true)));
+        assert!(!planning(&run(false)));
+        assert!(!planning(&json!({})));
+
+        let execution = ChatExecution {
+            message_id: "message".into(),
+            text: "Implement".into(),
+            attachments: Vec::new(),
+            recovery: false,
+            context: None,
+            plan: false,
+            after_plan: true,
+            operation: None,
+            previous: None,
+        };
+        let value = serde_json::to_value(execution).unwrap();
+        assert!(value.get("plan").is_none());
+        assert_eq!(value["afterPlan"], true);
+
+        // A compaction starts no turn: the turn after it still follows the plan turn.
+        assert!(follows_plan(&run(true)));
+        assert!(!follows_plan(&run(false)));
+        let compaction = |after_plan: bool| json!({ "chatExecution": { "operation": COMPACT, "afterPlan": after_plan } });
+        assert!(follows_plan(&compaction(true)));
+        assert!(!follows_plan(&compaction(false)));
+        assert!(!follows_plan(
+            &json!({ "chatExecution": { "afterPlan": true } })
+        ));
+
+        let event = serde_json::to_value(UserMessageEvent {
+            message_id: "message",
+            question_id: None,
+            text: "Plan it",
+            attachments: &[],
+            created_at: 1,
+            plan: true,
+        })
+        .unwrap();
+        assert_eq!(event["plan"], true);
+        let ordinary = serde_json::to_value(UserMessageEvent {
+            message_id: "message",
+            question_id: None,
+            text: "Do it",
+            attachments: &[],
+            created_at: 1,
+            plan: false,
+        })
+        .unwrap();
+        assert!(ordinary.get("plan").is_none());
     }
 
     #[test]

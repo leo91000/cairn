@@ -20,7 +20,8 @@ function draftEntries(drafts: unknown, installationId: string) {
     throw new Error('Invalid draft transfer')
   const entries = Object.entries(drafts)
   const prefix = `cairn-chat-draft:${installationId}:`
-  if (entries.length > 1000 || entries.some(([key, value]) => !key.startsWith(prefix) || typeof value !== 'string' || value.length > 1000000))
+  const draftKeys = new Set(entries.map(([key]) => key.endsWith(':plan') ? key.slice(0, -5) : key))
+  if (draftKeys.size > 1000 || entries.length > 2000 || entries.some(([key, value]) => !key.startsWith(prefix) || typeof value !== 'string' || value.length > 1000000 || (key.endsWith(':plan') && value !== 'true' && value !== 'false')))
     throw new Error('Invalid draft transfer')
   return entries as [string, string][]
 }
@@ -76,9 +77,14 @@ export function restoreInstallationDrafts(installationId: string, accountId: str
     return
   }
 
-  for (const [key, value] of draftEntries(batch.drafts, installationId)) {
-    // Empty is a newer deliberately cleared draft, not an absent key.
-    if (sessionStorage.getItem(key) === null)
+  const entries = draftEntries(batch.drafts, installationId)
+  const existingDrafts = new Set(entries.map(([key]) => key.endsWith(':plan') ? key.slice(0, -5) : key)
+    .filter(key => sessionStorage.getItem(key) !== null || sessionStorage.getItem(`${key}:plan`) !== null))
+  for (const [key, value] of entries) {
+    // Text and Plan belong together. Empty text is a newer deliberate clear,
+    // including legacy drafts whose absent Plan field means ordinary execution.
+    const draftKey = key.endsWith(':plan') ? key.slice(0, -5) : key
+    if (!existingDrafts.has(draftKey))
       sessionStorage.setItem(key, value)
   }
 

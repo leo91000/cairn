@@ -74,20 +74,20 @@ class ScrollResumeTest {
                             }
                     val json =
                         wireJson.encodeToString(
-                            LiveBatch(
+                            timelineBatch(
                                 events,
                                 LiveState(chat = chat),
                                 false,
                                 end < 60,
-                                history = "v1:fixture:1",
+                                history = "v2:fixture:1",
                             )
                         )
                     val frame = "event: batch\nid: $end\ndata: $json\n\n"
-                    val padding = 8192 - frame.toByteArray().size - 4
+                    val padding = 16384 - frame.toByteArray().size - 4
                     require(padding > 0)
                     return frame + ": " + "x".repeat(padding) + "\n\n"
                 }
-                val keepalive = (": " + "x".repeat(8188) + "\n\n").repeat(60)
+                val keepalive = (": " + "x".repeat(16380) + "\n\n").repeat(60)
                 server.dispatcher =
                     object : Dispatcher() {
                         override fun dispatch(request: RecordedRequest): MockResponse {
@@ -114,7 +114,7 @@ class ScrollResumeTest {
                                 return MockResponse()
                                     .setHeader("Content-Type", "text/event-stream")
                                     .setBody(history + keepalive)
-                                    .throttleBody(8192, 2, TimeUnit.SECONDS)
+                                    .throttleBody(16384, 2, TimeUnit.SECONDS)
                             }
                             val result =
                                 when (request.path?.substringBefore('?')) {
@@ -229,7 +229,7 @@ class ScrollResumeTest {
                 assertTrue(visible(60))
                 // Following the latest output accepts the recent window instead of a long replay.
                 assertEquals(
-                    "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream?after=60&history=v1%3Afixture%3A1&window=1&recent=1",
+                    "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream?after=60&history=v2%3Afixture%3A1&window=1&recent=1",
                     requests[1],
                 )
                 // Reopening from the feed restores the cached tail before its first visible frame.
@@ -298,7 +298,7 @@ class ScrollResumeTest {
                 compose.waitForIdle()
                 assertEquals(before, position(), 0.01f)
                 assertEquals(
-                    "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream?after=60&history=v1%3Afixture%3A1&window=1",
+                    "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream?after=60&history=v2%3Afixture%3A1&window=1",
                     requests[3],
                 )
                 compose.runOnIdle { opened = false }
@@ -314,7 +314,7 @@ class ScrollResumeTest {
                 compose.waitForIdle()
                 assertEquals(before, position(), 0.01f)
                 assertEquals(
-                    "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream?after=60&history=v1%3Afixture%3A1&window=1",
+                    "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream?after=60&history=v2%3Afixture%3A1&window=1",
                     requests[4],
                 )
                 // Keep a real drag active long enough for the fade-out to finish.

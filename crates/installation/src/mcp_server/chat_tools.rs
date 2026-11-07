@@ -36,6 +36,7 @@ fn summary(chat: &Value) -> Result<Value> {
         "createdAt",
         "updatedAt",
         "finishedAt",
+        "readAt",
         "pendingQuestions",
         "requestedBy",
         "requester",
@@ -299,34 +300,33 @@ pub(crate) async fn invoke(
             _ => {}
         }
     }
-    let management = management_authorization(bearer);
+    let management = management_authorization(s, bearer).await?;
     let control_id = control.then(|| text(&args, "chatId").to_owned());
     let commit_id = control_id.clone();
     let control_origin = origin.clone();
-    let authorize = move |db: &Db<'_>| -> Result<()> {
-        management(db)?;
+    let authorize = management.with_guard(move |db: &Db<'_>| -> Result<()> {
         if let Some(id) = &control_id {
             let chat = required(db.conversation_boundary(id)?, "Chat not found")?;
             crate::native::policy::chat_grant(db, &chat, &control_origin)?;
         }
         Ok(())
-    };
+    });
     let commit_authority = {
-        let check = authorize.clone();
         let source = origin.clone();
-        move |db: &Db<'_>| -> Result<()> {
-            check(db)?;
-            if let Some(id) = &commit_id {
-                crate::native::policy::authorize_chat_in(db, id, &source)?;
-            }
-            Ok(())
-        }
+        authorize
+            .clone()
+            .with_publication(move |db: &Db<'_>| -> Result<()> {
+                if let Some(id) = &commit_id {
+                    crate::native::policy::authorize_chat_in(db, id, &source)?;
+                }
+                Ok(())
+            })
     };
     if name == "get_chat_coding_agent_options" {
-        return chats::coding_agent::options(s, text(&args, "chatId"), authorize).await;
+        return chats::coding_agent::options_live(s, text(&args, "chatId"), authorize).await;
     }
     if name == "switch_chat_coding_agent" {
-        return s.switch_chat_coding_agent(args, authorize).await;
+        return s.switch_chat_coding_agent_live(args, authorize).await;
     }
     if matches!(
         name,
@@ -348,7 +348,7 @@ pub(crate) async fn invoke(
                     rusqlite::TransactionBehavior::Deferred,
                 )?;
                 let db = &Db(&transaction);
-                authorize(db)?;
+                authorize.authorize(db)?;
                 let result = match operation.as_str() {
                     "list_chats" => list(db, &args, reader.as_deref())?,
                     "get_chat" => detail(db, &args)?,
@@ -376,7 +376,7 @@ pub(crate) async fn invoke(
             .read({
                 let chat_id = chat_id.clone();
                 move |db| {
-                    check(db)?;
+                    check.authorize(db)?;
                     let chat = required(db.conversation(&chat_id)?, "Chat not found")?;
                     if chat.lifecycle != cairn_contracts::ConversationLifecycle::Active {
                         return Err(Error::conflict("This conversation has been deleted."));
@@ -397,13 +397,13 @@ pub(crate) async fn invoke(
             && let Some(run) = record.1.filter(|run| run.status.is_resumable())
         {
             s.worker
-                .resume_authorized(s, &run.id, commit_authority.clone())
+                .resume_live(s, &run.id, commit_authority.clone())
                 .await?;
         }
         let result = s
             .store
             .transaction(move |db| {
-                commit_authority(db)?;
+                commit_authority.authorize(db)?;
                 db.delete(&format!("chat-error:{chat_id}"))?;
                 chats::pause_in(db, &chat_id, paused)
             })
@@ -413,42 +413,116 @@ pub(crate) async fn invoke(
     }
     if name == "restore_chat" {
         return s
-            .chat_restore_authorized(text(&args, "chatId"), commit_authority)
+            .chat_restore_live(text(&args, "chatId"), commit_authority)
             .await;
     }
     if name == "resume_chat" {
-        let chat_id = text(&args, "chatId").to_owned();
+        let input: cairn_contracts::ResumeChatInput =
+            serde_json::from_value(args).map_err(|error| Error::bad(error.to_string()))?;
+        let chat_id = input.chat_id.to_string();
+        let commit_chat_id = chat_id.clone();
+        let expected_run_id = input.run_id.map(|expected| expected.to_string());
+        let expected_turn_id = input.turn_id;
+        let mut selection = input.selection;
+        if expected_turn_id
+            .as_ref()
+            .is_some_and(|turn| turn.is_empty() || turn.chars().count() > 200)
+        {
+            return Err(Error::bad("Invalid turn identifier."));
+        }
+        if selection.is_some() && expected_run_id.is_none() {
+            return Err(Error::bad(
+                "A run identifier is required when selecting a model for resume.",
+            ));
+        }
+        if selection.is_some() && expected_turn_id.is_none() {
+            return Err(Error::bad(
+                "A turn identifier is required when selecting a model for resume.",
+            ));
+        }
         let check = authorize.clone();
         let run_id = s
             .store
             .read(move |db| {
-                check(db)?;
+                check.authorize(db)?;
                 let chat = required(db.conversation_boundary(&chat_id)?, "Chat not found")?;
                 require_active(&chat)?;
-                required(chat["runId"].as_str().map(str::to_owned), "Run not found")
+                let run_id = required(chat["runId"].as_str().map(str::to_owned), "Run not found")?;
+                if expected_run_id.as_ref().is_some_and(|expected| expected != &run_id) {
+                    return Err(Error::conflict(
+                        "This conversation's run changed before it could be resumed. Refresh the conversation.",
+                    ));
+                }
+                Ok(run_id)
             })
             .await?;
+        let selected_resume = selection.is_some();
+        let mut run = s.store.run(&run_id).await?;
+        let saved_auto_catalog =
+            if !selected_resume && crate::resume_selection::has_saved_opencode_auto(&run) {
+                let preflight_id = run_id.clone();
+                let preflight_authority = authorize.clone();
+                run = s
+                    .store
+                    .read(move |db| {
+                        preflight_authority.authorize(db)?;
+                        required(db.run(&preflight_id)?, "Run not found")
+                    })
+                    .await?;
+                crate::resume_selection::saved_opencode_auto_catalog(s, &run).await
+            } else {
+                None
+            };
+        let selected_provider = if let Some(selection) = selection.as_mut() {
+            let expected_turn_id = expected_turn_id.as_deref().ok_or_else(|| {
+                Error::bad("A turn identifier is required when selecting a model for resume.")
+            })?;
+            Some(crate::resume_selection::validate(s, &run, selection, expected_turn_id).await?)
+        } else {
+            None
+        };
+        let committed_run_id = run_id.clone();
+        let resume_authority = commit_authority.with_publication(move |db| {
+            let chat = required(
+                db.conversation_boundary(&commit_chat_id)?,
+                "Chat not found",
+            )?;
+            require_active(&chat)?;
+            if chat["runId"] != committed_run_id {
+                return Err(Error::conflict(
+                    "This conversation's run changed before it could be resumed. Refresh the conversation.",
+                ));
+            }
+            Ok(())
+        });
         return s
             .worker
-            .resume_authorized(s, &run_id, commit_authority)
+            .resume_selected_live(
+                s,
+                &run_id,
+                crate::worker::ResumeSelectionContext {
+                    expected_turn_id,
+                    selection,
+                    selected_provider,
+                    saved_auto_catalog,
+                },
+                resume_authority,
+            )
             .await;
     }
     if name == "cancel_chat_question" {
         let native = crate::native::policy::chat_authorization(text(&args, "chatId"));
         return s
-            .question_cancel_authorized(
+            .question_cancel_live(
                 text(&args, "chatId"),
                 text(&args, "questionId"),
-                move |db| {
-                    commit_authority(db)?;
-                    native(db)
-                },
+                commit_authority.with_publication(native),
             )
             .await;
     }
     if name == "answer_chat_question" {
         return s
-            .question_answer_authorized(
+            .question_answer_live(
                 text(&args, "chatId"),
                 text(&args, "questionId"),
                 args["answer"].clone(),
@@ -473,7 +547,7 @@ pub(crate) async fn invoke(
     }
     if name == "delete_chat" {
         return s
-            .chat_trash_authorized(
+            .chat_trash_live(
                 text(&args, "chatId"),
                 args["confirm"] == true,
                 commit_authority,
@@ -483,13 +557,13 @@ pub(crate) async fn invoke(
     if name == "compact_chat" {
         // Compaction starts model work: the conversation's own grant is checked when it commits.
         return s
-            .chat_compact_authorized(text(&args, "chatId"), commit_authority)
+            .chat_compact_live(text(&args, "chatId"), commit_authority)
             .await;
     }
     if name == "stop_chat" {
         return s
             .worker
-            .stop_chat_authorized(s, text(&args, "chatId"), commit_authority)
+            .stop_chat_live(s, text(&args, "chatId"), commit_authority)
             .await;
     }
 
@@ -504,7 +578,7 @@ pub(crate) async fn invoke(
     let result = s
         .store
         .transaction(move |db| {
-            commit_authority(db)?;
+            commit_authority.authorize(db)?;
             let id = text(&args, "chatId");
             match name.as_str() {
                 "restart_chat_session" => {

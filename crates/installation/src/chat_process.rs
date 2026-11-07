@@ -14,22 +14,31 @@ use std::{
     path::Path,
     time::Duration,
 };
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 pub mod resident;
+mod streamed_text;
+
+use streamed_text::StreamedText;
 
 const STOPPED: &str = "Conversation stopped.";
 const MAX_MESSAGE: usize = 5_000_000;
+const TEXT_IDLE_FLUSH: Duration = Duration::from_millis(250);
 
 /// A Codex thread item as a chat item: snake_case names, as the conversation events use.
-pub fn chat_item(mut item: Value) -> Value {
+/// `planning` is a Cairn plan turn, whose boundary Cairn enforces.
+pub fn chat_item(mut item: Value, planning: bool) -> Value {
     let kind = match text(&item, "type") {
         "agentMessage" => "agent_message",
         "commandExecution" => "command_execution",
         "fileChange" => "file_change",
         "mcpToolCall" => "mcp_tool_call",
-        "reasoning" | "plan" => "reasoning",
+        "reasoning" => "reasoning",
+        // The approach a Cairn plan turn proposes, distinct from the progress checklist.
+        // Elsewhere nothing guarantees it was not acted on: it shows as reasoning.
+        "plan" if planning => "proposed_plan",
+        "plan" => "reasoning",
         "webSearch" => "web_search",
         "collabAgentToolCall" => "collab_tool_call",
         "contextCompaction" => "context_compaction",
@@ -122,6 +131,15 @@ struct ThreadConfig<'a> {
     sandbox_workspace_write: WorkspaceWrite<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model_reasoning_effort: Option<&'a str>,
+    /// Off during a plan turn. Codex 0.164.0 still offers its collaboration tools on a
+    /// resumed thread: sub-agents keep the read-only sandbox because a plan turn runs in a
+    /// process that has not loaded them with another one (`resident.rs`,
+    /// `tests/native_plan_turns.rs`).
+    #[serde(
+        rename = "features.multi_agent",
+        skip_serializing_if = "Option::is_none"
+    )]
+    multi_agent: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -142,9 +160,28 @@ struct TurnParams<'a> {
     client_user_message_id: Option<&'a Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     model: Option<&'a Value>,
+    /// Codex keeps a turn's sandbox for later turns of the thread.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sandbox_policy: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    collaboration_mode: Option<Value>,
     /// Kept by the thread for later turns, as `effort` is.
     #[serde(skip_serializing_if = "Option::is_none")]
     service_tier: Option<&'a str>,
+}
+
+/// The turn's sandbox as a `turn/start` override. A plan turn is read-only without
+/// network, whatever the agent's access.
+fn sandbox_policy(plan: &Value) -> Value {
+    match text(plan, "sandbox") {
+        "yolo" => json!({ "type": "dangerFullAccess" }),
+        "workspace-write" => json!({
+            "type": "workspaceWrite",
+            "writableRoots": plan["writableRoots"],
+            "networkAccess": true,
+        }),
+        _ => json!({ "type": "readOnly", "networkAccess": false }),
+    }
 }
 
 /// The plan's model, unless it leaves the choice to Codex.
@@ -184,6 +221,14 @@ impl Cursors {
 // operational identity across turns without changing provider message UUIDs.
 const OPERATIONAL_ID: &str = "cairn-runtime-disk:";
 
+/// Item notifications may precede the initial turn/start response. Keep them
+/// bounded and unacknowledged until the native process accepts that request.
+#[derive(Default)]
+struct StartingItems {
+    items: Vec<(Value, String)>,
+    bytes: usize,
+}
+
 struct Chat<'a> {
     session: &'a mut Session,
     events: mpsc::Sender<Value>,
@@ -197,7 +242,9 @@ struct Chat<'a> {
     seen: HashSet<String>,
     attempted: HashSet<String>,
     turn_submitted: bool,
-    texts: HashMap<String, String>,
+    texts: HashMap<String, StreamedText>,
+    /// Only the latest cumulative update is pending; switching items flushes it.
+    pending_text: Option<(String, Option<String>, Instant)>,
     /// Subagents this conversation started, by the ID of the item that started them.
     subagents: HashMap<String, Value>,
     /// The subagent each spawned thread works for.
@@ -206,6 +253,11 @@ struct Chat<'a> {
     context: Option<ContextUsage>,
     /// Whether Codex reported a completed compaction during this execution.
     compacted: bool,
+    /// A Cairn plan turn: only its plans are proposals nothing has acted on.
+    planning: bool,
+    /// Human request preceding the current native proposal, retained through history replay.
+    proposal_request: Option<String>,
+    starting_items: Option<StartingItems>,
 }
 
 impl Chat<'_> {
@@ -233,15 +285,23 @@ impl Chat<'_> {
         Ok(())
     }
 
-    async fn emit(&self, value: Value) -> Result<()> {
+    async fn send(&self, value: Value) -> Result<()> {
         self.events
             .send(value)
             .await
             .map_err(|_| Error::unavailable("Conversation output stopped."))
     }
 
+    async fn emit(&mut self, value: Value) -> Result<()> {
+        // Only a visible event is a causal boundary. Ignored provider output
+        // notifications and foreign threads cannot force extra text snapshots.
+        self.flush_text().await?;
+        self.send(value).await
+    }
+
     async fn acknowledge(&mut self, id: &str) -> Result<()> {
         if self.seen.insert(id.to_owned()) && !id.starts_with(OPERATIONAL_ID) {
+            self.proposal_request = Some(id.to_owned());
             self.emit(json!({ "type": "chat.delivered", "messageId": id }))
                 .await?;
         }
@@ -249,6 +309,19 @@ impl Chat<'_> {
     }
 
     async fn item(&mut self, item: Value, kind: &str) -> Result<()> {
+        if let Some(starting) = &mut self.starting_items {
+            let bytes = crate::validation::encoded_size(&item)? + kind.len();
+            if starting.items.len() >= 4096
+                || bytes > (128 * 1024 * 1024_usize).saturating_sub(starting.bytes)
+            {
+                return Err(Error::bad_gateway(
+                    "Codex sent too much item data before accepting the turn.",
+                ));
+            }
+            starting.bytes += bytes;
+            starting.items.push((item, kind.to_owned()));
+            return Ok(());
+        }
         let user_input_result = item["type"] == "functionCallOutput"
             && ["request_user_input", "request_user_input_async"].contains(&text(&item, "name"));
         if user_input_result {
@@ -262,14 +335,25 @@ impl Chat<'_> {
         }
         if item["type"] == "userMessage" {
             if let Some(id) = item["clientId"].as_str() {
+                // Replay acknowledgements may already have been seen. Their native
+                // position still determines the causal boundary of following items.
+                if !id.starts_with(OPERATIONAL_ID) {
+                    self.proposal_request = Some(id.to_owned());
+                }
                 self.acknowledge(id).await?;
             }
             return Ok(());
         }
+        if self.planning && item["type"] == "plan" && !text(&item, "text").is_empty() {
+            self.last_message = text(&item, "text").to_owned();
+        }
         if item["type"] == "agentMessage" && !text(&item, "text").is_empty() {
             self.last_message = text(&item, "text").to_owned();
         }
-        let mut item = chat_item(item);
+        let mut item = chat_item(item, self.planning);
+        if item["type"] == "proposed_plan" && kind == "item.completed" {
+            item["request_id"] = json!(self.proposal_request);
+        }
         if item["type"] == "context_compaction" {
             // Codex reports only the lifecycle; the visible transcript is never rewritten.
             let completed = kind == "item.completed";
@@ -425,7 +509,7 @@ impl Chat<'_> {
         if matches!(tool, "wait" | "listAgents") {
             return Ok(());
         }
-        let mut item = chat_item(item);
+        let mut item = chat_item(item, self.planning);
         if let Some(parent) = parent {
             item["parent_id"] = parent.into();
         }
@@ -487,7 +571,7 @@ impl Chat<'_> {
                     let kind = method.replace('/', ".");
                     return self.collaboration(item, &kind, Some(parent)).await;
                 }
-                let mut item = chat_item(item);
+                let mut item = chat_item(item, self.planning);
                 if item["type"] == "agent_message" {
                     item["type"] = "subagent_message".into();
                     // Its latest message is its report once its turn completes.
@@ -507,18 +591,7 @@ impl Chat<'_> {
                     text(params, "turnId"),
                     text(params, "itemId")
                 );
-                let value = self.texts.entry(id.clone()).or_default();
-                if value.len() + text(params, "delta").len() > MAX_MESSAGE {
-                    return Ok(());
-                }
-                value.push_str(text(params, "delta"));
-                let item = json!({
-                    "id": id,
-                    "type": "subagent_message",
-                    "text": value,
-                    "parent_id": parent,
-                });
-                self.emit(json!({ "type": "item.updated", "item": item }))
+                self.text_delta(&id, Some(parent), text(params, "delta"))
                     .await
             }
             "turn/plan/updated" => {
@@ -551,20 +624,65 @@ impl Chat<'_> {
     }
 
     async fn message_delta(&mut self, params: &Value) -> Result<()> {
-        let delta = text(params, "delta");
-        let value = self
-            .texts
-            .entry(text(params, "itemId").to_owned())
-            .or_default();
+        self.text_delta(text(params, "itemId"), None, text(params, "delta"))
+            .await
+    }
+
+    async fn text_delta(&mut self, id: &str, parent: Option<&str>, delta: &str) -> Result<()> {
+        if delta.is_empty() {
+            return Ok(());
+        }
+        if self
+            .pending_text
+            .as_ref()
+            .is_some_and(|pending| pending.0 != id)
+        {
+            self.flush_text().await?;
+        }
+        let value = self.texts.entry(id.to_owned()).or_default();
         if value.len() + delta.len() > MAX_MESSAGE {
+            if parent.is_some() {
+                return Ok(());
+            }
             return Err(Error::bad_gateway(
                 "Conversation output exceeded the supported limit.",
             ));
         }
-        value.push_str(delta);
-        let item = json!({ "id": params["itemId"], "type": "agent_message", "text": value });
-        self.emit(json!({ "type": "item.updated", "item": item }))
+        value.append(delta);
+        let ready = value.ready();
+        self.pending_text = Some((id.to_owned(), parent.map(str::to_owned), Instant::now()));
+        if ready {
+            self.flush_text().await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_text(&mut self) -> Result<()> {
+        let Some((id, parent, _)) = self.pending_text.take() else {
+            return Ok(());
+        };
+        let value = self.texts.get_mut(&id).unwrap().publish();
+        let kind = if parent.is_some() {
+            "subagent_message"
+        } else {
+            "agent_message"
+        };
+        let mut item = json!({
+            "id": id,
+            "type": kind,
+            "text": value,
+        });
+        if let Some(parent) = parent {
+            item["parent_id"] = parent.into();
+        }
+        self.send(json!({ "type": "item.updated", "item": item }))
             .await
+    }
+
+    fn text_flush_deadline(&self) -> Option<Instant> {
+        self.pending_text
+            .as_ref()
+            .map(|pending| pending.2 + TEXT_IDLE_FLUSH)
     }
 
     async fn incoming(&mut self, incoming: Incoming) -> Result<()> {
@@ -574,6 +692,7 @@ impl Chat<'_> {
         let params = incoming.params;
         if let Some(request_id) = incoming.id {
             if incoming.method == "item/tool/requestUserInput" {
+                self.flush_text().await?;
                 return self
                     .session
                     .rpc
@@ -633,9 +752,13 @@ impl Chat<'_> {
         let request = rpc.request(method, params);
         tokio::pin!(request);
         loop {
+            let flush_at = self.text_flush_deadline();
             tokio::select! {
                 () = self.cancel.cancelled() => return Err(Error::conflict(STOPPED)),
                 result = &mut request => return result,
+                () = tokio::time::sleep_until(flush_at.unwrap_or_else(Instant::now)), if flush_at.is_some() => {
+                    self.flush_text().await?;
+                }
                 incoming = self.session.incoming.recv() => {
                     let Some(incoming) = incoming else {
                         return Err(self.session.rpc.failure().await);
@@ -689,6 +812,7 @@ impl Chat<'_> {
                     writable_roots: &plan["writableRoots"],
                 },
                 model_reasoning_effort: (!effort.is_empty()).then_some(effort),
+                multi_agent: (plan["planning"] == true).then_some(false),
             },
             model: model(plan),
             thread_id: resume.then(|| &plan["sessionId"]),
@@ -833,6 +957,7 @@ impl Chat<'_> {
     }
 
     async fn execute(&mut self, plan: &Value) -> Result<()> {
+        self.planning = plan["planning"] == true;
         let effort = self.effort(plan).await;
         let resume = plan["sessionId"].is_string();
         if compacting(plan) && !resume {
@@ -845,7 +970,11 @@ impl Chat<'_> {
             return self.compact(plan).await;
         }
         let (turns, paginated) = self.history(&result, resume).await?;
-        for turn in &turns {
+        let mut chronological: Vec<_> = turns.iter().collect();
+        if paginated {
+            chronological.reverse();
+        }
+        for turn in chronological {
             for item in turn["items"].as_array().into_iter().flatten() {
                 if item["type"] == "userMessage"
                     && let Some(id) = item["clientId"].as_str()
@@ -873,6 +1002,16 @@ impl Chat<'_> {
             self.acknowledge(text(&plan["execution"], "messageId"))
                 .await?;
             if previous["status"] == "completed" {
+                // Native history can place the initial request block after its first
+                // output. Subsequent user blocks change only the items that follow them.
+                self.proposal_request = previous["items"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|item| item["type"] == "userMessage")
+                    .filter_map(|item| item["clientId"].as_str())
+                    .find(|id| !id.starts_with(OPERATIONAL_ID))
+                    .map(str::to_owned);
                 for item in previous["items"].as_array().into_iter().flatten() {
                     self.item(item.clone(), "item.completed").await?;
                 }
@@ -883,21 +1022,65 @@ impl Chat<'_> {
         self.wait(plan).await
     }
 
+    /// Codex's preset for a plan turn, or its default preset for the turn after one:
+    /// a thread keeps its collaboration mode for later turns. `None` when this Codex
+    /// lists no such preset or the model is unknown; the turn's sandbox applies anyway.
+    async fn collaboration_mode(&mut self, plan: &Value, effort: &str) -> Option<Value> {
+        let kind = if plan["planning"] == true {
+            "plan"
+        } else if plan["afterPlan"] == true {
+            "default"
+        } else {
+            return None;
+        };
+        let presets = self
+            .request("collaborationMode/list", json!({}))
+            .await
+            .ok()?;
+        let preset = presets["data"]
+            .as_array()?
+            .iter()
+            .find(|preset| preset["mode"] == kind)?
+            .clone();
+        // Preserve a selected or thread-reported model. If Codex does not report the
+        // configured thread model, omit the preset model so it cannot replace that config.
+        let model = model(plan)
+            .cloned()
+            .or_else(|| (!self.thread_model.is_empty()).then(|| self.thread_model.clone().into()));
+        let effort = if effort.is_empty() {
+            preset["reasoning_effort"].clone()
+        } else {
+            effort.into()
+        };
+        let mut settings = json!({
+            "reasoning_effort": effort,
+            "developer_instructions": null,
+        });
+        if let Some(model) = model {
+            settings["model"] = model;
+        }
+        Some(json!({ "mode": kind, "settings": settings }))
+    }
+
     async fn start_turn(&mut self, plan: &Value, effort: &str, continuing: bool) -> Result<()> {
         // A turn can complete before the first steering tick. Reject an oversized
         // inbox before submitting any input, independently of provider timing.
         crate::chat_inbox::read(inbox(plan), crate::chat_inbox::ADAPTER_LIMIT).await?;
 
         let message = if continuing {
+            let mut pending = text(&plan["execution"], "text").to_owned();
+            if plan["planning"] == true {
+                pending = format!("{}\n\n{pending}", crate::chats::PLAN_TURN);
+            }
             format!(
-                "Continue the interrupted conversation from its last completed step. Preserve completed work and verify external effects before repeating any action. The pending user request is:\n{}",
-                text(&plan["execution"], "text")
+                "Continue the interrupted conversation from its last completed step. Preserve completed work and verify external effects before repeating any action. The pending user request is:\n{pending}"
             )
         } else {
             crate::chats::execution_text(plan)
         };
         let input =
             crate::attachments::input(&message, &plan["execution"]["attachments"], inbox(plan));
+        let collaboration_mode = self.collaboration_mode(plan, effort).await;
         let (service_tier, speed_notice) = self.service_tier(plan).await?;
         let params = TurnParams {
             thread_id: &self.thread,
@@ -905,14 +1088,26 @@ impl Chat<'_> {
             effort: (!effort.is_empty()).then_some(effort),
             client_user_message_id: (!continuing).then(|| &plan["execution"]["messageId"]),
             model: model(plan),
+            sandbox_policy: (plan["planning"] == true || plan["afterPlan"] == true)
+                .then(|| sandbox_policy(plan)),
+            collaboration_mode,
             service_tier: Some(service_tier.as_str()).filter(|tier| !tier.is_empty()),
         };
         let params = serde_json::to_value(params)?;
         self.turn_submitted = true;
+        self.starting_items = self.planning.then(StartingItems::default);
         let started = self.request("turn/start", params).await?;
         self.turn = text(&started["turn"], "id").to_owned();
+        let starting = self.starting_items.take();
         self.acknowledge(text(&plan["execution"], "messageId"))
             .await?;
+        // The durable initial request must precede proposals that the server sent
+        // before its acceptance reply. Rejected starts never flush these items.
+        if let Some(starting) = starting {
+            for (item, kind) in starting.items {
+                self.item(item, &kind).await?;
+            }
+        }
         // Only an attempt Codex accepted says how it asks for the speed, after its message.
         if let Some(notice) = speed_notice {
             self.emit(notice).await?;
@@ -1001,8 +1196,12 @@ impl Chat<'_> {
         let mut interval = tokio::time::interval(Duration::from_millis(250));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         while self.completed.is_none() {
+            let flush_at = self.text_flush_deadline();
             tokio::select! {
                 () = self.cancel.cancelled() => return Err(Error::conflict(STOPPED)),
+                () = tokio::time::sleep_until(flush_at.unwrap_or_else(Instant::now)), if flush_at.is_some() => {
+                    self.flush_text().await?;
+                }
                 incoming = self.session.incoming.recv() => {
                     let Some(incoming) = incoming else {
                         return Err(self.session.rpc.failure().await);
@@ -1057,6 +1256,7 @@ impl Chat<'_> {
                 id.to_owned()
             };
             if self.completed.is_some()
+                || !crate::chat_inbox::joins_turn(&message, plan)
                 || self.seen.contains(&client_id)
                 || !self.attempted.insert(id.to_owned())
             {
@@ -1089,7 +1289,7 @@ impl Chat<'_> {
         Ok(())
     }
 
-    async fn finish(&self, plan: &Value) -> Result<()> {
+    async fn finish(&mut self, plan: &Value) -> Result<()> {
         atomic_write(
             Path::new(text(plan, "output")),
             self.last_message.as_bytes(),
@@ -1108,10 +1308,11 @@ fn keep_item(turn: &mut Value, item: &Value) -> Result<()> {
         "userMessage" => {
             items.push(json!({ "type": "userMessage", "clientId": item["clientId"] }));
         }
-        "agentMessage" => {
-            // Only the final answer is needed to settle a completed turn. Its tools are
-            // already in our durable event log.
-            items.retain(|item| item["type"] != "agentMessage");
+        // Only the final answer is needed to settle a completed turn: its latest message
+        // and, for a plan turn, its proposed plan, which may be the only answer. Its tools
+        // are already in our durable event log.
+        kind @ ("agentMessage" | "plan") => {
+            items.retain(|item| item["type"] != kind);
             items.push(item.clone());
         }
         _ => {}
@@ -1126,13 +1327,14 @@ pub async fn run(
     events: mpsc::Sender<Value>,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let args = plan["args"]
+    let mut args = plan["args"]
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect::<Vec<_>>();
+    args.extend(crate::coding_agent_configuration::codex_arguments(&plan)?);
     let mut session =
         match Session::codex(config, home, &args, Some(Path::new(text(&plan, "cwd")))).await {
             Ok(session) => session,
@@ -1186,12 +1388,23 @@ async fn run_session(
         attempted: HashSet::new(),
         turn_submitted: false,
         texts: HashMap::new(),
+        pending_text: None,
         subagents: HashMap::new(),
         children: HashMap::new(),
         context: None,
         compacted: false,
+        planning: false,
+        proposal_request: None,
+        starting_items: None,
     };
     let mut result = chat.execute(&plan).await;
+    // EOF, cancellation and transport errors can end without another provider
+    // notification. Preserve the last accepted text before reporting the failure.
+    if let Err(error) = chat.flush_text().await
+        && result.is_ok()
+    {
+        result = Err(error);
+    }
     if let Err(error) = &result
         && !chat.turn_submitted
         && let Some(failure) = crate::run_retry::startup_failure(error)

@@ -8,19 +8,15 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.ConfigurePlacementInput
+import build.cairn.contracts.ConversationPlacement as Placement
+import build.cairn.contracts.GetPlacementInput
+import build.cairn.contracts.MoveToNodeInput
+import build.cairn.contracts.PlacementSelection
+import build.cairn.contracts.configureConversationPlacement
+import build.cairn.contracts.getConversationPlacement
+import build.cairn.contracts.moveConversationToNode
 import kotlinx.coroutines.delay
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonNull
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
-
-@Serializable
-private data class Placement(
-    val nodes: List<ExecutionNode> = emptyList(),
-    val pinnedNodeId: String? = null,
-    val preferredNodeId: String? = null,
-)
 
 private val nodeStates =
     mapOf(
@@ -40,7 +36,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
     var loaded by remember(run.id) { mutableStateOf(false) }
     var savedMode by remember(run.id) { mutableStateOf("automatic") }
     var savedNode by remember(run.id) { mutableStateOf("") }
-    var placement by remember(run.id) { mutableStateOf(Placement()) }
+    var placement by remember(run.id) { mutableStateOf(Placement(emptyList(), null, null)) }
     var mode by remember(run.id) { mutableStateOf("automatic") }
     var selected by remember(run.id) { mutableStateOf(run.nodeId.orEmpty()) }
     var destination by remember(run.id) { mutableStateOf("") }
@@ -52,7 +48,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
     var placementRevision by remember(run.id) { mutableIntStateOf(0) }
     LaunchedEffect(run.id, placementRevision) {
         try {
-            placement = vm.api.get("/nodes/placement/${run.id}")
+            placement = vm.api.getConversationPlacement(GetPlacementInput(run.id))
             mode =
                 if (placement.pinnedNodeId != null) "fixed"
                 else if (placement.preferredNodeId != null) "preferred" else "automatic"
@@ -69,7 +65,7 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
         if (!expanded || run.executionBackend != "native") return@LaunchedEffect
         while (true) {
             try {
-                val current = vm.api.get<Placement>("/nodes/placement/${run.id}")
+                val current = vm.api.getConversationPlacement(GetPlacementInput(run.id))
                 // Keep unsaved placement choices while refreshing observed privileges.
                 placement = placement.copy(nodes = current.nodes)
                 privilegeError = false
@@ -319,21 +315,14 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                             {
                                 val requestedMode = mode
                                 val requestedNode = selected
-                                api.request(
-                                    "PUT",
-                                    "/nodes/placement/${run.id}",
-                                    buildJsonObject {
-                                        put(
-                                            "pinnedNodeId",
-                                            if (mode == "fixed") JsonPrimitive(selected)
-                                            else JsonNull,
-                                        )
-                                        put(
-                                            "preferredNodeId",
-                                            if (mode == "preferred") JsonPrimitive(selected)
-                                            else JsonNull,
-                                        )
-                                    },
+                                api.configureConversationPlacement(
+                                    ConfigurePlacementInput(
+                                        run.id,
+                                        PlacementSelection(
+                                            if (mode == "fixed") selected else null,
+                                            if (mode == "preferred") selected else null,
+                                        ),
+                                    )
                                 )
                                 savedMode = requestedMode
                                 savedNode = requestedNode
@@ -364,12 +353,8 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
                 onClick = {
                     request(
                         {
-                            api.request(
-                                "POST",
-                                "/nodes/placement/${run.id}/move",
-                                buildJsonObject {
-                                    put("nodeId", destination)
-                                },
+                            api.moveConversationToNode(
+                                MoveToNodeInput(runId = run.id, nodeId = destination)
                             )
                         },
                         "Déplacement demandé.",

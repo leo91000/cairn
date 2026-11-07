@@ -63,7 +63,12 @@ const props = withDefaults(defineProps<{
 })
 const router = useRouter()
 const live = useLiveRun(() => `/runs/${props.runId}/stream`)
-const { events, connectionNotice, catchingUp: loading } = live
+const {
+  events,
+  timeline,
+  connectionNotice,
+  catchingUp: loading,
+} = live
 const run = computed(() => live.snapshot.value?.run ?? undefined)
 const suspended = computed(() => isExclusivelySuspended(run.value))
 const recovery = useRetryState(() => run.value)
@@ -84,7 +89,7 @@ const converting = ref(false)
 // As on Android, a run opens on its conversation.
 const tab = ref('events')
 // Only acknowledge output that is displayed, including a mission finishing while it is open.
-useReadWhileOpen(() => ['events', 'result'].includes(tab.value) && live.synced.value && !loading.value && run.value?.trigger !== 'chat' && run.value?.status === 'succeeded' && run.value.finishedAt ? { key: `task:${run.value.taskId}`, at: run.value.finishedAt } : null)
+useReadWhileOpen(() => live.synced.value && !loading.value && run.value?.trigger !== 'chat' && run.value?.finishedAt ? { key: `task:${run.value.taskId}`, at: run.value.finishedAt } : null)
 // Where the Fil holds this run's blocked outcome, while it is its mission's latest.
 const missionRuns = useMissionRuns()
 const outcomeItem = computed(() => {
@@ -283,6 +288,7 @@ async function copy() {
           :position="live.position.value"
           :deliverables="deliverables"
           :events="events"
+          :timeline="timeline"
           :active="!!active && run.status !== 'waiting'"
           :wakeup="{ wakeup: run.wakeup ?? null, paused: false, settled: run.status === 'waiting', canPause: false }"
           :suspended="suspended"

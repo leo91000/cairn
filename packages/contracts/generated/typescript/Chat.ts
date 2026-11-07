@@ -6,16 +6,22 @@ import type { ChatQuestion } from './ChatQuestion'
 import type { ChatRequester } from './ChatRequester'
 import type { ChatSideQuestion } from './ChatSideQuestion'
 import type { ChatWakeup } from './ChatWakeup'
+import type { CodingAgentPreferences } from './CodingAgentPreferences'
 import type { CodingAgentSwitch } from './CodingAgentSwitch'
 import type { ContextUsage } from './ContextUsage'
 import type { ConversationEnvironmentState } from './ConversationEnvironmentState'
 import type { ConversationLifecycle } from './ConversationLifecycle'
 import type { ConversationRequester } from './ConversationRequester'
 import type { ConversationStatus } from './ConversationStatus'
+import type { ExclusiveReservation } from './ExclusiveReservation'
 import type { SideQuestionUnavailable } from './SideQuestionUnavailable'
 
 export interface Chat {
   id: string
+  /**
+   * Resolved selection for the next implicit message, including changed defaults.
+   */
+  nextSelection?: CodingAgentPreferences
   slug: string
   revision: string
   title: string
@@ -31,6 +37,10 @@ export interface Chat {
   purgeAt?: number | null
   restoredAt?: number | null
   finishedAt?: number | null
+  /**
+   * Latest visible question or finished turn to acknowledge, independently of its status.
+   */
+  readAt?: number | null
   sessionRestartRequested: boolean
   canRequestNewSession: boolean
   unread: boolean
@@ -68,7 +78,7 @@ export interface Chat {
   agentName: string
   projectName: string | null
   status: ConversationStatus
-  suspendedByExclusive?: import('../../nodes').ExclusiveReservation | null
+  suspendedByExclusive?: ExclusiveReservation | null
   wakeup?: ChatWakeup | null
   questions: Array<ChatQuestion>
   /**

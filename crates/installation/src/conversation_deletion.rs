@@ -240,8 +240,8 @@ async fn files(s: &Service, chat: &Value) -> Result<()> {
             text(chat, "id"),
         )
         .await?;
-    for (_, artifact) in s.store.keys(&format!("artifact:{run}:")).await? {
-        let id = text(&artifact, "id");
+    for artifact in s.store.artifacts(Some(run)).await? {
+        let id = &artifact.id;
         crate::validation::uuid(id)?;
         for name in [id.to_owned(), format!("{id}.jpg")] {
             remove(&s.config.data_dir.join("artifacts").join(name)).await?;
@@ -254,12 +254,7 @@ async fn files(s: &Service, chat: &Value) -> Result<()> {
 fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
     let [side_questions, open_side_questions, used_side_questions] =
         crate::chats::side_question_prefixes(cid);
-    for prefix in [
-        format!("artifact:{run}:"),
-        side_questions,
-        open_side_questions,
-        used_side_questions,
-    ] {
+    for prefix in [side_questions, open_side_questions, used_side_questions] {
         for (key, value) in db.keys(&prefix)? {
             if let Some(token) = value["publicToken"].as_str() {
                 db.delete(&format!("artifact-share:{token}"))?;
@@ -328,18 +323,12 @@ pub async fn expire_environment(s: &Service, chat: Value) -> Result<()> {
                 "isolated": false,
                 "backup": null,
                 "storage": null,
-                "nodeId": null,
-                "targetNodeId": null,
-                "preferredNodeId": null,
-                "pinnedNodeId": null,
                 "requiredRuntimeId": null,
                 "requiredRuntime": null,
                 "runtimeId": null,
-                "nodeState": null,
                 "workspaces": [],
                 "restoredAt": null,
                 "contextUsage": null,
-                "movementError": null,
             });
             db.change_run(&run, crate::runs::RunChanges {
                 session_id: Some(None),
@@ -347,6 +336,15 @@ pub async fn expire_environment(s: &Service, chat: Value) -> Result<()> {
                 workspace: Some(None),
                 workspace_cleaned_at: Some(None),
                 recovery_pending: Some(false),
+                placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                    node_id: Some(None),
+                    target_node_id: Some(None),
+                    preferred_node_id: Some(None),
+                    pinned_node_id: Some(None),
+                    node_state: Some(None),
+                    movement_error: Some(None),
+                    ..Default::default()
+                })),
                 boundary: Some(boundary),
                 ..Default::default()
             })?;

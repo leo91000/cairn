@@ -9,6 +9,12 @@ use tokio::{
     time::Instant,
 };
 
+mod telemetry;
+
+#[cfg(test)]
+pub(super) use telemetry::{Capture as SummaryCapture, Probe};
+pub(super) use telemetry::{Publisher, Reports};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum OutputKind {
     Stdout,
@@ -49,8 +55,13 @@ impl Output {
             && let Ok(event) = serde_json::from_str::<Value>(&raw)
             && text(&event, "type").starts_with("item.")
             && event["item"].is_object()
-            && event["item"]["type"] != "agent_message"
         {
+            // JSON frames already have a transport bound. Conversation text must
+            // reach the manager intact for redaction and durable storage.
+            if run_output::conversation_item(&event) {
+                return Self::new(false, raw.into_owned());
+            }
+
             return Self::new(
                 false,
                 run_output::compact_activity(&event, secrets).to_string(),
@@ -74,7 +85,7 @@ const DIAGNOSTIC_FRAGMENT_LIMIT: usize = 8192;
 // A target name mentioned in another logger's message is still a diagnostic.
 static AGENT_PERFORMANCE_RECORD: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(
-        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+(?:TRACE|DEBUG|INFO|WARN|ERROR)\s+(?:[A-Za-z_][A-Za-z0-9_]*\{[^{}\r\n]*\}:\s*)*cairn_performance: ",
+        r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+(?P<level>TRACE|DEBUG|INFO|WARN|ERROR)\s+(?:[A-Za-z_][A-Za-z0-9_]*\{[^{}\r\n]*\}:\s*)*cairn_performance: ",
     )
     .unwrap()
 });
@@ -119,7 +130,7 @@ pub(super) async fn read_output(
     secrets: Vec<String>,
 ) {
     if diagnostic {
-        return read_diagnostics(reader, events).await;
+        return read_diagnostics(reader, events, None).await;
     }
 
     let mut bytes = [0; 8192];
@@ -164,13 +175,26 @@ pub(super) async fn read_output(
 
 /// Forwards agent stderr by whole lines, so styling and performance records are
 /// recognized intact. A long fragment without a line end is still forwarded.
-async fn read_diagnostics(mut reader: impl AsyncRead + Unpin, events: mpsc::Sender<Output>) {
+pub(super) async fn read_agent_diagnostics(
+    reader: impl AsyncRead + Unpin,
+    events: mpsc::Sender<Output>,
+    telemetry: telemetry::Publisher,
+) {
+    read_diagnostics(reader, events, Some(telemetry)).await;
+}
+
+async fn read_diagnostics(
+    mut reader: impl AsyncRead + Unpin,
+    events: mpsc::Sender<Output>,
+    mut telemetry: Option<telemetry::Publisher>,
+) {
     let mut bytes = [0; 8192];
     let mut pending = Vec::new();
     let mut styling = run_output::TerminalStyling::default();
-    loop {
+    let eof = loop {
         let n = match reader.read(&mut bytes).await {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break true,
+            Err(_) => break false,
             Ok(n) => n,
         };
         styling.push(&bytes[..n], &mut pending);
@@ -190,27 +214,40 @@ async fn read_diagnostics(mut reader: impl AsyncRead + Unpin, events: mpsc::Send
             None => continue,
         };
         let lines: Vec<u8> = pending.drain(..complete).collect();
-        if !forward_diagnostics(&lines, &events).await {
+        if !forward_diagnostics(&lines, &events, &mut telemetry).await {
             return;
         }
+    };
+    // The receiver only disappears once the run stopped listening.
+    if !pending.is_empty() && !forward_diagnostics(&pending, &events, &mut telemetry).await {
+        return;
     }
-    if !pending.is_empty() {
-        // The receiver only disappears once the run stopped listening.
-        forward_diagnostics(&pending, &events).await;
+    if let Some(telemetry) = &mut telemetry {
+        telemetry.finish(eof);
     }
 }
 
 /// Sends readable diagnostics to the run. The agent process's own performance
 /// records belong to the manager log, like the worker's.
-async fn forward_diagnostics(bytes: &[u8], events: &mpsc::Sender<Output>) -> bool {
+async fn forward_diagnostics(
+    bytes: &[u8],
+    events: &mpsc::Sender<Output>,
+    telemetry: &mut Option<telemetry::Publisher>,
+) -> bool {
     let text = String::from_utf8_lossy(bytes);
     let mut diagnostics = String::new();
     let mut lines = text.split_inclusive(['\r', '\n']).peekable();
     while let Some(line) = lines.next() {
         if AGENT_PERFORMANCE_RECORD.is_match(line) {
+            let aggregated = telemetry
+                .as_mut()
+                .is_some_and(|metrics| metrics.observe(line));
             // CRLF is one terminator; do not leave its LF as an empty diagnostic.
             if line.ends_with('\r') && lines.peek() == Some(&"\n") {
                 lines.next();
+            }
+            if aggregated {
+                continue;
             }
             if events
                 .send(Output::performance(line.trim_end().to_owned()))
@@ -335,7 +372,7 @@ pub(super) async fn record(
     }
     let exhausted = run_output::exhausted(&event);
     // Every activity item has its own detail limit, regardless of earlier output.
-    let conversation = event["item"]["type"] == "agent_message"
+    let conversation = run_output::conversation_item(&event)
         || CONVERSATION_EVENTS.contains(&text(&event, "type"))
         || shown_notice(&event);
     let activity_item = text(&event, "type").starts_with("item.") && event["item"].is_object();

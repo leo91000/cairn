@@ -37,29 +37,11 @@ val Chat.exclusiveSuspended: Boolean
         (run?.status ?: status) in listOf("running", "queued") &&
             (suspendedByExclusive != null || run?.suspendedByExclusive != null)
 
-@Serializable
-data class Deliverable(
-    val id: String,
-    val runId: String,
-    val messageId: String? = null,
-    val key: String,
-    val version: Int = 1,
-    val title: String = "",
-    val name: String = "",
-    val group: String = "",
-    val kind: String = "file",
-    val mediaType: String = "application/octet-stream",
-    val size: Long = 0,
-    val createdAt: Long = 0,
-    val visibility: String = "private",
-    val publicUrl: String? = null,
-    val previewStatus: String = "none",
-    val excerpt: String? = null,
-) {
-    fun path(preview: Boolean = false) =
-        "/runs/${segment(runId)}/artifacts/${segment(id)}" +
-            if (preview) "?preview=1" else "?download=1"
-}
+typealias Deliverable = build.cairn.contracts.Deliverable
+
+fun Deliverable.path(preview: Boolean = false) =
+    "/runs/${segment(runId)}/artifacts/${segment(id)}" +
+        if (preview) "?preview=1" else "?download=1"
 
 fun latestArtifacts(items: List<Deliverable>) =
     items
@@ -86,9 +68,19 @@ data class LiveBatch(
     val history: String? = null,
     val oldest: Long? = null,
     val hasOlder: Boolean = false,
+    /** Timeline cards: the window's snapshot, or the cards these events changed. */
+    val entries: List<TimelineChange> = emptyList(),
+    val largeEntries: List<build.cairn.contracts.LargeTimelineReference> = emptyList(),
 )
 
 typealias HistoryPage = build.cairn.contracts.HistoryPage
+
+/** A timeline card the server interpreted; the UI's own feed rows are `ui.TimelineEntry`. */
+typealias TimelineCard = build.cairn.contracts.TimelineEntry
+
+typealias TimelineChange = build.cairn.contracts.TimelineChange
+
+typealias TimelineNotice = build.cairn.contracts.TimelineNotice
 
 typealias ReasoningOption = build.cairn.contracts.ReasoningOption
 

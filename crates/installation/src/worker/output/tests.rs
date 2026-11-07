@@ -682,6 +682,96 @@ async fn transport_previews_do_not_cut_secrets_before_manager_redaction() {
 }
 
 #[tokio::test]
+async fn proposals_over_the_activity_limit_keep_their_redacted_text() {
+    let mut fixture = Fixture::new().await;
+    let steps: String = (0..1500)
+        .map(|step| format!("{step}. Update module {step} and its tests.\n"))
+        .collect();
+    let text = format!("{steps}Use sensitive-tool-credential for the deploy.");
+    assert!(text.len() > 2 * ITEM_DETAIL_LIMIT);
+    let event = json!({
+        "type": "item.completed",
+        "item": { "id": "plan", "type": "proposed_plan", "text": text },
+    });
+    // Through the guest transport, then the manager's own storage classification.
+    let transported: Value = serde_json::from_slice(&run_output::event_line(&event)).unwrap();
+    assert_eq!(transported, event);
+    fixture.event(transported).await;
+    let events = fixture.events().await;
+    let item = &events[0]["payload"]["item"];
+    assert_eq!(item["type"], "proposed_plan");
+    assert!(item["details_truncated"].is_null());
+    assert_eq!(
+        item["text"],
+        text.replace("sensitive-tool-credential", "[redacted]")
+    );
+    assert_eq!(fixture.log_total, 0);
+}
+
+#[tokio::test]
+async fn completed_plan_frames_above_the_line_limit_reach_storage_intact_and_redacted() {
+    let mut fixture = Fixture::new().await;
+    let plan = format!(
+        "{}sensitive-tool-credential{}",
+        "x".repeat(LINE_LIMIT + 4096),
+        "😀".repeat(100)
+    );
+    let redacted = plan.replace("sensitive-tool-credential", "[redacted]");
+    let items = [
+        json!({
+            "id": "root-plan",
+            "type": "proposed_plan",
+            "text": plan,
+            "status": "completed",
+        }),
+        json!({
+            "id": "child-plan",
+            "parent_id": "delegated-actor",
+            "type": "proposed_plan",
+            "text": plan,
+            "status": "completed",
+        }),
+        json!({
+            "id": "following",
+            "type": "agent_message",
+            "text": "After the proposals",
+        }),
+    ];
+    let (reader, mut writer) = tokio::io::duplex(8192);
+    let (sender, mut receiver) = mpsc::channel(32);
+    // The manager may learn the redaction after the pipe reader starts.
+    let reading = tokio::spawn(read_output(reader, false, sender, Vec::new()));
+    let writing = tokio::spawn(async move {
+        for item in items {
+            let event = json!({ "type": "item.completed", "item": item });
+            writer
+                .write_all(&run_output::event_line(&event))
+                .await
+                .unwrap();
+        }
+    });
+    while let Some(output) = receiver.recv().await {
+        fixture.output(output).await;
+    }
+    writing.await.unwrap();
+    reading.await.unwrap();
+
+    let events = fixture.events().await;
+    assert_eq!(events.len(), 3);
+    for (event, id) in events[..2].iter().zip(["root-plan", "child-plan"]) {
+        let item = &event["payload"]["item"];
+        assert_eq!(item["type"], "proposed_plan");
+        assert_eq!(item["id"], id);
+        assert_eq!(item["text"], redacted);
+        assert!(item["details_truncated"].is_null());
+        assert!(!event.to_string().contains("sensitive-tool-credential"));
+    }
+    assert_eq!(events[1]["payload"]["item"]["parent_id"], "delegated-actor");
+    assert_eq!(events[2]["payload"]["item"]["text"], "After the proposals");
+    assert_eq!(fixture.log_total, 0);
+}
+
+#[tokio::test]
 async fn command_previews_redact_secrets_before_cutting_and_file_changes_stay_bounded() {
     let mut fixture = Fixture::new().await;
     fixture.event(json!({
@@ -1177,6 +1267,58 @@ async fn performance_names_inside_diagnostics_are_retained_and_manager_logs_are_
     assert!(!logs.contains("invalid record"), "{logs}");
 }
 
+#[test]
+fn observed_reader_keeps_unknown_performance_on_the_current_redacted_path() {
+    crate::test_process::run_ignored("worker::output::tests::observed_reader_redaction_child");
+}
+
+#[tokio::test]
+#[ignore = "process-global diagnostic capture, invoked by its wrapper"]
+async fn observed_reader_redaction_child() {
+    use tracing::instrument::WithSubscriber;
+
+    let _registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let mut fixture = Fixture::new().await;
+    let log_path = fixture._root.path().join("manager.log");
+    let file = std::fs::File::create(&log_path).unwrap();
+    let dispatch = tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(Arc::new(file))
+            .finish(),
+    );
+    let publisher = Publisher::new(&fixture.id, &crate::config::id());
+    let input = concat!(
+        "2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"thread/items/list\" request_id=1 event=\"started\" timeout_ms=20000\r\n",
+        "2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"sensitive-tool-credential\" request_id=1 event=\"started\" timeout_ms=20000\n",
+        "2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"thread/items/list\" request_id=1 event=\"started\" timeout_ms=20000 secret=sensitive-tool-credential\n",
+        "WARN native: cairn_performance: sensitive-tool-credential\r\n",
+        "2026-11-01T00:19:49Z INFO cairn_performance: operation=\"codex_rpc\" method=\"thread/items/list\" request_id=1 event=\"started\" timeout_ms=20000",
+    );
+    let (sender, mut events) = mpsc::channel(32);
+    read_agent_diagnostics(input.as_bytes(), sender, publisher).await;
+    let mut count = 0;
+    while let Some(output) = events.recv().await {
+        count += 1;
+        fixture
+            .output(output)
+            .with_subscriber(dispatch.clone())
+            .await;
+    }
+    assert_eq!(count, 4);
+    let logs = std::fs::read_to_string(&log_path).unwrap();
+    assert!(!logs.contains("sensitive-tool-credential"));
+    assert!(logs.contains("method=\\\"[redacted]\\\"") || logs.contains("method=\"[redacted]\""));
+    assert!(logs.contains("secret=[redacted]"));
+    let stored = fixture.events().await;
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0]["text"],
+        "WARN native: cairn_performance: [redacted]\r\n"
+    );
+}
+
 #[tokio::test]
 async fn terminal_styling_and_utf8_survive_long_diagnostic_fragments() {
     let prefix = "x".repeat(8190);
@@ -1565,7 +1707,9 @@ async fn durable_progress_is_atomic_bound_and_survives_restart_without_a_fresh_c
 async fn malformed_or_truncated_stdout_retains_monitoring_gap_without_changing_control_policy() {
     let malformed = "{malformed".to_owned();
     let oversized = json!({
-        "type": "item.updated",
+        // Conversation frames are retained intact; this unknown technical frame
+        // still exercises the raw line budget and an incomplete JSON record.
+        "type": "unknown.diagnostic",
         "item": {
             "id": "message",
             "type": "agent_message",

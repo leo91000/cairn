@@ -166,6 +166,50 @@ internal object CairnIcons {
             moveTo(16f, 5f)
             lineTo(16f, 19f)
         }
+
+    private fun PathBuilder.ring() {
+        moveTo(12f, 3f)
+        arcTo(9f, 9f, 0f, true, true, 11.99f, 3f)
+    }
+
+    // The Fil's status marks: one glyph per row in place of a repeated status word.
+    val Circle = line("Circle") { ring() }
+    val CircleCheck =
+        line("CircleCheck") {
+            ring()
+            moveTo(8.5f, 12.2f)
+            lineTo(11f, 14.7f)
+            lineTo(15.7f, 9.5f)
+        }
+    val CircleX =
+        line("CircleX") {
+            ring()
+            moveTo(9.2f, 9.2f)
+            lineTo(14.8f, 14.8f)
+            moveTo(14.8f, 9.2f)
+            lineTo(9.2f, 14.8f)
+        }
+    val CirclePause =
+        line("CirclePause") {
+            ring()
+            moveTo(10f, 9f)
+            lineTo(10f, 15f)
+            moveTo(14f, 9f)
+            lineTo(14f, 15f)
+        }
+    val CircleAlert =
+        line("CircleAlert") {
+            ring()
+            moveTo(12f, 8f)
+            lineTo(12f, 12.5f)
+            moveTo(12f, 16f)
+            lineTo(12f, 16.1f)
+        }
+    val CircleProgress =
+        line("CircleProgress") {
+            moveTo(12f, 3f)
+            arcTo(9f, 9f, 0f, true, true, 3f, 12f)
+        }
     val Steer =
         line("Steer") {
             moveTo(13f, 2f)

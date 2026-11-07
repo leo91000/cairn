@@ -35,7 +35,7 @@ class HistoryCacheMeasurementTest {
             val value =
                 CachedHistory(
                     1250,
-                    "v1:measurement:1",
+                    "v2:measurement:1",
                     LiveState(),
                     events.takeLast(count).map {
                         if (scoped) it.copy(runId = "12345678-1234-1234-1234-123456789abc") else it

@@ -7,6 +7,8 @@ use crate::{
 };
 use serde_json::{Value, json};
 
+const MAX_AUTHORITY_DEPTH: usize = 16;
+
 tokio::task_local! { pub static CALLER: Option<String>; }
 
 tokio::task_local! { pub(crate) static PARENT: String; }
@@ -394,7 +396,12 @@ fn allows_agent(
     }
     let mut scope = run.clone();
     let mut seen = std::collections::HashSet::new();
-    for _ in 0..16 {
+    if let Some(id) = run["id"].as_str() {
+        // A prospective destination may not yet have this grant in storage.
+        // Do not validate a back edge by loading its old parentless version.
+        seen.insert(id.to_owned());
+    }
+    for _ in 0..MAX_AUTHORITY_DEPTH {
         if scope["nativeProvenanceUnknown"] == true
             || !explicit(&scope["nativeAuthorityNodes"], text(node, "id"))
             || principals(&scope).as_array().is_none_or(Vec::is_empty)
@@ -468,6 +475,35 @@ pub(crate) fn authorize_origin(db: &Db<'_>, agent: &Value, source: &Origin) -> R
     ))
 }
 
+/// A prospective grant must be checked against its destination identity before
+/// committing it. Traversing only the old stored graph misses an edge back to
+/// a currently parentless destination. The writer transaction serializes these
+/// checks with the grant and directing effect, including opposing requests.
+pub(crate) fn require_acyclic_parent(db: &Db<'_>, destination: &str, grant: &Value) -> Result<()> {
+    if destination.is_empty() {
+        // A conversation without a run receives a fresh run identity later.
+        return Ok(());
+    }
+    let mut seen = std::collections::HashSet::from([destination.to_owned()]);
+    let mut parent = grant["nativeParentRunId"].as_str().map(str::to_owned);
+    for _ in 0..MAX_AUTHORITY_DEPTH {
+        let Some(id) = parent else {
+            return Ok(());
+        };
+        if !seen.insert(id.clone()) {
+            return Err(Error::forbidden(
+                "This directing action would create a cyclic native authority lineage.",
+            ));
+        }
+        // A missing parent cannot introduce a cycle. Native authority still
+        // rejects it through the separate live admission checks.
+        parent = db.native_parent_run(&id)?;
+    }
+    Err(Error::forbidden(
+        "Native authority lineage is too deep to extend safely.",
+    ))
+}
+
 pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<Value> {
     let agent = db
         .agent_snapshot(text(chat, "agentId"))?
@@ -492,6 +528,16 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
     if policy(&agent)["backend"] == "auto" && run["id"].is_string() {
         effective["access"]["backend"] = policy(&run["snapshot"]["agent"])["backend"].clone();
     }
+    // Directing one's own conversation retains its existing ancestry. Treating
+    // this as delegation would make the run its own parent and invalidate leases.
+    let directing_self = matches!(source, Origin::Run(id) if run["id"] == *id);
+    let retained;
+    let source = if directing_self {
+        retained = Origin::Stored(run.clone());
+        &retained
+    } else {
+        source
+    };
     let incoming = authorize_origin(db, &effective, source)?;
     if chat["id"].is_string()
         && run["id"].is_string()
@@ -546,7 +592,9 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
         }) {
             continue;
         }
-        if parent.is_some() && !explicit(&incoming["nativeAuthorityNodes"], text(&node, "id")) {
+        if (parent.is_some() || directing_self)
+            && !explicit(&incoming["nativeAuthorityNodes"], text(&node, "id"))
+        {
             continue;
         }
         if chat["nativeParentRunId"].is_string()
@@ -569,6 +617,7 @@ pub(crate) fn chat_grant(db: &Db<'_>, chat: &Value, source: &Origin) -> Result<V
     });
     grant["nativePluginGrants"] = incoming["nativePluginGrants"].clone();
     merge_plugin_grants(&mut grant, chat);
+    require_acyclic_parent(db, text(&run, "id"), &grant)?;
     if native(&effective) {
         let mut combined = json!({ "snapshot": { "agent": effective } });
         apply(&mut combined, &grant);
@@ -798,6 +847,15 @@ pub async fn authorize_request(s: &Service, input: &crate::http::Input) -> Resul
         .trim_start_matches("/api/")
         .split('/')
         .collect::<Vec<_>>();
+    if input.method == "POST"
+        && matches!(
+            parts.as_slice(),
+            ["runs" | "chats", _, "timeline-content" | "event-content"]
+        )
+    {
+        // This endpoint reads an immutable source snapshot; use the same admission as history GET.
+        return Ok(());
+    }
     let reduces_execution = input.method == "POST"
         && match parts.as_slice() {
             ["runs", _, "cancel" | "cleanup"] | ["chats", _, "stop"] => true,

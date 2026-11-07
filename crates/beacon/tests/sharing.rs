@@ -2470,6 +2470,9 @@ async fn author_removal_during_slow_preparation_prevents_late_scheduled_admissio
         .write_all(b"---\nname: block\ndescription: Regression fixture.\n---\nScheduled work.\n")
         .await
         .unwrap();
+    // Tokio queues file writes on its blocking pool. Finish that write before
+    // dropping the last writer and starting the scheduler completion deadline.
+    writer.flush().await.unwrap();
     drop(writer);
     assert_eq!(removed.status(), StatusCode::NO_CONTENT);
     tokio::time::timeout(Duration::from_secs(5), scheduled)

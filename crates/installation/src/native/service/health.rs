@@ -26,6 +26,7 @@ impl Controller {
             value["activeRuns"] = active.len().into();
         }
         value["telemetryAgeMs"] = age.map(|age| age.as_millis() as u64).into();
+        value["bootstrapObservation"] = self.bootstrap.health();
         value
     }
 
@@ -88,6 +89,97 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn retained_credit_sampling_cannot_reject_a_stopped_workspace_delete() {
+        use std::io::Write;
+
+        for cancel_sample in [false, true] {
+            let (_root, controller) = super::super::tests::fixture().await;
+            let run = crate::config::id();
+            let root = workspace::directory(&controller.state, &run).unwrap();
+            let journal = storage::environment::directory(&controller.state, &run)
+                .unwrap()
+                .join("lazy");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::create_dir_all(&journal).unwrap();
+            std::fs::write(
+                journal.join("capacity.json"),
+                serde_json::to_vec(&json!({ "workspaceBytes": disk::MIB })).unwrap(),
+            )
+            .unwrap();
+            let attempt_path = root.join("attempt");
+            let fifo = std::ffi::CString::new(attempt_path.as_os_str().as_encoded_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+
+            // Opening the writer proves the real sampler has acquired owner.lock
+            // and reached its attempt read. Hold that read across the HTTP request.
+            let (opened, observed_open) = tokio::sync::oneshot::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let writer = std::thread::spawn(move || {
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(attempt_path)
+                    .unwrap();
+                opened.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(10)).unwrap();
+                file.write_all(b"stopped-attempt").unwrap();
+            });
+            let state = controller.state.clone();
+            let sampling = tokio::spawn(async move {
+                crate::native::capacity::Capacity::default()
+                    .report(&state, 0)
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(5), observed_open)
+                .await
+                .unwrap()
+                .unwrap();
+            let no_foreground_intent = crate::file_lock::exclusive(
+                &controller.state.join("storage-foreground.lock"),
+                "Diagnostic sampling must not preempt background preparation.",
+            )
+            .is_ok();
+            if cancel_sample {
+                sampling.abort();
+            }
+            let request = Request::builder()
+                .method("POST")
+                .uri(format!("/disks/{run}/delete"))
+                .header("authorization", "Bearer synthetic-private-controller-token")
+                .body(Body::empty())
+                .unwrap();
+            let mut deleting =
+                tokio::spawn(
+                    async move { super::super::handler(State(controller), request).await },
+                );
+            let early_result =
+                tokio::time::timeout(Duration::from_millis(100), &mut deleting).await;
+            release.send(()).unwrap();
+            writer.join().unwrap();
+            let sample_result = sampling.await;
+            assert!(
+                no_foreground_intent,
+                "diagnostics must not advertise foreground intent"
+            );
+            if cancel_sample {
+                assert!(sample_result.err().unwrap().is_cancelled());
+            } else {
+                sample_result.unwrap().unwrap();
+            }
+            let result = match early_result {
+                Ok(result) => result,
+                Err(_) => tokio::time::timeout(Duration::from_secs(5), deleting)
+                    .await
+                    .unwrap(),
+            };
+            let response = result
+                .unwrap()
+                .expect("a stopped workspace delete must wait for diagnostic ownership to release");
+            assert_eq!(response.status(), 200);
+            assert!(!root.join("attempt").exists());
+        }
+    }
 
     #[tokio::test]
     async fn blocked_diagnostic_read_keeps_single_worker_health_and_leases_responsive() {

@@ -224,7 +224,7 @@ async fn plugin_conversations_answer_in_their_channel_and_are_never_unread() {
 }
 
 #[tokio::test]
-async fn failed_and_stopped_work_is_never_unread() {
+async fn errors_can_be_read_without_changing_their_status() {
     let app = App::new().await;
     app.get(&app.owner, "/api/chats").await;
     let (_, chat) = app
@@ -244,7 +244,18 @@ async fn failed_and_stopped_work_is_never_unread() {
             .await
             .unwrap();
         let listed = app.get(&app.owner, "/api/chats").await;
-        assert_eq!(find(&listed, "id", text(&chat, "id"))["unread"], false);
+        let item = find(&listed, "id", text(&chat, "id"));
+        assert_eq!(item["unread"], status == RunStatus::Failed);
+        assert_eq!(
+            app.read(&app.owner, &[chat_read(text(&chat, "id"), &item["readAt"])])
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let listed = app.get(&app.owner, "/api/chats").await;
+        let read = find(&listed, "id", text(&chat, "id"));
+        assert_eq!(read["unread"], false);
+        assert_eq!(read["status"], item["status"]);
     }
 }
 
@@ -728,4 +739,75 @@ async fn mission_outcomes_set_aside_on_a_tool_stay_with_its_account() {
     let listed = find(result(&activity), "id", &run);
     assert!(listed["dismissal"].is_null(), "{listed}");
     assert_eq!(listed["unread"], false);
+}
+
+#[tokio::test]
+async fn reading_a_pending_question_does_not_answer_it_and_new_questions_notify_again() {
+    let app = App::new().await;
+    app.get(&app.owner, "/api/chats").await;
+    app.get(&app.member, "/api/chats").await;
+    let chat = app.finished_chat().await;
+    let chat_id = text(&chat, "id").to_owned();
+    for index in 0..2 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let chat_id = chat_id.clone();
+        app.service.store.transaction(move |db| {
+            let chat = db.conversation(&chat_id)?.unwrap();
+            db.update_run_boundary_fixture(chat.run_id.as_deref().unwrap(), &json!({ "status": "running", "finishedAt": null }))?;
+            db.save_question(&serde_json::from_value(json!({
+                "id": format!("question-{index}"), "chatId": chat_id, "runId": chat.run_id,
+                "source": "cairn", "status": "pending", "blocking": false, "createdAt": now(),
+                "fields": [{ "id": "field", "title": "Pick one", "mode": "single", "secret": false, "options": [] }],
+            }))?)?;
+            Ok(())
+        }).await.unwrap();
+        let listed = app.get(&app.owner, "/api/chats").await;
+        let item = find(&listed, "id", text(&chat, "id"));
+        assert_eq!(item["unread"], true);
+        assert_eq!(item["pendingQuestions"], index + 1);
+        assert_eq!(
+            app.read(&app.owner, &[chat_read(text(&chat, "id"), &item["readAt"])])
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let listed = app.get(&app.owner, "/api/chats").await;
+        let item = find(&listed, "id", text(&chat, "id"));
+        assert_eq!(item["unread"], false);
+        assert_eq!(item["pendingQuestions"], index + 1);
+        assert_eq!(item["status"], "running");
+        let member = app.get(&app.member, "/api/chats").await;
+        assert_eq!(find(&member, "id", text(&chat, "id"))["unread"], true);
+    }
+}
+
+#[tokio::test]
+async fn completed_delegated_conversations_do_not_create_unread_notifications() {
+    let app = App::new().await;
+    app.get(&app.owner, "/api/chats").await;
+    let parent = app.finished_chat().await;
+    let parent = app
+        .service
+        .conversation_boundary(text(&parent, "id"))
+        .await
+        .unwrap();
+    let child = app.finished_chat().await;
+    let mut stored = app
+        .service
+        .conversation_boundary(text(&child, "id"))
+        .await
+        .unwrap();
+    stored["requestedBy"] =
+        json!({ "chatId": parent["id"], "runId": parent["runId"], "requestId": null });
+    app.service
+        .store
+        .save_conversation_boundary(stored)
+        .await
+        .unwrap();
+    let listed = app.get(&app.owner, "/api/chats").await;
+    let item = find(&listed, "id", text(&child, "id"));
+    assert_eq!(item["status"], "succeeded");
+    assert_eq!(item["unread"], false);
+    assert_eq!(item["requester"]["chatId"], parent["id"]);
+    assert!(item["preview"].is_null());
 }

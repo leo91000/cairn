@@ -130,6 +130,45 @@ it('renders through the relay while direct authorization is pending, then uses t
   await vi.waitFor(() => expect(state.transportRoute).toBe('direct'))
 })
 
+it('does not authorize an offer completed after redirecting', async () => {
+  const offered = Promise.withResolvers<Awaited<ReturnType<Peer['createOffer']>>>()
+  vi.spyOn(Peer.prototype, 'createOffer').mockImplementation(() => offered.promise)
+  const fetch = vi.fn(() => Promise.resolve(Response.json({ available: false })))
+  vi.stubGlobal('fetch', fetch)
+  const { redirect, state } = await import('../src/api')
+  state.authenticated = true
+  state.ready = true
+  await vi.waitFor(() => expect(Peer.all).toHaveLength(1))
+  const peer = Peer.all[0]
+  Object.assign(window.location, { assign: vi.fn() })
+
+  redirect('https://provider.test/authorize')
+  offered.resolve(peer.localDescription)
+  await vi.advanceTimersByTimeAsync(0)
+  expect(fetch).not.toHaveBeenCalled()
+  expect(peer.channel.readyState).toBe('closed')
+})
+
+it('does not authorize an old offer using a replacement connection controller', async () => {
+  const offered = Promise.withResolvers<Awaited<ReturnType<Peer['createOffer']>>>()
+  vi.spyOn(Peer.prototype, 'createOffer').mockImplementationOnce(() => offered.promise)
+  const fetch = vi.fn(() => Promise.resolve(Response.json({ available: false })))
+  vi.stubGlobal('fetch', fetch)
+  const { state } = await import('../src/api')
+  state.authenticated = true
+  state.ready = true
+  await vi.waitFor(() => expect(Peer.all).toHaveLength(1))
+  const previous = Peer.all[0]
+
+  state.ready = false
+  state.ready = true
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce())
+  offered.resolve(previous.localDescription)
+  await vi.advanceTimersByTimeAsync(0)
+  expect(fetch).toHaveBeenCalledOnce()
+  expect(previous.channel.readyState).toBe('closed')
+})
+
 it('cancels pending direct authorization before redirecting and ignores its late response', async () => {
   let authorize: (value: Response) => void = () => {}
   const grant = () => Response.json({
@@ -288,7 +327,31 @@ it('requests identity when browser gzip decompression is unavailable', async () 
   expect(await response).toEqual({ events: [] })
 })
 
-it.each(['/api/runs/r/stream?history=invalid', '/api/shared-artifacts/a/file'])('requests identity on streamed route %s so JSON errors remain readable', async (path) => {
+it('streams private artifact files like the Rust stream_path contract', async () => {
+  const { streamedRoute } = await import('../src/direct-channel')
+  for (const path of [
+    '/api/runs/run/artifacts/file',
+    '/api/runs/run/artifacts/file?download=1',
+    '/api/runs/run/artifacts/file?download=1&metadata=0',
+    '/api/shared-artifacts/token',
+    '/api/runs/run/stream?after=0',
+  ])
+    expect(streamedRoute(path), path).toBe(true)
+  for (const path of [
+    '/api/runs/run/artifacts/file?metadata=1',
+    '/api/runs/run/artifacts/file?download=1&metadata=1',
+    '/api/runs/run/artifacts/file?preview=1',
+    '/api/runs/run/artifacts/file?preview',
+    '/api/runs/run/artifacts',
+    '/api/runs/run/artifacts/',
+    '/api/runs/run/artifacts/file/visibility',
+    '/api/runs//artifacts/file',
+    '/api/chats/chat/artifacts/file',
+  ])
+    expect(streamedRoute(path), path).toBe(false)
+})
+
+it.each(['/api/runs/r/stream?history=invalid', '/api/shared-artifacts/a/file', '/api/runs/r/artifacts/a?download=1'])('requests identity on streamed route %s so JSON errors remain readable', async (path) => {
   const { DirectChannel } = await import('../src/direct-channel')
   const channel = new Channel()
   channel.readyState = 'open'
@@ -378,6 +441,31 @@ it('retries interrupted reads on relay but leaves other mutations visibly failed
   await failed
   expect(state.toast).toBe('Connection unavailable. Please try again.')
   expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith('/api/chats/c'))).toHaveLength(0)
+})
+
+it('replays an interrupted immutable timeline snapshot read on relay', async () => {
+  const { api, channel } = await direct()
+  const body = JSON.stringify({ snapshot: { id: 'message:1:a' }, offset: 0, sha256: null })
+  const read = api('/runs/r/timeline-content', { method: 'POST', body })
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  channel.dispatchEvent(new Event('close'))
+  expect(await read).toEqual({ marker: 'relay' })
+  expect(fetch).toHaveBeenLastCalledWith('/api/installations/install/api/runs/r/timeline-content', expect.objectContaining({ method: 'POST', body }))
+})
+
+it('replays an interrupted immutable event-content read on relay', async () => {
+  const { api, channel } = await direct()
+  const body = JSON.stringify({
+    runId: 'r',
+    eventId: 'event-1',
+    offset: 0,
+    sha256: null,
+  })
+  const read = api('/runs/r/event-content', { method: 'POST', body })
+  await vi.waitFor(() => expect(channel.packets.length).toBe(1))
+  channel.dispatchEvent(new Event('close'))
+  expect(await read).toEqual({ marker: 'relay' })
+  expect(fetch).toHaveBeenLastCalledWith('/api/installations/install/api/runs/r/event-content', expect.objectContaining({ method: 'POST', body }))
 })
 
 it('sends an unsent mutation through relay when the channel is closing', async () => {
@@ -1111,4 +1199,150 @@ it('treats an explicit installation protocol refusal as terminal', async () => {
   expect(state.protocolError).toContain('Update required')
   await expect(api('/chats')).rejects.toMatchObject({ status: 426 })
   expect(vi.mocked(fetch).mock.calls.every(([url]) => String(url).includes('/direct/'))).toBe(true)
+})
+
+it('quiesces pending reads and live streams before transport loss on hard document departure', async () => {
+  const { api, channel, installationTransport } = await direct()
+  const { liveConnection } = await import('../src/live-connection')
+  const live = liveConnection('/chats/stream', vi.fn(), vi.fn())
+  const rejected = api('/chats').catch(error => error)
+  await vi.waitFor(() => expect(channel.packets).toHaveLength(2))
+  const fetch = vi.mocked(globalThis.fetch)
+  fetch.mockClear()
+  try {
+    window.dispatchEvent(new Event('pagehide'))
+    // The loss callback can run synchronously as the departing peer closes.
+    channel.dispatchEvent(new Event('close'))
+    window.dispatchEvent(new Event('online'))
+    document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(await rejected).toMatchObject({ name: 'AbortError' })
+    expect(fetch).not.toHaveBeenCalled()
+    expect(Source.all.every(source => source.closed)).toBe(true)
+    expect(() => installationTransport.source('/chats/stream', '/api/chats/stream')).toThrow(expect.objectContaining({ name: 'AbortError' }))
+  }
+  finally {
+    live.close()
+  }
+})
+
+it('restores fresh document work without reviving an old pending read or stream callback', async () => {
+  const { api, channel, state } = await direct()
+  const { liveConnection } = await import('../src/live-connection')
+  const accept = vi.fn()
+  const live = liveConnection('/chats/stream', accept, vi.fn())
+  const oldRead = api('/chats').catch(error => error)
+  await vi.waitFor(() => expect(channel.packets).toHaveLength(2))
+  try {
+    window.dispatchEvent(new Event('pagehide'))
+    window.dispatchEvent(new Event('pageshow'))
+    await vi.waitFor(() => expect(Source.all.filter(source => !source.closed).length).toBeGreaterThan(0))
+    expect(await oldRead).toMatchObject({ name: 'AbortError' })
+    expect(state.connectionLost).toBe(false)
+    expect(accept).not.toHaveBeenCalled()
+    expect(await api('/settings')).toEqual({ marker: 'relay' })
+  }
+  finally {
+    live.close()
+  }
+})
+
+it('does not signal a late offer from a departed generation after pageshow', async () => {
+  const offered = Promise.withResolvers<Awaited<ReturnType<Peer['createOffer']>>>()
+  vi.spyOn(Peer.prototype, 'createOffer').mockImplementationOnce(() => offered.promise)
+  const fetch = vi.fn(() => Promise.resolve(Response.json({ available: false })))
+  vi.stubGlobal('fetch', fetch)
+  const { state } = await import('../src/api')
+  state.authenticated = true
+  state.ready = true
+  await vi.waitFor(() => expect(Peer.all).toHaveLength(1))
+  const old = Peer.all[0]
+  window.dispatchEvent(new Event('pagehide'))
+  window.dispatchEvent(new Event('pageshow'))
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce())
+  offered.resolve(old.localDescription)
+  await vi.advanceTimersByTimeAsync(0)
+  expect(fetch).toHaveBeenCalledOnce()
+  expect(old.channel.readyState).toBe('closed')
+})
+
+it('rejects a late relay result from an old document generation after restoration', async () => {
+  const pending = Promise.withResolvers<Response>()
+  const fetch = vi.fn().mockImplementationOnce(() => pending.promise).mockResolvedValue(Response.json({ marker: 'fresh' }))
+  vi.stubGlobal('fetch', fetch)
+  const { api, state } = await import('../src/api')
+  // Keep the ordinary relay path, with no direct signaling.
+  state.authenticated = true
+  const old = api('/settings').catch(error => error)
+  const signal = fetch.mock.calls[0][1].signal
+  window.dispatchEvent(new Event('pagehide'))
+  expect(signal.aborted).toBe(true)
+  window.dispatchEvent(new Event('pageshow'))
+  pending.resolve(Response.json({ marker: 'stale' }))
+  expect(await old).toMatchObject({ name: 'AbortError' })
+  expect(await api('/settings')).toEqual({ marker: 'fresh' })
+  expect(state.connectionLost).toBe(false)
+})
+
+it('restores client work when an explicit redirect cannot navigate', async () => {
+  const { redirect, channel, api } = await direct()
+  Object.assign(window.location, {
+    assign: () => {
+      throw new Error('Navigation refused')
+    },
+  })
+  expect(() => redirect('https://provider.test/authorize')).toThrow('Navigation refused')
+  expect(channel.readyState).toBe('closed')
+  expect(await api('/settings')).toEqual({ marker: 'relay' })
+})
+
+it('ignores an old signaling refusal after a fresh document generation resumes', async () => {
+  const pending = Promise.withResolvers<Response>()
+  const fetch = vi.fn().mockImplementationOnce(() => pending.promise).mockResolvedValue(Response.json({ available: false }))
+  vi.stubGlobal('fetch', fetch)
+  const { state } = await import('../src/api')
+  state.authenticated = true
+  state.ready = true
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce())
+  window.dispatchEvent(new Event('pagehide'))
+  window.dispatchEvent(new Event('pageshow'))
+  await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
+  pending.resolve(Response.json({ error: 'Old session refused' }, { status: 401 }))
+  await vi.advanceTimersByTimeAsync(0)
+  expect(state.authenticated).toBe(true)
+})
+
+it('ignores an old API refusal decoded after a fresh document generation resumes', async () => {
+  const text = Promise.withResolvers<string>()
+  const response = Response.json({}, { status: 401 })
+  const decode = vi.spyOn(response, 'text').mockReturnValue(text.promise)
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response))
+  const { api, state } = await import('../src/api')
+  state.authenticated = true
+  const pending = api('/settings').catch(error => error)
+  await vi.waitFor(() => expect(decode).toHaveBeenCalledOnce())
+  window.dispatchEvent(new Event('pagehide'))
+  window.dispatchEvent(new Event('pageshow'))
+  text.resolve('{"error":"Old session refused"}')
+  expect(await pending).toMatchObject({ name: 'AbortError' })
+  expect(state.authenticated).toBe(true)
+})
+
+it('retires a departed recovery loop and permits fresh reads after restoration', async () => {
+  const fetch = vi.fn()
+    .mockResolvedValueOnce(Response.json({ error: 'Installation unavailable' }, { status: 503 }))
+    .mockResolvedValue(Response.json({ marker: 'fresh' }))
+  vi.stubGlobal('fetch', fetch)
+  const { api, state } = await import('../src/api')
+  state.authenticated = true
+  const old = api('/settings').catch(error => error)
+  await vi.waitFor(() => expect(state.connectionLost).toBe(true))
+  window.dispatchEvent(new Event('pagehide'))
+  expect(state.connectionLost).toBe(false)
+  window.dispatchEvent(new Event('pageshow'))
+  expect(await old).toMatchObject({ name: 'AbortError' })
+  await vi.advanceTimersByTimeAsync(10000)
+  expect(fetch).toHaveBeenCalledOnce()
+  expect(state.error).toBe('')
+  expect(await api('/settings')).toEqual({ marker: 'fresh' })
 })

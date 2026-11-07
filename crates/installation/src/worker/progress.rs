@@ -327,7 +327,9 @@ fn valid_item(item: &Value) -> bool {
         return false;
     }
     match item["type"].as_str().unwrap_or("") {
-        "agent_message" | "reasoning" | "subagent_message" => item["text"].is_string(),
+        "agent_message" | "proposed_plan" | "reasoning" | "subagent_message" => {
+            item["text"].is_string()
+        }
         "command_execution" => {
             optional("aggregated_output", Value::is_string)
                 && optional("exit_code", |v| v.as_i64().is_some())
@@ -447,7 +449,7 @@ fn semantic_detail(item: &Value) -> Map<String, Value> {
 
 fn semantic_fields(kind: &str) -> Option<&'static [&'static str]> {
     Some(match kind {
-        "agent_message" | "reasoning" | "subagent_message" => &["text"],
+        "agent_message" | "proposed_plan" | "reasoning" | "subagent_message" => &["text"],
         "command_execution" => &["aggregated_output", "exit_code"],
         "mcp_tool_call" | "collab_tool_call" => &["result", "error"],
         "todo_list" => &["items"],
@@ -875,6 +877,18 @@ mod migration_tests {
             db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
                 .unwrap(),
             20
+        );
+    }
+
+    #[test]
+    fn upgrade_accepts_a_database_already_advanced_by_another_opener() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("PRAGMA user_version=22;").unwrap();
+        upgrade(&mut db).unwrap();
+        assert_eq!(
+            db.pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            22
         );
     }
 }

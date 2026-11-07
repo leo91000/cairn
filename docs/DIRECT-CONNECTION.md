@@ -333,8 +333,10 @@ peers, with eight streams per verified account across those peers. The relay
 retains 32 authenticated requests and 24 streams per installation tunnel, with
 eight browser streams per account across all installations in the beacon
 process. For one installation the maximum combined allowance is therefore 64
-requests / 48 streams, and at most 16 browser streams for one account (eight on
-each route). Relay public downloads retain their independent four-slot pool;
+requests / 48 streams, and at most 16 live browser streams for one account (eight
+on each route). Relay public downloads retain their independent four-slot pool,
+and relay private deliverable files their own eight-transfer pool (four per
+account, further files queue up to 30 seconds); on direct, files count as streams.
 MCP and direct authorization/signaling allowances are unchanged. Saturating
 reassembly or direct application capacity never borrows fallback slots. These
 transport limits do not count or cancel agent executions.

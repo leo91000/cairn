@@ -1,0 +1,140 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "CodingAgentSetting": {
+      "additionalProperties": false,
+      "properties": {
+        "choices": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": "string"
+        },
+        "group": {
+          "type": "string"
+        },
+        "inherited": {
+          "type": "boolean"
+        },
+        "kind": {
+          "description": "text, integer, boolean or select.",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "value": {
+          "description": "Serialized JSON, or null when the engine chooses its own default.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "label",
+        "description",
+        "group",
+        "kind",
+        "choices",
+        "value",
+        "inherited"
+      ],
+      "type": "object"
+    },
+    "ManagedCodingAgentSetting": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "reason"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "agentId": {
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "agentName": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "customizedPaths": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "document": {
+      "type": "string"
+    },
+    "filename": {
+      "type": "string"
+    },
+    "inheritedDocument": {
+      "type": "string"
+    },
+    "managed": {
+      "items": {
+        "$ref": "#/definitions/ManagedCodingAgentSetting"
+      },
+      "type": "array"
+    },
+    "notices": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "provider": {
+      "pattern": "^(codex|claude|opencode)$",
+      "type": "string"
+    },
+    "revision": {
+      "type": "string"
+    },
+    "settings": {
+      "items": {
+        "$ref": "#/definitions/CodingAgentSetting"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "provider",
+    "agentId",
+    "agentName",
+    "revision",
+    "filename",
+    "document",
+    "inheritedDocument",
+    "customizedPaths",
+    "settings",
+    "managed",
+    "notices"
+  ],
+  "title": "CodingAgentConfiguration",
+  "type": "object"
+}

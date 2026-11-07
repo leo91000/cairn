@@ -23,7 +23,7 @@ class HistoryCacheTest {
     private fun record() =
         CachedHistory(
             2,
-            "v1:r:1",
+            "v2:r:1",
             LiveState(),
             listOf(
                 RunEvent(
@@ -94,7 +94,7 @@ class HistoryCacheTest {
             val original =
                 CachedHistory(
                     1250,
-                    "v1:r:1",
+                    "v2:r:1",
                     LiveState(),
                     events,
                     position = ReadingPosition(5, 10, false),
@@ -126,7 +126,7 @@ class HistoryCacheTest {
                 "bytes",
                 CachedHistory(
                     4,
-                    "v1:r:1",
+                    "v2:r:1",
                     LiveState(),
                     events,
                     position = ReadingPosition(5, 10, false),
@@ -141,6 +141,94 @@ class HistoryCacheTest {
         }
 
     @Test
+    fun `timeline cards and source events are trimmed together to a bounded suffix`() =
+        runBlocking {
+            val events =
+                (1L..4L).map { RunEvent(id = it, createdAt = it, type = "output", text = "") }
+            val cards =
+                (1L..4L).map {
+                    TimelineCard(
+                        id = "reply:$it",
+                        runId = "r",
+                        position = if (it == 4L) 1 else it,
+                        source = it,
+                        revision = it,
+                        turn = 1,
+                        attempt = 1,
+                        createdAt = it,
+                        updatedAt = it,
+                        content =
+                            build.cairn.contracts.TimelineContent.B(
+                                itemId = "reply:$it",
+                                state = "done",
+                                text = "x".repeat(1200 * 1024),
+                            ),
+                    )
+                }
+            cache()
+                .save(
+                    "cards",
+                    CachedHistory(
+                        4,
+                        "v2:r:1",
+                        LiveState(),
+                        events,
+                        entries = cards,
+                        position = ReadingPosition(5, 10, false),
+                    ),
+                    true,
+                )
+            val restored = cache().read("cards")!!
+            assertEquals(listOf(3L, 4L), restored.events.map { it.id })
+            assertEquals(listOf(3L, 4L), restored.entries.map { it.source })
+            assertEquals(3L, restored.oldest)
+            assertTrue(restored.hasOlder)
+            assertNull(restored.position)
+        }
+
+    @Test
+    fun `an older active background wait survives suffix trimming`() = runBlocking {
+        val events =
+            (1L..4L).map {
+                RunEvent(id = it, createdAt = it, type = "output", text = "x".repeat(1200 * 1024))
+            }
+        val wait =
+            TimelineCard(
+                id = "wait:1",
+                runId = "r",
+                position = 1,
+                source = 1,
+                revision = 1,
+                turn = 1,
+                attempt = 1,
+                createdAt = 1,
+                updatedAt = 1,
+                content =
+                    build.cairn.contracts.TimelineContent.C(
+                        build.cairn.contracts.TimelineNotice(
+                            code = "backgroundTasks",
+                            state = "info",
+                            prominent = false,
+                            tasks = listOf("Build"),
+                            taskIds = listOf("one"),
+                            waitingSince = 1,
+                        )
+                    ),
+            )
+        cache()
+            .save(
+                "wait",
+                CachedHistory(4, "v2:r:1", LiveState(), events, entries = listOf(wait)),
+                true,
+            )
+        val restored = cache().read("wait")!!
+        assertEquals(listOf(3L, 4L), restored.events.map { it.id })
+        assertEquals(listOf(wait), restored.entries)
+        assertEquals(3L, restored.oldest)
+        assertTrue(restored.hasOlder)
+    }
+
+    @Test
     fun `disk restores complete snapshots and position across instances and isolates sessions`() =
         runBlocking {
             val first = cache()
@@ -152,7 +240,7 @@ class HistoryCacheTest {
             assertEquals(record().events, second.read(key)?.events)
             assertEquals(ReadingPosition(12, 30, false), second.read(key)?.position)
             assertNull(second.read(second.key("https://cairn.example", "other", "/chats/a/stream")))
-            second.save(key, record().copy(history = "v1:r:2"), true)
+            second.save(key, record().copy(history = "v2:r:2"), true)
             assertNull(second.read(key)?.position)
             val previousGeneration = second.generation
             second.clear()

@@ -57,23 +57,25 @@ class StreamingCostTest {
                     "## Étape\n\nUne **réponse détaillée** avec du texte, une liste et un lien.\n\n- Premier point\n- Deuxième point\n\n"
                 var text = paragraph.repeat(length / paragraph.length + 1).take(length)
                 var cursor = count.toLong() + 1
-                fun message(id: Long, field: String, value: String) =
-                    RunEvent(
-                        id = id,
-                        createdAt = id,
-                        type = "item.updated",
-                        text = if (field == "text") value else "",
-                        payload =
-                            kotlinx.serialization.json.JsonObject(
-                                mapOf(
-                                    "item" to
-                                        buildJsonObject {
-                                            put("id", "stream-message")
-                                            put("type", "agent_message")
-                                            put(field, value)
-                                        }
-                                )
-                            ),
+                fun reply(revision: Long, value: String) =
+                    build.cairn.contracts.TimelineChange.A(
+                        build.cairn.app.data.TimelineCard(
+                            attempt = 0,
+                            content =
+                                build.cairn.contracts.TimelineContent.B(
+                                    itemId = "stream-message",
+                                    state = "running",
+                                    text = value,
+                                ),
+                            createdAt = cursor,
+                            id = "message:1:stream-message",
+                            position = cursor,
+                            revision = revision,
+                            runId = "",
+                            source = revision,
+                            turn = 1,
+                            updatedAt = revision,
+                        )
                     )
                 accumulator.append(
                     (1..count).map {
@@ -83,7 +85,9 @@ class StreamingCostTest {
                             type = "output",
                             text = "Prior output $it",
                         )
-                    } + message(cursor, "text", text)
+                    },
+                    listOf(reply(cursor, text)),
+                    cursor,
                 )
                 val reduce = mutableListOf<Double>()
                 val persist = mutableListOf<Double>()
@@ -98,19 +102,34 @@ class StreamingCostTest {
                     text += suffix
                     cursor++
                     var start = System.nanoTime()
-                    val rows = accumulator.append(listOf(message(cursor, "delta", suffix)))
+                    accumulator.append(
+                        emptyList(),
+                        listOf(
+                            build.cairn.contracts.TimelineChange.B(
+                                id = "message:1:stream-message",
+                                revision = cursor,
+                                source = cursor,
+                                text = suffix,
+                                updatedAt = cursor,
+                            )
+                        ),
+                        cursor,
+                    )
+                    val rows = accumulator.events
+                    val cards = accumulator.entries
                     val reduceMs = (System.nanoTime() - start) / 1e6
                     start = System.nanoTime()
                     cache.save(
                         "$length-$count",
-                        CachedHistory(cursor, "v1:fixture:1", LiveState(), rows),
+                        CachedHistory(cursor, "v2:fixture:1", LiveState(), rows, cards),
                     )
                     val persistMs = (System.nanoTime() - start) / 1e6
                     start = System.nanoTime()
                     val merged = mergeHistory(rows.dropLast(1), rows.takeLast(1))
+                    val mergedCards = mergeCards(cards, cards)
                     val mergeMs = (System.nanoTime() - start) / 1e6
                     start = System.nanoTime()
-                    val entries = timelineEntries(merged)
+                    val entries = timelineEntries(merged, cards = mergedCards)
                     val timelineMs = (System.nanoTime() - start) / 1e6
                     start = System.nanoTime()
                     // The baseline deliberately recreates the 0.5.1 full-text rendering path.
@@ -148,7 +167,7 @@ class StreamingCostTest {
                         view.layout(0, 0, 380, view.measuredHeight)
                     }
                     val layoutMs = (System.nanoTime() - start) / 1e6
-                    assertEquals(text, rows.last().text)
+                    assertEquals(text, cards.single().messageText())
                     assertEquals(1, entries.count { it.message })
                     if (sample >= 3) {
                         reduce.add(reduceMs)

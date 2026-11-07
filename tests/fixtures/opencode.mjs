@@ -52,15 +52,24 @@ async function main() {
     }
   }
 
+  const hiddenDefault = process.env.CAIRN_OPENCODE_FIXTURE_HIDDEN_DEFAULT === '1'
+  const opencodeModels = {
+    'ling-3.1-flash-free': nativeModel('ling-3.1-flash-free', 'Ling 3.1 Flash Free', ['low', 'medium', 'high']),
+    'cat-jam-free': nativeModel('cat-jam-free', 'Cat Jam Free', ['low', 'medium', 'high', 'xhigh', 'max']),
+  }
+  if (hiddenDefault) {
+    opencodeModels['retired-model'] = {
+      ...nativeModel('retired-model', 'Retired model', []),
+      status: 'deprecated',
+    }
+  }
+
   const providers = {
     all: [
       {
         id: 'opencode',
         name: 'OpenCode',
-        models: {
-          'ling-3.1-flash-free': nativeModel('ling-3.1-flash-free', 'Ling 3.1 Flash Free', ['low', 'medium', 'high']),
-          'cat-jam-free': nativeModel('cat-jam-free', 'Cat Jam Free', ['low', 'medium', 'high', 'xhigh', 'max']),
-        },
+        models: opencodeModels,
       },
       {
         id: 'opencode-go',
@@ -79,7 +88,11 @@ async function main() {
       },
       { id: 'openai', name: 'OpenAI', models: { 'fixture-model': nativeModel('fixture-model', 'Fixture model', []) } },
     ],
-    default: { opencode: 'ling-3.1-flash-free', openrouter: 'anthropic/claude-sonnet-4.6', openai: 'fixture-model' },
+    default: {
+      opencode: hiddenDefault ? 'retired-model' : 'ling-3.1-flash-free',
+      openrouter: 'anthropic/claude-sonnet-4.6',
+      openai: 'fixture-model',
+    },
     connected: Object.keys(auth),
   }
 

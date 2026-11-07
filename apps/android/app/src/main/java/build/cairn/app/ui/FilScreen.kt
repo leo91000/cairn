@@ -1,31 +1,75 @@
+@file:OptIn(
+    androidx.compose.material3.ExperimentalMaterial3Api::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+)
+
 package build.cairn.app.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import build.cairn.app.R
 import build.cairn.app.data.*
@@ -97,18 +141,20 @@ internal data class FeedItem(
     val requester: FeedRequester? = null,
     /** The coding agent of its latest turn. */
     val harness: String? = null,
+    val statusLabel: String = subtitle,
+    val project: String? = null,
+    val unread: Boolean = kind == FeedKind.UNREAD_CHAT || kind == FeedKind.UNREAD_TASK,
+    val readAt: Long = stamp,
+    /** It finished as expected: its row shows no status label, only a quiet mark. */
+    val finished: Boolean = false,
 ) {
     /** Only a blocked outcome can be dismissed; input the agent asked for can only be snoozed. */
     val dismissible
         get() = kind == FeedKind.REVIEW_TASK && outcome == "blocked"
 
-    val unread
-        get() = kind == FeedKind.UNREAD_CHAT || kind == FeedKind.UNREAD_TASK
-
     /** What reading this item marks, with the end of the work it reads. */
     val read
-        get() =
-            if (kind == FeedKind.UNREAD_TASK) "task:$taskId" to stamp else "chat:$chatId" to stamp
+        get() = if (taskId != null) "task:$taskId" to readAt else "chat:$chatId" to readAt
 }
 
 internal data class Feed(
@@ -122,8 +168,26 @@ internal data class Feed(
         get() = forYou.isEmpty() && running.isEmpty() && waiting.isEmpty() && recent.isEmpty()
 
     /** Finished work waiting to be read, below what needs an answer or a decision. */
+    val all
+        get() = (forYou + running + waiting + recent).sortedByDescending { it.stamp }
+
     val unread
-        get() = forYou.filter { it.unread }
+        get() = all.filter { it.unread }
+
+    val ongoing
+        get() = all.filter {
+            it.kind in
+                setOf(
+                    FeedKind.QUESTION,
+                    FeedKind.RECONNECT,
+                    FeedKind.REVIEW_TASK,
+                    FeedKind.RUNNING_CHAT,
+                    FeedKind.RUNNING_TASK,
+                    FeedKind.WAITING_CHAT,
+                    FeedKind.WAITING_TASK,
+                    FeedKind.SNOOZED_TASK,
+                ) || (it.kind == FeedKind.SET_ASIDE_TASK && it.setAside != SetAside.DISMISSED)
+        }
 }
 
 private fun context(agent: String, project: String?) =
@@ -192,6 +256,22 @@ internal fun buildFeed(
                             )
                         },
                     harness = chat.provider,
+                    project = chat.projectName,
+                    statusLabel =
+                        when (kind) {
+                            FeedKind.QUESTION -> "Répondre"
+                            FeedKind.RECONNECT -> "Connexion requise"
+                            FeedKind.RUNNING_CHAT ->
+                                if (chat.exclusiveSuspended) "Suspendue"
+                                else if (chat.status == "queued") "En attente" else "En cours"
+                            FeedKind.WAITING_CHAT -> "Reprise prévue"
+                            else -> if (chat.paused) "En pause" else statusLabel(chat.status)
+                        },
+                    readAt = chat.readAt ?: chat.finishedAt ?: chat.updatedAt,
+                    unread =
+                        chat.unread &&
+                            unreadNow("chat:${chat.id}", chat.readAt ?: chat.finishedAt) &&
+                            (chat.requestedBy == null || chat.pendingQuestions > 0),
                 )
             val wait = chatWaitNotice(chat.run)
             when {
@@ -248,17 +328,27 @@ internal fun buildFeed(
                                 // at resumption.
                                 resolved = chat.wakeup.observation != null,
                             )
-                chat.unread && !chat.paused && unreadNow("chat:${chat.id}", chat.finishedAt) ->
+                chat.unread &&
+                    !chat.paused &&
+                    chat.requestedBy == null &&
+                    unreadNow("chat:${chat.id}", chat.readAt ?: chat.finishedAt) ->
                     toRead +=
                         item(FeedKind.UNREAD_CHAT, context(agent, chat.projectName))
-                            .copy(stamp = chat.finishedAt ?: chat.updatedAt, preview = chat.preview)
+                            .copy(
+                                stamp = chat.finishedAt ?: chat.updatedAt,
+                                preview = chat.preview,
+                                finished = chat.status == "succeeded",
+                            )
                 else ->
                     recent +=
                         item(
-                            FeedKind.CHAT,
-                            if (chat.paused) "En pause · ${context(agent, chat.projectName)}"
-                            else context(agent, chat.projectName),
-                        )
+                                FeedKind.CHAT,
+                                if (chat.paused) "En pause · ${context(agent, chat.projectName)}"
+                                else if (chat.status == "succeeded")
+                                    "Terminée · ${context(agent, chat.projectName)}"
+                                else context(agent, chat.projectName),
+                            )
+                            .copy(finished = !chat.paused && chat.status == "succeeded")
             }
         }
     val names = tasks.associateBy { it.id }
@@ -297,6 +387,18 @@ internal fun buildFeed(
                     runId = run.id,
                     taskId = run.taskId,
                     harness = run.provider,
+                    statusLabel =
+                        when (kind) {
+                            FeedKind.REVIEW_TASK ->
+                                if (run.outcome?.status == "needs_input") "Répondre" else "Bloquée"
+                            FeedKind.RUNNING_TASK ->
+                                if (run.suspendedByExclusive != null) "Suspendue"
+                                else if (run.status == "queued") "En attente" else "En cours"
+                            FeedKind.WAITING_TASK -> "Reprise prévue"
+                            else -> statusLabel(run.status)
+                        },
+                    readAt = run.finishedAt ?: run.createdAt,
+                    unread = run.unread && unreadNow("task:${run.taskId}", run.finishedAt),
                 )
             when {
                 // A mission that scheduled its continuation resumes on its own, like a chat.
@@ -374,7 +476,12 @@ internal fun buildFeed(
                     run.unread &&
                     unreadNow("task:${run.taskId}", run.finishedAt) ->
                     toRead +=
-                        item(FeedKind.UNREAD_TASK, "Mission · $agent").copy(preview = run.preview)
+                        item(FeedKind.UNREAD_TASK, "Mission terminée · $agent")
+                            .copy(finished = true, preview = run.preview)
+                else ->
+                    recent +=
+                        item(FeedKind.UNREAD_TASK, "Mission terminée · $agent")
+                            .copy(unread = false, finished = run.status == "succeeded")
             }
         }
     return Feed(
@@ -386,8 +493,82 @@ internal fun buildFeed(
     )
 }
 
+/**
+ * Rows in reading order, each delegated conversation or mission right below the work that started
+ * it when both are listed. One that started without its requester in the list stays in place and
+ * names it instead. The second value tells whether the row is nested.
+ */
+internal fun threadFeed(items: List<FeedItem>): List<Pair<FeedItem, Boolean>> {
+    val byChat = items.filter { it.chatId != null }.associateBy { it.chatId }
+    val byRun = items.filter { it.runId != null }.associateBy { it.runId }
+    val childrenOf = mutableMapOf<String, MutableList<FeedItem>>()
+    val roots = mutableListOf<FeedItem>()
+    items.forEach { item ->
+        val parent =
+            item.requester?.let { requester ->
+                requester.chatId?.let { byChat[it] } ?: requester.runId?.let { byRun[it] }
+            }
+        if (parent != null && parent.key != item.key)
+            childrenOf.getOrPut(parent.key) { mutableListOf() } += item
+        else roots += item
+    }
+
+    val rows = mutableListOf<Pair<FeedItem, Boolean>>()
+    val placed = mutableSetOf<String>()
+    fun place(item: FeedItem, nested: Boolean) {
+        if (!placed.add(item.key)) return
+        rows += item to nested
+        childrenOf[item.key]?.forEach { place(it, true) }
+    }
+    roots.forEach { place(it, false) }
+    // A requester cycle has no root: keep those rows rather than losing them.
+    items.forEach { place(it, false) }
+    return rows
+}
+
+/** A Fil row, or a run of quiet missions folded into one. */
+internal sealed interface FeedEntry {
+    data class Line(val item: FeedItem, val nested: Boolean) : FeedEntry
+
+    data class Fold(val items: List<FeedItem>) : FeedEntry {
+        val key
+            get() = "fold:${items.first().key}"
+    }
+}
+
+/**
+ * Folds consecutive missions that finished as expected and were read into one row, so that
+ * scheduled checks stop crowding the work worth reading. A lone one, a mission with delegated work
+ * below it, and nested rows stay as they are.
+ */
+internal fun foldFeed(rows: List<Pair<FeedItem, Boolean>>): List<FeedEntry> {
+    fun quiet(index: Int): Boolean {
+        val (item, nested) = rows[index]
+        return !nested &&
+            item.taskId != null &&
+            item.finished &&
+            !item.unread &&
+            rows.getOrNull(index + 1)?.second != true
+    }
+
+    val entries = mutableListOf<FeedEntry>()
+    var index = 0
+    while (index < rows.size) {
+        var end = index
+        while (end < rows.size && quiet(end)) end++
+        if (end - index >= 2) {
+            entries += FeedEntry.Fold(rows.subList(index, end).map { it.first })
+            index = end
+        } else {
+            entries += FeedEntry.Line(rows[index].first, rows[index].second)
+            index++
+        }
+    }
+    return entries
+}
+
 /** The Fil in reading order, one key per item: what a swipe between pages moves through. */
-internal fun Feed.keys() = (forYou + running + waiting + recent).map { it.key }
+internal fun Feed.keys() = threadFeed(all).map { (item, _) -> item.key }
 
 /** The shell and its pages share one conversation stream and one mission poll. */
 internal data class FilSnapshot(val conversations: LiveSnapshot, val activity: List<Run>?)
@@ -429,7 +610,7 @@ internal fun feedSummary(feed: Feed): String {
         parts +=
             if (feed.running.size == 1) "1 agent au travail"
             else "${feed.running.size} agents au travail"
-    val need = feed.forYou.size - feed.unread.size
+    val need = feed.forYou.count { !it.unread }
     if (need > 0) parts += if (need == 1) "1 élément pour vous" else "$need éléments pour vous"
     if (feed.unread.isNotEmpty())
         parts +=
@@ -471,6 +652,23 @@ fun FilScreen(
     val trash = rememberConversationTrash(vm)
     val chats = live.state?.chats?.filter { it.id !in trash.hidden }
     val feed = buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads, now)
+    var selectedView by rememberSaveable { mutableIntStateOf(0) }
+    var filter by rememberSaveable { mutableStateOf("") }
+    // The filter opens on demand and stays open while it holds a query.
+    var searchOpen by rememberSaveable { mutableStateOf(false) }
+    var unfolded by rememberSaveable { mutableStateOf(listOf<String>()) }
+    // A finished result previewed by a long press, without opening or reading it.
+    var peeked by remember { mutableStateOf<FeedItem?>(null) }
+    val searching = searchOpen || filter.isNotEmpty()
+    val views = listOf(feed.unread, feed.ongoing, feed.all)
+    val query = filter.trim()
+    val visible =
+        views[selectedView].filter {
+            query.isEmpty() ||
+                listOfNotNull(it.title, it.subtitle, it.agent, it.project).any { value ->
+                    value.contains(query, ignoreCase = true)
+                }
+        }
     fun retry(item: FeedItem) {
         val task = item.taskId ?: return
         vm.perform { openRun(api.runMission(RunMissionInput(task)).id) }
@@ -500,6 +698,12 @@ fun FilScreen(
             item.runId != null -> openRun(item.runId)
         }
     }
+    peeked?.let { item ->
+        PeekSheet(item, now, close = { peeked = null }) {
+            peeked = null
+            open(item)
+        }
+    }
     LazyColumn(
         Modifier.fillMaxSize().testTag("fil"),
         contentPadding = PaddingValues(bottom = 24.dp),
@@ -513,13 +717,35 @@ fun FilScreen(
                     account = openAccount,
                 )
                 Spacer(Modifier.height(12.dp))
-                Text(greeting(), style = MaterialTheme.typography.headlineLarge)
-                Text(
-                    if (chats == null) "Chargement…" else feedSummary(feed),
-                    Modifier.padding(top = 4.dp),
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                FilHeader(
+                    working = feed.running.filter { it.working }.distinctBy { it.agentKey },
+                    unread = feed.unread.isNotEmpty(),
+                    searching = searching,
+                    toggleSearch = {
+                        if (searching) {
+                            filter = ""
+                            searchOpen = false
+                        } else searchOpen = true
+                    },
+                    showOngoing = { selectedView = 1 },
+                    readAll = { vm.markRead(feed.unread.map { it.read }) },
                 )
+                FilSearch(
+                    searching,
+                    filter,
+                    { filter = it },
+                    close = {
+                        filter = ""
+                        searchOpen = false
+                    },
+                )
+                FilViews(
+                    listOf("À lire", "En cours", "Tout"),
+                    listOf(views[0].size, views[1].size, null),
+                    selectedView,
+                ) {
+                    selectedView = it
+                }
                 if (chats == null)
                     LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 12.dp))
                 live.error?.let {
@@ -536,31 +762,54 @@ fun FilScreen(
                     )
                 }
             }
-        val unread = feed.unread
-        section(
-            "Pour vous",
-            feed.forYou,
-            action =
-                if (unread.isEmpty()) null
-                else {
-                    {
-                        SignalButton(
-                            "Tout lire",
-                            Modifier.testTag("read-all"),
-                            icon = CairnIcons.Check,
-                            container = Color.Transparent,
-                            content = MaterialTheme.colorScheme.onSurfaceVariant,
-                            height = 32.dp,
-                        ) {
-                            vm.markRead(unread.map { it.read })
-                        }
-                    }
-                },
-        ) { item ->
+        if (chats != null && visible.isEmpty() && !feed.empty)
+            item(key = "view-empty") {
+                Text(
+                    if (filter.isNotBlank()) "Aucun résultat"
+                    else if (selectedView == 0) "Tout est lu." else "Aucune tâche en cours.",
+                    Modifier.padding(20.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        // Quiet missions fold together, except while filtering, which looks for each row.
+        val rows = threadFeed(visible)
+        val entries =
+            if (query.isEmpty()) foldFeed(rows)
+            else rows.map { (item, nested) -> FeedEntry.Line(item, nested) }
+        val lines = entries.flatMap { entry ->
+            when (entry) {
+                is FeedEntry.Line -> listOf(entry)
+                is FeedEntry.Fold ->
+                    listOf(entry) +
+                        if (entry.key in unfolded)
+                            entry.items.map { FeedEntry.Line(it, nested = true) }
+                        else emptyList()
+            }
+        }
+        items(
+            lines,
+            key = {
+                when (it) {
+                    is FeedEntry.Line -> it.item.key
+                    is FeedEntry.Fold -> it.key
+                }
+            },
+        ) { line ->
+            if (line is FeedEntry.Fold) {
+                FoldRow(line, line.key in unfolded, now) {
+                    unfolded =
+                        if (line.key in unfolded) unfolded - line.key else unfolded + line.key
+                }
+                return@items
+            }
+            val (item, nested) = line as FeedEntry.Line
             FeedRow(
                 item,
                 { open(item) },
                 onDelete = item.chatId?.let { id -> { trash.trash(id) } },
+                now = now,
+                nested = nested,
+                onPeek = item.preview?.ifBlank { null }?.let { { peeked = item } },
             ) {
                 ForYouAction(
                     item,
@@ -575,41 +824,331 @@ fun FilScreen(
                 )
             }
         }
-        section("En cours", feed.running) { item ->
-            FeedRow(
-                item,
-                { open(item) },
-                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
-            ) {
-                Text(
-                    elapsed(item.startedAt, now),
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
+    }
+}
+
+/** Quiet missions folded into one row: two stacked avatars, their count and names. */
+@Composable
+private fun FoldRow(fold: FeedEntry.Fold, open: Boolean, now: Long, toggle: () -> Unit) {
+    val rotation by
+        androidx.compose.animation.core.animateFloatAsState(
+            if (open) 180f else 0f,
+            tween(200),
+            label = "fil-fold",
+        )
+    Surface(
+        onClick = toggle,
+        color = Color.Transparent,
+        modifier =
+            Modifier.fillMaxWidth().testTag("fil-fold").semantics {
+                stateDescription = if (open) "Déplié" else "Replié"
+            },
+    ) {
+        Row(
+            Modifier.widthIn(max = 760.dp)
+                .heightIn(min = 56.dp)
+                .padding(start = 22.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(28.dp)) {
+                Box(Modifier.align(Alignment.TopStart).alpha(0.8f)) {
+                    AgentAvatar(
+                        fold.items[1].agent,
+                        fold.items[1].agentKey.ifBlank { fold.items[1].agent },
+                        19.dp,
+                    )
+                }
+                Box(
+                    Modifier.align(Alignment.BottomEnd)
+                        .background(MaterialTheme.colorScheme.background, RoundedCornerShape(7.dp))
+                        .padding(1.5.dp)
+                ) {
+                    AgentAvatar(
+                        fold.items[0].agent,
+                        fold.items[0].agentKey.ifBlank { fold.items[0].agent },
+                        19.dp,
+                    )
+                }
+            }
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "${fold.items.size} missions terminées",
+                        Modifier.weight(1f),
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Stamp(fold.items.first().stamp, now)
+                }
+                Row(Modifier.padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        CairnIcons.Retry,
+                        null,
+                        Modifier.size(12.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        fold.items.joinToString(" · ") { it.title },
+                        Modifier.weight(1f).padding(start = 4.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            // Where other rows have their actions, so times line up.
+            Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                Icon(
+                    CairnIcons.Down,
+                    null,
+                    Modifier.size(20.dp).rotate(rotation),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
-        section("Reprise prévue", feed.waiting) { item ->
-            FeedRow(
-                item,
-                { open(item) },
-                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
-            ) {
+    }
+}
+
+/** A finished result's opening, read without opening the work, which stays unread. */
+@Composable
+internal fun PeekSheet(item: FeedItem, now: Long, close: () -> Unit, open: () -> Unit) {
+    ModalBottomSheet(
+        onDismissRequest = close,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        modifier = Modifier.testTag("fil-peek"),
+    ) {
+        Column(
+            Modifier.verticalScroll(rememberScrollState())
+                .padding(start = 24.dp, end = 24.dp, bottom = 24.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                AgentAvatar(item.agent, item.agentKey.ifBlank { item.agent }, 24.dp)
+                Spacer(Modifier.width(10.dp))
                 Text(
-                    item.wakeAt?.let { waitLeft(it, item.condition, item.resolved, now) }
-                        ?: "Selon disponibilité",
+                    listOfNotNull(item.agent, item.project?.ifBlank { null }).joinToString(" · "),
+                    Modifier.weight(1f),
                     style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.primary,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-            }
-        }
-        section("Récents", feed.recent) { item ->
-            FeedRow(
-                item,
-                { open(item) },
-                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
-            ) {
                 Stamp(item.stamp, now)
+            }
+            Text(
+                item.title,
+                Modifier.padding(top = 12.dp),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                item.preview.orEmpty(),
+                Modifier.padding(top = 8.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 12,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                "Reste non lu jusqu’à l’ouverture.",
+                Modifier.padding(top = 12.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            androidx.compose.material3.Button(
+                onClick = open,
+                modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
+            ) {
+                Text("Ouvrir")
+            }
+        }
+    }
+}
+
+/** The Fil's title, the agents at work, and its filter and read-all actions. */
+@Composable
+private fun FilHeader(
+    working: List<FeedItem>,
+    unread: Boolean,
+    searching: Boolean,
+    toggleSearch: () -> Unit,
+    showOngoing: () -> Unit,
+    readAll: () -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            "Fil",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+        )
+        if (working.isNotEmpty()) {
+            Spacer(Modifier.width(10.dp))
+            Surface(
+                onClick = showOngoing,
+                shape = RoundedCornerShape(50),
+                color = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier.testTag("fil-at-work"),
+            ) {
+                Row(
+                    Modifier.padding(start = 3.dp, end = 10.dp, top = 3.dp, bottom = 3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    working.take(3).forEachIndexed { index, item ->
+                        Box(
+                            Modifier.offset(x = (-6 * index).dp)
+                                .background(
+                                    MaterialTheme.colorScheme.primaryContainer,
+                                    RoundedCornerShape(7.dp),
+                                )
+                                .padding(1.5.dp)
+                        ) {
+                            AgentAvatar(item.agent, item.agentKey.ifBlank { item.agent }, 20.dp)
+                        }
+                    }
+                    Text(
+                        "${working.size} au travail",
+                        Modifier.offset(x = (-6 * (minOf(working.size, 3) - 1)).dp)
+                            .padding(start = 6.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.weight(1f))
+        RoundAction(
+            "Filtrer le fil",
+            CairnIcons.Search,
+            Modifier.testTag("fil-search"),
+            container =
+                if (searching) MaterialTheme.colorScheme.secondaryContainer
+                else MaterialTheme.colorScheme.surface,
+            size = 36.dp,
+            onClick = toggleSearch,
+        )
+        if (unread) {
+            Spacer(Modifier.width(6.dp))
+            RoundAction(
+                "Tout marquer comme lu",
+                CairnIcons.Check,
+                Modifier.testTag("read-all"),
+                size = 36.dp,
+                onClick = readAll,
+            )
+        }
+    }
+}
+
+/** The filter field, which unfolds from the header when the user asks to filter. */
+@Composable
+private fun FilSearch(
+    open: Boolean,
+    value: String,
+    change: (String) -> Unit,
+    close: () -> Unit,
+) {
+    val focus = remember { FocusRequester() }
+    AnimatedVisibility(
+        open,
+        enter =
+            expandVertically(tween(220)) +
+                fadeIn(tween(220)) +
+                slideInVertically(tween(220)) { -it / 3 },
+        exit = shrinkVertically(tween(180)) + fadeOut(tween(140)),
+    ) {
+        LaunchedEffect(Unit) { focus.requestFocus() }
+        OutlinedTextField(
+            value = value,
+            onValueChange = change,
+            modifier = Modifier.fillMaxWidth().padding(top = 12.dp).focusRequester(focus),
+            placeholder = { Text("Titre, agent ou projet") },
+            leadingIcon = { Icon(CairnIcons.Search, null, Modifier.size(18.dp)) },
+            trailingIcon = {
+                androidx.compose.material3.IconButton(onClick = close) {
+                    Icon(CairnIcons.Close, "Fermer le filtre", Modifier.size(18.dp))
+                }
+            },
+            shape = RoundedCornerShape(50),
+            singleLine = true,
+        )
+    }
+}
+
+/** À lire / En cours / Tout as a segmented control whose selection slides between views. */
+@Composable
+private fun FilViews(
+    labels: List<String>,
+    counts: List<Int?>,
+    selected: Int,
+    select: (Int) -> Unit,
+) {
+    BoxWithConstraints(
+        Modifier.fillMaxWidth()
+            .padding(top = 12.dp)
+            .background(
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                RoundedCornerShape(14.dp),
+            )
+            .padding(4.dp)
+            .selectableGroup()
+    ) {
+        val width = maxWidth / labels.size
+        val offset by animateDpAsState(width * selected, tween(220), label = "fil-view")
+        val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+        Box(
+            Modifier.offset(x = offset)
+                .width(width)
+                .height(36.dp)
+                .shadow(1.dp, RoundedCornerShape(10.dp))
+                .background(
+                    if (dark) MaterialTheme.colorScheme.surfaceContainerHighest
+                    else MaterialTheme.colorScheme.surface,
+                    RoundedCornerShape(10.dp),
+                )
+                .border(
+                    1.dp,
+                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    RoundedCornerShape(10.dp),
+                )
+        )
+        Row {
+            labels.forEachIndexed { index, label ->
+                val count = counts[index]?.takeIf { it > 0 }
+                val accent = MaterialTheme.colorScheme.primary
+                Box(
+                    Modifier.weight(1f).height(36.dp).clip(RoundedCornerShape(10.dp)).selectable(
+                        selected == index,
+                        role = Role.Tab,
+                    ) {
+                        select(index)
+                    },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        buildAnnotatedString {
+                            append(label)
+                            if (count != null) {
+                                append(" ")
+                                withStyle(
+                                    SpanStyle(
+                                        color = if (index == 0) accent else Color.Unspecified,
+                                        fontWeight = FontWeight.Bold,
+                                    )
+                                ) {
+                                    append("$count")
+                                }
+                            }
+                        },
+                        style = MaterialTheme.typography.labelLarge,
+                        color =
+                            if (selected == index) MaterialTheme.colorScheme.onSurface
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
@@ -653,77 +1192,63 @@ private fun ForYouAction(
     snooze: () -> Unit = {},
     archive: () -> Unit = {},
 ) {
-    if (item.kind == FeedKind.REVIEW_TASK)
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (item.dismissible)
-                RoundAction(
-                    "Écarter ${item.title}",
-                    CairnIcons.Check,
-                    size = 38.dp,
-                    onClick = dismiss,
+    var menu by remember { mutableStateOf(false) }
+    Box {
+        RoundAction("Autres actions pour ${item.title}", CairnIcons.More, size = 36.dp) {
+            menu = true
+        }
+        DropdownMenu(menu, { menu = false }) {
+            if (item.unread)
+                DropdownMenuItem(
+                    text = { Text("Marquer comme lu") },
+                    onClick = {
+                        menu = false
+                        markRead()
+                    },
                 )
-            var menu by remember { mutableStateOf(false) }
-            Box {
-                RoundAction(
-                    "Autres actions pour ${item.title}",
-                    CairnIcons.More,
-                    size = 38.dp,
-                ) {
-                    menu = true
-                }
-                DropdownMenu(menu, { menu = false }) {
-                    DropdownMenuItem(
-                        text = { Text("Me le rappeler demain") },
-                        leadingIcon = { androidx.compose.material3.Icon(CairnIcons.Clock, null) },
-                        onClick = {
-                            menu = false
-                            snooze()
-                        },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Relancer") },
-                        leadingIcon = { androidx.compose.material3.Icon(CairnIcons.Retry, null) },
-                        enabled = enabled,
-                        onClick = {
-                            menu = false
-                            retry()
-                        },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Archiver la mission") },
-                        leadingIcon = { androidx.compose.material3.Icon(CairnIcons.Trash, null) },
-                        enabled = enabled,
-                        onClick = {
-                            menu = false
-                            archive()
-                        },
-                    )
-                }
+            DropdownMenuItem(
+                text = { Text("Ouvrir") },
+                onClick = {
+                    menu = false
+                    open()
+                },
+            )
+            if (item.dismissible)
+                DropdownMenuItem(
+                    text = { Text("Écarter le résultat") },
+                    onClick = {
+                        menu = false
+                        dismiss()
+                    },
+                )
+            if (item.kind == FeedKind.REVIEW_TASK)
+                DropdownMenuItem(
+                    text = { Text("Me le rappeler demain") },
+                    onClick = {
+                        menu = false
+                        snooze()
+                    },
+                )
+            if (item.taskId != null) {
+                DropdownMenuItem(
+                    text = { Text("Relancer") },
+                    enabled = enabled,
+                    onClick = {
+                        menu = false
+                        retry()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Archiver la mission") },
+                    enabled = enabled,
+                    onClick = {
+                        menu = false
+                        archive()
+                    },
+                )
             }
         }
-    else if (item.unread)
-        RoundAction(
-            "Marquer ${item.title} comme lu",
-            CairnIcons.Check,
-            size = 38.dp,
-            onClick = markRead,
-        )
-    else if (item.kind == FeedKind.QUESTION)
-        SignalButton("Répondre", height = 36.dp, onClick = open)
-    else if (item.kind == FeedKind.RECONNECT)
-        SignalButton("Connexions", height = 36.dp, onClick = open)
-    else if (item.kind == FeedKind.FAILED_TASK)
-        RoundAction(
-            "Relancer ${item.title}",
-            CairnIcons.Retry,
-            size = 38.dp,
-            enabled = enabled,
-            onClick = retry,
-        )
-    else Stamp(item.stamp, now)
+    }
 }
 
 @Composable
@@ -770,123 +1295,256 @@ internal fun Wordmark() {
     }
 }
 
+/** The agent's avatar with what the row asks for in its corner; finished work stays quiet. */
+@Composable
+internal fun FilAvatar(item: FeedItem, size: androidx.compose.ui.unit.Dp) {
+    Box {
+        AgentAvatar(item.agent, item.agentKey.ifBlank { item.agent }, size)
+        if (!item.finished)
+            Box(
+                Modifier.align(Alignment.BottomEnd)
+                    .offset(5.dp, 4.dp)
+                    .background(MaterialTheme.colorScheme.background, CircleShape)
+                    .padding(1.dp)
+            ) {
+                StatusMark(item)
+            }
+    }
+}
+
+/** The row's status glyph, coloured like its label: quiet once the work finished as expected. */
+@Composable
+private fun StatusMark(item: FeedItem) {
+    val (icon, tint) =
+        when {
+            item.kind == FeedKind.QUESTION ||
+                (item.kind == FeedKind.REVIEW_TASK && item.outcome == "needs_input") ->
+                CairnIcons.CircleAlert to signal.answer
+            item.kind == FeedKind.RECONNECT -> CairnIcons.CircleAlert to signal.warning
+            item.kind == FeedKind.FAILED_CHAT || item.kind == FeedKind.FAILED_TASK ->
+                CairnIcons.CircleX to signal.attention
+            item.kind == FeedKind.REVIEW_TASK -> CairnIcons.CirclePause to signal.warning
+            item.kind == FeedKind.RUNNING_CHAT || item.kind == FeedKind.RUNNING_TASK ->
+                CairnIcons.CircleProgress to MaterialTheme.colorScheme.primary
+            item.kind == FeedKind.WAITING_CHAT ||
+                item.kind == FeedKind.WAITING_TASK ||
+                item.kind == FeedKind.SNOOZED_TASK ->
+                CairnIcons.Clock to MaterialTheme.colorScheme.primary
+            item.kind == FeedKind.SET_ASIDE_TASK ->
+                CairnIcons.Hourglass to MaterialTheme.colorScheme.onSurfaceVariant
+            item.finished ->
+                (if (item.taskId != null) CairnIcons.Retry else CairnIcons.CircleCheck) to
+                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+            item.kind == FeedKind.CHAT && item.statusLabel == "En pause" ->
+                CairnIcons.CirclePause to MaterialTheme.colorScheme.onSurfaceVariant
+            else -> CairnIcons.Circle to MaterialTheme.colorScheme.onSurfaceVariant
+        }
+    val rotation =
+        if (item.working)
+            rememberInfiniteTransition(label = "fil-working")
+                .animateFloat(
+                    0f,
+                    360f,
+                    infiniteRepeatable(tween(1000, easing = LinearEasing)),
+                    label = "rotation",
+                )
+        else null
+    Icon(
+        icon,
+        contentDescription = item.statusLabel,
+        modifier =
+            Modifier.size(14.dp).testTag("fil-mark").graphicsLayer {
+                rotationZ = rotation?.value ?: 0f
+            },
+        tint = tint,
+    )
+}
+
 @Composable
 private fun FeedRow(
     item: FeedItem,
     onClick: () -> Unit,
     onDelete: (() -> Unit)? = null,
+    now: Long,
+    nested: Boolean = false,
+    /** Previews a finished result without opening it. */
+    onPeek: (() -> Unit)? = null,
     trailing: @Composable () -> Unit,
 ) {
-    val badge =
-        when (item.kind) {
-            FeedKind.RUNNING_CHAT,
-            FeedKind.RUNNING_TASK -> AvatarBadge.LIVE
-            FeedKind.QUESTION,
-            FeedKind.FAILED_CHAT,
-            FeedKind.FAILED_TASK,
-            FeedKind.REVIEW_TASK,
-            FeedKind.RECONNECT -> AvatarBadge.ATTENTION
-            FeedKind.UNREAD_CHAT,
-            FeedKind.UNREAD_TASK -> AvatarBadge.DONE
-            FeedKind.WAITING_CHAT,
-            FeedKind.WAITING_TASK,
-            FeedKind.SNOOZED_TASK -> AvatarBadge.WAITING
-            FeedKind.SET_ASIDE_TASK,
-            FeedKind.CHAT -> null
-        }
+    val thread = MaterialTheme.colorScheme.outlineVariant
+    val haptics = LocalHapticFeedback.current
+    // Where the text below the title starts: after the unread dot, the avatar and its gap.
+    val inset = if (nested) 42.dp else 50.dp
     SwipeToTrashRow(enabled = onDelete != null, onTrash = { onDelete?.invoke() }) { swipe ->
-        // Unread work keeps a faint wash of the accent until it is read.
         Surface(
-            onClick = onClick,
-            color =
-                if (item.unread) MaterialTheme.colorScheme.primary.copy(alpha = 0.06f)
-                else Color.Transparent,
+            color = Color.Transparent,
             modifier =
                 swipe
                     .fillMaxWidth()
-                    .then(if (item.unread) Modifier.testTag("unread") else Modifier),
+                    .semantics { if (item.finished) stateDescription = item.statusLabel }
+                    .combinedClickable(
+                        onClick = onClick,
+                        onLongClickLabel = onPeek?.let { "Aperçu" },
+                        onLongClick =
+                            onPeek?.let {
+                                {
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    it()
+                                }
+                            },
+                    )
+                    .then(if (item.unread) Modifier.testTag("unread") else Modifier)
+                    .then(if (nested) Modifier.testTag("fil-nested") else Modifier),
         ) {
             Row(
                 Modifier.widthIn(max = 760.dp)
-                    .heightIn(min = 72.dp)
-                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                    .heightIn(min = if (nested) 44.dp else 56.dp)
+                    .padding(start = if (nested) 36.dp else 10.dp, end = 16.dp)
+                    .then(
+                        if (nested)
+                            Modifier.drawBehind {
+                                drawLine(
+                                    thread,
+                                    Offset(0f, 0f),
+                                    Offset(0f, size.height),
+                                    1.dp.toPx(),
+                                )
+                            }
+                        else Modifier
+                    )
+                    .padding(start = if (nested) 8.dp else 0.dp, top = 8.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (item.working) WorkingAvatar(item.agent, item.agentKey, 44.dp)
-                else AgentAvatar(item.agent, item.agentKey, 44.dp, badge)
-                Spacer(Modifier.width(14.dp))
                 Column(Modifier.weight(1f)) {
-                    if (item.unread) UnreadLabel(item)
-                    val delegatedBy = item.requester?.takeIf { item.key.startsWith("chat:") }
-                    if (delegatedBy != null)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.width(12.dp)) {
+                            if (item.unread)
+                                Box(
+                                    Modifier.size(6.dp)
+                                        .background(
+                                            MaterialTheme.colorScheme.primary,
+                                            androidx.compose.foundation.shape.CircleShape,
+                                        )
+                                        .semantics { contentDescription = "Non lu" }
+                                )
+                        }
+                        FilAvatar(item, if (nested) 20.dp else 28.dp)
+                        Spacer(Modifier.width(10.dp))
                         Text(
-                            "↳ Délégué par ${delegatedBy.title}",
-                            Modifier.testTag("fil-requester"),
+                            item.title,
+                            modifier = Modifier.weight(1f),
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight =
+                                if (item.unread) FontWeight.SemiBold else FontWeight.Medium,
+                            color =
+                                if (nested && !item.unread)
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                else MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Stamp(item.stamp, now)
+                    }
+                    val needsAnswer =
+                        item.kind == FeedKind.QUESTION ||
+                            (item.kind == FeedKind.REVIEW_TASK && item.outcome == "needs_input")
+                    val failed =
+                        item.kind == FeedKind.FAILED_CHAT || item.kind == FeedKind.FAILED_TASK
+                    val label = item.statusLabel
+                    if (!nested || !item.finished)
+                        Row(
+                            Modifier.padding(start = inset, top = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (!nested)
+                                item.harness?.let {
+                                    Box(
+                                        Modifier.padding(end = 5.dp)
+                                            .testTag("harness-$it")
+                                            .semantics {
+                                                contentDescription =
+                                                    "Dernier harness : ${providerLabel(it)}"
+                                            }
+                                    ) {
+                                        ProviderMark(it, 12.dp)
+                                    }
+                                }
+                            if (!item.finished)
+                                Text(
+                                    label,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Medium,
+                                    color =
+                                        if (needsAnswer) signal.answer
+                                        else if (failed) signal.attention
+                                        else if (item.kind == FeedKind.REVIEW_TASK) signal.warning
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            if (!nested && item.taskId != null)
+                                Icon(
+                                    CairnIcons.Retry,
+                                    "Mission",
+                                    Modifier.padding(start = if (item.finished) 0.dp else 4.dp)
+                                        .size(12.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            // The avatar already names the agent: the detail line gives the
+                            // project.
+                            if (!nested)
+                                Text(
+                                    (if (item.finished || item.taskId != null) "" else " · ") +
+                                        (item.project?.ifBlank { null } ?: item.agent),
+                                    Modifier.weight(1f)
+                                        .padding(start = if (item.taskId != null) 4.dp else 0.dp),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                        }
+                    if (
+                        item.kind == FeedKind.SET_ASIDE_TASK ||
+                            item.kind == FeedKind.SNOOZED_TASK ||
+                            item.kind == FeedKind.WAITING_CHAT ||
+                            item.kind == FeedKind.WAITING_TASK
+                    )
+                        Text(
+                            item.subtitle,
+                            Modifier.padding(start = inset),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
-                    Text(
-                        item.title,
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                    if (
+                        item.kind == FeedKind.WAITING_CHAT ||
+                            item.kind == FeedKind.WAITING_TASK ||
+                            item.kind == FeedKind.SNOOZED_TASK
                     )
-                    Row(
-                        Modifier.padding(top = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        if (item.working) WorkingLabel("En cours", Modifier.padding(end = 6.dp))
-                        item.harness?.let {
-                            // Beside a two-line preview, it stays on the first line.
-                            val line =
-                                if (item.preview != null)
-                                    Modifier.align(Alignment.Top).padding(top = 4.dp)
-                                else Modifier
-                            Box(
-                                line.padding(end = 5.dp).testTag("harness-$it").semantics {
-                                    contentDescription = "Dernier harness : ${providerLabel(it)}"
-                                }
-                            ) {
-                                ProviderMark(it, 13.dp)
-                            }
-                        }
                         Text(
-                            item.preview ?: item.subtitle,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = if (item.preview != null) 2 else 1,
-                            overflow = TextOverflow.Ellipsis,
+                            item.wakeAt?.let { waitLeft(it, item.condition, item.resolved, now) }
+                                ?: "Selon disponibilité",
+                            Modifier.padding(start = inset).testTag("fil-wait-time"),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
                         )
-                    }
+                    if (!nested)
+                        item.requester?.let {
+                            Text(
+                                "↳ Délégué par ${it.title}",
+                                Modifier.padding(start = inset).testTag("fil-requester"),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                 }
-                Spacer(Modifier.width(10.dp))
                 trailing()
             }
         }
-    }
-}
-
-/** "Terminé" with the unread dot, above the title of finished work not read yet. */
-@Composable
-private fun UnreadLabel(item: FeedItem) {
-    Row(Modifier.padding(bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(
-            Modifier.size(8.dp)
-                .background(
-                    MaterialTheme.colorScheme.primary,
-                    androidx.compose.foundation.shape.CircleShape,
-                )
-                .semantics { contentDescription = "Non lu" }
-        )
-        Spacer(Modifier.width(6.dp))
-        Text(
-            if (item.kind == FeedKind.UNREAD_TASK) "Mission terminée · ${shortStamp(item.stamp)}"
-            else "Terminé · ${shortStamp(item.stamp)}",
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.primary,
-        )
     }
 }

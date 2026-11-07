@@ -68,6 +68,8 @@
   --shadow-pressed: none;
   --shadow-focus: 0 0 0 3px light-dark(#cadcf0, #8db8e833);
   /* « Signal »: coral marks what needs the user, green what succeeded. */
+  --color-answer: light-dark(#7150a0, #c4b5fd);
+  --color-answer-surface: light-dark(#f0eafb, #30263f);
   --color-coral: light-dark(#e2512f, #ff7b5e);
   --color-coral-soft: light-dark(#fbe6df, #3a211c);
   --color-success: light-dark(#12806f, #4fc7a8);

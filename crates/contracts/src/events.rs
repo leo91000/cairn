@@ -1,5 +1,6 @@
 //! Durable event envelopes. Engine payloads are redacted by execution adapters;
-//! chat, wait and artifact payloads remain boundaries of A7/A8/A16 until C1.
+//! the timeline presents messages, the run cycle, errors and retries (C1). Wait,
+//! tool and artifact payloads remain boundaries of A8/A16 and C2–C4.
 use crate::*;
 
 /// The event's ordering identity is distinct from a client's presentation identity.
@@ -30,6 +31,16 @@ pub struct RunEvent {
     pub display_id: Option<i64>,
     #[serde(default)]
     pub run_id: String,
+    /// Run-wide legacy approval eligibility, derived when an old root plan is read.
+    /// This is absent for authored request boundaries and non-plan events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "boolean", optional)]
+    pub legacy_plan_approval: Option<bool>,
+    /// The timeline presents this event. Clients render it only through its
+    /// card and read it as a boundary of families that are not converted yet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(as = "Option<bool>", optional)]
+    pub timeline: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, TS)]
@@ -160,6 +171,13 @@ impl<'de> serde::Deserialize<'de> for EventKind {
 #[serde(rename_all = "camelCase")]
 pub struct HistoryPage {
     pub events: Vec<RunEvent>,
+    /// Timeline cards that first appeared within this page or last changed in it.
+    #[serde(default)]
+    pub entries: Vec<TimelineEntry>,
+    /// Oversized timeline cards, fetched in bounded chunks before this page is applied.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<LargeTimelineReference>>", optional)]
+    pub large_entries: Vec<LargeTimelineReference>,
     pub history: String,
     #[ts(type = "number")]
     pub oldest: i64,
@@ -266,5 +284,18 @@ mod tests {
         for value in corpus["invalidEvents"].as_array().unwrap() {
             assert!(serde_json::from_value::<RunEvent>(value.clone()).is_err());
         }
+
+        let legacy_plan = serde_json::json!({
+            "id": 5,
+            "createdAt": 5,
+            "type": "item.completed",
+            "text": "Approach",
+            "runId": "00000000-0000-4000-8000-000000000001",
+            "legacyPlanApproval": true,
+            "payload": {"item": {"id": "plan", "type": "proposed_plan", "text": "Approach"}}
+        });
+        let event: RunEvent = serde_json::from_value(legacy_plan.clone()).unwrap();
+        assert_eq!(event.legacy_plan_approval, Some(true));
+        assert_eq!(serde_json::to_value(event).unwrap(), legacy_plan);
     }
 }

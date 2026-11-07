@@ -129,8 +129,8 @@ class NativeParityPreviewTest {
                 if (compact)
                     listOf(
                         Deliverable(
-                            "report",
-                            "run",
+                            id = "report",
+                            runId = "run",
                             key = "report",
                             messageId = "reply",
                             title = "Compte rendu de la version",
@@ -142,8 +142,8 @@ class NativeParityPreviewTest {
                             group = "Rapports",
                         ),
                         Deliverable(
-                            "notes",
-                            "run",
+                            id = "notes",
+                            runId = "run",
                             key = "notes",
                             messageId = "reply",
                             title = "Notes de validation",
@@ -155,8 +155,8 @@ class NativeParityPreviewTest {
                             group = "Rapports",
                         ),
                         Deliverable(
-                            "changes",
-                            "run",
+                            id = "changes",
+                            runId = "run",
                             key = "changes",
                             messageId = "reply",
                             title = "Détails des modifications",
@@ -204,7 +204,7 @@ class NativeParityPreviewTest {
                 )
             fun stream(state: LiveState): MockResponse {
                 val frame =
-                    "event: batch\nid: 2\ndata: ${wireJson.encodeToString(LiveBatch(events, state.copy(artifacts = files), true, false))}\n\n"
+                    "event: batch\nid: 2\ndata: ${wireJson.encodeToString(timelineBatch(events, state.copy(artifacts = files), true, false))}\n\n"
                 return MockResponse()
                     .setHeader("Content-Type", "text/event-stream")
                     .setBody(frame + ": keepalive\n\n".repeat(100000))
@@ -316,6 +316,8 @@ class NativeParityPreviewTest {
                 }
             }
             try {
+                waitText("Tout")
+                compose.onNodeWithText("Tout").performClick()
                 waitText(chat.title)
                 if (!wide) {
                     compose.onNodeWithText(chat.title).performClick()

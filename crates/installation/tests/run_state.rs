@@ -1,6 +1,6 @@
 //! Lifecycle writes keep admission constraints and partial failures atomic.
 use cairn_contracts::{RunState, RunStatus};
-use cairn_installation::{runs::RunChanges, store::Store};
+use cairn_installation::{nodes::run_placement::PlacementChanges, runs::RunChanges, store::Store};
 use serde_json::json;
 
 fn state(id: &str, task: &str) -> RunState {
@@ -41,6 +41,18 @@ async fn unchanged_lifecycle_assignments_do_not_wake_subscribers() {
             resume_count: Some(0),
             ..Default::default()
         },
+        RunChanges {
+            placement: Some(Box::new(PlacementChanges::default())),
+            ..Default::default()
+        },
+        RunChanges {
+            placement: Some(Box::new(PlacementChanges {
+                node_state: Some(None),
+                required_tags: Some(None),
+                ..Default::default()
+            })),
+            ..Default::default()
+        },
     ] {
         assert_eq!(store.change_run("run", change).await.unwrap(), expected);
         assert_eq!(store.revision(), revision);
@@ -77,15 +89,15 @@ async fn unchanged_boundary_patches_preserve_null_presence_without_notifications
     }
 
     let result = store
-        .update_run_boundary("run", json!({ "nodeState": null }))
+        .update_run_boundary("run", json!({ "backup": null }))
         .await
         .unwrap();
-    assert!(result.as_object().unwrap().contains_key("nodeState"));
+    assert!(result.as_object().unwrap().contains_key("backup"));
     assert!(changes.has_changed().unwrap());
     changes.borrow_and_update();
     let revision = store.revision();
     let repeated = store
-        .update_run_boundary("run", json!({ "nodeState": null }))
+        .update_run_boundary("run", json!({ "backup": null }))
         .await
         .unwrap();
     assert_eq!(repeated, result);
@@ -172,6 +184,34 @@ async fn domain_changes_still_commit_when_lifecycle_fields_are_unchanged() {
     assert_eq!(lifecycle, state("run", "mission"));
     assert_eq!(store.run("run").await.unwrap()["storage"]["dirtyBytes"], 0);
     assert!(changes.has_changed().unwrap());
+
+    changes.borrow_and_update();
+    let placement = PlacementChanges {
+        node_state: Some(Some("saving".into())),
+        ..Default::default()
+    };
+    let placed = store
+        .update_run_placement("run", placement.clone())
+        .await
+        .unwrap();
+    assert_eq!(placed["nodeState"], "saving");
+    assert!(changes.has_changed().unwrap());
+    changes.borrow_and_update();
+    let revision = store.revision();
+
+    store
+        .change_run(
+            "run",
+            RunChanges {
+                placement: Some(Box::new(placement.clone())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    store.update_run_placement("run", placement).await.unwrap();
+    assert_eq!(store.revision(), revision);
+    assert!(!changes.has_changed().unwrap());
 }
 
 #[tokio::test]
@@ -238,7 +278,15 @@ async fn a_caught_transition_error_cannot_commit_partial_writes() {
                     RunChanges {
                         status: Some(RunStatus::Cancelled),
                         cancel_requested_at: Some(Some(2)),
-                        boundary: Some(json!({"nodeId": "after", "status": "running"})),
+                        placement: Some(Box::new(
+                            cairn_installation::nodes::run_placement::PlacementChanges {
+                                node_id: Some(
+                                    serde_json::from_value(serde_json::json!("after")).unwrap(),
+                                ),
+                                ..Default::default()
+                            },
+                        )),
+                        boundary: Some(serde_json::json!({"status": "running"})),
                         ..Default::default()
                     },
                 )

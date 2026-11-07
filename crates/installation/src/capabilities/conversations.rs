@@ -133,7 +133,7 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "resume_chat",
         scope: "run",
-        description: "Resume a failed or stopped agent execution using its saved session, subject to existing recovery rules. Use set_chat_paused(false) to resume queued follow-ups.",
+        description: "Resume a failed or stopped chat turn using its saved session, subject to existing recovery rules. An optional selection changes only this turn's model, reasoning and speed for the same coding agent; runId and turnId are required and guard against stale selections. An empty model resolves to the current catalog default unless preserveModel is true, which requires a blank saved model and keeps it blank. For Codex, an empty selection speed inherits the saved request and standard explicitly selects Standard. Mission runs do not support model selection. Use set_chat_paused(false) to resume queued follow-ups.",
     },
     ChatOperation {
         name: "restart_chat_session",
@@ -253,7 +253,7 @@ impl ChatOperation {
                 schema_for::<Chat>(Contract::Serialize),
             ),
             "resume_chat" => (
-                schema_for::<ChatInput>(Contract::Deserialize),
+                schema_for::<ResumeChatInput>(Contract::Deserialize),
                 schema_for::<Run>(Contract::Serialize),
             ),
             "restart_chat_session" => (
@@ -327,12 +327,12 @@ impl ChatOperation {
                 .decode(&input.data)
                 .map_err(|_| Error::bad("Expected base64 file data."))?;
             let attachment = s
-                .store_attachment_authorized(
+                .store_attachment_live(
                     &input.chat_id,
                     &input.attachment_id,
                     &input.name,
                     &bytes,
-                    crate::installation_mcp::management_authorization(bearer.as_deref()),
+                    crate::installation_mcp::management_authorization(s, bearer.as_deref()).await?,
                 )
                 .await?;
             return Ok(serde_json::to_value(attachment)?);
@@ -461,7 +461,7 @@ impl ChatOperation {
                 serde_json::to_value(input)?
             }
             "resume_chat" => {
-                let input: ChatInput = decode(input)?;
+                let input: ResumeChatInput = decode(input)?;
                 serde_json::to_value(input)?
             }
             "restart_chat_session" => {
@@ -490,16 +490,16 @@ impl ChatOperation {
         };
         if self.name == "get_conversation_retention" {
             return s
-                .conversation_retention_authorized(
-                    crate::installation_mcp::management_authorization(bearer.as_deref()),
+                .conversation_retention_live(
+                    crate::installation_mcp::management_authorization(s, bearer.as_deref()).await?,
                 )
                 .await;
         }
         if self.name == "set_conversation_retention" {
             return s
-                .save_conversation_retention_authorized(
+                .save_conversation_retention_live(
                     args,
-                    crate::installation_mcp::management_authorization(bearer.as_deref()),
+                    crate::installation_mcp::management_authorization(s, bearer.as_deref()).await?,
                 )
                 .await;
         }
@@ -507,12 +507,10 @@ impl ChatOperation {
             .scope(origin, async {
                 if self.name == "convert_run_to_chat" {
                     let authorize =
-                        crate::installation_mcp::management_authorization(bearer.as_deref());
+                        crate::installation_mcp::management_authorization(s, bearer.as_deref())
+                            .await?;
                     return s
-                        .chat_from_run_authorized(
-                            crate::validation::text(&args, "runId"),
-                            authorize,
-                        )
+                        .chat_from_run_live(crate::validation::text(&args, "runId"), authorize)
                         .await;
                 }
                 crate::mcp_server::chat_tools::invoke(s, self.name, args, bearer.as_deref(), reader)

@@ -13,8 +13,28 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub(crate) async fn authorize(s: &Service, bearer: &str) -> Result<Value> {
-    let bearer = bearer.to_owned();
-    s.store.read(move |db| authorize_in(db, &bearer)).await
+    authorize_with_authority(s, bearer)
+        .await
+        .map(|(run, _)| run)
+}
+
+/// Retain both the execution token and semantic delegation proof across effects.
+pub(crate) async fn authorize_with_authority(
+    s: &Service,
+    bearer: &str,
+) -> Result<(Value, crate::capabilities::plugin_packages::Authority)> {
+    let caller = bearer.to_owned();
+    let token = caller.clone();
+    let read_token = caller.clone();
+    let run = s
+        .store
+        .read(move |db| authorize_in(db, &read_token))
+        .await?;
+    let authority = crate::capabilities::plugin_packages::Authority::for_execution(&run)
+        .with_guard(move |db| authorize_in(db, &token).map(|_| ()));
+    let mut authority = crate::delegation::authorize_async_with(s, &run, authority).await?;
+    authority.bearer = Some(caller);
+    Ok((run, authority))
 }
 
 pub(crate) fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {
@@ -33,6 +53,7 @@ pub(crate) fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {
     if policy(agent)["installation"] != true || !agent_allowed(&current, agent) {
         return Err(Error::forbidden("Agent permissions were reduced."));
     }
+    crate::delegation::authorize_run(db, &run)?;
     Ok(run)
 }
 
@@ -53,15 +74,16 @@ pub(crate) fn agent_allowed(caller: &Value, target: &Value) -> bool {
 }
 
 /// Authorization for management effects after asynchronous preparation.
-pub(crate) fn management_authorization(
+pub(crate) async fn management_authorization(
+    s: &Service,
     bearer: Option<&str>,
-) -> impl Fn(&Db<'_>) -> Result<()> + Clone + Send + Sync + 'static {
-    let bearer = bearer.map(str::to_owned);
-    move |db| {
-        if let Some(bearer) = &bearer {
-            authorize_in(db, bearer)?;
+) -> Result<crate::authorization::Authorization> {
+    match bearer {
+        Some(bearer) => {
+            let (_, authority) = authorize_with_authority(s, bearer).await?;
+            Ok(crate::authorization::Authorization::installation_management(s, authority, bearer))
         }
-        Ok(())
+        None => Ok(crate::authorization::Authorization::default()),
     }
 }
 
@@ -121,11 +143,31 @@ pub(crate) async fn rpc(
     }
 }
 
+/// A plan turn exposes only operations whose delegated MCP scope is `read`.
+fn has_read_scope(operation: &Value) -> bool {
+    operation["_meta"]["securitySchemes"]
+        .as_array()
+        .is_some_and(|schemes| {
+            schemes.iter().any(|scheme| {
+                let scopes = scheme["scopes"].as_array();
+                scheme["type"] == "oauth2"
+                    && scopes.is_some_and(|scopes| {
+                        scopes.len() == 1 && scopes[0].as_str() == Some("read")
+                    })
+            })
+        })
+}
+
+fn allowed_in_turn(run: &Value, operation: &Value) -> bool {
+    !crate::chats::planning(run) || has_read_scope(operation)
+}
+
 pub(crate) async fn operations(s: &Service, bearer: &str) -> Result<Vec<Value>> {
     let run = authorize(s, bearer).await?;
     let agent_id = &run["snapshot"]["agent"]["id"];
     let tools = crate::mcp_server::operations()
         .into_iter()
+        .filter(|tool| allowed_in_turn(&run, tool))
         .map(|mut tool| {
             tool.as_object_mut().unwrap().remove("_meta");
             if tool["name"] == "create_task" {
@@ -155,11 +197,23 @@ pub(crate) async fn operation(
     mut args: Value,
 ) -> Result<Value> {
     let run = authorize(s, bearer).await?;
-    let known = crate::mcp_server::operations()
-        .iter()
-        .any(|tool| text(tool, "name") == name);
-    if !known {
+    let operations = crate::mcp_server::operations();
+    let Some(operation) = operations.iter().find(|tool| text(tool, "name") == name) else {
         return Err(Error::not_found("Unknown operation"));
+    };
+    if !allowed_in_turn(&run, operation) {
+        return Err(Error::forbidden(
+            "Only read-scoped installation operations are available during a plan turn.",
+        ));
+    }
+    if let Some(op) = crate::capabilities::artifact_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
     }
     if let Some(operation) = crate::capabilities::plugin_package_operation(name) {
         return operation
@@ -262,11 +316,15 @@ pub(crate) async fn operation(
             .await;
     }
     if let Some(op) = crate::capabilities::node_operation(name) {
-        return op
-            .invoke(
-                s,
-                args,
-                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+        // Bound the shared RPC frame while placement can await nested node work.
+        return crate::native::policy::PARENT
+            .scope(
+                crate::validation::text(&run, "id").to_owned(),
+                Box::pin(op.invoke(
+                    s,
+                    args,
+                    crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+                )),
             )
             .await;
     }

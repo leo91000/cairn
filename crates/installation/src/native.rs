@@ -4,6 +4,7 @@ pub(crate) mod bases;
 mod bases_tests;
 mod bases_warmer;
 pub(crate) mod block;
+mod bootstrap;
 mod capacity;
 pub(crate) mod disk;
 pub mod docker;
@@ -23,7 +24,11 @@ mod workspace;
 pub(crate) use mode::matches as mode_matches;
 pub(crate) use service::native_budget;
 pub use service::serve;
+#[cfg(test)]
+pub(crate) use service::tests::output_limit_completion;
 pub use watchdog::serve as watchdog;
+
+pub(crate) const MISSING_NATIVE_JOURNAL_CODE: &str = "missing_native_journal";
 
 pub fn enabled() -> bool {
     std::env::var("CAIRN_NODE_BACKEND").is_ok_and(|value| value == "native")

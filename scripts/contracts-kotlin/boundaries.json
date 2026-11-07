@@ -3,7 +3,6 @@
     "extension": {
       "x-kotlin-type": {
         "TaskOutcome": "build.cairn.boundary.TaskOutcome",
-        "ExclusiveReservation": "build.cairn.boundary.ExclusiveReservation",
         "NodeBackup": "build.cairn.boundary.NodeBackup",
         "RunStorage": "build.cairn.boundary.RunStorage",
         "RunUsage": "kotlinx.serialization.json.JsonObject"

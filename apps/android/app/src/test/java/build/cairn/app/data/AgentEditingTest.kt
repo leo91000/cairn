@@ -1503,6 +1503,7 @@ class AgentEditingTest {
         assertEquals(0, access["mcps"]!!.jsonArray.size)
         assertEquals(0, access["mcpTools"]!!.jsonObject.size)
         val body = agentSaveBody(created)
+        assertEquals("", body["settings"]!!.jsonObject["reasoning"]!!.jsonPrimitive.content)
         assertEquals("", body["settings"]!!.jsonObject["speed"]!!.jsonPrimitive.content)
         assertEquals(
             "priority",

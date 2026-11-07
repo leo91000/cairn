@@ -76,8 +76,8 @@ class ChatJourneyTest {
                 )
             val artifact =
                 Deliverable(
-                    "report-v2",
-                    "run",
+                    id = "report-v2",
+                    runId = "run",
                     key = "report",
                     version = 2,
                     title = "Compte rendu",
@@ -91,8 +91,8 @@ class ChatJourneyTest {
                 )
             val picture =
                 Deliverable(
-                    "image",
-                    "run",
+                    id = "image",
+                    runId = "run",
                     key = "image",
                     version = 1,
                     title = "Aperçu du projet",
@@ -151,7 +151,7 @@ class ChatJourneyTest {
                 )
             fun stream(state: LiveState, events: List<RunEvent> = emptyList()): MockResponse {
                 val body =
-                    "event: batch\nid: ${events.lastOrNull()?.id ?: 0}\ndata: ${wireJson.encodeToString(LiveBatch(events,state,false,false))}\n\n"
+                    "event: batch\nid: ${events.lastOrNull()?.id ?: 0}\ndata: ${wireJson.encodeToString(timelineBatch(events,state,false,false))}\n\n"
                 return MockResponse()
                     .setHeader("Content-Type", "text/event-stream")
                     .setBody(body + ": keepalive\n\n")

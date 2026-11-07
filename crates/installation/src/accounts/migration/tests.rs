@@ -69,10 +69,7 @@ async fn real_version13_database_preserves_accounts_usage_secrets_and_references
         &db,
         "SELECT json_array(id,updated_at) FROM records WHERE kind='agentAccounts' ORDER BY id",
     );
-    let runs = rows(
-        &db,
-        "SELECT json_array(id,json(data)) FROM runs ORDER BY id",
-    );
+    let runs = crate::placement_migration_fixture::run_views(&db);
     let checkpoints = rows(
         &db,
         "SELECT json_array(run_id,state) FROM run_checkpoints ORDER BY run_id",
@@ -80,13 +77,7 @@ async fn real_version13_database_preserves_accounts_usage_secrets_and_references
     let direct = direct_metadata(&db);
     let store = Store::open(root.path()).unwrap();
     assert_eq!(direct_metadata(&db), direct);
-    assert_eq!(
-        rows(
-            &db,
-            "SELECT json_array(id,json(data)) FROM run_views ORDER BY id"
-        ),
-        runs
-    );
+    assert_eq!(crate::placement_migration_fixture::run_views(&db), runs);
     assert_eq!(
         rows(
             &db,

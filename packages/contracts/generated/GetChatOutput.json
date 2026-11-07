@@ -110,6 +110,15 @@
             }
           ]
         },
+        "codingAgentDefaults": {
+          "additionalProperties": {
+            "$ref": "#/definitions/CodingAgentPreferences"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "createdAt": {
           "format": "int64",
           "maximum": 9007199254740991,
@@ -403,6 +412,17 @@
           },
           "type": "array"
         },
+        "nextSelection": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CodingAgentPreferences"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Resolved selection for the next implicit message, including changed defaults."
+        },
         "paused": {
           "default": false,
           "type": "boolean"
@@ -465,6 +485,17 @@
             "$ref": "#/definitions/ChatQuestion"
           },
           "type": "array"
+        },
+        "readAt": {
+          "default": null,
+          "description": "Latest visible question or finished turn to acknowledge, independently of its status.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "requestedBy": {
           "anyOf": [
@@ -558,13 +589,15 @@
           "type": "string"
         },
         "suspendedByExclusive": {
-          "additionalProperties": true,
-          "default": null,
-          "type": [
-            "object",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExclusiveReservation"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "x-kotlin-type": "ExclusiveReservation"
+          "default": null
         },
         "title": {
           "default": "",
@@ -697,6 +730,10 @@
     },
     "ChatExecution": {
       "properties": {
+        "afterPlan": {
+          "description": "The previous turn of this run was a plan turn, whose engine mode may persist.",
+          "type": "boolean"
+        },
         "attachments": {
           "default": [],
           "items": {
@@ -719,6 +756,10 @@
             "string",
             "null"
           ]
+        },
+        "plan": {
+          "description": "A plan turn: the agent explores and proposes without changing anything.",
+          "type": "boolean"
         },
         "previous": {
           "anyOf": [
@@ -775,6 +816,10 @@
         "model": {
           "default": "",
           "type": "string"
+        },
+        "plan": {
+          "description": "A plan turn request. Absent on messages saved before plan turns, which never were.",
+          "type": "boolean"
         },
         "provider": {
           "default": "",
@@ -1131,6 +1176,26 @@
       ],
       "type": "object"
     },
+    "CodingAgentPreferences": {
+      "description": "Safe display defaults. These are inherited preferences, never profile overrides.",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "reasoning": {
+          "type": "string"
+        },
+        "speed": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "reasoning",
+        "speed"
+      ],
+      "type": "object"
+    },
     "CodingAgentSwitch": {
       "properties": {
         "error": {
@@ -1235,6 +1300,105 @@
       ],
       "type": "object"
     },
+    "ExclusiveReservation": {
+      "additionalProperties": false,
+      "properties": {
+        "createdAt": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expiresAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "minimumAvailableMemoryMiB": {
+          "default": 0,
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "nodeId": {
+          "type": "string"
+        },
+        "ownerRunId": {
+          "type": "string"
+        },
+        "pausedRunIds": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "renewalPending": {
+          "default": false,
+          "type": "boolean"
+        },
+        "state": {
+          "pattern": "^(queued|acquiring|acquired|releasing|released|failed|expired)$",
+          "type": "string"
+        },
+        "waitUntil": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "nodeId",
+        "ownerRunId",
+        "reason",
+        "state"
+      ],
+      "type": "object"
+    },
+    "ExecutionResources": {
+      "additionalProperties": false,
+      "description": "Execution allowances after node reserves are deducted. Configured node\nbudgets retain NodeResources' separate 128 MiB disk minimum.",
+      "properties": {
+        "cpu": {
+          "format": "uint32",
+          "maximum": 4096,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "diskMiB": {
+          "format": "uint64",
+          "maximum": 1099511627776,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "memoryMiB": {
+          "format": "uint64",
+          "maximum": 1073741824,
+          "minimum": 128,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cpu",
+        "memoryMiB",
+        "diskMiB"
+      ],
+      "type": "object"
+    },
     "MissionPluginGrant": {
       "additionalProperties": false,
       "properties": {
@@ -1255,6 +1419,43 @@
       ],
       "type": "object"
     },
+    "NativeConfigurationSnapshot": {
+      "additionalProperties": false,
+      "description": "Frozen per message. Contains editable settings only, never credentials.",
+      "properties": {
+        "agentId": {
+          "description": "Profile that supplied these defaults, even if the conversation is later transferred.",
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "configuredPaths": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "document": {
+          "type": "string"
+        },
+        "provider": {
+          "pattern": "^(codex|claude|opencode)$",
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "document",
+        "revision"
+      ],
+      "type": "object"
+    },
     "NativeModeRequest": {
       "additionalProperties": false,
       "properties": {
@@ -1271,35 +1472,6 @@
       },
       "required": [
         "mode"
-      ],
-      "type": "object"
-    },
-    "NodeResources": {
-      "additionalProperties": false,
-      "properties": {
-        "cpu": {
-          "format": "uint32",
-          "maximum": 4096,
-          "minimum": 1,
-          "type": "integer"
-        },
-        "diskMiB": {
-          "format": "uint64",
-          "maximum": 1099511627776,
-          "minimum": 128,
-          "type": "integer"
-        },
-        "memoryMiB": {
-          "format": "uint64",
-          "maximum": 1073741824,
-          "minimum": 128,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "cpu",
-        "memoryMiB",
-        "diskMiB"
       ],
       "type": "object"
     },
@@ -1764,7 +1936,7 @@
         "resources": {
           "anyOf": [
             {
-              "$ref": "#/definitions/NodeResources"
+              "$ref": "#/definitions/ExecutionResources"
             },
             {
               "type": "null"
@@ -1852,13 +2024,15 @@
           "type": "string"
         },
         "suspendedByExclusive": {
-          "additionalProperties": true,
-          "default": null,
-          "type": [
-            "object",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExclusiveReservation"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "x-kotlin-type": "ExclusiveReservation"
+          "default": null
         },
         "taskId": {
           "type": "string"
@@ -1996,6 +2170,16 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "nativeConfiguration": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NativeConfigurationSnapshot"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "project": {

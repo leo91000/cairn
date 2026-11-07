@@ -21,7 +21,7 @@ import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
 
 @Composable
-fun SettingsScreen(vm: CairnViewModel, state: Workspace) {
+fun SettingsScreen(vm: CairnViewModel, state: Workspace, navigate: (String) -> Unit = {}) {
     val theme by vm.theme.collectAsStateWithLifecycle(initialValue = "system")
     var settings by remember { mutableStateOf<InstallationSettings?>(null) }
     var grants by remember { mutableStateOf<List<Grant>>(emptyList()) }
@@ -58,7 +58,22 @@ fun SettingsScreen(vm: CairnViewModel, state: Workspace) {
         NotificationSettings(vm)
         PerformanceSettings(vm)
         if (state.isOwner) {
+            Panel {
+                Text(
+                    "Configuration des agents de code",
+                    style = MaterialTheme.typography.titleLarge,
+                )
+                Text(
+                    "Valeurs natives par défaut pour l’installation, personnalisables pour chaque agent."
+                )
+                for (provider in listOf("codex", "claude", "opencode")) {
+                    OutlinedButton(onClick = { navigate("coding-agent-configuration/$provider") }) {
+                        Text(providerLabel(provider))
+                    }
+                }
+            }
             StorageSettings(vm)
+            TaskStorageSettings(vm)
             ConversationRetentionSettings(vm)
             settings?.let { info ->
                 Panel {

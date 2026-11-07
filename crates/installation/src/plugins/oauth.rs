@@ -590,6 +590,37 @@ async fn access_token_with(
     if let Some(secret) = metadata["clientSecret"].as_str() {
         fields.push(("client_secret".into(), secret.to_owned()));
     }
+    let expected = connection.clone();
+    let management = management.cloned();
+    let selected_package = (!package.builtin).then(|| {
+        (
+            package.manifest.id.clone(),
+            package.manifest.version.clone(),
+            package.digest.clone(),
+        )
+    });
+    let authorize_refresh = Arc::new(move |db: &crate::store::Db<'_>| -> Result<()> {
+        if let Some(authority) = &management {
+            authority.authorize(db)?;
+        }
+        authorize_token(db, &expected, editing)?;
+        if let Some((id, version, digest)) = &selected_package {
+            let current = db.plugin_package(id)?;
+            if current.active.as_ref() != Some(version)
+                || current.approvals.get(version) != Some(digest)
+            {
+                return Err(Error::conflict(
+                    "The plugin package changed during OAuth refresh.",
+                ));
+            }
+        }
+        Ok(())
+    });
+    // Credential/package retrieval awaited after the mutex's initial check.
+    // Fence local revocation again immediately before the provider effect;
+    // semantic resolution here could recursively require this same OAuth lock.
+    let before_send = authorize_refresh.clone();
+    s.store.read(move |db| before_send(db)).await?;
     let response = post(s, &package.manifest, &oauth.token_url, &fields).await?;
     let flow = Flow {
         id: id(),
@@ -615,14 +646,9 @@ async fn access_token_with(
     };
     let refreshed = credentials(&response, &flow, oauth, Some(&saved))?;
     let encrypted = s.vault.encrypt(&key, &refreshed)?;
-    let expected = connection.clone();
-    let management = management.cloned();
     s.store
         .transaction(move |db| {
-            if let Some(authority) = management {
-                authority.authorize(db)?;
-            }
-            authorize_token(db, &expected, editing)?;
+            authorize_refresh(db)?;
             db.set(&format!("mcp-secret:{key}"), &encrypted, None)
         })
         .await?;
@@ -634,12 +660,11 @@ pub(crate) async fn disconnect<F>(
     plugin: &str,
     instance: &str,
     authorize: F,
+    management: Option<super::management::Authority>,
 ) -> Result<Value>
 where
     F: Fn(&crate::store::Db<'_>) -> Result<()> + Send + Sync + 'static,
 {
-    let lock = s.plugins.oauth_flows.lock(instance);
-    let _guard = lock.lock().await;
     let package = registry::active(s, plugin).await?;
     let oauth = package
         .manifest
@@ -648,40 +673,56 @@ where
         .and_then(|c| c.oauth.as_ref())
         .ok_or_else(|| Error::bad("This plugin has no OAuth account."))?;
     let connection = connections::get(s, plugin, instance).await?;
-    let key = connections::credential_key(instance);
-    let saved = s.vault.get(&key).await?;
+    let lock = s.plugins.oauth_flows.lock(instance);
+    let guard = loop {
+        let guard = lock.lock().await;
+        let Some(authority) = &management else {
+            break guard;
+        };
+        // Resource ancestry may itself refresh this account. Never resolve it
+        // while holding its OAuth mutex. If someone acquires the lock during
+        // that check, wait and recheck again before the mutation.
+        drop(guard);
+        authority.recheck(s).await?;
+        if let Ok(guard) = lock.try_lock() {
+            break guard;
+        }
+    };
     let expected = connection.clone();
-    s.store
-        .transaction(move |db| {
-            authorize(db)?;
-            let mut current = db.plugin_instance(&expected.id)?.ok_or_else(expired)?;
-            if current.revision != expected.revision {
+    let expected_package = package.clone();
+    let check = std::sync::Arc::new(move |db: &crate::store::Db<'_>| {
+        authorize(db)?;
+        let current = db.plugin_instance(&expected.id)?.ok_or_else(expired)?;
+        if current.revision != expected.revision {
+            return Err(Error::conflict(
+                "This account changed. Reload it before disconnecting.",
+            ));
+        }
+        if !expected_package.builtin {
+            let package = db.plugin_package(&expected_package.manifest.id)?;
+            if package.active.as_deref() != Some(&expected_package.manifest.version)
+                || package.approvals.get(&expected_package.manifest.version)
+                    != Some(&expected_package.digest)
+            {
                 return Err(Error::conflict(
-                    "This account changed. Reload it before disconnecting.",
+                    "The plugin package changed. Retry disconnecting.",
                 ));
             }
-            current.enabled = false;
-            current.revision = id();
-            current.updated_at = now();
-            db.save_plugin_instance(&current)?;
-            db.delete(&format!(
-                "mcp-secret:{}",
-                connections::credential_key(&expected.id)
-            ))?;
-            db.set_plugin_status(
-                &current.id,
-                &current.revision,
-                &cairn_contracts::PluginStatus::default(),
-            )?;
-            db.audit(
-                "plugin.oauth.disconnected",
-                &json!({ "instance": expected.id, "plugin": expected.plugin_id }),
-            )
+        }
+        Ok(current)
+    });
+    let read = check.clone();
+    let vault = s.vault.clone();
+    let saved = s
+        .store
+        .read(move |db| {
+            let current = read(db)?;
+            let key = connections::credential_key(&current.id);
+            db.kv(&format!("mcp-secret:{key}"))?
+                .map(|value| vault.decrypt(&key, &value))
+                .transpose()
         })
         .await?;
-    s.plugins.changed.notify_one();
-    s.plugins.files.forget(instance);
-    s.plugins.program_caches.forget(instance);
     let mut revoked = None;
     if let (Some(endpoint), Some(saved)) = (&oauth.revocation_url, saved) {
         let token = saved["oauth"]["refreshToken"]
@@ -690,6 +731,12 @@ where
         if let Some(token) = token {
             let endpoint = target(s, &package.manifest, endpoint, "https")?;
             let body = serde_urlencoded::to_string([("token", token)]).map_err(Error::internal)?;
+            // Revoke under the pre-mutation proof. Disabling this instance first
+            // would invalidate its own delegated coverage and lose the token.
+            // Semantic checks ran before try_lock; only local fences run while
+            // holding the refresh mutex, so a resolver cannot deadlock on it.
+            let before_send = check.clone();
+            s.store.read(move |db| before_send(db).map(|_| ())).await?;
             revoked = Some(
                 s.plugins
                     .http
@@ -703,6 +750,36 @@ where
             );
         }
     }
+    s.store
+        .transaction(move |db| {
+            let mut current = check(db)?;
+            current.enabled = false;
+            current.revision = id();
+            current.updated_at = now();
+            db.save_plugin_instance(&current)?;
+            db.delete(&format!(
+                "mcp-secret:{}",
+                connections::credential_key(&current.id)
+            ))?;
+            db.set_plugin_status(
+                &current.id,
+                &current.revision,
+                &cairn_contracts::PluginStatus::default(),
+            )?;
+            db.audit(
+                "plugin.oauth.disconnected",
+                &json!({
+                    "instance": current.id,
+                    "plugin": current.plugin_id,
+                }),
+            )?;
+            Ok(())
+        })
+        .await?;
+    drop(guard);
+    s.plugins.changed.notify_one();
+    s.plugins.files.forget(instance);
+    s.plugins.program_caches.forget(instance);
     Ok(
         json!({ "disconnected": true, "revoked": revoked, "message": if revoked == Some(false) {
         "Disconnected locally. The service could not confirm revocation; remove the app from your provider's connected applications if needed."

@@ -1,12 +1,14 @@
 import type { ChatView } from '../../../packages/contracts/chats'
 import type { RunEvent, RunListItem, Task } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
-import { activityEntries } from '../src/activity'
 import { exclusiveSuspensionLabel } from '../src/run-status'
 import {
   backgroundWait,
   dismissible,
+  filFolds,
   filOf,
+  filThread,
+  filViews,
   identityColor,
   liveElapsed,
   shortAge,
@@ -14,6 +16,7 @@ import {
   waitingStep,
   workingStep,
 } from '../src/signal'
+import { fixtureEntries } from './timeline-fixture'
 
 function chat(id: string, values: Partial<ChatView> = {}): ChatView {
   return {
@@ -150,6 +153,8 @@ describe('the Fil', () => {
     ownerRunId: 'owner',
     reason: 'Compile',
     state: 'acquired',
+    renewalPending: false,
+    error: null,
     createdAt: 1,
     expiresAt: 1000,
     waitUntil: 1000,
@@ -423,50 +428,50 @@ describe('the Fil', () => {
 
 describe('the working indicator', () => {
   it('names the step in progress with its command, timed from the latest message', () => {
-    const entries = activityEntries([user(1, 5000), command(2, 5100, 'cat README.md'), command(3, 5200, 'pnpm test', true)], true)
+    const entries = fixtureEntries([user(1, 5000), command(2, 5100, 'cat README.md'), command(3, 5200, 'pnpm test', true)], true)
     expect(workingStep(entries, 'Cairn', 10)).toEqual({ title: expect.any(String), detail: 'pnpm test', since: 5000 })
   })
 
   it('says the agent is working with its last step, ignoring earlier turns', () => {
-    const entries = activityEntries([command(1, 1000, 'pnpm build', true), user(2, 7000)], true)
+    const entries = fixtureEntries([command(1, 1000, 'pnpm build', true), user(2, 7000)], true)
     expect(workingStep(entries, '', 3000)).toEqual({ title: 'The agent is working', detail: '', since: 7000 })
-    const done = activityEntries([user(1, 1), command(2, 2, 'pnpm lint')], true)
+    const done = fixtureEntries([user(1, 1), command(2, 2, 'pnpm lint')], true)
     expect(workingStep(done, 'Cairn', null).detail).toMatch(/^Last step: /)
     expect(workingStep([], 'Cairn', 3000)).toEqual({ title: 'Cairn is working', detail: '', since: 3000 })
   })
 
-  it('shows an idle agent waiting for its background tasks, timed from when it began waiting', () => {
-    const events = [user(1, 1000), command(2, 2000, 'pnpm test > log 2>&1'), waiting(3, 9000, ['Rebuild and run regression test'])]
-    const wait = backgroundWait(events)
-    expect(wait).toEqual({ tasks: ['Rebuild and run regression test'], since: 9000 })
-    expect(waitingStep(wait!)).toEqual({
-      title: 'Waiting for a background task',
-      detail: 'Rebuild and run regression test',
-      since: 9000,
-      waiting: ['Rebuild and run regression test'],
-    })
-    expect(waitingStep({ tasks: ['Build', ''], since: 1 }).title).toBe('Waiting for 2 background tasks')
-    expect(backgroundWait([waiting(1, 1, [' ', 'Watch CI'])])?.tasks).toEqual(['Background task', 'Watch CI'])
-  })
-
-  it('keeps the original wait duration when tasks change and resets after the agent resumes', () => {
-    const events = [waiting(1, 1000, ['Build', 'Watch CI']), waiting(2, 2000, ['Watch CI'])]
-    expect(backgroundWait(events)).toEqual({ tasks: ['Watch CI'], since: 1000 })
-    expect(backgroundWait([...events, command(3, 3000, 'cat log', true), waiting(4, 4000, ['Watch CI'])])).toEqual({ tasks: ['Watch CI'], since: 4000 })
-    expect(backgroundWait([...events, waiting(3, 3000, []), waiting(4, 4000, ['Build'])])).toEqual({ tasks: ['Build'], since: 4000 })
-  })
-
-  it('stops waiting once the tasks finish, the agent acts again or the user writes', () => {
-    const announced = [user(1, 1000), waiting(2, 2000, ['Build'])]
+  it('presents the server’s current background wait and local fallback labels', () => {
+    const card = {
+      id: 'notice:3',
+      runId: 'run',
+      position: 3,
+      revision: 3,
+      source: 3,
+      turn: 1,
+      attempt: 0,
+      createdAt: 9000,
+      updatedAt: 9000,
+      content: {
+        kind: 'notice' as const,
+        notice: {
+          code: 'backgroundTasks' as const,
+          state: 'info' as const,
+          prominent: false,
+          tasks: ['Build', ' '],
+          taskIds: ['one', 'two'],
+          waitingSince: 1000,
+        },
+      },
+    }
+    const wait = backgroundWait([card])
+    expect(wait).toEqual({ tasks: ['Build', 'Background task'], taskIds: ['one', 'two'], since: 1000 })
+    expect(waitingStep(wait!).title).toBe('Waiting for 2 background tasks')
+    expect(backgroundWait([{ ...card, content: { ...card.content, notice: { ...card.content.notice, waitingSince: undefined } } }])).toBeNull()
     expect(backgroundWait([])).toBeNull()
-    expect(backgroundWait([...announced, waiting(3, 3000, [])])).toBeNull()
-    expect(backgroundWait([...announced, command(3, 3000, 'cat log', true)])).toBeNull()
-    expect(backgroundWait([...announced, user(3, 3000)])).toBeNull()
-    expect(backgroundWait([...announced, { ...user(3, 3000), type: 'diagnostic' }])).not.toBeNull()
   })
 
   it('labels background waits in the activity log', () => {
-    const [group] = activityEntries([waiting(1, 1, ['Build', 'Watch CI']), waiting(2, 2, [])])
+    const [group] = fixtureEntries([waiting(1, 1, ['Build', 'Watch CI']), waiting(2, 2, [])])
     expect(group?.kind === 'group' && group.artifacts.map(artifact => [artifact.title, artifact.subtitle])).toEqual([
       ['Waiting for background tasks', 'Build · Watch CI'],
       ['Background tasks finished', ''],
@@ -496,7 +501,183 @@ describe('delegated conversations', () => {
     const requester = chat('requester', { title: 'Refactor the send queue', slug: 'refactor' })
     const delegated = chat('delegated', { status: 'running', requester: { chatId: 'requester', title: 'Refactor the send queue' } })
     const fil = filOf([requester, delegated], [], [])
-    expect(fil.live.find(item => item.chatId === 'delegated')?.requester).toEqual({ title: 'Refactor the send queue', to: '/chats/requester' })
+    expect(fil.live.find(item => item.chatId === 'delegated')?.requester).toEqual({ title: 'Refactor the send queue', to: '/chats/requester', chatId: 'requester' })
     expect(fil.recent.find(item => item.chatId === 'requester')?.requester).toBeUndefined()
   })
+
+  it('sit right below the work that started them when both are listed', () => {
+    const fil = filOf([
+      chat('ship', { title: 'Ship PR 382', updatedAt: 10 }),
+      chat('review', { title: 'Review R51', updatedAt: 30, requester: { chatId: 'ship', title: 'Ship PR 382' } }),
+      chat('other', { title: 'Other work', updatedAt: 20 }),
+      chat('orphan', { title: 'Orphan review', updatedAt: 5, requester: { chatId: 'gone', title: 'Deleted' } }),
+    ], [task('proof')], [
+      run('proof-1', 'proof', {
+        finishedAt: 1,
+        outcome: {
+          status: 'blocked',
+          reason: 'CI belongs to the parent',
+          evidence: [],
+          reportedAt: 1,
+          waitingOn: 'requester',
+        },
+        requestedBy: { runId: 'chat-run', chatId: 'review' },
+      }),
+    ])
+    const rows = filThread(filViews(fil).all)
+    expect(rows.map(({ item, nested }) => [item.title, nested])).toEqual([
+      ['Other work', false],
+      ['Ship PR 382', false],
+      ['Review R51', true],
+      ['proof', true],
+      ['Orphan review', false],
+    ])
+  })
+
+  it('stay in place when their requester is not listed', () => {
+    const fil = filOf([
+      chat('ship', { title: 'Ship PR 382', updatedAt: 10 }),
+      chat('review', {
+        title: 'Review R51',
+        status: 'running',
+        updatedAt: 30,
+        requester: { chatId: 'ship', title: 'Ship PR 382' },
+      }),
+    ], [], [])
+    expect(filThread(filViews(fil).ongoing)).toEqual([{ item: expect.objectContaining({ title: 'Review R51' }), nested: false }])
+  })
+})
+
+describe('quiet missions', () => {
+  const fold = (fil: ReturnType<typeof filOf>) => filFolds(filThread(filViews(fil).all)).map(entry => entry.folded ? entry.folded.map(item => item.title) : entry.item.title)
+
+  it('fold together when two or more finished and were read in a row', () => {
+    const fil = filOf([chat('talk', { title: 'talk', updatedAt: 25 })], [task('a'), task('b'), task('c'), task('d'), task('e')], [
+      run('a-1', 'a', { finishedAt: 50 }),
+      run('b-1', 'b', { finishedAt: 40 }),
+      run('c-1', 'c', { finishedAt: 30 }),
+      run('d-1', 'd', { finishedAt: 20 }),
+      // A lone quiet mission stays a row.
+      run('e-1', 'e', { status: 'failed', finishedAt: 10 }),
+    ])
+    expect(fold(fil)).toEqual([['a', 'b', 'c'], 'talk', 'd', 'e'])
+  })
+
+  it('stay rows while unread, unfinished or followed by the work they delegated', () => {
+    const fil = filOf([], [task('a'), task('b'), task('c'), task('child')], [
+      run('a-1', 'a', { finishedAt: 50, unread: true }),
+      run('b-1', 'b', { finishedAt: 40 }),
+      run('c-1', 'c', { finishedAt: 30 }),
+      run('child-1', 'child', {
+        finishedAt: 20,
+        outcome: {
+          status: 'blocked',
+          reason: 'Waits on c',
+          evidence: [],
+          reportedAt: 20,
+          waitingOn: 'requester',
+        },
+        requestedBy: { runId: 'c-1', taskId: 'c' },
+      }),
+    ])
+    expect(fold(fil)).toEqual(['a', 'b', 'c', 'child'])
+  })
+})
+
+describe('finished work', () => {
+  it('is marked so its row can stay quiet, unlike work that needs attention', () => {
+    const fil = filOf([
+      chat('done', { title: 'done', status: 'succeeded' }),
+      chat('failed', { title: 'failed', status: 'failed' }),
+      chat('paused', { title: 'paused', status: 'succeeded', paused: true }),
+    ], [task('mission')], [run('mission-1', 'mission', { status: 'succeeded' })])
+    expect(filViews(fil).all.map(item => [item.title, !!item.finished]).sort()).toEqual([
+      ['done', true],
+      ['failed', false],
+      ['mission', true],
+      ['paused', false],
+    ])
+  })
+})
+
+describe('compact reception tabs', () => {
+  it('acknowledges questions and errors without removing their status or active work', () => {
+    const chats = [
+      chat('answer', { pendingQuestions: 1, unread: true, readAt: 10 }),
+      chat('error', {
+        status: 'failed',
+        unread: true,
+        finishedAt: 20,
+        readAt: 20,
+      }),
+      chat('working', { status: 'running' }),
+    ]
+    const before = filViews(filOf(chats, [], []))
+    expect(before.unread.map(item => item.title)).toEqual(['answer', 'error'])
+    expect(before.ongoing.map(item => item.title)).toEqual(['answer', 'working'])
+    const after = filViews(filOf(chats, [], [], { 'chat:answer': 10, 'chat:error': 20 }))
+    expect(after.unread).toEqual([])
+    expect(after.ongoing.map(item => [item.title, item.kind])).toEqual([['answer', 'question'], ['working', 'running']])
+    expect(after.all.find(item => item.title === 'error')?.kind).toBe('failed')
+    expect(filViews(filOf([chat('answer', { pendingQuestions: 2, unread: true, readAt: 30 })], [], [], { 'chat:answer': 10 })).unread).toHaveLength(1)
+  })
+
+  it('keeps read mission results in Tout and pending outcomes in En cours', () => {
+    const runs = [run('done', 'mission', { unread: true, finishedAt: 20 }), run('blocked', 'input', {
+      unread: true,
+      finishedAt: 30,
+      outcome: {
+        status: 'needs_input',
+        reason: 'Pick one',
+        reportedAt: 30,
+        evidence: [],
+      },
+    })]
+    const views = filViews(filOf([], [task('mission'), task('input')], runs, { 'task:mission': 20, 'task:input': 30 }))
+    expect(views.unread).toEqual([])
+    expect(views.ongoing.map(item => item.title)).toEqual(['input'])
+    expect(views.all.map(item => item.title)).toEqual(['input', 'mission'])
+  })
+
+  it('does not notify for completed delegated conversations', () => {
+    const views = filViews(filOf([chat('delegate', {
+      status: 'succeeded',
+      unread: true,
+      finishedAt: 30,
+      requestedBy: { chatId: 'parent', runId: 'run', requestId: null },
+
+    })], [], []))
+    expect(views.unread).toEqual([])
+    expect(views.all.map(item => item.title)).toEqual(['delegate'])
+  })
+})
+
+it('shows unread notifications regardless of outcome routing or snooze state', () => {
+  for (const waitingOn of ['external', 'user'] as const) {
+    const views = filViews(filOf([], [task('mission')], [run('result', 'mission', {
+      unread: true,
+      finishedAt: 20,
+      outcome: {
+        status: 'blocked',
+        waitingOn,
+        reason: 'Waiting',
+        reportedAt: 20,
+        evidence: [],
+      },
+      ...(waitingOn === 'user' ? { dismissal: { until: 100 } } : {}),
+    })], {}, 50))
+    expect(views.unread).toHaveLength(1)
+    expect(views.all[0].unread).toBe(true)
+    expect(filViews(filOf([], [task('mission')], [run('result', 'mission', {
+      unread: true,
+      finishedAt: 20,
+      outcome: {
+        status: 'blocked',
+        waitingOn,
+        reason: 'Waiting',
+        reportedAt: 20,
+        evidence: [],
+      },
+    })], { 'task:mission': 20 })).unread).toEqual([])
+  }
 })

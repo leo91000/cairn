@@ -448,29 +448,28 @@ abstract class SideQuestionCases {
 
     @Test
     fun aReplyOffersItsSideQuestionsOnlyWhileTheAgentCanAnswer() {
-        val asked = mutableListOf<Pair<String, String>>()
-        val shown = mutableListOf<String>()
+        val asked = mutableListOf<Triple<String, String, Long?>>()
+        val shown = mutableListOf<Triple<String, Long?, Long?>>()
         var canAsk by mutableStateOf(true)
         val vm = viewModel()
         val models = ViewModelStore().apply { put("fixture", vm) }
-        val event =
-            RunEvent(
-                id = 1,
-                createdAt = 0,
-                type = "item.completed",
-                text = "Réponse",
-                payload =
-                    buildJsonObject {
-                        put(
-                            "item",
-                            buildJsonObject {
-                                put("id", "reply-1")
-                                put("type", "agent_message")
-                                put("text", "Réponse de l’agent")
-                            },
-                        )
-                    },
+        val card =
+            TimelineCard(
+                id = "reply:first",
                 runId = "run",
+                position = 11,
+                revision = 15,
+                source = 15,
+                turn = 1,
+                attempt = 0,
+                createdAt = 0,
+                updatedAt = 1,
+                content =
+                    build.cairn.contracts.TimelineContent.B(
+                        itemId = "reply-1",
+                        text = "Réponse de l’agent",
+                        state = "done",
+                    ),
             )
         compose.setContent {
             CairnTheme {
@@ -478,20 +477,24 @@ abstract class SideQuestionCases {
                     LocalSideQuestions provides
                         SideQuestionActions(
                             canAsk,
-                            mapOf("item:reply-1" to 2),
-                            { item, quote, _ -> asked += item to quote },
-                            { item, _, _ -> shown += item },
+                            mapOf(
+                                "event:reply-1:11" to 1,
+                                "event:reply-1:15" to 1,
+                                "event:reply-1:30" to 5,
+                            ),
+                            { item, quote, anchor -> asked += Triple(item, quote, anchor) },
+                            { item, first, last -> shown += Triple(item, first, last) },
                         )
                 ) {
-                    EventRow(vm, event, "Agent")
+                    TimelineRow(vm, TimelineEntry(card.id, emptyList(), true, card = card), "Agent")
                 }
             }
         }
         try {
             compose.onNodeWithContentDescription("Poser une question à côté").performClick()
-            assertEquals(listOf("reply-1" to ""), asked)
+            assertEquals(listOf(Triple("reply-1", "", 11L)), asked)
             compose.onNodeWithText("2").performClick()
-            assertEquals(listOf("reply-1"), shown)
+            assertEquals(listOf(Triple("reply-1", 11L, 15L)), shown)
             val label = compose.onNodeWithText("Agent").getBoundsInRoot()
             canAsk = false
             compose.waitForIdle()

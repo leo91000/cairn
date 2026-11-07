@@ -67,6 +67,38 @@ internal fun effortLabel(value: String): String =
         else -> value
     }
 
+internal fun pickerAppliedReasoning(
+    selectedModel: CodingAgentModel?,
+    reasoning: String,
+    inheritedReasoning: String,
+): String = reasoning.ifBlank {
+    inheritedReasoning.ifBlank { selectedModel?.defaultReasoningEffort.orEmpty() }
+}
+
+internal sealed interface ResumeReasoningIntent {
+    data object Untouched : ResumeReasoningIntent
+
+    data object ModelDefault : ResumeReasoningIntent
+
+    data class Effort(val value: String) : ResumeReasoningIntent
+}
+
+internal fun resumeSelectionReasoning(
+    intent: ResumeReasoningIntent,
+    reasoning: String,
+    savedReasoning: String,
+    modelChanged: Boolean,
+    modelDefault: String,
+): String =
+    when (intent) {
+        is ResumeReasoningIntent.Effort -> intent.value
+        ResumeReasoningIntent.ModelDefault -> modelDefault
+        ResumeReasoningIntent.Untouched ->
+            reasoning.ifBlank {
+                if (modelChanged) modelDefault else savedReasoning
+            }
+    }
+
 internal fun providerLabel(value: String) = codingAgent(value).label
 
 internal fun selectedModel(
@@ -78,6 +110,12 @@ internal fun selectedModel(
     return if (name.isNotBlank()) catalog.models.find { it.matches(name) }
     else catalog.models.find { it.isDefault }
 }
+
+internal fun resumeSelectionModelId(
+    selectedModel: CodingAgentModel?,
+    model: String,
+    savedModel: String,
+): String = model.ifBlank { savedModel.ifBlank { selectedModel?.model.orEmpty() } }
 
 internal fun billingLabel(value: String) =
     when (value) {
@@ -135,7 +173,7 @@ private val OpenCodeMark by lazy {
  * across model changes.
  */
 @Composable
-fun ModelPicker(
+internal fun ModelPicker(
     catalog: ModelCatalog,
     model: String,
     reasoning: String,
@@ -153,8 +191,16 @@ fun ModelPicker(
     speed: String = "",
     defaultSpeed: String = "",
     changeSpeed: ((String) -> Unit)? = null,
+    onReasoningIntent: (ResumeReasoningIntent) -> Unit = {},
     change: (String, String) -> Unit,
 ) {
+    val inheritedModel =
+        if (inherit) defaultModel else catalog.nativeDefaults?.model ?: defaultModel
+    val inheritedReasoning =
+        if (inherit) defaultReasoning else catalog.nativeDefaults?.reasoning ?: defaultReasoning
+    val inheritedSpeedValue =
+        if (inherit) defaultSpeed else catalog.nativeDefaults?.speed ?: defaultSpeed
+    val inheriting = inherit || catalog.nativeDefaults != null
     var open by rememberSaveable { mutableStateOf(false) }
     var refreshing by remember { mutableStateOf(false) }
     var refreshError by remember { mutableStateOf("") }
@@ -172,38 +218,38 @@ fun ModelPicker(
             refreshing = false
         }
     }
-    val chosen = selectedModel(catalog, model, defaultModel)
+    val chosen = selectedModel(catalog, model, inheritedModel)
     // A pinned route offers its own reasoning levels; Auto offers those all routes share.
-    val route = chosen?.route(model.ifBlank { defaultModel })
+    val route = chosen?.route(model.ifBlank { inheritedModel })
     val selected =
         route?.let { chosen.copy(supportedReasoningEfforts = it.supportedReasoningEfforts) }
             ?: chosen
-    LaunchedEffect(provider, catalog.models, model, defaultModel, inherit) {
-        if (
-            codingAgent(provider).requiresModel &&
-                model.isBlank() &&
-                !(inherit && defaultModel.isNotBlank())
-        ) {
+    LaunchedEffect(provider, catalog.models, model, inheritedModel, inheriting) {
+        if (codingAgent(provider).requiresModel && model.isBlank() && !inheriting) {
+            onReasoningIntent(ResumeReasoningIntent.Untouched)
             val next =
                 catalog.models.find { it.isDefault && !it.hidden }
                     ?: catalog.models.find { !it.hidden }
             if (next != null) change(next.model, "")
         }
     }
+    val followsReasoningDefault =
+        inheriting &&
+            (model.isBlank() || (field && !conversationDefault && inheritedReasoning.isNotBlank()))
     val inheritedEffort =
-        if (inherit && model.isBlank())
-            defaultReasoning.ifBlank { selected?.defaultReasoningEffort.orEmpty() }
+        if (followsReasoningDefault)
+            inheritedReasoning.ifBlank { selected?.defaultReasoningEffort.orEmpty() }
         else selected?.defaultReasoningEffort.orEmpty()
-    val effectiveEffort = reasoning.ifBlank { inheritedEffort }
+    val effectiveEffort = pickerAppliedReasoning(selected, reasoning, inheritedEffort)
     // Speeds Codex names in this catalog, to label a saved speed the selected model lacks.
     val knownTiers = catalog.models.flatMap { it.serviceTiers.orEmpty() }
-    val inheritedSpeed = if (inherit) defaultSpeed else ""
+    val inheritedSpeed = if (inheriting) inheritedSpeedValue else ""
     val currentSpeed = effectiveSpeed(speed, inheritedSpeed)
     val speedShown =
         changeSpeed != null && showsSpeed(provider, selected, speed.ifBlank { inheritedSpeed })
     // A speed the model lacks runs at standard speed, so the trigger never claims it.
     val appliedSpeed =
-        if (speedShown && offersSpeed(selected, currentSpeed)) currentSpeed else STANDARD_SPEED
+        pickerAppliedSpeed(provider, selected, speed, inheritedSpeed, changeSpeed != null)
     // A speed not every account confirms, or a model whose speeds are unknown, is only requested.
     val speedUncertain = selected?.serviceTiers?.any { it.id == appliedSpeed && it.limited } ?: true
     val speedTag =
@@ -214,7 +260,7 @@ fun ModelPicker(
     val modelLabel =
         listOfNotNull(
                 selected?.displayName?.ifBlank { selected.model }
-                    ?: model.ifBlank { defaultModel }.ifBlank { "Modèle par défaut" },
+                    ?: model.ifBlank { inheritedModel }.ifBlank { "Modèle par défaut" },
                 route?.providerName?.ifBlank { null },
             )
             .joinToString(" · ")
@@ -251,7 +297,7 @@ fun ModelPicker(
             val alias =
                 catalog.models
                     .find { it.model == "default" }
-                    ?.takeIf { !inherit || defaultModel.isBlank() }
+                    ?.takeIf { !inheriting || inheritedModel.isBlank() }
             val defaultName =
                 alias?.displayName?.takeIf {
                     provider == "claude" && it.isNotBlank() && !it.startsWith("Default")
@@ -264,7 +310,14 @@ fun ModelPicker(
                 it.displayName.contains(query, true) || it.model.contains(query, true)
             }
             val reasoningFor: @Composable () -> Unit = {
-                ReasoningControl(selected, reasoning, inheritedEffort, enabled) {
+                ReasoningControl(
+                    selected,
+                    reasoning,
+                    inheritedEffort,
+                    enabled,
+                    onReasoningIntent,
+                    hasExplicitModelSelection = model.isNotBlank(),
+                ) {
                     change(model, it)
                 }
                 if (changeSpeed != null) {
@@ -302,7 +355,7 @@ fun ModelPicker(
                             if (changeProvider != null) "Assistant et modèle" else "Modèle",
                             style = MaterialTheme.typography.titleLarge,
                         )
-                        if (inherit)
+                        if (inheriting)
                             Text(
                                 "Ces réglages s’appliquent au prochain message.",
                                 style = MaterialTheme.typography.bodySmall,
@@ -401,16 +454,21 @@ fun ModelPicker(
                     )
                 if (visible.size > 6) SearchField("Rechercher un modèle", query) { query = it }
                 val fallback =
-                    selectedModel(catalog, "", defaultModel)?.let {
+                    selectedModel(catalog, "", inheritedModel)?.let {
                         it.displayName.ifBlank { it.model }
-                    } ?: defaultModel
-                if (!codingAgent(provider).requiresModel || (inherit && defaultModel.isNotBlank()))
+                    } ?: inheritedModel
+                if (
+                    !codingAgent(provider).requiresModel ||
+                        (inheriting && inheritedModel.isNotBlank())
+                )
                     ModelCard(
-                        if (inherit) {
-                            if (conversationDefault) "Modèle de la conversation"
+                        if (inheriting) {
+                            if (!inherit && catalog.nativeDefaults != null)
+                                "Modèle de l’installation"
+                            else if (conversationDefault) "Modèle de la conversation"
                             else "Modèle de l’agent"
                         } else listOfNotNull("Modèle par défaut", defaultName).joinToString(" · "),
-                        if (inherit)
+                        if (inheriting)
                             fallback
                                 .ifBlank { null }
                                 ?.let {
@@ -424,17 +482,18 @@ fun ModelPicker(
                                 ?: "Suivre le réglage par défaut de ${providerLabel(provider)}",
                         model.isBlank(),
                         enabled,
-                        badge = if (alias != null && !inherit) "Recommandé" else "",
+                        badge = if (alias != null && !inheriting) "Recommandé" else "",
                         reasoning = {
-                            if (inherit && chosen != null)
+                            if (inheriting && chosen != null)
                                 RouteControl(
                                     chosen,
                                     chosen.routes.filter {
-                                        !it.hidden || it.model == defaultModel
+                                        !it.hidden || it.model == inheritedModel
                                     },
                                     route,
                                     enabled,
                                 ) { value ->
+                                    onReasoningIntent(ResumeReasoningIntent.Untouched)
                                     val efforts =
                                         (chosen.route(value)?.supportedReasoningEfforts
                                                 ?: chosen.supportedReasoningEfforts)
@@ -447,6 +506,7 @@ fun ModelPicker(
                             reasoningFor()
                         },
                     ) {
+                        onReasoningIntent(ResumeReasoningIntent.Untouched)
                         change("", "")
                     }
                 models.forEach { item ->
@@ -466,6 +526,7 @@ fun ModelPicker(
                             } else "",
                         reasoning = {
                             RouteControl(item, routes, route, enabled) { value ->
+                                onReasoningIntent(ResumeReasoningIntent.Untouched)
                                 val efforts =
                                     (item.route(value)?.supportedReasoningEfforts
                                             ?: item.supportedReasoningEfforts)
@@ -475,7 +536,10 @@ fun ModelPicker(
                             reasoningFor()
                         },
                     ) {
-                        if (!item.matches(model)) change(item.model, "")
+                        if (!item.matches(model)) {
+                            onReasoningIntent(ResumeReasoningIntent.Untouched)
+                            change(item.model, "")
+                        }
                     }
                 }
                 if (models.isEmpty() && query.isNotBlank())
@@ -499,7 +563,10 @@ fun ModelPicker(
                     Field(
                         "Nom du modèle",
                         model,
-                        { change(it, "") },
+                        {
+                            onReasoningIntent(ResumeReasoningIntent.Untouched)
+                            change(it, "")
+                        },
                         keyboardOptions = InputKeyboards.Literal,
                     )
                 if (catalog.stale || catalog.error.isNotBlank())
@@ -875,6 +942,8 @@ internal fun ReasoningControl(
     value: String,
     default: String,
     enabled: Boolean,
+    onIntent: (ResumeReasoningIntent) -> Unit = {},
+    hasExplicitModelSelection: Boolean = model != null,
     change: (String) -> Unit,
 ) {
     val order = listOf("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
@@ -888,7 +957,7 @@ internal fun ReasoningControl(
                     if (rank < 0) Int.MAX_VALUE else rank
                 }
             }
-    val effective = value.ifBlank { default }
+    val effective = pickerAppliedReasoning(model, value, default)
     val index = efforts.indexOfFirst { it.reasoningEffort == effective }
     val haptic = LocalHapticFeedback.current
     val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
@@ -914,6 +983,7 @@ internal fun ReasoningControl(
             value = index.coerceAtLeast(0).toFloat(),
             onValueChange = { position ->
                 val next = efforts[position.roundToInt().coerceIn(efforts.indices)].reasoningEffort
+                onIntent(ResumeReasoningIntent.Effort(next))
                 if (next != effective || value.isBlank()) {
                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                     change(next)
@@ -984,6 +1054,7 @@ internal fun ReasoningControl(
             value == efforts.single().reasoningEffort,
             enabled,
         ) {
+            onIntent(ResumeReasoningIntent.Effort(efforts.single().reasoningEffort))
             change(efforts.single().reasoningEffort)
         }
     }
@@ -1015,6 +1086,10 @@ internal fun ReasoningControl(
         enabled,
         Modifier.testTag("reasoning-default"),
     ) {
+        onIntent(
+            if (hasExplicitModelSelection) ResumeReasoningIntent.ModelDefault
+            else ResumeReasoningIntent.Untouched
+        )
         change("")
     }
 }

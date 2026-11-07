@@ -7,6 +7,8 @@ use serde_json::Value;
 #[derive(Default)]
 pub struct RunChanges {
     pub wakeup: Option<Option<cairn_contracts::ChatWakeup>>,
+
+    pub placement: Option<Box<crate::nodes::run_placement::PlacementChanges>>,
     pub snapshot: Option<cairn_contracts::RunSnapshot>,
     pub task_id: Option<String>,
     pub project_id: Option<Option<String>>,
