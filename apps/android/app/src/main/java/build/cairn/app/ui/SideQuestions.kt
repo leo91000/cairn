@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import build.cairn.app.data.CairnViewModel
 import build.cairn.app.data.Chat
 import build.cairn.app.data.ChatSideQuestion
+import build.cairn.app.data.TimelineCard
 import build.cairn.app.data.Workspace
 import build.cairn.contracts.AskChatSideQuestionInput
 import build.cairn.contracts.ChatSideQuestionInput
@@ -135,6 +136,19 @@ internal class SideQuestionState {
         show(itemId, replyEventId)
         notice =
             "Cette réponse n’est pas dans la conversation chargée. Remontez pour charger les messages précédents, puis réessayez."
+    }
+
+    /** Keeps the focused reply's range current as streaming or older pages extend it. */
+    fun follow(cards: List<TimelineCard>) {
+        if (focus.isEmpty()) return
+        val anchor = focusEventId ?: return
+        val card =
+            cards.firstOrNull {
+                (it.content as? build.cairn.contracts.TimelineContent.B)?.itemId == focus &&
+                    anchor in it.position..it.source
+            } ?: return
+        focusEventId = card.position
+        focusLastEventId = card.source
     }
 
     /**

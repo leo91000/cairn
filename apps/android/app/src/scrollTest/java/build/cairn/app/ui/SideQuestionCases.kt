@@ -448,6 +448,51 @@ abstract class SideQuestionCases {
     }
 
     @Test
+    fun anOpenReplyFilterFollowsStreamingButNotAnotherAttemptWithTheSameItemId() {
+        val side =
+            SideQuestionState().apply {
+                observe(emptyList())
+                show("reply-1", 100, 105)
+                text = "Un brouillon"
+            }
+        val draft = side.draft()
+        val card =
+            TimelineCard(
+                id = "reply:first",
+                runId = "run",
+                position = 100,
+                source = 110,
+                revision = 110,
+                turn = 1,
+                attempt = 0,
+                createdAt = 0,
+                updatedAt = 1,
+                content =
+                    build.cairn.contracts.TimelineContent.B(
+                        itemId = "reply-1",
+                        text = "Réponse qui continue",
+                        state = "running",
+                    ),
+            )
+        val other =
+            card.copy(
+                id = "reply:second",
+                position = 200,
+                source = 205,
+                revision = 205,
+                attempt = 1,
+            )
+        val later = answered.copy(replyEventId = "110")
+        val unrelated = answered.copy(id = pending.id, replyEventId = "205")
+        side.follow(listOf(card, other))
+        side.observe(listOf(later, unrelated))
+        assertTrue(side.shows(later))
+        assertFalse(side.shows(unrelated))
+        assertEquals(listOf(unrelated.id), side.unread(listOf(later, unrelated)).map { it.id })
+        assertEquals(draft, side.draft())
+    }
+
+    @Test
     fun aReplyOffersItsSideQuestionsOnlyWhileTheAgentCanAnswer() {
         val asked = mutableListOf<Triple<String, String, Long?>>()
         val shown = mutableListOf<Triple<String, Long?, Long?>>()

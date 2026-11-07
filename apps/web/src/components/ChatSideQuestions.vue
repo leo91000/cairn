@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import type { Provider } from '../../../../packages/contracts/accounts'
 import type { ChatSideQuestion } from '../../../../packages/contracts/chats'
+import type { TimelineEntry } from '../../../../packages/contracts/live'
 import {
   computed,
   ref,
   watch,
+  watchEffect,
 } from 'vue'
 import { providers } from '../../../../packages/contracts/accounts'
 import { askChatSideQuestion } from '../../../../packages/contracts/generated/askChatSideQuestion'
@@ -21,6 +23,7 @@ import UiNotice from './UiNotice.vue'
 const props = defineProps<{
   chatId: string
   questions: ChatSideQuestion[]
+  timeline: TimelineEntry[]
   /** The running reply can answer a side question now. */
   canAsk: boolean
   /** Why a side question cannot be asked now, from the server. */
@@ -40,6 +43,18 @@ const replyEventId = ref<number | null>(null)
 /** Shows only the side questions about one reply. */
 const focus = ref('')
 const focusEvents = ref<number[]>([])
+// A reply keeps its identity while later snapshots extend its event range.
+watchEffect(() => {
+  const anchor = focusEvents.value[0]
+  if (!focus.value || anchor === undefined)
+    return
+  const card = props.timeline.find(card =>
+    card.content.kind === 'agentMessage' && card.content.itemId === focus.value
+    && anchor >= card.position && anchor <= card.source,
+  )
+  if (card && (card.position !== focusEvents.value[0] || card.source !== focusEvents.value[1]))
+    focusEvents.value = [card.position, card.source]
+})
 const busy = ref(false)
 const error = ref('')
 /** The dialog focuses the question field when it opens to ask. */
@@ -53,7 +68,7 @@ watch([text, quote, itemId, replyEventId, focus], () => {
 // Answers that arrived while the panel was closed show above the composer until read.
 const seen = ref(new Set<string>())
 let known = ''
-watch(() => [props.chatId, props.questions] as const, ([chatId, questions]) => {
+watch(() => [props.chatId, props.questions, focusEvents.value] as const, ([chatId, questions]) => {
   if (known !== chatId) {
     draftRevision++
     known = chatId

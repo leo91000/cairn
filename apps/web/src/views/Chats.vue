@@ -1484,6 +1484,7 @@ function key(event: KeyboardEvent) {
               ref="sideQuestions"
               :chat-id="detail.id"
               :questions="detail.sideQuestions || []"
+              :timeline="timeline"
               :can-ask="!!detail.canAskSideQuestion"
               :reason="detail.sideQuestionReason"
               :provider="detail.provider"

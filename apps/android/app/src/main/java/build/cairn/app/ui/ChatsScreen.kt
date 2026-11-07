@@ -544,7 +544,9 @@ internal fun ChatPage(
         side.focus,
         side.focusEventId,
         side.focusLastEventId,
+        live.entries,
     ) {
+        side.follow(live.entries)
         chat?.let { side.observe(it.sideQuestions) }
     }
     val sideCounts =

@@ -156,6 +156,50 @@ test('asks side questions about a running reply without steering, queuing or rec
   await page.screenshot({ path: test.info().outputPath('side-question-mobile-dark.png'), animations: 'disabled' })
 })
 
+test('an open reply panel follows later snapshots without following a reused item ID', async ({ page, workspace }) => {
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review. fixture:chat-hang', provider: 'claude' })
+  try {
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).canAskSideQuestion).toBe(true)
+    const run = (await workspace.api(`/api/chats/${chat.id}`)).run.id
+    const snapshot = (text: string) => {
+      workspace.service.store.event(run, 'item.updated', '', { item: { id: 'streamed-reply', type: 'agent_message', text } })
+      const events = workspace.service.store.events(run, 0, 200) as Array<{ id: number, payload?: { item?: { id?: string } } }>
+      return events.filter(event => event.payload?.item?.id === 'streamed-reply').at(-1)!.id
+    }
+
+    const ask = (text: string, anchor: number) => workspace.api(`/api/chats/${chat.id}/side-questions`, 'POST', {
+      id: randomUUID(),
+      text,
+      itemId: 'streamed-reply',
+      replyEventId: String(anchor),
+    })
+    await ask('Question about the first snapshot', snapshot('Streaming draft'))
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).sideQuestions[0]?.status).toBe('answered')
+    await page.goto(workspacePath(`/chats/${chat.id}`))
+    await authenticateWorkspace(page)
+    const message = page.locator('.activity-message').filter({ hasText: 'Streaming draft' })
+    await message.getByRole('button', { name: 'Show 1 side question about this reply' }).click()
+    const panel = page.getByRole('dialog', { name: 'Side questions' })
+    const later = snapshot('Streaming draft with more content')
+    await ask('Question about the later snapshot', later)
+    await expect(panel.getByText('Question about the later snapshot', { exact: true })).toBeVisible()
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).sideQuestions[1]?.status).toBe('answered')
+    await expect(panel.getByText('Answered', { exact: true })).toHaveCount(2)
+
+    workspace.service.store.event(run, 'turn.completed', '')
+    workspace.service.store.event(run, 'status', 'Preparing workspace', { attempt: true })
+    await ask('Question about a different attempt', snapshot('Another reply reuses the native ID'))
+    await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).sideQuestions[2]?.status).toBe('answered')
+    await expect(panel.getByText('Question about a different attempt', { exact: true })).toHaveCount(0)
+    await panel.getByRole('button', { name: 'Close dialog' }).click()
+    await expect(page.getByRole('button', { name: /Side questions · Answer ready/ })).toBeVisible()
+  }
+  finally {
+    await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
+  }
+})
+
 test('keeps a reply filter when asking more than once', async ({ page, workspace }) => {
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review. fixture:chat-hang', provider: 'claude' })
