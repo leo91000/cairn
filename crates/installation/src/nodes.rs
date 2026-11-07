@@ -60,8 +60,36 @@ pub const LOCAL_NODE_ID: &str = "00000000-0000-4000-8000-000000000002";
 const HEARTBEAT_TIMEOUT_MS: i64 = 60_000;
 const HEARTBEAT_INTERVAL_MS: i64 = 10_000;
 const ENROLLMENT_TTL_MS: i64 = 600_000;
+
+/// End-to-end ceiling for opening an on-demand project in a running execution.
+pub(crate) const PROJECT_OPEN_REQUEST_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(300);
+
+/// Queueing and relay reserve stays inside the end-to-end project-open ceiling.
+pub(crate) const PROJECT_OPEN_HEAD_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(285);
+
+/// Includes node-side seed reception and the final controller import.
+pub(crate) const PROJECT_OPEN_RELAY_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(270);
+
 /// Storage mode of journal-backed disks mounted from their published S3 state.
 pub(crate) const ON_DEMAND: &str = "on-demand";
+
+/// Whether this request is the bounded import used by `open_project`.
+pub(crate) fn is_project_import_request(method: &str, path: &str) -> bool {
+    if method != "POST" {
+        return false;
+    }
+
+    let parts = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    match parts.as_slice() {
+        ["runs", attempt, "projects", project] => {
+            crate::validation::uuid(attempt).is_ok() && crate::validation::uuid(project).is_ok()
+        }
+        _ => false,
+    }
+}
 
 /// Execution progress of a conversation relative to its node, persisted in `run.nodeState`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

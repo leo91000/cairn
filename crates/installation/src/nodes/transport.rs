@@ -364,6 +364,9 @@ fn head_timeout(method: &str, path: &str, native: bool) -> Duration {
     if method == "POST" && path.ends_with("/direct-reader") {
         return super::snapshots::DIRECT_PUBLICATION_STARTUP;
     }
+    if native && crate::nodes::is_project_import_request(method, path) {
+        return crate::nodes::PROJECT_OPEN_HEAD_TIMEOUT;
+    }
     Duration::from_secs(if method == "POST" && path.ends_with("/direct-upload") {
         crate::storage::direct::TRANSFER_SECONDS + 60
     } else if method == "POST" && path.ends_with("/publication") {
@@ -515,6 +518,70 @@ mod tests {
         .await
         .unwrap();
         assert!(request.await.unwrap().unwrap().status().is_success());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_project_import_head_waits_for_the_route_budget_only() {
+        let hub = Arc::new(Transport::default());
+        let node = crate::config::id();
+        let path = format!(
+            "/runs/{}/projects/{}",
+            crate::config::id(),
+            crate::config::id()
+        );
+        let project_timeout = head_timeout("POST", &path, true);
+        assert_eq!(project_timeout, crate::nodes::PROJECT_OPEN_HEAD_TIMEOUT);
+        assert_eq!(head_timeout("POST", &path, false), Duration::from_secs(30));
+        assert_eq!(
+            head_timeout("GET", "/health", true),
+            Duration::from_secs(30)
+        );
+
+        let (request_hub, request_node) = (hub.clone(), node.clone());
+        let request = tokio::spawn(async move {
+            request_hub
+                .request_before(&request_node, "POST", &path, vec![], project_timeout)
+                .await
+        });
+        let command = hub.poll(&node).await.unwrap();
+        tokio::time::advance(Duration::from_secs(260)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !request.is_finished(),
+            "Project seed reception and native import may both outlast the old head deadline"
+        );
+        hub.reply(
+            &node,
+            json!({
+                "id": command["id"],
+                "sequence": 0,
+                "status": 200,
+                "length": 0,
+                "done": true,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(request.await.unwrap().unwrap().status().is_success());
+
+        let ordinary = Arc::new(Transport::default());
+        let ordinary_node = crate::config::id();
+        let (request_hub, request_node) = (ordinary.clone(), ordinary_node.clone());
+        let request = tokio::spawn(async move {
+            request_hub
+                .request_before(
+                    &request_node,
+                    "GET",
+                    "/health",
+                    vec![],
+                    head_timeout("GET", "/health", true),
+                )
+                .await
+        });
+        let _command = ordinary.poll(&ordinary_node).await.unwrap();
+        tokio::time::advance(Duration::from_secs(31)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(request.await.unwrap().unwrap_err().status, 503);
     }
 
     #[tokio::test(start_paused = true)]
