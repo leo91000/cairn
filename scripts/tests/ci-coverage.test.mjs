@@ -148,7 +148,8 @@ describe('parallel CI coverage', () => {
     expect(selected.steps[0].uses).toBe('actions/checkout@v7.0.1')
     expect(selected.steps[1]).toEqual({ uses: './.github/actions/setup-pnpm', with: { cache: true } })
     expect(selected.steps[2].run).toBe('rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1')
-    expect(selected.steps[3].run).toBe('sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot')
+    expect(selected.steps[3].run).toBe('node scripts/install-native-ci-dependencies.mjs')
+    expect(selected.steps[3]['timeout-minutes']).toBe(10)
     expect(selected.env).toEqual({ CARGO_PROFILE_DEV_DEBUG: '0', CARGO_INCREMENTAL: '0' })
     expect(selected.steps.some(step => step.uses?.startsWith('actions/download-artifact@'))).toBe(false)
     const step = selected.steps.find(step => step.name === 'Qualify physical backend migration from this commit')
@@ -171,7 +172,8 @@ describe('parallel CI coverage', () => {
     expect(job.steps[0]).toEqual({ uses: 'actions/checkout@v7.0.1' })
     expect(job.steps[1]).toEqual({ uses: './.github/actions/setup-pnpm', with: { cache: true } })
     expect(job.steps[2].run).toBe('rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1')
-    expect(job.steps[3].run).toBe('sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot')
+    expect(job.steps[3].run).toBe('node scripts/install-native-ci-dependencies.mjs')
+    expect(job.steps[3]['timeout-minutes']).toBe(10)
     const qualifications = job.steps.filter(step => step.name?.startsWith('Qualify'))
     expect(qualifications.map(step => step.name)).toEqual([
       'Qualify the resolved OpenCode release against its native adapter',
