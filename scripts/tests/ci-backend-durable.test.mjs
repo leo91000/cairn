@@ -308,7 +308,16 @@ it.each([0, 250])('commits source/clock/startup before the real child, checkpoin
   assert.equal(receipts[0].acquisition, 'admitted-before-command')
   assert.deepEqual(receipts[0].clock, f.receipt.clock)
   assert.equal(receipts[0].proof.samples.at(-1).processCount, 0)
-  assert.equal(receipts.at(-1).proof.timedOut, true)
+
+  const finalProof = receipts.at(-1).proof
+  assert.equal(finalProof.timedOut, true)
+  assert.equal(finalProof.cleanupUnknown, false)
+  assert.equal(finalProof.inventoryComplete, true)
+  assert.equal(finalProof.ownershipUncertain, false)
+  assert.equal(finalProof.containmentReady, true)
+  assert.equal(finalProof.samples.at(-1).reason, 'finished')
+  assert.equal(finalProof.samples.at(-1).processCount, 0)
+
   assert.ok(receipts.some(item => item.acquisition === 'periodic' && item.proof.samples.some(sample => sample.processCount >= 2)))
   assert.ok(receipts.every(item => item.qualificationClaim === false))
   for (const item of receipts.flatMap(item => item.proof.samples).flatMap(sample => sample.processes))
