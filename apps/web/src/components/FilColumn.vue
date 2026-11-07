@@ -546,7 +546,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
               ><Icon :name="mark(item)" :size="13" :class="tone(item) === 'text-muted' ? 'text-subtle' : tone(item)" /></span>
             </span>
             <span class="min-w-0 flex-1">
-              <span class="flex items-baseline gap-2"><span class="truncate text-[13px] leading-snug" :class="[isUnread(item) ? 'font-semibold text-ink' : 'font-medium', !isUnread(item) && (nested ? 'text-muted' : 'text-ink/85')]">{{ item.title }}</span><span class="ml-auto shrink-0 text-[10px] tabular-nums text-subtle group-hover:invisible group-has-[[aria-expanded=true]]:invisible phone:visible!">{{ shortAge(item.at, now) }}</span></span>
+              <span class="flex items-baseline gap-2"><span class="truncate text-[13px] leading-snug" :class="[isUnread(item) ? 'font-semibold text-ink' : 'font-medium', !isUnread(item) && (nested ? 'text-muted' : 'text-ink/85')]">{{ item.title }}</span><span class="ml-auto shrink-0 text-[10px] tabular-nums text-subtle phone:visible!" :class="(item.taskId || (isUnread(item) && item.readAt)) ? 'group-hover:invisible group-has-[[aria-expanded=true]]:invisible' : undefined">{{ shortAge(item.at, now) }}</span></span>
               <span v-if="!nested || !item.finished" class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-subtle">
                 <span :class="item.finished ? 'sr-only' : ['truncate font-medium', tone(item)]">{{ label(item) }}</span><span v-if="!item.finished && !nested">·</span><template v-if="!nested"><HarnessMark v-if="item.harness" :provider="item.harness" /><Icon v-if="item.taskId" :name="RefreshCw" :size="10" /><span class="truncate">{{ item.project || item.agent }}</span></template>
               </span>
@@ -554,7 +554,22 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
               <span v-if="item.wakeAt !== undefined" class="mt-0.5 block text-[10px] text-accent">{{ waitLeft({ wakeAt: item.wakeAt, condition: item.condition, resolved: item.resolved }, now) }}</span>
             </span>
           </button>
-          <MenuButton :label="`More actions for “${item.title}”`" trigger-class="absolute right-1 top-1.5 grid size-7 shrink-0 place-items-center rounded-md bg-hover text-muted opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-ink aria-expanded:opacity-100 phone:static phone:mr-1 phone:bg-transparent phone:opacity-100" :width="210">
+          <button
+            v-if="!item.taskId && isUnread(item) && item.readAt"
+            type="button"
+            :aria-label="`Mark “${item.title}” as read`"
+            title="Mark as read"
+            class="absolute right-1 top-1.5 grid size-7 shrink-0 place-items-center rounded-md bg-hover text-muted opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-ink phone:static phone:mr-1 phone:bg-transparent phone:opacity-100"
+            @click="read(item)"
+          >
+            <Icon :name="Check" :size="15" />
+          </button>
+          <MenuButton
+            v-if="item.taskId"
+            :label="`More actions for “${item.title}”`"
+            trigger-class="absolute right-1 top-1.5 grid size-7 shrink-0 place-items-center rounded-md bg-hover text-muted opacity-0 group-hover:opacity-100 focus:opacity-100 hover:text-ink aria-expanded:opacity-100 phone:static phone:mr-1 phone:bg-transparent phone:opacity-100"
+            :width="210"
+          >
             <template #trigger>
               <Icon :name="MoreHorizontal" :size="15" />
             </template>
