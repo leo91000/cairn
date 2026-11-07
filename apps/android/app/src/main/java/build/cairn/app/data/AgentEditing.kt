@@ -465,6 +465,7 @@ fun agentAccessSummary(
     catalog: PluginCatalog? = null,
     /** Known machines, to show exclusivity only where it takes effect; null (unknown) omits it. */
     nodes: List<ExecutionNode>? = null,
+    selectedPluginAccess: Boolean? = false,
 ): String {
     val access = agent.access
     return buildList {
@@ -483,6 +484,8 @@ fun agentAccessSummary(
                             }
                             .distinct()
                     )
+            if (selectedPluginAccess == true) add("Accès plugin sélectionné")
+            if (selectedPluginAccess == null) add("Droits des plugins inconnus")
             if (
                 // Only where it takes effect, so never while the machines are unknown.
                 nodes != null && agent.effectiveExclusive(nodes).isNotEmpty()
@@ -617,7 +620,11 @@ enum class ReviewKind(val label: String) {
     Reduction("Réduction"),
 }
 
-data class ReviewLine(val kind: ReviewKind, val text: String)
+data class ReviewLine(
+    val kind: ReviewKind,
+    val text: String,
+    val requiresReview: Boolean = false,
+)
 
 private val sandboxStrictness = mapOf("yolo" to 0, "workspace-write" to 1, "read-only" to 2)
 
@@ -840,7 +847,7 @@ fun AgentPreview.preselectedReapprovals(): Set<String> =
  * its own. Otherwise the page saves directly.
  */
 fun needsReview(lines: List<ReviewLine>, preview: AgentPreview?): Boolean =
-    lines.any { it.kind != ReviewKind.Reduction } ||
+    lines.any { it.kind != ReviewKind.Reduction || it.requiresReview } ||
         (preview != null &&
             (preview.runs.queued + preview.runs.running > 0 ||
                 preview.suspendedDelegations().any { !it.alreadySuspended }))

@@ -38,6 +38,7 @@ class AgentEditingTest {
             storage = NodeStoragePolicy(),
             staleDisks = StaleDisks(count = 0, diskMiB = 0),
         )
+
     private val mac =
         ExecutionNode(
             id = "17ce976c-733b-5e32-9840-7888af8907c0",
@@ -703,6 +704,10 @@ class AgentEditingTest {
         )
         // With them: package names, and exclusivity only where it applies (mac cannot run it).
         assertEquals("2 projets · 2 nodes · 1Password", agentAccessSummary(granted, catalog, nodes))
+        assertEquals(
+            "2 projets · 2 nodes · 1Password · Accès plugin sélectionné",
+            agentAccessSummary(granted, catalog, nodes, selectedPluginAccess = true),
+        )
     }
 
     @Test

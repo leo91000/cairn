@@ -64,7 +64,7 @@ abstract class InstallationAccessCases {
                                     wireJson.encodeToString(updated)
                                 }
                                 path.endsWith("/preview") ->
-                                    """{"runs":{"queued":0,"running":0},"delegations":[]}"""
+                                    """{"runs":{"queued":0,"running":0},"delegations":[],"accounts":[{"email":"owner@example.test"},{"email":"member@example.test"}]}"""
                                 path == "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
                                         build.cairn.contracts.ListAgentsOutput(listOf(agent.get()))

@@ -4,10 +4,16 @@ import android.graphics.Bitmap
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
+import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class AgentPageDeviceTest : AgentPageCases() {
+    @Test
+    fun contributionGrantUsesResourceAncestryAndAnExplicitCredentialSupplier() {
+        runContributionGrantSelectionJourney()
+    }
+
     override fun capture(name: String) {
         compose.waitForIdle()
         // Let dialog and ripple animations settle before reading the screen.

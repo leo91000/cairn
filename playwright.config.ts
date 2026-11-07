@@ -93,6 +93,7 @@ export default defineConfig({
         colorScheme: 'dark',
       },
     },
+    { name: 'journeys-agent-grants', testMatch: 'agent-grants.spec.ts', use: { serviceWorkers: 'block' } },
     {
       name: 'layout-webkit-agent-priorities',
       testMatch: 'agent-access.spec.ts',

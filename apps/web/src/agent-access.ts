@@ -540,6 +540,7 @@ export function changes(saved: AgentDraft, draft: AgentDraft) {
 
 export interface ReviewLine {
   kind: 'power' | 'secret' | 'reduction'
+  requiresReview?: boolean
   text: string
   section: SectionId
 }
@@ -644,7 +645,7 @@ export type Preview = import('../../../packages/contracts/generated/typescript/A
 export function needsReview(lines: ReviewLine[], preview: Preview | null) {
   const runs = preview ? preview.runs.queued + preview.runs.running : 0
   const delegations = preview?.delegations.some(item => item.suspended && !item.alreadySuspended) ?? false
-  return lines.some(line => line.kind !== 'reduction') || runs > 0 || delegations
+  return lines.some(line => line.kind !== 'reduction' || line.requiresReview) || runs > 0 || delegations
 }
 
 export interface Issue {
