@@ -811,9 +811,8 @@ fun FilScreen(
                 nested = nested,
                 onPeek = item.preview?.ifBlank { null }?.let { { peeked = item } },
             ) {
-                ForYouAction(
+                FilRowActions(
                     item,
-                    now,
                     !state.busy,
                     { open(item) },
                     { retry(item) },
@@ -1176,14 +1175,10 @@ private fun androidx.compose.foundation.lazy.LazyListScope.section(
     items(items, key = { it.key }) { Box(Modifier.animateItem()) { row(it) } }
 }
 
-/**
- * What a "for you" row offers: answer, reconnect, retry, mark read, set a blocked mission aside, or
- * its time.
- */
+/** Conversations offer a direct read action; missions keep their additional actions in a menu. */
 @Composable
-private fun ForYouAction(
+internal fun FilRowActions(
     item: FeedItem,
-    now: Long,
     enabled: Boolean,
     open: () -> Unit,
     retry: () -> Unit,
@@ -1192,6 +1187,15 @@ private fun ForYouAction(
     snooze: () -> Unit = {},
     archive: () -> Unit = {},
 ) {
+    if (item.taskId == null) {
+        if (item.unread && item.readAt > 0) {
+            RoundAction("Marquer comme lu : ${item.title}", CairnIcons.Check, size = 36.dp) {
+                markRead()
+            }
+        }
+        return
+    }
+
     var menu by remember { mutableStateOf(false) }
     Box {
         RoundAction("Autres actions pour ${item.title}", CairnIcons.More, size = 36.dp) {

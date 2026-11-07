@@ -130,3 +130,37 @@ test('an open mission acknowledges completion from any tab after syncing', async
   await expect(page.getByText('Execution finished', { exact: true }).first()).toBeVisible({ timeout: 20000 })
   await expect.poll(unread).toBe(false)
 })
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test(`conversation read checks act directly at ${viewport.width}px`, async ({ page, workspace }) => {
+    test.setTimeout(150000)
+    const { chat, notes } = await seed(workspace)
+    await page.setViewportSize(viewport)
+    await page.goto(workspacePath('/'))
+    await authenticateWorkspace(page)
+    const row = page.locator(`[data-fil-key="chat:${chat.id}"]`)
+    await expect(row).toHaveAttribute('data-unread', '')
+    await expect(row.getByRole('button', { name: /^More actions/ })).toHaveCount(0)
+    const check = row.getByRole('button', { name: /^Mark “.*” as read$/ })
+    await check.focus()
+    await expect(check).toBeVisible()
+    const location = page.url()
+    await check.click()
+    await expect.poll(() => unreadOf(workspace, chat.id)).toBe(false)
+    await expect(row).toHaveCount(0)
+    expect(page.url()).toBe(location)
+    await expect(page.getByRole('menu')).toHaveCount(0)
+
+    await page.getByRole('tab', { name: 'Tout', exact: true }).click()
+    await expect(row).toBeVisible()
+    await expect(row).not.toHaveAttribute('data-unread')
+    await expect(row.getByRole('button')).toHaveCount(1)
+    await expect(row.getByRole('button', { name: /^Open “/ })).toBeVisible()
+
+    const mission = page.locator(`[data-fil-key="task:${notes.id}"]`)
+    await mission.getByRole('button', { name: /^More actions/ }).click()
+    await expect(page.getByRole('menuitem', { name: 'Mark as read', exact: true })).toBeVisible()
+    await expect(page.getByRole('menuitem', { name: 'Run again', exact: true })).toBeVisible()
+    await expect(page.getByRole('menuitem', { name: 'Archive mission', exact: true })).toBeVisible()
+  })
+}
