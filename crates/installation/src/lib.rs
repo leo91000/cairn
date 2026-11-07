@@ -11,6 +11,7 @@ pub(crate) mod authorization;
 pub(crate) mod backend_migration;
 pub(crate) mod capabilities;
 mod chat_inbox;
+pub(crate) mod chat_plan_settings;
 pub mod chat_process;
 pub mod chat_titles;
 pub mod chats;

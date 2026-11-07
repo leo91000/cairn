@@ -5,6 +5,7 @@ import type { LargeTimelineReference } from './generated/typescript/LargeTimelin
 import type { TimelineChange } from './generated/typescript/TimelineChange'
 
 export interface LiveState {
+  planTurnsEnabled?: boolean
   cacheRevision?: string
   run: Run | null
   chat: ChatDetail | null

@@ -1,5 +1,19 @@
 [
   {
+    "input": "GetChatPlanSettingsInput",
+    "method": "GET",
+    "name": "getChatPlanSettings",
+    "output": "ChatPlanSettings",
+    "path": "/settings/chat-plan"
+  },
+  {
+    "input": "ChatPlanSettings",
+    "method": "PUT",
+    "name": "saveChatPlanSettings",
+    "output": "ChatPlanSettings",
+    "path": "/settings/chat-plan"
+  },
+  {
     "input": "GetTaskStorageLimitsInput",
     "method": "GET",
     "name": "getTaskStorageLimits",

@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Installation opt-in for new chat plan requests. Missing policy means disabled.",
+  "properties": {
+    "enabled": {
+      "type": "boolean"
+    },
+    "revision": {
+      "maxLength": 200,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "enabled",
+    "revision"
+  ],
+  "title": "ChatPlanSettings",
+  "type": "object"
+}
