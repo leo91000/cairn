@@ -33,6 +33,7 @@ await writeFile(path.join(output, 'identity.json'), `${JSON.stringify({
   playwright: installed,
   diagnosticOnly: true,
   nativeBuild: false,
+  scheduling: 'Completed HTTP session response is delivered at native window.load before initial native pageshow; this scheduling was not observed in the original CI trace',
 }, null, 2)}\n`)
 const browser = await webkit.launch()
 const results = []
@@ -53,11 +54,17 @@ async function observe(label, sha) {
   const originalPath = `/installations/${installationId}/mcps/callback`
   const canonicalPath = `/installations/${slug}/mcps/callback`
   const redirected = Promise.withResolvers()
+  const sessionHeld = Promise.withResolvers()
   let barrierResponse
   let canonicalResponse
   let origin = ''
   const started = performance.now()
-  const record = value => events.push({ elapsed: performance.now() - started, ...value })
+  const record = (value) => {
+    events.push({ elapsed: performance.now() - started, ...value })
+    if (value.kind === 'session-response-held')
+      sessionHeld.resolve()
+  }
+
   const session = {
     authenticated: true,
     account: { id: 'diagnostic-account', email: 'fixture@example.test' },
@@ -175,6 +182,18 @@ async function observe(label, sha) {
       ready: window.__pageshowDiagnosticState?.ready,
       aborted: window.__pageshowDiagnosticLifetime?.(),
     })
+    let releaseSession
+    // Schedule the completed HTTP response at the native load checkpoint, before
+    // initial pageshow. No lifecycle event or production function is substituted.
+    window.addEventListener('load', (event) => {
+      void window.__pageshowDiagnosticRecord({
+        kind: 'load',
+        trusted: event.isTrusted,
+        sessionHeld: !!releaseSession,
+        ...snapshot(),
+      })
+      releaseSession?.()
+    }, { once: true })
     window.addEventListener('pageshow', (event) => {
       void window.__pageshowDiagnosticRecord({
         kind: 'pageshow-before',
@@ -203,7 +222,18 @@ async function observe(label, sha) {
       if (pathname?.endsWith('/direct/authorize'))
         void window.__pageshowDiagnosticRecord({ kind: 'authorize-attempt', signalAborted: args[1]?.signal?.aborted, ...snapshot() })
 
-      return fetch(...args)
+      const pending = fetch(...args)
+      if (pathname === '/api/account/session') {
+        return pending.then(async (response) => {
+          const text = await response.text()
+          return new Promise((resolve) => {
+            releaseSession = () => resolve(new Response(text, { status: response.status, headers: response.headers }))
+            void window.__pageshowDiagnosticRecord({ kind: 'session-response-held', ...snapshot() })
+          })
+        })
+      }
+
+      return pending
     }
   })
 
@@ -213,22 +243,29 @@ async function observe(label, sha) {
     origin = `http://localhost:${server.httpServer.address().port}`
     await page.goto(`${origin}${originalPath}`, { waitUntil: 'commit', timeout: 45000 })
     await Promise.race([
-      redirected.promise,
+      sessionHeld.promise,
       delay(45000).then(() => {
-        throw new Error('Canonical production redirect was not reached')
+        throw new Error('Session HTTP response was not buffered before native load')
       }),
     ])
     assert.ok(barrierResponse, 'Initial load barrier must have been requested')
     record({ kind: 'release-load-barrier', alreadyDestroyed: barrierResponse.destroyed })
     if (!barrierResponse.destroyed)
       barrierResponse.writeHead(200, { 'content-type': 'image/svg+xml' }).end('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>')
+    await Promise.race([
+      redirected.promise,
+      delay(45000).then(() => {
+        throw new Error('Canonical production redirect was not reached')
+      }),
+    ])
     await delay(2000)
 
     const departure = events.find(event => event.kind === 'redirect')
     assert.ok(departure?.aborted && departure.redirecting, 'Real redirect must retire the document before navigation')
-    const initialShow = events.find(event => event.kind === 'pageshow-after' && event.elapsed > departure.elapsed && event.persisted === false && event.trusted === true)
+    assert.ok(events.some(event => event.kind === 'load' && event.documentId === departure.documentId && event.trusted && event.sessionHeld), 'Actual native load must release the buffered session response')
+    const initialShow = events.find(event => event.kind === 'pageshow-after' && event.documentId === departure.documentId && event.elapsed > departure.elapsed && event.persisted === false && event.trusted === true)
     assert.ok(initialShow, 'Native initial pageshow after redirect was not observed; diagnosis remains inconclusive')
-    const lateAuthorizations = events.filter(event => event.kind === 'authorize-attempt' && event.elapsed > departure.elapsed)
+    const lateAuthorizations = events.filter(event => event.kind === 'authorize-attempt' && event.documentId === departure.documentId && event.elapsed > departure.elapsed)
     if (label === 'reference') {
       assert.equal(initialShow.aborted, false)
       assert.equal(initialShow.redirecting, false)
