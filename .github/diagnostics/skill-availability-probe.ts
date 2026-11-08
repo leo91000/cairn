@@ -13,14 +13,17 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
     }
     const requests = new Map<import('@playwright/test').Request, 'pending' | 'finished' | 'cancelled' | 'failed'>()
     const statuses = new Map<import('@playwright/test').Request, number>()
-    const availabilityRequest = (request: import('@playwright/test').Request) => new URL(request.url()).pathname === '/api/installations'
+    const finiteRequest = (request: import('@playwright/test').Request) => {
+      const path = new URL(request.url()).pathname
+      return ['fetch', 'xhr'].includes(request.resourceType()) && (path.startsWith('/api/') || path === '/web-build.json')
+    }
     page.on('request', (request) => {
-      if (availabilityRequest(request))
+      if (finiteRequest(request))
         requests.set(request, 'pending')
     })
     page.on('response', (response) => {
       const request = response.request()
-      if (availabilityRequest(request)) {
+      if (finiteRequest(request)) {
         statuses.set(request, response.status())
         record(`network-poll-status-${response.status()}`)
       }
@@ -58,8 +61,8 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
       }, { message: `Reach the ${kind} response boundary` }).toBe(true)
     }
     const browserSettled = async () => {
-      await expect.poll(() => page.evaluate(() => (window as any).availabilityPending.size), {
-        message: 'Current document availability fetches have settled',
+      await expect.poll(() => page.evaluate(() => (window as any).shellPending.size), {
+        message: 'Current document finite HTTP work and body continuations have settled',
       }).toBe(0)
       // This round trip follows the completed fetch microtasks and their native diagnostics.
       await page.evaluate(() => {})
@@ -75,10 +78,13 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
         const documentId = crypto.randomUUID()
         let pollId = 0
         const pending = new Set<number>()
-        ;(window as any).availabilityPending = pending
+        const consuming = new Set<number>()
+        ;(window as any).shellPending = pending
         const completions = new MessageChannel()
         completions.port1.onmessage = (event) => {
           const { kind, poll } = event.data as { kind: string, poll: number }
+          if (kind.endsWith('-headers') && consuming.has(poll))
+            return
           pending.delete(poll)
           probe(kind, poll)
         }
@@ -89,39 +95,46 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
           window.addEventListener(kind, () => probe(kind))
         const fetch = window.fetch.bind(window)
         window.fetch = (...args) => {
-          if (args[0] !== '/api/installations')
+          const input = args[0]
+          const url = typeof input === 'string' || input instanceof URL ? String(input) : input.url
+          const path = new URL(url, location.href).pathname
+          if (!path.startsWith('/api/') && path !== '/web-build.json')
             return fetch(...args)
+          const category = path === '/api/installations' ? 'poll' : 'http'
           const poll = ++pollId
           pending.add(poll)
-          probe('poll-start', poll)
-          args[1]?.signal?.addEventListener('abort', () => probe('poll-abort', poll), { once: true })
+          probe(`${category}-start`, poll)
+          args[1]?.signal?.addEventListener('abort', () => probe(`${category}-abort`, poll), { once: true })
           const settled = (kind: string) => {
             // A posted task follows the application's await/catch/finally microtasks.
-            // On success that includes consuming JSON and arming the next poll timer.
-            completions.port2.postMessage({ kind, poll })
+            // Body consumers keep this cycle pending through their continuation.
+            completions.port2.postMessage({ kind: `${category}-${kind}`, poll })
           }
           try {
             return fetch(...args).then((response) => {
-              if (!response.ok) {
-                settled('poll-http-rejected')
-                return response
+              for (const method of ['json', 'text', 'arrayBuffer', 'blob', 'formData'] as const) {
+                const consume = response[method].bind(response)
+                ;(response as any)[method] = (...options: unknown[]) => {
+                  consuming.add(poll)
+                  pending.add(poll)
+                  return Reflect.apply(consume, response, options).then((body: unknown) => {
+                    settled('body-resolved')
+                    return body
+                  }, (cause: unknown) => {
+                    settled('body-rejected')
+                    throw cause
+                  })
+                }
               }
-              const json = response.json.bind(response)
-              response.json = () => json().then((body) => {
-                settled('poll-body-resolved')
-                return body
-              }, (cause) => {
-                settled('poll-body-rejected')
-                throw cause
-              })
+              settled('headers')
               return response
             }, (cause) => {
-              settled('poll-rejected')
+              settled('rejected')
               throw cause
             })
           }
           catch (cause) {
-            settled('poll-threw')
+            settled('threw')
             throw cause
           }
         }
@@ -129,6 +142,9 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
       await page.clock.install()
       await useRelayForHttpMocks(page)
       await page.goto(workspacePath('/skills'))
+      const accountView = page.getByLabel('Email address').or(page.getByRole('button', { name: 'Sign out', exact: true, includeHidden: true }))
+      await expect(accountView.first()).toBeAttached()
+      await browserSettled()
       await authenticateWorkspace(page)
       await expect(page.getByRole('heading', { name: 'Skills library', exact: true })).toBeVisible()
       await page.clock.pauseAt(new Date(Date.now() + 1000))
@@ -209,17 +225,19 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
         await reload?.catch(() => {})
         await page.unrouteAll({ behavior: 'wait' })
         await expect.poll(() => [...requests.values()].every(state => state !== 'pending'), {
-          message: 'Every observed availability network request has terminated',
+          message: 'Every observed finite application HTTP request has terminated',
         }).toBe(true)
         for (const [request, terminal] of requests) {
           if (request === targetPoll)
             record(`target-network-${terminal}`)
-          if (terminal === 'finished' && statuses.get(request) !== 200)
-            throw new Error(`An observed availability response has unexpected HTTP status ${statuses.get(request) ?? 'unknown'}`)
+          const status = statuses.get(request)
+          const successfulResponse = status !== undefined && status >= 200 && status < 300
+          if (terminal === 'finished' && !successfulResponse)
+            throw new Error(`An observed finite HTTP response has unexpected status ${status ?? 'unknown'}`)
           if (terminal === 'failed')
-            throw new Error('An observed availability request failed unexpectedly')
+            throw new Error('An observed finite HTTP request failed unexpectedly')
           if (terminal === 'cancelled' && request !== targetPoll)
-            throw new Error('An availability request outside the old-document target was cancelled')
+            throw new Error('A finite HTTP request outside the old-document target was cancelled')
         }
         if (deliveryFailure && (!targetPoll || requests.get(targetPoll) !== 'cancelled'))
           throw deliveryFailure
