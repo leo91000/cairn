@@ -78,6 +78,17 @@ Image publication requires both jobs to succeed. When physical migration is
 selected for a full run, it waits for both jobs; a backend-only migration run
 continues to require only the backend suite.
 
+The backend installs nextest 0.9.149 from an immutable install-action version
+whose manifest includes that release and its SHA256 checksum. Fallback installation
+is disabled: an unsupported version fails immediately instead of acquiring
+cargo-binstall or compiling another tool. Acquisition has a three-minute step
+budget inside the unchanged 30-minute backend job. An acquisition timeout remains
+a failed qualification; it does not retry the job or reduce the test workload.
+When updating either pin, verify the action manifest supports the selected Linux
+GNU binary and run the normal complete backend qualification. The workflow
+regression checks the fail-closed acquisition policy; it does not prove network
+availability or replace that qualification.
+
 Before backend or CLI test compilation, the disposable GitHub-hosted Ubuntu
 runner requires 32 GiB available on the build filesystem. When capacity is
 insufficient, it reclaims a fixed allowlist of unused platform SDK directories

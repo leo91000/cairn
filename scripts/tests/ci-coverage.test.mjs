@@ -15,6 +15,23 @@ const pr = parse(readFileSync(new URL('../../.github/workflows/pr.yaml', import.
 const chatJourneySource = readFileSync(new URL('../../tests/e2e/chats.spec.ts', import.meta.url), 'utf8')
 
 describe('parallel CI coverage', () => {
+  it('bounds nextest acquisition and refuses an unsupported version instead of installing fallback tools', () => {
+    const backend = quality.jobs.backend
+    const installers = backend.steps.filter(step => step.uses?.startsWith('taiki-e/install-action@'))
+    expect(installers).toHaveLength(1)
+
+    const installer = installers[0]
+    expect(installer.uses).toMatch(/^taiki-e\/install-action@[a-f0-9]{40}$/)
+    expect(installer.with.tool).toBe('cargo-nextest@0.9.149')
+    expect(installer.with.fallback).toBe('none')
+    expect(installer.with.checksum).toBe('true')
+    expect(installer['timeout-minutes']).toBeGreaterThan(0)
+    expect(installer['timeout-minutes']).toBeLessThanOrEqual(3)
+    expect(installer['continue-on-error']).toBeUndefined()
+    expect(installer.if).toBeUndefined()
+    expect(backend['timeout-minutes']).toBe(30)
+  })
+
   it.each(['image', 'beacon-image'])('exports %s layers for main and version tags without giving PR refs a cache writer', (name) => {
     const build = quality.jobs[name].steps.find(step => step.uses?.startsWith('docker/build-push-action@'))
     const expression = build.with['cache-to'].replace(/^\$\{\{\s*|\s*\}\}$/g, '')
