@@ -689,6 +689,7 @@ jobs:
           CANDIDATE_SHA: ${{ inputs.ci-diagnostic == 'native' && inputs.diagnostic-candidate || github.sha }}
           REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
         run: |
+          git fetch --no-tags origin "$REFERENCE_SHA"
           mkdir -p native-storage-evidence/prerequisite
           if test -n "$CI_DIAGNOSTIC_SOURCE"; then
             node scripts/ci-deadline.mjs "$PWD/native-diagnostics/preparation/tool-acquisition" 90 -- python3 -B scripts/prepare-native-reference-tools.py --candidate "$CANDIDATE_SHA" --reference "$REFERENCE_SHA" --cache-output "$RUNNER_TEMP/native-pristine-tool-cache" --output "$PWD/native-storage-evidence/prerequisite/tool-cache.json"
