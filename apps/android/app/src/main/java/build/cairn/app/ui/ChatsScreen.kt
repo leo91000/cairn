@@ -34,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
@@ -1009,12 +1010,14 @@ internal fun ChatPage(
         ArtifactLinkHost(vm, live.state?.artifacts.orEmpty()) {
             Column(Modifier.fillMaxSize()) {
                 if (!fullscreen) {
+                    val headerProject =
+                        chat?.projectName ?: state.projects.find { it.id == project }?.name
                     val conversation =
                         conversationState(
                             chat,
                             agentName,
                             waitingTasks,
-                            state.installation?.name,
+                            headerProject,
                             newChat = id == null,
                         )
                     ConversationHeader(
@@ -1031,10 +1034,14 @@ internal fun ChatPage(
                             persistDraft()
                             openChat(it)
                         },
-                        live = conversation.live,
+                        working = conversation.working,
                         harness = chat?.provider,
-                        liveSince = waitingTasks?.since ?: chat?.run?.startedAt,
+                        failed = conversation.failed,
                         route = connectionRoute(state.installation, state.transportRoute),
+                        installation = state.installation?.name,
+                        notable =
+                            conversation.status !=
+                                (headerProject?.takeIf { it.isNotBlank() } ?: agentName),
                         back = {
                             persistDraft()
                             back()
@@ -1071,32 +1078,55 @@ internal fun ChatPage(
                             ActionIcon("Options de la conversation", CairnIcons.More) {
                                 menu = true
                             }
+                            // Options of this conversation only: new conversations start from the
+                            // list.
                             DropdownMenu(menu, { menu = false }) {
-                                DropdownMenuItem(
-                                    text = { Text("Nouvelle conversation") },
-                                    leadingIcon = { Icon(CairnIcons.Plus, null) },
-                                    onClick = {
-                                        menu = false
-                                        persistDraft()
-                                        create()
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Connexion") },
-                                    leadingIcon = {
-                                        ConnectionDot(
-                                            connectionRoute(
-                                                state.installation,
-                                                state.transportRoute,
-                                            ),
-                                            description = null,
+                                if (chat?.run != null) {
+                                    Text(
+                                        "Contexte · ${contextSummary(chat.contextUsage).short}",
+                                        Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                            .testTag("menu-context"),
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    HorizontalDivider()
+                                }
+                                chat
+                                    ?.compaction
+                                    ?.takeIf { it.supported && chat.lifecycle == "active" }
+                                    ?.let { compaction ->
+                                        DropdownMenuItem(
+                                            text = {
+                                                Column {
+                                                    Text(
+                                                        if (compaction.running)
+                                                            "Compaction du contexte…"
+                                                        else "Compacter le contexte"
+                                                    )
+                                                    // Why it waits, as web shows under the item.
+                                                    compaction.reason
+                                                        ?.takeIf { !compaction.running }
+                                                        ?.let {
+                                                            Text(
+                                                                it,
+                                                                style =
+                                                                    MaterialTheme.typography
+                                                                        .bodySmall,
+                                                                color =
+                                                                    MaterialTheme.colorScheme
+                                                                        .onSurfaceVariant,
+                                                            )
+                                                        }
+                                                }
+                                            },
+                                            leadingIcon = { Icon(CairnIcons.Layers, null) },
+                                            enabled = compaction.available,
+                                            onClick = {
+                                                menu = false
+                                                compacting = true
+                                            },
                                         )
-                                    },
-                                    onClick = {
-                                        menu = false
-                                        connection = true
-                                    },
-                                )
+                                    }
                                 if (chat != null)
                                     DropdownMenuItem(
                                         text = { Text("Détails de la conversation") },
@@ -1107,19 +1137,20 @@ internal fun ChatPage(
                                         },
                                     )
                                 DropdownMenuItem(
+                                    text = { Text("Plein écran") },
+                                    leadingIcon = { Icon(CairnIcons.Expand, null) },
+                                    onClick = {
+                                        menu = false
+                                        fullscreen = true
+                                    },
+                                )
+                                DropdownMenuItem(
                                     text = { Text("Suivre les réponses") },
                                     leadingIcon = { Icon(CairnIcons.Bottom, null) },
                                     trailingIcon = { if (follow) Icon(CairnIcons.Check, "Activé") },
                                     onClick = {
                                         menu = false
                                         follow = !follow
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Plein écran") },
-                                    onClick = {
-                                        menu = false
-                                        fullscreen = true
                                     },
                                 )
                                 chat?.let { current ->
@@ -1153,7 +1184,38 @@ internal fun ChatPage(
                                             },
                                         )
                                     }
-                                    if (active || current.wakeup != null)
+                                }
+                                Text(
+                                    "Avancé",
+                                    Modifier.padding(
+                                            start = 16.dp,
+                                            end = 16.dp,
+                                            top = 12.dp,
+                                            bottom = 4.dp,
+                                        )
+                                        .semantics { heading() },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Connexion") },
+                                    leadingIcon = {
+                                        ConnectionDot(
+                                            connectionRoute(
+                                                state.installation,
+                                                state.transportRoute,
+                                            ),
+                                            description = null,
+                                        )
+                                    },
+                                    onClick = {
+                                        menu = false
+                                        connection = true
+                                    },
+                                )
+                                chat?.let { current ->
+                                    if (active || current.wakeup != null) {
+                                        HorizontalDivider()
                                         DropdownMenuItem(
                                             text = {
                                                 Text(
@@ -1174,6 +1236,7 @@ internal fun ChatPage(
                                                 stopping = true
                                             },
                                         )
+                                    }
                                 }
                             }
                         }

@@ -204,8 +204,10 @@ test('installation subdomains preserve browser drafts and canonical account acce
     await expect(page).toHaveURL(`${hostedOrigin}/`)
     await page.goto(`${hostedOrigin}/chats/${chat.slug}`)
     await expect(page.getByRole('heading', { name: 'Keep this draft across origins', exact: true })).toBeVisible()
-    await page.getByRole('button', { name: 'Chat details', exact: true }).click()
-    await page.getByRole('link', { name: 'Question notifications', exact: true }).click()
+    // Account settings open from the account menu, on the account's canonical origin.
+    await page.goto(`${hostedOrigin}/`)
+    await page.getByRole('button', { name: 'Account', exact: true }).click()
+    await page.getByRole('menuitem', { name: 'Account settings', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Profile', exact: true })).toBeVisible()
     expect(new URL(page.url()).origin).toBe(origin)
     executeBeaconSql(isolated, 'UPDATE web_sessions SET last_proof_at=clock_timestamp() - interval \'1 hour\'')

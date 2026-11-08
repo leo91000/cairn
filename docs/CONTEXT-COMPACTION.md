@@ -36,8 +36,10 @@ tokens by the window would report occupancy that does not exist.
 - **OpenCode**: no usage is reported and compaction is unsupported, so clients show the usage
   as unavailable.
 
-The web header and both details sheets show `used / window · percent`. The percentage
-appears only when both values are known. Otherwise they show "window unknown". With no
+The web conversation menu (the ⋯ dropdown, or the sheet on phones), Android's « Options de la
+conversation » and its details sheet show `used / window · percent`; the web header shows
+« Context N% » only from 80 %, wider than a phone. The percentage appears only when both values
+are known. Otherwise they show "window unknown". With no
 report, they show "unavailable". The share is raw occupancy: it does not subtract Codex's
 fixed 12,000-token baseline the way the Codex TUI's "context left" does.
 

@@ -618,9 +618,13 @@ class SignalJourneyTest {
                     )
                 )
             compose.onAllNodesWithTag("agent-working").assertCountEquals(0)
-            // The header no longer says the agent works; the wait is timed from its start.
+            // The header names the wait instead of the agent working; the timeline times it.
             compose
-                .onNodeWithText("Tâche en arrière-plan · 13 min", useUnmergedTree = true)
+                .onNode(
+                    hasText("Tâche en arrière-plan") and
+                        hasAnyAncestor(hasTestTag("conversation-header")),
+                    useUnmergedTree = true,
+                )
                 .assertExists()
             capture("chat-background-wait-light")
         }
