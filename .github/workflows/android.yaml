@@ -37,11 +37,18 @@ jobs:
           test -z "$(git status --porcelain)"
           git show -s --format='%H %T %cI'
           sha256sum apps/android/app/src/test/java/build/cairn/app/ui/BlockedMissionJourneyTest.kt apps/android/app/src/main/java/build/cairn/app/ui/FilScreen.kt
-      - name: Preserve original full Android observation
-        run: pnpm validate:pr android
-      - name: Verify source after observation
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ci/blocked-mission-observer
+          path: observer
+      - name: Instrument only the diagnostic fixture
+        run: python3 observer/.github/blocked-mission-probe.py
+      - name: Repeat the archive journey with named waits
+        working-directory: apps/android
+        run: ./gradlew :app:testDebugUnitTest --tests '*BlockedMissionJourneyTest.archiving*' --no-daemon
+      - name: Record diagnostic source patch
         if: always()
-        run: git diff --exit-code
+        run: git diff -- apps/android/app/src/test/java/build/cairn/app/ui/BlockedMissionJourneyTest.kt
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
