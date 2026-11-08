@@ -506,6 +506,15 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await page.screenshot({ path: 'test-results/execution-desktop.png' })
   await page.keyboard.press('Escape')
   await expect(details).toBeFocused()
+  // On a narrow tablet the chip shortens rather than running under the actions.
+  for (const width of [1440, 700]) {
+    await page.setViewportSize({ width, height: 720 })
+    const chipBox = (await chip.boundingBox())!
+    const actions = (await page.locator('.chat-header > div').last().boundingBox())!
+    expect(chipBox.x + chipBox.width).toBeLessThanOrEqual(actions.x)
+  }
+
+  await page.setViewportSize({ width: 1280, height: 720 })
   // Opened from the chip, the panel keeps it until it closes; focus then falls back to ⋯ once it is gone.
   await chip.click()
   await expect(panel).toBeVisible()

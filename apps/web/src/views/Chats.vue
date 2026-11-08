@@ -1398,7 +1398,8 @@ function key(event: KeyboardEvent) {
           />
           <div class="flex min-w-0 flex-1 items-center gap-2.5 overflow-x-clip text-xs text-muted [overflow-clip-margin:4px]">
             <!-- When the row runs out of room the title (it has a tooltip), project and requester give
-                 way; the pills that need a look keep their width up to a share of the row. -->
+                 way; the status and context keep their width up to a share of the row, and the node
+                 chip shrinks with the title once both are crowded. -->
             <h1 class="min-w-0 truncate text-base! font-semibold! leading-snug! tracking-tight! text-ink" :title="heading?.title || undefined">
               {{ heading?.title || 'New conversation' }}
             </h1>
@@ -1525,6 +1526,7 @@ function key(event: KeyboardEvent) {
                   :disabled="item.disabled"
                   :aria-label="item.label"
                   :aria-describedby="item.hint ? `conversation-action-${item.id}` : undefined"
+                  :aria-haspopup="item.dialog ? 'dialog' : undefined"
                   @click="select(() => item.run(menuButton?.trigger))"
                 >
                   <Icon :name="item.icon" :size="16" :class="item.danger ? '' : 'text-muted'" /><span class="min-w-0">

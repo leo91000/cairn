@@ -352,7 +352,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div v-if="relevant" :class="showChip ? (variant === 'chip' ? 'relative inline-flex min-w-0 max-w-full' : 'relative inline-flex max-w-[35%] shrink-0') : 'hidden'" @keydown.esc.stop="close(true)">
+  <div v-if="relevant" :class="showChip ? (variant === 'chip' ? 'relative inline-flex min-w-0 max-w-full' : 'relative inline-flex min-w-0 max-w-[35%]') : 'hidden'" @keydown.esc.stop="close(true)">
     <button
       v-if="showChip"
       ref="chip"
