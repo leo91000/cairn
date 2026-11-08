@@ -547,8 +547,12 @@ const chatStatus = computed(() => {
   return 'Ready'
 })
 const headerState = computed(() => detail.value ? headerStatus(chatStatus.value) : null)
-// A conversation not created yet already names the project it will start in.
-const headerProject = computed(() => heading.value ? heading.value.projectName : state.projects.find(project => project.id === projectId.value)?.name)
+// A conversation not created yet already names the project it will start in; one still loading waits.
+const headerProject = computed(() => {
+  if (heading.value)
+    return heading.value.projectName
+  return route.params.id ? undefined : state.projects.find(project => project.id === projectId.value)?.name
+})
 // The avatar's ring is the header's only sign of work, on every width.
 const working = computed(() => detail.value?.run?.status === 'running' && !detail.value.paused && !suspended.value && !quota.value)
 // Phones name the installation and its route with the connection dot, not in words.
@@ -887,16 +891,27 @@ function openCompactionFromHeader() {
   compacting.value = true
 }
 
-// Focus goes back to whatever opened the dialog while it is still on the page (the header pill may
-// have left meanwhile), else to the visible ⋯ trigger.
-async function closeCompaction() {
-  compacting.value = false
+// The ⋯ control shown at this width: a dropdown trigger on wider screens, the sheet's button on phones.
+function visibleMenuTrigger() {
+  return [menuButton.value?.trigger, detailsButton.value].find(button => button?.getClientRects().length)
+}
+
+// Focus goes back to what opened a dialog while it is still shown (the header pill may have left, or
+// the window crossed a breakpoint meanwhile), else to the visible ⋯ control.
+async function refocus(opener: HTMLElement | undefined) {
   await nextTick()
-  const opener = compactionOpener.value
-  const target = opener?.isConnected && opener.getClientRects().length
-    ? opener
-    : [menuButton.value?.trigger, detailsButton.value].find(button => button?.getClientRects().length)
+  const target = opener?.isConnected && opener.getClientRects().length ? opener : visibleMenuTrigger()
   target?.focus()
+}
+
+function closeCompaction() {
+  compacting.value = false
+  void refocus(compactionOpener.value)
+}
+
+function closeConnection() {
+  connectionOpen.value = false
+  void refocus(connectionOpener.value)
 }
 
 // The pill leaves once compaction frees the window: focus on it moves to the ⋯ menu.
@@ -1295,7 +1310,7 @@ function key(event: KeyboardEvent) {
     :agent="detail?.agentName || selectedAgent?.name || 'Main agent'"
     :project="detail ? detail.projectName : state.projects.find(project => project.id === projectId)?.name"
     :return-focus="connectionOpener ?? detailsButton"
-    @close="connectionOpen = false"
+    @close="closeConnection"
   />
   <div class="flex h-full min-h-0 min-w-0 flex-1">
     <div class="chat-page flex h-full min-h-0 min-w-0 flex-1 flex-col gap-3 px-6 pb-4 pt-3 phone:gap-0 phone:px-3 phone:pb-2 phone:pt-[env(safe-area-inset-top)]">
@@ -1412,7 +1427,7 @@ function key(event: KeyboardEvent) {
               :key="detail.run.id"
               variant="attention"
               :run="detail.run"
-              :fallback-focus="menuButton?.trigger"
+              :fallback-focus="visibleMenuTrigger"
             />
           </div>
         </div>

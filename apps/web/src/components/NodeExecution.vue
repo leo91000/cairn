@@ -39,8 +39,8 @@ const props = withDefaults(defineProps<{
   run: Run
   /** `attention` shows the chip only while the node needs attention or is changing; routine sync stays in the menu. */
   variant?: 'chip' | 'attention'
-  /** Takes focus when the panel closes after its attention chip went away. */
-  fallbackFocus?: HTMLElement
+  /** The visible control that takes focus when neither the opener nor the chip can. */
+  fallbackFocus?: () => HTMLElement | undefined
 }>(), { variant: 'chip' })
 // Lets hosts drop the row around the chip while it renders nothing.
 const emit = defineEmits<{ relevance: [relevant: boolean] }>()
@@ -158,7 +158,7 @@ watch(showChip, async (shown) => {
   if (shown || !chip.value || document.activeElement !== chip.value)
     return
   await nextTick()
-  props.fallbackFocus?.focus()
+  props.fallbackFocus?.()?.focus()
 })
 const chipTone = {
   bad: 'border-coral/40 bg-coral-soft text-coral',
@@ -267,10 +267,10 @@ function close(returnFocus = false) {
   panel.value?.close()
   open.value = false
   if (returnFocus) {
+    // A window crossing a breakpoint can hide the opener or the chip: focus the first one still shown.
     const chipStays = props.variant === 'chip' || attention.value
-    const target = opener.value?.isConnected && opener.value.getClientRects().length
-      ? opener.value
-      : chipStays ? chip.value : props.fallbackFocus
+    const target = [opener.value, chipStays ? chip.value : undefined].find(element => element?.isConnected && element.getClientRects().length)
+      ?? props.fallbackFocus?.()
     target?.focus()
   }
 

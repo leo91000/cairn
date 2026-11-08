@@ -110,6 +110,8 @@ test('a Claude spend limit waits automatically and appears once in the real conv
     await page.screenshot({ path: testInfo.outputPath('quota-web-desktop-dark.png'), animations: 'disabled' })
     await workspace.api(`/api/chats/${chat.id}/pause`, 'POST', { paused: true })
     await expect(headerStatus(page, /^Paused$/)).toBeVisible()
+    // Screen readers hear the new status through the header's mounted live region.
+    await expect(page.locator('.chat-header .sr-only[role="status"]')).toHaveText('Paused')
     await expect(card.getByText('Work resumes automatically when an account is available.')).toBeVisible()
     await expect(card.getByRole('button', { name: 'Resume conversation', exact: true })).toHaveCount(0)
     await card.getByRole('link', { name: 'Manage accounts' }).click()

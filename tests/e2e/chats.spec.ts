@@ -424,6 +424,8 @@ test('a durable condition wait follows a dependency across restart and queue pau
     await authenticateWorkspace(page)
     await expect(page.locator('.chat-wait')).toContainText(/Waiting for another run to finish.*Join dependency.*up to \d+ min/)
     await expect(headerStatus(page, /^Awaiting result · up to \d+ min$/)).toBeVisible()
+    // A countdown stays out of the live region, which would otherwise repeat it every minute.
+    await expect(page.locator('.chat-header .sr-only[role="status"]')).toHaveText('')
     // A crowded row truncates its pills rather than covering the header's actions.
     for (const width of [1440, 1000, 901, 700]) {
       await page.setViewportSize({ width, height: 800 })
@@ -1097,6 +1099,17 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
   await expect(page.getByRole('dialog', { name: 'Fullscreen activity' })).toBeVisible()
   await page.getByRole('button', { name: 'Exit fullscreen', exact: true }).click()
   await expect(details).toBeFocused()
+  // Closing after the window narrowed to a phone returns focus to the ⋯ control shown there.
+  await details.click()
+  await menu.getByRole('menuitem', { name: 'Connection', exact: true }).click()
+  const connectionSheet = page.getByRole('dialog', { name: 'Connection', exact: true })
+  await expect(connectionSheet).toBeVisible()
+  await page.setViewportSize({ width: 390, height: 844 })
+  await connectionSheet.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  await expect(connectionSheet).toHaveCount(0)
+  await expect(details).toBeFocused()
+  await expect(details).toBeInViewport()
+  await page.setViewportSize({ width: 1440, height: 1000 })
   // A short window scrolls the dropdown, so its last actions stay reachable.
   await page.setViewportSize({ width: 844, height: 390 })
   await details.click()
