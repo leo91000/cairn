@@ -73,15 +73,23 @@ async function show(focus: 'first' | 'last' = 'first') {
   place()
   // Focus once the height limit applies, so a scrolling menu shows the item it focuses.
   await nextTick()
+  if (!open.value)
+    return
   const list = items()
   const item = focus === 'first' ? list[0] : list.at(-1)
   item?.focus({ preventScroll: true })
   item?.scrollIntoView({ block: 'nearest' })
   // An item that is removed or disabled while focused would drop focus to the page, where the
-  // menu's keys no longer reach it: focus stays in the menu instead.
+  // menu's keys no longer reach it: focus moves to the next enabled item instead.
   contents = new MutationObserver(() => {
-    if (open.value && !menu.value?.contains(document.activeElement))
-      (items()[0] ?? trigger.value)?.focus({ preventScroll: true })
+    const active = document.activeElement as HTMLElement | null
+    if (!open.value || (menu.value?.contains(active) && !active?.matches(':disabled, [aria-disabled="true"]')))
+      return
+    const all = Array.from(menu.value?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
+    const at = active ? all.indexOf(active) : -1
+    const enabled = items()
+    const next = at < 0 ? enabled[0] : [...all.slice(at + 1), ...all.slice(0, at)].find(item => enabled.includes(item))
+    ;(next ?? trigger.value)?.focus({ preventScroll: true })
   })
   if (menu.value) {
     contents.observe(menu.value, {
@@ -199,8 +207,9 @@ defineExpose({ show, hide, trigger })
   <div
     ref="menu"
     popover="manual"
+    tabindex="-1"
     :style="{ width: `${width}px`, ...position }"
-    class="fixed inset-auto m-0 overflow-y-auto overscroll-contain rounded-xl border border-line bg-raised p-1.5 text-ink shadow-[0_9px_25px_#0003]"
+    class="fixed inset-auto m-0 overflow-y-auto overscroll-contain rounded-xl border border-line bg-raised p-1.5 text-ink shadow-[0_9px_25px_#0003] outline-none"
     @keydown="menuKeydown"
     @click.stop
   >

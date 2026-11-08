@@ -891,15 +891,30 @@ const liveStatus = computed(() => [
 ].filter(Boolean).join(' · '))
 const announcedStatus = ref('')
 let announcement: ReturnType<typeof setTimeout> | undefined
-watch([() => detail.value?.id, liveStatus], ([id, text], [previousId]) => {
-  clearTimeout(announcement)
-  if (id !== previousId) {
+// Opening a conversation is not news: its saved copy shows first and the live stream completes it
+// moments later (a node's sync state, for one). The opening ends once the stream has caught up and
+// its data has landed; a stream that later reconnects to the same conversation does not reopen it.
+let openedId: string | undefined
+const opening = ref(false)
+let openingEnd: ReturnType<typeof setTimeout> | undefined
+watch([() => detail.value?.id, live.synced, catchingUp], ([id, synced, catching]) => {
+  if (id && id !== openedId) {
+    openedId = id
+    opening.value = true
+    clearTimeout(announcement)
     announcedStatus.value = ''
-    return
   }
 
-  announcement = setTimeout(() => announcedStatus.value = text, 1000)
+  clearTimeout(openingEnd)
+  if (opening.value && synced && !catching)
+    openingEnd = setTimeout(() => opening.value = false, 200)
+}, { immediate: true })
+watch(liveStatus, (text) => {
+  clearTimeout(announcement)
+  if (!opening.value && detail.value)
+    announcement = setTimeout(() => announcedStatus.value = text, 1000)
 })
+onBeforeUnmount(() => clearTimeout(openingEnd))
 onBeforeUnmount(() => clearTimeout(announcement))
 
 function openCompactionFromHeader() {

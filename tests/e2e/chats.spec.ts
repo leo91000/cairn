@@ -1093,6 +1093,10 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
   // Screen readers hear the agent, its status and context with the menu, not only its actions.
   await expect(menu).toHaveAccessibleDescription(/Main agent.*Ready.*Context/)
   await expect(menu.getByRole('group', { name: 'Advanced', exact: true }).getByRole('menuitem', { name: 'Connection', exact: true })).toBeVisible()
+  // Clicking the summary keeps the menu's keys working.
+  await menu.locator('..').getByText('Ready', { exact: true }).click()
+  await page.keyboard.press('ArrowDown')
+  await expect(menu.getByRole('menuitem').first()).toBeFocused()
   await expect(menu.getByRole('menuitem').first()).toBeFocused()
   await expect(menu.getByRole('menuitem', { name: 'Open activity fullscreen', exact: true })).toBeVisible()
   await page.keyboard.press('End')
@@ -2450,6 +2454,16 @@ test('context usage shows the latest request and an explicit compaction keeps th
   await expect(confirmCompaction).toHaveCount(0)
   await expect(indicator).toHaveCount(0, { timeout: 15000 })
   await expect(page.getByRole('button', { name: 'Chat details', exact: true })).toBeFocused()
+
+  // A focused action that becomes unavailable while the menu is open hands focus to the next one.
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).compaction?.available, { timeout: 15000 }).toBe(true)
+  ;({ action } = await openChatDetails(page))
+  await expect(action('Compact context')).toBeFocused()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:chat-hang' })
+  await expect(action('Compact context')).toBeDisabled({ timeout: 15000 })
+  await expect(action('Open activity fullscreen')).toBeFocused()
+  await page.keyboard.press('Escape')
+  await workspace.api(`/api/chats/${chat.id}/stop`, 'POST', {})
 })
 
 test('compaction is unavailable while a turn runs and explains why', async ({ page, workspace }) => {

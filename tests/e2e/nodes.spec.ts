@@ -515,6 +515,11 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   }
 
   await page.setViewportSize({ width: 1280, height: 720 })
+  // A node problem already there when the conversation opens is not news.
+  await page.reload()
+  await expect(chip).toHaveText('Sync overdue')
+  await page.waitForTimeout(1500)
+  await expect(page.locator('.chat-header .sr-only[role="status"]')).toHaveText('')
   // Opened from the chip, the panel keeps it until it closes; focus then falls back to ⋯ once it is gone.
   await chip.click()
   await expect(panel).toBeVisible()
