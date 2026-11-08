@@ -1,23 +1,23 @@
-# Observer branch only. No build, qualification, publication or deployment.
-name: Public tool acquisition diagnostic (not qualification)
+# Observer branch only. Complete prerequisite acquisition, never runtime/release provenance.
+name: Native tool preparation qualification (not native runtime)
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  public-acquisition:
+  pinned-tool-preparation:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Fetch immutable source bindings without building
-        run: git fetch --no-tags --depth=1 origin 272f4f3bbe5b276b0b9339cf38bab53b04bef8b2 ca526fc46e8aae81c0955a2dd6e116a9bac45d60 c7dc7fb78aeb9f50fdf0e8ed8295659dec6e9b93 c186d11e048cdcb8d2d1ae31a11a277a03411baf
-      - name: Observe public acquisition with fixed request and byte bounds
-        run: python3 scripts/native-tool-acquisition-diagnostic.py --output native-tool-acquisition-diagnostic.json --official-routes
+      - name: Fetch immutable candidate and reference source
+        run: git fetch --no-tags --depth=1 origin 35d151a14a912ff5436ae152813c66321a6bb469 c186d11e048cdcb8d2d1ae31a11a277a03411baf
+      - name: Verify complete acquisition, extraction, publication and cache reuse
+        run: timeout --signal=TERM --kill-after=5s 360s python3 scripts/native-tool-preparation-qualification.py --output native-tool-preparation-qualification.json
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: native-tool-acquisition-diagnostic
-          path: native-tool-acquisition-diagnostic.json
+          name: native-tool-preparation-qualification
+          path: native-tool-preparation-qualification.json
           if-no-files-found: error
           retention-days: 14
