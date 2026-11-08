@@ -1,6 +1,6 @@
 # Skill-bundle availability diagnostic checkpoint
 
-Status: **slot explicitly re-ceded by requester; unresolved diagnosis**. No new diagnostic run has been dispatched yet. Independent full-diff harness review is required before dispatch. This branch is diagnostic only. Do not merge it into main.
+Status: **HEAVY HOLD; slot explicitly returned to requester; unresolved diagnosis**. No new diagnostic run has been dispatched. Source/light preparation remains active; dispatch requires a new explicit cession and a completed clean fresh full-diff review. This branch is diagnostic only. Do not merge it into main.
 
 ## Scope and identities
 
@@ -47,6 +47,6 @@ The probe records fixed event labels for poll start/abort, beforeunload/pagehide
 
 **Unexecuted and unqualified:** the prepared observer tests have not established a red-capable loop and may need harness corrections. Neither a production root cause nor an appropriate final regression seam is confirmed. Do not infer a defect solely from source similarity or missing lifecycle integration.
 
-Next heavy-slot need: one serial base/candidate diagnostic lot, with the same pinned browser container/fixture builds, using the prepared probes instead of rerunning the original suite for green. Expected job limit 25 minutes each, test step at most 5 minutes each. The parent explicitly ceded the slot again on resumption; dispatch remains gated by the completed fresh full-diff review. Preserve any first probe failure and distinguish native page errors from harness failures. After a real red loop: diagnose, targeted product repair if confirmed, fresh independent full-diff SolHigh review rounds, exact affected qualification, ordinary guarded merge and verified post-merge CI. If #731-specific, send evidence to its sole writer instead of editing #731.
+Next heavy-slot need: one serial base/candidate diagnostic lot, with the same pinned browser container/fixture builds, using the prepared probes instead of rerunning the original suite for green. Expected job limit 25 minutes each, test step at most 5 minutes each. The parent has reclaimed the heavy slot for other owners. No dispatch is authorized until a new explicit cession, regardless of review result. Preserve any first probe failure and distinguish native page errors from harness failures. After a real red loop: diagnose, targeted product repair if confirmed, fresh independent full-diff SolHigh review rounds, exact affected qualification, ordinary guarded merge and verified post-merge CI. If #731-specific, send evidence to its sole writer instead of editing #731.
 
 Current main was refreshed and remains `7028fbfdd6d13e27b8f4e7db767899828d631b42`; #732 added an error filter and #727 added conversation renaming. These changes are preserved and excluded from the immutable historical diagnostic pair. Any later product repair must start from the then-current main, and current-main qualification must independently capture all native page errors before #732's filter.

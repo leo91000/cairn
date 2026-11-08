@@ -5,9 +5,12 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
   test(`availability native reload probe (${boundary})`, async ({ page }, testInfo) => {
     const journal: Array<{ kind: string, hostAt: number, browserAt?: number, document?: string, poll?: number }> = []
     const errors: string[] = []
+    const bodyFailures: Array<{ kind: string, document?: string, poll?: number }> = []
     const journalPath = testInfo.outputPath('availability-boundaries.json')
-    const saveJournal = () => saveAvailabilityJournal(journalPath, JSON.stringify({ boundary, journal, errors }))
+    const saveJournal = () => saveAvailabilityJournal(journalPath, JSON.stringify({ boundary, journal, errors, bodyFailures }))
     const record = (kind: string, browserAt?: number, document?: string, poll?: number) => {
+      if (kind.endsWith('-body-rejected'))
+        bodyFailures.push({ kind, document, poll })
       journal.push({ kind, hostAt: Date.now(), browserAt, document, poll })
       saveJournal()
     }
@@ -66,6 +69,7 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
       }).toBe(0)
       // This round trip follows the completed fetch microtasks and their native diagnostics.
       await page.evaluate(() => {})
+      expect(bodyFailures).toEqual([])
     }
     record('setup-entered')
     page.on('pageerror', (error) => {
@@ -81,15 +85,17 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
         const consuming = new Set<number>()
         ;(window as any).shellPending = pending
         const completions = new MessageChannel()
-        completions.port1.onmessage = (event) => {
+        completions.port1.onmessage = async (event) => {
           const { kind, poll } = event.data as { kind: string, poll: number }
           if (kind.endsWith('-headers') && consuming.has(poll))
             return
+          await probe(kind, poll)
+          if (kind.endsWith('-headers') && consuming.has(poll))
+            return
           pending.delete(poll)
-          probe(kind, poll)
         }
         const probe = (kind: string, poll?: number) => {
-          void (window as any).availabilityProbe(kind, performance.now(), documentId, poll)
+          return (window as any).availabilityProbe(kind, performance.now(), documentId, poll) as Promise<void>
         }
         for (const kind of ['beforeunload', 'pagehide', 'pageshow'])
           window.addEventListener(kind, () => probe(kind))
@@ -182,6 +188,8 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
           return route.continue()
         try {
           const response = await route.fetch({ timeout: 7000 })
+          record(`reload-response-status-${response.status()}`)
+          expect(response.status()).toBe(200)
           reloadHeld = true
           record('reload-response-held')
           await releaseReload.promise
