@@ -182,6 +182,7 @@ async fn direct_read(
             .json(&json!({
                 "fingerprint": fingerprint,
                 "version": 4,
+                "timeline": 1,
             }))
             .send()
             .await?

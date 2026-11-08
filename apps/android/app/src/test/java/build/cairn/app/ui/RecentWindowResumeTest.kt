@@ -216,7 +216,7 @@ class RecentWindowResumeTest {
                         olderRequests.size == 2
                     }
                     assertEquals(
-                        "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream?after=60&history=v2%3Afixture%3A1&window=1&recent=1",
+                        "/api/installations/fixture/api/chats/aa61a476-87e5-5034-b813-8a63564107d7/stream?after=60&history=v2%3Afixture%3A1&window=1&timeline=1&recent=1",
                         streams[1],
                     )
                     // Pages loaded above the replaced events are dropped: paging resumes at

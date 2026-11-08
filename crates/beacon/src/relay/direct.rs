@@ -30,6 +30,7 @@ pub(super) struct Connection {
 pub(crate) struct AuthorizationRequest {
     fingerprint: String,
     version: u16,
+    timeline: Option<u16>,
 }
 
 pub(crate) fn body_limit() -> DefaultBodyLimit {
@@ -109,6 +110,14 @@ async fn issue(
         return Err(ApiError::Http(
             StatusCode::UPGRADE_REQUIRED,
             "Direct protocol mismatch. Update required: update the app and Beacon.",
+        ));
+    }
+    // This account-session control is the UI handshake, not the public MCP/API.
+    // Older apps already understand its 426, even before ICE can use UDP.
+    if input.timeline != Some(1) {
+        return Err(ApiError::Http(
+            StatusCode::UPGRADE_REQUIRED,
+            "Timeline protocol mismatch. Update required: update the app to read timeline cards.",
         ));
     }
     let Some(tunnel) = tunnel else {
