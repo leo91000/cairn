@@ -53,6 +53,12 @@ jobs:
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
+        trap 'rm -f "$index_entries"' EXIT
+        source_git ls-files -v -z > "$index_entries"
+        while IFS= read -r -d '' index_entry; do
+          test "${index_entry:0:2}" = 'H '
+        done < "$index_entries"
         tracked_clean=true
         allowed_evidence='[]'
         source_git diff --quiet
@@ -81,6 +87,12 @@ jobs:
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
+        trap 'rm -f "$index_entries"' EXIT
+        source_git ls-files -v -z > "$index_entries"
+        while IFS= read -r -d '' index_entry; do
+          test "${index_entry:0:2}" = 'H '
+        done < "$index_entries"
         tracked_clean=true
         allowed_evidence='[]'
         source_git diff --quiet
@@ -124,6 +136,12 @@ jobs:
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
+        trap 'rm -f "$index_entries"' EXIT
+        source_git ls-files -v -z > "$index_entries"
+        while IFS= read -r -d '' index_entry; do
+          test "${index_entry:0:2}" = 'H '
+        done < "$index_entries"
         tracked_clean=true
         allowed_evidence='[]'
         source_git diff --quiet
@@ -193,6 +211,12 @@ jobs:
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
+        trap 'rm -f "$index_entries"' EXIT
+        source_git ls-files -v -z > "$index_entries"
+        while IFS= read -r -d '' index_entry; do
+          test "${index_entry:0:2}" = 'H '
+        done < "$index_entries"
         tracked_clean=true
         allowed_evidence='[]'
         source_git diff --quiet
@@ -283,6 +307,12 @@ jobs:
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
+        trap 'rm -f "$index_entries"' EXIT
+        source_git ls-files -v -z > "$index_entries"
+        while IFS= read -r -d '' index_entry; do
+          test "${index_entry:0:2}" = 'H '
+        done < "$index_entries"
         tracked_clean=true
         allowed_evidence='[]'
         source_git diff --quiet
@@ -353,6 +383,12 @@ jobs:
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
+        trap 'rm -f "$index_entries"' EXIT
+        source_git ls-files -v -z > "$index_entries"
+        while IFS= read -r -d '' index_entry; do
+          test "${index_entry:0:2}" = 'H '
+        done < "$index_entries"
         tracked_clean=true
         allowed_evidence='[]'
         case '${{ matrix.group }}' in
@@ -448,6 +484,12 @@ jobs:
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
+        trap 'rm -f "$index_entries"' EXIT
+        source_git ls-files -v -z > "$index_entries"
+        while IFS= read -r -d '' index_entry; do
+          test "${index_entry:0:2}" = 'H '
+        done < "$index_entries"
         tracked_clean=true
         allowed_evidence='[]'
         source_git diff --quiet
@@ -513,6 +555,12 @@ jobs:
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
+        trap 'rm -f "$index_entries"' EXIT
+        source_git ls-files -v -z > "$index_entries"
+        while IFS= read -r -d '' index_entry; do
+          test "${index_entry:0:2}" = 'H '
+        done < "$index_entries"
         tracked_clean=true
         allowed_evidence='[]'
         source_git diff --quiet
@@ -553,6 +601,12 @@ jobs:
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
+        trap 'rm -f "$index_entries"' EXIT
+        source_git ls-files -v -z > "$index_entries"
+        while IFS= read -r -d '' index_entry; do
+          test "${index_entry:0:2}" = 'H '
+        done < "$index_entries"
         tracked_clean=true
         allowed_evidence='[]'
         source_git diff --quiet
@@ -601,6 +655,12 @@ jobs:
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
+        trap 'rm -f "$index_entries"' EXIT
+        source_git ls-files -v -z > "$index_entries"
+        while IFS= read -r -d '' index_entry; do
+          test "${index_entry:0:2}" = 'H '
+        done < "$index_entries"
         tracked_clean=true
         allowed_evidence='[]'
         source_git diff --quiet
@@ -667,6 +727,12 @@ jobs:
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
+        trap 'rm -f "$index_entries"' EXIT
+        source_git ls-files -v -z > "$index_entries"
+        while IFS= read -r -d '' index_entry; do
+          test "${index_entry:0:2}" = 'H '
+        done < "$index_entries"
         tracked_clean=true
         allowed_evidence='[]'
         source_git diff --quiet
@@ -747,6 +813,12 @@ jobs:
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
+        trap 'rm -f "$index_entries"' EXIT
+        source_git ls-files -v -z > "$index_entries"
+        while IFS= read -r -d '' index_entry; do
+          test "${index_entry:0:2}" = 'H '
+        done < "$index_entries"
         tracked_clean=true
         allowed_evidence='[]'
         source_git diff --quiet
