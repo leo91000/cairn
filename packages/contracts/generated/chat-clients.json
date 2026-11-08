@@ -81,6 +81,13 @@
     "path": "/chats/{chatId}/messages/{messageId}"
   },
   {
+    "input": "RenameChatInput",
+    "method": "PUT",
+    "name": "renameChat",
+    "output": "Chat",
+    "path": "/chats/{chatId}"
+  },
+  {
     "input": "SetChatPausedInput",
     "method": "POST",
     "name": "setChatPaused",

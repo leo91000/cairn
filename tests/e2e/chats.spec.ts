@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test'
+import type { Page, Route } from '@playwright/test'
 import type { Workspace } from './fixtures'
 import type { ResumeDiagnosticRecord } from './resume-diagnostic'
 import { randomUUID } from 'node:crypto'
@@ -1090,6 +1090,9 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
   await details.click()
   const menu = page.getByRole('menu', { name: 'Chat details', exact: true })
   await expect(menu.locator('..').getByText('Ready', { exact: true })).toBeVisible()
+  // The dropdown shows the full title the header may truncate.
+  const shownTitle = (await page.locator('.chat-header h1:not(.sr-only)').textContent())!.trim()
+  await expect(menu.locator('..').locator('p').first()).toHaveText(shownTitle)
   // Screen readers hear the agent, its status and context with the menu, not only its actions.
   await expect(menu).toHaveAccessibleDescription(/Main agent.*Ready.*Context/)
   await expect(menu.getByRole('group', { name: 'Advanced', exact: true }).getByRole('menuitem', { name: 'Connection', exact: true })).toBeVisible()
@@ -2165,6 +2168,168 @@ test('long words and URLs wrap inside messages without widening the conversation
   await workspace.restart()
 })
 
+test('a renamed conversation keeps its title and Cairn stops naming it', async ({ page, workspace }) => {
+  test.setTimeout(60000)
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Draft the release notes for the next version' })
+  await expect.poll(() => workspace.service.chats.detail(chat.id).run?.status).toBe('succeeded')
+  await useRelayForHttpMocks(page)
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const details = page.getByRole('button', { name: 'Chat details', exact: true })
+  const dialog = page.getByRole('dialog', { name: 'Rename conversation', exact: true })
+  const title = dialog.getByRole('textbox', { name: 'Title', exact: true })
+
+  // The dropdown offers renaming first and says what it changes.
+  let { action } = await openChatDetails(page)
+  await expect(page.getByRole('menu', { name: 'Chat details', exact: true }).getByRole('menuitem').first()).toHaveAccessibleName('Rename conversation')
+  await action('Rename conversation').click()
+  await expect(dialog).toContainText('Cairn stops naming this conversation automatically')
+  await expect(title).toHaveValue('Draft the release notes for the next version')
+  await expect(title).toBeFocused()
+  await title.fill('   ')
+  await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeDisabled()
+  // Counted in characters like the installation: emoji count once, and too long is explained.
+  await title.fill('🚀'.repeat(91))
+  await expect(dialog).toContainText('Use at most 90 characters (91 now).')
+  await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeDisabled()
+  await title.fill('🚀'.repeat(90))
+  await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeEnabled()
+  await title.fill('  Release notes  ')
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(details).toBeFocused()
+  await expect(page.locator('.chat-header').getByRole('heading', { name: 'Release notes', exact: true })).toBeVisible()
+  const fil = page.getByRole('complementary', { name: 'Fil' })
+  await fil.getByRole('tab', { name: /^Tout/ }).click()
+  await expect(fil.locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('Release notes')
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).title).toBe('Release notes')
+
+  // A message and its turn while the dialog is open leave the conversation renamable at the
+  // revision it now has.
+  ;({ action } = await openChatDetails(page))
+  await action('Rename conversation').click()
+  await expect(title).toHaveValue('Release notes')
+  const before = (await workspace.api(`/api/chats/${chat.id}`)).revision
+  const followUp = randomUUID()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: followUp, text: 'Add the migration notes too' })
+  // The conversation's run is reused, so its turn is done once it took the message and succeeded.
+  await expect.poll(() => {
+    const current = workspace.service.chats.detail(chat.id)
+    return current.messages.some(message => message.id === followUp && message.status === 'delivered') && current.run?.status === 'succeeded'
+  }).toBe(true)
+  expect((await workspace.api(`/api/chats/${chat.id}`)).revision).not.toBe(before)
+  await title.fill('Release notes 0.52')
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(page.locator('.chat-header').getByRole('heading', { name: 'Release notes 0.52', exact: true })).toBeVisible()
+
+  // Another client renames it while the dialog is open: the live title shows, the field keeps what
+  // the person typed, and the dialog names the new title before saving replaces it.
+  ;({ action } = await openChatDetails(page))
+  await action('Rename conversation').click()
+  await expect(title).toHaveValue('Release notes 0.52')
+  // The finished turn may still update the conversation, so the other client retries on a stale revision.
+  await expect(async () => {
+    const current = await workspace.api(`/api/chats/${chat.id}`)
+    await workspace.api(`/api/chats/${chat.id}`, 'PUT', { revision: current.revision, title: 'Renamed elsewhere' })
+  }).toPass()
+  await expect(page.locator('.chat-header').getByRole('heading', { name: 'Renamed elsewhere', exact: true })).toBeVisible()
+  await expect(dialog.getByRole('alert')).toHaveText('The title changed to “Renamed elsewhere” meanwhile; saving replaces it.')
+  // Save follows the current title: the untouched field would restore the earlier one, and the
+  // new title itself is nothing to save.
+  await expect(title).toHaveValue('Release notes 0.52')
+  await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeEnabled()
+  await title.fill('Renamed elsewhere')
+  await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeDisabled()
+  await title.fill('Racing title')
+  expect((await workspace.api(`/api/chats/${chat.id}`)).title).toBe('Renamed elsewhere')
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(page.locator('.chat-header').getByRole('heading', { name: 'Racing title', exact: true })).toBeVisible()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).title).toBe('Racing title')
+
+  // A title changed while saving reads the conversation is named with focus back in the field, even
+  // when the live conversation shows it before the read returns, and the next save replaces it.
+  ;({ action } = await openChatDetails(page))
+  await action('Rename conversation').click()
+  await expect(title).toHaveValue('Racing title')
+  await expect(dialog.getByRole('alert')).toHaveCount(0)
+  const renamePath = `**/chats/${chat.id}`
+  await title.fill('Found title')
+  let renameDuringRead = true
+  await page.route(renamePath, async (route) => {
+    if (route.request().method() === 'GET' && renameDuringRead) {
+      renameDuringRead = false
+      const current = await workspace.api(`/api/chats/${chat.id}`)
+      await workspace.api(`/api/chats/${chat.id}`, 'PUT', { revision: current.revision, title: 'Automatic title' })
+      await page.locator('.chat-header').getByRole('heading', { name: 'Automatic title', exact: true }).waitFor()
+    }
+
+    return route.continue()
+  })
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog.getByRole('alert')).toHaveText('The title changed to “Automatic title” meanwhile; saving replaces it.')
+  await expect(title).toBeFocused()
+  await expect(title).toHaveValue('Found title')
+  await title.press('Enter')
+  await expect(dialog).toHaveCount(0)
+  await page.unroute(renamePath)
+  await expect(page.locator('.chat-header').getByRole('heading', { name: 'Found title', exact: true })).toBeVisible()
+
+  // A revision that moves between reading and renaming is read once more, unseen.
+  let refusals = 1
+  let renames = 0
+  await page.route(renamePath, (route: Route) => {
+    if (route.request().method() !== 'PUT')
+      return route.continue()
+    renames++
+    if (refusals === 0)
+      return route.continue()
+    refusals--
+    return route.fulfill({ status: 409, json: { error: 'This conversation changed. Reload before renaming.' } })
+  })
+  ;({ action } = await openChatDetails(page))
+  await action('Rename conversation').click()
+  await expect(title).toHaveValue('Found title')
+  await title.fill('Retried title')
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(page.locator('.chat-header').getByRole('heading', { name: 'Retried title', exact: true })).toBeVisible()
+  expect(renames).toBe(2)
+
+  // A rename refused again is reported and the field takes focus back, keeping what the person typed.
+  refusals = 2
+  renames = 0
+  ;({ action } = await openChatDetails(page))
+  await action('Rename conversation').click()
+  await expect(title).toHaveValue('Retried title')
+  await expect(dialog.getByRole('alert')).toHaveCount(0)
+  await title.fill('Final title')
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog.getByRole('alert')).toContainText('This conversation changed. Reload before renaming.')
+  expect(renames).toBe(2)
+  await expect(title).toBeFocused()
+  await page.keyboard.press('End')
+  await page.keyboard.type('!')
+  await expect(title).toHaveValue('Final title!')
+  await page.unroute(renamePath)
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(page.locator('.chat-header').getByRole('heading', { name: 'Final title!', exact: true })).toBeVisible()
+
+  // Phones rename from the sheet, which shows the full title, and focus returns to its ⋯ button.
+  await page.setViewportSize({ width: 390, height: 844 })
+  ;({ action } = await openChatDetails(page))
+  await expect(page.getByRole('dialog', { name: 'Chat details', exact: true })).toContainText('Final title!')
+  await action('Rename conversation').click()
+  await title.fill('Release notes 0.53')
+  await title.press('Enter')
+  await expect(dialog).toHaveCount(0)
+  await expect(details).toBeFocused()
+  await expect(page.getByRole('button', { name: 'Conversations', exact: true })).toContainText('Release notes 0.53')
+})
+
 test('conversation deletion is visible, confirmed and permanent on desktop and mobile', async ({ page, workspace }, testInfo) => {
   test.setTimeout(60000)
   const chat = await workspace.api('/api/chats', 'POST', {})
@@ -2443,6 +2608,17 @@ test('context usage shows the latest request and an explicit compaction keeps th
   const indicator = page.getByTestId('context-indicator')
   await expect(indicator).toHaveText('Context 88%')
   await expect(indicator).toHaveAttribute('title', /227,400 of 258,400 tokens \(88%\)/)
+  // An estimate says so in the pill too.
+  workspace.service.store.updateRun(after.run.id, {
+    contextUsage: {
+      contextTokens: 227400,
+      contextWindow: 258400,
+      cachedTokens: null,
+      estimated: true,
+    },
+  } as any)
+  await page.reload()
+  await expect(indicator).toHaveText('Context ≈ 88%')
   await page.screenshot({ path: testInfo.outputPath('context-header-full.png'), animations: 'disabled' })
   await indicator.click()
   const confirmCompaction = page.getByRole('dialog', { name: 'Compact the agent context?', exact: true })
@@ -2461,6 +2637,8 @@ test('context usage shows the latest request and an explicit compaction keeps th
   // A focused action that becomes unavailable while the menu is open hands focus to the next one.
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).compaction?.available, { timeout: 15000 }).toBe(true)
   ;({ action } = await openChatDetails(page))
+  await expect(action('Rename conversation')).toBeFocused()
+  await page.keyboard.press('ArrowDown')
   await expect(action('Compact context')).toBeFocused()
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:chat-hang' })
   await expect(action('Compact context')).toBeDisabled({ timeout: 15000 })

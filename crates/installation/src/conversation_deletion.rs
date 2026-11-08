@@ -273,12 +273,10 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
         ],
     )?;
     db.delete_checkpoint(run)?;
-    for key in [
-        format!("turn-speed:{run}"),
-        format!("chat-error:{cid}"),
-        format!("chat-title-pending:{cid}"),
-        format!("chat-title-checked:{cid}"),
-    ] {
+    for key in [format!("turn-speed:{run}"), format!("chat-error:{cid}")]
+        .into_iter()
+        .chain(crate::chat_titles::keys(cid))
+    {
         db.delete(&key)?;
     }
     for prefix in ["push-outbox:"] {
@@ -433,11 +431,18 @@ mod tests {
             .transaction(|db| {
                 db.add_run_fixture(&json!({ "id": "run", "taskId": "chat", "status": "succeeded", "createdAt": 0 }), None)?;
                 db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run" }))?;
-                for key in ["turn-speed:run", "chat-error:chat"] {
+                let keys = [
+                    "turn-speed:run",
+                    "chat-error:chat",
+                    "chat-title-pending:chat",
+                    "chat-title-checked:chat",
+                    "chat-title-manual:chat",
+                ];
+                for key in keys {
                     db.set(key, &json!({ "messageId": "message" }), None)?;
                 }
                 forget(db, "chat", "run")?;
-                for key in ["turn-speed:run", "chat-error:chat"] {
+                for key in keys {
                     assert!(db.kv(key)?.is_none(), "{key}");
                 }
                 Ok(())

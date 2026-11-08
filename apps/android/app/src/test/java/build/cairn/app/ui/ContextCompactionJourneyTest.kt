@@ -58,10 +58,14 @@ class ContextCompactionJourneyTest {
         MockWebServer().use { server ->
             val chatId = "00000000-0000-4000-8000-000000000099"
             val calls = CopyOnWriteArrayList<Pair<String, String>>()
+            val renames = CopyOnWriteArrayList<String>()
+            // The title the installation holds, which another client may have changed.
+            val serverTitle = java.util.concurrent.atomic.AtomicReference<String?>(null)
             val chat =
                 Chat(
                     id = chatId,
                     title = "Refonte du module",
+                    revision = "r7",
                     agentName = "Cairn",
                     status = "succeeded",
                     provider = "claude",
@@ -168,6 +172,40 @@ class ContextCompactionJourneyTest {
                         val path = request.path.orEmpty().substringBefore('?')
                         val method = request.method.orEmpty()
                         if (method in listOf("POST", "PUT", "DELETE")) calls += method to path
+                        if (
+                            method == "GET" &&
+                                path == "/api/installations/fixture/api/chats/$chatId"
+                        )
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody(
+                                    wireJson.encodeToString(
+                                        chat.copy(title = serverTitle.get() ?: chat.title)
+                                    )
+                                )
+                        if (
+                            method == "PUT" &&
+                                path == "/api/installations/fixture/api/chats/$chatId"
+                        ) {
+                            val body = request.body.readUtf8()
+                            renames += body
+                            val title =
+                                wireJson
+                                    .parseToJsonElement(body)
+                                    .jsonObject["title"]!!
+                                    .jsonPrimitive
+                                    .content
+                            if (title == "Titre concurrent")
+                                return MockResponse()
+                                    .setResponseCode(409)
+                                    .setHeader("Content-Type", "application/json")
+                                    .setBody(
+                                        """{"error":"This conversation changed. Reload before renaming."}"""
+                                    )
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody(wireJson.encodeToString(chat.copy(title = title)))
+                        }
                         val value =
                             when (path) {
                                 "/api/installations" -> beaconInstallationsFixture()
@@ -312,6 +350,78 @@ class ContextCompactionJourneyTest {
                 )
                 // Compaction is never sent as a chat message.
                 assertTrue(calls.none { it.second.endsWith("/messages") })
+
+                // Renaming sends the trimmed title with the revision it was read at.
+                compose.onNodeWithContentDescription("Options de la conversation").performClick()
+                compose.onNodeWithText("Renommer").performClick()
+                waitText("Renommer la conversation")
+                compose
+                    .onNodeWithText("Cairn ne renommera plus cette conversation automatiquement.")
+                    .assertExists()
+                compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                // A longer title stays in the field and says why it cannot be saved.
+                compose.onNodeWithTag("rename-title").performTextReplacement("é".repeat(91))
+                waitText("90 caractères au plus (91 actuellement).")
+                compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                // A title that changed meanwhile, found when saving, is named before saving
+                // replaces it.
+                serverTitle.set("Titre automatique")
+                compose.onNodeWithTag("rename-title").performTextReplacement("Notes 0.53")
+                compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
+                waitText(
+                    "Le titre est devenu « Titre automatique » entre-temps ; enregistrer le remplace."
+                )
+                assertTrue(renames.isEmpty())
+                // Saving follows the current title, so the new title itself is nothing to save.
+                compose.onNodeWithTag("rename-title").performTextReplacement("Titre automatique")
+                compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                compose.onNodeWithTag("rename-title").performTextReplacement("Notes 0.53")
+                compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Renommer la conversation")
+                        .fetchSemanticsNodes()
+                        .isEmpty()
+                }
+                assertEquals(
+                    "Notes 0.53",
+                    wireJson
+                        .parseToJsonElement(renames.single())
+                        .jsonObject["title"]!!
+                        .jsonPrimitive
+                        .content,
+                )
+                serverTitle.set(null)
+                compose.onNodeWithContentDescription("Options de la conversation").performClick()
+                compose.onNodeWithText("Renommer").performClick()
+                waitText("Renommer la conversation")
+                // A rename refused again after reading the conversation once more is reported, and
+                // its error does not follow the sheet once closed.
+                compose.onNodeWithTag("rename-title").performTextReplacement("Titre concurrent")
+                compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
+                waitText("This conversation changed. Reload before renaming.")
+                assertEquals(3, renames.size)
+                compose.onNodeWithText("Annuler").performClick()
+                compose.onNodeWithContentDescription("Options de la conversation").performClick()
+                compose.onNodeWithText("Renommer").performClick()
+                waitText("Renommer la conversation")
+                compose
+                    .onAllNodesWithText("This conversation changed. Reload before renaming.")
+                    .assertCountEquals(0)
+                compose.onNodeWithTag("rename-title").performTextReplacement("  Notes de version  ")
+                compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
+                // The save reads the conversation first; the sheet closes once the rename is done.
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Renommer la conversation")
+                        .fetchSemanticsNodes()
+                        .isEmpty()
+                }
+                assertEquals(4, renames.size)
+                val rename = wireJson.parseToJsonElement(renames.last()).jsonObject
+                assertEquals("Notes de version", rename["title"]!!.jsonPrimitive.content)
+                assertEquals(chat.revision, rename["revision"]!!.jsonPrimitive.content)
+                assertEquals(chatId, rename["chatId"]!!.jsonPrimitive.content)
             } finally {
                 vm.api.closeStreams()
             }

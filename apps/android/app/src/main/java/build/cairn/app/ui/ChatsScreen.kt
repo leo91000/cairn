@@ -58,6 +58,7 @@ import build.cairn.contracts.EditChatMessage
 import build.cairn.contracts.EditChatMessageInput
 import build.cairn.contracts.PlanApproval
 import build.cairn.contracts.QuestionAnswerInput
+import build.cairn.contracts.RenameChatInput
 import build.cairn.contracts.ResumeChatInput
 import build.cairn.contracts.ResumeExecutionSelection
 import build.cairn.contracts.SendChatMessageInput
@@ -68,6 +69,8 @@ import build.cairn.contracts.compactChat
 import build.cairn.contracts.createChat
 import build.cairn.contracts.deleteChatMessage
 import build.cairn.contracts.editChatMessage
+import build.cairn.contracts.getChat
+import build.cairn.contracts.renameChat
 import build.cairn.contracts.restartChatSession
 import build.cairn.contracts.restoreChat
 import build.cairn.contracts.resumeChat
@@ -466,6 +469,7 @@ internal fun ChatPage(
     var queueExpanded by rememberSaveable(id) { mutableStateOf(false) }
     var newSession by remember(id) { mutableStateOf(false) }
     var compacting by remember(id) { mutableStateOf(false) }
+    var renaming by remember(id) { mutableStateOf(false) }
     var cancelledExpanded by rememberSaveable(id) { mutableStateOf(false) }
     BackHandler(selected && fullscreen) { fullscreen = false }
     var choosing by rememberSaveable(id) { mutableStateOf(false) }
@@ -1091,6 +1095,15 @@ internal fun ChatPage(
                                     )
                                     HorizontalDivider()
                                 }
+                                if (chat?.lifecycle == "active")
+                                    DropdownMenuItem(
+                                        text = { Text("Renommer") },
+                                        leadingIcon = { Icon(Icons.Default.Edit, null) },
+                                        onClick = {
+                                            menu = false
+                                            renaming = true
+                                        },
+                                    )
                                 chat
                                     ?.compaction
                                     ?.takeIf { it.supported && chat.lifecycle == "active" }
@@ -2201,6 +2214,34 @@ internal fun ChatPage(
                     vm.perform {
                         api.restartChatSession(ConfirmChatInput(chatId = chat.id, confirm = true))
                         newSession = false
+                    }
+                }
+            if (renaming && chat != null)
+                ConversationRename(chat.title, state.busy, state.error, { renaming = false }) {
+                    title,
+                    current,
+                    found ->
+                    vm.perform {
+                        // Messages and turns change the revision too, and the live conversation
+                        // can trail it: a revision that moves between reading and renaming is
+                        // read once more.
+                        suspend fun rename(retry: Boolean) {
+                            val latest = api.getChat(ChatInput(chatId = chat.id))
+                            if (latest.title != current) return found(latest.title)
+                            try {
+                                api.renameChat(
+                                    RenameChatInput(
+                                        chatId = chat.id,
+                                        revision = latest.revision,
+                                        title = title,
+                                    )
+                                )
+                                renaming = false
+                            } catch (e: ApiException) {
+                                if (retry && e.status == 409) rename(false) else throw e
+                            }
+                        }
+                        rename(true)
                     }
                 }
             if (compacting && chat != null)

@@ -6,6 +6,7 @@ import messageSchema from '../../../packages/contracts/generated/ChatMessageInpu
 import { deleteChat } from '../../../packages/contracts/generated/deleteChat'
 import { editChatMessage } from '../../../packages/contracts/generated/editChatMessage'
 import editSchema from '../../../packages/contracts/generated/EditChatMessageInput.json'
+import { renameChat } from '../../../packages/contracts/generated/renameChat'
 import { sendChatMessage } from '../../../packages/contracts/generated/sendChatMessage'
 import uploadSchema from '../../../packages/contracts/generated/UploadChatAttachmentInput.json'
 import corpus from '../../../tests/fixtures/conversation-contracts.json'
@@ -30,7 +31,7 @@ it('qualifies conversation lifecycle, message selection, attachments and wire da
     expect(chat(structuredClone(value)), JSON.stringify(value)).toBe(false)
 })
 
-it('keeps path identity, flat message bodies and explicit deletion confirmation in generated calls', async () => {
+it('keeps path identity, flat message bodies, revision-checked renames and explicit deletion confirmation in generated calls', async () => {
   const calls: [string, RequestInit][] = []
   const request = async <T>(path: string, options: RequestInit): Promise<T> => {
     calls.push([path, options])
@@ -53,10 +54,12 @@ it('keeps path identity, flat message bodies and explicit deletion confirmation 
   await sendChatMessage(request, { chatId, message })
   const { id: _id, ...edit } = message
   await editChatMessage(request, { chatId, messageId, message: edit })
+  await renameChat(request, { chatId, revision: 'r1', title: 'Release notes' })
   await deleteChat(request, { chatId, confirm: true })
   expect(calls.map(([path, options]) => [path, options.method, JSON.parse(String(options.body))])).toEqual([
     [`/chats/${chatId}/messages`, 'POST', message],
     [`/chats/${chatId}/messages/${messageId}`, 'PUT', edit],
+    [`/chats/${chatId}`, 'PUT', { chatId, revision: 'r1', title: 'Release notes' }],
     [`/chats/${chatId}`, 'DELETE', { chatId, confirm: true }],
   ])
 })

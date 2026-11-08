@@ -877,7 +877,8 @@ pub(crate) fn send(
     validate_speed(db, &chat, &values)?;
     validate_steer(db, &chat, &values)?;
     require_plan_support(db, &chat, &values)?;
-    if messages.is_empty() {
+    // The first message names the conversation, unless a person already did.
+    if messages.is_empty() && !crate::chat_titles::is_manual(db, &chat.id)? {
         let private_answer = answer
             .as_ref()
             .is_some_and(|(question, _)| question.is_private());

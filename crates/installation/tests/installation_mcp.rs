@@ -3097,6 +3097,76 @@ async fn both_mcp_endpoints_list_current_chat_account_waits() {
 }
 
 #[tokio::test]
+async fn a_renamed_conversation_keeps_its_title_through_its_first_message() {
+    for internal in [false, true] {
+        let root = TempDir::new().unwrap();
+        let s = service(&root).await;
+        let main = enabled_main(&s).await;
+        let (_, configuration) = active_run(&s, &main).await;
+        let invoke = |name, args| {
+            let s = s.clone();
+            let configuration = configuration.clone();
+            async move {
+                if internal {
+                    call(&s, &configuration, name, args).await
+                } else {
+                    public_call(&s, &["read", "manage", "run"], name, args).await
+                }
+            }
+        };
+        let created = invoke("create_chat", json!({})).await;
+        let chat_id = result(&created)["id"].as_str().unwrap().to_owned();
+        invoke(
+            "set_chat_paused",
+            json!({ "chatId": chat_id, "paused": true }),
+        )
+        .await;
+        let revision = s
+            .store
+            .conversation_boundary(&chat_id)
+            .await
+            .unwrap()
+            .unwrap()["revision"]
+            .clone();
+        let renamed = invoke(
+            "rename_chat",
+            json!({ "chatId": chat_id, "title": "Release notes", "revision": revision }),
+        )
+        .await;
+        assert_eq!(result(&renamed)["title"], "Release notes");
+        let sent = invoke(
+            "send_chat_message",
+            json!({
+                "chatId": chat_id,
+                "message": {
+                    "id": uuid::Uuid::new_v4(),
+                    "text": "Draft the notes for 0.53",
+                },
+            }),
+        )
+        .await;
+        assert_eq!(result(&sent)["status"], "queued", "{sent}");
+        // The first message no longer names a conversation a person already named.
+        assert_eq!(
+            s.store
+                .conversation_boundary(&chat_id)
+                .await
+                .unwrap()
+                .unwrap()["title"],
+            "Release notes"
+        );
+        assert!(
+            s.store
+                .kv(&format!("chat-title-manual:{chat_id}"))
+                .await
+                .unwrap()
+                .is_some(),
+            "a manual title ends automatic titles"
+        );
+    }
+}
+
+#[tokio::test]
 async fn both_mcp_endpoints_manage_chat_queues_and_lifecycle() {
     for internal in [false, true] {
         let root = TempDir::new().unwrap();

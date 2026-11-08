@@ -18,6 +18,30 @@ use std::{path::Path, sync::Arc, time::Duration};
 const MODEL: &str = "gpt-6-luna";
 const COOLDOWN: i64 = 5 * 60_000;
 const PREFIX: &str = "chat-title-pending:";
+/// Set when a person renames a conversation: its title is theirs from then on.
+const MANUAL: &str = "chat-title-manual:";
+
+/// Marks the conversation's title as chosen by a person, which ends automatic titles for it.
+pub fn set_manual(db: &Db<'_>, chat_id: &str) -> Result<()> {
+    db.set(&format!("{MANUAL}{chat_id}"), &Value::Bool(true), None)?;
+    db.delete(&format!("{PREFIX}{chat_id}"))?;
+    Ok(())
+}
+
+/// Whether a person chose the conversation's title.
+pub fn is_manual(db: &Db<'_>, chat_id: &str) -> Result<bool> {
+    Ok(db.kv(&format!("{MANUAL}{chat_id}"))?.is_some())
+}
+
+/// Keys this module keeps for a conversation, removed with it.
+pub fn keys(chat_id: &str) -> [String; 3] {
+    [
+        format!("{PREFIX}{chat_id}"),
+        format!("chat-title-checked:{chat_id}"),
+        format!("{MANUAL}{chat_id}"),
+    ]
+}
+
 const CONTEXT_BYTES: usize = 64_000;
 const SUMMARY_BYTES: usize = 8_000;
 const MAX_OUTPUT: usize = 64_000;
@@ -80,7 +104,7 @@ pub async fn enqueue(s: &Service, run_id: &str) -> Result<()> {
             let current = db
                 .conversation_boundary(chat_id)?
                 .is_some_and(|chat| chat["runId"] == run_id);
-            if current {
+            if current && !is_manual(db, chat_id)? {
                 let pending = Pending {
                     run_id: &run_id,
                     revision: id(),
@@ -360,8 +384,10 @@ fn apply(db: &Db<'_>, chat: &Value, pending: &Value, title: &str) -> Result<bool
         return Ok(false);
     };
     let run = db.run(text(chat, "runId"))?;
-    // A newer user message or turn must never be relabelled by an older result.
-    let fresh = crate::conversation_lifecycle::state(&current) == "active"
+    // A newer user message or turn must never be relabelled by an older result, nor a title a
+    // person chose.
+    let fresh = !is_manual(db, text(chat, "id"))?
+        && crate::conversation_lifecycle::state(&current) == "active"
         && current["updatedAt"] == chat["updatedAt"]
         && current["title"] == chat["title"]
         && current["runId"] == chat["runId"]
@@ -768,6 +794,59 @@ mod tests {
                     db.conversation_boundary("chat")?.unwrap()["title"],
                     "Custom title"
                 );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        s.shutdown.cancel();
+    }
+
+    #[tokio::test]
+    async fn a_manual_title_ends_automatic_titles_for_good() {
+        let root = tempfile::TempDir::new().unwrap();
+        let s = service(&root, "ready").await;
+        let pending = s
+            .store
+            .kv("chat-title-pending:chat")
+            .await
+            .unwrap()
+            .unwrap();
+        let chat = s
+            .store
+            .conversation_boundary("chat")
+            .await
+            .unwrap()
+            .unwrap();
+        s.store
+            .transaction(|db| set_manual(db, "chat"))
+            .await
+            .unwrap();
+        // Renaming drops queued work, and later turns queue none.
+        assert!(
+            s.store
+                .kv("chat-title-pending:chat")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        enqueue(&s, "run").await.unwrap();
+        assert!(
+            s.store
+                .kv("chat-title-pending:chat")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // A result already in flight cannot replace the person's title either.
+        s.store
+            .transaction(move |db| {
+                db.set("chat-title-pending:chat", &pending, None)?;
+                assert!(!apply(db, &chat, &pending, "Generated title")?);
+                assert_eq!(
+                    db.conversation_boundary("chat")?.unwrap()["title"],
+                    chat["title"]
+                );
+                assert!(is_manual(db, "chat")?);
                 Ok(())
             })
             .await

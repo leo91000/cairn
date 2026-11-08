@@ -108,7 +108,7 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
     ChatOperation {
         name: "rename_chat",
         scope: "manage",
-        description: "Set a conversation title. Automatic title evaluation may update it after later replies.",
+        description: "Set a conversation title. The title is then the person's: neither the first message nor automatic title evaluation changes it again.",
     },
     ChatOperation {
         name: "set_chat_paused",
