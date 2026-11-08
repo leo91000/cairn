@@ -1,13 +1,43 @@
 name: Quality and container
 on:
   workflow_dispatch:
+    inputs:
+      graph-mode:
+        type: choice
+        description: Schema preflight uses only tiny offline crates; full is the separate graph comparison
+        options: [schema, full]
+        default: schema
 permissions:
   contents: read
 concurrency:
   group: backend-tail-graph-${{ github.run_id }}
   cancel-in-progress: false
 jobs:
+  collector-schema:
+    if: inputs.graph-mode == 'schema'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+      CAIRN_COLLECTOR_SYNTHETIC: synthetic-only
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - run: rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1
+      - name: Exercise collector against real Cargo build-script and test fingerprints
+        run: python3 scripts/diagnostics/backend-tail-schema-preflight.py
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: backend-tail-real-cargo-schema
+          path: backend-tail-schema-evidence/
+          if-no-files-found: error
+          retention-days: 14
   backend:
+    if: inputs.graph-mode == 'full'
     name: Compile-only graph diagnostic (${{ matrix.scope }}) — no test qualification
     runs-on: ubuntu-latest
     timeout-minutes: 30

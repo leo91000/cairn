@@ -2,6 +2,8 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
 import unittest
 
 
@@ -22,6 +24,25 @@ def fingerprint():
 
 
 class ObservationTests(unittest.TestCase):
+    def test_failed_snapshot_retains_closed_receipt_and_nonzero_exit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / 'private-sentinel-1234'
+            directory.mkdir()
+            target = directory / 'lib-private-sentinel.json'
+            target.write_text('private-sentinel malformed json')
+            output = root / 'receipt.json'
+            result = subprocess.run([sys.executable, str(Path(__file__).with_name('backend-tail-fingerprints.py')),
+                                     str(root), str(output)], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            receipt = json.loads(output.read_text())
+            self.assertFalse(receipt['complete'])
+            self.assertEqual(receipt['error']['stage'], 'json_projection')
+            self.assertEqual(receipt['error']['reason'], 'invalid_json')
+            self.assertEqual(len(receipt['error']['identitySha256']), 64)
+            self.assertNotIn('private-sentinel', json.dumps(receipt) + result.stderr)
+            self.assertNotIn(str(root), json.dumps(receipt) + result.stderr)
+
     def test_accepts_synthetic_build_script_features(self):
         source = fingerprint()
         source["features"] = ""
