@@ -716,6 +716,7 @@ jobs:
         env:
           REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
         run: |
+          set -o pipefail
           # Keep the reference's private protocol fixtures paired with its binaries.
           # The current S3 launcher still provides identical host/emulator conditions.
           git fetch --no-tags origin "$REFERENCE_SHA"
