@@ -17,8 +17,20 @@ agent cannot be recalled. Grants are live and do not depend on a run snapshot.
 The workspace `onepassword` tool supports `accounts`, `vaults`, `items` (with a
 vault name or ID) and `fields` (with a vault and item, returns references without
 values). Secrets are read only with `cairn plugin onepassword read --account ID
-op://vault/item/field`, piped into the consuming command. Everything is read-only. Create the service account in 1Password with access to only the
-intended vaults. The service account's permissions remain the upper bound of access.
+op://vault/item/field`, piped into the consuming command. Create the service account
+in 1Password with access to only the intended vaults. The service account's
+permissions remain the upper bound of access.
+
+Writing is off by default. The owner turns on **Create items and edit fields** in an
+account's permissions; agents granted that account can then run `create-item` and
+`set-fields` from the CLI, never the metadata tool. To let only some agents write,
+create a second service account with write access and grant it to them alone. Field
+values arrive as a JSON argument that agents build from variables or command
+substitution, so a value never appears literally in the command text. Cairn sends
+them to `op` through stdin, as an item JSON template, never in its arguments, and
+returns field references without values. `set-fields` rewrites the item from its
+JSON, which carries no passkey, so it refuses Login items. Nothing deletes items.
+Write requests have their own hourly quota and share the daily account quota.
 Tool results containing secrets enter the authorized agent's context and may be
 stored in run history; avoid asking
 agents to print secrets in messages, logs or artifacts.

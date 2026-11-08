@@ -685,7 +685,7 @@ abstract class AgentPageCases {
             waitForDescription("Accès à Production")
             compose.onNodeWithText("1Password · comptes de service").assertExists()
             compose
-                .onNodeWithText("Lecture seule · aucun accès par défaut, Main compris")
+                .onNodeWithText("Aucun accès par défaut, Main compris")
                 .assertExists()
             compose.onNodeWithText("Compte désactivé").assertExists()
             compose

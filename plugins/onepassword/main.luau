@@ -1,15 +1,17 @@
 -- 1Password through its CLI. Each instance is a service account: Cairn keeps its token
 -- and hands it to `op` only through the environment, for one command at a time.
--- Plaintext values from `read` go only to the consuming command's stdout.
+-- Plaintext values from `read` go only to the consuming command's stdout. Writes, when
+-- the owner allows them, reach `op` only through stdin and return references, never values.
 
 local FAILED = "1Password request failed. Check the token, vault permissions, reference, and service account limits."
 
 -- Runs `op` for one service account and returns its stdout.
-local function run_op(account, args)
+local function run_op(account, args, stdin)
     return cairn.exec.run({
         program = "op",
         instance = account,
         args = args,
+        stdin = stdin,
         env = {
             OP_SERVICE_ACCOUNT_TOKEN = { secret = "token" },
             -- Cairn owns a private encrypted in-memory cache daemon per connection.
@@ -55,12 +57,13 @@ local function quota_usage(account)
     return if #limits > 0 then limits else nil
 end
 
-local function quota_failure(account)
+-- Hourly token limits are separate for reads and writes; the daily account limit is shared.
+local function quota_failure(account, action)
     local exhausted
     for _, limit in quota_usage(account) or {} do
-        local applies_to_read = (limit.type == "token" and limit.action == "read")
+        local applies = (limit.type == "token" and limit.action == action)
             or (limit.type == "account" and limit.action == "read_write")
-        if applies_to_read and limit.remaining == 0 and (not exhausted or limit.reset > exhausted.reset) then
+        if applies and limit.remaining == 0 and (not exhausted or limit.reset > exhausted.reset) then
             exhausted = limit
         end
     end
@@ -76,15 +79,15 @@ local function quota_failure(account)
     cairn.fail(message)
 end
 
-local function op(account, args)
-    local result = run_op(account, args)
+local function op(account, args, stdin)
+    local result = run_op(account, args, stdin)
     if result.status == 0 then
         return result.stdout
     end
     local error = string.lower(result.stderr or "")
     if string.find(error, "rate-limit", 1, true) or string.find(error, "rate limit", 1, true)
         or string.find(error, "too many requests", 1, true) or string.find(error, "(429)", 1, true) then
-        quota_failure(account)
+        quota_failure(account, if stdin == nil then "read" else "write")
     end
     cairn.fail(FAILED)
     return result.stdout
@@ -110,6 +113,18 @@ local function account(input)
     return id
 end
 
+-- The same account, only when its owner allowed agents to write with it.
+local function writable_account(input)
+    local id = account(input)
+    for _, instance in input.instances do
+        if instance.id == id and instance.settings.allowWrite == true then
+            return id
+        end
+    end
+    cairn.fail("Writing is disabled for this 1Password account. The owner can allow it in the service account's permissions.")
+    return id
+end
+
 local function required(value, message)
     if value == nil or value == "" then
         cairn.fail(message)
@@ -130,6 +145,76 @@ local function references(item)
         })
     end
     return { fields = fields }
+end
+
+-- Field metadata of a created or edited item, with where it lives.
+local function written(item)
+    local result = references(item)
+    result.id = item.id
+    result.title = item.title
+    result.vault = item.vault and item.vault.id
+    return result
+end
+
+local FIELD_TYPES = { STRING = true, CONCEALED = true, EMAIL = true, URL = true, PHONE = true, OTP = true }
+local FIELDS_FORMAT = 'fields must be a JSON array of 1 to 32 {"field", "value", "type"?} objects with distinct fields.'
+
+-- Field assignments: values are never echoed in errors.
+local function assignments(encoded)
+    local ok, entries = pcall(cairn.json.decode, encoded)
+    if not string.match(encoded, "^%s*%[") or not ok or type(entries) ~= "table" or #entries == 0 or #entries > 32 then
+        cairn.fail(FIELDS_FORMAT)
+    end
+    local count = 0
+    for _ in entries do
+        count += 1
+    end
+    if count ~= #entries then
+        cairn.fail(FIELDS_FORMAT)
+    end
+
+    local seen = {}
+    for _, entry in entries do
+        local valid = type(entry) == "table" and type(entry.field) == "string" and entry.field ~= ""
+            and #entry.field <= 200 and type(entry.value) == "string" and not seen[entry.field]
+            and (entry.type == nil or FIELD_TYPES[entry.type])
+        if not valid then
+            cairn.fail(FIELDS_FORMAT)
+        end
+        seen[entry.field] = true
+    end
+    return entries
+end
+
+-- Applies assignments to an item's fields by ID, then label, like read-fields.
+-- Unknown fields are added, concealed unless a type is given.
+local function assign(item, entries)
+    item.fields = item.fields or cairn.array()
+    for _, entry in entries do
+        local selected
+        for _, key in { "id", "label" } do
+            for _, field in item.fields do
+                if field[key] == entry.field then
+                    if selected then
+                        cairn.fail("A field to set is ambiguous. Use unique field IDs from the fields command.")
+                    end
+                    selected = field
+                end
+            end
+            if selected then
+                break
+            end
+        end
+
+        if selected then
+            selected.value = entry.value
+            if entry.type then
+                selected.type = entry.type
+            end
+        else
+            table.insert(item.fields, { label = entry.field, type = entry.type or "CONCEALED", value = entry.value })
+        end
+    end
 end
 
 local operations = {}
@@ -229,6 +314,43 @@ operations["read-fields"] = function(input)
     return cairn.json.encode(values)
 end
 
+operations["create-item"] = function(input)
+    local id = writable_account(input)
+    local entries = if input.arguments.fields then assignments(input.arguments.fields) else {}
+
+    -- The category's template carries its built-in fields, such as username and password.
+    local item = decode(op(id, { "item", "template", "get", "--", input.arguments.category }))
+    item.title = input.arguments.title
+    assign(item, entries)
+    if input.arguments.url then
+        item.urls = { { href = input.arguments.url, primary = true } }
+    end
+
+    local created = op(id, {
+        "item", "create", "--vault=" .. input.arguments.vault, "--format=json", "-",
+    }, cairn.json.encode(item))
+    return written(decode(created))
+end
+
+-- Edits rewrite the item from its JSON, which carries no passkey: Login items are refused.
+operations["set-fields"] = function(input)
+    local id = writable_account(input)
+    local entries = assignments(input.arguments.fields)
+
+    local item = decode(op(id, {
+        "item", "get", "--vault=" .. input.arguments.vault, "--format=json", "--", input.arguments.item,
+    }))
+    if item.category == "LOGIN" or type(item.id) ~= "string" or item.id == "" then
+        cairn.fail("set-fields cannot edit Login items, which may hold passkeys. Edit it in 1Password, or create a new item.")
+    end
+    assign(item, entries)
+
+    local edited = op(id, {
+        "item", "edit", "--vault=" .. input.arguments.vault, "--format=json", "--", item.id,
+    }, cairn.json.encode(item))
+    return written(decode(edited))
+end
+
 local function vault_list(instance)
     local vaults = decode(op(instance.id, { "vault", "list", "--format=json" }))
     local items = cairn.array()
@@ -247,7 +369,9 @@ return {
     tool = function(input)
         local request = input.input
         local operation = operations[request.operation]
-        if request.operation == "read" or request.operation == "read-fields" or operation == nil then
+        local metadata = request.operation == "accounts" or request.operation == "limits" or request.operation == "vaults"
+            or request.operation == "items" or request.operation == "fields"
+        if not metadata or operation == nil then
             cairn.fail("Read secrets through the Cairn plugin CLI and pipe them directly to the consuming command.")
         end
 

@@ -884,10 +884,31 @@ plaintext secret TTL. This reduces repeated CLI work but does not raise the upst
 quota or guarantee that a warm read makes no API calls. See the
 [official CLI cache reference](https://www.1password.dev/cli/reference).
 
+When the owner allows writing on a service account (`allowWrite`, off by default),
+its agents can create an item or change and add fields:
+
+```sh
+token=$(openssl rand -hex 32)
+fields=$(jq -nc --arg token "$token" '[{field: "credential", value: $token}]')
+cairn plugin onepassword create-item --account ACCOUNT_ID --vault VAULT_ID \
+  --category "API Credential" --title Deploy --fields "$fields"
+cairn plugin onepassword set-fields --account ACCOUNT_ID --vault VAULT_ID \
+  --item ITEM_ID --fields "$fields"
+```
+
+`fields` is a JSON array of up to 32 `{ field, value, type? }` objects. A field
+matches by ID, then label, like `read-fields`; an unknown one is added, `CONCEALED`
+unless `type` is `STRING`, `EMAIL`, `URL`, `PHONE` or `OTP`. `create-item` starts
+from the category's template. Both send the item JSON to `op` through stdin, so values
+never enter its arguments, and return field references without values. `set-fields`
+refuses Login items: a JSON rewrite loses passkeys, which the CLI does not export.
+Neither is available through the metadata tool, and nothing deletes items.
+
 `limits` is also available through the metadata tool. It reports the CLI's
 hourly token and daily account limits, usage, remaining requests and `reset` in
 seconds. A rate-limited read reports the exhausted quota and the longest reset
-among exhausted limits that apply to reads (hourly write limits are independent).
+among exhausted limits that apply to reads; a rate-limited write uses the hourly
+write limit instead. Both share the daily account limit.
 If the diagnostic query fails, it returns a safe rate-limit
 message rather than forwarding program output. Other errors retain the generic
 message, since arbitrary CLI diagnostics can contain secrets.

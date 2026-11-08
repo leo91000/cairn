@@ -731,6 +731,214 @@ printf '{"fields":[{"id":"username","value":"alice"},{"id":"other","label":"user
     assert_eq!(run(&f, read(r#"["username"]"#)).await, Err(403));
 }
 
+#[tokio::test]
+async fn writes_need_the_owner_switch_send_values_through_stdin_and_return_references() {
+    let f = fixture().await;
+    let saved = save(
+        &f.s,
+        json!({ "name": "Production", "enabled": true, "secrets": { "token": "ops_fixture" }, "agentIds": [MAIN_AGENT_ID] }),
+        None,
+    ).await;
+    let account = text(&saved, "id").to_owned();
+    let calls = f.root.path().join("calls");
+    let input = f.root.path().join("stdin");
+    let login = f.root.path().join("login");
+    write_program(
+        &f.program,
+        &format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> '{calls}'
+case "$2" in
+template) printf '{{"title":"","category":"API_CREDENTIAL","fields":[{{"id":"credential","label":"credential","type":"CONCEALED","value":""}}]}}' ;;
+create|edit) /usr/bin/tee '{input}' ;;
+get) [ -f '{login}' ] && category=LOGIN || category=API_CREDENTIAL
+    printf '{{"id":"item-id","title":"Deploy","category":"%s","vault":{{"id":"vault-id"}},"fields":[{{"id":"credential","label":"credential","type":"CONCEALED","value":"old-secret","reference":"op://vault/Deploy/credential"}}]}}' "$category" ;;
+*) exit 1 ;;
+esac
+"#,
+            calls = calls.display(),
+            input = input.display(),
+            login = login.display(),
+        ),
+    );
+    let fields = r#"[{"field":"credential","value":"new-secret"},{"field":"host","value":"db.example","type":"STRING"}]"#;
+    let create = command(
+        "create-item",
+        &[
+            "--account",
+            &account,
+            "--vault",
+            "vault",
+            "--category",
+            "API Credential",
+            "--title",
+            "Deploy",
+            "--fields",
+            fields,
+            "--url",
+            "https://example.com",
+        ],
+    );
+    let set = command(
+        "set-fields",
+        &[
+            "--account",
+            &account,
+            "--vault",
+            "vault",
+            "--item",
+            "Deploy",
+            "--fields",
+            fields,
+        ],
+    );
+
+    // Writing is off until the owner allows it on the service account.
+    for write in [&create, &set] {
+        let error =
+            f.s.plugins
+                .command(&f.s, &f.bearer, write)
+                .await
+                .unwrap_err();
+        assert!(error.message.contains("Writing is disabled"), "{error:?}");
+    }
+    assert!(!calls.exists());
+    save(
+        &f.s,
+        json!({ "name": "Production", "enabled": true, "settings": { "allowWrite": true } }),
+        Some(&account),
+    )
+    .await;
+
+    // Values reach the CLI only through stdin, and only references come back.
+    let created = run(&f, create.clone()).await.unwrap();
+    assert!(!created.to_string().contains("new-secret"), "{created}");
+    assert_eq!(created["value"]["title"], "Deploy");
+    assert_eq!(created["value"]["fields"][1]["label"], "host");
+    let template: Value = serde_json::from_str(&std::fs::read_to_string(&input).unwrap()).unwrap();
+    assert_eq!(template["title"], "Deploy");
+    assert_eq!(template["category"], "API_CREDENTIAL");
+    assert_eq!(
+        template["fields"],
+        json!([
+            { "id": "credential", "label": "credential", "type": "CONCEALED", "value": "new-secret" },
+            { "label": "host", "type": "STRING", "value": "db.example" },
+        ])
+    );
+    assert_eq!(
+        template["urls"],
+        json!([{ "href": "https://example.com", "primary": true }])
+    );
+    let invoked = std::fs::read_to_string(&calls).unwrap();
+    assert!(!invoked.contains("new-secret"));
+    assert_eq!(
+        invoked.lines().collect::<Vec<_>>(),
+        [
+            "item template get -- API Credential",
+            "item create --vault=vault --format=json -",
+        ]
+    );
+
+    let edited = run(&f, set.clone()).await.unwrap();
+    assert!(!edited.to_string().contains("secret"), "{edited}");
+    assert_eq!(edited["value"]["id"], "item-id");
+    assert_eq!(edited["value"]["vault"], "vault-id");
+    assert_eq!(
+        edited["value"]["fields"][0]["reference"],
+        "op://vault/Deploy/credential"
+    );
+    let item: Value = serde_json::from_str(&std::fs::read_to_string(&input).unwrap()).unwrap();
+    assert_eq!(item["fields"][0]["value"], "new-secret");
+    assert_eq!(item["fields"][1]["label"], "host");
+    let invoked = std::fs::read_to_string(&calls).unwrap();
+    assert!(!invoked.contains("new-secret"));
+    assert!(invoked.ends_with(
+        "item get --vault=vault --format=json -- Deploy\nitem edit --vault=vault --format=json -- item-id\n"
+    ));
+
+    // A JSON rewrite would drop passkeys, so Login items are never edited.
+    std::fs::write(&login, "").unwrap();
+    let error =
+        f.s.plugins
+            .command(&f.s, &f.bearer, &set)
+            .await
+            .unwrap_err();
+    assert!(error.message.contains("Login items"), "{error:?}");
+    assert!(
+        !std::fs::read_to_string(&calls)
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap()
+            .starts_with("item edit")
+    );
+
+    for fields in [
+        "[]",
+        "{}",
+        "not-json",
+        r#"[{"field":"credential"}]"#,
+        r#"[{"field":"credential","value":1}]"#,
+        r#"[{"field":"credential","value":"a","type":"FILE"}]"#,
+        r#"[{"field":"credential","value":"a"},{"field":"credential","value":"b"}]"#,
+    ] {
+        let invalid = command(
+            "create-item",
+            &[
+                "--account",
+                &account,
+                "--vault",
+                "vault",
+                "--category",
+                "Login",
+                "--title",
+                "x",
+                "--fields",
+                fields,
+            ],
+        );
+        let error =
+            f.s.plugins
+                .command(&f.s, &f.bearer, &invalid)
+                .await
+                .unwrap_err();
+        assert!(
+            error.message.contains("fields must be"),
+            "{fields}: {error:?}"
+        );
+    }
+
+    // Hourly write limits are separate from read limits.
+    write_program(
+        &f.program,
+        r#"#!/bin/sh
+if [ "$1" = service-account ]; then
+    printf '[{"type":"token","action":"write","limit":100,"used":100,"remaining":0,"reset":3500},{"type":"token","action":"read","limit":1000,"used":1000,"remaining":0,"reset":60}]'
+    exit 0
+fi
+[ "$2" = get ] && printf '{"id":"item-id","category":"PASSWORD","fields":[]}' && exit 0
+echo 'rate limit exceeded' >&2
+exit 1
+"#,
+    );
+    let error =
+        f.s.plugins
+            .command(&f.s, &f.bearer, &set)
+            .await
+            .unwrap_err();
+    assert!(error.message.contains("100/100"), "{error:?}");
+    assert!(error.message.contains("3500 seconds"), "{error:?}");
+
+    // The metadata tool never writes.
+    let tool = mcp(
+        &f,
+        "tools/call",
+        json!({ "name": "onepassword", "arguments": { "operation": "create-item", "accountId": account } }),
+    )
+    .await;
+    assert_eq!(tool["result"]["isError"], true, "{tool}");
+}
+
 async fn run(f: &Fixture, input: Value) -> Result<Value, u16> {
     f.s.plugins
         .command(&f.s, &f.bearer, &input)
