@@ -93,6 +93,7 @@ import process from 'node:process'
     let pollIntercepted = false
     let targetPoll: import('@playwright/test').Request | undefined
     let targetJavaScriptPoll: number | undefined
+    const expectedTargetRejection = control === 'native-cancel' ? 'poll-rejected-signal-active' : 'poll-rejected-signal-aborted'
     let deliveryFailure: unknown
     let pollHeld = false
     let navigationHeld = false
@@ -369,7 +370,7 @@ import process from 'node:process'
       await expect.poll(() => {
         if (routeFailure)
           throw routeFailure
-        return journal.some(event => event.document === departingDocument && (event.kind === 'poll-rejected-signal-active' || event.kind === 'poll-rejected-signal-aborted'))
+        return fetchFailures.some(failure => failure.document === departingDocument && failure.poll === targetJavaScriptPoll && failure.kind === expectedTargetRejection)
       }, { message: 'The actual old-document poll has rejected or been explicitly aborted' }).toBe(true)
       record('old-document-poll-rejection-observed')
       await page.evaluate(() => new Promise<void>((resolve) => {
@@ -386,6 +387,9 @@ import process from 'node:process'
         return sources.every(source => source.readyState !== EventSource.CONNECTING)
       }), { message: 'Every native chat source admitted by the old document has opened or closed' }).toBe(true)
       record('old-document-native-source-outcomes-observed')
+      await browserSettled()
+      expect(await page.evaluate(() => (window as any).b534Observation.documentId)).toBe(departingDocument)
+      record('old-document-finite-javascript-settled')
       releaseNavigation.resolve()
       await navigation
       releasePoll.resolve()
@@ -456,8 +460,8 @@ import process from 'node:process'
           if (target) {
             if (!targetPoll || requests.get(targetPoll) !== 'cancelled')
               throw new Error('The target JavaScript rejection has no matching native cancellation')
-            if (control === 'abort-before-goto' && !failure.kind.endsWith('-signal-aborted'))
-              throw new Error('The explicit-abort control did not reject with its caller signal aborted')
+            if (failure.kind !== expectedTargetRejection)
+              throw new Error('The target rejection does not match its control-specific caller signal state')
             continue
           }
           const withdrawnCaller = failure.document !== currentDocument && failure.kind.endsWith('-signal-aborted')
