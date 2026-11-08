@@ -406,7 +406,7 @@ jobs:
           git fetch origin 35a721cb499afb1d12711fb9e855288f66c1abf0
           git worktree add --detach source-base 272f4f3bbe5b276b0b9339cf38bab53b04bef8b2
           git worktree add --detach source-candidate 35a721cb499afb1d12711fb9e855288f66c1abf0
-      - name: Observe the pristine base with the original PR command
+      - name: Amplify the base header journey without changing assertions
         id: base
         continue-on-error: true
         working-directory: source-base
@@ -415,7 +415,8 @@ jobs:
           git rev-parse HEAD HEAD^{tree} > ../header-evidence/base-source.txt
           test -z "$(git status --porcelain)"
           set +e
-          pnpm validate:pr android > ../header-evidence/base-command.log 2>&1
+          python3 ../scripts/observe-header-trials.py . ../header-evidence/base-observed.patch
+          apps/android/gradlew -p apps/android testDebugUnitTest --tests build.cairn.app.ui.UnifiedHeaderTest --no-daemon > ../header-evidence/base-command.log 2>&1
           result=$?
           set -e
           echo "$result" > ../header-evidence/base-exit.txt
@@ -424,14 +425,14 @@ jobs:
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: header-base-first-observation
+          name: header-base-amplified-observation
           path: |
             header-evidence/
             source-base/apps/android/app/build/test-results/testDebugUnitTest/*.xml
             source-base/apps/android/app/build/reports/tests/
           if-no-files-found: error
           retention-days: 14
-      - name: Observe the pristine candidate with the original PR command
+      - name: Amplify the candidate header journey without changing assertions
         id: candidate
         if: always() && steps.base.outcome != 'skipped'
         continue-on-error: true
@@ -441,7 +442,8 @@ jobs:
           git rev-parse HEAD HEAD^{tree} > ../header-evidence/candidate-source.txt
           test -z "$(git status --porcelain)"
           set +e
-          pnpm validate:pr android > ../header-evidence/candidate-command.log 2>&1
+          python3 ../scripts/observe-header-trials.py . ../header-evidence/candidate-observed.patch
+          apps/android/gradlew -p apps/android testDebugUnitTest --tests build.cairn.app.ui.UnifiedHeaderTest --no-daemon > ../header-evidence/candidate-command.log 2>&1
           result=$?
           set -e
           echo "$result" > ../header-evidence/candidate-exit.txt
@@ -450,7 +452,7 @@ jobs:
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: header-candidate-first-observation
+          name: header-candidate-amplified-observation
           path: |
             header-evidence/
             source-candidate/apps/android/app/build/test-results/testDebugUnitTest/*.xml
