@@ -5,7 +5,7 @@ import { ProtocolMismatch } from './direct-channel'
 import { documentLifetime } from './document-lifetime'
 import { observeTransport } from './transport-observation'
 
-export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'offline'
+export type LiveStatus = 'connecting' | 'live' | 'reconnecting' | 'offline' | 'update-required'
 
 // The cursor advances only after the consumer accepts a complete batch. Every
 // connection owns its cursor, optionally restored with a matching cached snapshot.
@@ -93,6 +93,14 @@ export function liveConnection(path: string, accept: (batch: LiveBatch, cursor: 
         const batch = JSON.parse(event.data) as LiveBatch
         if (!Array.isArray(batch.events) || typeof batch.reset !== 'boolean' || typeof batch.more !== 'boolean')
           throw new Error('Invalid stream batch')
+        if (windowed && typeof batch.history === 'string' && batch.history.startsWith('v1:')) {
+          stopped = true
+          disconnect()
+          status('update-required')
+          installationTransport.rejectProtocol(new ProtocolMismatch('Timeline protocol mismatch. Update required: update the app and installation.'))
+          return
+        }
+
         if (history && !batch.history) {
           cursor = '0'
           history = undefined

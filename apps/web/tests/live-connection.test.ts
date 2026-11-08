@@ -26,6 +26,7 @@ class Source extends EventTarget {
 beforeEach(() => {
   vi.useFakeTimers()
   state.redirecting = false
+  state.protocolError = ''
   Source.instances = []
   vi.stubGlobal('EventSource', Source)
   vi.stubGlobal('window', new EventTarget())
@@ -150,9 +151,9 @@ it('backs off repeated failures and does not advance after a consumer failure', 
 
 it('validates cached history and restarts safely when the server no longer supports revisions', () => {
   const accept = vi.fn()
-  const connection = liveConnection('/chats/c/stream', accept, vi.fn(), { cursor: 42, history: 'v1:r:1' })
-  expect(Source.instances[0].url).toBe('/api/chats/c/stream?after=42&history=v1%3Ar%3A1&window=1')
-  Source.instances[0].batch('43', '{"events":[],"reset":false,"more":false,"history":"v1:r:1"}')
+  const connection = liveConnection('/chats/c/stream', accept, vi.fn(), { cursor: 42, history: 'v2:r:1' })
+  expect(Source.instances[0].url).toBe('/api/chats/c/stream?after=42&history=v2%3Ar%3A1&window=1')
+  Source.instances[0].batch('43', '{"events":[],"reset":false,"more":false,"history":"v2:r:1"}')
   expect(accept).toHaveBeenCalledTimes(1)
   connection.reconnect()
   expect(Source.instances[1].url).toContain('after=43&history=')
@@ -165,12 +166,12 @@ it('validates cached history and restarts safely when the server no longer suppo
 
 it('offers the recent window only when a viewer following the latest output resumes', () => {
   let follows = true
-  const connection = liveConnection('/chats/c/stream', vi.fn(), vi.fn(), { cursor: 42, history: 'v1:r:1' }, () => follows)
-  expect(Source.instances[0].url).toBe('/api/chats/c/stream?after=42&history=v1%3Ar%3A1&window=1&recent=1')
+  const connection = liveConnection('/chats/c/stream', vi.fn(), vi.fn(), { cursor: 42, history: 'v2:r:1' }, () => follows)
+  expect(Source.instances[0].url).toBe('/api/chats/c/stream?after=42&history=v2%3Ar%3A1&window=1&recent=1')
   // A reader of older messages keeps the replay that preserves their position.
   follows = false
   connection.reconnect()
-  expect(Source.instances[1].url).toBe('/api/chats/c/stream?after=42&history=v1%3Ar%3A1&window=1')
+  expect(Source.instances[1].url).toBe('/api/chats/c/stream?after=42&history=v2%3Ar%3A1&window=1')
   connection.close()
   // A fresh stream already opens on the recent window; the conversation list has none.
   const fresh = liveConnection('/runs/r/stream', vi.fn(), vi.fn(), undefined, () => true)
@@ -185,11 +186,11 @@ it('replays from zero with a reset when a cached consumer baseline is invalid', 
   const accept = vi.fn().mockImplementationOnce(() => {
     throw new Error('invalid baseline')
   })
-  const connection = liveConnection('/chats/c/stream', accept, vi.fn(), { cursor: 42, history: 'v1:r:1' })
-  Source.instances[0].batch('43', '{"events":[],"reset":false,"more":false,"history":"v1:r:1"}')
+  const connection = liveConnection('/chats/c/stream', accept, vi.fn(), { cursor: 42, history: 'v2:r:1' })
+  Source.instances[0].batch('43', '{"events":[],"reset":false,"more":false,"history":"v2:r:1"}')
   vi.advanceTimersByTime(500)
   expect(Source.instances[1].url).toBe('/api/chats/c/stream?after=0&window=1')
-  Source.instances[1].batch('10', '{"events":[],"reset":false,"more":true,"history":"v1:r:1"}')
+  Source.instances[1].batch('10', '{"events":[],"reset":false,"more":true,"history":"v2:r:1"}')
   expect(accept.mock.calls[1][0].reset).toBe(true)
   connection.close()
 })
@@ -207,9 +208,34 @@ it('suspends live streams during navigation and resumes even when direct remains
   expect(Source.instances).toHaveLength(1)
 
   state.redirecting = false
+  state.protocolError = ''
   expect(Source.instances).toHaveLength(2)
   connection.close()
   state.redirecting = true
   state.redirecting = false
+  state.protocolError = ''
   expect(Source.instances).toHaveLength(2)
+})
+
+it('refuses an events-only conversation before acceptance and stops reconnecting', () => {
+  const accept = vi.fn()
+  const status = vi.fn()
+  const connection = liveConnection('/chats/c/stream', accept, status, { cursor: 12, history: 'v2:r:1' })
+  const source = Source.instances[0]
+  source.batch('20', JSON.stringify({
+    events: [],
+    entries: [],
+    reset: false,
+    more: false,
+    history: 'v1:r:1',
+  }))
+  expect(accept).not.toHaveBeenCalled()
+  expect(source.closed).toBe(true)
+  expect(status).toHaveBeenLastCalledWith('update-required')
+  expect(state.protocolError).toMatch(/update required/i)
+  window.dispatchEvent(new Event('online'))
+  document.dispatchEvent(new Event('visibilitychange'))
+  vi.advanceTimersByTime(120000)
+  expect(Source.instances).toHaveLength(1)
+  connection.close()
 })

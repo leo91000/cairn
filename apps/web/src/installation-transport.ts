@@ -216,6 +216,10 @@ export class InstallationTransport {
     this.grant = undefined
   }
 
+  rejectProtocol(error = new ProtocolMismatch()) {
+    this.failed(error)
+  }
+
   private failed(error?: unknown) {
     if (error instanceof ProtocolMismatch) {
       this.context.protocolError = error.message
