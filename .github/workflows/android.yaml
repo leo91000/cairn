@@ -6,6 +6,10 @@ on:
     - cron: '47 2 * * *'
   workflow_dispatch:
     inputs:
+      header-diagnostic:
+        description: Observe the pinned UnifiedHeader base and candidate only (no release/device qualification)
+        default: false
+        type: boolean
       stability-repetitions:
         description: Additional trials of the three issue 175 device journeys (0 disables measurement, 1–20 runs every trial without retries)
         default: '0'
@@ -23,6 +27,7 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 jobs:
   resolve:
+    if: inputs.header-diagnostic != true
     runs-on: ubuntu-latest
     timeout-minutes: 47
     permissions:
@@ -368,3 +373,93 @@ jobs:
           fi
           gh release upload "$RELEASE_TAG" distribution/cairn-android.apk distribution/android-update.json --clobber
           gh release edit "$RELEASE_TAG" --draft=false --latest
+
+  header-diagnostic:
+    if: github.event_name == 'workflow_dispatch' && inputs.header-diagnostic == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          cache: true
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - uses: gradle/actions/setup-gradle@v5
+      - run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+      - name: Pin the two source trees and record host conditions
+        run: |
+          set -euo pipefail
+          mkdir -p header-evidence
+          git rev-parse HEAD HEAD^{tree} > header-evidence/observer.txt
+          uname -a > header-evidence/host.txt
+          lscpu >> header-evidence/host.txt
+          free -b >> header-evidence/host.txt
+          java -version 2>> header-evidence/host.txt
+          git fetch origin 35a721cb499afb1d12711fb9e855288f66c1abf0
+          git worktree add --detach source-base 272f4f3bbe5b276b0b9339cf38bab53b04bef8b2
+          git worktree add --detach source-candidate 35a721cb499afb1d12711fb9e855288f66c1abf0
+      - name: Observe the pristine base with the original PR command
+        id: base
+        continue-on-error: true
+        working-directory: source-base
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD HEAD^{tree} > ../header-evidence/base-source.txt
+          test -z "$(git status --porcelain)"
+          set +e
+          pnpm validate:pr android > ../header-evidence/base-command.log 2>&1
+          result=$?
+          set -e
+          echo "$result" > ../header-evidence/base-exit.txt
+          git status --porcelain >> ../header-evidence/base-source.txt
+          exit "$result"
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: header-base-first-observation
+          path: |
+            header-evidence/
+            source-base/apps/android/app/build/test-results/testDebugUnitTest/*.xml
+            source-base/apps/android/app/build/reports/tests/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Observe the pristine candidate with the original PR command
+        id: candidate
+        if: always() && steps.base.outcome != 'skipped'
+        continue-on-error: true
+        working-directory: source-candidate
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD HEAD^{tree} > ../header-evidence/candidate-source.txt
+          test -z "$(git status --porcelain)"
+          set +e
+          pnpm validate:pr android > ../header-evidence/candidate-command.log 2>&1
+          result=$?
+          set -e
+          echo "$result" > ../header-evidence/candidate-exit.txt
+          git status --porcelain >> ../header-evidence/candidate-source.txt
+          exit "$result"
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: header-candidate-first-observation
+          path: |
+            header-evidence/
+            source-candidate/apps/android/app/build/test-results/testDebugUnitTest/*.xml
+            source-candidate/apps/android/app/build/reports/tests/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve both original verdicts
+        if: always()
+        env:
+          BASE_OUTCOME: ${{ steps.base.outcome }}
+          CANDIDATE_OUTCOME: ${{ steps.candidate.outcome }}
+        run: test "$BASE_OUTCOME" = success && test "$CANDIDATE_OUTCOME" = success
