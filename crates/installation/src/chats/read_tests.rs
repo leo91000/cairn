@@ -181,9 +181,11 @@ async fn lightweight_cards_match_full_execution_metadata() {
             for provider in ["codex", "claude", "opencode", "unknown"] {
                 for fresh in [false, true] {
                     let id = format!("{status}-{provider}-{fresh}");
+                    // Side-question availability reads the stop request and the announcement.
                     let state = serde_json::from_value(json!({
                         "id": id, "taskId": id, "status": status, "sessionId": "saved",
                         "finishedAt": 123, "accountWaitReason": "fixture wait", "accountRequired": "codex",
+                        "cancelRequestedAt": if fresh { Value::Null } else { json!(7) },
                     }))?;
                     let reservation = (!fresh).then(|| cairn_contracts::ExclusiveReservation {
                         id: format!("reservation-{id}"),
@@ -203,6 +205,7 @@ async fn lightweight_cards_match_full_execution_metadata() {
                         "contextUsage": { "contextTokens": 42, "contextWindow": 100, "estimated": true },
                         "restoredAt": 1, "suspendedByExclusive": reservation,
                         "chatExecution": { "operation": if index == 1 { "compact" } else { "message" } },
+                        "sideQuestions": fresh,
                     }), None)?;
                     db.0.execute("UPDATE runs SET snapshot=? WHERE id=?", rusqlite::params![
                         json!({ "agent": { "provider": provider, "instructions": "x".repeat(128 * 1024) } }).to_string(), id,
@@ -220,6 +223,32 @@ async fn lightweight_cards_match_full_execution_metadata() {
                     }
                 }
             }
+        }
+        // A running Claude reply that announced side questions takes them in lists too,
+        // unless it is stopping, compacting or its native consumer has finished.
+        for (stopping, compacting, closed) in [
+            (false, false, false), (true, false, false), (false, true, false),
+            (true, true, false), (false, false, true), (true, true, true),
+        ] {
+            let id = format!("side-{stopping}-{compacting}-{closed}");
+            let state = serde_json::from_value(json!({
+                "id": id, "taskId": id, "status": "running",
+                "cancelRequestedAt": if stopping { json!(7) } else { Value::Null },
+            }))?;
+            db.admit_run(&state, None, &json!({
+                "chatExecution": { "operation": "message" }, "sideQuestions": true,
+                "sideQuestionsCompacting": compacting,
+                "sideQuestionsClosed": closed,
+            }), None)?;
+            db.0.execute("UPDATE runs SET snapshot=? WHERE id=?", rusqlite::params![
+                json!({ "agent": { "provider": "claude" } }).to_string(), id,
+            ])?;
+            let chat: Conversation = serde_json::from_value(json!({ "id": id, "runId": id }))?;
+            let full_run = db.run(&id)?;
+            let expected = conversation_view_with_run(db, chat.clone(), full_run.as_ref())?;
+            let actual = conversation_view(db, chat)?;
+            assert_eq!(serde_json::to_value(&actual)?, serde_json::to_value(expected)?, "{id}");
+            assert_eq!(actual.can_ask_side_question, !stopping && !compacting && !closed, "{id}");
         }
         let chat: Conversation = serde_json::from_value(json!({ "id": "no-run" }))?;
         let expected = conversation_view_with_run(db, chat.clone(), None)?;

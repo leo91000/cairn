@@ -36,6 +36,21 @@ pub(crate) const CHAT_OPERATIONS: &[ChatOperation] = &[
         description: "Cancel a pending questionnaire without supplying an answer or granting permission. Management can cancel a question from any turn; workspace withdraw_question remains limited to its own run.",
     },
     ChatOperation {
+        name: "list_chat_side_questions",
+        scope: "read",
+        description: "List side questions asked beside a conversation's running reply, oldest first, with their answers, and whether one can be asked now.",
+    },
+    ChatOperation {
+        name: "ask_chat_side_question",
+        scope: "run",
+        description: "Ask a question beside the running reply, optionally about a quoted passage. Claude denies requested native tools, but an operator's managed-policy PreToolUse hooks may run first and can write or have other effects. Withdrawing cannot undo effects already performed. Cairn does not steer or queue the question as a normal message or add it to conversation history. Only the qualified Claude Code release supports this; Codex and OpenCode report it unavailable. Supply a fresh UUID id; identical retries return the retained question; pruned identities are refused. Read the answer with list_chat_side_questions.",
+    },
+    ChatOperation {
+        name: "cancel_chat_side_question",
+        scope: "run",
+        description: "Withdraw a pending side question. Cairn suppresses the answer and requests cancellation on a best-effort basis; effects already performed cannot be undone.",
+    },
+    ChatOperation {
         name: "get_conversation_retention",
         scope: "read",
         description: "Read the installation inactivity policy. Default 7 days; 0 disables automatic environment expiration. Conversations, uploaded attachments, published artifact versions and public links are retained.",
@@ -159,6 +174,18 @@ impl ChatOperation {
             "cancel_chat_question" => (
                 schema_for::<ChatQuestionInput>(Contract::Deserialize),
                 schema_for::<ChatQuestion>(Contract::Serialize),
+            ),
+            "list_chat_side_questions" => (
+                schema_for::<GetChatInput>(Contract::Deserialize),
+                schema_for::<ListChatSideQuestionsOutput>(Contract::Serialize),
+            ),
+            "ask_chat_side_question" => (
+                schema_for::<AskChatSideQuestionInput>(Contract::Deserialize),
+                schema_for::<ChatSideQuestion>(Contract::Serialize),
+            ),
+            "cancel_chat_side_question" => (
+                schema_for::<ChatSideQuestionInput>(Contract::Deserialize),
+                schema_for::<ChatSideQuestion>(Contract::Serialize),
             ),
 
             "get_conversation_retention" => (
@@ -330,6 +357,25 @@ impl ChatOperation {
                 let input: ChatQuestionInput = decode(input)?;
                 if input.question_id.is_empty() || input.question_id.chars().count() > 200 {
                     return Err(Error::bad("Invalid question identity."));
+                }
+                serde_json::to_value(input)?
+            }
+            "list_chat_side_questions" => {
+                let input: GetChatInput = decode(input)?;
+                if !(1..=100).contains(&input.limit) {
+                    return Err(Error::bad("Choose a limit from 1 to 100."));
+                }
+                serde_json::to_value(input)?
+            }
+            "ask_chat_side_question" => {
+                let mut input: AskChatSideQuestionInput = decode(input)?;
+                input.question.validate().map_err(Error::bad)?;
+                serde_json::to_value(input)?
+            }
+            "cancel_chat_side_question" => {
+                let input: ChatSideQuestionInput = decode(input)?;
+                if uuid::Uuid::parse_str(&input.side_question_id).is_err() {
+                    return Err(Error::bad("Invalid side question identity."));
                 }
                 serde_json::to_value(input)?
             }

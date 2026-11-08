@@ -13,7 +13,7 @@ export interface RunEvent {
    */
   payload?: Record<string, unknown>
   /**
-   * Client cache identity; never supplied by the event writer.
+   * Stable presentation identity for a coalesced reply; not supplied by event writers.
    */
   displayId?: number
   runId: string

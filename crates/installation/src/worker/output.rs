@@ -363,7 +363,7 @@ pub(super) async fn record(
     }
 
     activity.observe(&event);
-    if handle_chat_control(s, id, &event).await? {
+    if handle_chat_control(s, id, &event, secrets).await? {
         return Ok(false);
     }
     if !super::progress::known_frame(&event) {
@@ -456,7 +456,12 @@ async fn record_raw(
 }
 
 /// Handles chat protocol messages, which are not run output.
-async fn handle_chat_control(s: &Service, id: &str, event: &Value) -> Result<bool> {
+async fn handle_chat_control(
+    s: &Service,
+    id: &str,
+    event: &Value,
+    secrets: &[String],
+) -> Result<bool> {
     match text(event, "type") {
         // Only the authenticated workspace tool can create a questionnaire.
         "chat.question" => {}
@@ -467,6 +472,24 @@ async fn handle_chat_control(s: &Service, id: &str, event: &Value) -> Result<boo
             if let Some(message) = event["messageId"].as_str() {
                 s.chat_acknowledge(id, message).await?;
             }
+        }
+        "chat.side.available" => s.side_questions_available(id, true).await?,
+        "chat.side.unavailable" => s.side_questions_available(id, false).await?,
+        "chat.side.closed" => s.side_questions_closed(id).await?,
+        "chat.side.compacting" => {
+            s.side_questions_compacting(id, event["compacting"] != false)
+                .await?;
+        }
+        // Answers come from the live context, which can hold output Cairn masks elsewhere.
+        "chat.side.answered" | "chat.side.failed" => {
+            // Keep protocol identity intact when a secret overlaps its type or UUID.
+            let settled = json!({
+                "type": event["type"],
+                "sideQuestionId": event["sideQuestionId"],
+                "text": run_output::payload(&event["text"], secrets),
+                "error": run_output::payload(&event["error"], secrets),
+            });
+            s.side_question_settle(id, &settled).await?;
         }
         _ => return Ok(false),
     }
@@ -522,6 +545,13 @@ async fn apply_event(
     let completed = event["type"] == "turn.completed";
     if completed && !event["usage"].is_null() {
         changes.boundary = Some(json!({ "usage": event["usage"] }));
+        changed = true;
+    }
+    if completed || provider_failure || controller_failure {
+        // The native consumer has ended even while controller/process finalization
+        // still owns a Running run. Commit closure with the terminal frame itself.
+        let boundary = changes.boundary.get_or_insert_with(|| json!({}));
+        boundary["sideQuestionsClosed"] = json!(true);
         changed = true;
     }
     checkpoint

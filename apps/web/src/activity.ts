@@ -79,6 +79,9 @@ export type ActivityEntry
     delivery?: string
     /** The model provider that wrote this reply, when the engine chose among several. */
     via?: string
+    /** Native reply identity and persisted event range for side questions. */
+    itemId?: string
+    replyEventIds?: number[]
     attachments?: import('../../../packages/contracts/chats').ChatAttachment[]
     /** A user request for a plan turn, which explores without changing anything. */
     plan?: boolean
@@ -295,6 +298,8 @@ export function activityEntries(events: RunEvent[], chat = false, groups = new A
             id: card.id,
             time: card.createdAt,
             text: content.text,
+            itemId: content.itemId,
+            replyEventIds: [card.position, card.source],
             ...(content.via ? { via: content.via } : {}),
           })
         }

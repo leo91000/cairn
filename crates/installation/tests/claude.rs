@@ -1584,6 +1584,441 @@ async fn plan_requests_only_join_a_plan_turn() {
     }
 }
 
+fn side_question(id: &str, text: &str) -> Value {
+    json!({ "id": format!("side-question:{id}"), "sideQuestion": { "id": id, "text": text } })
+}
+
+#[cfg(target_os = "linux")]
+async fn main_result_through_full_side_control(withdrawals: bool) {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let home = c.home.join(".claude");
+    let prompt = if withdrawals {
+        "fixture:side-block-after-asks"
+    } else {
+        "fixture:side-block-control"
+    };
+    let p = plan(&root, prompt);
+    // Force observation before the inbox loop can retire its whole side batch.
+    let (tx, mut rx) = mpsc::channel(1);
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    let task = tokio::spawn(async move { claude_process::run(&c, p, tx, stop).await });
+    let id = |index| format!("a1b2c3d4-0000-4000-8000-{index:012}");
+    let mut events = Vec::new();
+    let mut dispatched = false;
+    let mut observed_while_frozen = false;
+    let result = tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(event) = rx.recv().await {
+            let message = event["type"] == "item.completed";
+            let text = text(&event["item"], "text");
+            if message && text == "Fixture ready for side controls" {
+                let asks = (1..=3)
+                    .map(|index| side_question(&id(index), "fixture:side-fill-control"))
+                    .collect::<Vec<_>>();
+                deliver(&root, &json!(asks));
+            }
+            if message && text == "Fixture control pipe full" {
+                assert!(
+                    std::fs::read_to_string(home.join("control-pipe-full"))
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap()
+                        > 0
+                );
+                let mut entries = if withdrawals {
+                    vec![side_question(&id(4), "Why?"), side_question(&id(5), "Why?")]
+                } else {
+                    (1..=5)
+                        .map(|index| side_question(&id(index), "Why?"))
+                        .collect()
+                };
+                if withdrawals {
+                    for index in 1..=3 {
+                        entries.push(json!({
+                            "id": format!("withdraw-side-question:{}", id(index)),
+                            "sideQuestionId": id(index),
+                            "sideQuestionCancelled": true,
+                        }));
+                    }
+                }
+                deliver(&root, &json!(entries));
+                dispatched = true;
+            }
+            let first_blocked_send = dispatched && event["type"] == "chat.side.failed";
+            events.push(event);
+            if first_blocked_send && !home.join("release-main-result").exists() {
+                // The one-slot event channel keeps later side writes behind this
+                // observer. Freeze their deadlines, then release the real result
+                // through a separate channel while the control pipe stays full.
+                tokio::time::pause();
+                let frozen = tokio::time::Instant::now();
+                std::fs::write(home.join("release-main-result"), "ready").unwrap();
+                let limit = std::time::Instant::now() + Duration::from_secs(5);
+                while std::time::Instant::now() < limit {
+                    if let Ok(next) = rx.try_recv() {
+                        observed_while_frozen = next["type"] == "turn.completed";
+                        events.push(next);
+                        if observed_while_frozen {
+                            break;
+                        }
+                    }
+                    // Keep the test runnable so Tokio cannot auto-advance the
+                    // frozen control deadlines while actual process I/O runs.
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(tokio::time::Instant::now(), frozen);
+                tokio::time::resume();
+            }
+        }
+    })
+    .await;
+    cancel.cancel();
+    let adapter = task.await.unwrap();
+    assert!(
+        result.is_ok(),
+        "Full-pipe fixture timed out: dispatched={dispatched}, events={events:?}"
+    );
+    adapter.unwrap();
+    assert!(dispatched);
+    assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+    assert!(
+        observed_while_frozen,
+        "A ready main result must not await side-control deadlines"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn side_control_dispatch_does_not_hold_main_result_for_pending_asks() {
+    main_result_through_full_side_control(false).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn side_control_dispatch_does_not_hold_main_result_for_withdrawals() {
+    main_result_through_full_side_control(true).await;
+}
+
+/// Runs `prompt`, delivering `inbox` once the adapter announces side questions, and
+/// returns every event.
+async fn with_side_questions(
+    prompt: &str,
+    inbox: impl Fn(&TempDir, &Value),
+) -> (TempDir, Config, Vec<Value>) {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let p = plan(&root, prompt);
+    let (tx, mut rx) = mpsc::channel(64);
+    let config = c.clone();
+    let task =
+        tokio::spawn(
+            async move { claude_process::run(&config, p, tx, CancellationToken::new()).await },
+        );
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(event) = rx.recv().await {
+            inbox(&root, &event);
+            events.push(event);
+        }
+    })
+    .await
+    .unwrap();
+    task.await.unwrap().unwrap();
+    (root, c, events)
+}
+
+fn position(events: &[Value], kind: &str) -> usize {
+    events
+        .iter()
+        .position(|event| event["type"] == kind)
+        .unwrap_or_else(|| panic!("missing {kind}"))
+}
+
+#[tokio::test]
+async fn a_side_question_is_answered_natively_while_the_turn_continues() {
+    let (_root, c, events) = with_side_questions("fixture:slow", |root, event| {
+        if event["type"] == "chat.side.available" {
+            deliver(
+                root,
+                &json!([side_question(
+                    "a1b2c3d4-0000-4000-8000-000000000001",
+                    "Why this order?"
+                )]),
+            );
+        }
+    })
+    .await;
+
+    let answered = position(&events, "chat.side.answered");
+    assert!(answered < position(&events, "turn.completed"));
+    assert_eq!(
+        events[answered]["sideQuestionId"],
+        "a1b2c3d4-0000-4000-8000-000000000001"
+    );
+    assert_eq!(events[answered]["text"], "Side answer: Why this order?");
+
+    // The question reached Claude as a control request, never as a user message.
+    let home = c.home.join(".claude");
+    let asked = std::fs::read_to_string(home.join("side-questions.jsonl")).unwrap();
+    assert!(asked.contains("\"subtype\":\"side_question\""));
+    let inputs = std::fs::read_to_string(home.join("inputs.jsonl")).unwrap();
+    assert_eq!(inputs.lines().count(), 1);
+    assert!(!inputs.contains("Why this order?"));
+    // The reply is the main turn's own answer, not the side answer.
+    let reply = events
+        .iter()
+        .rfind(|event| {
+            event["type"] == "item.completed" && event["item"]["type"] == "agent_message"
+        })
+        .unwrap();
+    assert_eq!(reply["item"]["text"], "Claude fixture completed");
+}
+
+#[tokio::test]
+async fn oversized_side_responses_are_bounded_before_worker_transport() {
+    let (_root, _config, events) = with_side_questions("fixture:slow", |root, event| {
+        if event["type"] == "chat.side.available" {
+            deliver(
+                root,
+                &json!([
+                    side_question(
+                        "a1b2c3d4-0000-4000-8000-000000000001",
+                        "fixture:side-huge-answer"
+                    ),
+                    side_question(
+                        "a1b2c3d4-0000-4000-8000-000000000002",
+                        "fixture:side-huge-error"
+                    ),
+                ]),
+            );
+        }
+    })
+    .await;
+    let failed = events
+        .iter()
+        .filter(|event| event["type"] == "chat.side.failed")
+        .collect::<Vec<_>>();
+    assert_eq!(failed.len(), 2);
+    for event in failed {
+        let encoded = serde_json::to_string(event).unwrap();
+        assert!(encoded.len() < 2_000_000);
+        assert!(!encoded.contains("SECRET"));
+        assert!(!encoded.contains(&"x".repeat(100)));
+        assert!(encoded.contains("exceeded the size limit"));
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "chat.side.answered")
+    );
+}
+
+#[tokio::test]
+async fn closed_side_control_does_not_fail_a_completed_main_turn() {
+    let (root, _config, events) = with_side_questions("fixture:slow", |root, event| {
+        if event["type"] == "chat.side.available" {
+            deliver(
+                root,
+                &json!([side_question(
+                    "a1b2c3d4-0000-4000-8000-000000000001",
+                    "fixture:side-slow fixture:side-close-input",
+                )]),
+            );
+        }
+    })
+    .await;
+    assert!(position(&events, "chat.side.failed") < position(&events, "turn.completed"));
+    assert!(root.path().join("result.claude-receipt.json").exists());
+}
+
+#[tokio::test]
+async fn closed_control_before_side_request_does_not_fail_the_main_turn() {
+    let (root, _config, events) =
+        with_side_questions("fixture:slow fixture:close-before-side", |root, event| {
+            if event["type"] == "chat.side.available" {
+                deliver(
+                    root,
+                    &json!([side_question(
+                        "a1b2c3d4-0000-4000-8000-000000000001",
+                        "Why?"
+                    )]),
+                );
+            }
+        })
+        .await;
+    assert!(position(&events, "chat.side.failed") < position(&events, "turn.completed"));
+    assert!(root.path().join("result.claude-receipt.json").exists());
+}
+
+#[tokio::test]
+async fn side_control_frame_larger_than_pipe_atomic_limit_is_refused_whole() {
+    let (root, config, events) = with_side_questions("fixture:slow", |root, event| {
+        if event["type"] == "chat.side.available" {
+            deliver(
+                root,
+                &json!([side_question(
+                    "a1b2c3d4-0000-4000-8000-000000000001",
+                    &"\u{1}".repeat(1000)
+                )]),
+            );
+        }
+    })
+    .await;
+    let failure = &events[position(&events, "chat.side.failed")];
+    assert!(failure["error"].as_str().unwrap().contains("too large"));
+    assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+    assert!(root.path().join("result.claude-receipt.json").exists());
+    assert!(!config.home.join(".claude/side-questions.jsonl").exists());
+}
+
+#[tokio::test]
+async fn synthetic_side_error_preserves_secret_boundaries_for_worker_redaction() {
+    let (_root, _config, events) = with_side_questions("fixture:slow", |root, event| {
+        if event["type"] == "chat.side.available" {
+            deliver(
+                root,
+                &json!([side_question(
+                    "a1b2c3d4-0000-4000-8000-000000000001",
+                    "fixture:side-secret",
+                )]),
+            );
+        }
+    })
+    .await;
+    assert_eq!(
+        events[position(&events, "chat.side.failed")]["error"],
+        "(fixture-secret)"
+    );
+}
+
+#[tokio::test]
+async fn a_claude_release_not_qualified_for_side_questions_never_takes_one() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    std::fs::create_dir_all(c.home.join(".claude")).unwrap();
+    std::fs::write(c.home.join(".claude/fixture-claude-2.1.280"), "").unwrap();
+    let p = plan(&root, "Hello");
+    let (tx, mut rx) = mpsc::channel(64);
+    let config = c.clone();
+    let task =
+        tokio::spawn(
+            async move { claude_process::run(&config, p, tx, CancellationToken::new()).await },
+        );
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    task.await.unwrap().unwrap();
+    assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "chat.side.available")
+    );
+    let unavailable = events
+        .iter()
+        .find(|event| event["type"] == "chat.side.unavailable")
+        .unwrap();
+    assert_eq!(unavailable["release"], "2.1.280");
+}
+
+#[tokio::test]
+async fn a_finished_turn_withdraws_the_side_questions_it_is_still_answering() {
+    let (_root, c, events) = with_side_questions("fixture:slow", |root, event| {
+        if event["type"] == "chat.side.available" {
+            deliver(
+                root,
+                &json!([
+                    side_question(
+                        "a1b2c3d4-0000-4000-8000-000000000002",
+                        "fixture:side-slow explain"
+                    ),
+                    side_question(
+                        "a1b2c3d4-0000-4000-8000-000000000003",
+                        "fixture:side-fail explain"
+                    ),
+                    side_question(
+                        "a1b2c3d4-0000-4000-8000-000000000005",
+                        "fixture:side-tool run it"
+                    ),
+                ]),
+            );
+        }
+    })
+    .await;
+
+    // The reply ends without waiting for the slower side question, which it withdraws.
+    let completed = position(&events, "turn.completed");
+    let outcome = |id: &str| {
+        events
+            .iter()
+            .position(|event| event["type"] == "chat.side.failed" && event["sideQuestionId"] == id)
+            .unwrap_or_else(|| panic!("missing failure of {id}"))
+    };
+    let unfinished = outcome("a1b2c3d4-0000-4000-8000-000000000002");
+    assert!(unfinished < completed);
+    assert_eq!(
+        events[unfinished]["error"],
+        "The reply stopped before this side question was answered. Ask it again while the agent works, or ask in the conversation."
+    );
+    let failed = outcome("a1b2c3d4-0000-4000-8000-000000000003");
+    assert_eq!(
+        events[failed]["error"],
+        "Claude Code could not answer this side question."
+    );
+    // A tool Claude Code refused comes back as its own explanation.
+    let refused = outcome("a1b2c3d4-0000-4000-8000-000000000005");
+    assert_eq!(
+        events[refused]["error"],
+        "(The model tried to call Bash instead of answering directly. Try rephrasing or ask in the main conversation.)"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| event["type"] == "chat.side.answered")
+    );
+    let cancelled =
+        std::fs::read_to_string(c.home.join(".claude/side-cancellations.jsonl")).unwrap();
+    assert!(cancelled.contains("side-question-a1b2c3d4-0000-4000-8000-000000000002"));
+}
+
+#[tokio::test]
+async fn a_withdrawn_side_question_cancels_the_native_request_silently() {
+    let (_root, c, events) = with_side_questions("fixture:slow", |root, event| {
+        let id = "a1b2c3d4-0000-4000-8000-000000000004";
+        if event["type"] == "chat.side.available" {
+            deliver(
+                root,
+                &json!([side_question(id, "fixture:side-pending explain")]),
+            );
+            let inbox = root.path().join("inbox/messages.json");
+            tokio::spawn(async move {
+                // After the adapter has read and asked the question.
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                let withdrawal = json!([{
+                    "id": format!("withdraw-side-question:{id}"),
+                    "sideQuestionId": id,
+                    "sideQuestionCancelled": true,
+                }]);
+                std::fs::write(inbox, withdrawal.to_string()).unwrap();
+            });
+        }
+    })
+    .await;
+
+    assert!(completes(&events));
+    assert!(!events.iter().any(|event| {
+        event["type"].as_str().is_some_and(|kind| {
+            kind.starts_with("chat.side.")
+                && !matches!(kind, "chat.side.available" | "chat.side.closed")
+        })
+    }));
+    let cancelled =
+        std::fs::read_to_string(c.home.join(".claude/side-cancellations.jsonl")).unwrap();
+    assert!(cancelled.contains("side-question-a1b2c3d4-0000-4000-8000-000000000004"));
+}
+
 #[tokio::test]
 async fn restored_background_results_cannot_complete_an_undelivered_prompt() {
     let root = TempDir::new().unwrap();
@@ -1862,6 +2297,10 @@ async fn engine_retries_limits_and_notices_are_reported_without_ending_the_turn(
     assert_eq!(notices[0]["message"], "Context is almost full.");
     let known = [
         "thread.started",
+        "chat.side.available",
+        "chat.side.unavailable",
+        "chat.side.closed",
+        "chat.side.compacting",
         "context.usage",
         "chat.delivered",
         "engine.retry",
@@ -2587,6 +3026,51 @@ async fn context_usage_uses_the_native_report_and_each_response_prompt() {
 }
 
 #[tokio::test]
+async fn automatic_compaction_defers_stale_side_requests_until_it_succeeds_or_fails() {
+    for prompt in [
+        "fixture:side-autocompact",
+        "fixture:side-autocompact-failure",
+    ] {
+        let (_root, c, events) = with_side_questions(prompt, |root, event| {
+            if event["type"] == "item.started" && event["item"]["type"] == "context_compaction" {
+                // The same inbox poll sees a stale side request before the steering
+                // that releases compaction. The fixture records premature native dispatch.
+                deliver(root, &json!([
+                    side_question("a1b2c3d4-0000-4000-8000-000000000001", "Why this order?"),
+                    { "id": "a1b2c3d4-0000-4000-8000-000000000011", "text": "fixture:release-side-compaction" },
+                ]));
+            }
+            if event["type"] == "chat.side.answered" {
+                deliver(root, &json!([
+                    { "id": "a1b2c3d4-0000-4000-8000-000000000012", "text": "fixture:finish-side-compaction" },
+                ]));
+            }
+        }).await;
+        assert!(
+            !c.home.join(".claude/side-during-compaction").exists(),
+            "{prompt}"
+        );
+        let completed = events
+            .iter()
+            .position(|event| {
+                event["type"] == "item.completed" && event["item"]["type"] == "context_compaction"
+            })
+            .unwrap();
+        assert!(
+            position(&events, "chat.side.answered") > completed,
+            "{prompt}"
+        );
+        let states = events
+            .iter()
+            .filter(|event| event["type"] == "chat.side.compacting")
+            .map(|event| event["compacting"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(states, vec![json!(true), json!(false)], "{prompt}");
+        assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+    }
+}
+
+#[tokio::test]
 async fn automatic_compaction_shows_without_rewriting_the_reply() {
     let root = TempDir::new().unwrap();
     let c = setup(&root);
@@ -2644,6 +3128,48 @@ async fn a_resumed_compaction_shows_as_its_own_divider() {
         attempts.push(items[0].clone());
     }
     assert_ne!(attempts[0], attempts[1]);
+}
+
+#[tokio::test]
+async fn side_admission_closes_before_waiting_for_a_final_context_report() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    run_to_end(&c, plan(&root, "Inspect the workspace"))
+        .await
+        .0
+        .unwrap();
+    std::fs::write(c.home.join(".claude/fixture-context-unanswered"), "").unwrap();
+    let p = compaction_plan(&root);
+    let (tx, mut rx) = mpsc::channel(64);
+    let task =
+        tokio::spawn(async move { claude_process::run(&c, p, tx, CancellationToken::new()).await });
+    let mut closed = false;
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(event) = rx.recv().await {
+            if event["type"] == "chat.side.closed" {
+                assert!(!closed);
+                closed = true;
+                // The native result has ended inbox consumption, but its context
+                // deadline has not elapsed. No completion is needed to close admission.
+                assert!(!task.is_finished());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), rx.recv())
+                        .await
+                        .is_err()
+                );
+            }
+            if event["type"] == "turn.completed" {
+                assert!(closed);
+            }
+            events.push(event);
+        }
+    })
+    .await
+    .unwrap();
+    task.await.unwrap().unwrap();
+    assert!(closed);
+    assert!(completes(&events));
 }
 
 #[tokio::test]
