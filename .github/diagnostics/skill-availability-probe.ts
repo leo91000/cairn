@@ -3,16 +3,38 @@ import { writeFileSync as saveAvailabilityJournal } from 'node:fs'
 
 for (const boundary of ['pending-poll', 'departing-timer'] as const) {
   test(`availability native reload probe (${boundary})`, async ({ page }, testInfo) => {
-    const journal: Array<{ kind: string, hostAt: number, browserAt?: number, document?: string }> = []
+    const journal: Array<{ kind: string, hostAt: number, browserAt?: number, document?: string, poll?: number }> = []
     const errors: string[] = []
     const journalPath = testInfo.outputPath('availability-boundaries.json')
     const saveJournal = () => saveAvailabilityJournal(journalPath, JSON.stringify({ boundary, journal, errors }))
-    const record = (kind: string, browserAt?: number, document?: string) => {
-      journal.push({ kind, hostAt: Date.now(), browserAt, document })
+    const record = (kind: string, browserAt?: number, document?: string, poll?: number) => {
+      journal.push({ kind, hostAt: Date.now(), browserAt, document, poll })
       saveJournal()
     }
+    const requests = new Map<import('@playwright/test').Request, 'pending' | 'finished' | 'cancelled' | 'failed'>()
+    const availabilityRequest = (request: import('@playwright/test').Request) => new URL(request.url()).pathname === '/api/installations'
+    page.on('request', (request) => {
+      if (availabilityRequest(request))
+        requests.set(request, 'pending')
+    })
+    page.on('requestfinished', (request) => {
+      if (requests.has(request)) {
+        requests.set(request, 'finished')
+        record('network-poll-finished')
+      }
+    })
+    page.on('requestfailed', (request) => {
+      if (requests.has(request)) {
+        const cancelled = request.failure()?.errorText === 'Load request cancelled'
+        requests.set(request, cancelled ? 'cancelled' : 'failed')
+        record(cancelled ? 'network-poll-cancelled' : 'network-poll-failed')
+      }
+    })
     const releasePoll = Promise.withResolvers<void>()
     const releaseReload = Promise.withResolvers<void>()
+    let pollIntercepted = false
+    let targetPoll: import('@playwright/test').Request | undefined
+    let deliveryFailure: unknown
     let pollHeld = false
     let reloadHeld = false
     let routeFailure: unknown
@@ -27,6 +49,13 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
         return kind === 'poll' ? pollHeld : reloadHeld
       }, { message: `Reach the ${kind} response boundary` }).toBe(true)
     }
+    const browserSettled = async () => {
+      await expect.poll(() => page.evaluate(() => (window as any).availabilityPending.size), {
+        message: 'Current document availability fetches have settled',
+      }).toBe(0)
+      // This round trip follows the completed fetch microtasks and their native diagnostics.
+      await page.evaluate(() => {})
+    }
     record('setup-entered')
     page.on('pageerror', (error) => {
       errors.push(error.message)
@@ -36,18 +65,39 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
       await page.exposeFunction('availabilityProbe', record)
       await page.addInitScript(() => {
         const documentId = crypto.randomUUID()
-        const probe = (kind: string) => {
-          void (window as any).availabilityProbe(kind, performance.now(), documentId)
+        let pollId = 0
+        const pending = new Set<number>()
+        ;(window as any).availabilityPending = pending
+        const probe = (kind: string, poll?: number) => {
+          void (window as any).availabilityProbe(kind, performance.now(), documentId, poll)
         }
         for (const kind of ['beforeunload', 'pagehide', 'pageshow'])
           window.addEventListener(kind, () => probe(kind))
         const fetch = window.fetch.bind(window)
         window.fetch = (...args) => {
-          if (args[0] === '/api/installations') {
-            probe('poll-start')
-            args[1]?.signal?.addEventListener('abort', () => probe('poll-abort'), { once: true })
+          if (args[0] !== '/api/installations')
+            return fetch(...args)
+          const poll = ++pollId
+          pending.add(poll)
+          probe('poll-start', poll)
+          args[1]?.signal?.addEventListener('abort', () => probe('poll-abort', poll), { once: true })
+          const settled = (kind: string) => {
+            pending.delete(poll)
+            probe(kind, poll)
           }
-          return fetch(...args)
+          try {
+            return fetch(...args).then((response) => {
+              settled('poll-resolved')
+              return response
+            }, (cause) => {
+              settled('poll-rejected')
+              throw cause
+            })
+          }
+          catch (cause) {
+            settled('poll-threw')
+            throw cause
+          }
         }
       })
       await page.clock.install()
@@ -56,7 +106,13 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
       await authenticateWorkspace(page)
       await expect(page.getByRole('heading', { name: 'Skills library', exact: true })).toBeVisible()
       await page.clock.pauseAt(new Date(Date.now() + 1000))
+      await browserSettled()
       await page.route('**/api/installations', async (route) => {
+        // Hold exactly the old document's targeted request; the new document stays real.
+        if (pollIntercepted)
+          return route.continue()
+        pollIntercepted = true
+        targetPoll = route.request()
         try {
           const response = await route.fetch({ timeout: 7000 })
           pollHeld = true
@@ -66,8 +122,8 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
             await route.fulfill({ response })
             record('poll-response-delivered')
           }
-          catch {
-            // The departing document can cancel its already observed request.
+          catch (cause) {
+            deliveryFailure = cause
             record('poll-response-not-delivered')
           }
         }
@@ -109,6 +165,8 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
         await page.clock.runFor(3100)
         await reached('poll')
       }
+      // Both stimuli must reach the old document before the reload can commit.
+      expect(pollHeld).toBe(true)
       releaseReload.resolve()
       await reload
       releasePoll.resolve()
@@ -122,6 +180,10 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
       try {
         await reload?.catch(() => {})
         await page.unrouteAll({ behavior: 'wait' })
+        await expect.poll(() => [...requests.values()].every(state => state !== 'pending'), {
+          message: 'Every observed availability network request has terminated',
+        }).toBe(true)
+        await browserSettled()
         cleanupCompleted = true
       }
       finally {
@@ -129,6 +191,9 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
         await testInfo.attach('availability-boundaries', { path: journalPath, contentType: 'application/json' })
       }
     }
+    // Accept delivery cancellation only for this positively observed old-document request.
+    if (deliveryFailure && (!targetPoll || requests.get(targetPoll) !== 'cancelled'))
+      throw deliveryFailure
     if (routeFailure)
       throw routeFailure
     expect(errors).toEqual([])
