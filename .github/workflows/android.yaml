@@ -78,7 +78,6 @@ jobs:
         working-directory: apps/android
         run: ./gradlew "$GRADLE_TASK" --no-daemon --stacktrace
       - uses: actions/upload-artifact@v7.0.1
-        timeout-minutes: 2
         if: always()
         with:
           name: cairn-android-${{ matrix.task }}
@@ -179,7 +178,6 @@ jobs:
             node scripts/android-device-tests.mjs run --apk apks/debug/app-debug.apk --test-apk apks/androidTest/debug/app-debug-androidTest.apk --output device-results/shard-${{ matrix.shard }} --shard ${{ matrix.shard }}/${{ strategy.job-total }} --timings apps/android/device-test-timings.json --not-class build.cairn.app.data.DirectTransportDeviceTest ${SKIP_ON_PULL_REQUEST:+--not-annotation "$SKIP_ON_PULL_REQUEST"}
             node scripts/android-compose-stability.mjs "$STABILITY_REPETITIONS" device-results/stability
       - uses: actions/upload-artifact@v7.0.1
-        timeout-minutes: 2
         if: always()
         with:
           name: cairn-android-device-${{ matrix.shard }}
@@ -207,7 +205,6 @@ jobs:
           CAPTURES: ${{ github.event_name == 'pull_request' && 'scroll-validation/pinned-stream.png' || 'scroll-validation/pinned-stream.png,model-picker/reasoning.png,conversation-lifecycle/swipe-fil.png,node-screenshots/nodes.png,node-screenshots/storage.png,node-screenshots/execution-sheet.png' }}
         run: node scripts/android-device-tests.mjs report device-results --require "$CAPTURES" --write-timings device-test-timings.json
       - uses: actions/upload-artifact@v7.0.1
-        timeout-minutes: 2
         if: always()
         with:
           name: cairn-android-device-timings
@@ -265,7 +262,6 @@ jobs:
       - name: Attach smoke evidence to the original unsigned APK
         run: cp release-smoke-results/release-smoke.json apps/android/app/build/outputs/apk/release/
       - uses: actions/upload-artifact@v7.0.1
-        timeout-minutes: 2
         if: always()
         with:
           name: cairn-android-release-smoke
