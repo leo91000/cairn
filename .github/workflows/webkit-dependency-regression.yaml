@@ -91,7 +91,7 @@ jobs:
           result=0
           for control in native-cancel abort-before-goto; do
             set +e
-            CAIRN_B534_CONTROL="$control" PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$control" pnpm test:e2e mcps.spec.ts --project=layout-webkit-mcps --grep '^B534 native Agents navigation' --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --output="test-results/$control"
+            CAIRN_B534_CONTROL="$control" PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$control" pnpm test:e2e mcps.spec.ts --project=layout-webkit-mcps --grep 'B534 native Agents navigation' --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --output="test-results/$control"
             code=$?
             set -e
             printf '%s exit=%s\n' "$control" "$code" >> b534-control-results.txt

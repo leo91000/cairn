@@ -27,8 +27,8 @@ The probe performs a real MCP OAuth connect and callback, uses the original dark
 The single experimental variable is whether the *actual availability caller's own controller* is explicitly aborted immediately before the native goto. The native-cancel control does not abort it. This is a diagnostic counterfactual, not a production fix, error filter, or claim that explicit abort avoids every native WebKit diagnostic. Every page error remains subject to the unchanged empty-array assertion. Missing direct success, stimulus, native outcome or closure is non-green. All unknown or unexpected new-document HTTP/body outcomes are non-green.
 
 ```sh
-CAIRN_B534_CONTROL=native-cancel pnpm test:e2e mcps.spec.ts --project=layout-webkit-mcps --grep '^B534 native Agents navigation' --workers=2 --retries=0 --fail-on-flaky-tests --trace=on
-CAIRN_B534_CONTROL=abort-before-goto pnpm test:e2e mcps.spec.ts --project=layout-webkit-mcps --grep '^B534 native Agents navigation' --workers=2 --retries=0 --fail-on-flaky-tests --trace=on
+CAIRN_B534_CONTROL=native-cancel pnpm test:e2e mcps.spec.ts --project=layout-webkit-mcps --grep 'B534 native Agents navigation' --workers=2 --retries=0 --fail-on-flaky-tests --trace=on
+CAIRN_B534_CONTROL=abort-before-goto pnpm test:e2e mcps.spec.ts --project=layout-webkit-mcps --grep 'B534 native Agents navigation' --workers=2 --retries=0 --fail-on-flaky-tests --trace=on
 ```
 
 The commands are identical across the immutable base/B sources. This selected diagnostic is not the original full `layout-webkit-* --shard=4/4` qualification and cannot replace that workload. No native diagnostic has run, and no red-capable native loop has yet been established. Preserve first failures and distinguish the original EventSource-plus-chat-list symptom from observer failures or a different availability-only error. A later repair still requires current-main source, fresh full reviews, exact affected qualification, ordinary guarded merge and verified post-CI. UI534/679 capture gates, root731 ownership and all production prohibitions remain in force.
