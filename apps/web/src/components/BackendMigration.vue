@@ -12,6 +12,8 @@ interface Migration {
   fromBackend: 'native' | 'firecracker'
   toBackend: 'native' | 'firecracker'
   nodes: { id: string, name: string }[]
+  conversion?: boolean
+  mission?: boolean
   pending: boolean
   environmentExpired?: boolean
   reason?: string | null
@@ -88,7 +90,7 @@ async function migrate() {
     </h3>
     <template v-if="completed">
       <p role="status">
-        Migration complete. Send a new message to continue in the same conversation.
+        Execution backend changed. Continue in this conversation.
       </p>
       <UiButton v-if="state?.optional" size="small" @click="completed = false">
         Change environment again
@@ -100,7 +102,7 @@ async function migrate() {
         The next message will create an empty environment. Conversation history and published files are retained.
       </template>
       <template v-else>
-        Execution is stopped while the environment is saved and transferred. You can leave this screen.
+        Execution is paused while the environment moves. You can leave this screen.
       </template>
     </p>
     <template v-else>
@@ -147,7 +149,16 @@ async function migrate() {
         <p v-else>
           Execution will stop and its files will move to {{ label }}. This keeps the same conversation and history.
         </p>
-        <p>The next message starts a fresh engine session with the conversation context. Operating-system tools and dependencies may need reinstalling.</p>
+        <p v-if="state?.environmentExpired">
+          The next message starts a fresh engine session with the preserved conversation context.
+        </p>
+        <p v-else-if="state?.conversion">
+          A native-created disk needs a one-time conversion. Chats wait for the next message; missions resume automatically in a fresh engine session with their history.
+        </p>
+        <p v-else-if="!state?.environmentExpired">
+          The same disk and engine session are reused without copying files.
+        </p>
+        <p>Running commands stop. System tools and dependencies may need reinstalling on the destination.</p>
         <p v-if="!state?.environmentExpired">
           The original environment is retained if migration fails.
         </p>

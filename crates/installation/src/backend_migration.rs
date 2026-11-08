@@ -26,6 +26,29 @@ tokio::task_local! { pub(crate) static OWNER: Option<String>; }
 
 static PROCESS: LazyLock<String> = LazyLock::new(id);
 
+pub(crate) fn pending(run: &Value) -> bool {
+    run["backendMigration"]["process"] == PROCESS.as_str()
+}
+
+/// An explicit stop applies to the conversion even after its engine has exited.
+/// Internal fencing never invokes this operation.
+pub(crate) fn cancel_in(db: &Db<'_>, run_id: &str) -> Result<bool> {
+    let Some(run) = db.run(run_id)? else {
+        return Ok(false);
+    };
+    if !pending(&run) {
+        return Ok(false);
+    }
+    let mut migration = run["backendMigration"].clone();
+    migration["cancelledAt"] = now().into();
+    migration["resumeMission"] = false.into();
+    db.update_run_boundary(
+        run_id,
+        &json!({"backendMigration": migration, "resumeMissionAfterConversion": false}),
+    )?;
+    Ok(true)
+}
+
 /// Call only while holding the installation and in-process storage locks.
 fn migration_staging(data_dir: &Path) -> Result<PathBuf> {
     let root = data_dir.join("backend-migration-staging");
@@ -80,6 +103,9 @@ pub(crate) fn candidate(run: &Value) -> Value {
     candidate["preferredNodeId"] = Value::Null;
     candidate["requiredRuntime"] = migration["runtimeId"].clone();
     candidate["placementTransition"] = true.into();
+    if migration.get("requiredTags").is_some() {
+        candidate["requiredTags"] = migration["requiredTags"].clone();
+    }
     candidate
 }
 
@@ -98,10 +124,42 @@ pub(crate) fn lineage(run: &Value) -> &Value {
     if pending.is_object() { pending } else { run }
 }
 
+fn subject(db: &Db<'_>, key: &str) -> Result<Value> {
+    if let Some(chat) = db.conversation_boundary(key)? {
+        return Ok(chat);
+    }
+    if let Some(chat) = crate::chats::chat_for_run(db, key)? {
+        return Ok(chat);
+    }
+    let run = required(db.run(key)?, "Conversation not found")?;
+    if run["trigger"] == "chat" {
+        return Err(Error::not_found(
+            "The conversation for this chat run is no longer available.",
+        ));
+    }
+    Ok(
+        json!({ "id": key, "runId": key, "agentId": nodes::run_agent(&run), "mission": true, "paused": false }),
+    )
+}
+
+async fn load_subject(s: &Service, key: &str) -> Result<Value> {
+    let key = key.to_owned();
+    s.store.read(move |db| subject(db, &key)).await
+}
+
+fn save_subject(db: &Db<'_>, chat: &Value) -> Result<()> {
+    if chat["mission"] != true {
+        db.save_conversation_boundary(chat)?;
+    }
+    Ok(())
+}
+
 fn chat_run(db: &Db<'_>, chat_id: &str) -> Result<(Value, Value, Value, bool)> {
-    let chat = required(db.conversation_boundary(chat_id)?, "Chat not found")?;
-    require_active(&chat)?;
-    crate::conversation_lifecycle::require_environment_ready(&chat)?;
+    let chat = subject(db, chat_id)?;
+    if chat["mission"] != true {
+        require_active(&chat)?;
+        crate::conversation_lifecycle::require_environment_ready(&chat)?;
+    }
     let run = required(db.run(text(&chat, "runId"))?, "Run not found")?;
     let mut agent = required(
         db.agent_snapshot(text(&chat, "agentId"))?,
@@ -161,12 +219,21 @@ fn check_access(run: &Value, agent: &Value) -> Result<()> {
 /// A stopped source can fetch its own base while being copied. This is never a
 /// workload lease: ordinary execution continues to use the current backend grants.
 pub(crate) fn source_read(db: &Db<'_>, run_id: &str, node: &Value) -> Result<bool> {
-    let Some(run) = db.run(run_id)? else {
+    let Some(mut run) = db.run(run_id)? else {
         return Ok(false);
     };
+    let direct_move =
+        run["moveRequest"]["backend"].is_string() && run["moveRequest"]["sourceReadReady"] == true;
+    if direct_move {
+        let agent = required(db.agent_snapshot(nodes::run_agent(&run))?, "Agent removed")?;
+        let mut snapshot = run["snapshot"].clone();
+        snapshot["agent"] = agent;
+        snapshot["agent"]["access"]["backend"] = run["moveRequest"]["backend"].clone();
+        run["backendMigration"] = json!({ "process": PROCESS.as_str(), "sourceReadReady": true, "nodeId": run["moveRequest"]["nodeId"], "snapshot": snapshot, "grant": run.clone(), "runtimeId": nodes::component_runtime() });
+    }
     if run["backendMigration"]["process"] != PROCESS.as_str()
         || run["backendMigration"]["sourceReadReady"] != true
-        || RunStatus::of(&run).is_some_and(RunStatus::is_active)
+        || !direct_move && RunStatus::of(&run).is_some_and(RunStatus::is_active)
         || nodes::owner_node(&run) != text(node, "id")
     {
         return Ok(false);
@@ -186,7 +253,19 @@ pub(crate) fn source_read(db: &Db<'_>, run_id: &str, node: &Value) -> Result<boo
     Ok(true)
 }
 
-fn migration_grant(db: &Db<'_>, run: &Value, agent: &Value, source: &Origin) -> Result<Value> {
+pub(crate) fn migration_grant(
+    db: &Db<'_>,
+    run: &Value,
+    agent: &Value,
+    source: &Origin,
+) -> Result<Value> {
+    let retained;
+    let source = if matches!(source, Origin::Run(id) if run["id"] == *id) {
+        retained = Origin::Stored(run.clone());
+        &retained
+    } else {
+        source
+    };
     let mut grant = policy::authorize_origin(db, agent, source)?;
     // Initial/expired migration and the final conversion commit all construct
     // this grant inside their writer transaction. Owner adoption is explicit;
@@ -245,6 +324,9 @@ fn allowed(db: &Db<'_>, proposed: &Value, node: &Value) -> Result<bool> {
     Ok(node["revoked"] != true
         && node["capabilities"]["backend"] == backend(&proposed["snapshot"]["agent"])
         && nodes::agent_allows(&agent, text(node, "id"))
+        && (!policy::node_native(node)
+            || !nodes::vm_disk(&nodes::db_checkpoint(db, text(proposed, "id"))?)
+            || node["capabilities"]["vmDisks"] == true)
         && (!policy::node_native(node) || policy::allows(db, proposed, node)?))
 }
 
@@ -304,7 +386,7 @@ fn change_expired_backend(
 
     policy::apply(&mut chat, proposed);
     chat["sessionRestartRequested"] = true.into();
-    db.save_conversation_boundary(&chat)?;
+    save_subject(db, &chat)?;
 
     for action in [
         "chat.backend-migration.requested",
@@ -327,11 +409,8 @@ pub(crate) async fn chat_id(s: &Service, run: &str) -> Result<String> {
     let run = run.to_owned();
     s.store
         .read(move |db| {
-            let chat = required(
-                crate::chats::chat_for_run(db, &run)?,
-                "Conversation not found",
-            )?;
-            Ok(text(&chat, "id").to_owned())
+            Ok(crate::chats::chat_for_run(db, &run)?
+                .map_or(run, |chat| text(&chat, "id").to_owned()))
         })
         .await
 }
@@ -367,7 +446,7 @@ pub(crate) async fn preview_live(
     let check = authorize.clone();
     s.store.read(move |db| check.authorize(db)).await?;
     // Both native sources and destinations need fresh human authority.
-    let chat = s.conversation_boundary(chat_id).await?;
+    let chat = load_subject(s, chat_id).await?;
     refresh_authority(s, &chat).await?;
     authorize.recheck().await?;
     let (chat_id, origin) = (chat_id.to_owned(), origin());
@@ -390,6 +469,8 @@ pub(crate) async fn preview_live(
         }
         Ok(json!({
             "chatId": chat["id"],
+            "mission": chat["mission"] == true,
+            "diskFormat": if nodes::vm_disk(&nodes::db_checkpoint(db, text(&run, "id"))?) { "vm" } else { "native" },
             "fromBackend": from,
             "toBackend": to,
             "required": !automatic && from != to,
@@ -397,10 +478,11 @@ pub(crate) async fn preview_live(
             "environmentExpired": chat["environmentState"] == "expired",
             "nodes": nodes,
             "reason": reason,
-            "pending": run["backendMigration"]["process"] == PROCESS.as_str(),
+            "conversion": !nodes::vm_disk(&nodes::db_checkpoint(db, text(&run, "id"))?) && to == "firecracker",
+            "pending": run["backendMigration"]["process"] == PROCESS.as_str() || run["moveRequest"].is_object(),
             "error": if run["backendMigration"].is_object() && run["backendMigration"]["process"] != PROCESS.as_str() {
                 run["backendMigrationError"].as_str().map_or_else(|| json!("Migration interrupted by a manager restart. The original environment is retained; retry migration."), |message| json!(message))
-            } else { run["backendMigrationError"].clone() },
+            } else if run["backendMigrationError"].is_string() { run["backendMigrationError"].clone() } else { run["movementError"].clone() },
         }))
     }).await
 }
@@ -419,21 +501,121 @@ impl Service {
         input: Value,
         authorize: crate::authorization::Authorization,
     ) -> Result<Value> {
-        authorize.recheck().await?;
-        let input = parse("mcp:migrate_chat_backend", input)?;
-        let chat_id = text(&input, "chatId").to_owned();
-        let source = origin();
-        // Check management authority before contacting Beacon or a controller.
-        let check = authorize.clone();
-        self.store.read(move |db| check.authorize(db)).await?;
-        let chat = self.conversation_boundary(&chat_id).await?;
-        refresh_authority(self, &chat).await?;
-        authorize.recheck().await?;
-        let operation = id();
-        let (args, who, migration) = (input.clone(), source.clone(), operation.clone());
-        let job_authorization = authorize.clone().accepted().await?;
-        let request_authorization = authorize.clone();
-        let expired = self.store.transaction(move |db| {
+        self.migrate_backend(input, authorize, origin(), false)
+            .await
+    }
+
+    pub(crate) async fn convert_for_vm(
+        &self,
+        run: &Value,
+        args: &Value,
+        authorize: nodes::moves::Authorization,
+        by_agent: bool,
+    ) -> Result<Value> {
+        authorize.recheck(self).await?;
+        let guard = authorize.clone();
+        let auth = if let Some(auth) = authorize.management_authorization() {
+            auth
+        } else if let Some(bearer) = authorize.workspace_bearer() {
+            crate::authorization::Authorization::workspace_move(self, &bearer, text(run, "id"))
+                .await?
+        } else {
+            crate::authorization::Authorization::new(self, move |db| guard.check(db))
+        };
+        let auth = auth.with_movement_admission(self, authorize.clone());
+        let key = chat_id(self, text(run, "id")).await?;
+        let source = if by_agent {
+            Origin::Stored(run.clone())
+        } else {
+            origin()
+        };
+        let node_id = args["nodeId"].clone();
+        self.migrate_backend(json!({ "chatId": key, "backend": "firecracker", "nodeId": node_id, "confirm": true, "requiredTags": args["requiredTags"], "waitSeconds": args["waitSeconds"].as_u64().unwrap_or(0) }), auth, source, by_agent).await?;
+        authorize.mark_admitted();
+        Ok(json!({ "status": "migrating", "nodeId": node_id }))
+    }
+
+    fn migrate_backend(
+        &self,
+        input: Value,
+        authorize: crate::authorization::Authorization,
+        source: Origin,
+        own_move: bool,
+    ) -> futures_util::future::BoxFuture<'_, Result<Value>> {
+        Box::pin(async move {
+            authorize.recheck().await?;
+            let mut input = input;
+            if let Some(run_id) = input
+                .as_object_mut()
+                .and_then(|input| input.remove("runId"))
+            {
+                if input.get("chatId").is_some() {
+                    return Err(Error::bad("Choose chatId or runId, not both."));
+                }
+                input["chatId"] = run_id;
+            }
+            let input = parse("mcp:migrate_chat_backend", input)?;
+            if input["waitSeconds"].as_u64().unwrap_or(0)
+                > nodes::publication::settings(self).await?["maxCapacityWaitSeconds"]
+                    .as_u64()
+                    .unwrap_or(3600)
+            {
+                return Err(Error::bad("Capacity wait exceeds the configured maximum."));
+            }
+            let chat_id = text(&input, "chatId").to_owned();
+            // Check management authority before contacting Beacon or a controller.
+            let check = authorize.clone();
+            self.store.read(move |db| check.authorize(db)).await?;
+            let chat = load_subject(self, &chat_id).await?;
+            refresh_authority(self, &chat).await?;
+            authorize.recheck().await?;
+            let retained = self.store.run(text(&chat, "runId")).await?;
+            let own_move = own_move || matches!(&source, Origin::Run(id) if retained["id"] == *id);
+            let checkpoint = nodes::checkpoint(self, text(&retained, "id")).await?;
+            let chosen = self.node_boundary(text(&input, "nodeId")).await?;
+            if chosen["capabilities"]["backend"] != input["backend"] {
+                return Err(Error::conflict(
+                    "Destination backend does not match the requested backend.",
+                ));
+            }
+            if chat["environmentState"] != "expired" && nodes::vm_disk(&checkpoint) {
+                let movement = nodes::moves::Authorization::new(|_| Ok(()), None)
+                    .with_management_authorization(authorize)
+                    .with_origin(source.clone());
+                return Box::pin(nodes::moves::request_authorized(
+                    self,
+                    &retained,
+                    &json!({ "nodeId": input["nodeId"], "requiredTags": input["requiredTags"], "waitSeconds": input["waitSeconds"].as_u64().unwrap_or(0) }),
+                    movement,
+                ))
+                .await;
+            }
+            let required_tags = input
+                .get("requiredTags")
+                .filter(|tags| !tags.is_null())
+                .unwrap_or(&retained["requiredTags"])
+                .clone();
+            if required_tags
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|tag| !nodes::node_tags(&chosen).any(|present| present == tag))
+            {
+                return Err(Error::conflict("Destination lacks required tags."));
+            }
+            if retained["trigger"] != "chat" && retained["wakeup"].is_object() {
+                return Err(Error::conflict(
+                    "Finish the mission wait before changing backend.",
+                ));
+            }
+            let operation = id();
+            let (args, who, migration) = (input.clone(), source.clone(), operation.clone());
+            let job_authorization = authorize.clone().accepted().await?;
+            if own_move {
+                job_authorization.bind_self_move(text(&retained, "id"), &operation)?;
+            }
+            let request_authorization = authorize.clone();
+            let expired = self.store.transaction(move |db| {
             request_authorization.authorize(db)?;
             let (mut chat, run, agent, _) = chat_run(db, text(&args, "chatId"))?;
             if backend(&agent) != text(&args, "backend") || backend(&agent) == backend(&run["snapshot"]["agent"]) {
@@ -465,18 +647,30 @@ impl Service {
                 && previous["runtimeId"] == node["runtimeId"]
                 && backend(&previous["snapshot"]["agent"]) == backend(&agent);
             let reservation = previous["reservationId"].as_str().map_or_else(|| migration.clone(), str::to_owned);
+            let resume_mission = chat["mission"] == true
+                && (RunStatus::of(&run).is_some_and(RunStatus::is_active)
+                    || previous["resumeMission"] == true
+                    || run["resumeMissionAfterConversion"] == true);
+            let mission = if resume_mission {
+                Some(required(db.mission(text(&run, "taskId"))?, "The mission was removed before conversion." )?)
+            } else { None };
             let migration = json!({
+                "missionId": mission.as_ref().map(|mission| mission.id.to_string()),
+                "missionCreatedAt": mission.as_ref().map(|mission| mission.created_at),
                 "convertedBackup": if reusable { previous["convertedBackup"].clone() } else { Value::Null },
                 "id": migration,
                 "process": PROCESS.as_str(),
                 "sourceReadReady": false,
+                "selfMove": own_move,
+                "requiredTags": required_tags,
+                "resumeMission": resume_mission,
                 "nodeId": node["id"],
                 "runtimeId": node["runtimeId"],
                 "snapshot": proposed["snapshot"],
                 "grant": migration_grant(db, &run, &agent, &who)?,
                 "reservationId": reservation,
                 "agentRevision": agent["revision"],
-                "paused": if previous.is_object() { previous["paused"].clone() } else { chat["paused"].clone() },
+                "paused": if previous.is_object() && previous["cancelledAt"].is_null() { previous["paused"].clone() } else { chat["paused"].clone() },
                 "createdAt": now(),
             });
             for mut message in db.messages(text(&chat, "id"))? {
@@ -486,8 +680,8 @@ impl Service {
                 }
             }
             chat["paused"] = true.into();
-            db.save_conversation_boundary(&chat)?;
-            db.update_run_boundary(text(&run, "id"), &json!({ "backendMigration": migration, "backendMigrationError": null }))?;
+            save_subject(db, &chat)?;
+            db.update_run_boundary(text(&run, "id"), &json!({ "resumeMissionAfterConversion": migration["resumeMission"], "backendMigration": migration, "backendMigrationError": null }))?;
             db.audit("chat.backend-migration.requested", &json!({
                 "chatId": chat["id"],
                 "backend": args["backend"],
@@ -495,55 +689,79 @@ impl Service {
             }))?;
             Ok(false)
         }).await?;
-        if expired {
-            self.worker.notify();
-            return Ok(json!({ "status": "migrated", "chatId": chat_id }));
-        }
-        let s = self.clone();
-        let result = json!({
-            "status": "migrating",
-            "chatId": chat_id,
-            "migrationId": operation,
-        });
-        tokio::spawn(async move {
-            let outcome = s
-                .convert_chat_live(&chat_id, &operation, input, source, job_authorization)
-                .await;
-            if let Err(error) = outcome {
-                let message = error.message.clone();
-                let _ = s
-                    .store
-                    .transaction(move |db| {
-                        let Some(chat) = db.conversation_boundary(&chat_id)? else {
-                            return Ok(());
-                        };
-                        let Some(run) = db.run(text(&chat, "runId"))? else {
-                            return Ok(());
-                        };
-                        if run["backendMigration"]["id"] == operation {
-                            let mut migration = run["backendMigration"].clone();
-                            migration["process"] = Value::Null;
-                            // Before a converted point exists no destination has been
-                            // reserved. Clear the guard so prerequisites (including a
-                            // legacy native upgrade) can be repaired on the source.
-                            if !migration["convertedBackup"].is_string() {
-                                migration = Value::Null;
-                            }
-                            db.update_run_boundary(
-                                text(&run, "id"),
-                                &json!({
-                                    "backendMigration": migration,
-                                            "backendMigrationError": message,
-                                }),
-                            )?;
-                        }
-                        Ok(())
-                    })
-                    .await;
-                tracing::warn!(error = %error, "Backend migration retained its original environment");
+            if expired {
+                self.worker.notify();
+                return Ok(json!({ "status": "migrated", "chatId": chat_id }));
             }
-        });
-        Ok(result)
+            let (target, expected) = (text(&retained, "id").to_owned(), operation.clone());
+            let job_authorization = job_authorization.for_service(self).with_guard(move |db| {
+                let run = required(db.run(&target)?, "Conversation removed")?;
+                if run["backendMigration"]["id"] != expected
+                    || !run["backendMigration"]["cancelledAt"].is_null()
+                {
+                    return Err(Error::forbidden(
+                        "The backend conversion was explicitly cancelled.",
+                    ));
+                }
+                if let Some(mission) = run["backendMigration"]["missionId"].as_str() {
+                    let current = required(
+                        db.mission(mission)?,
+                        "The mission was removed during conversion.",
+                    )?;
+                    if json!(current.created_at) != run["backendMigration"]["missionCreatedAt"] {
+                        return Err(Error::forbidden(
+                            "The mission identity changed during conversion.",
+                        ));
+                    }
+                }
+                Ok(())
+            });
+            let s = self.clone();
+            let result = json!({
+                "status": "migrating",
+                "chatId": chat_id,
+                "migrationId": operation,
+            });
+            tokio::spawn(async move {
+                let outcome = s
+                    .convert_chat_live(&chat_id, &operation, input, source, job_authorization)
+                    .await;
+                if let Err(error) = outcome {
+                    let message = error.message.clone();
+                    let _ = s
+                        .store
+                        .transaction(move |db| {
+                            let Ok(chat) = subject(db, &chat_id) else {
+                                return Ok(());
+                            };
+                            let Some(run) = db.run(text(&chat, "runId"))? else {
+                                return Ok(());
+                            };
+                            if run["backendMigration"]["id"] == operation {
+                                let mut migration = run["backendMigration"].clone();
+                                migration["process"] = Value::Null;
+                                // Before a converted point exists no destination has been
+                                // reserved. Clear the guard so prerequisites (including a
+                                // legacy native upgrade) can be repaired on the source.
+                                if !migration["convertedBackup"].is_string() {
+                                    migration = Value::Null;
+                                }
+                                db.update_run_boundary(
+                                    text(&run, "id"),
+                                    &json!({
+                                        "backendMigration": migration,
+                                                "backendMigrationError": message,
+                                    }),
+                                )?;
+                            }
+                            Ok(())
+                        })
+                        .await;
+                    tracing::warn!(error = %error, "Backend migration retained its original environment");
+                }
+            });
+            Ok(result)
+        })
     }
 
     async fn convert_chat_live(
@@ -555,7 +773,7 @@ impl Service {
         authorize: crate::authorization::Authorization,
     ) -> Result<()> {
         authorize.recheck().await?;
-        let chat = self.conversation_boundary(chat_id).await?;
+        let chat = load_subject(self, chat_id).await?;
         let run_id = text(&chat, "runId").to_owned();
         let _storage_lock = crate::conversation_lifecycle::storage_lock(&self.config.data_dir)?;
         let _storage = self.conversation_storage_lock.lock().await;
@@ -565,16 +783,12 @@ impl Service {
         // Reclaim it before capacity checks, including retries using a saved point.
         let staging_root = migration_staging(&self.config.data_dir)?;
         let initial = self.store.run(&run_id).await?;
-        if RunStatus::of(&initial).is_some_and(RunStatus::is_active) {
-            match self
-                .worker
-                .cancel_live(self, &run_id, authorize.clone())
-                .await
-            {
-                Ok(()) => {}
-                Err(error) if error.is_conflict() => {}
-                Err(error) => return Err(error),
-            }
+        // Stopping the engine for conversion is not an explicit user stop.
+        // User cancellation records a separate marker in the admission state.
+        if RunStatus::of(&initial).is_some_and(RunStatus::is_active)
+            && let Some(stop) = self.worker.active.lock().await.get(&run_id)
+        {
+            stop.cancel();
         }
         for _ in 0..600 {
             if !self.worker.active.lock().await.contains_key(&run_id) {
@@ -714,13 +928,23 @@ impl Service {
         let proposed = candidate(&self.store.run(&run_id).await?);
         let placement_authorization = nodes::moves::Authorization::new(|_| Ok(()), None)
             .with_management_authorization(authorize.clone());
-        let placement = nodes::placement::reserve_authorized(
-            self,
-            &proposed,
-            &reservation,
-            placement_authorization,
-        )
-        .await?;
+        let deadline = now() + args["waitSeconds"].as_u64().unwrap_or(0) as i64 * 1000;
+        let placement = loop {
+            match nodes::placement::reserve_authorized(
+                self,
+                &proposed,
+                &reservation,
+                placement_authorization.clone(),
+            )
+            .await
+            {
+                Ok(placement) => break placement,
+                Err(error) if error.is_unavailable() && now() < deadline => {
+                    tokio::select! { () = authorize.cancelled() => return Err(Error::forbidden("Accepted migration cancelled.")), () = tokio::time::sleep(Duration::from_secs(1)) => {} }
+                }
+                Err(error) => return Err(error),
+            }
+        };
         let restored = async {
             nodes::placement::materialize_authorized(self, &reservation, authorize.clone()).await?;
             nodes::restore::start_authorized(
@@ -756,17 +980,36 @@ impl Service {
             if !allowed(db, &proposed, &destination)? {
                 return Err(Error::forbidden("Destination permission was revoked during migration."));
             }
-            let mut checkpoint = nodes::db_checkpoint(db, &run_id)?;
-            checkpoint["prepared"]["backend"] = args["backend"].clone();
-            checkpoint["nodeId"] = node["id"].clone();
-            checkpoint["runtimeId"] = node["runtimeId"].clone();
-            checkpoint["resources"] = placement["resources"].clone();
-            checkpoint["runnerId"] = run_id.clone().into();
-            checkpoint["launched"] = false.into();
-            checkpoint["freshSession"] = true.into();
-            checkpoint["completed"] = true.into();
-            for key in ["process", "settled", "controllerRecoveries"] { checkpoint[key] = Value::Null; }
-            db.save_checkpoint_boundary(&run_id, &checkpoint)?;
+            let previous = crate::worker::checkpoint::RunCheckpoint::from_value(
+                nodes::db_checkpoint(db, &run_id)?
+            )?;
+            let mut prepared = previous.prepared().cloned().unwrap_or_default();
+            prepared["backend"] = args["backend"].clone();
+            prepared["diskFormat"] = if args["backend"] == "firecracker" { "vm" } else { "native" }.into();
+            let resume_mission = chat["mission"] == true && migration["resumeMission"] == true;
+
+            // Publication/restoration settled the new environment. Old attempt
+            // failures cannot describe it or block its next idle transfer. A
+            // continuing mission keeps its remaining budget, never a fresh one.
+            crate::worker::checkpoint::RunCheckpoint {
+                prepared: Some(Some(prepared)),
+                node_id: Some(Some(text(&node, "id").to_owned())),
+                runtime_id: Some(Some(node["runtimeId"].clone())),
+                resources: serde_json::from_value(placement["resources"].clone())?,
+                runner_id: Some(Some(run_id.clone())),
+                launched: Some(false),
+                fresh_session: Some(true),
+                workspace_initialized: Some(true),
+                completed: Some(!resume_mission),
+                terminal_code: Some(if resume_mission { None } else { Some(0) }),
+                remaining_ms: if resume_mission {
+                    previous.remaining_ms
+                } else {
+                    Some(None)
+                },
+                ..Default::default()
+            }.store_in(db, &run_id)?;
+
             // This boundary replaces the backup pointer. Preserve only the
             // historical diagnosis; the migration owns the new pointer/status.
             let mut migrated_backup = json!({
@@ -782,11 +1025,14 @@ impl Service {
                 snapshot: Some(serde_json::from_value(proposed["snapshot"].clone())?),
                 session_id : Some(None),
                 resume_available : Some(false),
-                status : Some(RunStatus::Succeeded),
+                status : Some(if resume_mission { RunStatus::Queued } else { RunStatus::Succeeded }),
                 error : Some(None),
                 cancel_requested_at : Some(None),
-                recovery_pending : Some(false),
+                recovery_pending : Some(resume_mission),
+                retry: Some(None),
                 placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
+                    required_tags: Some(serde_json::from_value(migration.get("requiredTags").unwrap_or(&current["requiredTags"]).clone())?),
+                    execution_backend: Some(Some(text(&args, "backend").to_owned())),
                     node_id: Some(serde_json::from_value(serde_json::json!(node["id"]))?),
                     resources: Some(serde_json::from_value(serde_json::json!(placement["resources"]))?),
                     pinned_node_id: Some(None),
@@ -798,19 +1044,21 @@ impl Service {
                     "requiredRuntime": node["runtimeId"],
                     "backendMigration": null,
                     "backendMigrationError": null,
+                    "resumeMissionAfterConversion": null,
                     "storage": { "mode": nodes::ON_DEMAND },
                     "backup": migrated_backup
                 })),
                 ..Default::default()
             };
             let grant = migration_grant(db, &current, &agent, &source)?;
+            if chat["mission"] == true { patch.boundary.as_mut().unwrap()["sessionHandoff"] = crate::chats::handoff_context(db, &run_id)?.into(); }
             policy::apply(patch.boundary.as_mut().unwrap(), &grant);
             db.change_run(&run_id, patch)?;
             policy::apply(&mut chat, &grant);
             chat["paused"] = migration["paused"].clone();
             chat["sessionRestartRequested"] = true.into();
             chat["wakeup"] = Value::Null;
-            db.save_conversation_boundary(&chat)?;
+            save_subject(db, &chat)?;
             db.event(&run_id, &EventKind::Status, "Execution backend migrated. Conversation history and files preserved; the next message starts a fresh engine session.", None)?;
             db.audit("chat.backend-migration.completed", &json!({
                 "chatId": chat_id,
@@ -905,6 +1153,333 @@ use crate::run_fixture::DbRunFixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn active_native_mission() -> (crate::plugin_grant_fixture::Fixture, String) {
+        use crate::agent_fixture::StoreAgentFixture;
+        let f = crate::plugin_grant_fixture::Fixture::new().await;
+        let node = id();
+        let mut profile =
+            f.s.agent_snapshot(crate::config::MAIN_AGENT_ID)
+                .await
+                .unwrap();
+        profile["access"]["backend"] = "auto".into();
+        profile["access"]["nodes"] = json!([node]);
+        f.s.store.put_agent_fixture(profile.clone()).await.unwrap();
+        let mut snapshot = f.s.store.run(&f.run).await.unwrap()["snapshot"].clone();
+        snapshot["agent"] = profile;
+        snapshot["agent"]["access"]["backend"] = "native".into();
+        f.s.store.transaction({
+            let run = f.run.clone();
+            let node = node.clone();
+            move |db| {
+                db.change_run(&run, crate::runs::RunChanges {
+                    snapshot: Some(serde_json::from_value(snapshot)?),
+                    boundary: Some(json!({"nativePrincipals": ["owner"], "nativeAuthorityNodes": [node], "nativeProvenanceUnknown": false})),
+                    ..Default::default()
+                })?;
+                db.save_checkpoint_boundary(&run, &json!({"prepared": {"backend": "native", "projectRoot": "/data/runs/test/workspace"}}))?;
+                db.put_node_fixture(&json!({"id": node, "runtimeId": "development", "capabilities": {"backend": "firecracker"}}))?;
+                db.set("native-authority", &json!({"observedAt": now(), "accounts": {}}), None)
+            }
+        }).await.unwrap();
+        (f, node)
+    }
+
+    #[tokio::test]
+    async fn public_conversion_rechecks_scope_and_cancellation_before_admission() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        for change in ["scope", "cancel"] {
+            let (f, node) = active_native_mission().await;
+            let valid = Arc::new(AtomicBool::new(true));
+            let observed = Arc::new(tokio::sync::Notify::new());
+            let (current, reached) = (valid.clone(), observed.clone());
+            let app = axum::Router::new().route(
+                "/api/relay/00000000-0000-4000-8000-000000000055/plugin-mcp-authorization",
+                axum::routing::post(move || {
+                    let authorized = current.load(Ordering::SeqCst);
+                    reached.notify_one();
+                    async move { axum::Json(authorized) }
+                }),
+            );
+            let (origin, _server) = crate::common::serve_locally(app).await;
+            let path = f.s.config.data_dir.join("installation-relay/identity.json");
+            let mut identity: Value =
+                serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+            identity["origin"] = origin.into();
+            tokio::fs::write(path, serde_json::to_vec(&identity).unwrap())
+                .await
+                .unwrap();
+            let refresh = f.s.native_authority_refresh.lock().await;
+            let storage = f.s.conversation_storage_lock.clone().lock_owned().await;
+            let proof =
+                nodes::moves::Authorization::new(|_| Ok(()), Some("fixture-public-digest".into()))
+                    .with_management_authorization(crate::authorization::Authorization::default());
+            let retained = proof.clone();
+            let service = f.s.clone();
+            let run = f.s.store.run(&f.run).await.unwrap();
+            let task = tokio::spawn(async move {
+                policy::CALLER
+                    .scope(
+                        Some("owner".into()),
+                        service.convert_for_vm(&run, &json!({"nodeId": node}), proof, false),
+                    )
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(10), observed.notified())
+                .await
+                .unwrap();
+            if change == "scope" {
+                valid.store(false, Ordering::SeqCst);
+            } else {
+                retained.cancel();
+            }
+            drop(refresh);
+            let result = task.await.unwrap();
+            assert!(
+                result.is_err(),
+                "{change} revocation admitted a conversion: {result:?}"
+            );
+            assert!(f.s.store.run(&f.run).await.unwrap()["backendMigration"].is_null());
+            drop(storage);
+            f.s.shutdown.cancel();
+        }
+    }
+
+    #[tokio::test]
+    async fn owner_conversion_never_restarts_an_explicitly_cancelled_mission() {
+        use crate::mission_fixture::MissionFixture;
+        for change in ["running", "stopped", "deleted"] {
+            let (f, node) = active_native_mission().await;
+            let storage = f.s.conversation_storage_lock.clone().lock_owned().await;
+            let marker =
+                f.s.config
+                    .data_dir
+                    .join("backend-migration-staging/retained-source");
+            tokio::fs::create_dir_all(marker.parent().unwrap())
+                .await
+                .unwrap();
+            tokio::fs::write(&marker, b"retained").await.unwrap();
+            let run = f.s.store.run(&f.run).await.unwrap();
+            policy::CALLER
+                .scope(
+                    Some("owner".into()),
+                    f.s.convert_for_vm(
+                        &run,
+                        &json!({"nodeId": node}),
+                        nodes::moves::Authorization::default(),
+                        false,
+                    ),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                f.s.store.run(&f.run).await.unwrap()["backendMigration"]["resumeMission"],
+                true
+            );
+            if change != "running" {
+                f.s.store
+                    .change_run(
+                        &f.run,
+                        crate::runs::RunChanges {
+                            status: Some(RunStatus::Cancelled),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+            }
+            if change == "deleted" {
+                f.s.remove_mission_fixture(text(&run, "taskId"))
+                    .await
+                    .unwrap();
+            } else {
+                f.s.worker.cancel(&f.s, &f.run).await.unwrap();
+            }
+            drop(storage);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while pending(&f.s.store.run(&f.run).await.unwrap()) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(
+                marker.exists(),
+                "Explicit cancellation must stop conversion before staging effects"
+            );
+            let stopped = f.s.store.run(&f.run).await.unwrap();
+            assert_eq!(stopped["status"], RunStatus::Cancelled);
+            assert_ne!(stopped["recoveryPending"], true);
+            if change != "deleted" {
+                assert_ne!(stopped["resumeMissionAfterConversion"], true);
+            }
+            f.s.shutdown.cancel();
+        }
+    }
+
+    #[tokio::test]
+    async fn self_conversion_retains_stop_and_plugin_revocation_after_worker_exit() {
+        use crate::agent_fixture::StoreAgentFixture;
+        for change in ["stop", "plugin"] {
+            let f = crate::plugin_grant_fixture::Fixture::new().await;
+            f.set(json!([crate::plugin_grant_fixture::contribution(
+                "tool",
+                "grant_probe_post",
+                crate::plugin_grant_fixture::support()
+            )]))
+            .await;
+            let run_id = f.run.clone();
+            let node = id();
+            let mut profile =
+                f.s.agent_snapshot(crate::config::MAIN_AGENT_ID)
+                    .await
+                    .unwrap();
+            profile["access"]["backend"] = "auto".into();
+            profile["access"]["installation"] = false.into();
+            profile["access"]["nodes"] = json!([node]);
+            f.s.store.put_agent_fixture(profile.clone()).await.unwrap();
+            let chat =
+                f.s.chat_create(json!({"agentId": profile["id"]}))
+                    .await
+                    .unwrap();
+            let chat_id = text(&chat, "id").to_owned();
+            let mut snapshot = f.s.store.run(&run_id).await.unwrap()["snapshot"].clone();
+            snapshot["agent"] = profile;
+            snapshot["agent"]["access"]["backend"] = "native".into();
+            f.s.store.transaction({
+                let run_id = run_id.clone();
+                let mut chat = chat.clone();
+                let node = node.clone();
+                move |db| {
+                    chat["runId"] = run_id.clone().into();
+                    db.save_conversation_boundary(&chat)?;
+                    let resolved = subject(db, &run_id)?;
+                    assert_eq!(resolved["id"], chat["id"], "runId must retain chat lifecycle and message identity");
+                    assert_ne!(resolved["mission"], true);
+                    db.change_run(&run_id, crate::runs::RunChanges {
+                        snapshot: Some(serde_json::from_value(snapshot)?),
+                        trigger: Some("chat".into()),
+                        boundary: Some(json!({"nativePrincipals": ["owner"], "nativeAuthorityNodes": [node], "nativeProvenanceUnknown": false})),
+                        ..Default::default()
+                    })?;
+                    db.save_checkpoint_boundary(&run_id, &json!({"prepared": {"backend": "native", "projectRoot": "/data/runs/test/workspace"}}))?;
+                    db.put_node_fixture(&json!({"id": node, "runtimeId": "development", "capabilities": {"backend": "firecracker"}}))?;
+                    db.set("native-authority", &json!({"observedAt": now(), "accounts": {}}), None)?;
+                    Ok(())
+                }
+            }).await.unwrap();
+            let current = f.s.store.run(&run_id).await.unwrap();
+            let token = f.s.mcps.run_configuration(&f.s, &current).await.unwrap();
+            let bearer = text(&token["env"], "CAIRN_MCP_RUN_TOKEN");
+            let proof = nodes::moves::Authorization::workspace(bearer, &current);
+            let storage = f.s.conversation_storage_lock.clone().lock_owned().await;
+            let marker =
+                f.s.config
+                    .data_dir
+                    .join("backend-migration-staging/existing-source");
+            tokio::fs::create_dir_all(marker.parent().unwrap())
+                .await
+                .unwrap();
+            tokio::fs::write(&marker, b"retained").await.unwrap();
+            // Exercise the actual workspace move admission, with no installation grant.
+            f.s.convert_for_vm(&current, &json!({"nodeId": node}), proof, true)
+                .await
+                .unwrap();
+            let admitted = f.s.store.run(&run_id).await.unwrap();
+            assert!(pending(&admitted));
+            assert_eq!(admitted["backendMigration"]["selfMove"], true);
+            f.s.store
+                .change_run(
+                    &run_id,
+                    crate::runs::RunChanges {
+                        status: Some(RunStatus::Cancelled),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            f.s.mcps.revoke_run(&f.s, &run_id).await.unwrap();
+            if change == "stop" {
+                f.s.worker
+                    .stop_chat_live(
+                        &f.s,
+                        &chat_id,
+                        crate::authorization::Authorization::default(),
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                f.marker("revoked-during-self-conversion").await;
+            }
+            drop(storage);
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let current = f.s.store.run(&run_id).await.unwrap();
+                    if !pending(&current) {
+                        assert!(current["backendMigrationError"].is_string(), "{current}");
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(tokio::fs::read(&marker).await.unwrap(), b"retained");
+            assert_eq!(
+                f.s.store.run(&run_id).await.unwrap()["snapshot"]["agent"]["access"]["backend"],
+                "native"
+            );
+            if change == "stop" {
+                assert_eq!(
+                    f.s.store
+                        .conversation_boundary(&chat_id)
+                        .await
+                        .unwrap()
+                        .unwrap()["paused"],
+                    true
+                );
+            }
+            f.s.shutdown.cancel();
+        }
+    }
+
+    #[tokio::test]
+    async fn merge_preserves_native_reviews_and_active_conversion_ownership() {
+        use crate::agent_fixture::profile;
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(directory.path()).unwrap();
+        store.transaction(|db| {
+            let (source, target, node, run) = (id(), id(), id(), id());
+            for agent in [&source, &target] {
+                db.save_agent(&profile(json!({"id": agent, "access": {"backend": "auto", "nodes": [node]}}))?)?;
+            }
+            let mut host = db.put_node_fixture(&json!({
+                "id": node, "capabilities": {"backend": "native", "nativeModeProtocol": 1},
+                "nativeModeRequest": {"mode": "administrator", "generation": "review"},
+                "nativeModeObserved": {"mode": "administrator", "generation": "review", "status": "applied"},
+                "nativeReviewedAgents": [source],
+            }))?;
+            let snapshot = db.agent_snapshot(&source)?.unwrap();
+            db.add_run_fixture(&json!({"id": run, "taskId": id(), "status": RunStatus::Succeeded, "createdAt": now(), "snapshot": {"agent": snapshot}, "backendMigration": {"process": PROCESS.as_str()}}), None)?;
+            let input = serde_json::from_value(json!({"sourceId": source, "targetId": target, "confirm": true}))?;
+            assert!(crate::agent_merge::merge(db, &input, &[]).unwrap_err().message.contains("administrator approval"));
+            assert!(db.agent(&source)?.is_some());
+            assert_eq!(nodes::run_agent(&db.run(&run)?.unwrap()), source);
+            host["nativeReviewedAgents"] = json!([source, target]);
+            db.put_node_fixture(&host)?;
+            assert!(crate::agent_merge::merge(db, &input, &[]).unwrap_err().message.contains("active work"));
+            assert!(db.agent(&source)?.is_some());
+            // A process from a prior boot is interrupted, never a live converter.
+            db.update_run_boundary(&run, &json!({"backendMigration": {"process": "previous-process"}}))?;
+            crate::agent_merge::merge(db, &input, &[])?;
+            assert!(db.agent(&source)?.is_none());
+            assert_eq!(nodes::run_agent(&db.run(&run)?.unwrap()), target);
+            Ok(())
+        }).await.unwrap();
+    }
 
     #[tokio::test]
     async fn pending_migration_rechecks_ancestor_edges_before_reads_and_final_grant() {

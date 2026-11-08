@@ -5,7 +5,13 @@ Cairn permet de conduire des conversations avec des agents et de retrouver leur 
 ## Language
 
 **Placement automatique** :
-Le choix d’un node autorisé et disponible pour une nouvelle conversation, qu’il exécute des VM ou des processus natifs. Le type d’environnement choisi est conservé pendant la conversation, sauf migration explicite.
+Le choix d’un node autorisé et disponible pour une nouvelle conversation, qu’il exécute des VM ou des processus natifs. Le type d’environnement choisi est conservé pendant la conversation, sauf déplacement explicite vers une node de l’autre type.
+
+**Bascule d’environnement** :
+Le passage explicite d’une conversation entre VM et exécution native, en conservant ses fichiers et son historique. Elle ne change pas les priorités de placement de l’agent.
+
+**Conversion d’environnement** :
+La préparation nécessaire pour qu’un environnement créé en natif puisse reprendre dans une VM. La conversation conserve son historique et ses fichiers, avec une nouvelle session du moteur.
 
 **Priorité de nodes d’un agent** :
 L’ordre de préférence propre à un agent pour placer ses nouvelles conversations. Un node prioritaire indisponible laisse la place au suivant, puis aux autres nodes autorisés. Une préférence ne donne aucun droit d’accès.
@@ -87,7 +93,7 @@ _Avoid_ : agent (qui désigne l’agent chargé du travail, et non la machine)
 Travail d’un agent effectué par le système de la node, avec ses pilotes et les ressources partagées avec son propriétaire. Il exige des agents sélectionnés et des personnes explicitement autorisées, avec une frontière d’isolation plus faible qu’une VM.
 
 **Migration du mode d’exécution d’une conversation** :
-Action explicite qui transfère les fichiers durables entre VM Firecracker et Linux natif après configuration de l’agent, en conservant le même fil et son historique. L’exécution s’arrête ; le prochain message ouvre une nouvelle session du moteur avec le contexte du fil. Les dépendances système peuvent nécessiter une réinstallation. L’autorisation explicite du propriétaire permet de reprendre le travail existant avec ses droits natifs ; une délégation reste bornée par ses droits actuels.
+Déplacement explicite d’un environnement durable entre VM Firecracker et Linux natif, en conservant le même fil, ses fichiers et son historique. Un disque créé en VM est réutilisé avec sa session du moteur ; un disque créé en natif nécessite une première conversion, puis suit le même parcours. Cette conversion nécessite une nouvelle session à partir de l’historique : une conversation attend le prochain message, une mission active reprend automatiquement si elle reste autorisée et n’a pas été arrêtée. Les dépendances système peuvent nécessiter une réinstallation. L’autorisation explicite du propriétaire permet d’adopter le travail existant avec ses droits natifs ; une délégation reste bornée par ses droits actuels.
 
 **Capacité d’une node** :
 Possibilité de travail vérifiée sur une node, distincte de la seule présence du matériel et de sa disponibilité au moment de la demande. Une capacité ne donne aucun droit supplémentaire à l’agent.

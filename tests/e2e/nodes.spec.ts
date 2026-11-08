@@ -93,6 +93,7 @@ test('shows disk accounting and keeps the storage draft revision through invento
     capabilities: {
       backend: 'firecracker',
       ublk: false,
+      vmDisks: false,
       nativeModeProtocol: 0,
       diskTotalMiB: 0,
       cpu: 8,
@@ -471,7 +472,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await page.keyboard.press('Escape')
   await expect(panel).toHaveCount(0)
   await page.unroute(`**/nodes/placement/${detail.run.id}`)
-  workspace.service.store.updateRun(detail.run.id, { status: 'succeeded', executionBackend: null } as any)
+  workspace.service.store.updateRun(detail.run.id, { status: 'succeeded', sessionId: null, executionBackend: null } as any)
   workspace.service.store.updateRun(detail.run.id, {
     storage: {
       mode: 'on-demand',
@@ -479,7 +480,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
       dirtyBytes: 183890000,
       dirtySince: Date.now() - 60000,
     },
-    backup: { capturedAt: Date.now() - 120000, status: 'saving' },
+    backup: { id: randomUUID(), capturedAt: Date.now() - 120000, status: 'saving' },
   } as any)
   await heartbeat()
   await details.click()
@@ -561,8 +562,8 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await panel.getByRole('button', { name: 'Move…' }).click()
   const move = page.getByRole('dialog', { name: 'Move to another node', exact: true })
   await move.getByRole('combobox', { name: 'Destination', exact: true }).click()
-  await move.getByRole('option', { name: 'Destination server', exact: true }).click()
-  await expect(move.getByRole('combobox', { name: 'Destination', exact: true })).toHaveValue('Destination server')
+  await move.getByRole('option', { name: 'Destination server · Firecracker VM', exact: true }).click()
+  await expect(move.getByRole('combobox', { name: 'Destination', exact: true })).toHaveValue('Destination server · Firecracker VM')
   await expect(move.getByRole('button', { name: 'Move now' })).toBeEnabled()
   await expect(move.getByRole('spinbutton')).toHaveCount(0)
   // Omission preserves existing tag constraints; an explicit [] would clear them.
@@ -918,7 +919,7 @@ for (const { automatic, expired } of [{ automatic: false, expired: false }, { au
     const chat = await workspace.api('/api/chats', 'POST', { agentId: agent.id })
     await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Keep this conversation' })
     await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
-    await page.route('**/nodes/placement/*', route => route.fulfill({ json: { nodes: [{ id: 'native-fixture', name: 'Desktop GPU' }], pinnedNodeId: null, preferredNodeId: null } }))
+    await page.route('**/nodes/placement/*', route => route.fulfill({ json: { nodes: [{ id: 'native-fixture', name: 'Desktop GPU', capabilities: { backend: 'native', vmDisks: true } }], pinnedNodeId: null, preferredNodeId: null } }))
     let phase = 'ready'
     let requestBody: unknown
     await page.route('**/nodes/placement/*/backend-migration', async (route) => {
@@ -948,7 +949,7 @@ for (const { automatic, expired } of [{ automatic: false, expired: false }, { au
     await page.getByRole('menuitem', { name: 'Execution node', exact: true }).click()
     await page.getByRole('button', { name: 'Migrate this conversation…', exact: true }).click()
     const confirm = page.getByRole('dialog', { name: 'Migrate this conversation?', exact: true })
-    await expect(confirm).toContainText('fresh engine session')
+    await expect(confirm).toContainText(expired ? 'fresh engine session' : 'same disk and engine session')
     if (expired) {
       await expect(confirm).toContainText('new empty environment')
       await expect(confirm).toContainText('uploads and published artifacts')
@@ -964,7 +965,7 @@ for (const { automatic, expired } of [{ automatic: false, expired: false }, { au
     await expect(page.getByRole('status').filter({ hasText: 'Migrating to native execution' })).toBeVisible()
     expect(requestBody).toEqual({ nodeId: 'native-fixture', backend: 'native', confirm: true })
     phase = 'complete'
-    await expect(page.getByRole('status').filter({ hasText: 'Migration complete' })).toBeVisible()
+    await expect(page.getByRole('status').filter({ hasText: 'Execution backend changed' })).toBeVisible()
     if (automatic) {
       await expect(page.getByRole('button', { name: 'Migrate this conversation…', exact: true })).toHaveCount(0)
       await page.getByRole('button', { name: 'Change environment again', exact: true }).click()

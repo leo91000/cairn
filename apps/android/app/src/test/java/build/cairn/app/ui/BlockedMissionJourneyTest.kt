@@ -2,9 +2,13 @@ package build.cairn.app.ui
 
 import android.app.Application
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import build.cairn.contracts.OutcomeAsideAction
@@ -13,6 +17,7 @@ import build.cairn.contracts.SetOutcomeAsideOutput
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
@@ -39,6 +44,7 @@ class BlockedMissionJourneyTest {
     private val calls = CopyOnWriteArrayList<Triple<String, String, String>>()
     private val activityReads = CopyOnWriteArrayList<List<Run>>()
     private val savedMissions = ConcurrentHashMap<String, Task>()
+    private val initialProjectsReleased = CountDownLatch(1)
     private val now = System.currentTimeMillis()
     private val claude =
         Agent(
@@ -193,7 +199,7 @@ class BlockedMissionJourneyTest {
         )
     }
 
-    private fun journey(body: (CairnViewModel) -> Unit) {
+    private fun journey(holdInitialRefresh: Boolean = false, body: (CairnViewModel) -> Unit) {
         MockWebServer().use { server ->
             server.dispatcher =
                 object : Dispatcher() {
@@ -255,7 +261,13 @@ class BlockedMissionJourneyTest {
                                 stream(LiveState(run = activity().first { it.id == id }))
                             }
                             path == "$api/accounts" -> json("{\"accounts\":[],\"required\":[]}")
-                            path == "$api/projects" -> json("""{"projects":[]}""")
+                            path == "$api/projects" -> {
+                                if (holdInitialRefresh)
+                                    check(initialProjectsReleased.await(15, TimeUnit.SECONDS)) {
+                                        "Initial workspace refresh was not released"
+                                    }
+                                json("""{"projects":[]}""")
+                            }
                             path == "$api/mcps" -> json("""{"mcps":[]}""")
                             path == "$api/skills" ||
                                 path == "$api/onepassword" ||
@@ -270,19 +282,32 @@ class BlockedMissionJourneyTest {
                     MemoryVault(),
                     beaconOrigin = "",
                 )
-            compose.setContent {
-                LaunchedEffect(Unit) {
-                    vm.state.first { it.ready }
-                    vm.connect(server.url("/").toString())
-                }
-                CairnTheme("light") { CairnApp(vm = vm) }
-            }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            var mounted by mutableStateOf(true)
             try {
+                compose.setContent {
+                    if (mounted) {
+                        LaunchedEffect(Unit) {
+                            vm.state.first { it.ready }
+                            vm.connect(server.url("/").toString())
+                        }
+                        CairnTheme("light") { CairnApp(vm = vm) }
+                    }
+                }
                 waitText("Tout")
                 compose.onNodeWithText("Tout").performClick()
                 body(vm)
             } finally {
-                vm.api.closeStreams()
+                try {
+                    compose.runOnIdle { mounted = false }
+                    compose.waitForIdle()
+                } finally {
+                    try {
+                        models.clear()
+                    } finally {
+                        initialProjectsReleased.countDown()
+                    }
+                }
             }
         }
     }
@@ -358,29 +383,52 @@ class BlockedMissionJourneyTest {
             capture("android-blocked-set-aside")
         }
 
+    @Test fun `archiving from the Fil uses the current mission revision`() = archiveJourney()
+
     @Test
-    fun `archiving from the Fil uses the current mission revision`() = journey { vm ->
-        waitText("Preuve appareil F8")
-        compose
-            .onNodeWithContentDescription("Autres actions pour Preuve appareil F8")
-            .performScrollTo()
-            .performClick()
-        waitText("Archiver la mission")
-        compose.onNodeWithText("Archiver la mission").performClick()
-        val statePath = "/api/installations/fixture/api/tasks/${proof.id}/state"
-        waitCall("POST", statePath)
-        val command =
-            wireJson.decodeFromString<build.cairn.contracts.MissionStateInput>(
-                calls.last { it.second == statePath }.third
-            )
-        assertEquals(proof.id, command.taskId)
-        assertEquals(proof.revision, command.revision)
-        assertEquals(false, command.enabled)
-        assertEquals(true, command.archived)
-        waitText("Modifications enregistrées")
-        assertEquals("Archive refresh failed", null, vm.state.value.error)
-        assertTrue(vm.state.value.tasks.any { it.id == proof.id && it.archived && !it.enabled })
-    }
+    fun `archiving from the Fil waits for the initial mission refresh`() =
+        archiveJourney(holdInitialRefresh = true)
+
+    private fun archiveJourney(holdInitialRefresh: Boolean = false) =
+        journey(holdInitialRefresh) { vm ->
+            waitText("Preuve appareil F8")
+            compose
+                .onNodeWithContentDescription("Autres actions pour Preuve appareil F8")
+                .performScrollTo()
+                .performClick()
+            waitText("Archiver la mission")
+            val archive = compose.onNodeWithText("Archiver la mission")
+            if (holdInitialRefresh) {
+                // Activity can render a mission from its run snapshot before refresh loads tasks.
+                assertTrue(vm.state.value.busy)
+                assertTrue(vm.state.value.tasks.isEmpty())
+                archive.assertIsNotEnabled().performClick()
+                assertTrue(calls.none { it.first == "POST" && it.second.endsWith("/state") })
+                initialProjectsReleased.countDown()
+            }
+
+            // A visible menu item is still disabled while the workspace is loading.
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodes(hasText("Archiver la mission") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            archive.assertIsEnabled().performClick()
+            val statePath = "/api/installations/fixture/api/tasks/${proof.id}/state"
+            waitCall("POST", statePath)
+            val command =
+                wireJson.decodeFromString<build.cairn.contracts.MissionStateInput>(
+                    calls.last { it.second == statePath }.third
+                )
+            assertEquals(proof.id, command.taskId)
+            assertEquals(proof.revision, command.revision)
+            assertEquals(false, command.enabled)
+            assertEquals(true, command.archived)
+            waitText("Modifications enregistrées")
+            assertEquals("Archive refresh failed", null, vm.state.value.error)
+            assertTrue(vm.state.value.tasks.any { it.id == proof.id && it.archived && !it.enabled })
+        }
 
     @Test
     fun `a blocked run says who it waits on and can be set aside from its outcome`() = journey {

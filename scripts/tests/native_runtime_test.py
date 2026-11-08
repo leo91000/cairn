@@ -68,6 +68,17 @@ def require_finalization_failure(path, wait_result):
     return proof
 
 
+def completed_snapshot(api, run, vm=False):
+    snapshot = api('/disks/' + run + '/snapshot-completed')
+    manifest = snapshot['manifest']
+    assert manifest.get('kind') == (None if vm else 'native-ext4-v1')
+    assert manifest['runtime']['backend'] == 'native'
+    assert (manifest['runtime'].get('disk') == 'vm') == vm
+    assert isinstance(manifest['blocks'], list)
+    assert manifest['onDemand'] is True
+    return snapshot
+
+
 def fixture_garbage_inventory(root):
     root = Path(root)
     database = root / 'manager/manager.db'
@@ -328,6 +339,7 @@ def main():
 
         contexts = {}
         started_runs = set()
+        vm_runs = set()
         retained_disk_mib = {}
         controller_started = False
         current_mode = dict(mode="protected", generation=None)
@@ -375,7 +387,12 @@ def main():
 
         def managed(run):
             pid = command('systemctl', 'show', supervisor, '--property=MainPID', '--value').stdout.strip()
-            path = Path('/proc') / pid / 'root' / str(state).lstrip('/') / 'native' / run / 'data/workspaces'
+            mounted = state / 'native' / run
+            if run in vm_runs:
+                workspace = json.loads((mounted / 'view.json').read_text())['workspace'] if (mounted / 'view.json').exists() else str(mounted / 'data/upper' / str(data / 'runs' / run / 'workspace').lstrip('/'))
+                path = Path('/proc') / pid / 'root' / workspace.lstrip('/')
+            else:
+                path = Path('/proc') / pid / 'root' / str(state).lstrip('/') / 'native' / run / 'data/workspaces'
             return path / base_projects[run] if run in base_projects else path
 
         def start_controller():
@@ -530,7 +547,7 @@ def main():
             image.write_text('synthetic image bytes')
             image.chmod(0o600)
             (data / 'runner-plans' / (attempt + '.json')).write_text(json.dumps(plan))
-            manager('checkpoint', run=run, attempt=attempt)
+            manager('checkpoint', run=run, attempt=attempt, vm=run in vm_runs)
             api('/runs/' + attempt + '/lease', {'remainingMs': lease})
             progress('attempt-checkpointed')
             startup = time.perf_counter()
@@ -685,10 +702,7 @@ def main():
             active = command('systemctl', 'show', 'cairn-native-' + attempt + '.service', '--property=ActiveState', '--value').stdout.strip()
             assert active not in ('active', 'activating'), 'Descendant escaped cgroup fencing.'
             assert not (state / 'native' / run / 'data/workspaces/seed').exists(), 'Stopped conversation filesystem is still mounted.'
-            snapshot = api('/disks/' + run + '/snapshot-completed')
-            assert snapshot['manifest']['kind'] == 'native-ext4-v1'
-            assert snapshot['manifest']['onDemand'] is True
-            return snapshot
+            return completed_snapshot(api, run, vm=run in vm_runs)
 
         command('useradd', '--system', '--no-create-home', '--shell', '/usr/sbin/nologin', user)
         try:
@@ -936,6 +950,82 @@ def main():
             else:
                 raise AssertionError('Completed attempt restarted.')
             progress('concurrent-retirement-complete')
+            # Simulated guest-written flat ext4, using the real controller,
+            # protected enclave, ublk transport, publication and remote restore.
+            # Main retired paired disks; no retired format is reintroduced.
+            vm_run = create()
+            vm_runs.add(vm_run)
+            system_tree = root / (vm_run + '-vm-tree')
+            guest_workspace = str(data / 'runs' / vm_run / 'workspace').lstrip('/')
+            workspace = system_tree / 'upper' / guest_workspace
+            workspace.mkdir(parents=True)
+            (workspace / 'seed').write_text('initial project')
+            (workspace / 'asset').write_bytes(asset)
+            home = system_tree / 'upper/home/node'
+            (home / '.codex/sessions').mkdir(parents=True)
+            (home / '.codex/sessions/keep').write_text('retained VM session')
+            for path in [system_tree, *system_tree.rglob('*')]:
+                os.chown(path, 1000, 1000)
+            root_owned = home / 'root-owned'
+            root_owned.write_text('guest root retained')
+            root_owned.chmod(0o444)
+            os.chown(root_owned, 0, 0)
+            # Preserve the incompatible rootful daemon's private metadata.
+            rootful = system_tree / 'docker/containers/private'
+            rootful.mkdir(parents=True)
+            (rootful / 'config.v2.json').write_text('VM rootful daemon metadata')
+            for path in [system_tree / 'docker', *(system_tree / 'docker').rglob('*')]:
+                os.chown(path, 0, 0)
+                path.chmod(0o700 if path.is_dir() else 0o600)
+            raw = root / (vm_run + '.ext4')
+            with raw.open('wb') as output:
+                output.truncate(256 * 1024 * 1024)
+            command('mkfs.ext4', '-q', '-F', '-d', str(system_tree), str(raw))
+            manager('seed-vm', run=vm_run, context=contexts[vm_run])
+            first_vm = start(vm_run, measure='vmFlatRetained')
+            vm_identity = json.loads((state / 'native' / vm_run / 'file-owner.json').read_text())
+            engine_uid = vm_identity.get('host_engine', [vm_identity['subuid'] + 999])[0]
+            assert engine_uid != 1000, 'VM qualification requires a nonidentity engine UID.'
+            assert (managed(vm_run) / 'persisted').stat().st_uid == engine_uid
+            vm_view = json.loads((state / 'native' / vm_run / 'view.json').read_text())
+            assert (Path(vm_view['home']) / 'root-owned').stat().st_uid == 0
+            api('/runs/' + first_vm, method='DELETE')
+            fenced(vm_run, first_vm)
+            s3 = boto3.client('s3', endpoint_url=os.environ['CAIRN_NODE_TEST_S3_ENDPOINT'])
+            before_vm_objects = {obj['Key'] for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', [])}
+            point = manager('publish', run=vm_run)
+            vm_objects = [obj for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', []) if obj['Key'] not in before_vm_objects]
+            status = api('/disks/' + vm_run + '/storage-status')
+            receipt = dict(attempt=first_vm, backupId=point['backupId'], generation=point['generation'], grantId=status['grantId'])
+            assert api('/disks/' + vm_run + '/evict', receipt)['evictedBytes'] > 0
+            command('systemctl', 'stop', supervisor)
+            start_controller()
+            manager('restore', run=vm_run, backupId=point['backupId'])
+            resumed_vm = start(vm_run, measure='vmFlatRemote')
+            api('/runs/' + resumed_vm, method='DELETE')
+            fenced(vm_run, resumed_vm)
+            exported = Path(manager('export-vm', run=vm_run)['path'])
+            guest_file = '/upper/' + guest_workspace + '/persisted'
+            ownership = command('debugfs', '-R', 'stat ' + guest_file, str(exported)).stdout
+            assert 'User:  1000' in ownership and 'Group:  1000' in ownership, ownership
+            assert 'changed' in command('debugfs', '-R', 'cat ' + guest_file, str(exported)).stdout
+            root_ownership = command('debugfs', '-R', 'stat /upper/home/node/root-owned', str(exported)).stdout
+            assert 'User:     0' in root_ownership, root_ownership
+            daemon_ownership = command('debugfs', '-R', 'stat /docker', str(exported)).stdout
+            assert 'User:     0' in daemon_ownership, daemon_ownership
+            private_daemon = command('debugfs', '-R', 'stat /docker/containers/private/config.v2.json', str(exported)).stdout
+            assert 'User:     0' in private_daemon, private_daemon
+            assert 'VM rootful daemon metadata' in command('debugfs', '-R', 'cat /docker/containers/private/config.v2.json', str(exported)).stdout
+            native_daemon = command('debugfs', '-R', 'stat /.cairn-native-docker', str(exported)).stdout
+            assert '65537' in native_daemon, native_daemon
+            metrics['vmDisks'] = [dict(layout='flat', mappedEngineUid=engine_uid,
+                nativeWritesStoredAsUid=1000, namespaceRuntimeStoredAsUid=65537, rootfulDockerMetadataPreserved=True,
+                encodedNewS3Bytes=sum(obj['Size'] for obj in vm_objects), encodedNewS3Objects=len(vm_objects),
+                retained=metrics.pop('vmFlatRetained'), remote=metrics.pop('vmFlatRemote'),
+                conditions='Guest layout simulated by mkfs; real protected native controller/ext4/idmap/ublk and loopback S3. Ownership inspected offline; no Firecracker guest boot.')]
+            manager('purge', run=vm_run)
+            api('/disks/' + vm_run + '/delete')
+
             # Real host administration and both directions of a multi-conversation
             # transition. This runs only on the disposable CI VM guarded above.
             api('/node-budget', dict(limits=dict(diskMiB=4096, cpu=2, memoryMiB=1024), slots=2))

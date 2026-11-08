@@ -30,6 +30,30 @@ fn ready() -> Value {
     json!({ "ready": true })
 }
 
+/// Only an explicit move changes execution backend; the disk format stays independent.
+pub(crate) fn for_destination(mut manifest: Value, node: &Value) -> Result<Value> {
+    let native_node = crate::native::policy::node_native(node);
+    let native_disk = manifest["kind"] == "native-ext4-v1";
+    if native_disk && !native_node {
+        return Err(Error::conflict(
+            "An environment created natively must be converted before a VM can run it.",
+        ));
+    }
+    if native_node && !native_disk {
+        if node["capabilities"]["vmDisks"] != true {
+            return Err(Error::conflict("Destination cannot mount VM disks."));
+        }
+        let provenance = manifest["runtime"]["vmRuntimeId"]
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| manifest["runtime"]["runtimeId"].as_str().map(str::to_owned));
+        manifest["runtime"] = json!({ "backend": "native", "storage": crate::native::block::STORAGE, "os": "linux", "arch": "x86_64", "runtimeId": node["runtimeId"], "disk": "vm", "vmRuntimeId": provenance });
+    } else if !native_node && manifest["runtime"]["disk"] == "vm" {
+        manifest["runtime"] = json!({ "runtimeId": node["runtimeId"] });
+    }
+    Ok(manifest)
+}
+
 pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Result<()> {
     start_authorized(
         s,
@@ -50,14 +74,8 @@ pub(crate) async fn start_authorized(
 ) -> Result<()> {
     let _operation = s.node_backup_operation.lock(text(run, "id")).await;
     authorize.recheck().await?;
-    let manifest = super::publication::manifest(s, backup).await?;
     let record = s.node_boundary(node).await?;
-    let native = crate::native::policy::node_native(&record);
-    if native != matches!(manifest["kind"].as_str(), Some("native-ext4-v1")) {
-        return Err(Error::conflict(
-            "Conversation moves cannot change execution backend.",
-        ));
-    }
+    let manifest = for_destination(super::publication::manifest(s, backup).await?, &record)?;
     let policy = crate::storage::policy::for_node(&record["storage"])?;
     let grant =
         super::disk_grants::issue_authorized(s, run, node, backup, authorize.clone()).await?;
@@ -334,4 +352,30 @@ pub(crate) async fn restore_journal(state: &Path, run: &str, value: Value) -> Re
     tokio::fs::remove_file(directory.join("restore.pending")).await?;
     tokio::fs::File::open(&directory).await?.sync_all().await?;
     Ok(ready())
+}
+
+#[cfg(test)]
+mod backend_move_tests {
+    use super::*;
+
+    #[test]
+    fn vm_disk_round_trip_keeps_blocks_and_uses_current_controller_runtime() {
+        let disk = json!({ "version": 2, "size": 128 * 1024 * 1024, "blocks": [{ "hash": "retained" }], "runtime": { "runtimeId": "original-vm-image" } });
+        let native = json!({ "capabilities": { "backend": "native", "vmDisks": true }, "runtimeId": "current-native-tools" });
+        let mounted = for_destination(disk.clone(), &native).unwrap();
+        assert_eq!(mounted["blocks"], disk["blocks"]);
+        assert_eq!(mounted["runtime"]["vmRuntimeId"], "original-vm-image");
+        assert_eq!(mounted["runtime"]["disk"], "vm");
+        let vm = json!({ "capabilities": { "backend": "firecracker" }, "runtimeId": "current-vm-image" });
+        let returned = for_destination(mounted, &vm).unwrap();
+        assert_eq!(returned["blocks"], disk["blocks"]);
+        assert_eq!(
+            returned["runtime"],
+            json!({ "runtimeId": "current-vm-image" })
+        );
+        let unavailable = json!({ "capabilities": { "backend": "native" } });
+        assert!(for_destination(disk, &unavailable).is_err());
+        let native_born = json!({ "kind": "native-ext4-v1", "runtime": { "backend": "native" } });
+        assert!(for_destination(native_born, &vm).is_err());
+    }
 }
