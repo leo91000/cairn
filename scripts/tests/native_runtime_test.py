@@ -68,6 +68,17 @@ def require_finalization_failure(path, wait_result):
     return proof
 
 
+def completed_snapshot(api, run, vm=False):
+    snapshot = api('/disks/' + run + '/snapshot-completed')
+    manifest = snapshot['manifest']
+    assert manifest.get('kind') == (None if vm else 'native-ext4-v1')
+    assert manifest['runtime']['backend'] == 'native'
+    assert (manifest['runtime'].get('disk') == 'vm') == vm
+    assert isinstance(manifest['blocks'], list)
+    assert manifest['onDemand'] is True
+    return snapshot
+
+
 def fixture_garbage_inventory(root):
     root = Path(root)
     database = root / 'manager/manager.db'
@@ -691,10 +702,7 @@ def main():
             active = command('systemctl', 'show', 'cairn-native-' + attempt + '.service', '--property=ActiveState', '--value').stdout.strip()
             assert active not in ('active', 'activating'), 'Descendant escaped cgroup fencing.'
             assert not (state / 'native' / run / 'data/workspaces/seed').exists(), 'Stopped conversation filesystem is still mounted.'
-            snapshot = api('/disks/' + run + '/snapshot-completed')
-            assert snapshot['manifest']['kind'] == 'native-ext4-v1'
-            assert snapshot['manifest']['onDemand'] is True
-            return snapshot
+            return completed_snapshot(api, run, vm=run in vm_runs)
 
         command('useradd', '--system', '--no-create-home', '--shell', '/usr/sbin/nologin', user)
         try:

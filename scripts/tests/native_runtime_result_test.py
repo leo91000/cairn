@@ -115,5 +115,38 @@ class RetainedHealthTest(unittest.TestCase):
         api.assert_called_once_with('/health', method='GET')
 
 
+class CompletedSnapshotTest(unittest.TestCase):
+    def snapshot(self, vm):
+        manifest = dict(version=1, size=4096, blockSize=4096, blocks=[], onDemand=True,
+                        runtime=dict(backend='native', storage='ublk-rootless-v1'))
+        if vm:
+            manifest['runtime'].update(disk='vm', vmRuntimeId='fixture-vm')
+        else:
+            manifest['kind'] = 'native-ext4-v1'
+        return dict(id='point', manifest=manifest)
+
+    def test_native_and_vm_snapshots_keep_their_own_layout(self):
+        for vm in (False, True):
+            with self.subTest(vm=vm):
+                snapshot = self.snapshot(vm)
+                api = Mock(return_value=snapshot)
+                self.assertIs(runtime.completed_snapshot(api, 'run', vm=vm), snapshot)
+                api.assert_called_once_with('/disks/run/snapshot-completed')
+
+    def test_wrong_layout_and_nondemand_snapshots_remain_rejected(self):
+        for vm in (False, True):
+            for wrong in ('layout', 'runtime', 'demand'):
+                with self.subTest(vm=vm, wrong=wrong):
+                    snapshot = self.snapshot(vm)
+                    if wrong == 'layout':
+                        snapshot = self.snapshot(not vm)
+                    elif wrong == 'runtime':
+                        snapshot['manifest']['runtime']['backend'] = 'firecracker'
+                    else:
+                        snapshot['manifest']['onDemand'] = False
+                    with self.assertRaises((AssertionError, KeyError)):
+                        runtime.completed_snapshot(Mock(return_value=snapshot), 'run', vm=vm)
+
+
 if __name__ == '__main__':
     unittest.main()

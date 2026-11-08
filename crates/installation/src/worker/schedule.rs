@@ -608,6 +608,42 @@ fn recovery_cannot_replay(
     })
 }
 
+/// An explicit transfer of a stopped environment is not permission to replay
+/// the previous turn. Preserve the request while recovery fences its source.
+pub(super) fn explicit_idle_move(
+    state: &RunState,
+    movement: Option<&crate::nodes::run_placement::MoveRequest>,
+    saved: &RunCheckpoint,
+) -> bool {
+    let Some(movement) = movement else {
+        return false;
+    };
+    if movement.idle != Some(true)
+        || movement.automatic
+        || state.status != RunStatus::Queued
+        || !state.recovery_pending
+        || state.cancel_requested_at.is_some()
+        || !saved.managed()
+    {
+        return false;
+    }
+    match movement.idle_status.unwrap_or(RunStatus::Succeeded) {
+        RunStatus::Failed | RunStatus::Cancelled => {
+            matches!(movement.backend.as_deref(), Some("native" | "firecracker"))
+        }
+        RunStatus::Succeeded => {
+            saved.completed()
+                && saved.terminal_code() == Some(0)
+                && saved.finalization_error().is_none()
+                && saved.output_error().is_none()
+                && !saved.settled().is_some_and(|settled| {
+                    matches!(settled.status, RunStatus::Failed | RunStatus::Cancelled)
+                })
+        }
+        _ => false,
+    }
+}
+
 // Persist the controller's cumulative pause counter with the deadline it
 // extends. Both writes are atomic, so a restart cannot credit the same pause
 // twice. Never apply a response to a replacement execution.
@@ -835,22 +871,11 @@ async fn recover(s: &Service, run: &Value) -> Result<bool> {
     // requeued because its first fencing attempt failed. Placement and possible
     // disk relocation belong to admission after its wakeup.
     let cannot_replay = recovery_cannot_replay(checkpoint.as_ref(), recovery_deadline, &state, run);
-    // A move requested after a conversation has already succeeded is a disk
-    // transfer, not admission of another turn. Its idle marker is recorded by
-    // the public request while the run is succeeded; active-turn moves lack it.
-    let finished_idle_move = run["moveRequest"]["idle"] == true
-        && run["moveRequest"]["automatic"] == false
-        && state.cancel_requested_at.is_none()
-        && checkpoint.as_ref().is_some_and(|saved| {
-            saved.managed()
-                && saved.completed()
-                && saved.terminal_code() == Some(0)
-                && saved.finalization_error().is_none()
-                && saved.output_error().is_none()
-                && !saved.settled().is_some_and(|settled| {
-                    matches!(settled.status, RunStatus::Failed | RunStatus::Cancelled)
-                })
-        });
+    let movement: Option<crate::nodes::run_placement::MoveRequest> =
+        serde_json::from_value(run["moveRequest"].clone())?;
+    let finished_idle_move = checkpoint
+        .as_ref()
+        .is_some_and(|saved| explicit_idle_move(&state, movement.as_ref(), saved));
     if !parked
         && (!cannot_replay || finished_idle_move)
         && !crate::nodes::moves::advance_for_attempt(s, run, expected_checkpoint.as_ref()).await?

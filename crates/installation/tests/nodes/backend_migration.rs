@@ -618,6 +618,68 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     assert!(prompt.contains("Continue the original mission"));
     assert!(prompt.contains("Already completed the first step"));
     assert_files(&owner, &vm_node, &run, false).await;
+    // Drive real scheduler recovery, not moves::advance: a retained stopped
+    // environment must relocate without replaying its old terminal turn.
+    for (index, (status, destination)) in [
+        (RunStatus::Failed, &native_node),
+        (RunStatus::Cancelled, &vm_node),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut saved = owner
+            .service
+            .store
+            .checkpoint_boundary(&run)
+            .await
+            .unwrap()
+            .unwrap();
+        saved["completed"] = true.into();
+        saved["terminalCode"] = 70.into();
+        saved["remainingMs"] = Value::Null;
+        saved["runnerId"] = run.clone().into();
+        saved["settled"] = json!({ "status": status, "summary": "Retained stopped work", "error": null, "finishedAt": now() });
+        owner.set_checkpoint(&run, saved).await;
+        owner.service.store.change_run_fixture(&run, json!({
+            "status": status, "recoveryPending": false, "requiredTags": [],
+            "cancelRequestedAt": if status == RunStatus::Cancelled { json!(now()) } else { Value::Null },
+        })).await.unwrap();
+        if index == 0 {
+            owner
+                .service
+                .worker
+                .start(owner.service.clone())
+                .await
+                .unwrap();
+        }
+        let before_move = owner.run(&run).await;
+        let response = move_to(&owner, &run, destination).await;
+        assert_eq!(response["status"], "moving");
+        let settled = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let current = owner.run(&run).await;
+                if current["moveRequest"].is_null() {
+                    break current;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(settled["movementError"].is_null(), "{settled}");
+        assert_eq!(
+            settled["nodeId"], *destination,
+            "Stopped move was discarded: {settled}"
+        );
+        assert_eq!(settled["status"], status);
+        assert!(!settled["recoveryPending"].as_bool().unwrap());
+        assert!(settled["sessionId"].is_null());
+        assert_eq!(settled["startedAt"], before_move["startedAt"]);
+        assert_eq!(settled["resumeCount"], before_move["resumeCount"]);
+        assert_files(&owner, destination, &run, false).await;
+    }
+    owner.service.shutdown.cancel();
+    owner.service.worker.close().await;
     stop.cancel();
     for task in tasks {
         task.abort();
