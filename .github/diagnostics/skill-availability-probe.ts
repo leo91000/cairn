@@ -76,6 +76,12 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
         let pollId = 0
         const pending = new Set<number>()
         ;(window as any).availabilityPending = pending
+        const completions = new MessageChannel()
+        completions.port1.onmessage = (event) => {
+          const { kind, poll } = event.data as { kind: string, poll: number }
+          pending.delete(poll)
+          probe(kind, poll)
+        }
         const probe = (kind: string, poll?: number) => {
           void (window as any).availabilityProbe(kind, performance.now(), documentId, poll)
         }
@@ -90,12 +96,24 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
           probe('poll-start', poll)
           args[1]?.signal?.addEventListener('abort', () => probe('poll-abort', poll), { once: true })
           const settled = (kind: string) => {
-            pending.delete(poll)
-            probe(kind, poll)
+            // A posted task follows the application's await/catch/finally microtasks.
+            // On success that includes consuming JSON and arming the next poll timer.
+            completions.port2.postMessage({ kind, poll })
           }
           try {
             return fetch(...args).then((response) => {
-              settled('poll-resolved')
+              if (!response.ok) {
+                settled('poll-http-rejected')
+                return response
+              }
+              const json = response.json.bind(response)
+              response.json = () => json().then((body) => {
+                settled('poll-body-resolved')
+                return body
+              }, (cause) => {
+                settled('poll-body-rejected')
+                throw cause
+              })
               return response
             }, (cause) => {
               settled('poll-rejected')
