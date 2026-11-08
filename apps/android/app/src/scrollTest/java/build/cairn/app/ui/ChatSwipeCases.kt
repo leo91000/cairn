@@ -513,7 +513,7 @@ abstract class ChatSwipeCases {
                                     state,
                                     false,
                                     false,
-                                    history = if (paginated) "v2:swipe:1" else null,
+                                    history = "v2:swipe:1",
                                     oldest = if (paginated) events.firstOrNull()?.id else null,
                                     hasOlder = paginated && chat != null,
                                 )

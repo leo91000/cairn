@@ -300,7 +300,10 @@ async fn removal_and_departure_close_member_streams_and_preserve_owner_access() 
         .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let run: Value = response.json().await.unwrap();
-        let run_path = format!("{api}/runs/{}/stream", run["id"].as_str().unwrap());
+        let run_path = format!(
+            "{api}/runs/{}/stream?timeline=1",
+            run["id"].as_str().unwrap()
+        );
         let mut run_stream = request(&relay, &cookie, &session, Method::GET, &run_path)
             .send()
             .await

@@ -1,5 +1,50 @@
 # Android 0.6.0 / web parity
 
+## Required update for incompatible timeline clients (2026-11-08)
+
+Conversation and run live streams explicitly select timeline cards with `timeline=1` on
+web and Android, through direct and relay routes. The installation refuses missing or
+unsupported selections with HTTP 426 / `update_required` after authentication and before
+starting account read state. The metadata-only Fil and the existing JSON history,
+public MCP and `cairn_installation` operations retain their contracts; there is no new
+blanket client-version requirement for API/agent readers.
+
+Both apps stop incompatible streams before accepting their frames, fetching large
+content or advancing cursors, and retain valid cards, history, caches and reading
+positions. A protocol refusal closes pending direct traffic as a protocol mismatch,
+so an uncertain mutation is not replayed through the relay. It never becomes a
+successful empty conversation or a reconnect loop.
+
+Web offers an explicit reload at the current destination (including query/hash),
+with conversation text and Plan drafts saved in the existing session storage. No
+automatic reload or mutation replay occurs; if refusal remains, the notice directs
+the person to update the installation. Android shows « Mise à jour requise » and
+exposes the existing app update settings: the official versioned APK URL, checksum,
+size and installed-package signer checks stay unchanged. Client reload/APK installation
+are platform presentation, not new installation operations or tool authority.
+
+The account-session Direct authorize/renew controls also negotiate `timeline: 1`,
+without changing the v4 envelope or the public MCP/installation APIs. Their authenticated
+426 is understood by distributed v0.74.5 clients before ICE, including when UDP is
+blocked and content remains on HTTPS relay. An established DataChannel converts an
+actual stream upgrade refusal to the existing terminal `update_required` control;
+its reader stops admission while the existing bounded writer delivers the refusal.
+Archived, byte-pinned v0.74.5 transport modules qualify authorization/renewal and
+uncertain-message handling without adding legacy rendering to production.
+
+There is a verified limit in an old HTTP-only binary that cannot start Direct
+(no `RTCPeerConnection`, unavailable native ABI, or failure before authorization):
+its SSE reader ignores the update indication and continues its existing network
+retry until the person manually reloads the web app or updates Android. The server
+still refuses incompatible data. A server response cannot retrofit that binary's
+missing reload/APK handler. We do not mislabel the installation as outdated or
+change shared MCP availability to hide this limit. Newly shipped clients do stop
+HTTP-only retries and expose the appropriate update action, as described above.
+
+This change supplies code and tests for the mandatory-update policy decided by Léo.
+A GitHub merge does not deploy the policy: shipping the apps/installation is a separate
+release operation. Existing binaries cannot acquire the new UI until updated.
+
 ## Direct conversation read action in the Fil (2026-11-07)
 
 Conversation rows no longer have an overflow menu on web or Android. Unread

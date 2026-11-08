@@ -450,6 +450,7 @@ internal class NativeDirect(private val api: CairnApi, context: Context) {
                         buildJsonObject {
                             put("fingerprint", fingerprint)
                             put("version", 4)
+                            put("timeline", 1)
                         },
                     )
                 )

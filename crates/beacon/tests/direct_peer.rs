@@ -211,6 +211,7 @@ async fn client_with_runtime(
         .json(&json!({
             "fingerprint": fingerprint,
             "version": 4,
+            "timeline": 1,
         }))
         .send()
         .await
@@ -335,6 +336,7 @@ async fn renew_delayed_peer(
         .json(&json!({
             "fingerprint": grant.claims.fingerprint,
             "version": 4,
+            "timeline": 1,
         }))
         .send()
         .await
@@ -871,6 +873,7 @@ async fn disabling_direct_refuses_authorization_and_preserves_the_relay() {
         .json(&json!({
             "fingerprint": fingerprint,
             "version": 4,
+            "timeline": 1,
         }))
         .send()
         .await
@@ -1176,6 +1179,7 @@ async fn signal_lag_keeps_the_peer_running_and_new_connections_work() {
         .json(&json!({
             "fingerprint": fingerprint,
             "version": 4,
+            "timeline": 1,
         }))
         .send()
         .await
@@ -2099,6 +2103,7 @@ async fn observed_certificate_is_compared_with_the_grant_without_an_sdp_check() 
         .json(&json!({
             "fingerprint": fingerprint,
             "version": 4,
+            "timeline": 1,
         }))
         .send()
         .await
@@ -2249,6 +2254,7 @@ async fn panicking_peer_task_child() {
         .json(&json!({
             "fingerprint": fingerprint,
             "version": 4,
+            "timeline": 1,
         }))
         .send()
         .await
@@ -2347,6 +2353,7 @@ async fn public_alias_is_withheld_without_remote_candidates_and_does_not_escape_
         .json(&json!({
             "fingerprint": fingerprint,
             "version": 4,
+            "timeline": 1,
         }))
         .send()
         .await
@@ -2486,5 +2493,63 @@ async fn incompatible_data_channels_receive_an_update_required_refusal() {
     let response = relay.get("/version-probe").send().await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+    relay.close().await;
+}
+
+#[tokio::test]
+async fn timeline_card_refusal_uses_terminal_direct_control_and_http_relay_status() {
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    let chat = relay.installation.chat_create(json!({})).await.unwrap();
+    let path = format!("/chats/{}/stream", chat["id"].as_str().unwrap());
+    production_connector(&mut relay).await;
+    let expected = relay.get(&path).send().await.unwrap();
+    assert_eq!(expected.status(), StatusCode::UPGRADE_REQUIRED);
+    let expected: serde_json::Value = expected.json().await.unwrap();
+    assert_eq!(expected["code"], "update_required");
+    let (peer, channel, _) = client(&relay).await;
+    send_frame(channel.as_ref(), 1, &request("old", &format!("/api{path}"))).await;
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::UpdateRequired { message } if message.contains("Update required"))
+    );
+    peer.close().await.unwrap();
+    // A current app still opens normally on a fresh authorized peer.
+    let (peer, channel, _) = client(&relay).await;
+    send_frame(
+        channel.as_ref(),
+        4,
+        &request("current", &format!("/api{path}?timeline=1")),
+    )
+    .await;
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::StreamStart(reply) if reply.status == 200)
+    );
+    send_frame(
+        channel.as_ref(),
+        5,
+        &Frame::StreamCredit {
+            id: "current".into(),
+        },
+    )
+    .await;
+    let Frame::StreamChunk { body, .. } = response(channel.as_ref()).await else {
+        panic!("Current timeline batch expected")
+    };
+    let text = std::str::from_utf8(&body).unwrap();
+    let data = text
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .unwrap();
+    let batch: serde_json::Value = serde_json::from_str(data).unwrap();
+    assert!(batch["entries"].is_array());
+    assert!(batch["history"].as_str().unwrap().starts_with("v2:"));
+    send_frame(
+        channel.as_ref(),
+        6,
+        &Frame::Cancel {
+            id: "current".into(),
+        },
+    )
+    .await;
+    peer.close().await.unwrap();
     relay.close().await;
 }

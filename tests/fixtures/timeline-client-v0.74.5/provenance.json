@@ -1,0 +1,9 @@
+{
+  "commit": "7bbf2390aaa949864cab65aff236a85407ea3bdb",
+  "tag": "v0.74.5",
+  "sha256": {
+    "direct-channel": "63adfeab9066ee506edc15115e4e3a95272d1a60925df6834e2876d050a92411",
+    "direct-source": "4638066799f7b74564ebeb7356c6ad6d51ac162460407e95d71adf6665fd1283",
+    "installation-transport": "97c9f575308514aba8f428e89d4497e0efb4c6299e512165940cec130b169536"
+  }
+}
