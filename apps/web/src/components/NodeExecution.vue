@@ -152,6 +152,8 @@ const attention = computed(() => {
   return relevant.value && !!(run.movementError || run.backup?.error || run.storage?.waitingFor || run.storage?.backupDegraded || run.capacityWaitUntil || run.nodeState)
 })
 // A chip whose panel is open stays until it closes, so focus can return to it.
+// The first placement answered, or failed: either way the node's state is known for now.
+const settled = computed(() => loaded.value || !!error.value)
 const showChip = computed(() => props.variant === 'chip' || attention.value || (open.value && !opener.value))
 // A focused chip that goes away hands focus on instead of dropping it to the page.
 watch(showChip, async (shown) => {
@@ -344,7 +346,7 @@ defineExpose({
   nodeName,
   status,
   attention,
-  loaded,
+  settled,
 })
 onUnmounted(() => {
   clearInterval(timer)

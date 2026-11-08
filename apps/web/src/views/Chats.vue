@@ -897,7 +897,7 @@ let announcement: ReturnType<typeof setTimeout> | undefined
 let openedId: string | undefined
 const opening = ref(false)
 let openingEnd: ReturnType<typeof setTimeout> | undefined
-watch([() => detail.value?.id, live.synced, catchingUp, () => nodeExecution.value ? nodeExecution.value.loaded : true], ([id, synced, catching, nodeLoaded]) => {
+watch([() => detail.value?.id, live.synced, catchingUp, () => nodeExecution.value ? nodeExecution.value.settled : true], ([id, synced, catching, nodeSettled]) => {
   if (id && id !== openedId) {
     openedId = id
     opening.value = true
@@ -906,7 +906,7 @@ watch([() => detail.value?.id, live.synced, catchingUp, () => nodeExecution.valu
   }
 
   clearTimeout(openingEnd)
-  if (opening.value && synced && !catching && nodeLoaded)
+  if (opening.value && synced && !catching && nodeSettled)
     openingEnd = setTimeout(() => opening.value = false, 200)
 }, { immediate: true })
 watch(liveStatus, (text) => {
@@ -1223,6 +1223,8 @@ async function implementPlan(sourceId: string) {
 watch(chatId, (id) => {
   openedSubagent.value = null
   history.value = false
+  // Coming back to a conversation opens it again, so its current status is not news.
+  openedId = undefined
   detailsOpen.value = false
   // Focus inside the dropdown returns to its trigger rather than to the page.
   menuButton.value?.hide()
