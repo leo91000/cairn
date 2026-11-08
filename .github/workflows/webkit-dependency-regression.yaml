@@ -1,34 +1,28 @@
-name: WebKit dependency regression
+name: Skill availability paired diagnostic
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - .github/workflows/ci.yaml
-      - .github/workflows/pr.yaml
-      - .github/workflows/webkit-dependency-regression.yaml
-      - package.json
-      - pnpm-lock.yaml
-      - playwright.config.ts
-      - scripts/qualify-beacon-sql-fixture.ts
-      - scripts/tests/ci-coverage.test.mjs
-      - tests/e2e/live.spec.ts
   workflow_dispatch:
 permissions:
   contents: read
-concurrency:
-  group: webkit-dependency-regression-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 jobs:
-  webkit:
-    name: WebKit bootstrap regression
+  browser:
+    name: skill availability (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - label: base-fbd0b96e
+            sha: fbd0b96e7450948e5f8b7829bdff157733291413
+          - label: candidate-59d80524
+            sha: 59d805247c872688fa59f84c77d9ffd560d9399a
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    permissions:
-      contents: read
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
       CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@postgres:5432/cairn_beacon_test
+    permissions:
+      contents: read
     services:
       postgres:
         image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
@@ -48,12 +42,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Record exact source identity
+          ref: ${{ matrix.sha }}
+      - name: Record immutable diagnostic source
+        env:
+          EXPECTED_SHA: ${{ matrix.sha }}
         run: |
-          commit="$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)"
-          tree="$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse 'HEAD^{tree}')"
-          printf 'Commit: `%s`\nTree: `%s`\n' "$commit" "$tree" >> "$GITHUB_STEP_SUMMARY"
+          actual="$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)"
+          test "$actual" = "$EXPECTED_SHA"
+          git -c safe.directory="$GITHUB_WORKSPACE" log -1 --format='commit=%H tree=%T'
+          test -z "$(git -c safe.directory="$GITHUB_WORKSPACE" status --porcelain)"
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
@@ -66,33 +63,29 @@ jobs:
           if (installed !== preinstalled)
             throw new Error(`Update the pinned browser image: Playwright package ${installed}, image ${preinstalled}`)
           JS
-      - name: Install the pinned Rust toolchain and test dependencies
+      - name: Install the pinned Rust toolchain and build dependencies
         run: |
-          apt-get update -qq
-          apt-get install -y --no-install-recommends build-essential curl libclang-dev libssl-dev pkg-config postgresql-client
+          node scripts/prepare-browser-build-dependencies.mjs
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Build the browser fixtures and web assets
+      - name: Build the manager fixtures and web assets
         run: |
           cargo build --locked -p cairn-installation --bin cairn --example worker_fixture --example browser_fixture
           cargo build --locked -p cairn-beacon --bin cairn-beacon --example beacon_sql_fixture
-          pnpm exec vite build --config apps/web/vite.config.ts
+          VITE_CAIRN_TEST_RESUME_DIAGNOSTICS=true pnpm exec vite build --config apps/web/vite.config.ts
       - name: Qualify the isolated Postgres fixture
         run: pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts
-      - name: Run the affected WebKit live test
+      - name: Run the saved-chat resume journey
         timeout-minutes: 10
-        env:
-          DEBUG: pw:browser
-        run: |
-          set -o pipefail
-          pnpm test:e2e tests/e2e/live.spec.ts --project=layout-webkit-live --grep 'two independent clients follow deltas, recover offline, refresh mid-answer and survive a server restart' --workers=2 --fail-on-flaky-tests 2>&1 | tee webkit-browser-debug.log
+        run: pnpm test:e2e --project=journeys-chats tests/e2e/chats.spec.ts --grep 'same-provider quota resume' --workers=1 --fail-on-flaky-tests
+      - name: Run deliverable preview and sharing journeys
+        timeout-minutes: 10
+        run: pnpm test:e2e deliverables.spec.ts skill-bundles.spec.ts beacon-sharing.spec.ts beacon-installations.spec.ts mcps.spec.ts --workers=2 --retries=0 --fail-on-flaky-tests --trace=on
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: webkit-bootstrap-evidence
+          name: skill-availability-${{ matrix.label }}
           path: |
             playwright-report/
             test-results/
-            docs/screenshots/
-            webkit-browser-debug.log
           retention-days: 14
