@@ -9,11 +9,14 @@ import process from 'node:process'
   test(`B534 native Agents navigation (${control})`, async ({ page, workspace }, testInfo) => {
     const journal: Array<{ kind: string, hostAt: number, browserAt?: number, document?: string, poll?: number }> = []
     const errors: string[] = []
+    const fetchFailures: Array<{ kind: string, document?: string, poll?: number }> = []
     const nativeSourceErrors: Array<{ document?: string, source?: number }> = []
     const bodyFailures: Array<{ kind: string, document?: string, poll?: number }> = []
     const journalPath = testInfo.outputPath('b534-navigation.json')
-    const saveJournal = () => saveB534Journal(journalPath, JSON.stringify({ control, journal, errors, bodyFailures, nativeSourceErrors }))
+    const saveJournal = () => saveB534Journal(journalPath, JSON.stringify({ control, journal, errors, bodyFailures, nativeSourceErrors, fetchFailures }))
     const record = (kind: string, browserAt?: number, document?: string, poll?: number) => {
+      if (measuring && /-(?:rejected|threw)-signal-(?:active|aborted)$/.test(kind))
+        fetchFailures.push({ kind, document, poll })
       if (kind === 'native-chat-source-error')
         nativeSourceErrors.push({ document, source: poll })
       if (kind.endsWith('-body-rejected'))
@@ -89,6 +92,7 @@ import process from 'node:process'
     const releaseNavigation = Promise.withResolvers<void>()
     let pollIntercepted = false
     let targetPoll: import('@playwright/test').Request | undefined
+    let targetJavaScriptPoll: number | undefined
     let deliveryFailure: unknown
     let pollHeld = false
     let navigationHeld = false
@@ -138,6 +142,7 @@ import process from 'node:process'
           chatAccepted: false,
           armedSources: [] as EventSource[],
           targetController: undefined as AbortController | undefined,
+          targetPollId: undefined as number | undefined,
         }
         ;(window as any).b534Observation = observation
         const pending = new Set<number>()
@@ -201,12 +206,13 @@ import process from 'node:process'
           if (!path.startsWith('/api/') && path !== '/web-build.json')
             return fetch(...args)
           const category = path === '/api/installations' ? 'poll' : path.endsWith('/api/chats') ? 'chat-read' : 'http'
+          const poll = ++pollId
           if (category === 'poll' && observation.armed && !observation.targetController) {
             const signal = args[1]?.signal
             observation.targetController = signal ? controllers.get(signal) : undefined
-            void probe(observation.targetController ? 'poll-controller-identified' : 'poll-controller-unknown')
+            observation.targetPollId = poll
+            void probe(observation.targetController ? 'poll-controller-identified' : 'poll-controller-unknown', poll)
           }
-          const poll = ++pollId
           pending.add(poll)
           probe(`${category}-start`, poll)
           args[1]?.signal?.addEventListener('abort', () => probe(`${category}-abort`, poll), { once: true })
@@ -239,7 +245,7 @@ import process from 'node:process'
             })
           }
           catch (cause) {
-            settled('threw')
+            settled(`threw-${args[1]?.signal?.aborted ? 'signal-aborted' : 'signal-active'}`)
             throw cause
           }
         }
@@ -333,10 +339,14 @@ import process from 'node:process'
       await expect.poll(() => page.evaluate(() => (window as any).shellPending.size)).toBe(1)
       await expect(page.locator('[data-transport-route]').first()).toHaveAttribute('data-transport-route', 'direct')
       const identified = await page.evaluate(() => {
-        const controller = (window as any).b534Observation.targetController as AbortController | undefined
-        return !!controller && !controller.signal.aborted
+        const observation = (window as any).b534Observation
+        const controller = observation.targetController as AbortController | undefined
+        return { active: !!controller && !controller.signal.aborted, poll: observation.targetPollId, document: observation.documentId }
       })
-      expect(identified).toBe(true)
+      expect(identified.active).toBe(true)
+      expect(identified.document).toBe(departingDocument)
+      expect(typeof identified.poll).toBe('number')
+      targetJavaScriptPoll = identified.poll
       if (control === 'abort-before-goto') {
         const aborted = await page.evaluate(() => {
           const controller = (window as any).b534Observation.targetController as AbortController
@@ -440,6 +450,21 @@ import process from 'node:process'
         if (deliveryFailure && (!targetPoll || requests.get(targetPoll) !== 'cancelled'))
           throw deliveryFailure
         await browserSettled()
+        const currentDocument = await page.evaluate(() => (window as any).b534Observation.documentId as string)
+        for (const failure of fetchFailures) {
+          const target = failure.document === departingDocument && failure.poll === targetJavaScriptPoll
+          if (target) {
+            if (!targetPoll || requests.get(targetPoll) !== 'cancelled')
+              throw new Error('The target JavaScript rejection has no matching native cancellation')
+            if (control === 'abort-before-goto' && !failure.kind.endsWith('-signal-aborted'))
+              throw new Error('The explicit-abort control did not reject with its caller signal aborted')
+            continue
+          }
+          const withdrawnCaller = failure.document !== currentDocument && failure.kind.endsWith('-signal-aborted')
+            && journal.some(event => event.document === failure.document && event.kind.startsWith('pagehide-'))
+          if (!withdrawnCaller)
+            throw new Error('A JavaScript fetch rejection lacks target or retired-caller cancellation provenance')
+        }
         cleanupCompleted = true
       }
       finally {
