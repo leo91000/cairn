@@ -1,13 +1,18 @@
 #!/usr/bin/env node
 // Synthetic official-CLI protocol fixture. Never connects to a model provider.
+import { Buffer } from 'node:buffer'
 import {
   appendFileSync,
+  closeSync,
+  constants,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   rmSync,
   statSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'
@@ -114,6 +119,7 @@ else {
   const sides = new Map()
   // The first message of a reply that keeps working until a steering message arrives.
   let working
+  let blockedControlTurn
   let sideCompaction
   // Like Claude Code 2.1.280: the last response's prompt (cached or not) is the context,
   // and a local estimate stands in before the first response or after `/compact`.
@@ -181,6 +187,44 @@ else {
     })
   }
 
+  // Linux adapter regression: an open control pipe that cannot accept a frame.
+  // Its final main result uses a separate file gate, independent of that pipe.
+  const blockSideControl = () => {
+    const reader = openSync('/proc/self/fd/0', constants.O_RDONLY | constants.O_NONBLOCK)
+    const writer = openSync('/proc/self/fd/0', constants.O_WRONLY | constants.O_NONBLOCK)
+    process.once('exit', () => closeSync(reader))
+    lines.close()
+    process.stdin.destroy()
+    setImmediate(() => {
+      let filled = 0
+      for (const size of [4096, 1]) {
+        const bytes = Buffer.alloc(size, 'x')
+        for (;;) {
+          try {
+            filled += writeSync(writer, bytes)
+          }
+          catch (error) {
+            if (error.code !== 'EAGAIN')
+              throw error
+            break
+          }
+        }
+      }
+
+      writeFileSync(path.join(home, 'control-pipe-full'), String(filled))
+      out({ type: 'assistant', message: { id: 'side-control-full', content: [{ type: 'text', text: 'Fixture control pipe full' }] } })
+      let released = false
+      // Keep the unread pipe open after the result until the adapter stops us.
+      setInterval(() => {
+        if (released || !existsSync(path.join(home, 'release-main-result')))
+          return
+        released = true
+        closeSync(writer)
+        complete('Main finished with a full control pipe', false, { user_message_uuid: blockedControlTurn })
+      }, 10)
+    })
+  }
+
   lines.on('line', (line) => {
     const value = JSON.parse(line)
     if (value.type === 'user')
@@ -210,6 +254,13 @@ else {
         status: 'started',
       })
       const asked = value.request.question
+      if (asked.includes('fixture:side-fill-control')) {
+        sides.set(value.request_id, null)
+        if (sides.size === 3)
+          blockSideControl()
+        return
+      }
+
       // Withdrawal journeys control completion through cancellation, not a timer.
       if (asked.includes('fixture:side-pending')) {
         sides.set(value.request_id, null)
@@ -432,6 +483,18 @@ else {
 
     if (prompt.includes('fixture:close-before-side'))
       process.stdin.destroy()
+    if (prompt.includes('fixture:side-block-control')) {
+      blockedControlTurn = value.uuid
+      blockSideControl()
+      return
+    }
+
+    if (prompt.includes('fixture:side-block-after-asks')) {
+      blockedControlTurn = value.uuid
+      out({ type: 'assistant', message: { id: 'side-control-ready', content: [{ type: 'text', text: 'Fixture ready for side controls' }] } })
+      return
+    }
+
     if (working) {
       const first = working
       working = undefined

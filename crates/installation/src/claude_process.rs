@@ -40,7 +40,6 @@ const CONTEXT_REQUEST: &str = "cairn-context-";
 /// How long a finished execution waits for the context report requested at a compaction
 /// boundary. Claude Code answers it locally, after the command's result.
 const CONTEXT_REPORT_WAIT: Duration = Duration::from_secs(5);
-const SIDE_CONTROL_WAIT: Duration = Duration::from_millis(100);
 
 const DENIED: &str =
     "This tool is outside the agent's access policy. Ask the user in your response.";
@@ -116,14 +115,14 @@ async fn send(stdin: &mut ChildStdin, value: Value) -> Result<()> {
     Ok(())
 }
 
-async fn cancel_finished_side(stdin: &mut ChildStdin, request: &str) {
+async fn cancel_side_request(stdin: &mut ChildStdin, request: &str) {
     let cancel = json!({
         "type": "control_cancel_request",
         "request_id": request,
     });
     // UUID-based cancellation frames are below PIPE_BUF, so a single poll either
-    // writes the whole frame or writes nothing. Never await control readiness at
-    // main completion; normal CLI shutdown handles a request that cannot be sent.
+    // writes the whole frame or writes nothing. Side work never waits for control
+    // readiness; unsent cancellations rely on native completion or CLI shutdown.
     let _ = send(stdin, cancel).now_or_never();
 }
 
@@ -854,7 +853,7 @@ impl Turn<'_> {
             },
         });
         // Writes no larger than PIPE_BUF are atomic on the nonblocking control pipe:
-        // a deadline cannot leave half a JSON frame for the main turn to consume.
+        // a single poll cannot leave half a JSON frame for the main turn to consume.
         if serde_json::to_vec(&request)?.len() + 1 > libc::PIPE_BUF {
             return self
                 .side_failed(
@@ -863,11 +862,11 @@ impl Turn<'_> {
                 )
                 .await;
         }
-        match tokio::time::timeout(SIDE_CONTROL_WAIT, send(&mut self.stdin, request)).await {
-            Ok(Ok(())) => {
+        match send(&mut self.stdin, request).now_or_never() {
+            Some(Ok(())) => {
                 self.sides.insert(request_id, question);
             }
-            Ok(Err(_)) | Err(_) => {
+            Some(Err(_)) | None => {
                 self.side_failed(&question, "The agent could not receive this side question.")
                     .await?;
             }
@@ -879,7 +878,7 @@ impl Turn<'_> {
     /// they never delay it, and can be asked again during the next one.
     async fn withdraw_sides(&mut self) -> Result<()> {
         for (request, question) in std::mem::take(&mut self.sides) {
-            cancel_finished_side(&mut self.stdin, &request).await;
+            cancel_side_request(&mut self.stdin, &request).await;
             self.side_failed(&question, crate::chats::side_questions::EXPIRED)
                 .await?;
         }
@@ -894,16 +893,9 @@ impl Turn<'_> {
             .map(|(request, _)| request.clone());
         if let Some(request) = request {
             self.sides.remove(&request);
-            self.cancel_side_request(&request).await;
+            cancel_side_request(&mut self.stdin, &request).await;
         }
         Ok(())
-    }
-
-    /// Explicit withdrawals have a bounded, best-effort send while the turn runs.
-    /// Completion uses cancel_finished_side instead, without waiting on the pipe.
-    async fn cancel_side_request(&mut self, request: &str) {
-        let cancel = json!({ "type": "control_cancel_request", "request_id": request });
-        let _ = tokio::time::timeout(SIDE_CONTROL_WAIT, send(&mut self.stdin, cancel)).await;
     }
 
     /// The reply to a side question. Claude reports a missing or synthetic answer
@@ -2105,7 +2097,7 @@ mod side_question_tests {
         let mut all_ready = true;
         for index in 0..5 {
             let request = format!("side-question-{index}");
-            let cancellation = super::cancel_finished_side(&mut stdin, &request);
+            let cancellation = super::cancel_side_request(&mut stdin, &request);
             tokio::pin!(cancellation);
             all_ready &= matches!(futures_util::poll!(&mut cancellation), Poll::Ready(()));
         }

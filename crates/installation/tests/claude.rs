@@ -1588,6 +1588,118 @@ fn side_question(id: &str, text: &str) -> Value {
     json!({ "id": format!("side-question:{id}"), "sideQuestion": { "id": id, "text": text } })
 }
 
+#[cfg(target_os = "linux")]
+async fn main_result_through_full_side_control(withdrawals: bool) {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    let home = c.home.join(".claude");
+    let prompt = if withdrawals {
+        "fixture:side-block-after-asks"
+    } else {
+        "fixture:side-block-control"
+    };
+    let p = plan(&root, prompt);
+    // Force observation before the inbox loop can retire its whole side batch.
+    let (tx, mut rx) = mpsc::channel(1);
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    let task = tokio::spawn(async move { claude_process::run(&c, p, tx, stop).await });
+    let id = |index| format!("a1b2c3d4-0000-4000-8000-{index:012}");
+    let mut events = Vec::new();
+    let mut dispatched = false;
+    let mut observed_while_frozen = false;
+    let result = tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(event) = rx.recv().await {
+            let message = event["type"] == "item.completed";
+            let text = text(&event["item"], "text");
+            if message && text == "Fixture ready for side controls" {
+                let asks = (1..=3)
+                    .map(|index| side_question(&id(index), "fixture:side-fill-control"))
+                    .collect::<Vec<_>>();
+                deliver(&root, &json!(asks));
+            }
+            if message && text == "Fixture control pipe full" {
+                assert!(
+                    std::fs::read_to_string(home.join("control-pipe-full"))
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap()
+                        > 0
+                );
+                let mut entries = if withdrawals {
+                    vec![side_question(&id(4), "Why?"), side_question(&id(5), "Why?")]
+                } else {
+                    (1..=5)
+                        .map(|index| side_question(&id(index), "Why?"))
+                        .collect()
+                };
+                if withdrawals {
+                    for index in 1..=3 {
+                        entries.push(json!({
+                            "id": format!("withdraw-side-question:{}", id(index)),
+                            "sideQuestionId": id(index),
+                            "sideQuestionCancelled": true,
+                        }));
+                    }
+                }
+                deliver(&root, &json!(entries));
+                dispatched = true;
+            }
+            let first_blocked_send = dispatched && event["type"] == "chat.side.failed";
+            events.push(event);
+            if first_blocked_send && !home.join("release-main-result").exists() {
+                // The one-slot event channel keeps later side writes behind this
+                // observer. Freeze their deadlines, then release the real result
+                // through a separate channel while the control pipe stays full.
+                tokio::time::pause();
+                let frozen = tokio::time::Instant::now();
+                std::fs::write(home.join("release-main-result"), "ready").unwrap();
+                let limit = std::time::Instant::now() + Duration::from_secs(5);
+                while std::time::Instant::now() < limit {
+                    if let Ok(next) = rx.try_recv() {
+                        observed_while_frozen = next["type"] == "turn.completed";
+                        events.push(next);
+                        if observed_while_frozen {
+                            break;
+                        }
+                    }
+                    // Keep the test runnable so Tokio cannot auto-advance the
+                    // frozen control deadlines while actual process I/O runs.
+                    tokio::task::yield_now().await;
+                }
+                assert_eq!(tokio::time::Instant::now(), frozen);
+                tokio::time::resume();
+            }
+        }
+    })
+    .await;
+    cancel.cancel();
+    let adapter = task.await.unwrap();
+    assert!(
+        result.is_ok(),
+        "Full-pipe fixture timed out: dispatched={dispatched}, events={events:?}"
+    );
+    adapter.unwrap();
+    assert!(dispatched);
+    assert!(events.iter().any(|event| event["type"] == "turn.completed"));
+    assert!(
+        observed_while_frozen,
+        "A ready main result must not await side-control deadlines"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn side_control_dispatch_does_not_hold_main_result_for_pending_asks() {
+    main_result_through_full_side_control(false).await;
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn side_control_dispatch_does_not_hold_main_result_for_withdrawals() {
+    main_result_through_full_side_control(true).await;
+}
+
 /// Runs `prompt`, delivering `inbox` once the adapter announces side questions, and
 /// returns every event.
 async fn with_side_questions(
