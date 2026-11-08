@@ -1,0 +1,76 @@
+name: Plan draft isolated observation
+on:
+  push:
+    branches: [ci/plan-draft-observer]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  observe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    container:
+      image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f
+      options: --init --ipc=host
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_USER: cairn
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: cairn_beacon_test
+        options: >-
+          --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@postgres:5432/cairn_beacon_test
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          cache: true
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: browser-backend
+          run-id: '42430133024'
+          github-token: ${{ github.token }}
+          path: target/debug/
+      - uses: actions/download-artifact@v8.0.1
+        with:
+          name: browser-build
+          run-id: '42430133024'
+          github-token: ${{ github.token }}
+          path: dist/
+      - name: Verify paired application identity
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git diff --exit-code 42b1ea433535b6cad1d83d94c6a0d0cd01c7afd0 dbd6bf8049a30565180c7dbe5a9d6437050fc398 -- apps packages crates tests/e2e
+          sha256sum target/debug/cairn target/debug/cairn-beacon target/debug/examples/browser_fixture
+          chmod +x target/debug/cairn target/debug/cairn-beacon target/debug/examples/*
+      - name: Compare original test on both exact sources
+        run: |
+          cp observe-plan.py /root/observe-plan.py
+          mkdir -p evidence
+          for source in 42b1ea433535b6cad1d83d94c6a0d0cd01c7afd0 dbd6bf8049a30565180c7dbe5a9d6437050fc398; do
+            git checkout --detach "$source"
+            python3 /root/observe-plan.py
+            git diff -- tests/e2e/claude.spec.ts > "evidence/$source.patch"
+            set +e
+            pnpm test:e2e --project=layout-webkit-claude --grep '^plan drafts keep their mode' --repeat-each=20 --workers=1 --retries=0 --trace=on --output="evidence/$source-results" > "evidence/$source.log" 2>&1
+            code=$?
+            set -e
+            echo "$source exit=$code"
+            tail -35 "evidence/$source.log"
+            git restore tests/e2e/claude.spec.ts
+          done
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: plan-draft-paired-observation
+          path: evidence/
+          retention-days: 14
