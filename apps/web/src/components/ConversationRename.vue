@@ -40,11 +40,12 @@ const tooLong = computed(() => length.value > MAX_TITLE)
 const changed = computed(() => !!trimmed.value && !tooLong.value && trimmed.value !== current.value)
 
 // Messages and turns change the revision too, and the live conversation can trail it: a revision
-// that moves between reading and renaming is read once more.
-async function rename(retry: boolean): Promise<boolean> {
+// that moves between reading and renaming is read once more. `seen` is the title the dialog showed
+// when the person saved, so a title arriving meanwhile is named rather than replaced.
+async function rename(seen: string, retry: boolean): Promise<boolean> {
   const chatId = props.chat.id
   const latest = await getChat(api, { chatId })
-  if (latest.title !== current.value) {
+  if (latest.title !== seen) {
     found.value = latest.title
     return false
   }
@@ -55,7 +56,7 @@ async function rename(retry: boolean): Promise<boolean> {
   }
   catch (e) {
     if (retry && e instanceof ApiError && e.status === 409)
-      return rename(false)
+      return rename(seen, false)
     throw e
   }
 }
@@ -66,7 +67,7 @@ async function save() {
   saving.value = true
   error.value = ''
   try {
-    if (await rename(true))
+    if (await rename(current.value, true))
       return
   }
   catch (e) {
