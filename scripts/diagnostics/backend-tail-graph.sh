@@ -48,11 +48,9 @@ rustc -vV > backend-tail-evidence/rustc.txt
 cargo --version > backend-tail-evidence/cargo.txt
 cargo nextest --version > backend-tail-evidence/nextest.txt
 grep -E '^cargo-nextest 0\.9\.149( |$)' backend-tail-evidence/nextest.txt
-cargo nextest run --help > backend-tail-evidence/nextest-help.txt
-grep -q -- '--no-run' backend-tail-evidence/nextest-help.txt
 
 date -u +'%FT%TZ workspace-start' | tee backend-tail-evidence/times.txt
-node scripts/test-backend.mjs --nextest --no-run --test-threads 8 --no-fail-fast --color never --status-level all 2>&1 | tee backend-tail-evidence/workspace-build.log
+node scripts/test-backend.mjs --nextest --no-run --test-threads 8 --color never --status-level all 2>&1 | tee backend-tail-evidence/workspace-build.log
 date -u +'%FT%TZ workspace-finished' | tee -a backend-tail-evidence/times.txt
 python3 "$RUNNER_TEMP/backend-tail-observer/backend-tail-fingerprints.py" target/debug/.fingerprint backend-tail-evidence/after-workspace.json
 

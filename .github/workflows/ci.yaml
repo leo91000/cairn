@@ -48,6 +48,8 @@ jobs:
       - name: Install the unchanged pinned nextest binary
         timeout-minutes: 3
         run: node scripts/install-nextest-ci.mjs
+      - name: Validate all generated flags with the actual pinned CLI before compilation
+        run: CAIRN_BACKEND_SOURCE="$GITHUB_WORKSPACE" CAIRN_NEXTEST_CLI="${CARGO_HOME:-$HOME/.cargo}/bin/cargo-nextest" python3 "$RUNNER_TEMP/backend-tail-observer/backend-tail-cli-regression.py"
       - name: Compare the test-library graph after the real workspace build
         env:
           GRAPH_SCOPE: ${{ matrix.scope }}
