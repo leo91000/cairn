@@ -396,29 +396,6 @@ internal fun SignalCard(
         }
 }
 
-/** Compact live status: "Cairn travaille · 14 min". */
-@Composable
-internal fun LiveChip(text: String, modifier: Modifier = Modifier) {
-    Row(
-        modifier
-            .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.primary)
-            .padding(horizontal = 8.dp, vertical = 2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(Modifier.size(6.dp).background(MaterialTheme.colorScheme.onPrimary, CircleShape))
-        Spacer(Modifier.width(6.dp))
-        Text(
-            text,
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onPrimary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
-
 /** Minutes/hours since [start], e.g. "14 min" or "2 h 05". */
 internal fun elapsed(start: Long?, now: Long = System.currentTimeMillis()): String {
     if (start == null || start <= 0) return ""

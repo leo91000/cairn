@@ -20,6 +20,8 @@ const props = withDefaults(defineProps<{
   /** Which trigger edge the menu lines up with. */
   align?: 'start' | 'end'
   width?: number
+  /** Ids of content (such as the header slot) that screen readers announce with the menu. */
+  describedby?: string
 }>(), { placement: 'below', align: 'end', width: 224 })
 const emit = defineEmits<{ open: [], close: [] }>()
 const trigger = ref<HTMLButtonElement>()
@@ -28,17 +30,29 @@ const open = ref(false)
 const position = ref<Record<string, string>>({})
 const id = useId()
 let frame = 0
+let contents: MutationObserver | undefined
 
 function place() {
   const rect = trigger.value!.getBoundingClientRect()
-  const height = menu.value?.offsetHeight ?? 0
+  // The natural height, not the height a previous placement capped.
+  const box = menu.value
+  const height = box ? box.scrollHeight + box.offsetHeight - box.clientHeight : 0
   const left = Math.max(8, Math.min(props.align === 'start' ? rect.left : rect.right - props.width, innerWidth - props.width - 8))
   const below = rect.bottom + 6
-  const above = rect.top - height - 6
-  const top = props.placement === 'above'
-    ? (above >= 8 ? above : below)
-    : (below + height > innerHeight - 8 && above >= 8 ? above : below)
-  position.value = { left: `${left}px`, top: `${Math.max(8, top)}px`, width: `${props.width}px` }
+  const roomBelow = innerHeight - 8 - below
+  const roomAbove = rect.top - 6 - 8
+  // When neither side fits, the roomier one scrolls the menu instead of cutting off its last items.
+  const fitsBelow = height <= roomBelow
+  const fitsAbove = height <= roomAbove
+  const useAbove = props.placement === 'above'
+    ? fitsAbove || (!fitsBelow && roomAbove > roomBelow)
+    : !fitsBelow && (fitsAbove || roomAbove > roomBelow)
+  const top = useAbove ? Math.max(8, rect.top - 6 - height) : below
+  position.value = {
+    left: `${left}px`,
+    top: `${top}px`,
+    maxHeight: `${useAbove ? rect.top - 6 - top : roomBelow}px`,
+  }
 }
 
 function items() {
@@ -57,8 +71,38 @@ async function show(focus: 'first' | 'last' = 'first') {
   await nextTick()
   menu.value?.showPopover?.()
   place()
+  // Focus once the height limit applies, so a scrolling menu shows the item it focuses.
+  await nextTick()
+  if (!open.value)
+    return
   const list = items()
-  ;(focus === 'first' ? list[0] : list.at(-1))?.focus({ preventScroll: true })
+  const item = focus === 'first' ? list[0] : list.at(-1)
+  item?.focus({ preventScroll: true })
+  item?.scrollIntoView({ block: 'nearest' })
+  // An item that is removed or disabled while focused would drop focus to the page, where the
+  // menu's keys no longer reach it: focus moves to the next enabled item (the first one when the
+  // focused item was removed) instead. Focus the app moved elsewhere on purpose stays there.
+  contents = new MutationObserver(() => {
+    const active = document.activeElement as HTMLElement | null
+    const lost = !active || active === document.body
+    const disabledHere = !!active && !!menu.value?.contains(active) && active.matches(':disabled, [aria-disabled="true"]')
+    if (!open.value || (!lost && !disabledHere))
+      return
+    const all = Array.from(menu.value?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
+    const at = active ? all.indexOf(active) : -1
+    const enabled = items()
+    const next = at < 0 ? enabled[0] : [...all.slice(at + 1), ...all.slice(0, at)].find(item => enabled.includes(item))
+    ;(next ?? trigger.value)?.focus({ preventScroll: true })
+  })
+  if (menu.value) {
+    contents.observe(menu.value, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['disabled', 'aria-disabled'],
+    })
+  }
+
   document.addEventListener('pointerdown', outside, true)
   window.addEventListener('resize', dismiss)
   window.addEventListener('scroll', scrolled, true)
@@ -68,6 +112,8 @@ function hide(restore = true) {
   if (!open.value)
     return
   open.value = false
+  contents?.disconnect()
+  contents = undefined
   document.removeEventListener('pointerdown', outside, true)
   window.removeEventListener('resize', dismiss)
   window.removeEventListener('scroll', scrolled, true)
@@ -129,7 +175,13 @@ function menuKeydown(event: KeyboardEvent) {
     event.preventDefault()
     const list = items()
     const current = list.indexOf(document.activeElement as HTMLElement)
-    const next = event.key === 'Home' ? 0 : event.key === 'End' ? list.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : -1) + list.length) % list.length
+    // With no item focused (after a click on the menu's own content), arrows start from either end.
+    const step = event.key === 'ArrowDown' ? 1 : -1
+    const next = event.key === 'Home'
+      ? 0
+      : event.key === 'End' || (current < 0 && step < 0)
+        ? list.length - 1
+        : (current + step + list.length) % list.length
     list[next]?.focus()
   }
 }
@@ -141,7 +193,7 @@ function select(action: () => void, restore = true) {
 }
 
 onBeforeUnmount(() => hide(false))
-defineExpose({ show, hide })
+defineExpose({ show, hide, trigger })
 </script>
 
 <template>
@@ -160,18 +212,27 @@ defineExpose({ show, hide })
   >
     <slot name="trigger" :open="open" />
   </button>
+  <!-- A header (what the menu is about) sits beside the menu, which may own only its items. -->
   <div
-    :id="id"
     ref="menu"
     popover="manual"
-    role="menu"
-    :aria-label="menuLabel ?? label"
-    :style="position"
-    class="fixed inset-auto m-0 rounded-xl border border-line bg-raised p-1.5 text-ink shadow-[0_9px_25px_#0003]"
+    tabindex="-1"
+    :style="{ width: `${width}px`, ...position }"
+    class="fixed inset-auto m-0 overflow-y-auto overscroll-contain rounded-xl border border-line bg-raised p-1.5 text-ink shadow-[0_9px_25px_#0003] outline-none"
     @keydown="menuKeydown"
     @click.stop
   >
-    <slot v-if="open" :select="select" :close="hide" />
+    <template v-if="open">
+      <slot name="header" />
+      <div
+        :id="id"
+        role="menu"
+        :aria-label="menuLabel ?? label"
+        :aria-describedby="describedby"
+      >
+        <slot :select="select" :close="hide" />
+      </div>
+    </template>
   </div>
 </template>
 

@@ -78,6 +78,21 @@ Image publication requires both jobs to succeed. When physical migration is
 selected for a full run, it waits for both jobs; a backend-only migration run
 continues to require only the backend suite.
 
+The backend installs nextest with `scripts/install-nextest-ci.mjs`. Its official
+GitHub release asset ID, size and SHA256 are pinned; acquisition uses the release
+asset API because the public download URL has returned persistent 504s. The
+digest also matches the immutable install-action manifest cited in the helper.
+One 120-second download budget covers the API response, its single allowed
+release-assets redirect and body. No fallback installer or job retry is used.
+The three-minute step remains inside the unchanged 30-minute backend job.
+Integrity and executable version verification precede replacing the tool.
+Closed response metadata on stderr distinguishes the API and asset status/type,
+numeric size/quota headers and the failure phase. It records no URL, signed
+redirect query, credentials or response body. The success receipt stays on stdout.
+When updating the pin, verify the official immutable release metadata and digest,
+then run the complete backend qualification. Mock acquisition and workflow tests
+do not prove network availability or replace that qualification.
+
 Before backend or CLI test compilation, the disposable GitHub-hosted Ubuntu
 runner requires 32 GiB available on the build filesystem. When capacity is
 insufficient, it reclaims a fixed allowlist of unused platform SDK directories

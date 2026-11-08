@@ -445,7 +445,7 @@ class SignalJourneyTest {
         }
 
     @Test
-    fun `compact fil finds questions and failures by their displayed project`() =
+    fun `compact fil leaves finding conversations by project to the header search`() =
         journey(
             feedChats =
                 listOf(
@@ -456,17 +456,15 @@ class SignalJourneyTest {
         ) {
             waitText("Choisir la pagination")
             waitText("Relecture de la PR")
-            // The filter unfolds from the header's search button.
+            // The header's search is the Fil's only search: no filter of its own.
+            compose.onNodeWithContentDescription("Filtrer le fil").assertDoesNotExist()
             compose.onNode(hasSetTextAction()).assertDoesNotExist()
-            compose.onNodeWithTag("fil-search").performClick()
-            compose.onNode(hasSetTextAction()).performTextInput("  aTlAs  ")
+            compose.onNodeWithContentDescription("Rechercher").performClick()
+            compose.onNodeWithTag("search-field").performTextInput("  aTlAs  ")
+            waitText("CONVERSATIONS")
             compose.onNodeWithText("Choisir la pagination").assertExists()
             compose.onNodeWithText("Relecture de la PR").assertExists()
             compose.onNodeWithText("Refonte de l’application").assertDoesNotExist()
-            compose.onNode(hasSetTextAction()).performTextReplacement("Absent")
-            compose.onNodeWithText("Choisir la pagination").assertDoesNotExist()
-            compose.onNodeWithText("Relecture de la PR").assertDoesNotExist()
-            compose.onNodeWithText("Aucun résultat").assertExists()
         }
 
     @Test
@@ -618,9 +616,13 @@ class SignalJourneyTest {
                     )
                 )
             compose.onAllNodesWithTag("agent-working").assertCountEquals(0)
-            // The header no longer says the agent works; the wait is timed from its start.
+            // The header names the wait instead of the agent working; the timeline times it.
             compose
-                .onNodeWithText("Tâche en arrière-plan · 13 min", useUnmergedTree = true)
+                .onNode(
+                    hasText("Tâche en arrière-plan") and
+                        hasAnyAncestor(hasTestTag("conversation-header")),
+                    useUnmergedTree = true,
+                )
                 .assertExists()
             capture("chat-background-wait-light")
         }
