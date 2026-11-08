@@ -46,7 +46,6 @@ const paletteOpen = ref(false)
 const shortcutsOpen = ref(false)
 provide(workspaceActionsKey, {
   search: () => { paletteOpen.value = true },
-  navigation: () => { void router.push('/') },
 })
 
 // The three places of « Signal »: the Fil (home and conversations), Missions and the Atelier.

@@ -1092,6 +1092,11 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
   await page.keyboard.press('Escape')
   await expect(menu).toBeHidden()
   await expect(details).toBeFocused()
+  await details.click()
+  await menu.getByRole('menuitem', { name: 'Open activity fullscreen', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: 'Fullscreen activity' })).toBeVisible()
+  await page.getByRole('button', { name: 'Exit fullscreen', exact: true }).click()
+  await expect(details).toBeFocused()
   // A short window scrolls the dropdown, so its last actions stay reachable.
   await page.setViewportSize({ width: 844, height: 390 })
   await details.click()
