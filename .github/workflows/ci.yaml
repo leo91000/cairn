@@ -50,10 +50,12 @@ jobs:
         checked_tree="$(git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        tracked_clean=true
+        allowed_evidence='[]'
         git diff --quiet
         git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
-        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":true,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" > "$RUNNER_TEMP/browser-qualification-source/before.json"
+        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/before.json"
         cat "$RUNNER_TEMP/browser-qualification-source/before.json"
         echo 'reuse=false' >> "$GITHUB_OUTPUT"
         echo 'commit=276c5431b4f3aa4e06a37d2d86807efc9252980d' >> "$GITHUB_OUTPUT"
@@ -73,10 +75,12 @@ jobs:
         checked_tree="$(git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        tracked_clean=true
+        allowed_evidence='[]'
         git diff --quiet
         git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
-        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"after","trackedClean":true,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" > "$RUNNER_TEMP/browser-qualification-source/after.json"
+        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"after","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/after.json"
         cat "$RUNNER_TEMP/browser-qualification-source/after.json"
     - uses: actions/upload-artifact@v7.0.1
       if: always()
@@ -111,10 +115,12 @@ jobs:
         checked_tree="$(git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        tracked_clean=true
+        allowed_evidence='[]'
         git diff --quiet
         git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
-        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":true,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" > "$RUNNER_TEMP/browser-qualification-source/before.json"
+        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/before.json"
         cat "$RUNNER_TEMP/browser-qualification-source/before.json"
     - uses: ./.github/actions/setup-pnpm
       with:
@@ -175,10 +181,12 @@ jobs:
         checked_tree="$(git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        tracked_clean=true
+        allowed_evidence='[]'
         git diff --quiet
         git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
-        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"after","trackedClean":true,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" > "$RUNNER_TEMP/browser-qualification-source/after.json"
+        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"after","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/after.json"
         cat "$RUNNER_TEMP/browser-qualification-source/after.json"
     - uses: actions/upload-artifact@v7.0.1
       if: always()
@@ -260,10 +268,12 @@ jobs:
         checked_tree="$(git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        tracked_clean=true
+        allowed_evidence='[]'
         git diff --quiet
         git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
-        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":true,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" > "$RUNNER_TEMP/browser-qualification-source/before.json"
+        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/before.json"
         cat "$RUNNER_TEMP/browser-qualification-source/before.json"
     - uses: ./.github/actions/setup-pnpm
       with:
@@ -325,10 +335,35 @@ jobs:
         checked_tree="$(git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
-        git diff --quiet
-        git diff --cached --quiet
+        tracked_clean=true
+        allowed_evidence='[]'
+        case '${{ matrix.group }}' in
+          journeys-1|journeys-2|journeys-3|journeys-4)
+            # The unchanged workspace journey regenerates these tracked evidence files.
+            # Keep every source and staged byte protected; do not claim clean images.
+            git diff --cached --quiet
+            git diff --quiet -- . ':(exclude)docs/screenshots/overview-desktop.png' ':(exclude)docs/screenshots/overview-mobile.png'
+            for evidence_path in docs/screenshots/overview-desktop.png docs/screenshots/overview-mobile.png; do
+              test -f "$evidence_path"
+              test ! -L "$evidence_path"
+              test ! -x "$evidence_path"
+            done
+            allowed_evidence='["docs/screenshots/overview-desktop.png","docs/screenshots/overview-mobile.png"]'
+            if git diff --quiet; then
+              :
+            else
+              diff_status=$?
+              test "$diff_status" = 1
+              tracked_clean=false
+            fi
+            ;;
+          *)
+            git diff --quiet
+            git diff --cached --quiet
+            ;;
+        esac
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
-        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"after","trackedClean":true,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" > "$RUNNER_TEMP/browser-qualification-source/after.json"
+        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"after","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/after.json"
         cat "$RUNNER_TEMP/browser-qualification-source/after.json"
     - uses: actions/upload-artifact@v7.0.1
       if: always()
@@ -392,10 +427,12 @@ jobs:
         checked_tree="$(git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        tracked_clean=true
+        allowed_evidence='[]'
         git diff --quiet
         git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
-        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":true,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" > "$RUNNER_TEMP/browser-qualification-source/before.json"
+        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/before.json"
         cat "$RUNNER_TEMP/browser-qualification-source/before.json"
     - uses: ./.github/actions/setup-pnpm
       with:
@@ -452,10 +489,12 @@ jobs:
         checked_tree="$(git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        tracked_clean=true
+        allowed_evidence='[]'
         git diff --quiet
         git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
-        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"after","trackedClean":true,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" > "$RUNNER_TEMP/browser-qualification-source/after.json"
+        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"after","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/after.json"
         cat "$RUNNER_TEMP/browser-qualification-source/after.json"
     - uses: actions/upload-artifact@v7.0.1
       if: always()
@@ -487,10 +526,12 @@ jobs:
         checked_tree="$(git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        tracked_clean=true
+        allowed_evidence='[]'
         git diff --quiet
         git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
-        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":true,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" > "$RUNNER_TEMP/browser-qualification-source/before.json"
+        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/before.json"
         cat "$RUNNER_TEMP/browser-qualification-source/before.json"
     - uses: ./.github/actions/setup-pnpm
       with:
@@ -530,10 +571,12 @@ jobs:
         checked_tree="$(git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        tracked_clean=true
+        allowed_evidence='[]'
         git diff --quiet
         git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
-        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"after","trackedClean":true,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" > "$RUNNER_TEMP/browser-qualification-source/after.json"
+        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"after","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/after.json"
         cat "$RUNNER_TEMP/browser-qualification-source/after.json"
     - uses: actions/upload-artifact@v7.0.1
       if: always()
@@ -591,10 +634,12 @@ jobs:
         checked_tree="$(git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        tracked_clean=true
+        allowed_evidence='[]'
         git diff --quiet
         git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
-        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":true,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" > "$RUNNER_TEMP/browser-qualification-source/before.json"
+        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/before.json"
         cat "$RUNNER_TEMP/browser-qualification-source/before.json"
     - uses: ./.github/actions/setup-pnpm
       with:
@@ -666,10 +711,12 @@ jobs:
         checked_tree="$(git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        tracked_clean=true
+        allowed_evidence='[]'
         git diff --quiet
         git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
-        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"after","trackedClean":true,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" > "$RUNNER_TEMP/browser-qualification-source/after.json"
+        printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"after","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/after.json"
         cat "$RUNNER_TEMP/browser-qualification-source/after.json"
     - uses: actions/upload-artifact@v7.0.1
       if: always()
