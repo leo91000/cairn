@@ -167,7 +167,14 @@ abstract class PluginsCases {
                                     title = "Service account token",
                                     type = "secret",
                                     required = true,
-                                )
+                                ),
+                                PluginSetting(
+                                    key = "allowWrite",
+                                    title = "Create items and edit fields",
+                                    type = "boolean",
+                                    risk = "high",
+                                    default = JsonPrimitive(false),
+                                ),
                             ))
                             .map { wireJson.encodeToJsonElement(PluginSetting.serializer(), it) },
                     agentAccess = PluginAgentAccess(description = "Off by default."),
@@ -223,6 +230,11 @@ abstract class PluginsCases {
                                             link = "Open the guide",
                                         )
                                     ),
+                            ),
+                            SetupStep(
+                                id = "permissions",
+                                title = "Permissions",
+                                settings = listOf("allowWrite"),
                             ),
                             SetupStep(id = "agents", kind = "agents", title = "Agents"),
                         ),
@@ -1536,6 +1548,12 @@ abstract class PluginsCases {
                 .assertExists()
             capture("plugin-setup-checklist")
             continueSetup()
+            // Writing is a separate, high-risk permission that stays off unless turned on.
+            compose
+                .onNode(hasText("Create items and edit fields") and isToggleable())
+                .assertIsOff()
+            compose.onNodeWithText("Risque élevé").assertExists()
+            continueSetup()
             // A new account is granted to the agents ticked here; later on, on agent pages.
             compose.onNode(hasText("Helper") and isToggleable()).assertIsEnabled().performClick()
             compose.onNode(hasText("Helper") and isToggleable()).assertIsOn()
@@ -1553,7 +1571,7 @@ abstract class PluginsCases {
                 JsonArray(listOf(JsonPrimitive("08c10fb1-ed4e-5f3d-9592-dbfcefd1cdd3"))),
                 payload["agentIds"],
             )
-            assertEquals(JsonObject(emptyMap()), payload["settings"])
+            assertEquals(buildJsonObject { put("allowWrite", false) }, payload["settings"])
         }
     }
 

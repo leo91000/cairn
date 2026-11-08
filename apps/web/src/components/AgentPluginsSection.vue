@@ -112,7 +112,7 @@ function set(id: string, on: boolean) {
       </p>
       <p class="mx-5 mb-4 rounded-lg bg-soft px-4 py-3 text-xs leading-relaxed phone:mx-4" :class="rows.length ? '' : 'mt-0'">
         <template v-if="entry.id === 'onepassword'">
-          With a granted account the agent can list vaults, items and field names, and read a value with <code>cairn plugin onepassword read</code>. It can create items and change fields only with accounts whose owner allowed writing; it never deletes. What the account can see and write is set in 1Password; create another service account for different rights. Removing access blocks the next reads immediately; secrets already read cannot be recalled.
+          With a granted account the agent can list vaults, items and field names, and read a value with <code>cairn plugin onepassword read</code>. It can create items and change fields only with accounts whose owner allowed writing; it never deletes items. What the account can see and write is set in 1Password; create another service account for different rights. Removing access blocks the next reads immediately; secrets already read cannot be recalled.
         </template>
         <template v-else>
           {{ entry.manifest?.agentAccess?.description || 'Agents with access receive this instance’s commands, tools and instructions.' }}

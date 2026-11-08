@@ -930,8 +930,8 @@ the daily budget. See [1Password's quota documentation](https://www.1password.de
 
 The CLI uses the same private VM channel and run grant, including remote nodes.
 It never authenticates `op` inside the conversation VM. The service-account token
-stays in the installation; `op` runs with the declared program rules above, the
-package's fixed read-only arguments and the post-I/O grant/rotation check. Secret
+stays in the installation; `op` runs with the declared program rules above, arguments
+the package builds without item values and the post-I/O grant/rotation check. Secret
 stdout has no added newline and is not persisted by the plugin host. Do not run a bare read,
 enable shell tracing or print the captured value: the ordinary command tool still
 records its output. Already delivered secrets cannot be revoked.

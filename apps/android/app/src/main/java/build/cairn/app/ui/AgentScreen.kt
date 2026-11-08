@@ -1639,7 +1639,7 @@ private fun PluginsSection(
             }
             if (onePassword)
                 Note(
-                    "Avec un compte accordé, l’agent peut lister les coffres, les éléments et les noms de champs, puis lire une valeur avec cairn plugin onepassword read. Il ne peut créer des éléments et modifier des champs qu’avec les comptes dont l’écriture est autorisée ; il ne supprime jamais rien. Ce que le compte voit et écrit se règle dans 1Password : créez un autre compte de service pour d’autres droits. Retirer l’accès bloque immédiatement les lectures suivantes ; un secret déjà lu ne peut pas être rappelé."
+                    "Avec un compte accordé, l’agent peut lister les coffres, les éléments et les noms de champs, puis lire une valeur avec cairn plugin onepassword read. Il ne peut créer des éléments et modifier des champs qu’avec les comptes dont l’écriture est autorisée ; il ne supprime jamais d’élément. Ce que le compte voit et écrit se règle dans 1Password : créez un autre compte de service pour d’autres droits. Retirer l’accès bloque immédiatement les lectures suivantes ; un secret déjà lu ne peut pas être rappelé."
                 )
             else Note("Effectif immédiatement, y compris dans les conversations en cours.")
         }
