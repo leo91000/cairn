@@ -414,8 +414,8 @@ jobs:
           set -euo pipefail
           git rev-parse HEAD HEAD^{tree} > ../header-evidence/base-source.txt
           test -z "$(git status --porcelain)"
-          set +e
           python3 ../scripts/observe-header-trials.py . ../header-evidence/base-observed.patch
+          set +e
           apps/android/gradlew -p apps/android testDebugUnitTest --tests build.cairn.app.ui.UnifiedHeaderTest --no-daemon > ../header-evidence/base-command.log 2>&1
           result=$?
           set -e
@@ -441,8 +441,8 @@ jobs:
           set -euo pipefail
           git rev-parse HEAD HEAD^{tree} > ../header-evidence/candidate-source.txt
           test -z "$(git status --porcelain)"
-          set +e
           python3 ../scripts/observe-header-trials.py . ../header-evidence/candidate-observed.patch
+          set +e
           apps/android/gradlew -p apps/android testDebugUnitTest --tests build.cairn.app.ui.UnifiedHeaderTest --no-daemon > ../header-evidence/candidate-command.log 2>&1
           result=$?
           set -e
