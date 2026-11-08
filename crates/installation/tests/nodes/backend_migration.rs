@@ -636,6 +636,28 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     assert_eq!(interrupted["status"], RunStatus::Cancelled);
     assert!(interrupted["backendMigration"].is_null());
     faults.failed.store(false, Ordering::SeqCst);
+    // A provider retry can expire while conversion or capacity waiting runs.
+    // It belongs to the retired attempt, unlike the mission's remaining budget.
+    let cause = cairn_installation::run_retry::Cause::classify(
+        &json!({ "code": "request_timeout", "message": "Retired provider timeout" }),
+    )
+    .unwrap();
+    let old_retry = cairn_installation::run_retry::Retry::next(
+        None,
+        cause,
+        now() - cairn_installation::run_retry::MAX_RECOVERY_MS - 1000,
+    )
+    .unwrap();
+    assert!(cairn_installation::run_retry::Retry::expired(
+        Some(&old_retry),
+        now()
+    ));
+    owner
+        .service
+        .store
+        .change_run_fixture(&run, json!({ "retry": old_retry }))
+        .await
+        .unwrap();
     let (status, response) = owner
         .send(
             "POST",
@@ -652,6 +674,11 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     assert!(mission["sessionId"].is_null());
     assert_eq!(mission["recoveryPending"], true);
     assert_eq!(mission["requiredTags"], json!(["cpu"]));
+    assert!(
+        mission["retry"].is_null(),
+        "Retired retry survived conversion: {}",
+        mission["retry"]
+    );
     let mission_checkpoint = owner
         .service
         .store

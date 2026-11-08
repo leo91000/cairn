@@ -1029,6 +1029,7 @@ impl Service {
                 error : Some(None),
                 cancel_requested_at : Some(None),
                 recovery_pending : Some(resume_mission),
+                retry: Some(None),
                 placement: Some(Box::new(crate::nodes::run_placement::PlacementChanges {
                     required_tags: Some(serde_json::from_value(migration.get("requiredTags").unwrap_or(&current["requiredTags"]).clone())?),
                     execution_backend: Some(Some(text(&args, "backend").to_owned())),
