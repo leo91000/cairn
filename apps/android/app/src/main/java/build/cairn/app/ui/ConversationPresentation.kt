@@ -16,6 +16,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
@@ -308,6 +309,8 @@ internal fun ConversationHeader(
                                         harness?.let { "Dernier harness : ${providerLabel(it)}" },
                                     )
                                     .joinToString(" · ")
+                            // The subtitle's status is read with the button, not only on sight.
+                            if (status.isNotBlank()) stateDescription = status
                         },
                     color = MaterialTheme.colorScheme.background,
                     shape = RoundedCornerShape(12.dp),

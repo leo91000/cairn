@@ -292,6 +292,7 @@ const provider = ref<'' | Provider>('')
 const planning = ref(false)
 const history = ref(false)
 const deletingConversation = ref<ChatDetail>()
+const deletionOpener = ref<HTMLElement>()
 const detailsOpen = ref(false)
 const detailsButton = ref<HTMLButtonElement>()
 const activity = ref<InstanceType<typeof ActivityFeed>>()
@@ -914,6 +915,16 @@ function closeConnection() {
   void refocus(connectionOpener.value)
 }
 
+function closeDetails() {
+  detailsOpen.value = false
+  void refocus(detailsButton.value)
+}
+
+function closeDeletion() {
+  deletingConversation.value = undefined
+  void refocus(deletionOpener.value)
+}
+
 // The pill leaves once compaction frees the window: focus on it moves to the ⋯ menu.
 watch(contextAlert, async (alert) => {
   if (alert || !contextPill.value || document.activeElement !== contextPill.value)
@@ -995,7 +1006,10 @@ const conversationActions = computed(() => {
       icon: Trash2,
       danger: true,
       dialog: true,
-      run: () => { deletingConversation.value = chat },
+      run: (anchor) => {
+        deletionOpener.value = anchor
+        deletingConversation.value = chat
+      },
     })
   }
 
@@ -1247,7 +1261,7 @@ function key(event: KeyboardEvent) {
     title="Chat details"
     sheet
     :return-focus="detailsButton"
-    @close="detailsOpen = false"
+    @close="closeDetails"
   >
     <div class="px-3 pb-4">
       <p class="m-0! px-2.5 pb-1 text-sm font-semibold leading-snug wrap-anywhere">
@@ -1301,7 +1315,7 @@ function key(event: KeyboardEvent) {
   <ConversationDeletion
     v-if="deletingConversation"
     :chat="deletingConversation"
-    @close="deletingConversation = undefined"
+    @close="closeDeletion"
     @deleted="() => { deletingConversation = undefined; newConversation() }"
   />
   <ConnectionSheet

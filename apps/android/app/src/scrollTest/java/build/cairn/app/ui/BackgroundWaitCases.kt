@@ -789,6 +789,13 @@ abstract class BackgroundWaitCases {
         }
         // The agent waits rather than works: the header says so, without a running label or timer.
         compose.onNodeWithText("Tâche en arrière-plan", useUnmergedTree = true).assertExists()
+        // TalkBack reads it with the conversation button, whose description stays its title.
+        compose
+            .onNode(
+                hasContentDescription("Changer de conversation : Conversation de test") and
+                    hasStateDescription("Tâche en arrière-plan")
+            )
+            .assertExists()
         compose
             .onAllNodesWithText("travaille", substring = true, useUnmergedTree = true)
             .assertCountEquals(0)

@@ -2163,6 +2163,7 @@ test('conversation deletion is visible, confirmed and permanent on desktop and m
   await details.getByRole('menuitem', { name: 'Delete conversation', exact: true }).click()
   await expect(confirmation).toBeVisible()
   await confirmation.getByRole('button', { name: 'Keep conversation' }).click()
+  await expect(page.getByRole('button', { name: 'Chat details', exact: true })).toBeFocused()
   for (const [width, colorScheme] of [[1280, 'light'], [390, 'dark']] as const) {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 900 })
     await page.emulateMedia({ colorScheme })
