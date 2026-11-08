@@ -2238,12 +2238,34 @@ test('a renamed conversation keeps its title and Cairn stops naming it', async (
   await expect(page.locator('.chat-header').getByRole('heading', { name: 'Racing title', exact: true })).toBeVisible()
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).title).toBe('Racing title')
 
-  // A refused save is reported and the field takes focus back, keeping what the person typed.
+  // A title found changed when saving, before the live conversation shows it, is named with focus
+  // back in the field, and the next save replaces it.
   ;({ action } = await openChatDetails(page))
   await action('Rename conversation').click()
   await expect(title).toHaveValue('Racing title')
   await expect(dialog.getByRole('alert')).toHaveCount(0)
   const renamePath = `**/chats/${chat.id}`
+  await page.route(renamePath, async (route) => {
+    if (route.request().method() !== 'GET')
+      return route.continue()
+    const response = await route.fetch()
+    return route.fulfill({ response, json: { ...await response.json(), title: 'Automatic title' } })
+  })
+  await title.fill('Found title')
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog.getByRole('alert')).toHaveText('The title changed to “Automatic title” meanwhile; saving replaces it.')
+  await expect(title).toBeFocused()
+  await expect(title).toHaveValue('Found title')
+  await title.press('Enter')
+  await expect(dialog).toHaveCount(0)
+  await page.unroute(renamePath)
+  await expect(page.locator('.chat-header').getByRole('heading', { name: 'Found title', exact: true })).toBeVisible()
+
+  // A refused save is reported and the field takes focus back, keeping what the person typed.
+  ;({ action } = await openChatDetails(page))
+  await action('Rename conversation').click()
+  await expect(title).toHaveValue('Found title')
+  await expect(dialog.getByRole('alert')).toHaveCount(0)
   await page.route(renamePath, route => route.request().method() === 'PUT'
     ? route.fulfill({ status: 409, json: { error: 'This conversation changed. Reload before renaming.' } })
     : route.continue())

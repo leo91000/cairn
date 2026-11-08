@@ -47,20 +47,19 @@ async function save() {
   try {
     // Messages and turns change the revision too, and the live conversation can trail it.
     const latest = await getChat(api, { chatId })
-    if (latest.title !== current.value) {
-      found.value = latest.title
+    if (latest.title === current.value) {
+      emit('renamed', await renameChat(api, { chatId, revision: latest.revision, title: trimmed.value }))
       return
     }
 
-    emit('renamed', await renameChat(api, { chatId, revision: latest.revision, title: trimmed.value }))
-    return
+    found.value = latest.title
   }
   catch (e) {
     error.value = (e as Error).message
   }
   finally { saving.value = false }
 
-  // The field was disabled while saving; the person corrects it from there.
+  // The field was disabled while saving; the person reads what changed or corrects it from there.
   await nextTick()
   field.value?.focus()
 }
