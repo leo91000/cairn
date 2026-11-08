@@ -57,13 +57,38 @@ fn plan_path(data: &Path, attempt: &str) -> PathBuf {
     data.join("runner-plans").join(format!("{attempt}.json"))
 }
 
-#[derive(Default)]
 pub struct Executor {
+    native: bool,
+    data: PathBuf,
     attempts: Mutex<HashMap<String, CancellationToken>>,
     preparation: super::coordination::Coordination,
 }
 
+impl Default for Executor {
+    fn default() -> Self {
+        Self {
+            native: crate::native::enabled(),
+            data: super::node_data_dir(),
+            attempts: Mutex::default(),
+            preparation: super::coordination::Coordination::default(),
+        }
+    }
+}
+
 impl Executor {
+    pub(super) fn native(&self) -> bool {
+        self.native
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_project_import(data: PathBuf) -> Self {
+        Self {
+            native: true,
+            data,
+            ..Self::default()
+        }
+    }
+
     pub async fn prepare(
         self: &Arc<Self>,
         client: &reqwest::Client,
@@ -78,7 +103,7 @@ impl Executor {
             token: token.into(),
             attempt: attempt.into(),
         };
-        let data = super::node_data_dir();
+        let data = self.data.clone();
         let descriptor = session.json("plan", &json!({})).await?;
         let run = text(&descriptor["plan"], "runId");
         crate::validation::uuid(run)?;
@@ -128,7 +153,7 @@ impl Executor {
         if let Some(stop) = self.attempts.lock().await.remove(attempt) {
             stop.cancel();
         }
-        let (data, attempt) = (super::node_data_dir(), attempt.to_owned());
+        let (data, attempt) = (self.data.clone(), attempt.to_owned());
         tokio::spawn(async move {
             if let Err(error) = crate::native::bases::release_attempt(&data, &attempt).await {
                 tracing::debug!(
@@ -162,14 +187,15 @@ impl Executor {
             let value: Value = serde_json::from_slice(body)?;
             let run = text(&value, "runId");
             crate::validation::uuid(run)?;
-            let target = super::node_data_dir()
+            let target = self
+                .data
                 .join("runs")
                 .join(run)
                 .join("workspace")
                 .join(project);
-            let expected = if crate::native::enabled() {
+            let expected = if self.native {
                 let plan: Value = serde_json::from_slice(
-                    &tokio::fs::read(plan_path(&super::node_data_dir(), attempt)).await?,
+                    &tokio::fs::read(plan_path(&self.data, attempt)).await?,
                 )?;
                 PathBuf::from(text(&plan, "guestDataRoot"))
                     .join("runs")
