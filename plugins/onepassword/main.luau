@@ -190,18 +190,26 @@ local function assignments(encoded)
     return entries
 end
 
--- Applies assignments to an item's fields by ID, then label, like read-fields.
--- Unknown fields are added, concealed unless a type is given; existing fields keep theirs,
--- so an edit never reveals a concealed value.
+-- Applies assignments to an item's fields by ID, then label, then label ignoring case, so
+-- "Password" still fills a template's built-in password. Unknown fields are added,
+-- concealed unless a type is given; existing fields keep theirs, so an edit never reveals
+-- a concealed value.
 local function assign(item, entries)
     item.fields = item.fields or cairn.array()
+    local matchers = {
+        function(field, name) return field.id == name end,
+        function(field, name) return field.label == name end,
+        function(field, name)
+            return type(field.label) == "string" and string.lower(field.label) == string.lower(name)
+        end,
+    }
     for _, entry in entries do
         local selected
-        for _, key in { "id", "label" } do
+        for _, matches in matchers do
             for _, field in item.fields do
-                if field[key] == entry.field then
+                if matches(field, entry.field) then
                     if selected then
-                        cairn.fail("A field to set is ambiguous. Use unique field IDs from the fields command.")
+                        cairn.fail("A field to set is ambiguous. Use unique field IDs from the template or fields command.")
                     end
                     selected = field
                 end
@@ -317,6 +325,11 @@ operations["read-fields"] = function(input)
         values[name] = selected.value or ""
     end
     return cairn.json.encode(values)
+end
+
+-- A category's fields before creating an item: IDs, labels and types, never values.
+function operations.template(input)
+    return references(decode(op(account(input), { "item", "template", "get", "--", input.arguments.category })))
 end
 
 operations["create-item"] = function(input)

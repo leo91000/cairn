@@ -759,7 +759,7 @@ esac
             input = input.display(),
         ),
     );
-    let fields = r#"[{"field":"credential","value":"new-secret"},{"field":"host","value":"db.example","type":"STRING"}]"#;
+    let fields = r#"[{"field":"Credential","value":"new-secret"},{"field":"host","value":"db.example","type":"STRING"}]"#;
     let create = command(
         "create-item",
         &[
@@ -857,6 +857,21 @@ esac
     assert_eq!(
         run(&f, command("accounts", &[])).await.unwrap()["value"]["accounts"][0]["write"],
         true
+    );
+
+    // A category's built-in fields can be listed first, without values.
+    let template = run(
+        &f,
+        command(
+            "template",
+            &["--account", &account, "--category", "API Credential"],
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        template["value"]["fields"],
+        json!([{ "id": "credential", "label": "credential", "type": "CONCEALED" }])
     );
 
     // A template needs no fields: the category's template is created with its title.

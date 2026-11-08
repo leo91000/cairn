@@ -902,7 +902,8 @@ cairn plugin onepassword set-fields --account ACCOUNT_ID --vault VAULT_ID \
 ```
 
 `fields` is a JSON array of 1 to 32 `{ field, value, type? }` objects. A field
-matches by ID, then label, like `read-fields`; an unknown one is added, `CONCEALED`
+matches by ID, then label, then label ignoring case; `template --account ACCOUNT_ID
+--category CATEGORY` lists a category's built-in field IDs, labels and types first; an unknown one is added, `CONCEALED`
 unless `type` is `STRING`, `EMAIL`, `URL`, `PHONE` or `OTP`. `type` applies only to new
 fields, so a concealed value is never revealed by an edit. `create-item` starts
 from the category's template. Both send the item JSON to `op` through stdin, so values

@@ -2914,6 +2914,7 @@ async fn installation_agents_can_turn_owner_only_switches_off_but_never_on() {
     )
     .await;
     assert_eq!(created["result"]["isError"], true, "{created}");
+    assert!(created.to_string().contains("Only the owner"), "{created}");
     let current = s
         .instance_fixture(saved["id"].as_str().unwrap())
         .await
