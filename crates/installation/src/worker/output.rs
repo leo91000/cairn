@@ -481,8 +481,14 @@ async fn handle_chat_control(
         }
         // Answers come from the live context, which can hold output Cairn masks elsewhere.
         "chat.side.answered" | "chat.side.failed" => {
-            s.side_question_settle(id, &run_output::payload(event, secrets))
-                .await?;
+            // Keep protocol identity intact when a secret overlaps its type or UUID.
+            let settled = json!({
+                "type": event["type"],
+                "sideQuestionId": event["sideQuestionId"],
+                "text": run_output::payload(&event["text"], secrets),
+                "error": run_output::payload(&event["error"], secrets),
+            });
+            s.side_question_settle(id, &settled).await?;
         }
         _ => return Ok(false),
     }
