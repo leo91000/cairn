@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
 import { expect, test } from '@playwright/test'
+import { revokeMcpClient } from './mcp-revocation'
 import { NativeFixture } from './native-fixture'
 
 test('selects installations, remembers the last one and honours deep workspace URLs', async ({ page }) => {
@@ -389,7 +390,8 @@ test('selects installations, remembers the last one and honours deep workspace U
     const oauthToken = (await exchange.json()).access_token
     await page.goto(firstUrl.replace(/agents$/, 'settings/installation'))
     await expect(page.getByText('Browser OAuth client', { exact: true })).toBeVisible()
-    await page.getByText('Browser OAuth client', { exact: true }).locator('..').locator('..').getByRole('button', { name: 'Revoke', exact: true }).click()
+    await revokeMcpClient(page, () => page.getByText('Browser OAuth client', { exact: true }).locator('..').locator('..').getByRole('button', { name: 'Revoke', exact: true }).click(), url)
+    await expect(page.getByText('Browser OAuth client', { exact: true })).toHaveCount(0)
     expect((await page.request.post(`${url}/mcp`, { headers: { authorization: `Bearer ${oauthToken}` }, data: { jsonrpc: '2.0', id: 1, method: 'tools/list' } })).status()).toBe(401)
     await page.getByRole('button', { name: 'Configure external S3', exact: true }).click()
     await expect(page.getByLabel('S3 endpoint', { exact: true })).toBeVisible()
