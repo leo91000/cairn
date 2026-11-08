@@ -473,9 +473,12 @@ async fn http(s: &Service, context: &Context, args: &Value) -> Result<Value> {
     let claim =
         super::idempotency::claim(s, &context.connection, args, context.management.as_ref())
             .await?;
-    // Claiming a durable receipt can wait behind another writer. Resolve the
-    // live resource ceiling again before a send or a cached result leaves Cairn.
-    authorize_management(s, context).await?;
+    // A durable receipt claim can wait behind another writer. Recheck it before
+    // sending or returning cached output. Without a key, claim returns immediately
+    // without I/O, so the preceding authorization still directly guards the send.
+    if claim.is_some() {
+        authorize_management(s, context).await?;
+    }
     if let Some(super::idempotency::Claim::Cached(response)) = &claim {
         return Ok(response.clone());
     }
