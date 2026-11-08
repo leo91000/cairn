@@ -1371,7 +1371,8 @@ it('retires a departed recovery loop and permits fresh reads after restoration',
 })
 
 it('stops a refused relay timeline without accepting or reconnecting', async () => {
-  const fetch = vi.fn(async () => Response.json({ code: 'update_required', error: 'Update required.' }, { status: 426 }))
+  const cancelled = vi.fn()
+  const fetch = vi.fn(async () => new Response(new ReadableStream({ cancel: cancelled }), { status: 426 }))
   vi.stubGlobal('fetch', fetch)
   const { state } = await import('../src/api')
   const { liveConnection } = await import('../src/live-connection')
@@ -1385,6 +1386,7 @@ it('stops a refused relay timeline without accepting or reconnecting', async () 
   document.dispatchEvent(new Event('visibilitychange'))
   await vi.advanceTimersByTimeAsync(300000)
   expect(fetch).toHaveBeenCalledOnce()
+  expect(cancelled).toHaveBeenCalledOnce()
   connection.close()
 })
 

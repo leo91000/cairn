@@ -68,7 +68,8 @@ test('chat groups visible calls despite diagnostics, updates and global event ID
       state: { run, chat: workspace.service.chats.detail(chat.id), artifacts: [] },
       reset: true,
       more: false,
-      history: `grouping:${run.id}`,
+      entries: [],
+      history: `v2:${run.id}:0`,
       hasOlder: false,
     })}\n\n`,
   }))
@@ -866,7 +867,7 @@ test('required update keeps the conversation draft and destination without a rel
   const chat = await workspace.api('/api/chats', 'POST', {})
   let refuse = false
   let refused = 0
-  await page.route(`**/chats/${chat.id}/stream?**`, async (route) => {
+  await page.route('**/chats/*/stream?**', async (route) => {
     if (!refuse)
       return route.fallback()
     refused++

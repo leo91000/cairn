@@ -21,11 +21,11 @@ export class DirectSource extends EventTarget {
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
     try {
       const response = await request(this.abort.signal)
+      reader = response.body?.getReader()
       if (response.status === 426)
         throw new ProtocolMismatch()
-      if (!response.ok || !response.body)
+      if (!response.ok || !reader)
         throw new Error('Stream unavailable')
-      reader = response.body.getReader()
       const decoder = new TextDecoder('utf-8', { fatal: true })
       let buffer = ''
       let type = ''

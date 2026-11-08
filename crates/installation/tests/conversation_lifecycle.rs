@@ -756,7 +756,10 @@ async fn readable_slugs_resolve_live_requests_and_keep_uuid_links_and_lifecycle(
     let response = common::send(
         &app.router,
         app.session
-            .authorize(common::request("GET", &format!("{path}/stream?after=0")))
+            .authorize(common::request(
+                "GET",
+                &format!("{path}/stream?after=0&timeline=1"),
+            ))
             .body(Body::empty())
             .unwrap(),
     )

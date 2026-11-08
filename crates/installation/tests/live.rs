@@ -72,6 +72,13 @@ impl Fixture {
     }
 
     async fn open_path(&self, path: &str, last: Option<i64>) -> Stream {
+        let list = path.split('?').next() == Some("/api/chats/stream");
+        let separator = if path.contains('?') { '&' } else { '?' };
+        let path = if list {
+            path.to_owned()
+        } else {
+            format!("{path}{separator}timeline=1")
+        };
         let mut request = reqwest::Client::new()
             .get(format!("{}{path}", self.url))
             .header("x-test-relay-token", &self.token)
@@ -1013,7 +1020,10 @@ async fn metadata_shutdown_and_invalid_requests() {
             StatusCode::BAD_REQUEST,
         ),
         ("/api/runs/not-an-id/stream".into(), StatusCode::BAD_REQUEST),
-        (format!("/api/runs/{}/stream", id()), StatusCode::NOT_FOUND),
+        (
+            format!("/api/runs/{}/stream?timeline=1", id()),
+            StatusCode::NOT_FOUND,
+        ),
     ] {
         assert_eq!(
             client
