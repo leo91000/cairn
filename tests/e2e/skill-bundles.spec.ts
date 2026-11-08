@@ -148,11 +148,11 @@ test('builds a multi-file skill, saves one batch and round-trips it through a zi
   await useRelayForHttpMocks(page)
   const errors: string[] = []
   let reloading = false
-  // WebKit reports a background poll that the reload cancels as an access-control page error, without
-  // a failed request for Playwright. Only that diagnostic, for the two polls, is expected while reloading.
+  // WebKit refuses a background poll started while the page reloads with an access-control page error,
+  // before any request reaches the network. Only that diagnostic, for the two polls, is expected then.
   const cancelledPoll = /^\/[^/]+\/api\/installations(?:\/[^/]+\/api\/tasks\/activity)? due to access control checks\.$/
   page.on('pageerror', (error) => {
-    if (reloading && browserName === 'webkit' && cancelledPoll.test(error.message) && error.stack?.startsWith('Fetch API cannot load '))
+    if (reloading && browserName === 'webkit' && cancelledPoll.test(error.message) && error.name.startsWith('Fetch API cannot load'))
       return
     errors.push(error.message)
   })
