@@ -445,7 +445,7 @@ class SignalJourneyTest {
         }
 
     @Test
-    fun `compact fil leaves finding questions and failures by project to the header search`() =
+    fun `compact fil leaves finding conversations by project to the header search`() =
         journey(
             feedChats =
                 listOf(
