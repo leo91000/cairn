@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: 9aab748ff34627d317adaffadb5e94210ac7d899
+          ref: a6f4625d6baa1377fe9a2b6d6d9f92ca22011930
       - uses: ./.github/actions/setup-pnpm
         with:
           cache: true
@@ -43,7 +43,7 @@ jobs:
       - name: Build exact committed source
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          test "$(git rev-parse HEAD)" = 9aab748ff34627d317adaffadb5e94210ac7d899
+          test "$(git rev-parse HEAD)" = a6f4625d6baa1377fe9a2b6d6d9f92ca22011930
           test -z "$(git status --porcelain)"
           git show -s --format='%H %cI %s'
           cargo build --locked -p cairn-installation --bin cairn --example worker_fixture --example browser_fixture
@@ -59,13 +59,13 @@ jobs:
       - name: Verify final source identity
         if: always()
         run: |
-          test "$(git rev-parse HEAD)" = 9aab748ff34627d317adaffadb5e94210ac7d899
+          test "$(git rev-parse HEAD)" = a6f4625d6baa1377fe9a2b6d6d9f92ca22011930
           git diff --exit-code
           git status --porcelain
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: plan-draft-exact-head-9aab748f
+          name: plan-draft-exact-head-a6f4625d
           path: |
             evidence/
             playwright-report/
