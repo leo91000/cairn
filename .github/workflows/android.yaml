@@ -12,7 +12,7 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        source: [0417288da8d52b92a4275aa2429b1b7a6e33f409, 1774148251ddf632218b60afb340f51c2e0ba7ad]
+        source: [32e148e3c04d09f73535e2330be480e6d7d0ca03]
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -37,24 +37,37 @@ jobs:
           test -z "$(git status --porcelain)"
           git show -s --format='%H %T %cI'
           sha256sum apps/android/app/src/test/java/build/cairn/app/ui/BlockedMissionJourneyTest.kt apps/android/app/src/main/java/build/cairn/app/ui/FilScreen.kt
-      - uses: actions/checkout@v7.0.1
-        with:
-          ref: ci/blocked-mission-observer
-          path: observer
-      - name: Instrument only the diagnostic fixture
-        run: python3 observer/.github/blocked-mission-probe.py
-      - name: Repeat the archive journey with named waits
-        working-directory: apps/android
-        run: ./gradlew :app:testDebugUnitTest --tests '*BlockedMissionJourneyTest.archiving*' --no-daemon
-      - name: Record diagnostic source patch
-        if: always()
-        run: git diff -- apps/android/app/src/test/java/build/cairn/app/ui/BlockedMissionJourneyTest.kt
+      - name: Apply repository Android formatter without a source diff
+        run: |
+          pnpm format:android
+          git diff --exit-code
+      - name: Qualify full Android on exact committed head
+        run: pnpm validate:pr android
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: blocked-mission-${{ matrix.source }}
+          name: blocked-mission-full-${{ matrix.source }}
           path: |
             apps/android/app/build/test-results/testDebugUnitTest/
             apps/android/app/build/reports/tests/testDebugUnitTest/
             apps/android/app/build/reports/lint-results-debug.*
+          retention-days: 14
+      - name: Qualify complete blocked mission fixture explicitly
+        working-directory: apps/android
+        run: ./gradlew :app:testDebugUnitTest --tests '*BlockedMissionJourneyTest*' --no-daemon
+      - name: Verify final source
+        if: always()
+        env:
+          SOURCE: ${{ matrix.source }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$SOURCE"
+          git diff --exit-code
+          git status --porcelain
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: blocked-mission-targeted-${{ matrix.source }}
+          path: |
+            apps/android/app/build/test-results/testDebugUnitTest/
+            apps/android/app/build/reports/tests/testDebugUnitTest/
           retention-days: 14
