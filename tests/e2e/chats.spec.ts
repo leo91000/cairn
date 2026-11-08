@@ -1123,6 +1123,11 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
   await expect(menu.getByRole('menuitem', { name: 'Delete conversation', exact: true })).toBeFocused()
   await expect(menu.getByRole('menuitem', { name: 'Delete conversation', exact: true })).toBeInViewport({ ratio: 1 })
   await page.keyboard.press('Escape')
+  // Opening with ArrowUp focuses the last action and scrolls it into view.
+  await page.keyboard.press('ArrowUp')
+  await expect(menu.getByRole('menuitem', { name: 'Delete conversation', exact: true })).toBeFocused()
+  await expect(menu.getByRole('menuitem', { name: 'Delete conversation', exact: true })).toBeInViewport({ ratio: 1 })
+  await page.keyboard.press('Escape')
   await page.setViewportSize({ width: 1440, height: 1000 })
   await expect(message).toHaveValue('Keep my draft while browsing details')
   await page.setViewportSize({ width: 390, height: 844 })
@@ -1412,6 +1417,9 @@ test('failed replies show the current error instead of an old answer and can be 
   await expect(headerStatus(page, /^Failed$/).locator('..')).toHaveClass(/text-coral/)
   await page.setViewportSize({ width: 1280, height: 800 })
   await expect(headerStatus(page, /^Failed$/)).toHaveClass(/text-coral/)
+  // Opening a failed conversation is not news: the live region waits for a change.
+  await page.waitForTimeout(1500)
+  await expect(page.locator('.chat-header .sr-only[role="status"]')).toHaveText('')
   await expect(page.getByRole('alert')).toHaveCount(0)
   for (const colorScheme of ['dark', 'light'] as const) {
     await page.emulateMedia({ colorScheme })

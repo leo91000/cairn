@@ -30,6 +30,7 @@ const open = ref(false)
 const position = ref<Record<string, string>>({})
 const id = useId()
 let frame = 0
+let contents: MutationObserver | undefined
 
 function place() {
   const rect = trigger.value!.getBoundingClientRect()
@@ -70,8 +71,27 @@ async function show(focus: 'first' | 'last' = 'first') {
   await nextTick()
   menu.value?.showPopover?.()
   place()
+  // Focus once the height limit applies, so a scrolling menu shows the item it focuses.
+  await nextTick()
   const list = items()
-  ;(focus === 'first' ? list[0] : list.at(-1))?.focus({ preventScroll: true })
+  const item = focus === 'first' ? list[0] : list.at(-1)
+  item?.focus({ preventScroll: true })
+  item?.scrollIntoView({ block: 'nearest' })
+  // An item that is removed or disabled while focused would drop focus to the page, where the
+  // menu's keys no longer reach it: focus stays in the menu instead.
+  contents = new MutationObserver(() => {
+    if (open.value && !menu.value?.contains(document.activeElement))
+      (items()[0] ?? trigger.value)?.focus({ preventScroll: true })
+  })
+  if (menu.value) {
+    contents.observe(menu.value, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['disabled', 'aria-disabled'],
+    })
+  }
+
   document.addEventListener('pointerdown', outside, true)
   window.addEventListener('resize', dismiss)
   window.addEventListener('scroll', scrolled, true)
@@ -81,6 +101,8 @@ function hide(restore = true) {
   if (!open.value)
     return
   open.value = false
+  contents?.disconnect()
+  contents = undefined
   document.removeEventListener('pointerdown', outside, true)
   window.removeEventListener('resize', dismiss)
   window.removeEventListener('scroll', scrolled, true)

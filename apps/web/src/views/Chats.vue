@@ -883,17 +883,23 @@ const menuButton = ref<InstanceType<typeof MenuButton>>()
 const contextPill = ref<HTMLElement>()
 // One region stays mounted so screen readers hear a new status, the conversation's or its node's;
 // a countdown would repeat every minute. A status must hold for a second, so the brief queue every
-// message passes through is not read out on each send.
+// message passes through is not read out on each send. Opening a conversation sets the baseline:
+// its current status is not news.
 const liveStatus = computed(() => [
   headerState.value && chatStatus.value !== sleepStatus.value ? headerState.value.label : '',
   nodeExecution.value?.attention ? nodeExecution.value.status.label : '',
 ].filter(Boolean).join(' · '))
 const announcedStatus = ref('')
 let announcement: ReturnType<typeof setTimeout> | undefined
-watch(liveStatus, (text) => {
+watch([() => detail.value?.id, liveStatus], ([id, text], [previousId]) => {
   clearTimeout(announcement)
+  if (id !== previousId) {
+    announcedStatus.value = ''
+    return
+  }
+
   announcement = setTimeout(() => announcedStatus.value = text, 1000)
-}, { immediate: true })
+})
 onBeforeUnmount(() => clearTimeout(announcement))
 
 function openCompactionFromHeader() {
