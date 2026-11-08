@@ -50,14 +50,14 @@ def main():
         return 0
     started = time.monotonic()
     try:
-        with tempfile.TemporaryDirectory(prefix='native-tool-preparation-', dir=Path.cwd()) as directory:
+        with tempfile.TemporaryDirectory(prefix='.np-', dir=Path.cwd()) as directory:
             root = Path(directory)
             module_file = root / 'native-host.py'
             module_file.write_bytes(raw)
             spec = importlib.util.spec_from_file_location('qualified_native_tool_preparation', module_file)
             host = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(host)
-            host.INSTALL = root / 'install'
+            host.INSTALL = root / 'i'
             original_open = host.open_docker_tool
             allowed = dict(pins(raw))
             def observe_open(url):
@@ -77,6 +77,10 @@ def main():
             def observe_probe(command, **kwargs):
                 assert command[-3:] == ['version', '--format', '{{json .Client}}']
                 assert set(kwargs['env']) == {'PATH', 'HOME', 'DOCKER_CONFIG', 'DOCKER_HOST'}
+                socket_path = kwargs['env']['DOCKER_HOST'].removeprefix('unix://')
+                report['offlineSocketBytes'] = len(socket_path.encode())
+                record()
+                assert report['offlineSocketBytes'] < 108, 'The private probe socket must fit Linux sun_path'
                 result = original_probe(command, **kwargs)
                 report['offlineClientProbe'] = {
                     'returnCode': result.returncode,
