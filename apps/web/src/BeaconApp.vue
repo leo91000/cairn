@@ -779,7 +779,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <WebUpdateNotice />
+  <WebUpdateNotice :required="!!state.protocolError" />
   <PrivacyPolicy v-if="privacyPage" />
   <main v-else-if="session?.authenticated && pluginCallbackPage" class="min-h-dvh bg-canvas text-ink px-6 py-10">
     <PluginOAuthCallback :parameters="pluginCallbackParameters" />

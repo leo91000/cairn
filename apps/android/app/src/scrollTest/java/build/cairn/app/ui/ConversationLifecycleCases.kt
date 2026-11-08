@@ -79,7 +79,7 @@ abstract class ConversationLifecycleCases {
                         if (path == "/api/installations/fixture/api/chats/stream") {
                             val chats = if (deleted.get()) emptyList() else listOf(chat)
                             val frame =
-                                "event: batch\nid: 0\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(chats = chats), true, false))}\n\n"
+                                "event: batch\nid: 0\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(chats = chats), true, false, history = "v2:fixture:1"))}\n\n"
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
                                 .setBody(frame)
@@ -96,7 +96,7 @@ abstract class ConversationLifecycleCases {
                                         else null,
                                 )
                             val frame =
-                                "event: batch\nid: 0\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(chat = current), true, false))}\n\n"
+                                "event: batch\nid: 0\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(chat = current), true, false, history = "v2:fixture:1"))}\n\n"
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
                                 .setBody(frame)

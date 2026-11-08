@@ -75,7 +75,7 @@ class MissionChatDeviceTest {
                                 }
                                 path.endsWith("/runs/waiting/stream") -> {
                                     val frame =
-                                        "event: batch\nid: 1\ndata: ${wireJson.encodeToString(LiveBatch(listOf(child), LiveState(run = run), true, false))}\n\n"
+                                        "event: batch\nid: 1\ndata: ${wireJson.encodeToString(LiveBatch(listOf(child), LiveState(run = run), true, false, history = "v2:fixture:1"))}\n\n"
                                     return MockResponse()
                                         .setHeader("Content-Type", "text/event-stream")
                                         .setBody(frame + ": keepalive\n\n".repeat(100000))
@@ -185,7 +185,7 @@ class MissionChatDeviceTest {
                                 }
                                 path.endsWith("/runs/${run.id}/stream") -> {
                                     val frame =
-                                        "event: batch\nid: 1\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(run = run), true, false))}\n\n"
+                                        "event: batch\nid: 1\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(run = run), true, false, history = "v2:fixture:1"))}\n\n"
                                     return MockResponse()
                                         .setHeader("Content-Type", "text/event-stream")
                                         .setBody(frame + ": keepalive\n\n".repeat(100000))
@@ -289,7 +289,7 @@ class MissionChatDeviceTest {
                                 }
                                 path.endsWith("/runs/${run.id}/stream") -> {
                                     val frame =
-                                        "event: batch\nid: 1\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(run = run), true, false))}\n\n"
+                                        "event: batch\nid: 1\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), LiveState(run = run), true, false, history = "v2:fixture:1"))}\n\n"
                                     return MockResponse()
                                         .setHeader("Content-Type", "text/event-stream")
                                         .setBody(frame + ": keepalive\n\n".repeat(100000))
