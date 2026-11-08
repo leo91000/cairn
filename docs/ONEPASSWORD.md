@@ -29,8 +29,8 @@ values arrive as a JSON argument that agents build from variables or command
 substitution, so a value never appears literally in the command text. Cairn sends
 them to `op` through stdin, as an item JSON template, never in its arguments, and
 returns field references without values. `set-fields` rewrites the item from its
-JSON, which carries no passkey, so it refuses Login items, as well as Document and SSH
-Key items and items with attachments. Nothing deletes items. Installation agents can
+JSON, which carries no passkey, so it refuses Login items, as well as Document, SSH Key
+and other less common categories, and items with attachments. Nothing deletes items. Installation agents can
 turn writing off but never on.
 Write requests have their own hourly quota and share the daily account quota.
 Tool results containing secrets enter the authorized agent's context and may be
@@ -55,8 +55,8 @@ AES-GCM credential vault. They are never returned by the management API, given t
 the package's script, copied into a run/VM environment, or included in audit
 records. Back up `mcp-encryption-key` together with the application database. The
 manager runs the plugin’s locked official CLI as the package's declared program: an empty
-environment with the token and `OP_CACHE=true`, the package's fixed read-only
-arguments and a 30-second timeout. Cairn supervises the official CLI's encrypted
+environment with the token and `OP_CACHE=true`, arguments the package builds without item values (writes pass
+them on stdin) and a 30-second timeout. Cairn supervises the official CLI's encrypted
 in-memory cache daemon with a private home/socket per connection, shared only by
 its authorized agents. It starts lazily, expires after ten idle minutes and is
 invalidated on settings/token changes, disable/delete/disconnect or shutdown.

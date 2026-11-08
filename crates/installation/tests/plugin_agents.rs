@@ -851,7 +851,7 @@ esac
     let invoked = std::fs::read_to_string(&calls).unwrap();
     assert!(!invoked.contains("new-secret"));
     assert!(invoked.ends_with(
-        "item get --vault=vault --format=json -- Deploy\nitem edit --vault=vault --format=json -- item-id\n"
+        "item get --cache=false --vault=vault --format=json -- Deploy\nitem edit --vault=vault --format=json -- item-id\n"
     ));
 
     assert_eq!(
@@ -891,6 +891,7 @@ esac
         r#"{"id":"item-id","category":"LOGIN","fields":[]}"#,
         r#"{"id":"item-id","category":"DOCUMENT","fields":[]}"#,
         r#"{"id":"item-id","category":"SSH_KEY","fields":[]}"#,
+        r#"{"id":"item-id","category":"CUSTOM","fields":[]}"#,
         r#"{"id":"item-id","category":"PASSWORD","files":[{"id":"file"}],"fields":[]}"#,
     ] {
         std::fs::write(&stored, item).unwrap();
@@ -909,6 +910,31 @@ esac
                 .unwrap_err();
         assert!(error.message.contains("cannot edit"), "{item}: {error:?}");
     }
+    // Like read-fields, a label shared by two fields must be named by ID.
+    std::fs::write(
+        &stored,
+        r#"{"id":"item-id","category":"PASSWORD","fields":[{"id":"a","label":"duplicate"},{"id":"b","label":"duplicate"}]}"#,
+    )
+    .unwrap();
+    let ambiguous = command(
+        "set-fields",
+        &[
+            "--account",
+            &account,
+            "--vault",
+            "vault",
+            "--item",
+            "Deploy",
+            "--fields",
+            r#"[{"field":"duplicate","value":"new-secret"}]"#,
+        ],
+    );
+    let error =
+        f.s.plugins
+            .command(&f.s, &f.bearer, &ambiguous)
+            .await
+            .unwrap_err();
+    assert!(error.message.contains("ambiguous"), "{error:?}");
     let invoked = std::fs::read_to_string(&calls).unwrap();
     assert_eq!(invoked.matches("item edit").count(), edits);
     assert!(!invoked.contains("new-secret"));
@@ -970,13 +996,15 @@ exit 1
     assert!(error.message.contains("3500 seconds"), "{error:?}");
 
     // The metadata tool never writes.
-    let tool = mcp(
-        &f,
-        "tools/call",
-        json!({ "name": "onepassword", "arguments": { "operation": "create-item", "accountId": account } }),
-    )
-    .await;
-    assert_eq!(tool["result"]["isError"], true, "{tool}");
+    for operation in ["create-item", "set-fields"] {
+        let tool = mcp(
+            &f,
+            "tools/call",
+            json!({ "name": "onepassword", "arguments": { "operation": operation, "accountId": account } }),
+        )
+        .await;
+        assert_eq!(tool["result"]["isError"], true, "{tool}");
+    }
 }
 
 async fn run(f: &Fixture, input: Value) -> Result<Value, u16> {

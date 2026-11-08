@@ -601,6 +601,29 @@ pub async fn save(
     .await
 }
 
+/// An `ownerOnly` switch widens what granted agents may do, like a grant. `previous`
+/// is set only when an installation agent saves: it may turn the switch off, never on.
+fn owner_only_unchanged(
+    manifest: &Manifest,
+    previous: Option<&Value>,
+    settings: &Value,
+) -> Result<()> {
+    let Some(previous) = previous else {
+        return Ok(());
+    };
+    let widened = manifest.settings.iter().find(|field| {
+        let key = text(field, "key");
+        field["ownerOnly"] == true && settings[key] == true && previous[key] != true
+    });
+    match widened {
+        Some(field) => Err(Error::forbidden(format!(
+            "Only the owner can turn on “{}”.",
+            text(field, "title")
+        ))),
+        None => Ok(()),
+    }
+}
+
 pub(crate) async fn save_authorized<F>(
     s: &Service,
     plugin_id: &str,
@@ -662,6 +685,15 @@ where
         return Err(Error::bad("Enter a connection name."));
     }
     let mut settings = settings(&manifest, &settings_input)?;
+    // Installation agents may turn an owner-only switch off, never on.
+    let previous_settings = match (&management, existing) {
+        (Some(authority), Some(id)) if authority.is_agent() => {
+            Some(get(s, plugin_id, id).await?.settings)
+        }
+        (Some(authority), None) if authority.is_agent() => Some(json!({})),
+        _ => None,
+    };
+    owner_only_unchanged(&manifest, previous_settings.as_ref(), &settings)?;
     let delegates = manifest.permits_capability("conversations.submit");
     let agent_id = if delegates {
         command.agent_id.as_str()
@@ -834,27 +866,8 @@ where
             }
         }
     }
-    // A risky switch widens what granted agents may do, like a grant: installation
-    // agents may turn one off, never on.
-    if management
-        .as_ref()
-        .is_some_and(super::management::Authority::is_agent)
-    {
-        let previous = match existing {
-            Some(id) => get(s, plugin_id, id).await?.settings,
-            None => json!({}),
-        };
-        let widened = manifest.settings.iter().find(|field| {
-            let key = text(field, "key");
-            field.get("risk").is_some() && settings[key] == true && previous[key] != true
-        });
-        if let Some(field) = widened {
-            return Err(Error::forbidden(format!(
-                "Only the owner can turn on “{}”.",
-                text(field, "title")
-            )));
-        }
-    }
+    // The package's form may set values too: check them again before saving.
+    owner_only_unchanged(&manifest, previous_settings.as_ref(), &settings)?;
     if let Some(flow) = flow {
         super::oauth::flow_credential(s, plugin_id, flow, existing, &settings, false).await?;
     }

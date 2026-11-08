@@ -337,21 +337,25 @@ operations["create-item"] = function(input)
 end
 
 -- Edits rewrite the item from its JSON. It carries no passkey, and attachments, documents
--- and SSH keys may not survive the round trip: those items are refused.
-local REWRITE_UNSAFE = { LOGIN = true, DOCUMENT = true, SSH_KEY = true }
+-- or SSH keys may not survive the round trip: only these categories are rewritten.
+local REWRITABLE = {
+    PASSWORD = true, API_CREDENTIAL = true, SERVER = true, DATABASE = true, SECURE_NOTE = true,
+    SOFTWARE_LICENSE = true, WIRELESS_ROUTER = true, EMAIL_ACCOUNT = true,
+}
 
 operations["set-fields"] = function(input)
     local id = writable_account(input)
     local entries = assignments(input.arguments.fields)
 
+    -- A cached copy could be stale, and the rewrite would undo newer changes.
     local item = decode(op(id, {
-        "item", "get", "--vault=" .. input.arguments.vault, "--format=json", "--", input.arguments.item,
+        "item", "get", "--cache=false", "--vault=" .. input.arguments.vault, "--format=json", "--", input.arguments.item,
     }))
     if type(item.id) ~= "string" or item.id == "" then
         cairn.fail("Invalid 1Password response.")
     end
-    if REWRITE_UNSAFE[item.category] or (type(item.files) == "table" and next(item.files) ~= nil) then
-        cairn.fail("set-fields cannot edit Login, Document or SSH Key items, or items with attachments. Edit it in 1Password, or create a new item.")
+    if not REWRITABLE[item.category] or (type(item.files) == "table" and next(item.files) ~= nil) then
+        cairn.fail("set-fields cannot edit this item: Login, Document, SSH Key and other categories, or attachments, could be damaged. Edit it in 1Password, or create a new item.")
     end
     assign(item, entries)
 
@@ -382,7 +386,7 @@ return {
         local metadata = request.operation == "accounts" or request.operation == "limits" or request.operation == "vaults"
             or request.operation == "items" or request.operation == "fields"
         if not metadata or operation == nil then
-            cairn.fail("Read secrets through the Cairn plugin CLI and pipe them directly to the consuming command.")
+            cairn.fail("This tool only lists metadata. Read secrets and write items through the Cairn plugin CLI.")
         end
 
         if request.operation ~= "accounts" and request.accountId == nil then
