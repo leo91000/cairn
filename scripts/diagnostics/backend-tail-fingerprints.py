@@ -13,7 +13,9 @@ import time
 NAME = re.compile(r"[A-Za-z0-9_+.-]{1,180}\Z")
 FEATURE = re.compile(r"[A-Za-z0-9_+./?=-]{1,180}\Z")
 MARKER = re.compile(rb"[0-9a-f]{16}\Z")
-MAX_BYTES = 65536
+# The real Cairn graph emitted a 240,501-byte Cargo fingerprint. Keep a fixed
+# 512 KiB read bound; parsing/projection and the whole 15-second scan stay strict.
+MAX_BYTES = 512 * 1024
 REASONS = frozenset([
     'unsupported_fingerprint_file', 'oversized_fingerprint_file',
     'invalid_feature_list', 'invalid_feature_name', 'invalid_fingerprint_number',
@@ -45,8 +47,10 @@ def read_regular(location):
     descriptor = os.open(location, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_BYTES:
+        if not stat.S_ISREG(metadata.st_mode):
             raise ValueError("unsupported_fingerprint_file")
+        if metadata.st_size > MAX_BYTES:
+            raise ValueError("oversized_fingerprint_file")
         with os.fdopen(descriptor, "rb", closefd=False) as source:
             data = source.read(MAX_BYTES + 1)
         if len(data) > MAX_BYTES:
