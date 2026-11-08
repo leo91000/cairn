@@ -3,7 +3,7 @@ import process from 'node:process'
 import { isolateTestCredentials } from './test-environment.mjs'
 
 isolateTestCredentials()
-const built = spawnSync('cargo', ['test', '--locked', '-p', 'cairn-installation', '--lib', '--no-run', '--message-format=json'], {
+const built = spawnSync('cargo', ['test', '--locked', '--workspace', '--lib', '--no-run', '--message-format=json'], {
   encoding: 'utf8',
   stdio: ['ignore', 'pipe', 'inherit'],
   maxBuffer: 64 * 1024 * 1024,
