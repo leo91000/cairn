@@ -225,7 +225,7 @@ async fn lightweight_cards_match_full_execution_metadata() {
             }
         }
         // A running Claude reply that announced side questions takes them in lists too,
-        // unless it is stopping.
+        // unless it is stopping, compacting or its native consumer has finished.
         for (stopping, compacting, closed) in [
             (false, false, false), (true, false, false), (false, true, false),
             (true, true, false), (false, false, true), (true, true, true),
@@ -237,7 +237,8 @@ async fn lightweight_cards_match_full_execution_metadata() {
             }))?;
             db.admit_run(&state, None, &json!({
                 "chatExecution": { "operation": "message" }, "sideQuestions": true,
-                "sideQuestionsCompacting": compacting, "sideQuestionsClosed": closed,
+                "sideQuestionsCompacting": compacting,
+                "sideQuestionsClosed": closed,
             }), None)?;
             db.0.execute("UPDATE runs SET snapshot=? WHERE id=?", rusqlite::params![
                 json!({ "agent": { "provider": "claude" } }).to_string(), id,

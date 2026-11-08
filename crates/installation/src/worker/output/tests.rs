@@ -977,7 +977,11 @@ async fn native_completion_closes_side_admission_before_worker_finalization() {
         .unwrap();
         let retained = fixture
             .service
-            .side_question_ask_live(&chat, input.clone(), Default::default())
+            .side_question_ask_live(
+                &chat,
+                input.clone(),
+                crate::authorization::Authorization::default(),
+            )
             .await
             .unwrap();
         fixture
@@ -1014,7 +1018,11 @@ async fn native_completion_closes_side_admission_before_worker_finalization() {
         );
         let retried = fixture
             .service
-            .side_question_ask_live(&chat, input.clone(), Default::default())
+            .side_question_ask_live(
+                &chat,
+                input.clone(),
+                crate::authorization::Authorization::default(),
+            )
             .await
             .unwrap();
         assert_eq!(retried["id"], retained["id"]);
@@ -1022,7 +1030,7 @@ async fn native_completion_closes_side_admission_before_worker_finalization() {
         fresh.id = "a1b2c3d4-0000-4000-8000-000000000002".into();
         let error = fixture
             .service
-            .side_question_ask_live(&chat, fresh, Default::default())
+            .side_question_ask_live(&chat, fresh, crate::authorization::Authorization::default())
             .await
             .unwrap_err();
         assert_eq!(error.status, 409);
@@ -1044,7 +1052,7 @@ async fn native_completion_closes_side_admission_before_worker_finalization() {
             .unwrap();
         let retried = fixture
             .service
-            .side_question_ask_live(&chat, input, Default::default())
+            .side_question_ask_live(&chat, input, crate::authorization::Authorization::default())
             .await
             .unwrap();
         assert_eq!(retried["status"], "failed");
