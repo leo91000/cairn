@@ -143,11 +143,19 @@ async function openFile(page: Page, filePath: string) {
   await row(page, filePath).click()
 }
 
-test('builds a multi-file skill, saves one batch and round-trips it through a zip', async ({ page, workspace }, testInfo) => {
+test('builds a multi-file skill, saves one batch and round-trips it through a zip', async ({ page, workspace, browserName }, testInfo) => {
   test.setTimeout(120000)
   await useRelayForHttpMocks(page)
   const errors: string[] = []
-  page.on('pageerror', error => errors.push(error.message))
+  let reloading = false
+  // WebKit refuses a background poll started while the page reloads with an access-control page error,
+  // before any request reaches the network. Only that diagnostic, for the two polls, is expected then.
+  const cancelledPoll = /^\/[^/]+\/api\/installations(?:\/[^/]+\/api\/tasks\/activity)? due to access control checks\.$/
+  page.on('pageerror', (error) => {
+    if (reloading && browserName === 'webkit' && cancelledPoll.test(error.message) && error.name.startsWith('Fetch API cannot load'))
+      return
+    errors.push(error.message)
+  })
   const batches: {
     base: string | null
     changes: {
@@ -235,7 +243,14 @@ test('builds a multi-file skill, saves one batch and round-trips it through a zi
   await expect(dialog).toHaveCount(0)
 
   // Reloading shows exactly what was saved, with modes.
-  await page.reload()
+  reloading = true
+  try {
+    await page.reload()
+  }
+  finally {
+    reloading = false
+  }
+
   await page.getByRole('button', { name: 'Edit bundle-demo', exact: true }).click()
   const editor = page.getByRole('dialog', { name: 'Edit skill' })
   await expect(editor.getByText('6 files')).toBeVisible()
