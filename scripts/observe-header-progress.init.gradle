@@ -1,0 +1,62 @@
+// Observer only. Preserve each test boundary before a runner or JVM is lost.
+import groovy.json.JsonOutput
+import org.gradle.api.tasks.testing.Test
+import org.gradle.api.tasks.testing.TestDescriptor
+import org.gradle.api.tasks.testing.TestListener
+import org.gradle.api.tasks.testing.TestResult
+
+final class HeaderProgress implements TestListener {
+    private final File destination
+
+    HeaderProgress(File destination) {
+        this.destination = destination
+    }
+
+    private synchronized void append(Map record) {
+        destination.withWriterAppend('UTF-8') { writer ->
+            writer.write(JsonOutput.toJson(record + [observedAt: java.time.Instant.now().toString()]))
+            writer.write('\n')
+        }
+    }
+
+    void beforeSuite(TestDescriptor suite) {}
+
+    void afterSuite(TestDescriptor suite, TestResult result) {
+        if (suite.parent == null) {
+            append([event: 'suite-end', result: result.resultType.toString(), tests: result.testCount,
+                    failed: result.failedTestCount, skipped: result.skippedTestCount])
+        }
+    }
+
+    void beforeTest(TestDescriptor test) {
+        if (test.className == 'build.cairn.app.ui.UnifiedHeaderTest') {
+            append([event: 'test-start', name: test.name])
+        }
+    }
+
+    void afterTest(TestDescriptor test, TestResult result) {
+        if (test.className == 'build.cairn.app.ui.UnifiedHeaderTest') {
+            def errors = result.exceptions.collect { error ->
+                def trace = new StringWriter()
+                error.printStackTrace(new PrintWriter(trace))
+                def value = trace.toString()
+                [trace: value.take(32768), truncated: value.length() > 32768]
+            }
+            append([event: 'test-end', name: test.name, result: result.resultType.toString(),
+                    startTime: result.startTime, endTime: result.endTime, errors: errors])
+        }
+    }
+}
+
+def evidence = gradle.startParameter.systemPropertiesArgs['cairnHeaderEvidence']
+if (!evidence) {
+    throw new GradleException('Missing explicit header evidence path')
+}
+
+gradle.projectsEvaluated {
+    allprojects {
+        tasks.withType(Test).configureEach {
+            addTestListener(new HeaderProgress(new File(evidence)))
+        }
+    }
+}

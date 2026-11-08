@@ -408,15 +408,17 @@ jobs:
           git worktree add --detach source-candidate 35a721cb499afb1d12711fb9e855288f66c1abf0
       - name: Amplify the base header journey without changing assertions
         id: base
+        timeout-minutes: 25
         continue-on-error: true
         working-directory: source-base
         run: |
           set -euo pipefail
           git rev-parse HEAD HEAD^{tree} > ../header-evidence/base-source.txt
+          sha256sum ../scripts/observe-header-progress.init.gradle > ../header-evidence/base-progress-observer.sha256
           test -z "$(git status --porcelain)"
           python3 ../scripts/observe-header-trials.py . ../header-evidence/base-observed.patch
           set +e
-          apps/android/gradlew -p apps/android testDebugUnitTest --tests build.cairn.app.ui.UnifiedHeaderTest --no-daemon > ../header-evidence/base-command.log 2>&1
+          apps/android/gradlew -p apps/android testDebugUnitTest --tests build.cairn.app.ui.UnifiedHeaderTest --no-daemon --init-script "$GITHUB_WORKSPACE/scripts/observe-header-progress.init.gradle" -DcairnHeaderEvidence="$GITHUB_WORKSPACE/header-evidence/base-progress.jsonl" > ../header-evidence/base-command.log 2>&1
           result=$?
           set -e
           echo "$result" > ../header-evidence/base-exit.txt
@@ -434,16 +436,18 @@ jobs:
           retention-days: 14
       - name: Amplify the candidate header journey without changing assertions
         id: candidate
+        timeout-minutes: 25
         if: always() && steps.base.outcome != 'skipped'
         continue-on-error: true
         working-directory: source-candidate
         run: |
           set -euo pipefail
           git rev-parse HEAD HEAD^{tree} > ../header-evidence/candidate-source.txt
+          sha256sum ../scripts/observe-header-progress.init.gradle > ../header-evidence/candidate-progress-observer.sha256
           test -z "$(git status --porcelain)"
           python3 ../scripts/observe-header-trials.py . ../header-evidence/candidate-observed.patch
           set +e
-          apps/android/gradlew -p apps/android testDebugUnitTest --tests build.cairn.app.ui.UnifiedHeaderTest --no-daemon > ../header-evidence/candidate-command.log 2>&1
+          apps/android/gradlew -p apps/android testDebugUnitTest --tests build.cairn.app.ui.UnifiedHeaderTest --no-daemon --init-script "$GITHUB_WORKSPACE/scripts/observe-header-progress.init.gradle" -DcairnHeaderEvidence="$GITHUB_WORKSPACE/header-evidence/candidate-progress.jsonl" > ../header-evidence/candidate-command.log 2>&1
           result=$?
           set -e
           echo "$result" > ../header-evidence/candidate-exit.txt
