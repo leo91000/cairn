@@ -43,9 +43,8 @@ jobs:
         run: node scripts/install-native-ci-dependencies.mjs
       - uses: ./.github/actions/prepare-rust-runner
         timeout-minutes: 3
-      - uses: ./.github/actions/observe-rust-build
-        with:
-          phase: before-build
+      - name: Preserve capacity before compilation without matrix artifact collisions
+        run: node scripts/ci-rust-build-observation.mjs before-build "$RUNNER_TEMP/backend-tail-capacity-before.json"
       - name: Install the unchanged pinned nextest binary
         timeout-minutes: 3
         run: node scripts/install-nextest-ci.mjs
@@ -53,14 +52,16 @@ jobs:
         env:
           GRAPH_SCOPE: ${{ matrix.scope }}
         run: bash "$RUNNER_TEMP/backend-tail-observer/backend-tail-graph.sh"
+      - name: Preserve capacity after compilation without matrix artifact collisions
+        if: always()
+        run: node scripts/ci-rust-build-observation.mjs after-build "$RUNNER_TEMP/backend-tail-capacity-after.json"
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
           name: backend-tail-graph-${{ matrix.scope }}
-          path: backend-tail-evidence/
+          path: |
+            backend-tail-evidence/
+            ${{ runner.temp }}/backend-tail-capacity-before.json
+            ${{ runner.temp }}/backend-tail-capacity-after.json
           if-no-files-found: error
           retention-days: 14
-      - uses: ./.github/actions/observe-rust-build
-        if: always()
-        with:
-          phase: after-build
