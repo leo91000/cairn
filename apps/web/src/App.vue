@@ -50,18 +50,19 @@ provide(workspaceActionsKey, {
 })
 
 // The three places of « Signal »: the Fil (home and conversations), Missions and the Atelier.
-const atelierPaths = ['/atelier', '/agents', '/projects', '/skills', '/mcps', '/connections', '/nodes', '/settings', '/runs']
+const atelierPaths = ['/atelier', '/agents', '/projects', '/skills', '/mcps', '/connections', '/plugins', '/nodes', '/settings', '/runs']
 const atelierSections = computed(() => [
   { to: '/agents', label: 'Agents' },
   { to: '/projects', label: 'Projects' },
   { to: '/skills', label: 'Skills' },
   { to: '/mcps', label: 'MCPs' },
   { to: '/connections', label: 'Connections' },
+  { to: '/plugins', label: 'Plugins' },
   { to: '/runs', label: 'Runs' },
   { to: '/nodes', label: 'Nodes' },
   { to: '/settings', label: 'Settings' },
 ].filter(item => state.installationRole === 'owner' || !ownerPage(item.to)))
-const atelierSection = computed(() => atelierSections.value.find(item => route.path === item.to || (item.to === '/settings' && route.path.startsWith('/settings/'))))
+const atelierSection = computed(() => atelierSections.value.find(item => route.path === item.to || (item.to === '/plugins' && route.path.startsWith('/plugins/')) || (item.to === '/settings' && route.path.startsWith('/settings/'))))
 const atelierOverview = computed(() => route.path === '/atelier')
 const places: Array<{
   to: string
