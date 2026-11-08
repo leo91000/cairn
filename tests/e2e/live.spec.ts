@@ -860,3 +860,41 @@ test('recent history loads older pages without moving the reader and survives a 
   await page.waitForTimeout(750)
   expect(repeatedHistoryReads).toBe(0)
 })
+
+test('required update keeps the conversation draft and destination without a reload loop', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  let refuse = false
+  let refused = 0
+  await page.route(`**/chats/${chat.id}/stream?**`, async (route) => {
+    if (!refuse)
+      return route.fallback()
+    refused++
+    await route.fulfill({ status: 426, json: { code: 'update_required', error: 'Update required.' } })
+  })
+  await page.goto(workspacePath(`${workspace.url}/chats/${chat.id}?view=conversation#draft`))
+  await authenticateWorkspace(page)
+  await expectChatReady(page)
+  const composer = page.locator('textarea').first()
+  await composer.fill('Keep this unsent draft')
+  const destination = page.url()
+  refuse = true
+  await page.evaluate(() => window.dispatchEvent(new Event('online')))
+  const notice = page.getByRole('complementary', { name: 'Cairn update' })
+  await expect(notice).toContainText('Update required.')
+  await expect(notice).toContainText('Your conversation drafts and destination are kept.')
+  await expect(page).toHaveURL(destination)
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event('online'))
+    document.dispatchEvent(new Event('visibilitychange'))
+  })
+  expect(refused).toBe(1)
+  const saved = await page.evaluate(() => Object.keys(sessionStorage).filter(key => key.startsWith('cairn-chat-draft:')).map(key => sessionStorage.getItem(key)))
+  expect(saved).toContain('Keep this unsent draft')
+  // Only an explicit user action resumes the page. It does not resend the draft.
+  refuse = false
+  await notice.getByRole('button', { name: 'Reload Cairn' }).click()
+  await expect(page).toHaveURL(destination)
+  await expect(composer).toHaveValue('Keep this unsent draft')
+  await expect(notice).toHaveCount(0)
+})

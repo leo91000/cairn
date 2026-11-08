@@ -68,6 +68,63 @@ class LiveTest {
         "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(batch)}\n\n"
 
     @Test
+    fun `incompatible timeline is terminal and preserves cached cards cursor and reading position`() =
+        runBlocking {
+            val responses =
+                listOf(
+                    MockResponse()
+                        .setResponseCode(426)
+                        .setBody("""{"code":"update_required","error":"Update required."}"""),
+                    MockResponse()
+                        .setHeader("Content-Type", "text/event-stream")
+                        .setBody(
+                            "event: batch\nid: 20\ndata: {\"events\":[],\"reset\":false,\"more\":false,\"history\":\"v1:r1:1\"}\n\n"
+                        ),
+                    MockResponse()
+                        .setHeader("Content-Type", "text/event-stream")
+                        .setBody(
+                            "event: batch\nid: 20\ndata: {\"events\":[],\"reset\":false,\"more\":false,\"history\":\"v2:r1:1\"}\n\n"
+                        ),
+                )
+            for (response in responses) {
+                MockWebServer().use { server ->
+                    server.enqueue(response)
+                    server.start()
+                    val api = CairnApi(server.url("/"), MemoryVault())
+                    val route = "/runs/r1/stream"
+                    val saved =
+                        CachedHistory(
+                            cursor = 7,
+                            history = "v2:r1:1",
+                            state =
+                                LiveState(run = Run(id = "r1", status = "running", taskId = "")),
+                            events = listOf(message(7, "Saved reply")),
+                            entries = listOf(reply(7, "Saved reply").entry),
+                            position = ReadingPosition(index = 2, offset = 19, follow = false),
+                        )
+                    val session =
+                        LiveSession().also { it.restore(saved, route, api.streamGeneration.get()) }
+                    val snapshots = withTimeout(3000) { api.live(route, session).toList() }
+                    val refusal = snapshots.last()
+                    assertEquals(426, refusal.httpStatus)
+                    assertEquals("Mise à jour requise", refusal.status)
+                    assertFalse(refusal.synced)
+                    assertEquals(7L, refusal.cursor)
+                    assertEquals(saved.history, refusal.history)
+                    assertEquals(saved.events, refusal.events)
+                    assertEquals(saved.entries, refusal.entries)
+                    assertEquals(saved.position, refusal.position)
+                    assertEquals(7L, session.cursor)
+                    assertNotNull(api.transport.protocolError.value)
+                    val request = server.takeRequest()
+                    assertEquals("1", request.requestUrl!!.queryParameter("timeline"))
+                    assertEquals("7", request.requestUrl!!.queryParameter("after"))
+                    assertEquals(1, server.requestCount)
+                }
+            }
+        }
+
+    @Test
     fun `older pages survive an IOException reconnect while the session lock remains occupied`() =
         runBlocking {
             MockWebServer().use { server ->
