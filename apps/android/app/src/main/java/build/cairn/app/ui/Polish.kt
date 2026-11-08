@@ -45,6 +45,25 @@ internal object CairnIcons {
             lineTo(3f, 6f)
             quadTo(3f, 4f, 5f, 4f)
         }
+    /** A speech bubble with quotation marks: a question about part of a reply. */
+    val SideQuestion =
+        line("SideQuestion") {
+            moveTo(5f, 4f)
+            lineTo(19f, 4f)
+            quadTo(21f, 4f, 21f, 6f)
+            lineTo(21f, 16f)
+            quadTo(21f, 18f, 19f, 18f)
+            lineTo(8f, 18f)
+            lineTo(3f, 21f)
+            lineTo(3f, 6f)
+            quadTo(3f, 4f, 5f, 4f)
+            moveTo(9.5f, 8f)
+            lineTo(9.5f, 10.5f)
+            quadTo(9.5f, 12.5f, 7.5f, 13f)
+            moveTo(15.5f, 8f)
+            lineTo(15.5f, 10.5f)
+            quadTo(15.5f, 12.5f, 13.5f, 13f)
+        }
     val Book =
         line("Book") {
             moveTo(12f, 7f)

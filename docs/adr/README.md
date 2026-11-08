@@ -89,6 +89,7 @@ for current behavior.
 | 0078 | [La sémantique de la timeline appartient à Cairn](0078-cairn-timeline.md) |
 | 0080 | [Les tours de plan sont bornés par Cairn, pas par le modèle](0080-plan-turns.md) |
 | 0079 | [Une configuration native commune aux deux modes d’édition](0079-native-coding-agent-configuration.md) |
+| 0081 | [Side questions use Claude Code's native side mechanism; Codex stays unavailable](0081-native-side-questions.md) |
 
 ## Renumbered collisions
 

@@ -1572,6 +1572,9 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "list_chat_questions",
         "answer_chat_question",
         "cancel_chat_question",
+        "list_chat_side_questions",
+        "ask_chat_side_question",
+        "cancel_chat_side_question",
         "list_models",
         "list_coding_agent_accounts",
         "get_coding_agent_account_sign_in",
@@ -6197,6 +6200,896 @@ async fn agents_follow_owner_sign_in_without_challenge_or_mutation_authority() {
     assert!(s.store.coding_account(id).await.unwrap().is_none());
 }
 
+#[tokio::test]
+async fn eventless_side_question_stays_on_its_reply_after_item_id_reuse() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let claude = s
+        .agent_fixture(json!({ "name": "Claude", "provider": "claude" }), None)
+        .await
+        .unwrap();
+    let (run, _) = active_run(&s, &claude).await;
+    let run_id = run["id"].as_str().unwrap();
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    s.side_questions_available(run_id, true).await.unwrap();
+    let item = |text: &str| {
+        json!({
+            "item": {
+                "id": "reused",
+                "type": "agent_message",
+                "text": text,
+            },
+        })
+    };
+    s.store
+        .event(
+            run_id,
+            &EventKind::ItemCompleted,
+            "First",
+            Some(item("First")),
+        )
+        .await
+        .unwrap();
+    let request = json!({
+        "chatId": chat_id,
+        "question": {
+            "id": uuid::Uuid::new_v4(),
+            "text": "Why?",
+            "itemId": "reused",
+        },
+    });
+    let asked = public_call(&s, &["run"], "ask_chat_side_question", request.clone()).await;
+    let saved = result(&asked).clone();
+    assert!(
+        !saved["replyEventId"].as_str().unwrap().is_empty(),
+        "{asked}"
+    );
+    s.store
+        .event(run_id, &EventKind::TurnCompleted, "", None)
+        .await
+        .unwrap();
+    s.store
+        .event(
+            run_id,
+            &EventKind::ItemCompleted,
+            "Second",
+            Some(item("Second")),
+        )
+        .await
+        .unwrap();
+    let retry = call(&s, &configuration, "ask_chat_side_question", request).await;
+    assert_eq!(result(&retry)["id"], saved["id"], "{retry}");
+    assert_eq!(
+        result(&retry)["replyEventId"],
+        saved["replyEventId"],
+        "{retry}"
+    );
+}
+
+#[tokio::test]
+async fn oversized_numeric_reply_identities_are_refused_on_http_and_both_tools() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let claude = s
+        .agent_fixture(json!({ "name": "Claude", "provider": "claude" }), None)
+        .await
+        .unwrap();
+    let (run, _) = active_run(&s, &claude).await;
+    let run_id = run["id"].as_str().unwrap();
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    s.side_questions_available(run_id, true).await.unwrap();
+    s.store
+        .event(
+            run_id,
+            &EventKind::ItemCompleted,
+            "First",
+            Some(json!({
+                "item": {
+                    "id": "reply-1",
+                    "type": "agent_message",
+                    "text": "First",
+                },
+            })),
+        )
+        .await
+        .unwrap();
+    let valid = public_call(
+        &s,
+        &["run"],
+        "ask_chat_side_question",
+        json!({
+            "chatId": chat_id,
+            "question": {
+                "id": uuid::Uuid::new_v4(),
+                "text": "Why?",
+                "itemId": "reply-1",
+            },
+        }),
+    )
+    .await;
+    let event_id = result(&valid)["replyEventId"].as_str().unwrap();
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let owner = common::RelayContext::new(&common::relay_fixture::context(&s).await);
+    for padded in [
+        format!("{event_id:0>17}"),
+        format!("{}{event_id}", "0".repeat(300_000)),
+    ] {
+        let question = || {
+            json!({
+                "id": uuid::Uuid::new_v4(),
+                "text": "Why?",
+                "itemId": "reply-1",
+                "replyEventId": padded,
+            })
+        };
+        // The short overlength case reaches validation within the HTTP body cap.
+        // The public MCP also admits the larger request at its transport boundary.
+        if padded.len() == 17 {
+            let request = owner
+                .authorize(common::request(
+                    "POST",
+                    &format!("/api/chats/{chat_id}/side-questions"),
+                ))
+                .body(Body::from(question().to_string()))
+                .unwrap();
+            let response = common::send(&app, request).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(
+                common::read_json(response)
+                    .await
+                    .to_string()
+                    .contains("too long")
+            );
+        }
+        for response in [
+            public_call(
+                &s,
+                &["run"],
+                "ask_chat_side_question",
+                json!({ "chatId": chat_id, "question": question() }),
+            )
+            .await,
+            call(
+                &s,
+                &configuration,
+                "ask_chat_side_question",
+                json!({ "chatId": chat_id, "question": question() }),
+            )
+            .await,
+        ] {
+            assert_eq!(response["result"]["isError"], true);
+            assert!(response.to_string().contains("too long"));
+        }
+    }
+    let listed = public_call(
+        &s,
+        &["read"],
+        "list_chat_side_questions",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    assert_eq!(
+        result(&listed)["sideQuestions"].as_array().unwrap().len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn pruned_side_question_ids_cannot_be_replayed_or_reused() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let claude = s
+        .agent_fixture(json!({ "name": "Claude", "provider": "claude" }), None)
+        .await
+        .unwrap();
+    let (run, _) = active_run(&s, &claude).await;
+    let run_id = run["id"].as_str().unwrap();
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    s.side_questions_available(run_id, true).await.unwrap();
+    let old_id = uuid::Uuid::new_v4().to_string();
+    for index in 0..31 {
+        let question_id = if index == 0 {
+            old_id.clone()
+        } else {
+            uuid::Uuid::new_v4().to_string()
+        };
+        s.store
+            .set(
+                &format!("chat-side-question:{chat_id}:{question_id}"),
+                json!({
+                    "id": question_id, "chatId": chat_id, "runId": run_id, "text": "Old question",
+                    "quote": "", "itemId": "", "replyEventId": "", "provider": "claude",
+                    "status": "answered", "answer": "Done", "error": null,
+                    "createdAt": index, "settledAt": index + 1,
+                }),
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    let fresh = call(
+        &s,
+        &configuration,
+        "ask_chat_side_question",
+        json!({
+            "chatId": chat_id, "question": { "id": uuid::Uuid::new_v4(), "text": "Fresh" },
+        }),
+    )
+    .await;
+    assert_ne!(fresh["result"]["isError"], true, "{fresh}");
+    for text in ["Old question", "Changed question"] {
+        let retry = call(
+            &s,
+            &configuration,
+            "ask_chat_side_question",
+            json!({
+                "chatId": chat_id, "question": { "id": old_id, "text": text },
+            }),
+        )
+        .await;
+        assert_eq!(retry["result"]["isError"], true, "{retry}");
+        assert!(retry.to_string().contains("no longer retained"), "{retry}");
+    }
+}
+
+#[tokio::test]
+async fn automatic_compaction_closes_side_questions_on_http_and_both_mcp_surfaces() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let claude = s
+        .agent_fixture(json!({ "name": "Claude", "provider": "claude" }), None)
+        .await
+        .unwrap();
+    let (target, _) = active_run(&s, &claude).await;
+    let run_id = target["id"].as_str().unwrap();
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = target["id"].clone();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    s.side_questions_available(run_id, true).await.unwrap();
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let owner = common::RelayContext::new(&common::relay_fixture::context(&s).await);
+
+    for compacting in [true, false] {
+        s.store
+            .update_run_boundary(run_id, json!({ "sideQuestionsCompacting": compacting }))
+            .await
+            .unwrap();
+        let read = owner
+            .authorize(common::request("GET", &format!("/api/chats/{chat_id}")))
+            .body(Body::empty())
+            .unwrap();
+        let response = common::send(&app, read).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let view = common::read_json(response).await;
+        assert_eq!(view["canAskSideQuestion"], !compacting, "{view}");
+        for response in [
+            call(
+                &s,
+                &configuration,
+                "list_chat_side_questions",
+                json!({ "chatId": chat_id }),
+            )
+            .await,
+            public_call(
+                &s,
+                &["read"],
+                "list_chat_side_questions",
+                json!({ "chatId": chat_id }),
+            )
+            .await,
+        ] {
+            assert_eq!(
+                result(&response)["canAskSideQuestion"],
+                !compacting,
+                "{response}"
+            );
+            if compacting {
+                assert_eq!(result(&response)["sideQuestionUnavailable"], "compacting");
+            }
+        }
+        for response in [
+            call(&s, &configuration, "list_chats", json!({})).await,
+            public_call(&s, &["read"], "list_chats", json!({})).await,
+        ] {
+            let view = result(&response)["chats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["id"] == chat_id)
+                .unwrap();
+            assert_eq!(view["canAskSideQuestion"], !compacting, "{view}");
+        }
+        let body = || json!({ "id": uuid::Uuid::new_v4(), "text": "Why this order?" });
+        let write = owner
+            .authorize(common::request(
+                "POST",
+                &format!("/api/chats/{chat_id}/side-questions"),
+            ))
+            .body(Body::from(body().to_string()))
+            .unwrap();
+        let response = common::send(&app, write).await;
+        assert_eq!(
+            response.status(),
+            if compacting {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::OK
+            }
+        );
+        for response in [
+            call(
+                &s,
+                &configuration,
+                "ask_chat_side_question",
+                json!({ "chatId": chat_id, "question": body() }),
+            )
+            .await,
+            public_call(
+                &s,
+                &["run"],
+                "ask_chat_side_question",
+                json!({ "chatId": chat_id, "question": body() }),
+            )
+            .await,
+        ] {
+            assert_eq!(
+                response["result"]["isError"] == true,
+                compacting,
+                "{response}"
+            );
+            if compacting {
+                assert!(response.to_string().contains("compacting"), "{response}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_reply() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (codex, configuration) = active_run(&s, &main).await;
+    let claude = s
+        .agent_fixture(json!({ "name": "Claude", "provider": "claude" }), None)
+        .await
+        .unwrap();
+    let (target, _) = active_run(&s, &claude).await;
+    let run_id = target["id"].as_str().unwrap().to_owned();
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = target["id"].clone();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    s.store.event(
+        &run_id,
+        &cairn_contracts::EventKind::ItemCompleted,
+        "First the migration",
+        Some(json!({ "type": "item.completed", "item": { "id": "reply-1", "type": "agent_message", "text": "First the migration" } })),
+    ).await.unwrap();
+    let ask = |text: &str| {
+        json!({
+            "chatId": chat_id,
+            "question": { "id": uuid::Uuid::new_v4(), "text": text, "quote": "First the migration", "itemId": "reply-1" },
+        })
+    };
+
+    // Until the running reply's adapter announces it, side questions wait for it.
+    let early = call(&s, &configuration, "ask_chat_side_question", ask("Why?")).await;
+    assert_eq!(early["result"]["isError"], true, "{early}");
+    assert!(
+        early.to_string().contains("not offered side questions"),
+        "{early}"
+    );
+    let listed = call(
+        &s,
+        &configuration,
+        "list_chat_side_questions",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    assert_eq!(result(&listed)["canAskSideQuestion"], false);
+    let summary = call(&s, &configuration, "get_chat", json!({ "chatId": chat_id })).await;
+    let reason = &result(&summary)["chat"]["sideQuestionReason"];
+    assert!(
+        reason
+            .as_str()
+            .unwrap()
+            .contains("not offered side questions"),
+        "{summary}"
+    );
+    assert_eq!(
+        result(&summary)["chat"]["sideQuestionUnavailable"],
+        "not-offered"
+    );
+
+    // A Claude Code release not qualified for side questions says so.
+    s.side_questions_available(&run_id, false).await.unwrap();
+    let old_release = call(&s, &configuration, "ask_chat_side_question", ask("Why?")).await;
+    assert!(
+        old_release
+            .to_string()
+            .contains("only version 2.1.308 has been qualified"),
+        "{old_release}"
+    );
+    let listed = call(
+        &s,
+        &configuration,
+        "list_chat_side_questions",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    assert_eq!(result(&listed)["sideQuestionUnavailable"], "claude-release");
+
+    s.side_questions_available(&run_id, true).await.unwrap();
+    let unknown = call(
+        &s,
+        &configuration,
+        "ask_chat_side_question",
+        json!({
+            "chatId": chat_id,
+            "question": { "id": uuid::Uuid::new_v4(), "text": "Why?", "itemId": "missing-reply" },
+        }),
+    )
+    .await;
+    assert_eq!(unknown["result"]["isError"], true, "{unknown}");
+    assert!(unknown.to_string().contains("Reply not found"), "{unknown}");
+    // Conversation lists report the same availability as the conversation itself.
+    let chats = call(&s, &configuration, "list_chats", json!({})).await;
+    let listed = result(&chats)["chats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|listed| listed["id"] == chat_id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(listed["canAskSideQuestion"], true, "{listed}");
+    let first = ask("Why this order?");
+    let asked = call(&s, &configuration, "ask_chat_side_question", first.clone()).await;
+    assert_eq!(result(&asked)["status"], "pending");
+    assert_eq!(result(&asked)["runId"], run_id.as_str());
+    assert_eq!(result(&asked)["provider"], "claude");
+    assert!(!result(&asked)["replyEventId"].as_str().unwrap().is_empty());
+    let repeated = call(&s, &configuration, "ask_chat_side_question", first.clone()).await;
+    assert_eq!(result(&asked), result(&repeated));
+    let mut reused = first.clone();
+    reused["question"]["text"] = "Another question".into();
+    let reused = call(&s, &configuration, "ask_chat_side_question", reused).await;
+    assert_eq!(reused["result"]["isError"], true);
+    assert!(reused.to_string().contains("already been used"), "{reused}");
+
+    // The public MCP needs the run scope to ask, and reads with the read scope.
+    let denied = public_call(&s, &["read"], "ask_chat_side_question", ask("Denied?")).await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    let second = public_call(
+        &s,
+        &["run"],
+        "ask_chat_side_question",
+        ask("And the tests?"),
+    )
+    .await;
+    let second_id = result(&second)["id"].as_str().unwrap().to_owned();
+    assert!(!result(&second)["replyEventId"].as_str().unwrap().is_empty());
+    let public = public_call(
+        &s,
+        &["read"],
+        "list_chat_side_questions",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    assert_eq!(
+        result(&public)["sideQuestions"].as_array().unwrap().len(),
+        2
+    );
+
+    // The running reply reads both from its inbox, apart from steering messages.
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let inbox_path = s
+        .config
+        .data_dir
+        .join("runs")
+        .join(&run_id)
+        .join("chat-input/messages.json");
+    let inbox: Value = serde_json::from_slice(&std::fs::read(&inbox_path).unwrap()).unwrap();
+    let delivered = inbox.as_array().unwrap();
+    assert_eq!(delivered.len(), 2, "{inbox}");
+    assert!(
+        delivered
+            .iter()
+            .all(|entry| entry["sideQuestion"].is_object() && entry["text"].is_null())
+    );
+    assert_eq!(
+        delivered[0]["sideQuestion"]["text"],
+        "About this passage of your reply:\n> First the migration\n\nWhy this order?"
+    );
+
+    let withdrawn = call(
+        &s,
+        &configuration,
+        "cancel_chat_side_question",
+        json!({ "chatId": chat_id, "sideQuestionId": second_id }),
+    )
+    .await;
+    assert_eq!(result(&withdrawn)["status"], "cancelled");
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let inbox = std::fs::read_to_string(&inbox_path).unwrap();
+    assert!(inbox.contains(&format!("withdraw-side-question:{second_id}")));
+
+    let first_id = first["question"]["id"].as_str().unwrap();
+    s.side_question_settle(
+        &run_id,
+        &json!({ "type": "chat.side.answered", "sideQuestionId": first_id, "text": "The migration must exist first." }),
+    )
+    .await
+    .unwrap();
+    // A late answer to a withdrawn question changes nothing.
+    s.side_question_settle(
+        &run_id,
+        &json!({ "type": "chat.side.answered", "sideQuestionId": second_id, "text": "Too late." }),
+    )
+    .await
+    .unwrap();
+    let listed = call(
+        &s,
+        &configuration,
+        "list_chat_side_questions",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    let questions = result(&listed)["sideQuestions"].as_array().unwrap();
+    assert_eq!(questions[0]["status"], "answered");
+    assert_eq!(questions[0]["answer"], "The migration must exist first.");
+    assert_eq!(questions[1]["status"], "cancelled");
+    assert!(questions[1]["answer"].is_null());
+    assert_eq!(result(&listed)["canAskSideQuestion"], true);
+
+    // A run handed back to its queue has no adapter answering until it announces again.
+    s.store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Queued),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let requeued = call(&s, &configuration, "ask_chat_side_question", ask("Queued?")).await;
+    assert_eq!(requeued["result"]["isError"], true, "{requeued}");
+    s.store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Running),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // A reply that is stopping, or switching coding agent, takes no new one.
+    s.store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                cancel_requested_at: Some(Some(1)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let stopping = call(
+        &s,
+        &configuration,
+        "ask_chat_side_question",
+        ask("Stopping?"),
+    )
+    .await;
+    assert!(stopping.to_string().contains("is stopping"), "{stopping}");
+    s.store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                cancel_requested_at: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Side questions never join the queue or the conversation.
+    let detail = call(&s, &configuration, "get_chat", json!({ "chatId": chat_id })).await;
+    assert_eq!(result(&detail)["messages"], json!([]));
+    assert_eq!(result(&detail)["chat"]["pendingSideQuestions"], 0);
+
+    // The next turn of the same run never answers a question about the previous one.
+    let earlier = call(
+        &s,
+        &configuration,
+        "ask_chat_side_question",
+        ask("Earlier turn?"),
+    )
+    .await;
+    let earlier_id = result(&earlier)["id"].clone();
+    s.store
+        .update_run_boundary(
+            &run_id,
+            json!({ "chatExecution": { "messageId": "next-turn" } }),
+        )
+        .await
+        .unwrap();
+    // Nor does an answer that arrives once the turn moved on.
+    s.side_question_settle(
+        &run_id,
+        &json!({ "type": "chat.side.answered", "sideQuestionId": earlier_id, "text": "Late." }),
+    )
+    .await
+    .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let inbox = std::fs::read_to_string(&inbox_path).unwrap();
+    assert!(!inbox.contains(earlier_id.as_str().unwrap()), "{inbox}");
+    let listed = call(
+        &s,
+        &configuration,
+        "list_chat_side_questions",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    let earlier = result(&listed)["sideQuestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|question| question["id"] == earlier_id)
+        .unwrap()
+        .clone();
+    assert_eq!(earlier["status"], "failed", "{earlier}");
+
+    // Asking and withdrawing again cannot grow a reply's side questions without bound.
+    let mut refused = Value::Null;
+    for index in 0..12 {
+        let asked = call(
+            &s,
+            &configuration,
+            "ask_chat_side_question",
+            ask(&format!("Again {index}?")),
+        )
+        .await;
+        if asked["result"]["isError"] == true {
+            refused = asked;
+            break;
+        }
+        let id = result(&asked)["id"].clone();
+        call(
+            &s,
+            &configuration,
+            "cancel_chat_side_question",
+            json!({ "chatId": chat_id, "sideQuestionId": id }),
+        )
+        .await;
+    }
+    assert!(
+        refused.to_string().contains("as many open side questions"),
+        "{refused}"
+    );
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let inbox: Value = serde_json::from_slice(&std::fs::read(&inbox_path).unwrap()).unwrap();
+    assert_eq!(inbox.as_array().unwrap().len(), 10, "{inbox}");
+    // The next turn starts with none of them.
+    s.store
+        .update_run_boundary(
+            &run_id,
+            json!({ "chatExecution": { "messageId": "third-turn" } }),
+        )
+        .await
+        .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let inbox: Value = serde_json::from_slice(&std::fs::read(&inbox_path).unwrap()).unwrap();
+    assert_eq!(inbox, json!([]), "{inbox}");
+
+    // A question about a whole reply carries the start of that reply to the agent.
+    s.store
+        .event(
+            &run_id,
+            &cairn_contracts::EventKind::ItemCompleted,
+            "I traced the boundaries first.",
+            Some(json!({
+                "type": "item.completed",
+                "item": { "id": "reply-7", "type": "agent_message", "text": "I traced the boundaries first." },
+            })),
+        )
+        .await
+        .unwrap();
+    let whole = call(
+        &s,
+        &configuration,
+        "ask_chat_side_question",
+        json!({
+            "chatId": chat_id,
+            "question": { "id": uuid::Uuid::new_v4(), "text": "Which boundaries?", "itemId": "reply-7" },
+        }),
+    )
+    .await;
+    assert_eq!(result(&whole)["status"], "pending", "{whole}");
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let inbox: Value = serde_json::from_slice(&std::fs::read(&inbox_path).unwrap()).unwrap();
+    assert_eq!(
+        inbox[0]["sideQuestion"]["text"],
+        "About this reply of yours:\n> I traced the boundaries first.\n\nWhich boundaries?",
+        "{inbox}"
+    );
+
+    // Once the reply ends, a question it never answered says so.
+    let third = call(
+        &s,
+        &configuration,
+        "ask_chat_side_question",
+        ask("Last one?"),
+    )
+    .await;
+    let third_id = result(&third)["id"].clone();
+    s.store
+        .change_run(
+            &run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Succeeded),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let listed = call(
+        &s,
+        &configuration,
+        "list_chat_side_questions",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    let expired = result(&listed)["sideQuestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|question| question["id"] == third_id)
+        .unwrap()
+        .clone();
+    assert_eq!(expired["status"], "failed");
+    // Withdrawing it then changes nothing: it was not answered.
+    let withdrawn = call(
+        &s,
+        &configuration,
+        "cancel_chat_side_question",
+        json!({ "chatId": chat_id, "sideQuestionId": third_id }),
+    )
+    .await;
+    assert_eq!(result(&withdrawn)["status"], "failed", "{withdrawn}");
+    assert!(
+        expired["error"]
+            .as_str()
+            .unwrap()
+            .contains("stopped before")
+    );
+    assert_eq!(result(&listed)["canAskSideQuestion"], false);
+    let late = call(&s, &configuration, "ask_chat_side_question", ask("Now?")).await;
+    assert_eq!(late["result"]["isError"], true);
+
+    // A Codex reply never takes one, even if an adapter announced it: its side
+    // conversations keep tools Cairn cannot remove before they run.
+    let codex_id = codex["id"].as_str().unwrap();
+    s.side_questions_available(codex_id, true).await.unwrap();
+    let mut codex_chat = s.chat_create(json!({})).await.unwrap();
+    codex_chat["runId"] = codex["id"].clone();
+    let codex_chat_id = codex_chat["id"].as_str().unwrap().to_owned();
+    s.store
+        .save_conversation_boundary(codex_chat)
+        .await
+        .unwrap();
+    let refused = call(
+        &s,
+        &configuration,
+        "ask_chat_side_question",
+        json!({
+            "chatId": codex_chat_id,
+            "question": { "id": uuid::Uuid::new_v4(), "text": "Why?" },
+        }),
+    )
+    .await;
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    assert!(
+        refused.to_string().contains("Codex cannot answer"),
+        "{refused}"
+    );
+    let listed = call(
+        &s,
+        &configuration,
+        "list_chat_side_questions",
+        json!({ "chatId": codex_chat_id }),
+    )
+    .await;
+    assert_eq!(result(&listed)["canAskSideQuestion"], false);
+    assert!(
+        result(&listed)["sideQuestionReason"]
+            .as_str()
+            .unwrap()
+            .contains("Codex")
+    );
+
+    // A conversation moved to trash fails the side questions its stopped turn left.
+    let (trashed_run, _) = active_run(&s, &claude).await;
+    let trashed_run_id = trashed_run["id"].as_str().unwrap().to_owned();
+    let mut trashed = s.chat_create(json!({})).await.unwrap();
+    trashed["runId"] = trashed_run["id"].clone();
+    let trashed_id = trashed["id"].as_str().unwrap().to_owned();
+    s.store.save_conversation_boundary(trashed).await.unwrap();
+    s.side_questions_available(&trashed_run_id, true)
+        .await
+        .unwrap();
+    let left = call(
+        &s,
+        &configuration,
+        "ask_chat_side_question",
+        json!({
+            "chatId": trashed_id,
+            "question": { "id": uuid::Uuid::new_v4(), "text": "Still there?" },
+        }),
+    )
+    .await;
+    assert_eq!(result(&left)["status"], "pending", "{left}");
+    s.store
+        .change_run(
+            &trashed_run_id,
+            cairn_installation::runs::RunChanges {
+                status: Some(RunStatus::Cancelled),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    s.chat_trash(&trashed_id, true).await.unwrap();
+    s.chat_tick(&std::collections::HashSet::new())
+        .await
+        .unwrap();
+    let stored = s
+        .store
+        .keys(&format!("chat-side-question:{trashed_id}:"))
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(stored[0].1["status"], "failed", "{stored:?}");
+}
+
+/// Settings, overview, audit and redacted storage read the same on HTTP and both tools.
+/// Credentials stay owner-only in the apps and never appear in any output.
 #[tokio::test]
 async fn installation_settings_audit_and_storage_match_on_every_surface() {
     let root = TempDir::new().unwrap();

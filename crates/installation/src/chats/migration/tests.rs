@@ -941,3 +941,36 @@ async fn version25_messages_gain_plan_requests_without_other_changes() {
     question(1).unwrap();
     assert!(question(2).is_err());
 }
+
+#[test]
+fn plan_request_upgrade_accepts_another_openers_completed_upgrade() {
+    let root = tempfile::tempdir().unwrap();
+    drop(Store::open(root.path()).unwrap());
+    let mut db = Connection::open(root.path().join("manager.db")).unwrap();
+    let definitions = |db: &Connection| {
+        db.prepare("SELECT type,name,sql FROM sqlite_schema ORDER BY type,name")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let before = definitions(&db);
+
+    // Another opener can finish all pending migrations while this opener waits
+    // for the immediate transaction after reading the old database version.
+    plan_requests(&mut db).unwrap();
+
+    assert_eq!(definitions(&db), before);
+    assert_eq!(
+        db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        crate::store::DATABASE_VERSION
+    );
+}
