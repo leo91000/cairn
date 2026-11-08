@@ -31,6 +31,7 @@ import process from 'node:process'
     })
     const requests = new Map<import('@playwright/test').Request, 'pending' | 'finished' | 'cancelled' | 'failed'>()
     const statuses = new Map<import('@playwright/test').Request, number>()
+    const streamStatuses = new Map<import('@playwright/test').Request, number>()
     const finiteRequest = (request: import('@playwright/test').Request) => {
       const path = new URL(request.url()).pathname
       return ['fetch', 'xhr'].includes(request.resourceType()) && (path.startsWith('/api/') || path === '/web-build.json')
@@ -43,6 +44,11 @@ import process from 'node:process'
     })
     page.on('response', (response) => {
       const request = response.request()
+      const chatStream = request.resourceType() === 'eventsource' && new URL(request.url()).pathname.endsWith('/api/chats/stream')
+      if (chatStream) {
+        streamStatuses.set(request, response.status())
+        record(`native-chat-source-http-status-${response.status()}`)
+      }
       if (requests.has(request)) {
         statuses.set(request, response.status())
         record(`network-poll-status-${response.status()}`)
@@ -111,6 +117,7 @@ import process from 'node:process'
           documentId,
           armed: false,
           directChatAccepted: false,
+          chatAccepted: false,
           armedSources: [] as EventSource[],
           targetController: undefined as AbortController | undefined,
         }
@@ -142,10 +149,12 @@ import process from 'node:process'
         })
         window.addEventListener('cairn-transport-observation', (event) => {
           const { route, path } = (event as CustomEvent).detail
-          if (path === '/chats/stream' && route === 'direct') {
+          if (path !== '/chats/stream')
+            return
+          observation.chatAccepted = true
+          if (route === 'direct')
             observation.directChatAccepted = true
-            void probe('chat-batch-direct-accepted')
-          }
+          void probe(route === 'direct' ? 'chat-batch-direct-accepted' : 'chat-batch-relay-accepted')
         })
         const NativeEventSource = window.EventSource
         window.EventSource = class extends NativeEventSource {
@@ -349,6 +358,9 @@ import process from 'node:process'
       await navigation
       releasePoll.resolve()
       await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
+      await expect.poll(() => page.evaluate(() => (window as any).b534Observation.chatAccepted), {
+        message: 'The new document has accepted its first real shell conversation-list batch',
+      }).toBe(true)
 
     }
     finally {
@@ -367,7 +379,7 @@ import process from 'node:process'
             record(`target-network-${terminal}`)
           const status = statuses.get(request)
           const successfulResponse = status !== undefined && status >= 200 && status < 300
-          if (terminal === 'finished' && !successfulResponse)
+          if ((status !== undefined && !successfulResponse) || (terminal === 'finished' && status === undefined))
             throw new Error(`An observed finite HTTP response has unexpected status ${status ?? 'unknown'}`)
           if (terminal === 'failed')
             throw new Error('An observed finite HTTP request failed unexpectedly')
@@ -375,6 +387,10 @@ import process from 'node:process'
             && ['GET', 'HEAD'].includes(request.method())
           if (terminal === 'cancelled' && request !== targetPoll && !departedRead)
             throw new Error('An HTTP cancellation lacks old-document read provenance')
+        }
+        for (const status of streamStatuses.values()) {
+          if (status !== 200)
+            throw new Error(`An observed native chat stream has unexpected HTTP status ${status}`)
         }
         if (deliveryFailure && (!targetPoll || requests.get(targetPoll) !== 'cancelled'))
           throw deliveryFailure
