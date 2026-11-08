@@ -336,6 +336,7 @@ defineExpose({
   relevant,
   nodeName,
   status,
+  attention,
 })
 onUnmounted(() => {
   clearInterval(timer)
@@ -379,7 +380,8 @@ onUnmounted(() => {
           :size="12"
           class="shrink-0"
         />
-        <span role="status" :class="variant === 'chip' ? 'whitespace-nowrap' : 'truncate'">{{ status.label }}</span>
+        <!-- The attention chip appears already filled: the header's own live region announces it. -->
+        <span :role="variant === 'chip' ? 'status' : undefined" :class="variant === 'chip' ? 'whitespace-nowrap' : 'truncate'">{{ status.label }}</span>
       </template>
     </button>
     <Teleport to="body">

@@ -770,7 +770,7 @@ abstract class BackgroundWaitCases {
         }
 
     @Test
-    fun headerNamesABackgroundWaitAndTurnsTheAvatarRing() {
+    fun headerNamesABackgroundWaitWithoutAWorkingLabel() {
         compose.setContent {
             CairnTheme {
                 ConversationHeader(

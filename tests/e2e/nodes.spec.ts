@@ -500,6 +500,8 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   // Overdue synchronization needs a look: the header names it, without the node.
   await expect(chip).toHaveText('Sync overdue', { timeout: 15000 })
   await expect(chip).toHaveAccessibleDescription('Sync overdue')
+  // The chip appears already filled, so the header's mounted live region announces it.
+  await expect(page.locator('.chat-header .sr-only[role="status"]')).toHaveText('Sync overdue')
   await expect(panel).toContainText('Work can continue while local storage is safe')
   await page.screenshot({ path: 'test-results/execution-desktop.png' })
   await page.keyboard.press('Escape')

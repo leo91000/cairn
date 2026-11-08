@@ -547,8 +547,6 @@ const chatStatus = computed(() => {
   return 'Ready'
 })
 const headerState = computed(() => detail.value ? headerStatus(chatStatus.value) : null)
-// One region stays mounted so screen readers hear a new status; a countdown would repeat every minute.
-const announcedStatus = computed(() => headerState.value && chatStatus.value !== sleepStatus.value ? headerState.value.label : '')
 // A conversation not created yet already names the project it will start in.
 const headerProject = computed(() => heading.value ? heading.value.projectName : state.projects.find(project => project.id === projectId.value)?.name)
 // The avatar's ring is the header's only sign of work, on every width.
@@ -877,6 +875,12 @@ const canCompact = computed(() => !!detail.value?.compaction?.supported && !inac
 const nodeExecution = ref<InstanceType<typeof NodeExecution>>()
 const menuButton = ref<InstanceType<typeof MenuButton>>()
 const contextPill = ref<HTMLElement>()
+// One region stays mounted so screen readers hear a new status, the conversation's or its node's;
+// a countdown would repeat every minute.
+const announcedStatus = computed(() => [
+  headerState.value && chatStatus.value !== sleepStatus.value ? headerState.value.label : '',
+  nodeExecution.value?.attention ? nodeExecution.value.status.label : '',
+].filter(Boolean).join(' · '))
 
 function openCompactionFromHeader() {
   compactionOpener.value = contextPill.value
@@ -1190,7 +1194,7 @@ function key(event: KeyboardEvent) {
   <Modal
     v-if="compacting"
     title="Compact the agent context?"
-    :return-focus="compactionOpener === contextPill && !contextAlert ? menuButton?.trigger : compactionOpener"
+    :return-focus="compactionOpener?.isConnected ? compactionOpener : menuButton?.trigger"
     @close="compacting = false"
   >
     <div class="p-6">
@@ -1220,6 +1224,9 @@ function key(event: KeyboardEvent) {
     @close="detailsOpen = false"
   >
     <div class="px-3 pb-4">
+      <p class="m-0! px-2.5 pb-1 text-sm font-semibold leading-snug wrap-anywhere">
+        {{ heading?.title || 'New conversation' }}
+      </p>
       <ConversationSummary
         :agent-name="heading?.agentName || selectedAgent?.name || 'Main agent'"
         :agent-id="heading?.agentId || selectedAgent?.id"
@@ -1338,7 +1345,7 @@ function key(event: KeyboardEvent) {
             :working="working"
           />
           <div class="flex min-w-0 flex-1 items-center gap-2.5 text-xs text-muted">
-            <h1 class="min-w-0 truncate text-base! font-semibold! leading-snug! tracking-tight! text-ink">
+            <h1 class="min-w-0 truncate text-base! font-semibold! leading-snug! tracking-tight! text-ink" :title="heading?.title || undefined">
               {{ heading?.title || 'New conversation' }}
             </h1>
             <button
