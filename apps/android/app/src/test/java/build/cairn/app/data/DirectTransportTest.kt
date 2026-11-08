@@ -6,9 +6,11 @@ import java.util.Base64
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
@@ -30,6 +32,119 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class DirectTransportTest {
+    @Test
+    fun `timeline refusal settles an uncertain direct message without replaying on relay`() =
+        runBlocking {
+            for (httpRefusal in listOf(false, true)) {
+                MockWebServer().use { server ->
+                    server.start()
+                    val api = CairnApi(server.url("/"), MemoryVault(), installationId = "test")
+                    val mutationStarted = CompletableDeferred<Unit>()
+                    val bodySent = java.util.concurrent.atomic.AtomicBoolean(false)
+                    lateinit var channel: DirectChannel
+                    fun receive(frame: JsonObject) {
+                        channel.receive(singleFramePacket(frame.toString().toByteArray()))
+                    }
+                    channel =
+                        DirectChannel(
+                            { packet, _, _ ->
+                                val frame =
+                                    wireJson
+                                        .parseToJsonElement(
+                                            String(packet.copyOfRange(13, packet.size))
+                                        )
+                                        .jsonObject
+                                when {
+                                    frame["method"]?.jsonPrimitive?.content == "POST" ->
+                                        mutationStarted.complete(Unit)
+                                    frame["method"]?.jsonPrimitive?.content == "GET" -> {
+                                        assertTrue(
+                                            frame["path"]!!
+                                                .jsonPrimitive
+                                                .content
+                                                .contains("timeline=1")
+                                        )
+                                        receive(
+                                            buildJsonObject {
+                                                put("type", "stream_start")
+                                                put("id", frame["id"]!!)
+                                                put("status", if (httpRefusal) 426 else 200)
+                                                put(
+                                                    "headers",
+                                                    buildJsonArray {
+                                                        add(
+                                                            buildJsonArray {
+                                                                add("content-type")
+                                                                add(
+                                                                    if (httpRefusal)
+                                                                        "application/json"
+                                                                    else "text/event-stream"
+                                                                )
+                                                            }
+                                                        )
+                                                    },
+                                                )
+                                                put("body", "")
+                                            }
+                                        )
+                                    }
+                                    frame["type"]?.jsonPrimitive?.content == "stream_credit" &&
+                                        bodySent.compareAndSet(false, true) -> {
+                                        val body =
+                                            if (httpRefusal)
+                                                """{"code":"update_required","error":"Update required."}"""
+                                            else
+                                                "event: batch\nid: 20\ndata: {\"events\":[],\"reset\":false,\"more\":false,\"history\":\"v1:r:1\"}\n\n"
+                                        receive(
+                                            buildJsonObject {
+                                                put("type", "stream_chunk")
+                                                put("id", frame["id"]!!)
+                                                put(
+                                                    "body",
+                                                    Base64.getEncoder()
+                                                        .encodeToString(body.toByteArray()),
+                                                )
+                                            }
+                                        )
+                                        receive(
+                                            buildJsonObject {
+                                                put("type", "stream_end")
+                                                put("id", frame["id"]!!)
+                                                put("failed", false)
+                                            }
+                                        )
+                                    }
+                                }
+                            },
+                            {},
+                        )
+                    api.transport.attach(channel)
+                    try {
+                        withTimeout(5000) {
+                            val mutation = async {
+                                runCatching {
+                                    api.request(
+                                        "POST",
+                                        "/chats/c/messages",
+                                        body("id" to "uncertain", "text" to "Once"),
+                                    )
+                                }
+                                    .exceptionOrNull()
+                            }
+                            mutationStarted.await()
+                            val snapshots = api.live("/chats/c/stream").toList()
+                            assertEquals(426, snapshots.last().httpStatus)
+                            assertTrue(mutation.await() is ProtocolMismatch)
+                            assertNotNull(api.transport.protocolError.value)
+                            assertEquals(0, server.requestCount)
+                        }
+                    } finally {
+                        api.closeStreams()
+                    }
+                }
+            }
+        }
+
     @Test
     fun `direct history negotiates gzip and decodes unicode JSON`() = runTest {
         MockWebServer().use { server ->

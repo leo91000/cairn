@@ -222,6 +222,12 @@ private fun CairnAppContent(
                             else
                                 "Les exécutions continuent sur votre installation. Réessayez lorsqu’elle sera connectée.",
                     )
+                    if (state.protocolError != null) {
+                        Text(
+                            "Recherchez la version Android courante sur le canal officiel. Si l’app est déjà à jour, mettez à jour votre installation."
+                        )
+                        AppUpdateSettings()
+                    }
                     TextButton(onClick = { vm.perform { refreshInstallations() } }) {
                         Text("Actualiser")
                     }

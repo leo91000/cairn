@@ -23,3 +23,17 @@ La conversion avance par familles sémantiques. Un événement présenté par la
 tout double affichage. Les cartes non supprimées restent dans le journal d'exécution ; la
 conversation n'affiche que les cartes marquées `prominent` et omet les réponses `echo`.
 Le MCP public et `cairn_installation` lisent les mêmes cartes avec `read_run_timeline`.
+
+
+## Négociation de la représentation (8 novembre 2026)
+
+Après la décision de mise à jour obligatoire des clients incompatibles (#713), les flux
+live de conversation et d’exécution exigent `timeline=1`. Cette capacité signifie que
+le lecteur présente les cartes transportées avec une identité d’historique `v2`, et non
+qu’il interprète à nouveau les événements. Un choix absent ou inconnu reçoit
+`426 update_required`, après authentification et avant l’initialisation de la lecture.
+La liste seule, les pages JSON d’historique et les outils MCP conservent leurs contrats.
+Le protocole de transport et les versions globales ne sont pas relevés pour cette
+seule représentation. Les applications refusent aussi une représentation inconnue avant
+d’accepter le lot et son curseur ; elles gardent les dernières données valides sans
+rejouer une mutation incertaine. Il n’y a pas de mode de rendu legacy.

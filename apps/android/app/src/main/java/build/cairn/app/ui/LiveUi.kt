@@ -144,7 +144,10 @@ fun rememberLive(
                                             error = it.error,
                                         )
                                 } else if (
-                                    !it.catchingUp && it.state != null && it.history != null
+                                    !it.catchingUp &&
+                                        it.httpStatus != 426 &&
+                                        it.state != null &&
+                                        it.history != null
                                 ) {
                                     cacheWriter?.offer(
                                         CachedHistory(

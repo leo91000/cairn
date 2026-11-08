@@ -1523,8 +1523,8 @@ async fn paginated_chat_metadata_keeps_pending_messages_without_replaying_delive
         1
     );
     assert_eq!(batch["state"]["chat"]["messages"][0]["status"], "queued");
-    let mut legacy = f.open_path(&format!("/api/chats/{id}/stream"), None).await;
-    let (_, batch) = legacy.batch().await;
+    let mut unwindowed = f.open_path(&format!("/api/chats/{id}/stream"), None).await;
+    let (_, batch) = unwindowed.batch().await;
     assert_eq!(
         batch["state"]["chat"]["messages"].as_array().unwrap().len(),
         2
@@ -2326,6 +2326,15 @@ async fn conversation_stream_refuses_missing_card_capability_after_authenticatio
             assert_eq!(error["code"], "update_required");
             assert!(text(&error, "error").contains("Update required"));
         }
+    }
+    for path in [
+        format!("/api/runs/{}/stream", f.run),
+        format!("/api/chats/{}/stream", text(&chat, "id")),
+    ] {
+        let mut current = f.open_path(&path, None).await;
+        let (_, batch) = current.batch().await;
+        assert!(text(&batch, "history").starts_with("v2:"));
+        assert!(batch["entries"].is_array());
     }
     // The metadata-only Fil and JSON history remain usable without a UI capability.
     let mut list = f.open_path("/api/chats/stream", None).await;

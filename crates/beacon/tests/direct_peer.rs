@@ -2488,3 +2488,85 @@ async fn incompatible_data_channels_receive_an_update_required_refusal() {
     assert_eq!(dispatched.load(Ordering::SeqCst), 1);
     relay.close().await;
 }
+
+#[tokio::test]
+async fn timeline_card_capability_is_enforced_identically_over_direct_and_relay() {
+    let mut relay = RelayedInstallation::new(axum::Router::new()).await;
+    let chat = relay.installation.chat_create(json!({})).await.unwrap();
+    let path = format!("/chats/{}/stream", chat["id"].as_str().unwrap());
+    production_connector(&mut relay).await;
+    let expected = relay.get(&path).send().await.unwrap();
+    assert_eq!(expected.status(), StatusCode::UPGRADE_REQUIRED);
+    let expected = expected.bytes().await.unwrap();
+    let (peer, channel, _) = client(&relay).await;
+    send_frame(channel.as_ref(), 1, &request("old", &format!("/api{path}"))).await;
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::StreamStart(reply) if reply.status == 426)
+    );
+    send_frame(
+        channel.as_ref(),
+        2,
+        &Frame::StreamCredit { id: "old".into() },
+    )
+    .await;
+    let mut body = Vec::new();
+    loop {
+        match response(channel.as_ref()).await {
+            Frame::StreamChunk { body: chunk, .. } => {
+                body.extend(chunk);
+                send_frame(
+                    channel.as_ref(),
+                    3,
+                    &Frame::StreamCredit { id: "old".into() },
+                )
+                .await;
+            }
+            Frame::StreamEnd { failed, .. } => {
+                assert!(!failed);
+                break;
+            }
+            _ => panic!("Unexpected refusal frame"),
+        }
+    }
+    assert_eq!(body, expected);
+    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(error["code"], "update_required");
+    send_frame(
+        channel.as_ref(),
+        4,
+        &request("current", &format!("/api{path}?timeline=1")),
+    )
+    .await;
+    assert!(
+        matches!(response(channel.as_ref()).await, Frame::StreamStart(reply) if reply.status == 200)
+    );
+    send_frame(
+        channel.as_ref(),
+        5,
+        &Frame::StreamCredit {
+            id: "current".into(),
+        },
+    )
+    .await;
+    let Frame::StreamChunk { body, .. } = response(channel.as_ref()).await else {
+        panic!("Current timeline batch expected")
+    };
+    let text = std::str::from_utf8(&body).unwrap();
+    let data = text
+        .lines()
+        .find_map(|line| line.strip_prefix("data: "))
+        .unwrap();
+    let batch: serde_json::Value = serde_json::from_str(data).unwrap();
+    assert!(batch["entries"].is_array());
+    assert!(batch["history"].as_str().unwrap().starts_with("v2:"));
+    send_frame(
+        channel.as_ref(),
+        6,
+        &Frame::Cancel {
+            id: "current".into(),
+        },
+    )
+    .await;
+    peer.close().await.unwrap();
+    relay.close().await;
+}
