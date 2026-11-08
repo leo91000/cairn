@@ -308,7 +308,7 @@ export class InstallationTransport {
       const fingerprint = /^a=fingerprint:(sha-256 [A-Fa-f0-9:]+)\r?$/m.exec(offer.sdp || '')?.[1]?.toUpperCase().replace('SHA-256', 'sha-256')
       if (!fingerprint)
         throw new Error('Missing DTLS fingerprint')
-      const authorization = { fingerprint, version: 4 }
+      const authorization = { fingerprint, version: 4, timeline: 1 }
       const grant = await this.control('/authorize', authorization) as GrantResponse
       if (!current())
         return

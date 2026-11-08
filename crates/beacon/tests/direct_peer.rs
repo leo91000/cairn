@@ -211,6 +211,7 @@ async fn client_with_runtime(
         .json(&json!({
             "fingerprint": fingerprint,
             "version": 4,
+            "timeline": 1,
         }))
         .send()
         .await
@@ -335,6 +336,7 @@ async fn renew_delayed_peer(
         .json(&json!({
             "fingerprint": grant.claims.fingerprint,
             "version": 4,
+            "timeline": 1,
         }))
         .send()
         .await
@@ -871,6 +873,7 @@ async fn disabling_direct_refuses_authorization_and_preserves_the_relay() {
         .json(&json!({
             "fingerprint": fingerprint,
             "version": 4,
+            "timeline": 1,
         }))
         .send()
         .await
@@ -1176,6 +1179,7 @@ async fn signal_lag_keeps_the_peer_running_and_new_connections_work() {
         .json(&json!({
             "fingerprint": fingerprint,
             "version": 4,
+            "timeline": 1,
         }))
         .send()
         .await
@@ -2099,6 +2103,7 @@ async fn observed_certificate_is_compared_with_the_grant_without_an_sdp_check() 
         .json(&json!({
             "fingerprint": fingerprint,
             "version": 4,
+            "timeline": 1,
         }))
         .send()
         .await
@@ -2249,6 +2254,7 @@ async fn panicking_peer_task_child() {
         .json(&json!({
             "fingerprint": fingerprint,
             "version": 4,
+            "timeline": 1,
         }))
         .send()
         .await
@@ -2347,6 +2353,7 @@ async fn public_alias_is_withheld_without_remote_candidates_and_does_not_escape_
         .json(&json!({
             "fingerprint": fingerprint,
             "version": 4,
+            "timeline": 1,
         }))
         .send()
         .await
@@ -2490,47 +2497,23 @@ async fn incompatible_data_channels_receive_an_update_required_refusal() {
 }
 
 #[tokio::test]
-async fn timeline_card_capability_is_enforced_identically_over_direct_and_relay() {
+async fn timeline_card_refusal_uses_terminal_direct_control_and_http_relay_status() {
     let mut relay = RelayedInstallation::new(axum::Router::new()).await;
     let chat = relay.installation.chat_create(json!({})).await.unwrap();
     let path = format!("/chats/{}/stream", chat["id"].as_str().unwrap());
     production_connector(&mut relay).await;
     let expected = relay.get(&path).send().await.unwrap();
     assert_eq!(expected.status(), StatusCode::UPGRADE_REQUIRED);
-    let expected = expected.bytes().await.unwrap();
+    let expected: serde_json::Value = expected.json().await.unwrap();
+    assert_eq!(expected["code"], "update_required");
     let (peer, channel, _) = client(&relay).await;
     send_frame(channel.as_ref(), 1, &request("old", &format!("/api{path}"))).await;
     assert!(
-        matches!(response(channel.as_ref()).await, Frame::StreamStart(reply) if reply.status == 426)
+        matches!(response(channel.as_ref()).await, Frame::UpdateRequired { message } if message.contains("Update required"))
     );
-    send_frame(
-        channel.as_ref(),
-        2,
-        &Frame::StreamCredit { id: "old".into() },
-    )
-    .await;
-    let mut body = Vec::new();
-    loop {
-        match response(channel.as_ref()).await {
-            Frame::StreamChunk { body: chunk, .. } => {
-                body.extend(chunk);
-                send_frame(
-                    channel.as_ref(),
-                    3,
-                    &Frame::StreamCredit { id: "old".into() },
-                )
-                .await;
-            }
-            Frame::StreamEnd { failed, .. } => {
-                assert!(!failed);
-                break;
-            }
-            _ => panic!("Unexpected refusal frame"),
-        }
-    }
-    assert_eq!(body, expected);
-    let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(error["code"], "update_required");
+    peer.close().await.unwrap();
+    // A current app still opens normally on a fresh authorized peer.
+    let (peer, channel, _) = client(&relay).await;
     send_frame(
         channel.as_ref(),
         4,

@@ -37,3 +37,14 @@ Le protocole de transport et les versions globales ne sont pas relevés pour cet
 seule représentation. Les applications refusent aussi une représentation inconnue avant
 d’accepter le lot et son curseur ; elles gardent les dernières données valides sans
 rejouer une mutation incertaine. Il n’y a pas de mode de rendu legacy.
+
+
+L’autorisation et le renouvellement Direct des interfaces déclarent aussi la capacité
+`timeline: 1`. Ces contrôles HTTPS peuvent fournir le refus déjà compris par les
+anciens clients avant ICE, même quand le contenu restera sur le relais. Sur un canal
+établi, un refus HTTP426 du handler est livré avec la trame terminale `update_required`
+déjà existante. Ni l’enveloppe v4 ni les interfaces MCP ne changent. La disponibilité
+persistée de l’installation n’est pas détournée pour simuler une version de client.
+Un ancien binaire dépourvu de Direct utilisable ne sait pas transformer son refus SSE
+en nouvel écran ; il exige une réouverture/mise à jour manuelle. Cette limite ne doit
+pas être présentée comme une transition automatique qualifiée.

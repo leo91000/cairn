@@ -118,7 +118,7 @@ afterEach(async () => {
 
 it('renders through the relay while direct authorization is pending, then uses the authorized channel', async () => {
   let authorize: (value: Response) => void = () => {}
-  const fetch = vi.fn((url: string) => url.endsWith('/direct/authorize')
+  const fetch = vi.fn((url: string, _options?: RequestInit) => url.endsWith('/direct/authorize')
     ? new Promise<Response>(resolve => authorize = resolve)
     : Promise.resolve(Response.json({ marker: 'relay' }, { headers: { 'x-cairn-transport': 'relay' } })))
   vi.stubGlobal('fetch', fetch)
@@ -129,6 +129,8 @@ it('renders through the relay while direct authorization is pending, then uses t
   await nextTick()
   expect(await api('/chats')).toEqual({ marker: 'relay' })
   await vi.waitFor(() => expect(fetch.mock.calls.some(([url]) => url.endsWith('/direct/authorize'))).toBe(true))
+  const authorization = fetch.mock.calls.find(([url]) => url.endsWith('/direct/authorize'))!
+  expect(JSON.parse(authorization[1]!.body as string)).toMatchObject({ version: 4, timeline: 1 })
   authorize(Response.json({
     available: true,
     grant: {
