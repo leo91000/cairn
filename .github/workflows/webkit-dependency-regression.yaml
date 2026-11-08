@@ -1,20 +1,20 @@
-name: Skill availability paired diagnostic
+name: B534 native navigation paired diagnostic
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   browser:
-    name: skill availability (${{ matrix.label }})
+    name: B534 native navigation (${{ matrix.label }})
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
         include:
-          - label: base-fbd0b96e
-            sha: fbd0b96e7450948e5f8b7829bdff157733291413
-          - label: candidate-59d80524
-            sha: 59d805247c872688fa59f84c77d9ffd560d9399a
+          - label: base-7028fbfd
+            sha: 7028fbfdd6d13e27b8f4e7db767899828d631b42
+          - label: B-5d1645ea
+            sha: 5d1645ea808cb18f7b64aa0dcd92987cc3ceeb2d
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -70,25 +70,40 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Build the manager fixtures and web assets
         run: |
-          cargo build --locked -p cairn-installation --bin cairn --example worker_fixture --example browser_fixture
-          cargo build --locked -p cairn-beacon --bin cairn-beacon --example beacon_sql_fixture
-          VITE_CAIRN_TEST_RESUME_DIAGNOSTICS=true pnpm exec vite build --config apps/web/vite.config.ts
+          cargo build --locked --bin cairn --example worker_fixture --example browser_fixture --example network_direct_client --example network_qualification --example native_storage_qualifier
+          cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server --example beacon_sql_fixture
+          pnpm exec vite build --config apps/web/vite.config.ts
       - name: Qualify the isolated Postgres fixture
         run: pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts
-      - name: Install observer-only real reload probes
+      - name: Install observer-only B534 navigation probe
         env:
           OBSERVER_SHA: ${{ github.sha }}
+          EXPECTED_SOURCE_SHA: ${{ matrix.sha }}
         run: |
+          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
+          test -z "$(git -c safe.directory="$GITHUB_WORKSPACE" status --porcelain)"
+          git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD:tests/e2e/mcps.spec.ts
           git -c safe.directory="$GITHUB_WORKSPACE" fetch origin "$OBSERVER_SHA"
-          git -c safe.directory="$GITHUB_WORKSPACE" show "$OBSERVER_SHA:.github/diagnostics/skill-availability-probe.ts" >> tests/e2e/skill-bundles.spec.ts
-      - name: Probe availability across actual reload boundaries
+          git -c safe.directory="$GITHUB_WORKSPACE" show "$OBSERVER_SHA:.github/diagnostics/b534-navigation-probe.ts" >> tests/e2e/mcps.spec.ts
+      - name: Observe both single-variable native navigation controls
         timeout-minutes: 5
-        run: pnpm test:e2e skill-bundles.spec.ts --project=layout-webkit-skill-bundles --grep 'availability native reload probe' --workers=1 --retries=0 --fail-on-flaky-tests --trace=on
+        run: |
+          result=0
+          for control in native-cancel abort-before-goto; do
+            set +e
+            CAIRN_B534_CONTROL="$control" PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$control" pnpm test:e2e mcps.spec.ts --project=layout-webkit-mcps --grep '^B534 native Agents navigation' --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --output="test-results/$control"
+            code=$?
+            set -e
+            printf '%s exit=%s\n' "$control" "$code" >> b534-control-results.txt
+            if [ "$code" -ne 0 ]; then result=1; fi
+          done
+          exit "$result"
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: skill-availability-${{ matrix.label }}
+          name: b534-navigation-${{ matrix.label }}
           path: |
             playwright-report/
             test-results/
+            b534-control-results.txt
           retention-days: 14

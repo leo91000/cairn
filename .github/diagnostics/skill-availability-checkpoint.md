@@ -32,7 +32,7 @@ Separate fresh disposable jobs ran **serially**, preserving the PR browser image
 
 ## Next lot prepared, not dispatched
 
-Observer `.github/workflows/webkit-dependency-regression.yaml` now builds each immutable source serially and appends `.github/diagnostics/skill-availability-probe.ts` to the original skill suite **after** the product build. No app source is changed. The prepared command is:
+Historical skill preparation is preserved in `.github/diagnostics/skill-availability-probe.ts`; it has not run. The existing workflow has since been retargeted exclusively to the B534 native-navigation case described in `b534-navigation-context.md`. It does not select this historical fbd/59d pair. No app source is changed. The prepared command is:
 
 ```sh
 pnpm test:e2e skill-bundles.spec.ts --project=layout-webkit-skill-bundles --grep 'availability native reload probe' --workers=1 --retries=0 --fail-on-flaky-tests --trace=on
