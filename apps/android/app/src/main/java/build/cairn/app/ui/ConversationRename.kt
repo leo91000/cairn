@@ -64,7 +64,8 @@ internal fun ConversationRename(
     // Counted in characters like the installation, so emoji and longer titles stay editable.
     val length = trimmed.codePointCount(0, trimmed.length)
     val tooLong = length > MAX_CONVERSATION_TITLE
-    val changed = trimmed.isNotEmpty() && !tooLong && trimmed != shown
+    // Compared with the conversation's current title, which the sheet names when it changed.
+    val changed = trimmed.isNotEmpty() && !tooLong && trimmed != current
     // The shared error belongs to this sheet only once it has tried to save.
     var tried by remember { mutableStateOf(false) }
     val savable = changed && !busy

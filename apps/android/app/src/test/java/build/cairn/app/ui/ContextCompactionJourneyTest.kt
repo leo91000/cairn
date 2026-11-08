@@ -372,6 +372,10 @@ class ContextCompactionJourneyTest {
                     "Le titre est devenu « Titre automatique » entre-temps ; enregistrer le remplace."
                 )
                 assertTrue(renames.isEmpty())
+                // Saving follows the current title, so the new title itself is nothing to save.
+                compose.onNodeWithTag("rename-title").performTextReplacement("Titre automatique")
+                compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                compose.onNodeWithTag("rename-title").performTextReplacement("Notes 0.53")
                 compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
                 compose.waitUntil(10000) {
                     compose

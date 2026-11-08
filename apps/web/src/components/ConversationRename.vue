@@ -36,7 +36,8 @@ const trimmed = computed(() => title.value.trim())
 // Counted in characters like the installation, so emoji and longer existing titles stay editable.
 const length = computed(() => [...trimmed.value].length)
 const tooLong = computed(() => length.value > MAX_TITLE)
-const changed = computed(() => !!trimmed.value && !tooLong.value && trimmed.value !== shown)
+// Compared with the conversation's current title, which the dialog names when it changed.
+const changed = computed(() => !!trimmed.value && !tooLong.value && trimmed.value !== current.value)
 
 async function save() {
   if (saving.value || !changed.value)

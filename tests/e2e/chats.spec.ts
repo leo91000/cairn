@@ -2223,7 +2223,7 @@ test('a renamed conversation keeps its title and Cairn stops naming it', async (
   // the person typed, and the dialog names the new title before saving replaces it.
   ;({ action } = await openChatDetails(page))
   await action('Rename conversation').click()
-  await title.fill('Racing title')
+  await expect(title).toHaveValue('Release notes 0.52')
   // The finished turn may still update the conversation, so the other client retries on a stale revision.
   await expect(async () => {
     const current = await workspace.api(`/api/chats/${chat.id}`)
@@ -2231,7 +2231,13 @@ test('a renamed conversation keeps its title and Cairn stops naming it', async (
   }).toPass()
   await expect(page.locator('.chat-header').getByRole('heading', { name: 'Renamed elsewhere', exact: true })).toBeVisible()
   await expect(dialog.getByRole('alert')).toHaveText('The title changed to “Renamed elsewhere” meanwhile; saving replaces it.')
-  await expect(title).toHaveValue('Racing title')
+  // Save follows the current title: the untouched field would restore the earlier one, and the
+  // new title itself is nothing to save.
+  await expect(title).toHaveValue('Release notes 0.52')
+  await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeEnabled()
+  await title.fill('Renamed elsewhere')
+  await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeDisabled()
+  await title.fill('Racing title')
   expect((await workspace.api(`/api/chats/${chat.id}`)).title).toBe('Renamed elsewhere')
   await dialog.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(dialog).toHaveCount(0)
