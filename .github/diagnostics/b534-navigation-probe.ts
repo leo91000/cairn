@@ -9,10 +9,13 @@ import process from 'node:process'
   test(`B534 native Agents navigation (${control})`, async ({ page, workspace }, testInfo) => {
     const journal: Array<{ kind: string, hostAt: number, browserAt?: number, document?: string, poll?: number }> = []
     const errors: string[] = []
+    const nativeSourceErrors: Array<{ document?: string, source?: number }> = []
     const bodyFailures: Array<{ kind: string, document?: string, poll?: number }> = []
     const journalPath = testInfo.outputPath('b534-navigation.json')
-    const saveJournal = () => saveB534Journal(journalPath, JSON.stringify({ control, journal, errors, bodyFailures }))
+    const saveJournal = () => saveB534Journal(journalPath, JSON.stringify({ control, journal, errors, bodyFailures, nativeSourceErrors }))
     const record = (kind: string, browserAt?: number, document?: string, poll?: number) => {
+      if (kind === 'native-chat-source-error')
+        nativeSourceErrors.push({ document, source: poll })
       if (kind.endsWith('-body-rejected'))
         bodyFailures.push({ kind, document, poll })
       journal.push({ kind, hostAt: Date.now(), browserAt, document, poll })
@@ -32,11 +35,18 @@ import process from 'node:process'
     const requests = new Map<import('@playwright/test').Request, 'pending' | 'finished' | 'cancelled' | 'failed'>()
     const statuses = new Map<import('@playwright/test').Request, number>()
     const streamStatuses = new Map<import('@playwright/test').Request, number>()
+    const nativeStreams = new Map<import('@playwright/test').Request, 'pending' | 'finished' | 'cancelled' | 'failed'>()
+    const chatStreamRequest = (request: import('@playwright/test').Request) => request.resourceType() === 'eventsource' && new URL(request.url()).pathname.endsWith('/api/chats/stream')
     const finiteRequest = (request: import('@playwright/test').Request) => {
       const path = new URL(request.url()).pathname
       return ['fetch', 'xhr'].includes(request.resourceType()) && (path.startsWith('/api/') || path === '/web-build.json')
     }
     page.on('request', (request) => {
+      if (chatStreamRequest(request)) {
+        nativeStreams.set(request, 'pending')
+        epochs.set(request, epoch)
+        record('native-chat-source-request')
+      }
       if (measuring && finiteRequest(request)) {
         requests.set(request, 'pending')
         epochs.set(request, epoch)
@@ -44,8 +54,7 @@ import process from 'node:process'
     })
     page.on('response', (response) => {
       const request = response.request()
-      const chatStream = request.resourceType() === 'eventsource' && new URL(request.url()).pathname.endsWith('/api/chats/stream')
-      if (chatStream) {
+      if (chatStreamRequest(request)) {
         streamStatuses.set(request, response.status())
         record(`native-chat-source-http-status-${response.status()}`)
       }
@@ -55,12 +64,21 @@ import process from 'node:process'
       }
     })
     page.on('requestfinished', (request) => {
+      if (nativeStreams.has(request)) {
+        nativeStreams.set(request, 'finished')
+        record('native-chat-source-request-finished')
+      }
       if (requests.has(request)) {
         requests.set(request, 'finished')
         record('network-poll-finished')
       }
     })
     page.on('requestfailed', (request) => {
+      if (nativeStreams.has(request)) {
+        const cancelled = request.failure()?.errorText === 'Load request cancelled'
+        nativeStreams.set(request, cancelled ? 'cancelled' : 'failed')
+        record(cancelled ? 'native-chat-source-request-cancelled' : 'native-chat-source-request-failed')
+      }
       if (requests.has(request)) {
         const cancelled = request.failure()?.errorText === 'Load request cancelled'
         requests.set(request, cancelled ? 'cancelled' : 'failed')
@@ -239,6 +257,10 @@ import process from 'node:process'
       await browserSettled()
       await authenticateWorkspace(page)
       await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
+      await expect.poll(() => page.evaluate(() => (window as any).b534Observation.directChatAccepted), {
+        message: 'The pre-OAuth shell accepted real direct chat-list traffic',
+      }).toBe(true)
+      await browserSettled()
       const card = page.locator('.mcp-card').filter({ hasText: 'B534 departure' })
       await card.getByRole('button', { name: 'Connect', exact: true }).click()
       await page.waitForURL(url => url.pathname.endsWith('/mcps/callback'))
@@ -374,6 +396,14 @@ import process from 'node:process'
         await expect.poll(() => [...requests.values()].every(state => state !== 'pending'), {
           message: 'Every observed finite application HTTP request has terminated',
         }).toBe(true)
+        await expect.poll(() => [...nativeStreams].every(([request, terminal]) => epochs.get(request) === epoch || terminal !== 'pending'), {
+          message: 'Every retired-document native chat request has terminated',
+        }).toBe(true)
+        const currentStreamHandoff = await page.evaluate(() => {
+          const observation = (window as any).b534Observation
+          return observation.directChatAccepted
+            && document.querySelector('[data-transport-route]')?.getAttribute('data-transport-route') === 'direct'
+        })
         for (const [request, terminal] of requests) {
           if (request === targetPoll)
             record(`target-network-${terminal}`)
@@ -392,6 +422,21 @@ import process from 'node:process'
           if (status !== 200)
             throw new Error(`An observed native chat stream has unexpected HTTP status ${status}`)
         }
+        for (const [request, terminal] of nativeStreams) {
+          const status = streamStatuses.get(request)
+          if (terminal === 'failed')
+            throw new Error('A native chat request failed without an attributable cancellation')
+          if ((terminal === 'finished' || terminal === 'pending') && status !== 200)
+            throw new Error('A native chat request has no successful opening proof')
+          if (terminal === 'cancelled') {
+            const requestEpoch = epochs.get(request)
+            const retired = requestEpoch !== undefined && requestEpoch < epoch
+            const handoff = requestEpoch === epoch && status === 200 && currentStreamHandoff
+            if (!retired && !handoff)
+              throw new Error('A native chat cancellation lacks document retirement or successful direct handoff')
+          }
+        }
+        expect(nativeSourceErrors).toEqual([])
         if (deliveryFailure && (!targetPoll || requests.get(targetPoll) !== 'cancelled'))
           throw deliveryFailure
         await browserSettled()
