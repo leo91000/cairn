@@ -61,7 +61,7 @@ jobs:
             python3 /root/observe-plan.py
             git diff -- tests/e2e/claude.spec.ts > "evidence/$source.patch"
             set +e
-            pnpm test:e2e --project=layout-webkit-claude --grep 'plan drafts keep their mode' --repeat-each=20 --workers=1 --retries=0 --trace=on --output="evidence/$source-results" > "evidence/$source.log" 2>&1
+            pnpm test:e2e --project=layout-webkit-claude --grep 'plan drafts keep their mode' --repeat-each=3 --workers=1 --retries=0 --trace=on --output="evidence/$source-results" > "evidence/$source.log" 2>&1
             code=$?
             set -e
             echo "$source exit=$code"
@@ -72,6 +72,6 @@ jobs:
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: plan-draft-paired-observation
+          name: plan-draft-forced-race
           path: evidence/
           retention-days: 14
