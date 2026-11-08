@@ -6,7 +6,7 @@ s = s.replace("class BlockedMissionJourneyTest {", """class BlockedMissionJourne
     companion object {
         @JvmStatic
         @org.robolectric.ParameterizedRobolectricTestRunner.Parameters(name = "observation={0}")
-        fun observations(): List<Array<Int>> = (1..30).map { arrayOf(it) }
+        fun observations(): List<Array<Int>> = (1..300).map { arrayOf(it) }
     }
 """)
 s = s.replace("private fun waitText(value: String, substring: Boolean = false) =\n        compose.waitUntil(15000) {", """private fun waitText(value: String, substring: Boolean = false) {
@@ -22,4 +22,5 @@ s = s.replace("\n    private fun waitCall(method:", """
 
     private fun waitCall(method:""")
 s = s.replace('        waitText("Modifications enregistrées")', '        println("[DEBUG-archive] before notice wait: busy=${vm.state.value.busy} notice=${vm.state.value.notice} error=${vm.state.value.error} archived=${vm.state.value.tasks.any { it.id == proof.id && it.archived }}")\n        waitText("Modifications enregistrées")')
+s = s.replace('        waitText("Modifications enregistrées")', '        waitText("Modifications enregistrées")\n        println("[DEBUG-archive] notification seen clock=${compose.mainClock.currentTime}")')
 p.write_text(s)
