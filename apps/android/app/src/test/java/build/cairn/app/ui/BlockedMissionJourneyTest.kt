@@ -2,9 +2,13 @@ package build.cairn.app.ui
 
 import android.app.Application
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
 import build.cairn.app.data.*
 import build.cairn.contracts.OutcomeAsideAction
@@ -278,20 +282,32 @@ class BlockedMissionJourneyTest {
                     MemoryVault(),
                     beaconOrigin = "",
                 )
-            compose.setContent {
-                LaunchedEffect(Unit) {
-                    vm.state.first { it.ready }
-                    vm.connect(server.url("/").toString())
-                }
-                CairnTheme("light") { CairnApp(vm = vm) }
-            }
+            val models = ViewModelStore().apply { put("fixture", vm) }
+            var mounted by mutableStateOf(true)
             try {
+                compose.setContent {
+                    if (mounted) {
+                        LaunchedEffect(Unit) {
+                            vm.state.first { it.ready }
+                            vm.connect(server.url("/").toString())
+                        }
+                        CairnTheme("light") { CairnApp(vm = vm) }
+                    }
+                }
                 waitText("Tout")
                 compose.onNodeWithText("Tout").performClick()
                 body(vm)
             } finally {
-                initialProjectsReleased.countDown()
-                vm.api.closeStreams()
+                try {
+                    compose.runOnIdle { mounted = false }
+                    compose.waitForIdle()
+                } finally {
+                    try {
+                        models.clear()
+                    } finally {
+                        initialProjectsReleased.countDown()
+                    }
+                }
             }
         }
     }
