@@ -1,21 +1,27 @@
 package build.cairn.app.ui
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -30,84 +36,96 @@ import androidx.compose.ui.unit.dp
 internal const val MAX_CONVERSATION_TITLE = 90
 
 /**
- * Renames a conversation. Once renamed, Cairn no longer names it automatically, so the dialog says
- * so; [save] receives the trimmed title only when it changed, and a way to report that the
- * conversation changed meanwhile, after which saving again waits for the dialog to reopen.
+ * Renames a conversation whose current title is [title], in a sheet like the web's phone layout.
+ * Once renamed, Cairn no longer names it automatically, so the sheet says so. [save] receives the
+ * trimmed title only when it changed, the title the sheet opened on, and where to report a
+ * different title found when saving.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun ConversationRename(
     title: String,
     busy: Boolean,
     error: String?,
     dismiss: () -> Unit,
-    save: (title: String, conflict: () -> Unit) -> Unit,
+    save: (title: String, shown: String, elsewhere: (String) -> Unit) -> Unit,
 ) {
-    var value by remember { mutableStateOf(TextFieldValue(title, TextRange(0, title.length))) }
+    // The title the sheet opened on. A message or a turn meanwhile leaves the conversation
+    // renamable; a title changed elsewhere is never overwritten from this sheet.
+    val shown = remember { title }
+    // Found when saving, before the live conversation shows it.
+    var found by remember { mutableStateOf<String?>(null) }
+    val renamedElsewhere = if (title != shown) title else found
+    var value by remember { mutableStateOf(TextFieldValue(shown, TextRange(0, shown.length))) }
     val trimmed = value.text.trim()
     // Counted in characters like the installation, so emoji and longer titles stay editable.
     val length = trimmed.codePointCount(0, trimmed.length)
     val tooLong = length > MAX_CONVERSATION_TITLE
-    val changed = trimmed.isNotEmpty() && !tooLong && trimmed != title
-    var stale by remember { mutableStateOf(false) }
-    // The shared error belongs to this dialog only once it has tried to save.
+    val changed = trimmed.isNotEmpty() && !tooLong && trimmed != shown
+    // The shared error belongs to this sheet only once it has tried to save.
     var tried by remember { mutableStateOf(false) }
-    val savable = changed && !stale && !busy
+    val savable = changed && renamedElsewhere == null && !busy
     val submit = {
         tried = true
-        save(trimmed) { stale = true }
+        save(trimmed, shown) { found = it }
     }
     val focus = remember { FocusRequester() }
-    AlertDialog(
+    ModalBottomSheet(
         onDismissRequest = { if (!busy) dismiss() },
-        title = { Text("Renommer la conversation") },
-        text = {
-            // The field exists once the dialog's content composes; a window not yet attached is
-            // simply left unfocused.
-            LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
-            Column {
-                OutlinedTextField(
-                    value = value,
-                    // A longer title stays in the field with its length, like on the web.
-                    onValueChange = { value = it },
-                    isError = tooLong,
-                    supportingText =
-                        if (tooLong) {
-                            {
-                                Text(
-                                    "$MAX_CONVERSATION_TITLE caractères au plus ($length actuellement)."
-                                )
-                            }
-                        } else null,
-                    label = { Text("Titre") },
-                    singleLine = true,
-                    enabled = !busy,
-                    keyboardOptions =
-                        KeyboardOptions(
-                            capitalization = KeyboardCapitalization.Sentences,
-                            imeAction = ImeAction.Done,
-                        ),
-                    keyboardActions =
-                        androidx.compose.foundation.text.KeyboardActions(
-                            onDone = { if (savable) submit() }
-                        ),
-                    modifier =
-                        Modifier.fillMaxWidth().focusRequester(focus).testTag("rename-title"),
-                )
-                Spacer(Modifier.height(8.dp))
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        containerColor = MaterialTheme.colorScheme.surface,
+    ) {
+        // The field exists once the sheet's content composes; a window not yet attached is simply
+        // left unfocused.
+        LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 20.dp).padding(bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("Renommer la conversation", style = MaterialTheme.typography.headlineSmall)
+            OutlinedTextField(
+                value = value,
+                // A longer title stays in the field with its length, like on the web.
+                onValueChange = { value = it },
+                isError = tooLong,
+                supportingText =
+                    if (tooLong) {
+                        {
+                            Text(
+                                "$MAX_CONVERSATION_TITLE caractères au plus ($length actuellement)."
+                            )
+                        }
+                    } else null,
+                label = { Text("Titre") },
+                singleLine = true,
+                enabled = !busy,
+                keyboardOptions =
+                    KeyboardOptions(
+                        capitalization = KeyboardCapitalization.Sentences,
+                        imeAction = ImeAction.Done,
+                    ),
+                keyboardActions = KeyboardActions(onDone = { if (savable) submit() }),
+                modifier = Modifier.fillMaxWidth().focusRequester(focus).testTag("rename-title"),
+            )
+            Text(
+                "Cairn ne renommera plus cette conversation automatiquement.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            ConnectionFeedbackNotice()
+            if (renamedElsewhere != null)
                 Text(
-                    "Cairn ne renommera plus cette conversation automatiquement.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    "Renommée « $renamedElsewhere » ailleurs entre-temps. Fermez puis rouvrez pour la renommer à nouveau.",
+                    color = MaterialTheme.colorScheme.error,
                 )
-                ConnectionFeedbackNotice()
-                if (tried && error != null) Text(error, color = MaterialTheme.colorScheme.error)
+            else if (tried && error != null) Text(error, color = MaterialTheme.colorScheme.error)
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            ) {
+                TextButton(onClick = dismiss, enabled = !busy) { Text("Annuler") }
+                Button(onClick = submit, enabled = savable) { Text("Enregistrer") }
             }
-        },
-        confirmButton = {
-            TextButton(onClick = submit, enabled = savable) {
-                Text("Enregistrer")
-            }
-        },
-        dismissButton = { TextButton(onClick = dismiss, enabled = !busy) { Text("Annuler") } },
-    )
+        }
+    }
 }

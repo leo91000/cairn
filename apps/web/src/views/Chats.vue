@@ -980,10 +980,10 @@ function closeRename() {
   void refocus(renameOpener.value)
 }
 
-// The title shows at once unless the live stream already brought something newer.
-function renamed(chat: ChatDetail, from: string) {
-  if (detail.value?.id === chat.id && detail.value.revision === from)
-    detail.value = { ...detail.value, title: chat.title, revision: chat.revision }
+// The title shows at once; the live stream brings the rest of the conversation moments later.
+function renamed(chat: ChatDetail) {
+  if (detail.value?.id === chat.id)
+    detail.value = { ...detail.value, title: chat.title }
   closeRename()
 }
 

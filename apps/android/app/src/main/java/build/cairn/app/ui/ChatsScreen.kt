@@ -69,6 +69,7 @@ import build.cairn.contracts.compactChat
 import build.cairn.contracts.createChat
 import build.cairn.contracts.deleteChatMessage
 import build.cairn.contracts.editChatMessage
+import build.cairn.contracts.getChat
 import build.cairn.contracts.renameChat
 import build.cairn.contracts.restartChatSession
 import build.cairn.contracts.restoreChat
@@ -468,9 +469,7 @@ internal fun ChatPage(
     var queueExpanded by rememberSaveable(id) { mutableStateOf(false) }
     var newSession by remember(id) { mutableStateOf(false) }
     var compacting by remember(id) { mutableStateOf(false) }
-    // The conversation as the rename dialog opened on it: a title changed meanwhile is reported
-    // by the installation instead of being overwritten.
-    var renaming by remember(id) { mutableStateOf<Chat?>(null) }
+    var renaming by remember(id) { mutableStateOf(false) }
     var cancelledExpanded by rememberSaveable(id) { mutableStateOf(false) }
     BackHandler(selected && fullscreen) { fullscreen = false }
     var choosing by rememberSaveable(id) { mutableStateOf(false) }
@@ -1102,7 +1101,7 @@ internal fun ChatPage(
                                         leadingIcon = { Icon(Icons.Default.Edit, null) },
                                         onClick = {
                                             menu = false
-                                            renaming = chat
+                                            renaming = true
                                         },
                                     )
                                 chat
@@ -2217,27 +2216,28 @@ internal fun ChatPage(
                         newSession = false
                     }
                 }
-            renaming?.let { shown ->
-                ConversationRename(shown.title, state.busy, state.error, { renaming = null }) {
+            if (renaming && chat != null)
+                ConversationRename(chat.title, state.busy, state.error, { renaming = false }) {
                     title,
-                    conflict ->
+                    shown,
+                    elsewhere ->
                     vm.perform {
-                        try {
+                        // Messages and turns change the revision too, and the live conversation
+                        // can trail it.
+                        val current = api.getChat(ChatInput(chatId = chat.id))
+                        if (current.title != shown) elsewhere(current.title)
+                        else {
                             api.renameChat(
                                 RenameChatInput(
-                                    chatId = shown.id,
-                                    revision = shown.revision,
+                                    chatId = chat.id,
+                                    revision = current.revision,
                                     title = title,
                                 )
                             )
-                        } catch (e: ApiException) {
-                            if (e.status == 409) conflict()
-                            throw e
+                            renaming = false
                         }
-                        renaming = null
                     }
                 }
-            }
             if (compacting && chat != null)
                 Confirm(
                     "Compacter le contexte de l’agent ?",

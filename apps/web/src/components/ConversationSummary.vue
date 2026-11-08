@@ -25,7 +25,7 @@ defineProps<{
 
 <template>
   <div>
-    <p v-if="title" class="m-0! px-2.5 pt-1 pb-1 text-sm font-semibold leading-snug wrap-anywhere">
+    <p v-if="title && !loading" class="m-0! px-2.5 pt-1 pb-1 text-sm font-semibold leading-snug wrap-anywhere">
       {{ title }}
     </p>
     <div v-if="!loading" class="flex items-center gap-2.5 px-2.5 pt-2 pb-3">

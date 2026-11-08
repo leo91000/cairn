@@ -59,6 +59,8 @@ class ContextCompactionJourneyTest {
             val chatId = "00000000-0000-4000-8000-000000000099"
             val calls = CopyOnWriteArrayList<Pair<String, String>>()
             val renames = CopyOnWriteArrayList<String>()
+            // The title the installation holds, which another client may have changed.
+            val serverTitle = java.util.concurrent.atomic.AtomicReference<String?>(null)
             val chat =
                 Chat(
                     id = chatId,
@@ -170,6 +172,17 @@ class ContextCompactionJourneyTest {
                         val path = request.path.orEmpty().substringBefore('?')
                         val method = request.method.orEmpty()
                         if (method in listOf("POST", "PUT", "DELETE")) calls += method to path
+                        if (
+                            method == "GET" &&
+                                path == "/api/installations/fixture/api/chats/$chatId"
+                        )
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody(
+                                    wireJson.encodeToString(
+                                        chat.copy(title = serverTitle.get() ?: chat.title)
+                                    )
+                                )
                         if (
                             method == "PUT" &&
                                 path == "/api/installations/fixture/api/chats/$chatId"
@@ -350,12 +363,27 @@ class ContextCompactionJourneyTest {
                 compose.onNodeWithTag("rename-title").performTextReplacement("é".repeat(91))
                 waitText("90 caractères au plus (91 actuellement).")
                 compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
-                // A conversation changed meanwhile is reported, and saving again waits for the
-                // dialog to reopen on the current title.
+                // A title changed elsewhere, found when saving, is never overwritten.
+                serverTitle.set("Renommée ailleurs")
+                compose.onNodeWithTag("rename-title").performTextReplacement("Notes 0.53")
+                compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
+                waitText(
+                    "Renommée « Renommée ailleurs » ailleurs entre-temps. Fermez puis rouvrez pour la renommer à nouveau."
+                )
+                compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                assertTrue(renames.isEmpty())
+                serverTitle.set(null)
+                compose.onNodeWithText("Annuler").performClick()
+                compose.onNodeWithContentDescription("Options de la conversation").performClick()
+                compose.onNodeWithText("Renommer").performClick()
+                waitText("Renommer la conversation")
+                compose
+                    .onAllNodesWithText("Renommée ailleurs", substring = true)
+                    .assertCountEquals(0)
+                // A refused save is reported, and its error does not follow the dialog once closed.
                 compose.onNodeWithTag("rename-title").performTextReplacement("Titre concurrent")
                 compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
                 waitText("This conversation changed. Reload before renaming.")
-                compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
                 compose.onNodeWithText("Annuler").performClick()
                 compose.onNodeWithContentDescription("Options de la conversation").performClick()
                 compose.onNodeWithText("Renommer").performClick()
