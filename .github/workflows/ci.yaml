@@ -684,6 +684,17 @@ jobs:
               for name, checksum in candidate['sha256'].items():
                   assert hashlib.sha256((Path('target/debug') / name).read_bytes()).hexdigest() == checksum
           PYREF
+      - name: Prepare the exact reference's private native tool prerequisite
+        env:
+          CANDIDATE_SHA: ${{ inputs.ci-diagnostic == 'native' && inputs.diagnostic-candidate || github.sha }}
+          REFERENCE_SHA: ${{ steps.native-reference-key.outputs.sha }}
+        run: |
+          mkdir -p native-storage-evidence/prerequisite
+          if test -n "$CI_DIAGNOSTIC_SOURCE"; then
+            node scripts/ci-deadline.mjs "$PWD/native-diagnostics/preparation/tool-acquisition" 90 -- python3 -B scripts/prepare-native-reference-tools.py --candidate "$CANDIDATE_SHA" --reference "$REFERENCE_SHA" --cache-output "$RUNNER_TEMP/native-pristine-tool-cache" --output "$PWD/native-storage-evidence/prerequisite/tool-cache.json"
+          else
+            python3 -B scripts/prepare-native-reference-tools.py --candidate "$CANDIDATE_SHA" --reference "$REFERENCE_SHA" --cache-output "$RUNNER_TEMP/native-pristine-tool-cache" --output "$PWD/native-storage-evidence/prerequisite/tool-cache.json"
+          fi
       - name: Check native fixture memory and garbage semantics against the candidate
         env:
           CAIRN_TEST_NATIVE_QUALIFIER: ${{ github.workspace }}/target/debug/examples/native_storage_qualifier
@@ -710,6 +721,7 @@ jobs:
           reference_fixture="$RUNNER_TEMP/cairn-native-reference-fixture"
           mkdir -p "$reference_fixture"
           git archive "$REFERENCE_SHA" scripts/tests deploy/nodes/native-host.py | tar -x -C "$reference_fixture"
+          python3 -B scripts/native-reference-tool-cache.py "$reference_fixture" --reference "$REFERENCE_SHA" --cache "$RUNNER_TEMP/native-pristine-tool-cache" --preparation "$PWD/native-storage-evidence/prerequisite/tool-cache.json" --receipt "$PWD/native-storage-evidence/prerequisite/reference-cache-setup.json" | tee native-storage-evidence/prerequisite/reference-fixture-setup.json
           if test -n "$CI_DIAGNOSTIC_SOURCE"; then
             mkdir -p "native-diagnostics/reference"
             python3 -B scripts/tests/native_admission_overlay.py "$reference_fixture" reference | tee "native-diagnostics/reference/admission-observation.json"

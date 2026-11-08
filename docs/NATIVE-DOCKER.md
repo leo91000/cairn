@@ -218,6 +218,22 @@ Artifacts from other runs are not selected. The complete reference
 qualification still runs on the current host before candidate measurements. No qualification
 command runs against the owner's desktop node or its Docker daemon.
 
+When both sources declare exactly the same managed Docker tool definitions
+(including extraction entries) and wrapper, the normal native job first prepares
+and verifies those tools with the exact candidate helper in a fresh private
+installation. Only the reference fixture receives a separate copy of the pristine
+13 inventoried files plus `manifest.json`, immediately before its original helper's
+cache-integrity check. The helper, paired binaries, runtime assertions, reference-first
+order and 90-minute job limit remain unchanged. The candidate fixture keeps its
+normal cold preparation. Evidence labels this condition `warmReferenceColdCandidate`
+and records source, fixture and file hashes; it does not claim a successful cold
+reference acquisition or compare preparation/network performance. Runtime cold
+read/daemon measurements retain their existing fresh conversation stores.
+If the definitions or wrapper differ, neither fixture is seeded and both keep
+their own cold preparation. A failed prerequisite, cache check or runtime assertion
+remains a failed qualification. Diagnostic observations keep their separate
+non-qualification status.
+
 `native-storage.json` records the host/kernel/build profile, shared budgets,
 startup samples, cold daemon startup before pulls, warm daemon commands, image
 pull time/digests separately, build/cache resume and restore, storage read/write

@@ -58,6 +58,14 @@ affected code and the full qualification workflows for specialist coverage:
 - Native storage, process ownership, installation and update changes require
   the `node-checks` and `native-runtime` qualifications in that workflow, plus
   [storage measurements](../STORAGE-COMPRESSION.md#qualification) when applicable.
+  The normal native job may seed only the reference fixture's private managed-tool
+  cache when exact tool definitions and wrapper match. It prepares and verifies
+  the complete candidate tool set first, preserves the reference's own helper and
+  cache checks, then executes every reference runtime assertion before the cold
+  candidate. Record `warmReferenceColdCandidate` and retain any earlier cold
+  reference acquisition failure. This setup is not a cold-reference download pass
+  or a preparation/network performance comparison; see
+  [native qualification](../NATIVE-DOCKER.md#qualification).
 - Firecracker changes require `scripts/test-firecracker-discard.sh` where
   relevant. Container/release changes require the corresponding image smoke
   tests. Use disposable infrastructure with the required KVM/ublk capabilities.
