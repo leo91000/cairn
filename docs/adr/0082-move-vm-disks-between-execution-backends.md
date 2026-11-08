@@ -66,9 +66,9 @@ Web, Android, public MCP and the installation tool expose the same operation.
 identify a chat or a mission run. Expired environments retain their separate
 fresh-environment flow and do not pretend to recover deleted files.
 
-Database layout 28 stores the advertised capability, initially false until a
-fresh report. Startup upgrades layout 27 transactionally. Older managers reject
-layout 28; a rollback needs a pre-upgrade database backup, or recovery using this
+Database layout 29 stores the advertised capability, initially false until a
+fresh report. Startup upgrades layouts 27 and 28 transactionally. Older managers reject
+layout 29; a rollback needs a pre-upgrade database backup, or recovery using this
 version. Léo accepted incompatible rollback on 2026-10-24. No claim that older
 strict typed readers accept newly written move state is retained.
 

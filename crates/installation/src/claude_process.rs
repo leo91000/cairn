@@ -9,6 +9,7 @@ use crate::{
     validation::text,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -26,6 +27,12 @@ use tokio_util::sync::CancellationToken;
 const STOPPED: &str = "Claude execution stopped.";
 const MAX_LINE: usize = 32_000_000;
 const MAX_IMAGE: usize = 10_000_000;
+
+/// Only the release tested against the native side-question protocol is enabled.
+/// Other releases must be qualified before extending this gate (ADR-0078).
+fn answers_side_questions(version: &str) -> bool {
+    version == "2.1.308"
+}
 
 /// Prefix of the context usage requests this adapter sends Claude Code.
 const CONTEXT_REQUEST: &str = "cairn-context-";
@@ -106,6 +113,17 @@ fn shell_environment_failed(item: &Value, block: &Value) -> bool {
 async fn send(stdin: &mut ChildStdin, value: Value) -> Result<()> {
     stdin.write_all(format!("{value}\n").as_bytes()).await?;
     Ok(())
+}
+
+async fn cancel_side_request(stdin: &mut ChildStdin, request: &str) {
+    let cancel = json!({
+        "type": "control_cancel_request",
+        "request_id": request,
+    });
+    // UUID-based cancellation frames are below PIPE_BUF, so a single poll either
+    // writes the whole frame or writes nothing. Side work never waits for control
+    // readiness; unsent cancellations rely on native completion or CLI shutdown.
+    let _ = send(stdin, cancel).now_or_never();
 }
 
 async fn emit(events: &mpsc::Sender<Value>, value: Value) -> Result<()> {
@@ -579,6 +597,10 @@ struct Turn<'a> {
     compaction_attempts: usize,
     /// Identifies this launch's compaction items.
     attempt: String,
+    /// Side questions Claude Code is answering, by control request ID.
+    sides: HashMap<String, String>,
+    /// This Claude Code release announced side questions; it takes none otherwise.
+    side_available: bool,
 }
 
 impl Turn<'_> {
@@ -653,10 +675,14 @@ impl Turn<'_> {
         self.emit(event).await
     }
 
-    /// Claude Code's answer to a context usage request. Answers whether the execution is now
-    /// complete.
+    /// Claude Code's answer to a side question or a context usage request. Answers whether the
+    /// execution is now complete.
     async fn on_control_response(&mut self, value: &Value) -> Result<bool> {
         let response = &value["response"];
+        if let Some(question) = self.sides.remove(text(response, "request_id")) {
+            self.on_side_answer(&question, response).await?;
+            return Ok(false);
+        }
         let Some(number) = text(response, "request_id")
             .strip_prefix(CONTEXT_REQUEST)
             .and_then(|number| number.parse::<u64>().ok())
@@ -709,6 +735,8 @@ impl Turn<'_> {
             if value["status"] == "compacting" && self.compaction.is_none() {
                 let id = self.compaction_id();
                 self.compaction = Some(id.clone());
+                self.emit(json!({ "type": "chat.side.compacting", "compacting": true }))
+                    .await?;
                 let item =
                     json!({ "id": id, "type": "context_compaction", "status": "in_progress" });
                 self.emit(json!({ "type": "item.started", "item": item }))
@@ -720,6 +748,8 @@ impl Turn<'_> {
             if failed && let Some(id) = self.compaction.take() {
                 let item = json!({ "id": id, "type": "context_compaction", "status": "failed" });
                 self.emit(json!({ "type": "item.completed", "item": item }))
+                    .await?;
+                self.emit(json!({ "type": "chat.side.compacting", "compacting": false }))
                     .await?;
             }
             return Ok(());
@@ -745,6 +775,8 @@ impl Turn<'_> {
             }
         }
         self.emit(json!({ "type": "item.completed", "item": item }))
+            .await?;
+        self.emit(json!({ "type": "chat.side.compacting", "compacting": false }))
             .await?;
         // The next response measures the compacted context; until then show Claude Code's estimate.
         self.request_context().await?;
@@ -774,6 +806,26 @@ impl Turn<'_> {
             if self.submitted.contains(id) || !crate::chat_inbox::joins_turn(&message, self.plan) {
                 continue;
             }
+            let side =
+                message["sideQuestion"].is_object() || message["sideQuestionCancelled"] == true;
+            if side && !self.side_available {
+                continue;
+            }
+            if message["sideQuestionCancelled"] == true {
+                self.withdraw_side(text(&message, "sideQuestionId")).await?;
+                self.submitted.insert(id.into());
+                continue;
+            }
+            if message["sideQuestion"].is_object() {
+                // Leave stale entries unsubmitted until compaction finishes. Withdrawals
+                // above remain independent, including for a side request already in flight.
+                if self.compaction.is_some() {
+                    continue;
+                }
+                self.ask_side(&message["sideQuestion"]).await?;
+                self.submitted.insert(id.into());
+                continue;
+            }
             if message["questionCancelled"] == true {
                 self.submitted.insert(id.into());
                 continue;
@@ -786,6 +838,124 @@ impl Turn<'_> {
         Ok(())
     }
 
+    /// Claude Code's native side question: answered from the live conversation,
+    /// including the running turn, with every tool denied and nothing written to
+    /// the session transcript. The main turn continues meanwhile.
+    async fn ask_side(&mut self, side: &Value) -> Result<()> {
+        let question = text(side, "id").to_owned();
+        let request_id = format!("side-question-{question}");
+        let request = json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {
+                "subtype": "side_question",
+                "question": side["text"],
+            },
+        });
+        // Writes no larger than PIPE_BUF are atomic on the nonblocking control pipe:
+        // a single poll cannot leave half a JSON frame for the main turn to consume.
+        if serde_json::to_vec(&request)?.len() + 1 > libc::PIPE_BUF {
+            return self
+                .side_failed(
+                    &question,
+                    "This side question is too large for the agent control channel.",
+                )
+                .await;
+        }
+        match send(&mut self.stdin, request).now_or_never() {
+            Some(Ok(())) => {
+                self.sides.insert(request_id, question);
+            }
+            Some(Err(_)) | None => {
+                self.side_failed(&question, "The agent could not receive this side question.")
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Withdraws the side questions Claude Code is still answering when the reply ends:
+    /// they never delay it, and can be asked again during the next one.
+    async fn withdraw_sides(&mut self) -> Result<()> {
+        for (request, question) in std::mem::take(&mut self.sides) {
+            cancel_side_request(&mut self.stdin, &request).await;
+            self.side_failed(&question, crate::chats::side_questions::EXPIRED)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Stop admitting questions as soon as this turn stops consuming its inbox.
+    async fn close_side_admission(&mut self) -> Result<()> {
+        if self.side_available {
+            self.side_available = false;
+            self.emit(json!({ "type": "chat.side.closed" })).await?;
+        }
+        Ok(())
+    }
+
+    async fn withdraw_side(&mut self, question: &str) -> Result<()> {
+        let request = self
+            .sides
+            .iter()
+            .find(|(_, id)| *id == question)
+            .map(|(request, _)| request.clone());
+        if let Some(request) = request {
+            self.sides.remove(&request);
+            cancel_side_request(&mut self.stdin, &request).await;
+        }
+        Ok(())
+    }
+
+    /// The reply to a side question. Claude reports a missing or synthetic answer
+    /// (its own fallback text) when it could not answer.
+    async fn on_side_answer(&mut self, question: &str, response: &Value) -> Result<()> {
+        let answer = &response["response"];
+        let answered = response["subtype"] == "success"
+            && answer["synthetic"] != true
+            && !text(answer, "response").trim().is_empty();
+        if answered {
+            let answer = text(answer, "response");
+            if !crate::chats::side_questions::answer_fits(answer) {
+                return self
+                    .side_failed(question, "The side answer exceeded the size limit.")
+                    .await;
+            }
+            return self
+                .emit(json!({
+                    "type": "chat.side.answered",
+                    "sideQuestionId": question,
+                    "text": answer,
+                }))
+                .await;
+        }
+        // A synthetic answer is Claude Code's own explanation, such as a tool it refused.
+        // Preserve the whole field until the worker redacts configured secrets.
+        let explanation = text(answer, "response");
+        let error = if response["subtype"] == "error" && !text(response, "error").is_empty() {
+            text(response, "error")
+        } else if answer["synthetic"] == true && !explanation.trim().is_empty() {
+            explanation
+        } else {
+            "Claude Code could not answer this side question."
+        };
+        self.side_failed(question, error).await
+    }
+
+    async fn side_failed(&self, question: &str, error: &str) -> Result<()> {
+        let error = if crate::chats::side_questions::error_fits(error) {
+            error
+        } else {
+            "The side question error exceeded the size limit."
+        };
+        self.emit(json!({
+            "type": "chat.side.failed",
+            "sideQuestionId": question,
+            "error": error,
+        }))
+        .await
+    }
+
     /// Handles one stream-json line. Answers whether the request is complete.
     async fn handle(&mut self, value: &Value) -> Result<bool> {
         match text(value, "type") {
@@ -794,6 +964,15 @@ impl Turn<'_> {
                 crate::validation::uuid(session)?;
                 self.emit(json!({ "type": "thread.started", "thread_id": session }))
                     .await?;
+                let release = text(value, "claude_code_version");
+                self.side_available = answers_side_questions(release);
+                if self.side_available {
+                    self.emit(json!({ "type": "chat.side.available" })).await?;
+                } else {
+                    // Says why, instead of leaving the reply "still starting".
+                    self.emit(json!({ "type": "chat.side.unavailable", "release": release }))
+                        .await?;
+                }
             }
             "system" if value["subtype"] == "background_tasks_changed" => {
                 self.background_tasks(value).await?;
@@ -1532,6 +1711,8 @@ impl Turn<'_> {
             }
             return Ok(false);
         }
+        self.close_side_admission().await?;
+        self.withdraw_sides().await?;
         if self.context_pending.is_some() {
             // Claude Code answers the compaction's context request after its result: wait
             // briefly for it so the run shows the compacted context.
@@ -1760,8 +1941,14 @@ pub async fn run(
         compactions: 0,
         compaction_attempts: 0,
         attempt: crate::config::id(),
+        sides: HashMap::new(),
+        side_available: false,
     };
     let operation = turn.execute(&mut stdout, auth.as_mut(), &cancel).await;
+    let closed = turn.close_side_admission().await;
+    // Preserve an original stop/provider error while retiring admission before
+    // the potentially slow child-group and stderr cleanup.
+    let operation = operation.and(closed);
     // Closes Claude Code's stdin.
     drop(turn);
     stop(&mut child, pid).await;
@@ -1880,4 +2067,81 @@ fn resolved(path: &Path) -> Option<PathBuf> {
         let parent = std::fs::canonicalize(path.parent()?).ok()?;
         Some(parent.join(path.file_name().unwrap_or_default()))
     })
+}
+
+#[cfg(test)]
+mod side_question_tests {
+    use super::answers_side_questions;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn finishing_side_cancellation_never_waits_on_a_full_open_control_pipe() {
+        use std::{os::fd::AsRawFd, process::Stdio, task::Poll};
+
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let fd = stdin.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert!(flags >= 0 && flags & libc::O_NONBLOCK != 0);
+        // The child keeps its read end open but never reads it. Fill even the
+        // final partial page so no cancellation frame can fit atomically.
+        let mut filled = 0;
+        for size in [libc::PIPE_BUF, 1] {
+            let bytes = vec![b'x'; size];
+            loop {
+                let written = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+                if written < 0 {
+                    assert_eq!(
+                        std::io::Error::last_os_error().kind(),
+                        std::io::ErrorKind::WouldBlock
+                    );
+                    break;
+                }
+                filled += written;
+            }
+        }
+
+        let mut all_ready = true;
+        for index in 0..5 {
+            let request = format!("side-question-{index}");
+            let cancellation = super::cancel_side_request(&mut stdin, &request);
+            tokio::pin!(cancellation);
+            all_ready &= matches!(futures_util::poll!(&mut cancellation), Poll::Ready(()));
+        }
+        child.start_kill().unwrap();
+        child.wait().await.unwrap();
+        assert!(filled > 0);
+        assert!(
+            all_ready,
+            "Main completion must not wait for side-control readiness or a deadline"
+        );
+    }
+
+    #[test]
+    fn only_the_qualified_release_answers_side_questions() {
+        assert!(answers_side_questions("2.1.308"));
+        for release in [
+            "2.1.280",
+            "2.1.307",
+            "2.1.307-rc",
+            "2.1.308-rc.1",
+            "2.1.308+build",
+            "2.1.310",
+            "2.1.310-beta.1",
+            "2.2.0",
+            "3.0.0+build",
+            "2.1",
+            "",
+            "next",
+        ] {
+            assert!(!answers_side_questions(release), "{release}");
+        }
+    }
 }

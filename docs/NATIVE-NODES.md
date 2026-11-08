@@ -36,7 +36,7 @@ start a conversation with that native agent through its installation tools. Each
 follow-up, resume, scheduled dispatch and delegated run retains and rechecks its
 originating permission. Previously unattributed conversations and external plugin
 origins cannot silently gain host access. Explicit node moves may change an
-existing conversation’s backend under those same checks; see ADR-0081.
+existing conversation’s backend under those same checks; see ADR-0082.
 
 ## Switching an existing machine
 

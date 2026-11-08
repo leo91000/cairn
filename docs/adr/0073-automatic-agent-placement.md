@@ -1,4 +1,4 @@
-> Update 2026-11-07: [ADR-0081](0081-move-vm-disks-between-execution-backends.md) permits explicit cross-backend node moves. VM-created disks are mounted directly by authorized native controllers; only native-created disks need physical conversion before VM execution. Automatic placement and priorities remain as defined in ADR-0073.
+> Update 2026-11-07: [ADR-0082](0082-move-vm-disks-between-execution-backends.md) permits explicit cross-backend node moves. VM-created disks are mounted directly by authorized native controllers; only native-created disks need physical conversion before VM execution. Automatic placement and priorities remain as defined in ADR-0073.
 
 # Automatic placement with per-agent node priorities
 

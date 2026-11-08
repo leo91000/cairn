@@ -63,6 +63,7 @@ import AgentAvatar from '../components/AgentAvatar.vue'
 import AssistantPicker from '../components/AssistantPicker.vue'
 import AttachMenu from '../components/AttachMenu.vue'
 import ChatQuestions from '../components/ChatQuestions.vue'
+import ChatSideQuestions from '../components/ChatSideQuestions.vue'
 import ChatSwitcher from '../components/ChatSwitcher.vue'
 import ComposerAttachments from '../components/ComposerAttachments.vue'
 import ConnectionSheet from '../components/ConnectionSheet.vue'
@@ -296,6 +297,19 @@ const deletingConversation = ref<ChatDetail>()
 const detailsOpen = ref(false)
 const detailsButton = ref<HTMLButtonElement>()
 const activity = ref<InstanceType<typeof ActivityFeed>>()
+const sideQuestions = ref<InstanceType<typeof ChatSideQuestions>>()
+// How many side questions each reply has, for its badge in the conversation.
+const sideQuestionCounts = computed(() => {
+  const counts: Record<string, number> = {}
+  for (const question of detail.value?.sideQuestions ?? []) {
+    if (question.itemId) {
+      const key = question.replyEventId ? `event:${question.itemId}:${question.replyEventId}` : `item:${question.itemId}`
+      counts[key] = (counts[key] ?? 0) + 1
+    }
+  }
+
+  return counts
+})
 const textarea = ref<InstanceType<typeof SkillTextarea>>()
 const workspaceActions = inject(workspaceActionsKey)
 const installation = inject(installationKey, null)
@@ -1428,9 +1442,13 @@ function key(event: KeyboardEvent) {
             :trimmed="0"
             :skills="skillNames"
             :subagent-bar="subagentBar"
+            :can-ask="!!detail?.canAskSideQuestion"
+            :side-questions="sideQuestionCounts"
             compact-toolbar
             chat
             :can-implement="!hasDraft && !editing && !busy && !inactive && !active && !pending.length && !delivery.sending.length"
+            @ask="sideQuestions?.ask($event)"
+            @side-questions="sideQuestions?.show($event)"
             @resume-quota="resumeQuota"
             @coding-agent-switched="chosenProvider = $event"
             @load="live.loadOlder"
@@ -1460,6 +1478,17 @@ function key(event: KeyboardEvent) {
               :active="active"
               :suspended="suspended"
               :highlighted="typeof route.query.question === 'string' ? route.query.question : undefined"
+            />
+            <ChatSideQuestions
+              v-if="detail"
+              ref="sideQuestions"
+              :chat-id="detail.id"
+              :questions="detail.sideQuestions || []"
+              :timeline="timeline"
+              :can-ask="!!detail.canAskSideQuestion"
+              :reason="detail.sideQuestionReason"
+              :provider="detail.provider"
+              @reveal="activity?.reveal($event) || sideQuestions?.unreachable($event)"
             />
             <section
               v-if="openCodeRegionBlocked && !dismissedError"

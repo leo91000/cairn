@@ -82,7 +82,7 @@ async fn upgrades_real_previous_store_with_order_privacy_and_unrelated_data_inta
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        28
+        29
     );
     for table in ["chat_messages", "chat_questions"] {
         assert_eq!(

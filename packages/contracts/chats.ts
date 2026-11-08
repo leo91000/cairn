@@ -8,6 +8,7 @@ export type { ChatCompaction } from './generated/typescript/ChatCompaction'
 export type { ChatExecution } from './generated/typescript/ChatExecution'
 export type { ChatMessage } from './generated/typescript/ChatMessage'
 export type { ChatQuestion } from './generated/typescript/ChatQuestion'
+export type { ChatSideQuestion } from './generated/typescript/ChatSideQuestion'
 
 export type { ChatWakeup } from './generated/typescript/ChatWakeup'
 export type { ContextUsage } from './generated/typescript/ContextUsage'

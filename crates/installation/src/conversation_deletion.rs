@@ -252,6 +252,26 @@ async fn files(s: &Service, chat: &Value) -> Result<()> {
 
 /// Deletes every record of a conversation and its run, including share tokens.
 fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
+    let [side_questions, open_side_questions, used_side_questions] =
+        crate::chats::side_question_prefixes(cid);
+    for prefix in [side_questions, open_side_questions] {
+        for (key, value) in db.keys(&prefix)? {
+            if let Some(token) = value["publicToken"].as_str() {
+                db.delete(&format!("artifact-share:{token}"))?;
+            }
+            db.delete(&key)?;
+        }
+    }
+    // The lifetime identity ledger has only opaque membership markers, never
+    // public tokens. Erase its indexed range without loading/parsing every row
+    // into a Rust collection. SQLite still performs work proportional to rows.
+    db.0.execute(
+        "DELETE FROM kv WHERE key>=?1 AND key<?2",
+        rusqlite::params![
+            used_side_questions,
+            format!("{used_side_questions}\u{10ffff}")
+        ],
+    )?;
     db.delete_checkpoint(run)?;
     for key in [
         format!("turn-speed:{run}"),
@@ -358,6 +378,51 @@ pub async fn expire_environment(s: &Service, chat: Value) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn forgetting_retired_identities_does_not_decode_the_lifetime_ledger() {
+        use crate::run_fixture::DbRunFixture;
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        store
+            .transaction(|db| {
+                db.add_run_fixture(
+                    &json!({
+                        "id": "run",
+                        "taskId": "chat",
+                        "status": "succeeded",
+                        "createdAt": 0,
+                    }),
+                    None,
+                )?;
+                db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run" }))?;
+                let [_, _, used] = crate::chats::side_question_prefixes("chat");
+                for index in 0..512 {
+                    db.set(&format!("{used}{index}"), &json!(true), None)?;
+                }
+                // Erasure needs only this namespace's keys, not its boolean payloads.
+                // A malformed opaque sentinel catches implementations that load/decode
+                // the entire lifetime ledger before removing its first record.
+                db.0.execute(
+                    "INSERT INTO kv VALUES(?, 'not-json', NULL)",
+                    [format!("{used}opaque")],
+                )?;
+                db.set(&format!("{used}expired"), &json!(true), Some(0))?;
+                let neighbor = "chat-side-question-used:chat-other:retired";
+                db.set(neighbor, &json!(true), None)?;
+                forget(db, "chat", "run")?;
+                let remaining: i64 = db.0.query_row(
+                    "SELECT COUNT(*) FROM kv WHERE key>=?1 AND key<?2",
+                    rusqlite::params![used, format!("{used}\u{10ffff}")],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(remaining, 0);
+                assert_eq!(db.kv(neighbor)?, Some(json!(true)));
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn forgetting_a_conversation_removes_its_run_records() {

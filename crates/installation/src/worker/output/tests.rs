@@ -128,6 +128,46 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn side_compaction_controls_update_transient_state_without_entering_history() {
+    let mut fixture = Fixture::new().await;
+    let id = fixture.id.clone();
+    let before = fixture
+        .service
+        .store
+        .read(move |db| db.events_fixture(&id, 0, 1000))
+        .await
+        .unwrap();
+    fixture
+        .event(json!({ "type": "chat.side.available" }))
+        .await;
+    for compacting in [true, false] {
+        fixture
+            .event(json!({ "type": "chat.side.compacting", "compacting": compacting }))
+            .await;
+        let run = fixture.service.store.run(&fixture.id).await.unwrap();
+        assert_eq!(run["sideQuestions"], true);
+        assert_eq!(run["sideQuestionsCompacting"], compacting);
+    }
+    fixture
+        .event(json!({ "type": "chat.side.compacting", "compacting": true }))
+        .await;
+    fixture
+        .event(json!({ "type": "chat.side.unavailable" }))
+        .await;
+    let run = fixture.service.store.run(&fixture.id).await.unwrap();
+    assert_eq!(run["sideQuestions"], false);
+    assert_eq!(run["sideQuestionsCompacting"], false);
+    let id = fixture.id.clone();
+    let after = fixture
+        .service
+        .store
+        .read(move |db| db.events_fixture(&id, 0, 1000))
+        .await
+        .unwrap();
+    assert_eq!(after, before);
+}
+
+#[tokio::test]
 async fn runtime_disk_notice_preserves_publication_metadata_and_redacts_all_payloads() {
     let mut fixture = Fixture::new().await;
     let storage = json!({ "mode": "on-demand", "grantId": "retained-grant", "dirtyBytes": 123,
@@ -896,6 +936,243 @@ fn question_event(id: &str, blocking: bool) -> Value {
             "fields": [{ "id": "scope", "title": "Which scope?" }],
         },
     })
+}
+
+#[tokio::test]
+async fn native_completion_closes_side_admission_before_worker_finalization() {
+    for terminal in [
+        "chat.side.closed",
+        "turn.completed",
+        "turn.failed",
+        "runner.failed",
+    ] {
+        let mut fixture = Fixture::new().await;
+        let chat = question_chat(&fixture).await;
+        let run = fixture.id.clone();
+        fixture
+            .service
+            .store
+            .write(move |db| {
+                db.update_run_boundary_fixture(
+                    &run,
+                    &json!({
+                        "status": "running",
+                        "snapshot": { "agent": { "provider": "claude" } },
+                        "chatExecution": { "messageId": "native-turn", "operation": "message" },
+                        "sideQuestions": true,
+                    }),
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture.service.chat_detail(&chat).await.unwrap()["canAskSideQuestion"],
+            true
+        );
+        let input: cairn_contracts::SideQuestionInput = serde_json::from_value(json!({
+            "id": "a1b2c3d4-0000-4000-8000-000000000001",
+            "text": "Why?",
+        }))
+        .unwrap();
+        let retained = fixture
+            .service
+            .side_question_ask_live(
+                &chat,
+                input.clone(),
+                crate::authorization::Authorization::default(),
+            )
+            .await
+            .unwrap();
+        fixture
+            .event(json!({
+                "type": terminal,
+                "error": { "message": "Native failure" },
+            }))
+            .await;
+        assert_eq!(
+            fixture.checkpoint.snapshot().await.completed(),
+            terminal == "turn.completed"
+        );
+        // Finalization is deliberately not called: the manager still owns a running
+        // execution while the native completion has already crossed its recorder.
+        assert_eq!(
+            fixture.service.store.run(&fixture.id).await.unwrap()["status"],
+            "running"
+        );
+        let detail = fixture.service.chat_detail(&chat).await.unwrap();
+        assert_eq!(detail["canAskSideQuestion"], false);
+        assert_eq!(detail["sideQuestionUnavailable"], "between-replies");
+        let listed = fixture
+            .service
+            .chat_list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|value| value["id"] == chat)
+            .unwrap();
+        assert_eq!(listed["canAskSideQuestion"], false);
+        assert_eq!(
+            listed["sideQuestionUnavailable"],
+            detail["sideQuestionUnavailable"]
+        );
+        let retried = fixture
+            .service
+            .side_question_ask_live(
+                &chat,
+                input.clone(),
+                crate::authorization::Authorization::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(retried["id"], retained["id"]);
+        let mut fresh = input.clone();
+        fresh.id = "a1b2c3d4-0000-4000-8000-000000000002".into();
+        let error = fixture
+            .service
+            .side_question_ask_live(&chat, fresh, crate::authorization::Authorization::default())
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 409);
+        // A late announcement on the old native attempt cannot reopen admission.
+        fixture
+            .event(json!({ "type": "chat.side.available" }))
+            .await;
+        assert_eq!(
+            fixture.service.chat_detail(&chat).await.unwrap()["canAskSideQuestion"],
+            false
+        );
+        // Pending work expires even though controller finalization is deliberately held.
+        let expiring_chat = chat.clone();
+        fixture
+            .service
+            .store
+            .transaction(move |db| crate::chats::side_questions::expire(db, &expiring_chat))
+            .await
+            .unwrap();
+        let retried = fixture
+            .service
+            .side_question_ask_live(&chat, input, crate::authorization::Authorization::default())
+            .await
+            .unwrap();
+        assert_eq!(retried["status"], "failed");
+        // Only an explicit new-attempt reset permits the next announcement.
+        crate::chats::side_questions::withdraw_announcement(
+            &fixture.service.store,
+            &fixture.id,
+            &fixture
+                .service
+                .config
+                .data_dir
+                .join("runs")
+                .join(&fixture.id),
+        )
+        .await
+        .unwrap();
+        fixture
+            .event(json!({ "type": "chat.side.available" }))
+            .await;
+        assert_eq!(
+            fixture.service.chat_detail(&chat).await.unwrap()["canAskSideQuestion"],
+            true
+        );
+    }
+}
+
+#[tokio::test]
+async fn side_answers_are_stored_redacted() {
+    for collision in ["unrelated-secret", "answered", "a1b2c3d4"] {
+        let mut fixture = Fixture::new().await;
+        let chat = question_chat(&fixture).await;
+        let (run, key) = (fixture.id.clone(), format!("chat-side-question:{chat}:"));
+        let (answered, failed) = (
+            "a1b2c3d4-0000-4000-8000-000000000001",
+            "a1b2c3d4-0000-4000-8000-000000000002",
+        );
+        for id in [answered, failed] {
+            let question = json!({
+                "id": id,
+                "chatId": chat,
+                "runId": run,
+                "text": "What was printed?",
+                "status": "pending",
+                "createdAt": 1,
+            });
+            // Asked during the run's current turn, which is still running.
+            let open = json!({ "runId": run, "turn": "", "status": "pending" });
+            let (key, open_key) = (
+                format!("{key}{id}"),
+                format!("chat-side-question-open:{chat}:{id}"),
+            );
+            fixture
+                .service
+                .store
+                .transaction(move |db| {
+                    db.set(&key, &question, None)?;
+                    db.set(&open_key, &open, None)
+                })
+                .await
+                .unwrap();
+        }
+        fixture
+            .service
+            .store
+            .change_run(
+                &run,
+                crate::runs::RunChanges {
+                    status: Some(cairn_contracts::RunStatus::Running),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let events = [
+            json!({
+                "type": "chat.side.answered",
+                "sideQuestionId": answered,
+                "text": format!("It printed sensitive-tool-credential near {collision}."),
+            }),
+            json!({
+                "type": "chat.side.failed",
+                "sideQuestionId": failed,
+                "error": format!("Failed near sensitive-tool-credential and {collision}"),
+            }),
+        ];
+        for event in events {
+            record(
+                &fixture.service,
+                &Output::new(false, event.to_string()),
+                &fixture.checkpoint,
+                false,
+                &["sensitive-tool-credential".into(), collision.into()],
+                &mut fixture.log_total,
+                &mut fixture.activity,
+            )
+            .await
+            .unwrap();
+        }
+
+        let stored = fixture
+            .service
+            .store
+            .read(move |db| db.keys(&key))
+            .await
+            .unwrap();
+        let answer = stored
+            .iter()
+            .map(|(_, question)| question)
+            .find(|question| question["id"] == answered)
+            .unwrap();
+        assert_eq!(answer["status"], "answered", "collision: {collision}");
+        assert_eq!(answer["answer"], "It printed [redacted] near [redacted].");
+        let failure = stored
+            .iter()
+            .map(|(_, question)| question)
+            .find(|question| question["id"] == failed)
+            .unwrap();
+        assert_eq!(failure["status"], "failed", "collision: {collision}");
+        assert_eq!(failure["error"], "Failed near [redacted] and [redacted]");
+    }
 }
 
 #[tokio::test]

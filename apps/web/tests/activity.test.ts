@@ -873,3 +873,40 @@ it('lets partial groups grow while preserving message boundaries', () => {
   const entries = activityEntries([...tools, message, next], true, groups, undefined, [card])
   expect(entries.map(entry => entry.kind)).toEqual(['group', 'message', 'group'])
 })
+
+it('keeps side question identity from timeline cards even without raw reply events', () => {
+  const original = codex.entries.find(card => card.content.kind === 'agentMessage')!
+  if (original.content.kind !== 'agentMessage')
+    throw new Error('Missing fixture reply')
+  const first: TimelineEntry = {
+    ...original,
+    id: 'reply:first',
+    position: 10,
+    source: 15,
+    revision: 15,
+    content: {
+      ...original.content,
+      itemId: 'reused',
+      text: 'First',
+      echo: false,
+    },
+  }
+  const second: TimelineEntry = {
+    ...first,
+    id: 'reply:second',
+    position: 30,
+    source: 35,
+    revision: 35,
+    content: {
+      ...original.content,
+      itemId: 'reused',
+      text: 'Second',
+      echo: false,
+    },
+  }
+  const messages = activityEntries([], true, undefined, undefined, [first, second]).filter(entry => entry.kind === 'message')
+  expect(messages.map(entry => [entry.itemId, entry.replyEventIds])).toEqual([
+    ['reused', [10, 15]],
+    ['reused', [30, 35]],
+  ])
+})

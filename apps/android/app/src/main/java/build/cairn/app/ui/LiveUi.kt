@@ -9,6 +9,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -1306,6 +1307,9 @@ internal fun TimelineRow(
                 card.createdAt,
                 if (via.isNullOrBlank()) agent else "$agent · via $via",
                 planRequest = (card.content as? TimelineContent.A)?.plan == true,
+                itemId = (card.content as? TimelineContent.B)?.itemId.orEmpty(),
+                firstEvent = card.position,
+                lastEvent = card.source,
             )
         }
     else if (entry.proposal) ProposedPlanCard(entry.events.single(), implement, canImplement)
@@ -1341,6 +1345,9 @@ fun MessageRow(
     createdAt: Long,
     agent: String = "Cairn",
     planRequest: Boolean = false,
+    itemId: String = "",
+    firstEvent: Long = 0,
+    lastEvent: Long = firstEvent,
 ) {
     run {
         val time =
@@ -1382,10 +1389,12 @@ fun MessageRow(
                             ),
                             verticalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
+                            val side = if (user) null else LocalSideQuestions.current
                             if (!user)
                                 Row(
                                     Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Text(
                                         agent,
@@ -1393,6 +1402,57 @@ fun MessageRow(
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
+                                    val prefix = "event:$itemId:"
+                                    val asked =
+                                        (side?.counts?.get("item:$itemId") ?: 0) +
+                                            side?.counts.orEmpty().entries.sumOf { (key, count) ->
+                                                val id =
+                                                    key.removePrefix(prefix)
+                                                        .takeIf { key.startsWith(prefix) }
+                                                        ?.toLongOrNull()
+                                                if (id != null && id in firstEvent..lastEvent) count
+                                                else 0
+                                            }
+                                    // These actions come and go with the reply's state; they
+                                    // never change the line's height, so the history does not move.
+                                    if (side != null && itemId.isNotEmpty() && asked > 0)
+                                        Box(Modifier.withoutLineHeight()) {
+                                            val label =
+                                                if (asked == 1)
+                                                    "Voir 1 question à côté sur cette réponse"
+                                                else
+                                                    "Voir $asked questions à côté sur cette réponse"
+                                            TextButton(
+                                                onClick = {
+                                                    side.show(itemId, firstEvent, lastEvent)
+                                                },
+                                                modifier =
+                                                    Modifier.semantics {
+                                                        contentDescription = label
+                                                    },
+                                                contentPadding = PaddingValues(horizontal = 8.dp),
+                                            ) {
+                                                Icon(
+                                                    CairnIcons.SideQuestion,
+                                                    null,
+                                                    Modifier.size(14.dp),
+                                                )
+                                                Spacer(Modifier.width(4.dp))
+                                                Text(
+                                                    "$asked",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                )
+                                            }
+                                        }
+                                    if (side?.canAsk == true && itemId.isNotEmpty())
+                                        Box(Modifier.withoutLineHeight()) {
+                                            ActionIcon(
+                                                "Poser une question à côté",
+                                                CairnIcons.SideQuestion,
+                                            ) {
+                                                side.ask(itemId, "", firstEvent)
+                                            }
+                                        }
                                     Text(
                                         time,
                                         style = MaterialTheme.typography.labelSmall,
@@ -1410,7 +1470,17 @@ fun MessageRow(
                                         style = MaterialTheme.typography.bodyLarge,
                                     )
                                 }
-                            else Markdown(content)
+                            else
+                                CompositionLocalProvider(
+                                    LocalSideQuestionAsk provides
+                                        side
+                                            ?.takeIf { it.canAsk && itemId.isNotEmpty() }
+                                            ?.let { actions ->
+                                                { quote -> actions.ask(itemId, quote, firstEvent) }
+                                            }
+                                ) {
+                                    Markdown(content)
+                                }
                             if (user)
                                 Text(
                                     if (planRequest) "Plan · $time" else time,
