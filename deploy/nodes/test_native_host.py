@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+import urllib.error
 from unittest.mock import Mock, patch
 import zipfile
 
@@ -24,6 +25,186 @@ def release(**changes):
                  binaryPath='/internal/nodes/native-binary', toolsPath='/internal/nodes/native-tools')
     value.update(changes)
     return value
+
+
+class DockerToolPreparationTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.payload = b'approved synthetic executable'
+        self.url = 'https://example.test/pinned-docker'
+        self.tools = ((self.url, hashlib.sha256(self.payload).hexdigest(), {'': 'bin/docker'}),)
+        self.now = 0
+        self.sleeps = []
+        self.errors = []
+        self.log = io.StringIO()
+        for replacement in (
+            patch.object(host, 'INSTALL', self.root),
+            patch.object(host, 'DOCKER_TOOLS', self.tools),
+            patch.object(host, 'STOP', False),
+            patch.object(host.time, 'monotonic', side_effect=lambda: self.now),
+            patch.object(host.time, 'sleep', side_effect=self.sleep),
+            patch.object(host.subprocess, 'run', return_value=Mock(stdout='{"ApiVersion":"1.53"}')),
+            contextlib.redirect_stderr(self.log),
+        ):
+            replacement.__enter__()
+            self.addCleanup(replacement.__exit__, None, None, None)
+        self.open_url = self.enterContext(patch.object(host.urllib.request, 'urlopen'))
+        # An incomplete synthetic response must never fall through to a network.
+        self.open_url.side_effect = AssertionError('Unexpected acquisition')
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def error(self, status):
+        body = io.BytesIO(b'private response body')
+        error = urllib.error.HTTPError(self.url, status, 'synthetic error', {}, body)
+        self.errors.append(body)
+        return error
+
+    def assert_unpublished(self):
+        self.assertFalse((self.root / 'docker-tools/v2').exists())
+        self.assertEqual([], list((self.root / 'docker-tools').iterdir()))
+        self.assertTrue(all(body.closed for body in self.errors))
+        self.assertNotIn('private response body', self.log.getvalue())
+        self.assertNotIn(self.url, self.log.getvalue())
+
+    def test_gateway_failures_recover_only_before_the_verified_atomic_publish(self):
+        for status in (502, 503, 504):
+            with self.subTest(status=status):
+                self.open_url.side_effect = [self.error(status), io.BytesIO(self.payload)]
+                target = host.prepare_docker_tools()
+                self.assertEqual(self.payload, (target / 'bin/docker').read_bytes())
+                self.assertEqual(hashlib.sha256(self.payload).hexdigest(),
+                                 json.loads((target / 'manifest.json').read_text())['bin/docker'])
+                self.assertEqual(0o555, (target / 'bin/docker').stat().st_mode & 0o777)
+                self.assertEqual(0o444, (target / 'manifest.json').stat().st_mode & 0o777)
+                self.assertEqual([target], list(target.parent.iterdir()))
+                calls = self.open_url.call_count
+                host.prepare_docker_tools()
+                self.assertEqual(calls, self.open_url.call_count)
+                host.shutil.rmtree(target)
+        self.assertTrue(all(body.closed for body in self.errors))
+
+    def test_persistent_504_exhausts_three_attempts_and_cleans_the_stage(self):
+        self.open_url.side_effect = [self.error(504) for _ in range(3)]
+        with self.assertRaises(urllib.error.HTTPError) as failure:
+            host.prepare_docker_tools()
+        self.assertEqual(504, failure.exception.code)
+        self.assertEqual(3, self.open_url.call_count)
+        self.assertEqual([1, 2], self.sleeps)
+        self.assert_unpublished()
+
+    def test_acquisition_attempts_share_the_original_sixty_second_budget(self):
+        def acquire(*args, **kwargs):
+            if self.open_url.call_count == 1:
+                self.now += 15
+                raise self.error(504)
+            return io.BytesIO(self.payload)
+        self.open_url.side_effect = acquire
+        host.prepare_docker_tools()
+        self.assertEqual([60, 44], [call.kwargs['timeout'] for call in self.open_url.call_args_list])
+        self.assertTrue(all(call.args == (self.url,) for call in self.open_url.call_args_list))
+
+    def test_no_backoff_or_request_when_the_budget_cannot_fit_the_backoff(self):
+        def acquire(*args, **kwargs):
+            self.now = 59
+            raise self.error(504)
+        self.open_url.side_effect = acquire
+        with self.assertRaises(urllib.error.HTTPError):
+            host.prepare_docker_tools()
+        self.assertEqual(1, self.open_url.call_count)
+        self.assertEqual([], self.sleeps)
+        self.assert_unpublished()
+
+    def test_delayed_wakeup_cannot_start_a_request_past_the_deadline(self):
+        def delayed_sleep(seconds):
+            self.now = 60
+        self.open_url.side_effect = self.error(504)
+        with patch.object(host.time, 'sleep', side_effect=delayed_sleep), \
+                self.assertRaisesRegex(TimeoutError, 'deadline exhausted'):
+            host.prepare_docker_tools()
+        self.assertEqual(1, self.open_url.call_count)
+        self.assert_unpublished()
+
+    def test_late_open_response_is_closed_without_reading_or_publishing(self):
+        response = io.BytesIO(self.payload)
+        def acquire(*args, **kwargs):
+            self.now = 60
+            return response
+        self.open_url.side_effect = acquire
+        with self.assertRaisesRegex(TimeoutError, 'deadline exhausted'):
+            host.prepare_docker_tools()
+        self.assertTrue(response.closed)
+        self.assertEqual(1, self.open_url.call_count)
+        self.assert_unpublished()
+
+    def test_exhaustion_of_a_later_artifact_cannot_publish_the_first(self):
+        tools = self.tools + (('https://example.test/pinned-plugin', self.tools[0][1], {'': 'plugins/docker-buildx'}),)
+        self.open_url.side_effect = [io.BytesIO(self.payload), *(self.error(504) for _ in range(3))]
+        with patch.object(host, 'DOCKER_TOOLS', tools), self.assertRaises(urllib.error.HTTPError):
+            host.prepare_docker_tools()
+        self.assertEqual(4, self.open_url.call_count)
+        self.assert_unpublished()
+
+    def test_stop_prevents_retry(self):
+        self.open_url.side_effect = self.error(504)
+        with patch.object(host, 'STOP', True), self.assertRaises(urllib.error.HTTPError):
+            host.prepare_docker_tools()
+        self.assertEqual(1, self.open_url.call_count)
+        self.assertEqual([], self.sleeps)
+        self.assert_unpublished()
+
+    def test_permanent_http_and_transport_errors_are_not_retried(self):
+        for status in (400, 401, 403, 404, 429, 500, 'transport', 'timeout'):
+            error = (urllib.error.URLError('synthetic transport failure') if status == 'transport' else
+                     TimeoutError('synthetic timeout') if status == 'timeout' else self.error(status))
+            with self.subTest(error=error), self.assertRaises(type(error)):
+                self.open_url.side_effect = error
+                host.prepare_docker_tools()
+            self.assertEqual([], self.sleeps)
+            self.assert_unpublished()
+        self.assertEqual(8, self.open_url.call_count)
+
+    def test_retry_does_not_accept_corrupt_or_truncated_payloads(self):
+        for payload in (self.payload[:-1], b'x' * len(self.payload)):
+            with self.subTest(payload=payload):
+                self.open_url.side_effect = [self.error(504), io.BytesIO(payload)]
+                with self.assertRaisesRegex(ValueError, 'digest mismatch'):
+                    host.prepare_docker_tools()
+                self.assert_unpublished()
+        self.assertEqual(4, self.open_url.call_count)
+
+    def test_transfer_failure_is_terminal_and_does_not_publish_partial_bytes(self):
+        response = self.enterContext(contextlib.closing(io.BytesIO(self.payload)))
+        failing_response = Mock(wraps=response)
+        failing_response.__enter__ = Mock(return_value=failing_response)
+        failing_response.__exit__ = Mock(side_effect=lambda *args: response.close())
+        failing_response.read.side_effect = [b'partial', TimeoutError('transfer stalled')]
+        self.open_url.side_effect = [self.error(504), failing_response]
+        with self.assertRaises(TimeoutError):
+            host.prepare_docker_tools()
+        self.assertEqual(2, self.open_url.call_count)
+        self.assertTrue(response.closed)
+        self.assert_unpublished()
+
+    def test_oversized_response_after_retry_is_terminal_before_writing(self):
+        class OversizedChunk(bytes):
+            def __len__(self):
+                return 256 * 1024 * 1024 + 1
+        response = self.enterContext(contextlib.closing(io.BytesIO()))
+        oversized = Mock(wraps=response)
+        oversized.__enter__ = Mock(return_value=oversized)
+        oversized.__exit__ = Mock(side_effect=lambda *args: response.close())
+        oversized.read.return_value = OversizedChunk(b'x')
+        self.open_url.side_effect = [self.error(504), oversized]
+        with self.assertRaisesRegex(ValueError, 'size bound'):
+            host.prepare_docker_tools()
+        self.assertEqual(2, self.open_url.call_count)
+        self.assertTrue(response.closed)
+        self.assert_unpublished()
 
 
 class NativeHostTests(unittest.TestCase):

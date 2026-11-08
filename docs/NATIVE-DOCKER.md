@@ -159,6 +159,12 @@ host state and does not claim the protected conversation isolation boundary.
 The native installer provisions verified, versioned binaries under its managed
 directory: Docker 29.9.0, RootlessKit 3.3.0, slirp4netns 1.3.6, Buildx 0.38.1 and
 Compose 5.6.1. Exact archive/executable SHA-256 pins are in `native-host.py`.
+Public tool acquisition retries HTTP 502/503/504 at most twice, with one- and
+two-second backoffs within the original shared 60-second acquisition budget.
+Each request uses only the remaining timeout. Transfer, size, digest and archive
+validation failures remain terminal; the complete verified tool set is published
+by the existing atomic rename. Exhausted acquisition fails preparation. This is
+not an end-to-end transfer deadline: urllib socket timeouts still apply to reads.
 The host needs Linux 5.12+, systemd 255+, cgroup v2, distribution `uidmap`,
 `iproute2`, `iptables`, `/dev/net/tun`, root-managed `/etc/subuid` and `/etc/subgid`,
 and the existing ublk/ext4 prerequisites. Mapping helpers must be root-owned, executable and not writable by workloads,
