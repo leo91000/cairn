@@ -267,6 +267,9 @@ fn controller_timeout(method: &str, path: &str, native: bool) -> Duration {
     if method == "POST" && path.ends_with("/direct-reader") {
         return super::snapshots::DIRECT_PUBLICATION_STARTUP;
     }
+    if native && crate::nodes::is_project_import_request(method, path) {
+        return crate::nodes::PROJECT_OPEN_RELAY_TIMEOUT;
+    }
     Duration::from_secs(if method == "POST" && path.ends_with("/direct-upload") {
         crate::storage::direct::TRANSFER_SECONDS + 60
     } else if method == "POST" && path.ends_with("/publication") {
@@ -319,19 +322,29 @@ async fn forward(
         };
         return master.send(&End::with_status(id, status)).await;
     }
+    let native = executor.native();
+    let project_import = native && crate::nodes::is_project_import_request(method, path);
     let operation = call_controller(master, runner, runner_token, command, executor);
-    let Ok(Ok(mut response)) = tokio::time::timeout(
-        controller_timeout(method, path, crate::native::enabled()),
-        operation,
-    )
-    .await
-    else {
-        let unavailable = End {
-            data: Some(STANDARD.encode(b"VM controller unavailable")),
-            ..End::with_status(id, 503)
+    let mut response =
+        match tokio::time::timeout(controller_timeout(method, path, native), operation).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) if project_import => {
+                tracing::warn!(
+                    status = error.status,
+                    error = %error,
+                    "Native project import failed before reaching the controller"
+                );
+                return master.send(&End::with_status(id, error.status)).await;
+            }
+            Err(_) if project_import => return master.send(&End::with_status(id, 504)).await,
+            _ => {
+                let unavailable = End {
+                    data: Some(STANDARD.encode(b"VM controller unavailable")),
+                    ..End::with_status(id, 503)
+                };
+                return master.send(&unavailable).await;
+            }
         };
-        return master.send(&unavailable).await;
-    };
     let content_type = response
         .headers()
         .get("content-type")
@@ -707,3 +720,7 @@ mod tests {
         assert!(route("POST", "/snapshots/invalid/publication").is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "relay/project_import_tests.rs"]
+mod project_import_tests;

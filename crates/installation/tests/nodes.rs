@@ -1930,6 +1930,117 @@ async fn outbound_transport_streams_only_to_the_authenticated_node() {
 }
 
 #[tokio::test]
+async fn native_project_proxy_preserves_long_imports_and_classifies_head_expiration() {
+    let owner = Owner::new().await;
+    let native = id();
+    let firecracker = id();
+    for (node, backend) in [(&native, "native"), (&firecracker, "firecracker")] {
+        owner.register_node(node, &auth::token()).await;
+        owner
+            .put_node_fixture(json!({
+                "id": node,
+                "revoked": false,
+                "capabilities": { "backend": backend },
+            }))
+            .await;
+    }
+    let credential =
+        cairn_installation::execution::secret(&owner.service.config.data_dir, "runner-secret")
+            .await
+            .unwrap();
+    let project = format!("/runs/{}/projects/{}", id(), id());
+    for (node, method, path, seconds, reply, expected) in [
+        (&native, "POST", project.as_str(), 260, true, StatusCode::OK),
+        (
+            &native,
+            "POST",
+            project.as_str(),
+            286,
+            false,
+            StatusCode::GATEWAY_TIMEOUT,
+        ),
+        (
+            &native,
+            "GET",
+            "/health",
+            31,
+            false,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            &firecracker,
+            "POST",
+            project.as_str(),
+            31,
+            false,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        let request = owner
+            .request("POST", &format!("/internal/execution/{node}{path}"))
+            .method(method)
+            .header("authorization", bearer(&credential))
+            .body(Body::empty())
+            .unwrap();
+        let app = owner.app.clone();
+        let waiting = tokio::spawn(async move { common::send(&app, request).await });
+        let command = owner.service.node_transport.poll(node).await.unwrap();
+        assert_eq!(command["path"], path);
+        assert_eq!(command["method"], method);
+
+        // Start virtual time only after the real proxy completed its store reads.
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(seconds)).await;
+        tokio::task::yield_now().await;
+        if reply {
+            assert!(
+                !waiting.is_finished(),
+                "Native import expired before its route budget"
+            );
+            owner
+                .service
+                .node_transport
+                .reply(
+                    node,
+                    json!({
+                        "id": command["id"],
+                        "sequence": 0,
+                        "status": 200,
+                        "length": 0,
+                        "done": true,
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+        tokio::time::resume();
+        let response = waiting.await.unwrap();
+        assert_eq!(response.status(), expected, "{method} {path}");
+        if !reply {
+            let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            if expected == StatusCode::GATEWAY_TIMEOUT {
+                assert_eq!(body["error"], "Project import node response timed out.");
+            }
+            assert_eq!(
+                owner
+                    .service
+                    .node_transport
+                    .reply(
+                        node,
+                        json!({ "id": command["id"], "status": 200, "done": true })
+                    )
+                    .await
+                    .unwrap_err()
+                    .status,
+                409,
+                "An expired request must release its outstanding command"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn node_responses_keep_their_length_when_a_proxy_asks_for_compression() {
     // Remote artifact exports reach the manager through its public origin, where a proxy may add
     // Accept-Encoding. Publication requires the declared length, so it must survive.
