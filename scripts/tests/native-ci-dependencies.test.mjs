@@ -35,10 +35,10 @@ async function executeSetup(fault = '', {
   const closedControl = fault === 'closed-control' ? createServer(socket => socket.end()) : undefined
   if (closedControl)
     await new Promise(resolve => closedControl.listen(closedControlPath, resolve))
-  const recordSpawn = `import childProcess from 'node:child_process';import{syncBuiltinESMExports}from'node:module';import{appendFileSync}from'node:fs';if(${JSON.stringify(fault)}==='stalled-supervision')appendFileSync(${JSON.stringify(history)},JSON.stringify({phase:'controller',pid:process.pid})+'\\n');const original=childProcess.spawn;childProcess.spawn=function(command,...args){const child=original.call(this,command,...args);if(command==='apt-get')appendFileSync(${JSON.stringify(history)},JSON.stringify({phase:'apt-spawn',pid:process.pid})+'\\n');return child};const originalSync=childProcess.spawnSync;childProcess.spawnSync=function(command,...args){const result=originalSync.call(this,command,...args);if(${JSON.stringify(fault)}==='stalled-supervision'&&command==='/usr/bin/printf'&&args[0].some(value=>value.includes('event=apt-start')))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5000);return result};syncBuiltinESMExports();`
+  const recordSpawn = `import childProcess from 'node:child_process';import{syncBuiltinESMExports}from'node:module';import{appendFileSync}from'node:fs';if(['stalled-supervision','controller-crash'].includes(${JSON.stringify(fault)}))appendFileSync(${JSON.stringify(history)},JSON.stringify({phase:'controller',pid:process.pid})+'\\n');const original=childProcess.spawn;childProcess.spawn=function(command,...args){const child=original.call(this,command,...args);if(command==='apt-get')appendFileSync(${JSON.stringify(history)},JSON.stringify({phase:'apt-spawn',pid:process.pid})+'\\n');return child};const originalSync=childProcess.spawnSync;childProcess.spawnSync=function(command,...args){const result=originalSync.call(this,command,...args);if(${JSON.stringify(fault)}==='stalled-supervision'&&command==='/usr/bin/printf'&&args[0].some(value=>value.includes('event=apt-start')))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5000);return result};syncBuiltinESMExports();`
   const fixture = `#!${process.execPath}
 const { spawn, spawnSync } = require('node:child_process')
-const { appendFileSync } = require('node:fs')
+const { appendFileSync, readFileSync } = require('node:fs')
 const { basename } = require('node:path')
 const { constants } = require('node:os')
 const name = basename(process.argv[1])
@@ -51,22 +51,28 @@ if (phase === 'entry' && fault === 'delayed-entry') {
   appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase: 'entry-resumed', pid: process.pid }) + '\\n')
   args.splice(args.indexOf(process.execPath) + 1, 0, '--import', ${JSON.stringify(`data:text/javascript,${encodeURIComponent(recordSpawn)}`)})
 }
-if (phase === 'entry' && fault === 'stalled-supervision')
+if (phase === 'entry' && ['stalled-supervision', 'controller-crash'].includes(fault))
   args.splice(args.indexOf(process.execPath) + 1, 0, '--import', ${JSON.stringify(`data:text/javascript,${encodeURIComponent(recordSpawn)}`)})
+if (phase === 'entry' && ['closure-marker-failure', 'fail-update-without-closure'].includes(fault))
+  appendFileSync(args.at(-1) + '.update.closed', 'not a closure receipt')
 if (phase === 'entry' && fault === 'closed-control')
   args[args.length - 1] = ${JSON.stringify(closedControlPath)}
 if (phase === fault) {
   setInterval(() => {}, 1000)
-} else if (phase === 'update' && ['hard-stall', 'orphan-stall', 'fail-descendant', 'success-descendant', 'stalled-supervision', 'owner-crash'].includes(fault)) {
-  if (['hard-stall', 'stalled-supervision', 'owner-crash'].includes(fault)) process.on('SIGTERM', () => {})
+} else if (phase === 'update' && ['hard-stall', 'orphan-stall', 'fail-descendant', 'success-descendant', 'stalled-supervision', 'owner-crash', 'controller-crash'].includes(fault)) {
+  if (['hard-stall', 'stalled-supervision', 'owner-crash', 'controller-crash'].includes(fault)) process.on('SIGTERM', () => {})
   const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: 'inherit' })
   appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase: 'descendant', pid: child.pid }) + '\\n')
   if (fault === 'owner-crash') process.kill(process.ppid, 'SIGKILL')
+  if (fault === 'controller-crash') {
+    const controller = readFileSync(${JSON.stringify(history)}, 'utf8').trim().split('\\n').map(JSON.parse).find(call => call.phase === 'controller')
+    process.kill(controller.pid, 'SIGKILL')
+  }
   if (fault === 'fail-descendant') process.exit(42)
   if (fault === 'success-descendant') process.exit(0)
   setInterval(() => {}, 1000)
 } else if (phase === 'update' || phase === 'install') {
-  process.exit(fault === 'fail-' + phase ? 42 : 0)
+  process.exit(fault === 'fail-' + phase || (fault === 'fail-update-without-closure' && phase === 'update') ? 42 : 0)
 } else {
   if (args[0] === '-n') args.shift()
   const command = args.shift()
@@ -79,7 +85,7 @@ if (phase === fault) {
 
   const started = Date.now()
   const fillOutput = `let full = false; const bytes = Buffer.alloc(64 * 1024); for (let i = 0; i < 256; i++) { try { writeSync(process.stdout.fd, bytes); } catch (error) { full = error.code === 'EAGAIN'; break; } } appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase: 'blocked-output', pid: process.pid, full }) + '\\n');`
-  const workSeconds = interruptSignal && !cancelMarkerFailure ? 5 : 0.15
+  const workSeconds = fault === 'controller-crash' ? 2 : interruptSignal && !cancelMarkerFailure ? 5 : 0.15
   const cancelFault = cancelMarkerFailure ? `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module'; const mkdir = fs.mkdirSync; fs.mkdirSync = function(candidate, ...args) { if (candidate.endsWith('owner.sock.cancel')) throw new Error('fixture metadata refusal'); return mkdir.call(this, candidate, ...args); }; syncBuiltinESMExports();` : ''
   const driver = `${cancelFault} import { writeSync, appendFileSync } from 'node:fs'; import { installNativeCiDependencies } from ${JSON.stringify(new URL('scripts/install-native-ci-dependencies.mjs', root).href)}; ${blockedOutput ? fillOutput : ''} process.exitCode = await installNativeCiDependencies({ profile: ${JSON.stringify(profile)}, phaseSeconds: { update: ${workSeconds}, install: ${workSeconds} }, entryAllowanceSeconds: 0.65, killAfterSeconds: 0.4${throwingMarker ? ', write: () => { throw new Error("fixture marker failure") }' : ''} });`
   const unsupportedProfile = !['native', 'android-network'].includes(profile)
@@ -272,6 +278,26 @@ describe('native CI dependency setup', () => {
     expect(result.calls.filter(call => call.phase === 'descendant')).toHaveLength(1)
     expect(result.liveAtPublicExit).toEqual([])
     expect(result.survivingFixturePids).toEqual([])
+    expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(0)
+  })
+
+  it.each(['native', 'android-network'])('awaits group cleanup after its privileged controller dies (%s)', async (profile) => {
+    const result = await executeSetup('controller-crash', { profile })
+    expect(result.status).toBe(137)
+    expect(result.harnessKilled).toBe(false)
+    expect(result.calls.filter(call => call.phase === 'controller')).toHaveLength(1)
+    expect(result.calls.filter(call => call.phase === 'descendant')).toHaveLength(1)
+    expect(result.liveAtPublicExit).toEqual([])
+    expect(result.survivingFixturePids).toEqual([])
+    expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(0)
+  })
+
+  it.each([['closure-marker-failure', 1], ['fail-update-without-closure', 42]])('never reports success without a closure receipt (%s)', async (fault, code) => {
+    const result = await executeSetup(fault)
+    expect(result.status).toBe(code)
+    expect(result.harnessKilled).toBe(false)
+    expect(result.output).toContain('event=cleanup-unknown')
+    expect(result.liveAtPublicExit).toEqual([])
     expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(0)
   })
 

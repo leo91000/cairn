@@ -1,7 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process'
 import {
+  closeSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
 } from 'node:fs'
@@ -32,11 +35,21 @@ grace="$1"
 controller_pid="$2"
 controller_started="$3"
 cancel_path="$4"
-shift 4
+closed_path="$5"
+shift 5
 stopped=0
 trap 'stopped=124' ALRM
 trap 'stopped=130' INT
 trap 'stopped=143' TERM
+
+controller_is_live() {
+  local controller_stat
+  local -a controller_fields
+  IFS= read -r controller_stat 2>/dev/null < "/proc/$controller_pid/stat" || return 1
+  read -r -a controller_fields <<< "${'$'}{controller_stat##*) }"
+  [ "${'$'}{controller_fields[19]}" = "$controller_started" ] &&
+    [ "${'$'}{controller_fields[0]}" != Z ]
+}
 
 if [ "$stopped" -ne 0 ]; then
   exit "$stopped"
@@ -58,6 +71,10 @@ apt_pid=$!
 # sudo's signal relay. Polling schedules observation; the GNU work bound remains
 # authoritative even if this loop cannot progress.
 while [ "$stopped" -eq 0 ] && kill -0 "$apt_pid" 2>/dev/null; do
+  if ! controller_is_live; then
+    stopped=137
+    break
+  fi
   if [ -d "$cancel_path" ]; then
     stopped=143
     break
@@ -81,15 +98,18 @@ if kill -0 -- "-$apt_pid" 2>/dev/null; then
   kill -KILL -- "-$apt_pid" 2>/dev/null || :
 fi
 wait "$apt_pid" 2>/dev/null || :
+if ! (set -C; : > "$closed_path") 2>/dev/null; then
+  if [ "$status" -eq 0 ]; then
+    exit 1
+  fi
+  exit "$status"
+fi
 printf "CLOSED\n" >&3 || exit 1
 if [ -d "$cancel_path" ]; then
   # A blocked controller cannot acknowledge socket cancellation. Package work
   # is settled now; retire only that known parent, never a global process name.
-  if IFS= read -r controller_stat < "/proc/$controller_pid/stat"; then
-    read -r -a controller_fields <<< "${'$'}{controller_stat##*) }"
-    if [ "${'$'}{controller_fields[19]}" = "$controller_started" ]; then
-      kill -KILL "$controller_pid" 2>/dev/null || :
-    fi
+  if controller_is_live; then
+    kill -KILL "$controller_pid" 2>/dev/null || :
   fi
 fi
 exit "$status"
@@ -118,6 +138,28 @@ function exitCode(result) {
   if (result.status !== null)
     return result.status
   return result.signal ? 128 + (constants.signals[result.signal] ?? 0) : 1
+}
+
+function hasPhaseClosure(closedPath) {
+  try {
+    const receipt = lstatSync(closedPath)
+    return receipt.isFile() && receipt.size === 0
+  }
+  catch {
+    return false
+  }
+}
+
+async function waitForPhaseClosure(closedPath, deadline) {
+  for (;;) {
+    if (hasPhaseClosure(closedPath))
+      return true
+
+    const remaining = deadline - performance.now()
+    if (remaining <= 0)
+      return false
+    await new Promise(resolve => setTimeout(resolve, Math.min(50, remaining)))
+  }
 }
 
 export async function runAptPhase(phase, seconds, cleanupGraceMs = 1000, profile = 'native', controlPath) {
@@ -177,12 +219,23 @@ export async function runAptPhase(phase, seconds, cleanupGraceMs = 1000, profile
       if (finished)
         return
       finished = true
+      let resultCode = status
+      try {
+        const closedPath = `${controlPath}.${phase}.closed`
+        if (!hasPhaseClosure(closedPath))
+          closeSync(openSync(closedPath, 'wx', 0o600))
+      }
+      catch {
+        marker(writeMarker, phase, 'cleanup-unknown')
+        resultCode ||= 1
+      }
+
       clearTimeout(fallbackTimer)
       child?.stdio[4]?.destroy()
       process.removeListener('SIGTERM', terminate)
       process.removeListener('SIGINT', interrupt)
       controlSocket?.destroy()
-      resolve(status)
+      resolve(resultCode)
     }
 
     function cleanup(status) {
@@ -232,6 +285,7 @@ export async function runAptPhase(phase, seconds, cleanupGraceMs = 1000, profile
         `${process.pid}`,
         controllerStarted,
         `${controlPath}.cancel`,
+        `${controlPath}.${phase}.closed`,
         'apt-get',
         ...args,
       ], { detached: true, stdio: ['ignore', 'inherit', 'inherit', 'pipe', 'pipe'] })
@@ -331,6 +385,7 @@ export async function installNativeCiDependencies({
   let controlDirectory
   let controlServer
   let interruptionTimer
+  let phaseAuthorized = false
   const interrupt = (signal) => {
     if (interruptedCode)
       return
@@ -379,10 +434,13 @@ export async function installNativeCiDependencies({
 
       controlSocket = socket
       socket.on('error', () => {})
-      if (interruptedCode)
+      if (interruptedCode) {
         socket.end(`${interruptedCode === 130 ? 'SIGINT' : 'SIGTERM'}\n`)
-      else
+      }
+      else {
+        phaseAuthorized = true
         socket.write('START\n')
+      }
     })
     await new Promise((resolve, reject) => {
       controlServer.once('error', reject)
@@ -392,7 +450,9 @@ export async function installNativeCiDependencies({
       if (interruptedCode)
         return interruptedCode
       const seconds = phaseSeconds[phase] ?? profiles[profile].seconds[phase]
+      phaseAuthorized = false
       const started = Date.now()
+      const phaseDeadline = performance.now() + (Number(seconds) + entryAllowanceSeconds + killAfterSeconds * 2) * 1000
       marker(write, phase, 'start', `limit_seconds=${seconds} profile=${profile}`)
 
       // The privileged owner bounds APT work and cleans its process group. These
@@ -421,6 +481,20 @@ export async function installNativeCiDependencies({
         child.on('error', () => resolve({ status: 1, signal: null }))
         child.on('close', (status, signal) => resolve({ status, signal }))
       })
+      // A failed sudo/controller exit does not prove that its detached guard
+      // has settled APT. Retain the existing cleanup allowance, clipped to the
+      // original outer phase budget, to acquire independent group closure.
+      if (phaseAuthorized) {
+        const closedPath = `${controlPath}.${phase}.closed`
+        const deadline = Math.min(phaseDeadline, performance.now() + killAfterSeconds * 1000)
+        const closed = await waitForPhaseClosure(closedPath, deadline)
+        if (!closed) {
+          marker(write, phase, 'cleanup-unknown')
+          if (result.status === 0)
+            result.status = 1
+        }
+      }
+
       clearTimeout(interruptionTimer)
       controlSocket?.destroy()
       controlSocket = undefined

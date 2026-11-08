@@ -131,7 +131,14 @@ is lost. A private cancellation marker reaches the shell independently of Node's
 control socket and sudo's signal relay; after APT cleanup the shell retires a
 blocked controller before the launcher can return. If marker acquisition fails,
 the launcher retains the admitted owner's original work deadline instead of
-abandoning it early. Neither side starts subsequent phases after failure.
+abandoning it early. The guard also verifies the controller's PID/start-time
+identity and settles its registered APT group if that controller disappears.
+A private per-phase closure receipt is published after cleanup; the launcher
+waits for it even after a failed sudo/controller exit. Receipt acquisition uses
+the existing kill-after allowance clipped to the original outer phase budget.
+Missing or unreadable closure remains explicit unknown/non-green, retaining an
+original failure code and refusing the next phase. Neither side starts subsequent
+phases after failure.
 
 The helper retains a closed `android-network` profile (90/90 seconds), but the
 Android direct job uses the newer `prepare-network-tools.mjs` preflight instead;
@@ -140,9 +147,9 @@ outside this helper.
 
 `pnpm exec vitest run scripts/tests/native-ci-dependencies.test.mjs` exercises
 success, failure, timeout, interruptions, delayed privilege entry, orphan cleanup,
-stalled Node supervision (including cancellation), lost privileged shells and
-bounded diagnostic output. Repeat with `CAIRN_TEST_REAL_SUDO=1` on a disposable
-or authorized sudo-capable host to run the same cases through `/usr/bin/sudo -n`
+stalled Node supervision (including cancellation), lost privileged controllers
+or shells, closure-receipt failure and bounded diagnostic output. Repeat with
+`CAIRN_TEST_REAL_SUDO=1` on a disposable or authorized sudo-capable host to run the same cases through `/usr/bin/sudo -n`
 and assert UID 0 in the synthetic APT executable. No real packages are changed by
 these fixture tests. The short PR quality job runs both routes. Full validation
 also runs the real package setup in its selected native jobs.
