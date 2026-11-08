@@ -329,6 +329,7 @@ for (const destination of ['committed', 'cancelled'] as const) {
             void window.cairnAvailabilityAbort(pageHidden)
           }, { once: true })
         }
+
         return request(...args)
       }
     })
@@ -421,6 +422,7 @@ for (const destination of ['committed', 'cancelled'] as const) {
       else {
         expect(callerAborts).toEqual([])
       }
+
       const resumedPoll = destination === 'cancelled'
         ? page.waitForResponse(response => response.request() === pollRequest)
         : undefined
@@ -453,6 +455,7 @@ for (const destination of ['committed', 'cancelled'] as const) {
         await recovered
         await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
       }
+
       await expect(transport).toHaveAttribute('data-transport-route', 'direct')
     }
     finally {
@@ -461,6 +464,7 @@ for (const destination of ['committed', 'cancelled'] as const) {
       await navigation?.catch(() => {})
       await page.unrouteAll({ behavior: 'wait' })
     }
+
     if (routeFailure)
       throw routeFailure
     expect(errors).toEqual([])
