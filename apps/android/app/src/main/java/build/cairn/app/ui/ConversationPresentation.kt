@@ -282,6 +282,10 @@ internal fun ConversationHeader(
     route: ConnectionRoute,
     /** Names the installation the connection dot describes. */
     installation: String? = null,
+    /**
+     * The subtitle is a status rather than the project or agent, so it reads as the button's state.
+     */
+    notable: Boolean = true,
     back: () -> Unit,
     choose: () -> Unit,
     /** A scheduled wait: its status counts down here, without recomposing the whole page. */
@@ -312,7 +316,7 @@ internal fun ConversationHeader(
                             // The subtitle's status is read with the button, not only on sight; a
                             // countdown would be re-read every minute, so it reads as a scheduled
                             // wait.
-                            if (status.isNotBlank())
+                            if (status.isNotBlank() && (notable || wakeup != null))
                                 stateDescription =
                                     if (wakeup != null) statusLabel("waiting") else status
                         },

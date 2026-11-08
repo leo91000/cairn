@@ -409,8 +409,8 @@ test('a durable condition wait follows a dependency across restart and queue pau
       wakeAt: Date.now() + 420000,
       condition: { type: 'run_finished' as const, runId: target.id },
     }
-    workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, wakeup })
-    // A nearly full window crowds the row further.
+    // A long generated title and a nearly full window crowd the row.
+    workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, wakeup, title: 'Wait for the dependency run to finish before reviewing the release candidate notes' })
     workspace.service.store.updateRun(detail.run.id, {
       contextUsage: {
         contextTokens: 238000,
@@ -426,14 +426,20 @@ test('a durable condition wait follows a dependency across restart and queue pau
     await expect(headerStatus(page, /^Awaiting result · up to \d+ min$/)).toBeVisible()
     // A countdown stays out of the live region, which would otherwise repeat it every minute.
     await expect(page.locator('.chat-header .sr-only[role="status"]')).toHaveText('')
-    // A crowded row truncates its pills rather than covering the header's actions.
+    // The title gives way before the pills, which never cover the header's actions.
     for (const width of [1440, 1000, 901, 700]) {
       await page.setViewportSize({ width, height: 800 })
       const actions = (await page.locator('.chat-header > div').last().boundingBox())!
       for (const pill of [headerStatus(page, /^Awaiting result/), page.getByTestId('context-indicator')]) {
         const box = (await pill.boundingBox())!
         expect(box.x + box.width).toBeLessThanOrEqual(actions.x)
+        if (width >= 1000)
+          expect(await pill.locator('.truncate').evaluate(label => label.scrollWidth <= label.clientWidth)).toBe(true)
       }
+
+      // The title gives way but stays readable.
+      if (width >= 1000)
+        expect((await page.locator('.chat-header h1:not(.sr-only)').boundingBox())!.width).toBeGreaterThan(60)
     }
 
     await page.setViewportSize({ width: 1280, height: 720 })

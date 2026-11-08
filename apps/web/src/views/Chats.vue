@@ -1397,6 +1397,8 @@ function key(event: KeyboardEvent) {
             :working="working"
           />
           <div class="flex min-w-0 flex-1 items-center gap-2.5 overflow-x-clip text-xs text-muted [overflow-clip-margin:4px]">
+            <!-- When the row runs out of room the title (it has a tooltip), project and requester give
+                 way; the pills that need a look keep their width up to a share of the row. -->
             <h1 class="min-w-0 truncate text-base! font-semibold! leading-snug! tracking-tight! text-ink" :title="heading?.title || undefined">
               {{ heading?.title || 'New conversation' }}
             </h1>
@@ -1411,20 +1413,19 @@ function key(event: KeyboardEvent) {
             >
               <Icon :name="ChevronDown" :size="16" />
             </button>
-            <span v-if="headerProject" class="flex min-w-0 shrink items-center gap-1.5"><Icon :name="FolderGit2" :size="13" class="shrink-0" /><span class="truncate max-w-48">{{ headerProject }}</span></span>
+            <span v-if="headerProject" class="flex min-w-0 items-center gap-1.5"><Icon :name="FolderGit2" :size="13" class="shrink-0" /><span class="truncate max-w-48">{{ headerProject }}</span></span>
             <RouterLink
               v-if="heading?.requester"
               :to="chatPath({ id: heading.requester.chatId })"
-              class="flex min-w-0 shrink items-center gap-1.5 font-semibold text-accent hover:underline"
+              class="flex min-w-0 items-center gap-1.5 font-semibold text-accent hover:underline"
               data-testid="chat-requester"
             >
               <Icon :name="CornerDownRight" :size="13" class="shrink-0" /><span class="truncate max-w-56">Delegated by {{ heading.requester.title || 'New conversation' }}</span>
             </RouterLink>
-            <!-- A crowded row truncates these rather than pushing into the actions. -->
             <span
               v-if="headerState"
               data-header-status
-              class="flex min-w-0 items-center gap-1.5 rounded-full px-2.5 leading-6 font-medium"
+              class="flex max-w-[45%] shrink-0 items-center gap-1.5 rounded-full px-2.5 leading-6 font-medium"
               :class="headerState.failed ? 'bg-coral-soft text-coral' : 'bg-hover'"
               :title="headerState.label"
             ><Icon
@@ -1438,7 +1439,7 @@ function key(event: KeyboardEvent) {
               v-if="contextAlert"
               ref="contextPill"
               :aria-description="canCompact ? 'Opens compaction' : undefined"
-              class="flex min-w-0 items-center gap-1.5 rounded-full px-2.5 leading-6 font-medium tabular-nums"
+              class="flex max-w-[25%] shrink-0 items-center gap-1.5 rounded-full px-2.5 leading-6 font-medium tabular-nums"
               :class="(context.percent ?? 0) >= 85 ? 'bg-coral-soft text-coral' : 'bg-warning-surface text-warning'"
               :title="[context.label, ...context.details].join('\n')"
               :aria-haspopup="canCompact ? 'dialog' : undefined"

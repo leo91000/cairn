@@ -11,6 +11,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -280,6 +281,12 @@ abstract class UnifiedHeaderCases {
                         useUnmergedTree = true,
                     )
                     .assertExists()
+                // A project is not a state: only a status worth a look is read as one.
+                compose
+                    .onNodeWithContentDescription(
+                        "Changer de conversation : ${chat.title} · Dernier harness : Claude Code"
+                    )
+                    .assert(SemanticsMatcher.keyNotDefined(SemanticsProperties.StateDescription))
                 compose.onNodeWithContentDescription("Options de la conversation").performClick()
                 compose.onNodeWithText("Connexion").performClick()
                 waitText("Agent · projet")

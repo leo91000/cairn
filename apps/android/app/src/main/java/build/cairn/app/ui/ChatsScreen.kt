@@ -974,12 +974,14 @@ internal fun ChatPage(
         ArtifactLinkHost(vm, live.state?.artifacts.orEmpty()) {
             Column(Modifier.fillMaxSize()) {
                 if (!fullscreen) {
+                    val headerProject =
+                        chat?.projectName ?: state.projects.find { it.id == project }?.name
                     val conversation =
                         conversationState(
                             chat,
                             agentName,
                             waitingTasks,
-                            chat?.projectName ?: state.projects.find { it.id == project }?.name,
+                            headerProject,
                             newChat = id == null,
                         )
                     ConversationHeader(
@@ -1001,6 +1003,9 @@ internal fun ChatPage(
                         failed = conversation.failed,
                         route = connectionRoute(state.installation, state.transportRoute),
                         installation = state.installation?.name,
+                        notable =
+                            conversation.status !=
+                                (headerProject?.takeIf { it.isNotBlank() } ?: agentName),
                         back = {
                             persistDraft()
                             back()
