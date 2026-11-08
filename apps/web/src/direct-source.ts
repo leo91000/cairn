@@ -1,4 +1,4 @@
-import { TransportNotSent } from './direct-channel'
+import { ProtocolMismatch, TransportNotSent } from './direct-channel'
 
 // Adapt the existing credited SSE body to the live client's EventSource seam.
 export class DirectSource extends EventTarget {
@@ -21,6 +21,8 @@ export class DirectSource extends EventTarget {
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
     try {
       const response = await request(this.abort.signal)
+      if (response.status === 426)
+        throw new ProtocolMismatch()
       if (!response.ok || !response.body)
         throw new Error('Stream unavailable')
       reader = response.body.getReader()
@@ -72,10 +74,13 @@ export class DirectSource extends EventTarget {
     }
     catch (error) {
       if (!this.abort.signal.aborted) {
-        if (error instanceof TransportNotSent && this.fallback) {
+        if (error instanceof ProtocolMismatch) {
+          this.dispatchEvent(new MessageEvent('update_required'))
+        }
+        else if (error instanceof TransportNotSent && this.fallback) {
           this.transportRoute = 'relay'
           const relay = this.relay = this.fallback()
-          for (const type of ['batch', 'ping', 'message']) {
+          for (const type of ['batch', 'ping', 'message', 'update_required']) {
             relay.addEventListener(type, (event) => {
               if (!this.abort.signal.aborted)
                 this.dispatchEvent(new MessageEvent(type, { data: event.data, lastEventId: event.lastEventId }))

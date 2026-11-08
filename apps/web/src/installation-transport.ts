@@ -475,13 +475,20 @@ export class InstallationTransport {
     if (this.context.protocolError)
       throw new ProtocolMismatch(this.context.protocolError)
     const traffic = this.context.transportRoute === 'direct' ? this.traffic : undefined
-    const source = !traffic
+    const relay = () => path.split('?')[0] === '/chats/stream'
       ? Object.assign(new EventSource(url), { transportRoute: 'relay' as const })
+      : Object.assign(new DirectSource(signal => fetch(url, {
+        signal,
+        headers: { accept: 'text/event-stream' },
+        cache: 'no-store',
+      })), { transportRoute: 'relay' as const }) as unknown as EventSource
+    const source = !traffic
+      ? relay()
       : new DirectSource(
         signal => traffic.request(`/api${path}`, { signal, headers: { accept: 'text/event-stream' } }),
         () => {
           signal.throwIfAborted()
-          return new EventSource(url)
+          return relay()
         },
       ) as unknown as EventSource
     const close = source.close.bind(source)

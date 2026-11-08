@@ -2291,3 +2291,38 @@ async fn installation_plan_policy_reaches_open_chat_streams_without_text_events(
         assert!(batch["events"].as_array().unwrap().is_empty());
     }
 }
+
+#[tokio::test]
+async fn conversation_stream_refuses_missing_card_capability_after_authentication() {
+    let f = Fixture::new().await;
+    let chat = f.service.chat_create(json!({})).await.unwrap();
+    let client = reqwest::Client::new();
+    for path in [
+        format!("/api/runs/{}/stream", f.run),
+        format!("/api/chats/{}/stream", text(&chat, "id")),
+    ] {
+        for query in ["", "?timeline=0", "?timeline=2"] {
+            let url = format!("{}{path}{query}", f.url);
+            let anonymous = client.get(&url).send().await.unwrap();
+            assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+            let response = client
+                .get(url)
+                .header("x-test-relay-token", &f.token)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
+            let error: Value = response.json().await.unwrap();
+            assert_eq!(error["code"], "update_required");
+            assert!(text(&error, "error").contains("Update required"));
+        }
+    }
+    // The metadata-only Fil and JSON history remain usable without a UI capability.
+    let mut list = f.open_path("/api/chats/stream", None).await;
+    let (_, batch) = list.batch().await;
+    assert!(batch["state"]["chats"].is_array());
+    let response = f.history("").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let history: Value = response.json().await.unwrap();
+    assert!(history["entries"].is_array());
+}

@@ -13,9 +13,26 @@ class Source extends EventTarget {
   static all: Source[] = []
   onerror: (() => void) | null = null
   closed = false
+  private body?: ReadableStreamDefaultController<Uint8Array>
   constructor(readonly url: string) {
     super()
     Source.all.push(this)
+  }
+
+  response(signal?: AbortSignal | null) {
+    signal?.addEventListener('abort', () => this.close())
+    return new Response(new ReadableStream<Uint8Array>({
+      start: controller => this.body = controller,
+    }), { headers: { 'content-type': 'text/event-stream' } })
+  }
+
+  override dispatchEvent(event: Event) {
+    if (this.body && event instanceof MessageEvent && !this.closed) {
+      this.body.enqueue(new TextEncoder().encode(`event: ${event.type}\nid: ${event.lastEventId}\ndata: ${event.data}\n\n`))
+      return true
+    }
+
+    return super.dispatchEvent(event)
   }
 
   close() { this.closed = true }
@@ -229,20 +246,22 @@ function reply(channel: Channel, frame: object) {
 
 async function direct(role: 'owner' | 'member' = 'owner') {
   const expiresAt = Date.now() / 1000 + 180
-  vi.stubGlobal('fetch', vi.fn((url: string) => Promise.resolve(url.endsWith('/authorize')
-    ? Response.json({
-        available: true,
-        grant: {
-          claims: {
-            connection_id: 'connection',
-            account_id: 'account',
-            role,
-            expires_at: expiresAt,
+  vi.stubGlobal('fetch', vi.fn((url: string, options?: RequestInit) => Promise.resolve(url.includes('/stream?')
+    ? new Source(url).response(options?.signal)
+    : url.endsWith('/authorize')
+      ? Response.json({
+          available: true,
+          grant: {
+            claims: {
+              connection_id: 'connection',
+              account_id: 'account',
+              role,
+              expires_at: expiresAt,
+            },
           },
-        },
-        iceServers: [],
-      })
-    : Response.json({ marker: 'relay' }, { headers: { 'x-cairn-transport': 'relay' } }))))
+          iceServers: [],
+        })
+      : Response.json({ marker: 'relay' }, { headers: { 'x-cairn-transport': 'relay' } }))))
   const module = await import('../src/api')
   Object.assign(module.state, {
     authenticated: true,
@@ -295,7 +314,7 @@ it('reads JSON from the actual direct response instead of relaying its payload',
 
 it('negotiates and decodes gzip history on the direct channel', async () => {
   const { api, channel } = await direct()
-  const response = api('/runs/r/history?before=42&history=v1:r:1')
+  const response = api('/runs/r/history?before=42&history=v2%3Ar%3A1:r:1')
   const decoded = { events: [{ id: 41, text: 'History 🦊 '.repeat(1000) }], hasOlder: true }
   await vi.waitFor(() => expect(channel.packets.length).toBe(1))
   const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
@@ -313,7 +332,7 @@ it('negotiates and decodes gzip history on the direct channel', async () => {
 it('requests identity when browser gzip decompression is unavailable', async () => {
   vi.stubGlobal('DecompressionStream', undefined)
   const { api, channel } = await direct()
-  const response = api('/runs/r/history?before=42&history=v1:r:1')
+  const response = api('/runs/r/history?before=42&history=v2%3Ar%3A1:r:1')
   await vi.waitFor(() => expect(channel.packets.length).toBe(1))
   const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
   expect(request.headers).toContainEqual(['accept-encoding', 'identity'])
@@ -524,19 +543,20 @@ it('uses fallback capacity for unsent mutations and live streams when direct slo
   expect(await api('/chats/c', { method: 'DELETE' })).toEqual({ marker: 'relay' })
   const { liveConnection } = await import('../src/live-connection')
   const accept = vi.fn()
-  const live = liveConnection('/chats/c/stream', accept, vi.fn(), { cursor: 7, history: 'v1' })
-  await vi.waitFor(() => expect(Source.all.some(source => source.url.includes('after=7&history=v1'))).toBe(true))
-  const stream = Source.all.find(source => source.url.includes('after=7&history=v1'))!
+  const live = liveConnection('/chats/c/stream', accept, vi.fn(), { cursor: 7, history: 'v2:r:1' })
+  await vi.waitFor(() => expect(Source.all.some(source => source.url.includes('after=7&history=v2%3Ar%3A1'))).toBe(true))
+  const stream = Source.all.find(source => source.url.includes('after=7&history=v2%3Ar%3A1'))!
   stream.dispatchEvent(new MessageEvent('batch', {
     lastEventId: '8',
     data: JSON.stringify({
-      history: 'v1',
+      history: 'v2:r:1',
+      entries: [],
       events: [],
       reset: false,
       more: false,
     }),
   }))
-  expect(accept).toHaveBeenCalledTimes(1)
+  await vi.waitFor(() => expect(accept).toHaveBeenCalledTimes(1))
   live.close()
   await vi.advanceTimersByTimeAsync(10000)
   expect(state.transportRoute).toBe('direct')
@@ -575,10 +595,10 @@ it('moves live streams between routes using only the accepted cursor and history
   const { channel } = await direct()
   const { liveConnection } = await import('../src/live-connection')
   const accept = vi.fn()
-  const connection = liveConnection('/chats/c/stream', accept, vi.fn(), { cursor: 7, history: 'v1' })
+  const connection = liveConnection('/chats/c/stream', accept, vi.fn(), { cursor: 7, history: 'v2:r:1' })
   await vi.waitFor(() => expect(channel.packets.length).toBe(1))
   const request = JSON.parse(new TextDecoder().decode(channel.packets[0].subarray(13)))
-  expect(request.path).toBe('/api/chats/c/stream?after=7&history=v1&window=1')
+  expect(request.path).toBe('/api/chats/c/stream?after=7&history=v2%3Ar%3A1&window=1&timeline=1')
   reply(channel, {
     type: 'stream_start',
     id: request.id,
@@ -594,7 +614,8 @@ it('moves live streams between routes using only the accepted cursor and history
     payload: { tasks: [{ id: 'build', description: 'Wait for build' }] },
   }
   const batch = {
-    history: 'v1',
+    history: 'v2:r:1',
+    entries: [],
     events: [waiting],
     reset: false,
     more: false,
@@ -603,14 +624,14 @@ it('moves live streams between routes using only the accepted cursor and history
   await vi.waitFor(() => expect(accept).toHaveBeenCalledTimes(1))
   expect(accept.mock.calls[0][0].events).toEqual([waiting])
   channel.dispatchEvent(new Event('close'))
-  await vi.waitFor(() => expect(Source.all.some(source => source.url.includes('after=8&history=v1'))).toBe(true))
-  const relay = Source.all.find(source => source.url.includes('after=8&history=v1'))!
+  await vi.waitFor(() => expect(Source.all.some(source => source.url.includes('after=8&history=v2%3Ar%3A1'))).toBe(true))
+  const relay = Source.all.find(source => source.url.includes('after=8&history=v2%3Ar%3A1'))!
   const finished = { ...waiting, id: 9, payload: { tasks: [] } }
   relay.dispatchEvent(new MessageEvent('batch', {
     data: JSON.stringify({ ...batch, events: [finished] }),
     lastEventId: '9',
   }))
-  expect(accept.mock.calls[1][0].events).toEqual([finished])
+  await vi.waitFor(() => expect(accept.mock.calls[1]?.[0].events).toEqual([finished]))
   connection.close()
 })
 
@@ -842,9 +863,11 @@ it.each([
 it('backs off capacity failures exponentially while relay requests remain usable', async () => {
   const network = Object.assign(new EventTarget(), { effectiveType: '4g', rtt: 50, downlink: 10 })
   Object.assign(navigator, { connection: network })
-  const fetch = vi.fn((url: string) => Promise.resolve(url.endsWith('/authorize')
-    ? Response.json({ error: 'Direct connection capacity reached' }, { status: 503 })
-    : Response.json({ marker: 'relay' })))
+  const fetch = vi.fn((url: string, options?: RequestInit) => Promise.resolve(url.includes('/stream?')
+    ? new Source(url).response(options?.signal)
+    : url.endsWith('/authorize')
+      ? Response.json({ error: 'Direct connection capacity reached' }, { status: 503 })
+      : Response.json({ marker: 'relay' })))
   vi.stubGlobal('fetch', fetch)
   const { api, state } = await import('../src/api')
   Object.assign(state, { authenticated: true, ready: true })
@@ -1345,4 +1368,52 @@ it('retires a departed recovery loop and permits fresh reads after restoration',
   expect(fetch).toHaveBeenCalledOnce()
   expect(state.error).toBe('')
   expect(await api('/settings')).toEqual({ marker: 'fresh' })
+})
+
+it('stops a refused relay timeline without accepting or reconnecting', async () => {
+  const fetch = vi.fn(async () => Response.json({ code: 'update_required', error: 'Update required.' }, { status: 426 }))
+  vi.stubGlobal('fetch', fetch)
+  const { state } = await import('../src/api')
+  const { liveConnection } = await import('../src/live-connection')
+  const accept = vi.fn()
+  const status = vi.fn()
+  const connection = liveConnection('/chats/c/stream', accept, status, { cursor: 7, history: 'v2:r:1' })
+  await vi.waitFor(() => expect(state.protocolError).toContain('Update required'))
+  expect(accept).not.toHaveBeenCalled()
+  expect(status).toHaveBeenLastCalledWith('update-required')
+  window.dispatchEvent(new Event('online'))
+  document.dispatchEvent(new Event('visibilitychange'))
+  await vi.advanceTimersByTimeAsync(300000)
+  expect(fetch).toHaveBeenCalledOnce()
+  connection.close()
+})
+
+it('does not replay an uncertain mutation when a timeline requires an update', async () => {
+  const { api, channel, state } = await direct()
+  const { liveConnection } = await import('../src/live-connection')
+  const pending = api('/chats/c/reorder', { method: 'POST', body: '{"before":"other"}' })
+  const rejected = expect(pending).rejects.toMatchObject({ status: 426 })
+  const connection = liveConnection('/chats/c/stream', vi.fn(), vi.fn(), { cursor: 7, history: 'v2:r:1' })
+  await vi.waitFor(() => expect(channel.packets).toHaveLength(2))
+  const stream = channel.packets.map(packet => JSON.parse(new TextDecoder().decode(packet.subarray(13)))).find(frame => frame.method === 'GET')!
+  reply(channel, {
+    type: 'stream_start',
+    id: stream.id,
+    status: 200,
+    headers: [['content-type', 'text/event-stream']],
+    body: '',
+  })
+  await vi.waitFor(() => expect(channel.packets).toHaveLength(3))
+  const batch = {
+    events: [],
+    reset: false,
+    more: false,
+    history: 'v1:r:1',
+  }
+  reply(channel, { type: 'stream_chunk', id: stream.id, body: btoa(`event: batch\nid: 9\ndata: ${JSON.stringify(batch)}\n\n`) })
+  await rejected
+  expect(state.protocolError).toContain('Update required')
+  await vi.advanceTimersByTimeAsync(300000)
+  expect(vi.mocked(fetch).mock.calls.every(([url]) => String(url).includes('/direct/'))).toBe(true)
+  connection.close()
 })
