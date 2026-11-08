@@ -450,6 +450,7 @@ class LiveTest {
                                 false,
                                 false,
                                 entries = listOf(reply(1, "Bonjour")),
+                                history = "v2:r1:1",
                             ),
                         )
                     )
@@ -462,6 +463,7 @@ class LiveTest {
                                 false,
                                 false,
                                 entries = listOf(appended(id, " é$id")),
+                                history = "v2:r1:1",
                             ),
                         )
                     )
@@ -653,6 +655,7 @@ class LiveTest {
                         ),
                         false,
                         false,
+                        history = "v2:r1:1",
                     )
                 val second =
                     LiveBatch(
@@ -667,6 +670,7 @@ class LiveTest {
                         ),
                         true,
                         false,
+                        history = "v2:r2:1",
                     )
                 server.enqueue(
                     MockResponse()
@@ -688,9 +692,12 @@ class LiveTest {
                             .take(2)
                             .toList()
                     }
-                assertEquals("/api/chats/chat/stream?after=0&window=1", server.takeRequest().path)
                 assertEquals(
-                    "/api/chats/chat/stream?after=1&window=1&recent=1",
+                    "/api/chats/chat/stream?after=0&window=1&timeline=1",
+                    server.takeRequest().path,
+                )
+                assertEquals(
+                    "/api/chats/chat/stream?after=1&history=v2%3Ar1%3A1&window=1&timeline=1&recent=1",
                     server.takeRequest().path,
                 )
                 assertEquals("r2", snapshots.last().state?.run?.id)
@@ -722,6 +729,7 @@ class LiveTest {
                                     false,
                                     false,
                                     entries = listOf(change),
+                                    history = "v2:r1:1",
                                 ),
                             )
                         )
@@ -745,13 +753,22 @@ class LiveTest {
                         api.live("/chats/two/stream", session).first { it.entries.isNotEmpty() }
                     assertEquals("Nouvelle session", fresh.replyText())
                 }
-                assertEquals("/api/chats/one/stream?after=0&window=1", server.takeRequest().path)
                 assertEquals(
-                    "/api/chats/one/stream?after=1&window=1&recent=1",
+                    "/api/chats/one/stream?after=0&window=1&timeline=1",
                     server.takeRequest().path,
                 )
-                assertEquals("/api/chats/two/stream?after=0&window=1", server.takeRequest().path)
-                assertEquals("/api/chats/two/stream?after=0&window=1", server.takeRequest().path)
+                assertEquals(
+                    "/api/chats/one/stream?after=1&history=v2%3Ar1%3A1&window=1&timeline=1&recent=1",
+                    server.takeRequest().path,
+                )
+                assertEquals(
+                    "/api/chats/two/stream?after=0&window=1&timeline=1",
+                    server.takeRequest().path,
+                )
+                assertEquals(
+                    "/api/chats/two/stream?after=0&window=1&timeline=1",
+                    server.takeRequest().path,
+                )
             }
         }
 

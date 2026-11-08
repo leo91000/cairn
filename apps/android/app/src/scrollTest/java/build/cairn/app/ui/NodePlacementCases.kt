@@ -686,7 +686,7 @@ abstract class NodePlacementCases {
                             }
                         if (live != null) {
                             val frame =
-                                "event: batch\nid: 0\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), live, true, false))}\n\n"
+                                "event: batch\nid: 0\ndata: ${wireJson.encodeToString(LiveBatch(emptyList(), live, true, false, history = "v2:fixture:1"))}\n\n"
                             return MockResponse()
                                 .setHeader("Content-Type", "text/event-stream")
                                 .setBody(nodeWireFixture(request.path, frame))

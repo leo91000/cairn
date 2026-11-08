@@ -189,7 +189,7 @@ internal fun timelineBatch(
     state: build.cairn.app.data.LiveState? = null,
     reset: Boolean,
     more: Boolean,
-    history: String? = null,
+    history: String? = "v2:fixture:1",
     oldest: Long? = null,
     hasOlder: Boolean = false,
 ): build.cairn.app.data.LiveBatch {

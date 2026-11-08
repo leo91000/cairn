@@ -1320,7 +1320,7 @@ class DirectTransportTest {
                     fun sse(cursor: Long, events: List<RunEvent>) =
                         "event: batch\nid: $cursor\ndata: ${wireJson.encodeToString(LiveBatch(events, LiveState(run = Run(id = "r1",
 status = "running",
-taskId = "",)), false, false, history = "h1", entries = listOf(build.cairn.contracts.TimelineChange.A(waitCard)),))}\n\n"
+taskId = "",)), false, false, history = "v2:r1:1", entries = listOf(build.cairn.contracts.TimelineChange.A(waitCard)),))}\n\n"
                     val first =
                         RunEvent(
                             id = 7,
@@ -1451,7 +1451,7 @@ taskId = "",)), false, false, history = "h1", entries = listOf(build.cairn.contr
                         build.cairn.app.ui.backgroundWait(final.entries),
                     )
                     assertEquals(
-                        "/api/installations/test/api/runs/r1/stream?after=7&history=h1&window=1&recent=1",
+                        "/api/installations/test/api/runs/r1/stream?after=7&history=v2%3Ar1%3A1&window=1&timeline=1&recent=1",
                         server.takeRequest().path,
                     )
                     assertEquals("relay", api.transport.route.value)
