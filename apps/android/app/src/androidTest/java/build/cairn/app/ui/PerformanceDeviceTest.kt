@@ -78,10 +78,21 @@ class PerformanceDeviceTest {
                     bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
                 }
             }
-            val windowBeforeReset = Performance.store.snapshot().windowId
+            // Other work may record measurements at any time, so the reset is checked against
+            // a ten-minute operation and frame that nothing else in the app produces.
+            val markerNs = 600_000_000_000L
+            val markerMs = markerNs / 1e6
+            Performance.store.timing(PerfOperation.API_WRITE, PerfScreen.STARTUP, markerNs, false)
+            Performance.store.frame(PerfScreen.STARTUP, true, markerNs, 16_000_000)
+            val beforeReset = Performance.store.snapshot()
+            assertTrue(beforeReset.operations.any { it.maxMs >= markerMs })
+            assertTrue(beforeReset.frames.any { it.maxMs >= markerMs })
             compose.onNodeWithText("Remettre à zéro").performScrollTo().performClick()
-            val windowAfterReset = Performance.store.snapshot().windowId
-            assertNotEquals(windowBeforeReset, windowAfterReset)
+            val afterReset = Performance.store.snapshot()
+            assertNotEquals(beforeReset.windowId, afterReset.windowId)
+            assertTrue(afterReset.operations.none { it.maxMs >= markerMs })
+            assertTrue(afterReset.frames.none { it.maxMs >= markerMs })
+            assertTrue(afterReset.recentSlowSamples.none { it.durationMs >= markerMs })
         } finally {
             compose.runOnUiThread { monitor.stop() }
         }
