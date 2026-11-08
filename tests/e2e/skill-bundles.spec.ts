@@ -143,11 +143,17 @@ async function openFile(page: Page, filePath: string) {
   await row(page, filePath).click()
 }
 
-test('builds a multi-file skill, saves one batch and round-trips it through a zip', async ({ page, workspace }, testInfo) => {
+test('builds a multi-file skill, saves one batch and round-trips it through a zip', async ({ page, workspace, browserName }, testInfo) => {
   test.setTimeout(120000)
   await useRelayForHttpMocks(page)
   const errors: string[] = []
+  const cancelledDuringReload: string[] = []
+  let reloading = false
   page.on('pageerror', error => errors.push(error.message))
+  page.on('requestfailed', (request) => {
+    if (reloading && request.method() === 'GET' && request.failure()?.errorText === 'Load request cancelled')
+      cancelledDuringReload.push(request.url())
+  })
   const batches: {
     base: string | null
     changes: {
@@ -235,7 +241,14 @@ test('builds a multi-file skill, saves one batch and round-trips it through a zi
   await expect(dialog).toHaveCount(0)
 
   // Reloading shows exactly what was saved, with modes.
-  await page.reload()
+  reloading = true
+  try {
+    await page.reload()
+  }
+  finally {
+    reloading = false
+  }
+
   await page.getByRole('button', { name: 'Edit bundle-demo', exact: true }).click()
   const editor = page.getByRole('dialog', { name: 'Edit skill' })
   await expect(editor.getByText('6 files')).toBeVisible()
@@ -323,7 +336,26 @@ test('builds a multi-file skill, saves one batch and round-trips it through a zi
   expect(uploads).toHaveLength(3)
   await page.getByRole('dialog', { name: 'Edit skill' }).getByRole('button', { name: 'Close', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Edit release-notes', exact: true })).toBeVisible()
-  expect(errors).toEqual([])
+  const unexpectedErrors = [...errors]
+  if (browserName === 'webkit') {
+    for (const address of cancelledDuringReload) {
+      const cancelled = new URL(address)
+      const pollingPath = cancelled.pathname === '/api/installations'
+        || /^\/api\/installations\/[^/]+\/api\/tasks\/activity$/.test(cancelled.pathname)
+      if (!pollingPath)
+        continue
+
+      // WebKit reports a request cancelled by page reload as an access-control
+      // page error. Ignore only that diagnostic when the matching poll failed
+      // with the browser's explicit navigation-cancellation reason.
+      const cancellationError = `/${cancelled.host}${cancelled.pathname} due to access control checks.`
+      const errorIndex = unexpectedErrors.indexOf(cancellationError)
+      if (errorIndex !== -1)
+        unexpectedErrors.splice(errorIndex, 1)
+    }
+  }
+
+  expect(unexpectedErrors).toEqual([])
 })
 
 test('connection feedback preserves the skill footer and a manual save retry', async ({ page, workspace }) => {
