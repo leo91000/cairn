@@ -4,6 +4,8 @@ mod exclusive;
 mod exclusive_tests;
 mod health;
 #[cfg(test)]
+mod seed_process_tests;
+#[cfg(test)]
 mod staging_tests;
 #[cfg(test)]
 mod terminal_tests;
