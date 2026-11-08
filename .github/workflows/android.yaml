@@ -78,6 +78,7 @@ jobs:
         working-directory: apps/android
         run: ./gradlew "$GRADLE_TASK" --no-daemon --stacktrace
       - uses: actions/upload-artifact@v7.0.1
+        timeout-minutes: 2
         if: always()
         with:
           name: cairn-android-${{ matrix.task }}
@@ -178,6 +179,7 @@ jobs:
             node scripts/android-device-tests.mjs run --apk apks/debug/app-debug.apk --test-apk apks/androidTest/debug/app-debug-androidTest.apk --output device-results/shard-${{ matrix.shard }} --shard ${{ matrix.shard }}/${{ strategy.job-total }} --timings apps/android/device-test-timings.json --not-class build.cairn.app.data.DirectTransportDeviceTest ${SKIP_ON_PULL_REQUEST:+--not-annotation "$SKIP_ON_PULL_REQUEST"}
             node scripts/android-compose-stability.mjs "$STABILITY_REPETITIONS" device-results/stability
       - uses: actions/upload-artifact@v7.0.1
+        timeout-minutes: 2
         if: always()
         with:
           name: cairn-android-device-${{ matrix.shard }}
@@ -205,6 +207,7 @@ jobs:
           CAPTURES: ${{ github.event_name == 'pull_request' && 'scroll-validation/pinned-stream.png' || 'scroll-validation/pinned-stream.png,model-picker/reasoning.png,conversation-lifecycle/swipe-fil.png,node-screenshots/nodes.png,node-screenshots/storage.png,node-screenshots/execution-sheet.png' }}
         run: node scripts/android-device-tests.mjs report device-results --require "$CAPTURES" --write-timings device-test-timings.json
       - uses: actions/upload-artifact@v7.0.1
+        timeout-minutes: 2
         if: always()
         with:
           name: cairn-android-device-timings
@@ -262,6 +265,7 @@ jobs:
       - name: Attach smoke evidence to the original unsigned APK
         run: cp release-smoke-results/release-smoke.json apps/android/app/build/outputs/apk/release/
       - uses: actions/upload-artifact@v7.0.1
+        timeout-minutes: 2
         if: always()
         with:
           name: cairn-android-release-smoke
@@ -375,6 +379,9 @@ jobs:
           gh release edit "$RELEASE_TAG" --draft=false --latest
 
   header-diagnostic:
+    permissions:
+      contents: read
+      actions: read
     if: github.event_name == 'workflow_dispatch' && inputs.header-diagnostic == true
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -406,9 +413,17 @@ jobs:
           git fetch origin 35a721cb499afb1d12711fb9e855288f66c1abf0
           git worktree add --detach source-base 272f4f3bbe5b276b0b9339cf38bab53b04bef8b2
           git worktree add --detach source-candidate 35a721cb499afb1d12711fb9e855288f66c1abf0
+      - name: Acquire the actual GitHub job clock
+        id: clock
+        timeout-minutes: 1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          node scripts/observe-header-evidence.mjs clock header-evidence/clock.json
       - name: Amplify the base header journey without changing assertions
         id: base
-        timeout-minutes: 25
+        timeout-minutes: 27
         continue-on-error: true
         working-directory: source-base
         run: |
@@ -417,14 +432,20 @@ jobs:
           sha256sum ../scripts/observe-header-progress.init.gradle > ../header-evidence/base-progress-observer.sha256
           test -z "$(git status --porcelain)"
           python3 ../scripts/observe-header-trials.py . ../header-evidence/base-observed.patch
+          budget=$(node ../scripts/observe-header-evidence.mjs budget ../header-evidence/clock.json)
+          echo "$budget" > ../header-evidence/base-budget-seconds.txt
           set +e
-          apps/android/gradlew -p apps/android testDebugUnitTest --tests build.cairn.app.ui.UnifiedHeaderTest --no-daemon --init-script "$GITHUB_WORKSPACE/scripts/observe-header-progress.init.gradle" -DcairnHeaderEvidence="$GITHUB_WORKSPACE/header-evidence/base-progress.jsonl" > ../header-evidence/base-command.log 2>&1
+          timeout --signal=TERM --kill-after=30s "${budget}s" apps/android/gradlew -p apps/android testDebugUnitTest --tests build.cairn.app.ui.UnifiedHeaderTest --no-daemon --init-script "$GITHUB_WORKSPACE/scripts/observe-header-progress.init.gradle" -DcairnHeaderEvidence="$GITHUB_WORKSPACE/header-evidence/base-progress.jsonl" > ../header-evidence/base-command.log 2>&1
           result=$?
           set -e
           echo "$result" > ../header-evidence/base-exit.txt
+          observation=0
+          node ../scripts/observe-header-evidence.mjs progress ../header-evidence/base-progress.jsonl ../header-evidence/base-observation.json || observation=$?
+          if [ "$result" -eq 0 ]; then result=$observation; fi
           git status --porcelain >> ../header-evidence/base-source.txt
           exit "$result"
       - uses: actions/upload-artifact@v7.0.1
+        timeout-minutes: 2
         if: always()
         with:
           name: header-base-amplified-observation
@@ -436,8 +457,8 @@ jobs:
           retention-days: 14
       - name: Amplify the candidate header journey without changing assertions
         id: candidate
-        timeout-minutes: 25
-        if: always() && steps.base.outcome != 'skipped'
+        timeout-minutes: 27
+        if: always() && steps.clock.outcome == 'success'
         continue-on-error: true
         working-directory: source-candidate
         run: |
@@ -446,14 +467,20 @@ jobs:
           sha256sum ../scripts/observe-header-progress.init.gradle > ../header-evidence/candidate-progress-observer.sha256
           test -z "$(git status --porcelain)"
           python3 ../scripts/observe-header-trials.py . ../header-evidence/candidate-observed.patch
+          budget=$(node ../scripts/observe-header-evidence.mjs budget ../header-evidence/clock.json)
+          echo "$budget" > ../header-evidence/candidate-budget-seconds.txt
           set +e
-          apps/android/gradlew -p apps/android testDebugUnitTest --tests build.cairn.app.ui.UnifiedHeaderTest --no-daemon --init-script "$GITHUB_WORKSPACE/scripts/observe-header-progress.init.gradle" -DcairnHeaderEvidence="$GITHUB_WORKSPACE/header-evidence/candidate-progress.jsonl" > ../header-evidence/candidate-command.log 2>&1
+          timeout --signal=TERM --kill-after=30s "${budget}s" apps/android/gradlew -p apps/android testDebugUnitTest --tests build.cairn.app.ui.UnifiedHeaderTest --no-daemon --init-script "$GITHUB_WORKSPACE/scripts/observe-header-progress.init.gradle" -DcairnHeaderEvidence="$GITHUB_WORKSPACE/header-evidence/candidate-progress.jsonl" > ../header-evidence/candidate-command.log 2>&1
           result=$?
           set -e
           echo "$result" > ../header-evidence/candidate-exit.txt
+          observation=0
+          node ../scripts/observe-header-evidence.mjs progress ../header-evidence/candidate-progress.jsonl ../header-evidence/candidate-observation.json || observation=$?
+          if [ "$result" -eq 0 ]; then result=$observation; fi
           git status --porcelain >> ../header-evidence/candidate-source.txt
           exit "$result"
       - uses: actions/upload-artifact@v7.0.1
+        timeout-minutes: 2
         if: always()
         with:
           name: header-candidate-amplified-observation

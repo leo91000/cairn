@@ -6,6 +6,7 @@ import org.gradle.api.tasks.testing.TestListener
 import org.gradle.api.tasks.testing.TestResult
 
 final class HeaderProgress implements TestListener {
+    private int failureIndex = 0
     private final File destination
 
     HeaderProgress(File destination) {
@@ -40,7 +41,9 @@ final class HeaderProgress implements TestListener {
                 def trace = new StringWriter()
                 error.printStackTrace(new PrintWriter(trace))
                 def value = trace.toString()
-                [trace: value.take(32768), truncated: value.length() > 32768]
+                def fullTrace = new File(destination.parentFile, destination.name + '.failure-' + (++failureIndex) + '.txt')
+                fullTrace.setText(value, 'UTF-8')
+                [trace: value.take(32768), truncated: value.length() > 32768, fullTrace: fullTrace.name]
             }
             append([event: 'test-end', name: test.name, result: result.resultType.toString(),
                     startTime: result.startTime, endTime: result.endTime, errors: errors])
@@ -56,6 +59,8 @@ if (!evidence) {
 gradle.projectsEvaluated {
     allprojects {
         tasks.withType(Test).configureEach {
+            outputs.upToDateWhen { false }
+            outputs.cacheIf { false }
             addTestListener(new HeaderProgress(new File(evidence)))
         }
     }
