@@ -561,7 +561,7 @@ const connectionDescription = computed(() => currentInstallation.value
   ? `${currentInstallation.value.name} · ${currentInstallation.value.status} · ${routeLabel(state.transportRoute)}`
   : '')
 const phoneDescription = computed(() => [
-  headerState.value?.label ?? '',
+  headerState.value?.label ?? headerProject.value ?? '',
   heading.value?.provider ? `Latest harness: ${providers[heading.value.provider].label}` : '',
   connectionDescription.value,
 ].filter(Boolean).join(' · '))
@@ -1384,7 +1384,7 @@ function key(event: KeyboardEvent) {
             :harness="heading.provider"
             :working="working"
           />
-          <div class="flex min-w-0 flex-1 items-center gap-2.5 overflow-x-clip text-xs text-muted">
+          <div class="flex min-w-0 flex-1 items-center gap-2.5 overflow-x-clip text-xs text-muted [overflow-clip-margin:4px]">
             <h1 class="min-w-0 truncate text-base! font-semibold! leading-snug! tracking-tight! text-ink" :title="heading?.title || undefined">
               {{ heading?.title || 'New conversation' }}
             </h1>

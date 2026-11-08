@@ -397,7 +397,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)
   // Routine synchronization stays out of the header: the conversation menu names the node and its sync.
-  const chip = page.locator('.chat-header').getByRole('button', { name: 'Execution node', exact: true })
+  const chip = page.locator('.chat-header').getByRole('button', { name: /^Execution node/ })
   const details = page.getByRole('button', { name: 'Chat details', exact: true })
   const nodeAction = page.getByRole('menu', { name: 'Chat details', exact: true }).getByRole('menuitem', { name: 'Execution node', exact: true })
   await details.click()
@@ -499,7 +499,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await heartbeat()
   // Overdue synchronization needs a look: the header names it, without the node.
   await expect(chip).toHaveText('Sync overdue', { timeout: 15000 })
-  await expect(chip).toHaveAccessibleDescription('Sync overdue')
+  await expect(chip).toHaveAccessibleName('Execution node: Sync overdue')
   // The chip appears already filled, so the header's mounted live region announces it.
   await expect(page.locator('.chat-header .sr-only[role="status"]')).toHaveText('Sync overdue')
   await expect(panel).toContainText('Work can continue while local storage is safe')
@@ -511,7 +511,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await expect(panel).toBeVisible()
   workspace.service.store.updateRun(detail.run.id, { storage: { backupDegraded: false } } as any)
   await heartbeat()
-  await expect(chip).toHaveAccessibleDescription('Saving…', { timeout: 15000 })
+  await expect(chip).toHaveAccessibleName('Execution node: Saving…', { timeout: 15000 })
   await page.keyboard.press('Escape')
   await expect(panel).toHaveCount(0)
   await expect(chip).toHaveCount(0)

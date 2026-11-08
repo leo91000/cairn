@@ -361,8 +361,7 @@ onUnmounted(() => {
       :class="chipTone[status.tone]"
       aria-haspopup="dialog"
       :aria-expanded="open"
-      aria-label="Execution node"
-      :aria-description="variant === 'attention' ? status.label : undefined"
+      :aria-label="variant === 'attention' ? `Execution node: ${status.label}` : 'Execution node'"
       @click="toggle"
     >
       <Icon :name="Server" :size="13" class="shrink-0" />

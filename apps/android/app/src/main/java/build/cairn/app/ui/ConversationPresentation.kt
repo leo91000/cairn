@@ -309,8 +309,12 @@ internal fun ConversationHeader(
                                         harness?.let { "Dernier harness : ${providerLabel(it)}" },
                                     )
                                     .joinToString(" · ")
-                            // The subtitle's status is read with the button, not only on sight.
-                            if (status.isNotBlank()) stateDescription = status
+                            // The subtitle's status is read with the button, not only on sight; a
+                            // countdown would be re-read every minute, so it reads as a scheduled
+                            // wait.
+                            if (status.isNotBlank())
+                                stateDescription =
+                                    if (wakeup != null) statusLabel("waiting") else status
                         },
                     color = MaterialTheme.colorScheme.background,
                     shape = RoundedCornerShape(12.dp),
