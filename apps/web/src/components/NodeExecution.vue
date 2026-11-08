@@ -153,6 +153,13 @@ const attention = computed(() => {
 })
 // A chip whose panel is open stays until it closes, so focus can return to it.
 const showChip = computed(() => props.variant === 'chip' || attention.value || (open.value && !opener.value))
+// A focused chip that goes away hands focus on instead of dropping it to the page.
+watch(showChip, async (shown) => {
+  if (shown || !chip.value || document.activeElement !== chip.value)
+    return
+  await nextTick()
+  props.fallbackFocus?.focus()
+})
 const chipTone = {
   bad: 'border-coral/40 bg-coral-soft text-coral',
   warn: 'border-warning/40 bg-warning-surface text-warning',

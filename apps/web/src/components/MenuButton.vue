@@ -50,7 +50,6 @@ function place() {
   position.value = {
     left: `${left}px`,
     top: `${top}px`,
-    width: `${props.width}px`,
     maxHeight: `${useAbove ? rect.top - 6 - top : roomBelow}px`,
   }
 }
@@ -178,7 +177,7 @@ defineExpose({ show, hide, trigger })
   <div
     ref="menu"
     popover="manual"
-    :style="position"
+    :style="{ width: `${width}px`, ...position }"
     class="fixed inset-auto m-0 overflow-y-auto overscroll-contain rounded-xl border border-line bg-raised p-1.5 text-ink shadow-[0_9px_25px_#0003]"
     @keydown="menuKeydown"
     @click.stop

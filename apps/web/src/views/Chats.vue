@@ -1355,7 +1355,7 @@ function key(event: KeyboardEvent) {
             :harness="heading.provider"
             :working="working"
           />
-          <div class="flex min-w-0 flex-1 items-center gap-2.5 text-xs text-muted">
+          <div class="flex min-w-0 flex-1 items-center gap-2.5 overflow-x-clip text-xs text-muted">
             <h1 class="min-w-0 truncate text-base! font-semibold! leading-snug! tracking-tight! text-ink" :title="heading?.title || undefined">
               {{ heading?.title || 'New conversation' }}
             </h1>
@@ -1397,14 +1397,14 @@ function key(event: KeyboardEvent) {
               v-if="contextAlert"
               ref="contextPill"
               :aria-description="canCompact ? 'Opens compaction' : undefined"
-              class="flex shrink-0 items-center gap-1.5 rounded-full px-2.5 leading-6 font-medium tabular-nums whitespace-nowrap"
+              class="flex min-w-0 items-center gap-1.5 rounded-full px-2.5 leading-6 font-medium tabular-nums"
               :class="(context.percent ?? 0) >= 85 ? 'bg-coral-soft text-coral' : 'bg-warning-surface text-warning'"
               :title="[context.label, ...context.details].join('\n')"
               :aria-haspopup="canCompact ? 'dialog' : undefined"
               data-testid="context-indicator"
               @click="canCompact && openCompactionFromHeader()"
             >
-              Context {{ context.percent }}%
+              <span class="truncate">Context {{ context.percent }}%</span>
             </component>
             <NodeExecution
               v-if="detail?.run && state.installationRole === 'owner'"
@@ -1420,7 +1420,7 @@ function key(event: KeyboardEvent) {
           <button
             v-if="detail?.run && fileCount"
             :class="iconButton"
-            class="w-auto! gap-1.5 px-2.5! text-xs font-semibold tabular-nums phone:hidden!"
+            class="w-auto! gap-1.5 px-2.5! text-xs font-semibold tabular-nums phone:hidden! pointer-coarse:h-10!"
             :aria-label="`Files: ${fileCount}`"
             :title="`Files: ${fileCount}`"
             @click="activity?.openFiles()"
@@ -1442,7 +1442,7 @@ function key(event: KeyboardEvent) {
             ref="menuButton"
             label="Chat details"
             :width="300"
-            :trigger-class="[iconButton, 'phone:hidden!']"
+            :trigger-class="[iconButton, 'phone:hidden! pointer-coarse:size-10!']"
             :describedby="['conversation-summary', compactionHint].filter(Boolean).join(' ')"
           >
             <template #trigger>

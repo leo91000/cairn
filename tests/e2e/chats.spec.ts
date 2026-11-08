@@ -410,17 +410,28 @@ test('a durable condition wait follows a dependency across restart and queue pau
       condition: { type: 'run_finished' as const, runId: target.id },
     }
     workspace.service.store.put('chats', { ...workspace.service.store.get('chats', chat.id)!, wakeup })
+    // A nearly full window crowds the row further.
+    workspace.service.store.updateRun(detail.run.id, {
+      contextUsage: {
+        contextTokens: 238000,
+        contextWindow: 258400,
+        cachedTokens: null,
+        estimated: false,
+      },
+    } as any)
     await workspace.restart()
     await page.goto(workspacePath(`/chats/${chat.id}`))
     await authenticateWorkspace(page)
     await expect(page.locator('.chat-wait')).toContainText(/Waiting for another run to finish.*Join dependency.*up to \d+ min/)
     await expect(headerStatus(page, /^Awaiting result · up to \d+ min$/)).toBeVisible()
-    // A crowded row truncates its status rather than covering the header's actions.
-    for (const width of [1440, 1000, 700]) {
+    // A crowded row truncates its pills rather than covering the header's actions.
+    for (const width of [1440, 1000, 901, 700]) {
       await page.setViewportSize({ width, height: 800 })
-      const status = (await headerStatus(page, /^Awaiting result/).boundingBox())!
-      const menu = (await page.getByRole('button', { name: 'Chat details', exact: true }).boundingBox())!
-      expect(status.x + status.width).toBeLessThanOrEqual(menu.x)
+      const actions = (await page.locator('.chat-header > div').last().boundingBox())!
+      for (const pill of [headerStatus(page, /^Awaiting result/), page.getByTestId('context-indicator')]) {
+        const box = (await pill.boundingBox())!
+        expect(box.x + box.width).toBeLessThanOrEqual(actions.x)
+      }
     }
 
     await page.setViewportSize({ width: 1280, height: 720 })
@@ -2054,7 +2065,8 @@ test('installation push registration is removed in favor of the beacon account',
   await authenticateWorkspace(page)
   // Notifications belong to the account, not to a conversation: its menu no longer links them.
   await page.getByRole('button', { name: 'Chat details', exact: true }).click()
-  await expect(page.getByRole('menu', { name: 'Chat details', exact: true }).getByRole('link', { name: 'Question notifications' })).toHaveCount(0)
+  // A conversation not created yet only offers its connection.
+  await expect(page.getByRole('menu', { name: 'Chat details', exact: true }).getByRole('menuitem')).toHaveText(['Connection'])
   await page.keyboard.press('Escape')
   await page.goto(workspacePath('/settings/account'))
   await expect(page.getByText('Know when your agent needs your input, across all your installations, even with the app closed. Question content stays private.')).toBeVisible()
