@@ -42,6 +42,10 @@ test('1Password service accounts are plugin instances with private tokens, grant
   await expect(token).toHaveAttribute('type', 'password')
   await token.fill('ops_browser_fixture')
   await dialog.getByRole('button', { name: 'Continue' }).click()
+  // Writing is a separate, high-risk permission that stays off unless the owner turns it on.
+  await expect(dialog.getByRole('heading', { name: 'Permissions' })).toBeVisible()
+  await expect(dialog.getByLabel('Create items and edit fields')).not.toBeChecked()
+  await dialog.getByRole('button', { name: 'Continue' }).click()
   // A new account may be granted on its last step; nothing is granted unless ticked.
   await expect(dialog.getByRole('heading', { name: 'Agents' })).toBeVisible()
   await expect(dialog.getByRole('checkbox', { name: 'Main agent', exact: true })).not.toBeChecked()
@@ -65,7 +69,7 @@ test('1Password service accounts are plugin instances with private tokens, grant
   await page.goto(workspacePath(`/agents/${MAIN_AGENT_ID}`))
   await openAgentSection(page, 'Secrets & plugins')
   const accounts1Password = page.getByRole('region', { name: '1Password · service accounts' })
-  await expect(accounts1Password).toContainText('Read-only · no access by default, including Main')
+  await expect(accounts1Password).toContainText('No access by default, including Main')
   await expect(accounts1Password.getByText('Not granted', { exact: true })).toBeVisible()
   await accounts1Password.getByRole('switch', { name: 'Access to 1Password Production secrets' }).check()
   for (const width of [1440, 390, 320]) {
@@ -98,7 +102,7 @@ test('1Password service accounts are plugin instances with private tokens, grant
   dialog = page.getByRole('dialog', { name: 'Edit Production secrets' })
   await expect(dialog.getByLabel('Service account token', { exact: true })).toHaveValue('')
   // Once it exists, its agents are listed read-only: grants change on agent pages.
-  await dialog.getByRole('button', { name: 'Step 2: Agents', exact: true }).click()
+  await dialog.getByRole('button', { name: 'Step 3: Agents', exact: true }).click()
   await expect(dialog.getByRole('region', { name: 'Agents' })).toContainText('Authorized agents: Main agent')
   await expect(dialog.getByRole('link', { name: 'Manage on agent pages ›' })).toBeVisible()
   await expect(dialog.getByRole('checkbox', { name: 'Main agent', exact: true })).toHaveCount(0)

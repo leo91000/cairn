@@ -96,7 +96,8 @@ A manifest declares `"apiVersion": 2` (the only version Cairn loads) and:
   owner can also sign in instead of pasting it: see [Device sign-in](#device-sign-in);
 - `settings`: the instance form, in order (`key`, `title`, `type`, `required`,
   `hidden`, `description`, `placeholder`, `section`, `default`, `maxLength`,
-  `minimum`, `maximum`, `pattern`, `options`, `dynamic` and `refresh`).
+  `minimum`, `maximum`, `pattern`, `options`, `dynamic`, `refresh`, and `risk` or
+  `ownerOnly` for switches).
   Types: `string`, `number`, `boolean`, `text`, `url`, `select`,
   `multiselect` (with `options`, or `dynamic: true` for choices the package's form
   handler provides) and `secret`;
@@ -428,7 +429,10 @@ packages and an `agents` step, last, with `agentAccess`. Only settings steps lis
 settings, may be `shared` and may have presets, whose values name the step's
 boolean settings. Checklist links are HTTPS; `copy = "callbackUrl"` needs OAuth. At
 most 8 steps, 8 tasks and 6 presets per step. Boolean settings may declare
-`risk = "low" | "medium" | "high"`, shown beside the switch.
+`risk = "low" | "medium" | "high"`, shown beside the switch. A switch that widens
+what granted agents may do, like a grant, declares `ownerOnly = true` and starts off:
+installation agents may turn it off, never on, even on an instance they hold, and may
+not replace the credential or secrets of an instance while it is on.
 Presets refresh each changed field marked `refresh`, just like its individual
 switch. Form errors apply only to the checked input; changing an ordinary field
 clears its stale error without requiring `refresh`. Save still runs the package's
@@ -884,10 +888,40 @@ plaintext secret TTL. This reduces repeated CLI work but does not raise the upst
 quota or guarantee that a warm read makes no API calls. See the
 [official CLI cache reference](https://www.1password.dev/cli/reference).
 
+When the owner allows writing on a service account (`allowWrite`, off by default),
+its agents can create an item or change and add fields:
+
+```sh
+# jq reads the value from the environment, so it never appears in a command's text.
+TOKEN=$(openssl rand -hex 32) && export TOKEN
+fields=$(jq -nc '[{field: "credential", value: env.TOKEN}]')
+cairn plugin onepassword create-item --account ACCOUNT_ID --vault VAULT_ID \
+  --category "API Credential" --title Deploy --fields "$fields"
+cairn plugin onepassword set-fields --account ACCOUNT_ID --vault VAULT_ID \
+  --item ITEM_ID --fields "$fields"
+```
+
+`fields` is a JSON array of 1 to 32 `{ field, value, type? }` objects. A field
+matches by ID, then label, then label ignoring case; `template --account ACCOUNT_ID
+--category CATEGORY` lists a category's built-in field IDs, labels and types first; an unknown one is added, `CONCEALED`
+unless `type` is `STRING`, `EMAIL`, `URL`, `PHONE` or `OTP`. `type` applies only to new
+fields, so a concealed value is never revealed by an edit. `create-item` starts
+from the category's template. Both send the item JSON to `op` through stdin, so values
+never enter its arguments, and return field references without values. `set-fields`
+reads the item without the CLI cache and rewrites it from its JSON, so a change made
+in between is overwritten. It edits only Password, API Credential, Server, Database,
+Secure Note, Software License, Wireless Router and Email Account items without
+attachments: Login items may hold passkeys, which the CLI does not export, and other
+categories or attachments might not survive the rewrite. `accounts` reports which
+accounts allow writing. Neither command is available through the metadata tool, and
+nothing deletes items. `allowWrite` is `ownerOnly`: an installation agent may turn it
+off, never on.
+
 `limits` is also available through the metadata tool. It reports the CLI's
 hourly token and daily account limits, usage, remaining requests and `reset` in
 seconds. A rate-limited read reports the exhausted quota and the longest reset
-among exhausted limits that apply to reads (hourly write limits are independent).
+among exhausted limits that apply to reads; a rate-limited write uses the hourly
+write limit instead. Both share the daily account limit.
 If the diagnostic query fails, it returns a safe rate-limit
 message rather than forwarding program output. Other errors retain the generic
 message, since arbitrary CLI diagnostics can contain secrets.
@@ -898,8 +932,8 @@ the daily budget. See [1Password's quota documentation](https://www.1password.de
 
 The CLI uses the same private VM channel and run grant, including remote nodes.
 It never authenticates `op` inside the conversation VM. The service-account token
-stays in the installation; `op` runs with the declared program rules above, the
-package's fixed read-only arguments and the post-I/O grant/rotation check. Secret
+stays in the installation; `op` runs with the declared program rules above, arguments
+the package builds without item values and the post-I/O grant/rotation check. Secret
 stdout has no added newline and is not persisted by the plugin host. Do not run a bare read,
 enable shell tracing or print the captured value: the ordinary command tool still
 records its output. Already delivered secrets cannot be revoked.
