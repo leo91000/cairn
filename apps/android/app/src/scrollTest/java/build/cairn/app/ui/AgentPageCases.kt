@@ -684,9 +684,7 @@ abstract class AgentPageCases {
             open(AgentSection.Plugins)
             waitForDescription("Accès à Production")
             compose.onNodeWithText("1Password · comptes de service").assertExists()
-            compose
-                .onNodeWithText("Lecture seule · aucun accès par défaut, Main compris")
-                .assertExists()
+            compose.onNodeWithText("Aucun accès par défaut, Main compris").assertExists()
             compose.onNodeWithText("Compte désactivé").assertExists()
             compose
                 .onNodeWithText("Répond en tant que cet agent sur « #support »", substring = true)
