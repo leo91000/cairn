@@ -1878,7 +1878,7 @@ async fn a_withdrawn_side_question_cancels_the_native_request_silently() {
         if event["type"] == "chat.side.available" {
             deliver(
                 root,
-                &json!([side_question(id, "fixture:side-slow explain")]),
+                &json!([side_question(id, "fixture:side-pending explain")]),
             );
             let inbox = root.path().join("inbox/messages.json");
             tokio::spawn(async move {

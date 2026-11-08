@@ -354,7 +354,7 @@ test('a pending side question can be withdrawn while the reply continues', async
   const chat = await workspace.api('/api/chats', 'POST', {})
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Review the layout. fixture:chat-hang', provider: 'claude' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).canAskSideQuestion).toBe(true)
-  const asked = await workspace.api(`/api/chats/${chat.id}/side-questions`, 'POST', { id: randomUUID(), text: 'fixture:side-slow Why this order?' })
+  const asked = await workspace.api(`/api/chats/${chat.id}/side-questions`, 'POST', { id: randomUUID(), text: 'fixture:side-pending Why this order?' })
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto(workspacePath(`/chats/${chat.id}`))
   await authenticateWorkspace(page)

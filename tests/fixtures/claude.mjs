@@ -187,9 +187,10 @@ else {
       appendFileSync(path.join(home, 'user-messages.jsonl'), `${JSON.stringify(value)}\n`)
     if (value.type === 'control_cancel_request') {
       appendFileSync(path.join(home, 'side-cancellations.jsonl'), `${JSON.stringify(value)}\n`)
-      const pending = sides.get(value.request_id)
-      if (pending) {
-        clearTimeout(pending)
+      if (sides.has(value.request_id)) {
+        const pending = sides.get(value.request_id)
+        if (pending)
+          clearTimeout(pending)
         sides.delete(value.request_id)
         out({ type: 'control_response', response: { subtype: 'error', request_id: value.request_id, error: 'Side question cancelled' } })
       }
@@ -209,6 +210,12 @@ else {
         status: 'started',
       })
       const asked = value.request.question
+      // Withdrawal journeys control completion through cancellation, not a timer.
+      if (asked.includes('fixture:side-pending')) {
+        sides.set(value.request_id, null)
+        return
+      }
+
       const delay = asked.includes('fixture:side-slow') ? 3000 : 200
       if (asked.includes('fixture:side-close-input'))
         process.stdin.destroy()
