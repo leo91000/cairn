@@ -4,6 +4,7 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { selectJobClock } from './ci-diagnostic-source.mjs'
+import { observeCommand } from './ci-deadline.mjs'
 
 export function commandBudget(clock, now = Date.now()) {
   const elapsed = now - clock.startedAt
@@ -34,6 +35,11 @@ export function validateProgress(events) {
   }
 }
 
+export function ownershipClosed(proof) {
+  return proof?.containmentReady === true && proof.inventoryComplete === true
+    && proof.ownershipUncertain === false && proof.cleanupUnknown === false
+}
+
 async function main() {
   const [mode, file, report] = process.argv.slice(2)
   if (mode === 'clock') {
@@ -50,6 +56,27 @@ async function main() {
   }
   else if (mode === 'budget') {
     console.log(commandBudget(JSON.parse(readFileSync(file, 'utf8'))))
+  }
+  else if (mode === 'run') {
+    const clock = JSON.parse(readFileSync(file, 'utf8'))
+    const budget = commandBudget(clock)
+    const [separator, command, ...args] = process.argv.slice(5)
+    assert(separator === '--' && command, 'Missing diagnostic command')
+    const code = await observeCommand({
+      command,
+      args,
+      output: report,
+      jobStartedAt: clock.startedAt,
+      jobMinutes: (Date.now() - clock.startedAt + budget * 1000 + 300000) / 60000,
+      reserveSeconds: 300,
+    })
+    const proof = JSON.parse(readFileSync(path.join(report, 'latest.json'), 'utf8'))
+    const closed = ownershipClosed(proof)
+    writeFileSync(path.join(report, 'closure.json'), `${JSON.stringify({ code, closed })}\n`)
+    process.exitCode = code || (closed ? 0 : 125)
+  }
+  else if (mode === 'closed') {
+    assert(JSON.parse(readFileSync(file, 'utf8')).closed === true, 'Previous owned-command closure is unknown')
   }
   else if (mode === 'progress') {
     let result
