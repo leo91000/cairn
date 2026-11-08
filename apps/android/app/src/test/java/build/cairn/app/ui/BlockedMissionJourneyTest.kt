@@ -376,44 +376,44 @@ class BlockedMissionJourneyTest {
 
     private fun archiveJourney(holdInitialRefresh: Boolean = false) =
         journey(holdInitialRefresh) { vm ->
-        waitText("Preuve appareil F8")
-        compose
-            .onNodeWithContentDescription("Autres actions pour Preuve appareil F8")
-            .performScrollTo()
-            .performClick()
-        waitText("Archiver la mission")
-        val archive = compose.onNodeWithText("Archiver la mission")
-        if (holdInitialRefresh) {
-            // Activity can render a mission from its run snapshot before refresh loads tasks.
-            assertTrue(vm.state.value.busy)
-            assertTrue(vm.state.value.tasks.isEmpty())
-            archive.assertIsNotEnabled().performClick()
-            assertTrue(calls.none { it.first == "POST" && it.second.endsWith("/state") })
-            initialProjectsReleased.countDown()
-        }
-
-        // A visible menu item is still disabled while the workspace is loading.
-        compose.waitUntil(15000) {
+            waitText("Preuve appareil F8")
             compose
-                .onAllNodes(hasText("Archiver la mission") and isEnabled())
-                .fetchSemanticsNodes()
-                .isNotEmpty()
+                .onNodeWithContentDescription("Autres actions pour Preuve appareil F8")
+                .performScrollTo()
+                .performClick()
+            waitText("Archiver la mission")
+            val archive = compose.onNodeWithText("Archiver la mission")
+            if (holdInitialRefresh) {
+                // Activity can render a mission from its run snapshot before refresh loads tasks.
+                assertTrue(vm.state.value.busy)
+                assertTrue(vm.state.value.tasks.isEmpty())
+                archive.assertIsNotEnabled().performClick()
+                assertTrue(calls.none { it.first == "POST" && it.second.endsWith("/state") })
+                initialProjectsReleased.countDown()
+            }
+
+            // A visible menu item is still disabled while the workspace is loading.
+            compose.waitUntil(15000) {
+                compose
+                    .onAllNodes(hasText("Archiver la mission") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            archive.assertIsEnabled().performClick()
+            val statePath = "/api/installations/fixture/api/tasks/${proof.id}/state"
+            waitCall("POST", statePath)
+            val command =
+                wireJson.decodeFromString<build.cairn.contracts.MissionStateInput>(
+                    calls.last { it.second == statePath }.third
+                )
+            assertEquals(proof.id, command.taskId)
+            assertEquals(proof.revision, command.revision)
+            assertEquals(false, command.enabled)
+            assertEquals(true, command.archived)
+            waitText("Modifications enregistrées")
+            assertEquals("Archive refresh failed", null, vm.state.value.error)
+            assertTrue(vm.state.value.tasks.any { it.id == proof.id && it.archived && !it.enabled })
         }
-        archive.assertIsEnabled().performClick()
-        val statePath = "/api/installations/fixture/api/tasks/${proof.id}/state"
-        waitCall("POST", statePath)
-        val command =
-            wireJson.decodeFromString<build.cairn.contracts.MissionStateInput>(
-                calls.last { it.second == statePath }.third
-            )
-        assertEquals(proof.id, command.taskId)
-        assertEquals(proof.revision, command.revision)
-        assertEquals(false, command.enabled)
-        assertEquals(true, command.archived)
-        waitText("Modifications enregistrées")
-        assertEquals("Archive refresh failed", null, vm.state.value.error)
-        assertTrue(vm.state.value.tasks.any { it.id == proof.id && it.archived && !it.enabled })
-    }
 
     @Test
     fun `a blocked run says who it waits on and can be set aside from its outcome`() = journey {
