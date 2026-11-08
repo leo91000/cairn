@@ -11,8 +11,7 @@ export async function revokeMcpClient(page: Pick<Page, 'waitForRequest'>, clickR
   })
 
   // A delivered click does not await the view's asynchronous revocation.
-  await clickRevoke()
-  const request = await requested
+  const [request] = await Promise.all([requested, Promise.resolve().then(clickRevoke)])
   const response = await request.response()
   assert.ok(response, 'The clicked MCP revocation must receive a response')
   assert.equal(response.status(), 200, 'The clicked MCP revocation must succeed')

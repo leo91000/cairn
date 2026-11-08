@@ -1,4 +1,5 @@
 import type { Page, Request, Response } from '@playwright/test'
+import { execFileSync } from 'node:child_process'
 import { setImmediate } from 'node:timers/promises'
 import { expect, it, vi } from 'vitest'
 import { revokeMcpClient } from '../../tests/e2e/mcp-revocation'
@@ -49,4 +50,45 @@ it('does not probe revoked access while the clicked DELETE is still pending', as
     responseFinished.resolve(null)
     await checkRevokedAccess
   }
+})
+
+it.each(['click rejects', 'click throws', 'wait rejects'])('observes both operations when %s', (mode) => {
+  const helper = new URL('../../tests/e2e/mcp-revocation.ts', import.meta.url).href
+  const script = `
+import { setImmediate } from 'node:timers/promises';
+import { revokeMcpClient } from ${JSON.stringify(helper)};
+const mode = ${JSON.stringify(mode)};
+const requested = Promise.withResolvers();
+const clicked = Promise.withResolvers();
+const unhandled = [];
+process.on('unhandledRejection', error => unhandled.push(error.message));
+const click = () => {
+  if (mode === 'click throws') throw new Error('click failed');
+  if (mode === 'click rejects') return Promise.reject(new Error('click failed'));
+  return clicked.promise;
+};
+const outcome = revokeMcpClient({waitForRequest: () => requested.promise}, click, 'http://localhost:4396')
+  .then(() => 'unexpected success', error => error.message);
+if (mode === 'wait rejects') {
+  requested.reject(new Error('wait failed'));
+  await setImmediate();
+  clicked.resolve();
+} else {
+  await outcome;
+  requested.reject(new Error('wait failed after click'));
+}
+const result = await outcome;
+await setImmediate();
+await setImmediate();
+process.stdout.write(JSON.stringify({result, unhandled}));
+`
+  const output = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 10000,
+  })
+  expect(JSON.parse(output)).toEqual({
+    result: mode === 'wait rejects' ? 'wait failed' : 'click failed',
+    unhandled: [],
+  })
 })
