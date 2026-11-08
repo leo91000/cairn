@@ -177,6 +177,34 @@ def require_docker_host():
         raise PrerequisiteError('kernel')
 
 
+def open_docker_tool(url):
+    # Retry only public, idempotent acquisition failures, before any bytes are
+    # accepted. Attempts share the existing 60-second acquisition timeout;
+    # transfer, size, digest and extraction failures remain terminal.
+    deadline = time.monotonic() + 60
+    for attempt in range(3):
+        if attempt and STOP:
+            raise InterruptedError('Native Docker tool acquisition interrupted.')
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('Native Docker tool acquisition deadline exhausted.')
+        try:
+            response = urllib.request.urlopen(url, timeout=min(60, remaining))
+            if time.monotonic() >= deadline:
+                response.close()
+                raise TimeoutError('Native Docker tool acquisition deadline exhausted.')
+            return response
+        except urllib.error.HTTPError as error:
+            error.close()
+            backoff = 2 ** attempt
+            remaining = deadline - time.monotonic()
+            if error.code not in (502, 503, 504) or attempt == 2 or remaining <= backoff or STOP:
+                raise
+            # Fixed fields only: never emit response bodies or request details.
+            print(f'Native Docker tool acquisition retry: status={error.code} attempt={attempt + 1}', file=sys.stderr)
+            time.sleep(backoff)
+
+
 def prepare_docker_tools():
     # Bump this package generation when wrapper or generated metadata changes.
     target = INSTALL / 'docker-tools/v2'
@@ -196,7 +224,7 @@ def prepare_docker_tools():
         for url, digest, names in DOCKER_TOOLS:
             archive = stage / 'download'
             # These public downloads carry no enrollment/node credential.
-            with urllib.request.urlopen(url, timeout=60) as response, archive.open('wb') as output:
+            with open_docker_tool(url) as response, archive.open('wb') as output:
                 total = 0
                 while chunk := response.read(65536):
                     total += len(chunk)
