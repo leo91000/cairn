@@ -46,14 +46,17 @@ jobs:
         test "${{ inputs.backend-only }}" = 'false'
         test "${{ inputs.ci-diagnostic }}" = 'none'
         test "${{ inputs.browser-workers }}" = '2'
-        checked_head="$(git rev-parse HEAD)"
-        checked_tree="$(git rev-parse 'HEAD^{tree}')"
+        source_git() {
+          command git -c safe.directory="$GITHUB_WORKSPACE" "$@"
+        }
+        checked_head="$(source_git rev-parse HEAD)"
+        checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
         tracked_clean=true
         allowed_evidence='[]'
-        git diff --quiet
-        git diff --cached --quiet
+        source_git diff --quiet
+        source_git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
         printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/before.json"
         cat "$RUNNER_TEMP/browser-qualification-source/before.json"
@@ -71,14 +74,17 @@ jobs:
         test "${{ inputs.backend-only }}" = 'false'
         test "${{ inputs.ci-diagnostic }}" = 'none'
         test "${{ inputs.browser-workers }}" = '2'
-        checked_head="$(git rev-parse HEAD)"
-        checked_tree="$(git rev-parse 'HEAD^{tree}')"
+        source_git() {
+          command git -c safe.directory="$GITHUB_WORKSPACE" "$@"
+        }
+        checked_head="$(source_git rev-parse HEAD)"
+        checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
         tracked_clean=true
         allowed_evidence='[]'
-        git diff --quiet
-        git diff --cached --quiet
+        source_git diff --quiet
+        source_git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
         printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"after","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/after.json"
         cat "$RUNNER_TEMP/browser-qualification-source/after.json"
@@ -111,14 +117,17 @@ jobs:
         test "${{ inputs.backend-only }}" = 'false'
         test "${{ inputs.ci-diagnostic }}" = 'none'
         test "${{ inputs.browser-workers }}" = '2'
-        checked_head="$(git rev-parse HEAD)"
-        checked_tree="$(git rev-parse 'HEAD^{tree}')"
+        source_git() {
+          command git -c safe.directory="$GITHUB_WORKSPACE" "$@"
+        }
+        checked_head="$(source_git rev-parse HEAD)"
+        checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
         tracked_clean=true
         allowed_evidence='[]'
-        git diff --quiet
-        git diff --cached --quiet
+        source_git diff --quiet
+        source_git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
         printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/before.json"
         cat "$RUNNER_TEMP/browser-qualification-source/before.json"
@@ -177,14 +186,17 @@ jobs:
         test "${{ inputs.backend-only }}" = 'false'
         test "${{ inputs.ci-diagnostic }}" = 'none'
         test "${{ inputs.browser-workers }}" = '2'
-        checked_head="$(git rev-parse HEAD)"
-        checked_tree="$(git rev-parse 'HEAD^{tree}')"
+        source_git() {
+          command git -c safe.directory="$GITHUB_WORKSPACE" "$@"
+        }
+        checked_head="$(source_git rev-parse HEAD)"
+        checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
         tracked_clean=true
         allowed_evidence='[]'
-        git diff --quiet
-        git diff --cached --quiet
+        source_git diff --quiet
+        source_git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
         printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"after","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/after.json"
         cat "$RUNNER_TEMP/browser-qualification-source/after.json"
@@ -264,14 +276,17 @@ jobs:
         test "${{ inputs.backend-only }}" = 'false'
         test "${{ inputs.ci-diagnostic }}" = 'none'
         test "${{ inputs.browser-workers }}" = '2'
-        checked_head="$(git rev-parse HEAD)"
-        checked_tree="$(git rev-parse 'HEAD^{tree}')"
+        source_git() {
+          command git -c safe.directory="$GITHUB_WORKSPACE" "$@"
+        }
+        checked_head="$(source_git rev-parse HEAD)"
+        checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
         tracked_clean=true
         allowed_evidence='[]'
-        git diff --quiet
-        git diff --cached --quiet
+        source_git diff --quiet
+        source_git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
         printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/before.json"
         cat "$RUNNER_TEMP/browser-qualification-source/before.json"
@@ -331,8 +346,11 @@ jobs:
         test "${{ inputs.backend-only }}" = 'false'
         test "${{ inputs.ci-diagnostic }}" = 'none'
         test "${{ inputs.browser-workers }}" = '2'
-        checked_head="$(git rev-parse HEAD)"
-        checked_tree="$(git rev-parse 'HEAD^{tree}')"
+        source_git() {
+          command git -c safe.directory="$GITHUB_WORKSPACE" "$@"
+        }
+        checked_head="$(source_git rev-parse HEAD)"
+        checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
         tracked_clean=true
@@ -341,15 +359,15 @@ jobs:
           journeys-1|journeys-2|journeys-3|journeys-4)
             # The unchanged workspace journey regenerates these tracked evidence files.
             # Keep every source and staged byte protected; do not claim clean images.
-            git diff --cached --quiet
-            git diff --quiet -- . ':(exclude)docs/screenshots/overview-desktop.png' ':(exclude)docs/screenshots/overview-mobile.png'
+            source_git diff --cached --quiet
+            source_git diff --quiet -- . ':(exclude)docs/screenshots/overview-desktop.png' ':(exclude)docs/screenshots/overview-mobile.png'
             for evidence_path in docs/screenshots/overview-desktop.png docs/screenshots/overview-mobile.png; do
               test -f "$evidence_path"
               test ! -L "$evidence_path"
               test ! -x "$evidence_path"
             done
             allowed_evidence='["docs/screenshots/overview-desktop.png","docs/screenshots/overview-mobile.png"]'
-            if git diff --quiet; then
+            if source_git diff --quiet; then
               :
             else
               diff_status=$?
@@ -358,8 +376,8 @@ jobs:
             fi
             ;;
           *)
-            git diff --quiet
-            git diff --cached --quiet
+            source_git diff --quiet
+            source_git diff --cached --quiet
             ;;
         esac
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
@@ -423,14 +441,17 @@ jobs:
         test "${{ inputs.backend-only }}" = 'false'
         test "${{ inputs.ci-diagnostic }}" = 'none'
         test "${{ inputs.browser-workers }}" = '2'
-        checked_head="$(git rev-parse HEAD)"
-        checked_tree="$(git rev-parse 'HEAD^{tree}')"
+        source_git() {
+          command git -c safe.directory="$GITHUB_WORKSPACE" "$@"
+        }
+        checked_head="$(source_git rev-parse HEAD)"
+        checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
         tracked_clean=true
         allowed_evidence='[]'
-        git diff --quiet
-        git diff --cached --quiet
+        source_git diff --quiet
+        source_git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
         printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/before.json"
         cat "$RUNNER_TEMP/browser-qualification-source/before.json"
@@ -485,14 +506,17 @@ jobs:
         test "${{ inputs.backend-only }}" = 'false'
         test "${{ inputs.ci-diagnostic }}" = 'none'
         test "${{ inputs.browser-workers }}" = '2'
-        checked_head="$(git rev-parse HEAD)"
-        checked_tree="$(git rev-parse 'HEAD^{tree}')"
+        source_git() {
+          command git -c safe.directory="$GITHUB_WORKSPACE" "$@"
+        }
+        checked_head="$(source_git rev-parse HEAD)"
+        checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
         tracked_clean=true
         allowed_evidence='[]'
-        git diff --quiet
-        git diff --cached --quiet
+        source_git diff --quiet
+        source_git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
         printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"after","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/after.json"
         cat "$RUNNER_TEMP/browser-qualification-source/after.json"
@@ -522,14 +546,17 @@ jobs:
         test "${{ inputs.backend-only }}" = 'false'
         test "${{ inputs.ci-diagnostic }}" = 'none'
         test "${{ inputs.browser-workers }}" = '2'
-        checked_head="$(git rev-parse HEAD)"
-        checked_tree="$(git rev-parse 'HEAD^{tree}')"
+        source_git() {
+          command git -c safe.directory="$GITHUB_WORKSPACE" "$@"
+        }
+        checked_head="$(source_git rev-parse HEAD)"
+        checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
         tracked_clean=true
         allowed_evidence='[]'
-        git diff --quiet
-        git diff --cached --quiet
+        source_git diff --quiet
+        source_git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
         printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/before.json"
         cat "$RUNNER_TEMP/browser-qualification-source/before.json"
@@ -567,14 +594,17 @@ jobs:
         test "${{ inputs.backend-only }}" = 'false'
         test "${{ inputs.ci-diagnostic }}" = 'none'
         test "${{ inputs.browser-workers }}" = '2'
-        checked_head="$(git rev-parse HEAD)"
-        checked_tree="$(git rev-parse 'HEAD^{tree}')"
+        source_git() {
+          command git -c safe.directory="$GITHUB_WORKSPACE" "$@"
+        }
+        checked_head="$(source_git rev-parse HEAD)"
+        checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
         tracked_clean=true
         allowed_evidence='[]'
-        git diff --quiet
-        git diff --cached --quiet
+        source_git diff --quiet
+        source_git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
         printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"after","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/after.json"
         cat "$RUNNER_TEMP/browser-qualification-source/after.json"
@@ -630,14 +660,17 @@ jobs:
         test "${{ inputs.backend-only }}" = 'false'
         test "${{ inputs.ci-diagnostic }}" = 'none'
         test "${{ inputs.browser-workers }}" = '2'
-        checked_head="$(git rev-parse HEAD)"
-        checked_tree="$(git rev-parse 'HEAD^{tree}')"
+        source_git() {
+          command git -c safe.directory="$GITHUB_WORKSPACE" "$@"
+        }
+        checked_head="$(source_git rev-parse HEAD)"
+        checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
         tracked_clean=true
         allowed_evidence='[]'
-        git diff --quiet
-        git diff --cached --quiet
+        source_git diff --quiet
+        source_git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
         printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/before.json"
         cat "$RUNNER_TEMP/browser-qualification-source/before.json"
@@ -707,14 +740,17 @@ jobs:
         test "${{ inputs.backend-only }}" = 'false'
         test "${{ inputs.ci-diagnostic }}" = 'none'
         test "${{ inputs.browser-workers }}" = '2'
-        checked_head="$(git rev-parse HEAD)"
-        checked_tree="$(git rev-parse 'HEAD^{tree}')"
+        source_git() {
+          command git -c safe.directory="$GITHUB_WORKSPACE" "$@"
+        }
+        checked_head="$(source_git rev-parse HEAD)"
+        checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
         test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
         test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
         tracked_clean=true
         allowed_evidence='[]'
-        git diff --quiet
-        git diff --cached --quiet
+        source_git diff --quiet
+        source_git diff --cached --quiet
         mkdir -p "$RUNNER_TEMP/browser-qualification-source"
         printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"after","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/after.json"
         cat "$RUNNER_TEMP/browser-qualification-source/after.json"
