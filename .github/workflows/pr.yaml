@@ -45,6 +45,11 @@ jobs:
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt && rustup default 1.97.1
       - run: pnpm validate:pr quality
+      - name: Qualify dependency supervision through real sudo and root
+        timeout-minutes: 2
+        env:
+          CAIRN_TEST_REAL_SUDO: '1'
+        run: pnpm exec vitest run scripts/tests/native-ci-dependencies.test.mjs
   contracts:
     needs: scope
     if: needs.scope.outputs.contracts == 'true'
