@@ -935,7 +935,8 @@ private fun FilHeader(
     showOngoing: () -> Unit,
     readAll: () -> Unit,
 ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    // Keeps the row's height when its only action, read-all, comes and goes.
+    Row(Modifier.heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(
             "Fil",
             style = MaterialTheme.typography.titleLarge,

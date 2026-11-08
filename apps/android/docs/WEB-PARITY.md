@@ -4,12 +4,15 @@
 
 Android drops the Fil's own filter button (« Filtrer le fil ») and its field,
 which duplicated the installation header's search button right above it. That
-search finds conversations by title, agent or project and missions by name, tags
-or prompt; it opens a mission rather than one of its runs. Android therefore no
-longer narrows the selected Fil view, nor finds a mission run by its agent or
-status text. Platform difference: web keeps the Fil filter beside the title
-(`/`). Presentation only: no contract, MCP, `cairn_installation` or stored schema
-changes.
+search finds conversations by title, agent or project, and missions by name,
+tags or prompt; a mission result opens the Missions tab, not one of its runs.
+The filter matched each Fil row's title, status line, agent and project within
+the selected view, so Android no longer narrows a view, finds a row by its
+status line (a failure, a waiting question, a required account), finds a mission
+run by its agent, or finds a run whose mission is gone. The title row keeps its
+height when its read-all action comes and goes. Platform difference: web keeps
+the Fil filter beside the title (`/`). Presentation only: no contract, MCP,
+`cairn_installation` or stored schema changes.
 
 ## Explicit VM/native moves (2026-11-07)
 
@@ -40,7 +43,8 @@ Two or more missions in a row that finished as expected and were read fold into
 one row: two stacked avatars, “3 missions finished” / « 3 missions terminées »,
 their names and the latest time. Tapping it unfolds them on a thread line. A
 lone one, a mission with delegated work below it, unread or unfinished work stay
-rows, and filtering (web only since 2026-11-08) shows every match unfolded. Web also unfolds the fold that
+rows, and filtering (web only since 2026-11-08) shows every match
+unfolded. Web also unfolds the fold that
 holds the work open beside the Fil.
 
 Unread finished work with a result preview can be read without opening it. Web
