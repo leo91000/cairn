@@ -9,13 +9,26 @@ import process from 'node:process'
   test(`B534 native Agents navigation (${control})`, async ({ page, workspace }, testInfo) => {
     const journal: Array<{ kind: string, hostAt: number, browserAt?: number, document?: string, poll?: number }> = []
     const errors: string[] = []
+    let epoch = 0
+    const documentEpochs = new Map<string, number>()
+    const fetchCalls = new Map<string, { document: string, method: string, path: string, aborted: boolean }>()
     const fetchFailures: Array<{ kind: string, document?: string, poll?: number }> = []
     const nativeSourceErrors: Array<{ document?: string, source?: number }> = []
     const bodyFailures: Array<{ kind: string, document?: string, poll?: number }> = []
     const journalPath = testInfo.outputPath('b534-navigation.json')
     const saveJournal = () => saveB534Journal(journalPath, JSON.stringify({ control, journal, errors, bodyFailures, nativeSourceErrors, fetchFailures }))
-    const record = (kind: string, browserAt?: number, document?: string, poll?: number) => {
-      if (measuring && /-(?:rejected|threw)-signal-(?:active|aborted)$/.test(kind))
+    const record = (kind: string, browserAt?: number, document?: string, poll?: number, request?: { method: string, path: string }) => {
+      if (kind === 'document-start' && document)
+        documentEpochs.set(document, epoch)
+      const callKey = `${document}:${poll}`
+      if (document && request && kind.endsWith('-start'))
+        fetchCalls.set(callKey, { document, method: request.method, path: request.path, aborted: false })
+      if (kind.endsWith('-abort') || kind.endsWith('-signal-aborted')) {
+        const call = fetchCalls.get(callKey)
+        if (call)
+          call.aborted = true
+      }
+      if ( /-(?:rejected|threw)-signal-(?:active|aborted)$/.test(kind))
         fetchFailures.push({ kind, document, poll })
       if (kind === 'native-chat-source-error')
         nativeSourceErrors.push({ document, source: poll })
@@ -24,8 +37,6 @@ import process from 'node:process'
       journal.push({ kind, hostAt: Date.now(), browserAt, document, poll })
       saveJournal()
     }
-    let measuring = false
-    let epoch = 0
     let departingEpoch: number | undefined
     let departingDocument: string | undefined
     const epochs = new Map<import('@playwright/test').Request, number>()
@@ -50,7 +61,7 @@ import process from 'node:process'
         epochs.set(request, epoch)
         record('native-chat-source-request')
       }
-      if (measuring && finiteRequest(request)) {
+      if (finiteRequest(request)) {
         requests.set(request, 'pending')
         epochs.set(request, epoch)
       }
@@ -135,9 +146,16 @@ import process from 'node:process'
           throw new Error(`An observed finite HTTP response has unexpected status ${status ?? 'unknown'}`)
         if (terminal === 'failed')
           throw new Error('An observed finite HTTP request failed unexpectedly')
-        const departedRead = departingEpoch !== undefined && epochs.get(request) === departingEpoch
-          && ['GET', 'HEAD'].includes(request.method())
-        if (terminal === 'cancelled' && request !== targetPoll && !departedRead)
+        const requestEpoch = epochs.get(request)
+        const retired = requestEpoch !== undefined && requestEpoch < epoch
+        const read = ['GET', 'HEAD'].includes(request.method())
+        const path = new URL(request.url()).pathname
+        const directControl = request.method() === 'POST' && /^\/api\/installations\/[^/]+\/direct\/(?:authorize|[^/]+\/(?:signal|renew))$/.test(path)
+        const abortedControl = directControl && [...fetchCalls.values()].some(call => call.path === path && call.method === 'POST'
+          && call.aborted && documentEpochs.get(call.document) === requestEpoch
+          && journal.some(event => event.document === call.document && event.kind.startsWith('pagehide-')))
+        const withdrawn = retired && (read || abortedControl)
+        if (terminal === 'cancelled' && request !== targetPoll && !withdrawn)
           throw new Error('An HTTP cancellation lacks old-document read provenance')
       }
       for (const status of streamStatuses.values()) {
@@ -217,14 +235,15 @@ import process from 'node:process'
           const { kind, poll } = event.data as { kind: string, poll: number }
           if (kind.endsWith('-headers') && consuming.has(poll))
             return
-          await probe(kind, poll)
+          await probe(`${kind}-cycle-completed`, poll)
           if (kind.endsWith('-headers') && consuming.has(poll))
             return
           pending.delete(poll)
         }
-        const probe = (kind: string, poll?: number) => {
-          return (window as any).b534Record(kind, performance.now(), documentId, poll) as Promise<void>
+        const probe = (kind: string, poll?: number, request?: { method: string, path: string }) => {
+          return (window as any).b534Record(kind, performance.now(), documentId, poll, request) as Promise<void>
         }
+        void probe('document-start')
         for (const kind of ['beforeunload', 'pagehide', 'pageshow']) {
           window.addEventListener(kind, (event) => {
             const persisted = 'persisted' in event && event.persisted === true
@@ -278,11 +297,12 @@ import process from 'node:process'
             void probe(observation.targetController ? 'poll-controller-identified' : 'poll-controller-unknown', poll)
           }
           pending.add(poll)
-          probe(`${category}-start`, poll)
+          probe(`${category}-start`, poll, { method: (args[1]?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase(), path })
           args[1]?.signal?.addEventListener('abort', () => probe(`${category}-abort`, poll), { once: true })
           const settled = (kind: string) => {
             // A posted task follows the application's await/catch/finally microtasks.
             // Body consumers keep this cycle pending through their continuation.
+            void probe(`${category}-${kind}`, poll)
             completions.port2.postMessage({ kind: `${category}-${kind}`, poll })
           }
           try {
@@ -342,7 +362,6 @@ import process from 'node:process'
       await expect(page.locator('[data-transport-route]').first()).toHaveAttribute('data-transport-route', 'direct')
       await page.clock.pauseAt(new Date(Date.now() + 1000))
       await browserSettled()
-      measuring = true
       departingDocument = await page.evaluate(() => {
         const observation = (window as any).b534Observation
         observation.armed = true

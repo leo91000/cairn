@@ -50,3 +50,12 @@ The probe records fixed event labels for poll start/abort, beforeunload/pagehide
 Next heavy-slot need: one serial base/candidate diagnostic lot, with the same pinned browser container/fixture builds, using the prepared probes instead of rerunning the original suite for green. Expected job limit 25 minutes each, test step at most 5 minutes each. The parent has reclaimed the heavy slot for other owners. No dispatch is authorized until a new explicit cession, regardless of review result. Preserve any first probe failure and distinguish native page errors from harness failures. After a real red loop: diagnose, targeted product repair if confirmed, fresh independent full-diff SolHigh review rounds, exact affected qualification, ordinary guarded merge and verified post-merge CI. If #731-specific, send evidence to its sole writer instead of editing #731.
 
 Current main was refreshed and remains `7028fbfdd6d13e27b8f4e7db767899828d631b42`; #732 added an error filter and #727 added conversation renaming. These changes are preserved and excluded from the immutable historical diagnostic pair. Any later product repair must start from the then-current main, and current-main qualification must independently capture all native page errors before #732's filter.
+
+## Open archival limitations (not selected by B534)
+
+The preserved source is available unchanged at [bc1b48316f033460e5c5ab40e128583260f8c386](https://github.com/leo91000/cairn/blob/bc1b48316f033460e5c5ab40e128583260f8c386/.github/diagnostics/skill-availability-probe.ts). It is not part of the admitted B534 execution surface. A clean B534 review does not resolve or qualify this prototype.
+
+- **P2, open:** legacy probe lines220–224 release reload before proving old-document JavaScript/body closure; its later `browserSettled()` reads the replacement document. Missing old-body receipts could be incorrectly accepted if this prototype were executed.
+- **P2, open:** legacy probe lines238–253 validate HTTP before a later asynchronous drain. A late new-document HTTP503 admitted during that drain can escape the HTTP verdict if this prototype is executed.
+
+Keep these scenarios, source and severity in the archive. Reuse requires separate root admission, correction, fresh full review and actual qualification. Do not dispatch or deploy this legacy prototype as part of B534, and do not count it as passed or fixed.
