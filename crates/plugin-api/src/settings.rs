@@ -137,6 +137,17 @@ fn valid_risk(field: &Value, kind: &str) -> bool {
     }
 }
 
+/// A switch only the owner may turn on (`ownerOnly`): it starts off.
+fn valid_owner_only(field: &Value, kind: &str) -> bool {
+    match field.get("ownerOnly") {
+        None | Some(Value::Bool(false)) => true,
+        Some(Value::Bool(true)) => {
+            kind == "boolean" && field.get("default") != Some(&Value::Bool(true))
+        }
+        Some(_) => false,
+    }
+}
+
 /// Checks the manifest's `settings` list. Values are checked again on every save.
 pub fn validate_settings_schema(settings: &[Value]) -> Result<(), &'static str> {
     if settings.len() > 30 {
@@ -183,6 +194,7 @@ pub fn validate_settings_schema(settings: &[Value]) -> Result<(), &'static str> 
             || !optional_text(field, "placeholder", 100)
             || !optional_text(field, "section", 60)
             || !valid_risk(field, kind)
+            || !valid_owner_only(field, kind)
             || (kind == "secret" && field.get("default").is_some())
             || !valid_default(field, kind, choices.as_deref())
         {
@@ -199,6 +211,23 @@ mod tests {
 
     fn field(kind: &str) -> Value {
         json!({ "key": "value", "title": "Value", "type": kind })
+    }
+
+    #[test]
+    fn owner_only_qualifies_switches_that_start_off() {
+        let mut setting = field("boolean");
+        setting["ownerOnly"] = json!(true);
+        validate_settings_schema(std::slice::from_ref(&setting)).unwrap();
+        setting["default"] = json!(false);
+        validate_settings_schema(std::slice::from_ref(&setting)).unwrap();
+        setting["default"] = json!(true);
+        assert!(validate_settings_schema(std::slice::from_ref(&setting)).is_err());
+        let mut text = field("string");
+        text["ownerOnly"] = json!(true);
+        assert!(validate_settings_schema(&[text]).is_err());
+        let mut invalid = field("boolean");
+        invalid["ownerOnly"] = json!("yes");
+        assert!(validate_settings_schema(&[invalid]).is_err());
     }
 
     #[test]

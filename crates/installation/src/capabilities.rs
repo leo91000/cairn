@@ -645,7 +645,7 @@ impl ManagePlugin {
     pub(crate) fn descriptor(&self) -> Value {
         serde_json::json!({
             "name": "manage_plugin",
-            "description": "Configure a plugin instance with a typed command. Setup and sign-in keep credentials on the host. Agents cannot grant plugin access or approve native delegations; the owner does so in the apps.",
+            "description": "Configure a plugin instance with a typed command. Setup and sign-in keep credentials on the host. Agents cannot grant plugin access, turn on owner-only switches or approve native delegations; the owner does so in the apps.",
             "inputSchema": cairn_contracts::schema_for::<cairn_contracts::ManagePluginInput>(cairn_contracts::Contract::Deserialize),
             "outputSchema": cairn_contracts::schema_for::<cairn_contracts::ManagePluginOutput>(cairn_contracts::Contract::Serialize),
             "_meta": { "securitySchemes": [{ "type": "oauth2", "scopes": ["manage"] }] },
