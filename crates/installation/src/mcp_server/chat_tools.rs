@@ -611,7 +611,10 @@ pub(crate) async fn invoke(
                     if chat.last_activity_at.is_none() { chat.last_activity_at = Some(chat.updated_at); }
                     chat.title = title.to_owned();
                     chat.updated_at = now();
-                    Ok(serde_json::to_value(db.save_conversation(&chat)?)?)
+                    let saved = db.save_conversation(&chat)?;
+                    // The title is the person's from now on: automatic titles stop for good.
+                    crate::chat_titles::set_manual(db, id)?;
+                    Ok(serde_json::to_value(saved)?)
                 }
                 _ => Err(Error::not_found("Unknown tool")),
             }

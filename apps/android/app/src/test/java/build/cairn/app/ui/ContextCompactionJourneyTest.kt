@@ -58,10 +58,12 @@ class ContextCompactionJourneyTest {
         MockWebServer().use { server ->
             val chatId = "00000000-0000-4000-8000-000000000099"
             val calls = CopyOnWriteArrayList<Pair<String, String>>()
+            val renames = CopyOnWriteArrayList<String>()
             val chat =
                 Chat(
                     id = chatId,
                     title = "Refonte du module",
+                    revision = "r7",
                     agentName = "Cairn",
                     status = "succeeded",
                     provider = "claude",
@@ -168,6 +170,22 @@ class ContextCompactionJourneyTest {
                         val path = request.path.orEmpty().substringBefore('?')
                         val method = request.method.orEmpty()
                         if (method in listOf("POST", "PUT", "DELETE")) calls += method to path
+                        if (
+                            method == "PUT" &&
+                                path == "/api/installations/fixture/api/chats/$chatId"
+                        ) {
+                            val body = request.body.readUtf8()
+                            renames += body
+                            val title =
+                                wireJson
+                                    .parseToJsonElement(body)
+                                    .jsonObject["title"]!!
+                                    .jsonPrimitive
+                                    .content
+                            return MockResponse()
+                                .setHeader("Content-Type", "application/json")
+                                .setBody(wireJson.encodeToString(chat.copy(title = title)))
+                        }
                         val value =
                             when (path) {
                                 "/api/installations" -> beaconInstallationsFixture()
@@ -312,6 +330,28 @@ class ContextCompactionJourneyTest {
                 )
                 // Compaction is never sent as a chat message.
                 assertTrue(calls.none { it.second.endsWith("/messages") })
+
+                // Renaming sends the trimmed title with the revision it was read at.
+                compose.onNodeWithContentDescription("Options de la conversation").performClick()
+                compose.onNodeWithText("Renommer").performClick()
+                waitText("Renommer la conversation")
+                compose
+                    .onNodeWithText("Cairn ne renommera plus cette conversation automatiquement.")
+                    .assertExists()
+                compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                compose.onNodeWithTag("rename-title").performTextReplacement("  Notes de version  ")
+                compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
+                compose.waitUntil(10000) { renames.isNotEmpty() }
+                val rename = wireJson.parseToJsonElement(renames.single()).jsonObject
+                assertEquals("Notes de version", rename["title"]!!.jsonPrimitive.content)
+                assertEquals(chat.revision, rename["revision"]!!.jsonPrimitive.content)
+                assertEquals(chatId, rename["chatId"]!!.jsonPrimitive.content)
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Renommer la conversation")
+                        .fetchSemanticsNodes()
+                        .isEmpty()
+                }
             } finally {
                 vm.api.closeStreams()
             }

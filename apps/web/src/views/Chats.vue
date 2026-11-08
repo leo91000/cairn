@@ -69,6 +69,7 @@ import ChatSwitcher from '../components/ChatSwitcher.vue'
 import ComposerAttachments from '../components/ComposerAttachments.vue'
 import ConnectionSheet from '../components/ConnectionSheet.vue'
 import ConversationDeletion from '../components/ConversationDeletion.vue'
+import ConversationRename from '../components/ConversationRename.vue'
 import ConversationSummary from '../components/ConversationSummary.vue'
 import Icon from '../components/Icon.vue'
 import MenuButton from '../components/MenuButton.vue'
@@ -104,6 +105,7 @@ import {
   MoreHorizontal,
   NotebookPen,
   Paperclip,
+  Pencil,
   Plug,
   Plus,
   Server,
@@ -294,6 +296,8 @@ const planning = ref(false)
 const history = ref(false)
 const deletingConversation = ref<ChatDetail>()
 const deletionOpener = ref<HTMLElement>()
+const renamingConversation = ref<ChatDetail>()
+const renameOpener = ref<HTMLElement>()
 const detailsOpen = ref(false)
 const detailsButton = ref<HTMLButtonElement>()
 const activity = ref<InstanceType<typeof ActivityFeed>>()
@@ -971,6 +975,18 @@ function closeDeletion() {
   void refocus(deletionOpener.value)
 }
 
+function closeRename() {
+  renamingConversation.value = undefined
+  void refocus(renameOpener.value)
+}
+
+// The title shows at once; the live stream confirms it moments later.
+function renamed(chat: ChatDetail) {
+  if (detail.value?.id === chat.id)
+    detail.value = { ...detail.value, title: chat.title, revision: chat.revision }
+  closeRename()
+}
+
 // The pill leaves once compaction frees the window: focus on it moves to the ⋯ menu.
 watch(contextAlert, async (alert) => {
   if (alert || !contextPill.value || document.activeElement !== contextPill.value)
@@ -997,6 +1013,19 @@ interface ConversationAction {
 const conversationActions = computed(() => {
   const chat = detail.value
   const actions: ConversationAction[] = []
+  if (chat && !inactive.value) {
+    actions.push({
+      id: 'rename',
+      label: 'Rename conversation',
+      icon: Pencil,
+      dialog: true,
+      run: (anchor) => {
+        renameOpener.value = anchor
+        renamingConversation.value = chat
+      },
+    })
+  }
+
   if (chat?.compaction?.supported && !inactive.value) {
     actions.push({
       id: 'compact',
@@ -1317,10 +1346,8 @@ function key(event: KeyboardEvent) {
     @close="closeDetails"
   >
     <div class="px-3 pb-4">
-      <p class="m-0! px-2.5 pb-1 text-sm font-semibold leading-snug wrap-anywhere">
-        {{ heading?.title || 'New conversation' }}
-      </p>
       <ConversationSummary
+        :title="heading?.title || 'New conversation'"
         :agent-name="heading?.agentName || selectedAgent?.name || 'Main agent'"
         :agent-id="heading?.agentId || selectedAgent?.id"
         :provider="heading?.provider"
@@ -1346,7 +1373,7 @@ function key(event: KeyboardEvent) {
         :aria-label="group.label || undefined"
       >
         <div v-if="group.id === 'danger'" class="my-1 border-t border-line" />
-        <p v-if="group.label" aria-hidden="true" class="m-0! px-3 pt-3 pb-1 text-[10.5px] font-semibold uppercase tracking-wider text-muted">
+        <p v-if="group.label" aria-hidden="true" class="m-0! px-2.5 pt-3 pb-1 text-[10.5px] font-semibold uppercase tracking-wider text-muted">
           {{ group.label }}
         </p>
         <button
@@ -1372,6 +1399,12 @@ function key(event: KeyboardEvent) {
     :chat="deletingConversation"
     @close="closeDeletion"
     @deleted="() => { deletingConversation = undefined; newConversation() }"
+  />
+  <ConversationRename
+    v-if="renamingConversation"
+    :chat="renamingConversation"
+    @close="closeRename"
+    @renamed="renamed"
   />
   <ConnectionSheet
     v-if="connectionOpen"
@@ -1490,7 +1523,7 @@ function key(event: KeyboardEvent) {
               data-testid="context-indicator"
               @click="canCompact && openCompactionFromHeader()"
             >
-              <span class="truncate">Context {{ context.percent }}%</span>
+              <span class="truncate">Context {{ detail?.contextUsage?.estimated ? '≈ ' : '' }}{{ context.percent }}%</span>
             </component>
             <NodeExecution
               v-if="detail?.run && state.installationRole === 'owner'"
@@ -1537,6 +1570,7 @@ function key(event: KeyboardEvent) {
             <template #header>
               <ConversationSummary
                 id="conversation-summary"
+                :title="heading?.title || 'New conversation'"
                 :agent-name="heading?.agentName || selectedAgent?.name || 'Main agent'"
                 :agent-id="heading?.agentId || selectedAgent?.id"
                 :provider="heading?.provider"
@@ -2046,7 +2080,7 @@ function key(event: KeyboardEvent) {
   gap: 12px;
   min-height: 48px;
   width: 100%;
-  padding: 8px 0;
+  padding: 8px 10px;
   text-align: left;
   font-size: 12px;
 }

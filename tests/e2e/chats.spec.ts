@@ -2165,6 +2165,64 @@ test('long words and URLs wrap inside messages without widening the conversation
   await workspace.restart()
 })
 
+test('a renamed conversation keeps its title and Cairn stops naming it', async ({ page, workspace }) => {
+  test.setTimeout(60000)
+  const chat = await workspace.api('/api/chats', 'POST', {})
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Draft the release notes for the next version' })
+  await expect.poll(() => workspace.service.chats.detail(chat.id).run?.status).toBe('succeeded')
+  await page.goto(workspacePath(`/chats/${chat.id}`))
+  await authenticateWorkspace(page)
+  const details = page.getByRole('button', { name: 'Chat details', exact: true })
+  const dialog = page.getByRole('dialog', { name: 'Rename conversation', exact: true })
+  const title = dialog.getByRole('textbox', { name: 'Title', exact: true })
+
+  // The dropdown offers renaming first and says what it changes.
+  let { action } = await openChatDetails(page)
+  await expect(page.getByRole('menu', { name: 'Chat details', exact: true }).getByRole('menuitem').first()).toHaveAccessibleName('Rename conversation')
+  await action('Rename conversation').click()
+  await expect(dialog).toContainText('Cairn stops naming this conversation automatically')
+  await expect(title).toHaveValue('Draft the release notes for the next version')
+  await expect(title).toBeFocused()
+  await title.fill('   ')
+  await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeDisabled()
+  await title.fill('  Release notes  ')
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(details).toBeFocused()
+  await expect(page.locator('.chat-header').getByRole('heading', { name: 'Release notes', exact: true })).toBeVisible()
+  const fil = page.getByRole('complementary', { name: 'Fil' })
+  await fil.getByRole('tab', { name: /^Tout/ }).click()
+  await expect(fil.locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('Release notes')
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).title).toBe('Release notes')
+
+  // Another client renamed it meanwhile: the stale revision is refused and nothing is overwritten.
+  ;({ action } = await openChatDetails(page))
+  await action('Rename conversation').click()
+  const current = await workspace.api(`/api/chats/${chat.id}`)
+  await workspace.api(`/api/chats/${chat.id}`, 'PUT', { revision: current.revision, title: 'Renamed elsewhere' })
+  await title.fill('Too late')
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog.getByRole('alert')).toContainText('This conversation changed. Reload before renaming.')
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(page.locator('.chat-header').getByRole('heading', { name: 'Renamed elsewhere', exact: true })).toBeVisible()
+
+  // A later reply leaves the person's title alone.
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Add the migration notes too' })
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  expect((await workspace.api(`/api/chats/${chat.id}`)).title).toBe('Renamed elsewhere')
+
+  // Phones rename from the sheet, which shows the full title, and focus returns to its ⋯ button.
+  await page.setViewportSize({ width: 390, height: 844 })
+  ;({ action } = await openChatDetails(page))
+  await expect(page.getByRole('dialog', { name: 'Chat details', exact: true })).toContainText('Renamed elsewhere')
+  await action('Rename conversation').click()
+  await title.fill('Release notes 0.53')
+  await title.press('Enter')
+  await expect(dialog).toHaveCount(0)
+  await expect(details).toBeFocused()
+  await expect(page.getByRole('button', { name: 'Conversations', exact: true })).toContainText('Release notes 0.53')
+})
+
 test('conversation deletion is visible, confirmed and permanent on desktop and mobile', async ({ page, workspace }, testInfo) => {
   test.setTimeout(60000)
   const chat = await workspace.api('/api/chats', 'POST', {})
@@ -2461,6 +2519,8 @@ test('context usage shows the latest request and an explicit compaction keeps th
   // A focused action that becomes unavailable while the menu is open hands focus to the next one.
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).compaction?.available, { timeout: 15000 }).toBe(true)
   ;({ action } = await openChatDetails(page))
+  await expect(action('Rename conversation')).toBeFocused()
+  await page.keyboard.press('ArrowDown')
   await expect(action('Compact context')).toBeFocused()
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'fixture:chat-hang' })
   await expect(action('Compact context')).toBeDisabled({ timeout: 15000 })

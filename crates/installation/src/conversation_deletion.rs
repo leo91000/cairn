@@ -273,12 +273,10 @@ fn forget(db: &Db<'_>, cid: &str, run: &str) -> Result<()> {
         ],
     )?;
     db.delete_checkpoint(run)?;
-    for key in [
-        format!("turn-speed:{run}"),
-        format!("chat-error:{cid}"),
-        format!("chat-title-pending:{cid}"),
-        format!("chat-title-checked:{cid}"),
-    ] {
+    for key in [format!("turn-speed:{run}"), format!("chat-error:{cid}")]
+        .into_iter()
+        .chain(crate::chat_titles::keys(cid))
+    {
         db.delete(&key)?;
     }
     for prefix in ["push-outbox:"] {

@@ -218,8 +218,9 @@ history and files but start a fresh native session. Chat summaries report
 unknown) and `compaction` (`supported`, `running`, `available`, `reason`).
 `compact_chat` compacts the Codex or Claude Code context of an idle conversation as
 its own execution, without a user message or rewritten history; see
-[context compaction](CONTEXT-COMPACTION.md). `rename_chat` sets a title;
-the first message or later automatic title evaluation can update it.
+[context compaction](CONTEXT-COMPACTION.md). `rename_chat` sets a title,
+which is then the person's: neither the first message nor automatic title evaluation
+replaces it again.
 `list_chat_questions` exposes fields and status; `answer_chat_question` accepts
 an idempotent UUID in `answer.id` and one answer per field in `answer.answers`.
 Each field answer is `{ "selected": ["option-id"], "comment": "Optional precision" }`;

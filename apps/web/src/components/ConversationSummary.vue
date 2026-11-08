@@ -7,6 +7,8 @@ import AgentAvatar from './AgentAvatar.vue'
 // The top of the conversation menu: who works here and how full its context is, which the
 // header leaves out until something needs a look.
 defineProps<{
+  /** The full title, which the header may truncate. */
+  title?: string
   agentName: string
   agentId?: string
   provider?: Provider | null
@@ -23,6 +25,9 @@ defineProps<{
 
 <template>
   <div>
+    <p v-if="title" class="m-0! px-2.5 pt-1 pb-1 text-sm font-semibold leading-snug wrap-anywhere">
+      {{ title }}
+    </p>
     <div v-if="!loading" class="flex items-center gap-2.5 px-2.5 pt-2 pb-3">
       <AgentAvatar
         :name="agentName"

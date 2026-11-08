@@ -401,6 +401,13 @@ fn main() {
                 "path": "/chats/{chatId}/messages/{messageId}"
             },
             {
+                "name": "renameChat",
+                "input": "RenameChatInput",
+                "output": "Chat",
+                "method": "PUT",
+                "path": "/chats/{chatId}"
+            },
+            {
                 "name": "setChatPaused",
                 "input": "SetChatPausedInput",
                 "output": "Chat",
