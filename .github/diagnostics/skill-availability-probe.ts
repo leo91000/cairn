@@ -115,6 +115,8 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
         targetPoll = route.request()
         try {
           const response = await route.fetch({ timeout: 7000 })
+          record(`poll-response-status-${response.status()}`)
+          expect(response.status()).toBe(200)
           pollHeld = true
           record('poll-response-held')
           await releasePoll.promise
@@ -183,6 +185,16 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
         await expect.poll(() => [...requests.values()].every(state => state !== 'pending'), {
           message: 'Every observed availability network request has terminated',
         }).toBe(true)
+        for (const [request, terminal] of requests) {
+          if (request === targetPoll)
+            record(`target-network-${terminal}`)
+          if (terminal === 'failed')
+            throw new Error('An observed availability request failed unexpectedly')
+          if (terminal === 'cancelled' && request !== targetPoll)
+            throw new Error('An availability request outside the old-document target was cancelled')
+        }
+        if (deliveryFailure && (!targetPoll || requests.get(targetPoll) !== 'cancelled'))
+          throw deliveryFailure
         await browserSettled()
         cleanupCompleted = true
       }
@@ -191,9 +203,6 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
         await testInfo.attach('availability-boundaries', { path: journalPath, contentType: 'application/json' })
       }
     }
-    // Accept delivery cancellation only for this positively observed old-document request.
-    if (deliveryFailure && (!targetPoll || requests.get(targetPoll) !== 'cancelled'))
-      throw deliveryFailure
     if (routeFailure)
       throw routeFailure
     expect(errors).toEqual([])
