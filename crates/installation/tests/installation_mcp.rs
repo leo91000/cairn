@@ -3036,7 +3036,13 @@ async fn a_renamed_conversation_keeps_its_title_through_its_first_message() {
         assert_eq!(result(&renamed)["title"], "Release notes");
         let sent = invoke(
             "send_chat_message",
-            json!({ "chatId": chat_id, "message": { "id": uuid::Uuid::new_v4(), "text": "Draft the notes for 0.53" } }),
+            json!({
+                "chatId": chat_id,
+                "message": {
+                    "id": uuid::Uuid::new_v4(),
+                    "text": "Draft the notes for 0.53",
+                },
+            }),
         )
         .await;
         assert_eq!(result(&sent)["status"], "queued", "{sent}");

@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import type { ChatView } from '../../../../packages/contracts/chats'
-import { computed, nextTick, ref } from 'vue'
+import {
+  computed,
+  nextTick,
+  ref,
+  watch,
+} from 'vue'
 import { getChat } from '../../../../packages/contracts/generated/getChat'
 import { renameChat } from '../../../../packages/contracts/generated/renameChat'
 import { api } from '../api'
@@ -11,12 +16,14 @@ const props = defineProps<{ chat: ChatView }>()
 
 const emit = defineEmits<{ close: [], renamed: [chat: ChatView] }>()
 
-// The title the dialog opened on. A message or a turn meanwhile leaves the conversation renamable;
-// a title changed elsewhere is never overwritten from this dialog.
+// The title the dialog opened on. Nothing that happens meanwhile blocks the rename, but a title
+// that changed (automatically or elsewhere) is never replaced unseen: the dialog names it first.
 const shown = props.chat.title
-// Found when saving, before the live conversation shows it.
+// A newer title found when saving, until the live conversation brings its own.
 const found = ref<string>()
-const renamedElsewhere = computed(() => props.chat.title !== shown ? props.chat.title : found.value)
+watch(() => props.chat.title, () => found.value = undefined)
+const current = computed(() => found.value ?? props.chat.title)
+const meanwhile = computed(() => current.value !== shown ? current.value : undefined)
 
 // The installation trims the title and keeps it within 90 characters without control characters.
 const MAX_TITLE = 90
@@ -32,20 +39,20 @@ const tooLong = computed(() => length.value > MAX_TITLE)
 const changed = computed(() => !!trimmed.value && !tooLong.value && trimmed.value !== shown)
 
 async function save() {
-  if (saving.value || renamedElsewhere.value !== undefined || !changed.value)
+  if (saving.value || !changed.value)
     return
   const chatId = props.chat.id
   saving.value = true
   error.value = ''
   try {
     // Messages and turns change the revision too, and the live conversation can trail it.
-    const current = await getChat(api, { chatId })
-    if (current.title !== shown) {
-      found.value = current.title
+    const latest = await getChat(api, { chatId })
+    if (latest.title !== current.value) {
+      found.value = latest.title
       return
     }
 
-    emit('renamed', await renameChat(api, { chatId, revision: current.revision, title: trimmed.value }))
+    emit('renamed', await renameChat(api, { chatId, revision: latest.revision, title: trimmed.value }))
     return
   }
   catch (e) {
@@ -79,17 +86,17 @@ async function save() {
       <p id="rename-hint" class="m-0! text-sm text-muted">
         Cairn stops naming this conversation automatically once you rename it.
       </p>
-      <p v-if="renamedElsewhere !== undefined" role="alert" class="m-0! text-sm text-danger">
-        Renamed “{{ renamedElsewhere }}” elsewhere meanwhile. Reopen this dialog to rename it again.
+      <p v-if="meanwhile !== undefined" role="alert" class="m-0! text-sm text-danger">
+        The title changed to “{{ meanwhile }}” meanwhile; saving replaces it.
       </p>
-      <p v-else-if="error" role="alert" class="m-0! text-sm text-danger">
+      <p v-if="error" role="alert" class="m-0! text-sm text-danger">
         {{ error }}
       </p>
       <div class="flex justify-end gap-3">
         <UiButton :disabled="saving" @click="emit('close')">
           Cancel
         </UiButton>
-        <UiButton type="submit" variant="primary" :disabled="saving || renamedElsewhere !== undefined || !changed">
+        <UiButton type="submit" variant="primary" :disabled="saving || !changed">
           {{ saving ? 'Saving…' : 'Save' }}
         </UiButton>
       </div>

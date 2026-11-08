@@ -2220,7 +2220,7 @@ test('a renamed conversation keeps its title and Cairn stops naming it', async (
   await expect(page.locator('.chat-header').getByRole('heading', { name: 'Release notes 0.52', exact: true })).toBeVisible()
 
   // Another client renames it while the dialog is open: the live title shows, the field keeps what
-  // the person typed, and the dialog no longer saves over the other title.
+  // the person typed, and the dialog names the new title before saving replaces it.
   ;({ action } = await openChatDetails(page))
   await action('Rename conversation').click()
   await title.fill('Racing title')
@@ -2230,39 +2230,39 @@ test('a renamed conversation keeps its title and Cairn stops naming it', async (
     await workspace.api(`/api/chats/${chat.id}`, 'PUT', { revision: current.revision, title: 'Renamed elsewhere' })
   }).toPass()
   await expect(page.locator('.chat-header').getByRole('heading', { name: 'Renamed elsewhere', exact: true })).toBeVisible()
-  await expect(dialog.getByRole('alert')).toHaveText('Renamed “Renamed elsewhere” elsewhere meanwhile. Reopen this dialog to rename it again.')
+  await expect(dialog.getByRole('alert')).toHaveText('The title changed to “Renamed elsewhere” meanwhile; saving replaces it.')
   await expect(title).toHaveValue('Racing title')
-  await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeDisabled()
-  await title.press('Enter')
-  await expect(dialog).toBeVisible()
   expect((await workspace.api(`/api/chats/${chat.id}`)).title).toBe('Renamed elsewhere')
-  // Reopened, the dialog starts from the current title.
-  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(page.locator('.chat-header').getByRole('heading', { name: 'Racing title', exact: true })).toBeVisible()
+  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).title).toBe('Racing title')
+
+  // A refused save is reported and the field takes focus back, keeping what the person typed.
   ;({ action } = await openChatDetails(page))
   await action('Rename conversation').click()
-  await expect(title).toHaveValue('Renamed elsewhere')
+  await expect(title).toHaveValue('Racing title')
   await expect(dialog.getByRole('alert')).toHaveCount(0)
-  // A refused save is reported and the field takes focus back, keeping what the person typed.
   const renamePath = `**/chats/${chat.id}`
   await page.route(renamePath, route => route.request().method() === 'PUT'
     ? route.fulfill({ status: 409, json: { error: 'This conversation changed. Reload before renaming.' } })
     : route.continue())
-  await title.fill('Racing title')
+  await title.fill('Final title')
   await dialog.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(dialog.getByRole('alert')).toContainText('This conversation changed. Reload before renaming.')
   await expect(title).toBeFocused()
   await page.keyboard.press('End')
   await page.keyboard.type('!')
-  await expect(title).toHaveValue('Racing title!')
+  await expect(title).toHaveValue('Final title!')
   await page.unroute(renamePath)
   await dialog.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(dialog).toHaveCount(0)
-  await expect(page.locator('.chat-header').getByRole('heading', { name: 'Racing title!', exact: true })).toBeVisible()
+  await expect(page.locator('.chat-header').getByRole('heading', { name: 'Final title!', exact: true })).toBeVisible()
 
   // Phones rename from the sheet, which shows the full title, and focus returns to its ⋯ button.
   await page.setViewportSize({ width: 390, height: 844 })
   ;({ action } = await openChatDetails(page))
-  await expect(page.getByRole('dialog', { name: 'Chat details', exact: true })).toContainText('Racing title!')
+  await expect(page.getByRole('dialog', { name: 'Chat details', exact: true })).toContainText('Final title!')
   await action('Rename conversation').click()
   await title.fill('Release notes 0.53')
   await title.press('Enter')

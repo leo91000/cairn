@@ -40,8 +40,8 @@ internal const val MAX_CONVERSATION_TITLE = 90
 /**
  * Renames a conversation whose current title is [title], in a sheet like the web's phone layout.
  * Once renamed, Cairn no longer names it automatically, so the sheet says so. [save] receives the
- * trimmed title only when it changed, the title the sheet opened on, and where to report a
- * different title found when saving.
+ * trimmed title only when it changed, the conversation's title as the sheet last showed it, and
+ * where to report a different title found when saving.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -50,14 +50,15 @@ internal fun ConversationRename(
     busy: Boolean,
     error: String?,
     dismiss: () -> Unit,
-    save: (title: String, shown: String, elsewhere: (String) -> Unit) -> Unit,
+    save: (title: String, current: String, found: (String) -> Unit) -> Unit,
 ) {
-    // The title the sheet opened on. A message or a turn meanwhile leaves the conversation
-    // renamable; a title changed elsewhere is never overwritten from this sheet.
+    // The title the sheet opened on. Nothing that happens meanwhile blocks the rename, but a title
+    // that changed (automatically or elsewhere) is never replaced unseen: the sheet names it first.
     val shown = remember { title }
-    // Found when saving, before the live conversation shows it.
-    var found by remember { mutableStateOf<String?>(null) }
-    val renamedElsewhere = if (title != shown) title else found
+    // A newer title found when saving, until the live conversation brings its own.
+    var found by remember(title) { mutableStateOf<String?>(null) }
+    val current = found ?: title
+    val meanwhile = current.takeIf { it != shown }
     var value by remember { mutableStateOf(TextFieldValue(shown, TextRange(0, shown.length))) }
     val trimmed = value.text.trim()
     // Counted in characters like the installation, so emoji and longer titles stay editable.
@@ -66,10 +67,10 @@ internal fun ConversationRename(
     val changed = trimmed.isNotEmpty() && !tooLong && trimmed != shown
     // The shared error belongs to this sheet only once it has tried to save.
     var tried by remember { mutableStateOf(false) }
-    val savable = changed && renamedElsewhere == null && !busy
+    val savable = changed && !busy
     val submit = {
         tried = true
-        save(trimmed, shown) { found = it }
+        save(trimmed, current) { found = it }
     }
     val focus = remember { FocusRequester() }
     // A sheet hides before it reports its dismissal, so it stays up while a save is in flight.
@@ -121,12 +122,12 @@ internal fun ConversationRename(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             ConnectionFeedbackNotice()
-            if (renamedElsewhere != null)
+            if (meanwhile != null)
                 Text(
-                    "Renommée « $renamedElsewhere » ailleurs entre-temps. Fermez puis rouvrez pour la renommer à nouveau.",
+                    "Le titre est devenu « $meanwhile » entre-temps ; enregistrer le remplace.",
                     color = MaterialTheme.colorScheme.error,
                 )
-            else if (tried && error != null) Text(error, color = MaterialTheme.colorScheme.error)
+            if (tried && error != null) Text(error, color = MaterialTheme.colorScheme.error)
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),

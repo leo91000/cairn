@@ -363,23 +363,34 @@ class ContextCompactionJourneyTest {
                 compose.onNodeWithTag("rename-title").performTextReplacement("é".repeat(91))
                 waitText("90 caractères au plus (91 actuellement).")
                 compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
-                // A title changed elsewhere, found when saving, is never overwritten.
-                serverTitle.set("Renommée ailleurs")
+                // A title that changed meanwhile, found when saving, is named before saving
+                // replaces it.
+                serverTitle.set("Titre automatique")
                 compose.onNodeWithTag("rename-title").performTextReplacement("Notes 0.53")
                 compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
                 waitText(
-                    "Renommée « Renommée ailleurs » ailleurs entre-temps. Fermez puis rouvrez pour la renommer à nouveau."
+                    "Le titre est devenu « Titre automatique » entre-temps ; enregistrer le remplace."
                 )
-                compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
                 assertTrue(renames.isEmpty())
+                compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Renommer la conversation")
+                        .fetchSemanticsNodes()
+                        .isEmpty()
+                }
+                assertEquals(
+                    "Notes 0.53",
+                    wireJson
+                        .parseToJsonElement(renames.single())
+                        .jsonObject["title"]!!
+                        .jsonPrimitive
+                        .content,
+                )
                 serverTitle.set(null)
-                compose.onNodeWithText("Annuler").performClick()
                 compose.onNodeWithContentDescription("Options de la conversation").performClick()
                 compose.onNodeWithText("Renommer").performClick()
                 waitText("Renommer la conversation")
-                compose
-                    .onAllNodesWithText("Renommée ailleurs", substring = true)
-                    .assertCountEquals(0)
                 // A refused save is reported, and its error does not follow the dialog once closed.
                 compose.onNodeWithTag("rename-title").performTextReplacement("Titre concurrent")
                 compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
@@ -400,7 +411,7 @@ class ContextCompactionJourneyTest {
                         .fetchSemanticsNodes()
                         .isEmpty()
                 }
-                assertEquals(2, renames.size)
+                assertEquals(3, renames.size)
                 val rename = wireJson.parseToJsonElement(renames.last()).jsonObject
                 assertEquals("Notes de version", rename["title"]!!.jsonPrimitive.content)
                 assertEquals(chat.revision, rename["revision"]!!.jsonPrimitive.content)

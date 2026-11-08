@@ -2219,18 +2219,18 @@ internal fun ChatPage(
             if (renaming && chat != null)
                 ConversationRename(chat.title, state.busy, state.error, { renaming = false }) {
                     title,
-                    shown,
-                    elsewhere ->
+                    current,
+                    found ->
                     vm.perform {
                         // Messages and turns change the revision too, and the live conversation
                         // can trail it.
-                        val current = api.getChat(ChatInput(chatId = chat.id))
-                        if (current.title != shown) elsewhere(current.title)
+                        val latest = api.getChat(ChatInput(chatId = chat.id))
+                        if (latest.title != current) found(latest.title)
                         else {
                             api.renameChat(
                                 RenameChatInput(
                                     chatId = chat.id,
-                                    revision = current.revision,
+                                    revision = latest.revision,
                                     title = title,
                                 )
                             )
