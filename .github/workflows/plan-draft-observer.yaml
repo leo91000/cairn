@@ -61,10 +61,11 @@ jobs:
             python3 /root/observe-plan.py
             git diff -- tests/e2e/claude.spec.ts > "evidence/$source.patch"
             set +e
-            pnpm test:e2e --project=layout-webkit-claude --grep '^plan drafts keep their mode' --repeat-each=20 --workers=1 --retries=0 --trace=on --output="evidence/$source-results" > "evidence/$source.log" 2>&1
+            pnpm test:e2e --project=layout-webkit-claude --grep 'plan drafts keep their mode' --repeat-each=20 --workers=1 --retries=0 --trace=on --output="evidence/$source-results" > "evidence/$source.log" 2>&1
             code=$?
             set -e
             echo "$source exit=$code"
+            if rg -q "No tests found" "evidence/$source.log"; then exit 2; fi
             tail -35 "evidence/$source.log"
             git restore tests/e2e/claude.spec.ts
           done
