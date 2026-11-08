@@ -8,6 +8,7 @@ import {
   capacityPlan,
   sdkPackagesToRemove,
 } from '../android-emulator-sdk.mjs'
+import { nextestArtifact } from '../install-nextest-ci.mjs'
 
 const quality = parse(readFileSync(new URL('../../.github/workflows/ci.yaml', import.meta.url), 'utf8'))
 const android = parse(readFileSync(new URL('../../.github/workflows/android.yaml', import.meta.url), 'utf8'))
@@ -17,14 +18,14 @@ const chatJourneySource = readFileSync(new URL('../../tests/e2e/chats.spec.ts', 
 describe('parallel CI coverage', () => {
   it('bounds nextest acquisition and refuses an unsupported version instead of installing fallback tools', () => {
     const backend = quality.jobs.backend
-    const installers = backend.steps.filter(step => step.uses?.startsWith('taiki-e/install-action@'))
+    const installers = backend.steps.filter(step => step.run === 'node scripts/install-nextest-ci.mjs')
     expect(installers).toHaveLength(1)
 
     const installer = installers[0]
-    expect(installer.uses).toMatch(/^taiki-e\/install-action@[a-f0-9]{40}$/)
-    expect(installer.with.tool).toBe('cargo-nextest@0.9.149')
-    expect(installer.with.fallback).toBe('none')
-    expect(installer.with.checksum).toBe('true')
+    expect(backend.steps.some(step => step.uses?.startsWith('taiki-e/install-action@'))).toBe(false)
+    expect(nextestArtifact.version).toBe('0.9.149')
+    expect(nextestArtifact.url).toBe('https://api.github.com/repos/nextest-rs/nextest/releases/assets/660814555')
+    expect(nextestArtifact.sha256).toBe('32d1d8c0567b7a80bee2bad8bb09125c846da96bc009b2de11ec08557290c770')
     expect(installer['timeout-minutes']).toBeGreaterThan(0)
     expect(installer['timeout-minutes']).toBeLessThanOrEqual(3)
     expect(installer['continue-on-error']).toBeUndefined()

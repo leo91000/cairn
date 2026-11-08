@@ -78,16 +78,17 @@ Image publication requires both jobs to succeed. When physical migration is
 selected for a full run, it waits for both jobs; a backend-only migration run
 continues to require only the backend suite.
 
-The backend installs nextest 0.9.149 from an immutable install-action version
-whose manifest includes that release and its SHA256 checksum. Fallback installation
-is disabled: an unsupported version fails immediately instead of acquiring
-cargo-binstall or compiling another tool. Acquisition has a three-minute step
-budget inside the unchanged 30-minute backend job. An acquisition timeout remains
-a failed qualification; it does not retry the job or reduce the test workload.
-When updating either pin, verify the action manifest supports the selected Linux
-GNU binary and run the normal complete backend qualification. The workflow
-regression checks the fail-closed acquisition policy; it does not prove network
-availability or replace that qualification.
+The backend installs nextest with `scripts/install-nextest-ci.mjs`. Its official
+GitHub release asset ID, size and SHA256 are pinned; acquisition uses the release
+asset API because the public download URL has returned persistent 504s. The
+digest also matches the immutable install-action manifest cited in the helper.
+One 120-second download budget covers the API response, its single allowed
+release-assets redirect and body. No fallback installer or job retry is used.
+The three-minute step remains inside the unchanged 30-minute backend job.
+Integrity and executable version verification precede replacing the tool.
+When updating the pin, verify the official immutable release metadata and digest,
+then run the complete backend qualification. Mock acquisition and workflow tests
+do not prove network availability or replace that qualification.
 
 Before backend or CLI test compilation, the disposable GitHub-hosted Ubuntu
 runner requires 32 GiB available on the build filesystem. When capacity is
