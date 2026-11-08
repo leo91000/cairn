@@ -4,6 +4,8 @@ mod exclusive;
 mod exclusive_tests;
 mod health;
 #[cfg(test)]
+mod seed_process_tests;
+#[cfg(test)]
 mod terminal_tests;
 
 use super::{atomic_write, block, bootstrap, disk, mode, systemd, workspace};
