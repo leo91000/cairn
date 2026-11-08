@@ -1090,6 +1090,9 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
   await details.click()
   const menu = page.getByRole('menu', { name: 'Chat details', exact: true })
   await expect(menu.locator('..').getByText('Ready', { exact: true })).toBeVisible()
+  // The dropdown shows the full title the header may truncate.
+  const shownTitle = (await page.locator('.chat-header h1:not(.sr-only)').textContent())!.trim()
+  await expect(menu.locator('..').locator('p').first()).toHaveText(shownTitle)
   // Screen readers hear the agent, its status and context with the menu, not only its actions.
   await expect(menu).toHaveAccessibleDescription(/Main agent.*Ready.*Context/)
   await expect(menu.getByRole('group', { name: 'Advanced', exact: true }).getByRole('menuitem', { name: 'Connection', exact: true })).toBeVisible()
@@ -2185,6 +2188,12 @@ test('a renamed conversation keeps its title and Cairn stops naming it', async (
   await expect(title).toBeFocused()
   await title.fill('   ')
   await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeDisabled()
+  // Counted in characters like the installation: emoji count once, and too long is explained.
+  await title.fill('🚀'.repeat(91))
+  await expect(dialog).toContainText('Use at most 90 characters (91 now).')
+  await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeDisabled()
+  await title.fill('🚀'.repeat(90))
+  await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeEnabled()
   await title.fill('  Release notes  ')
   await dialog.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(dialog).toHaveCount(0)
@@ -2195,26 +2204,36 @@ test('a renamed conversation keeps its title and Cairn stops naming it', async (
   await expect(fil.locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('Release notes')
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).title).toBe('Release notes')
 
-  // Another client renamed it meanwhile: the stale revision is refused and nothing is overwritten.
-  ;({ action } = await openChatDetails(page))
-  await action('Rename conversation').click()
+  // Another client renamed it meanwhile: the live title shows, and the dialog keeps the revision it
+  // now reads, so saving applies to what the person sees.
   const current = await workspace.api(`/api/chats/${chat.id}`)
   await workspace.api(`/api/chats/${chat.id}`, 'PUT', { revision: current.revision, title: 'Renamed elsewhere' })
-  await title.fill('Too late')
+  await expect(page.locator('.chat-header').getByRole('heading', { name: 'Renamed elsewhere', exact: true })).toBeVisible()
+  ;({ action } = await openChatDetails(page))
+  await action('Rename conversation').click()
+  await expect(title).toHaveValue('Renamed elsewhere')
+  // A change racing the save is refused and reported; saving again uses the current revision.
+  const renamePath = `**/chats/${chat.id}`
+  await page.route(renamePath, route => route.request().method() === 'PUT'
+    ? route.fulfill({ status: 409, json: { error: 'This conversation changed. Reload before renaming.' } })
+    : route.continue())
+  await title.fill('Racing title')
   await dialog.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(dialog.getByRole('alert')).toContainText('This conversation changed. Reload before renaming.')
-  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
-  await expect(page.locator('.chat-header').getByRole('heading', { name: 'Renamed elsewhere', exact: true })).toBeVisible()
+  await page.unroute(renamePath)
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(page.locator('.chat-header').getByRole('heading', { name: 'Racing title', exact: true })).toBeVisible()
 
   // A later reply leaves the person's title alone.
   await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Add the migration notes too' })
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
-  expect((await workspace.api(`/api/chats/${chat.id}`)).title).toBe('Renamed elsewhere')
+  expect((await workspace.api(`/api/chats/${chat.id}`)).title).toBe('Racing title')
 
   // Phones rename from the sheet, which shows the full title, and focus returns to its ⋯ button.
   await page.setViewportSize({ width: 390, height: 844 })
   ;({ action } = await openChatDetails(page))
-  await expect(page.getByRole('dialog', { name: 'Chat details', exact: true })).toContainText('Renamed elsewhere')
+  await expect(page.getByRole('dialog', { name: 'Chat details', exact: true })).toContainText('Racing title')
   await action('Rename conversation').click()
   await title.fill('Release notes 0.53')
   await title.press('Enter')
@@ -2501,6 +2520,17 @@ test('context usage shows the latest request and an explicit compaction keeps th
   const indicator = page.getByTestId('context-indicator')
   await expect(indicator).toHaveText('Context 88%')
   await expect(indicator).toHaveAttribute('title', /227,400 of 258,400 tokens \(88%\)/)
+  // An estimate says so in the pill too.
+  workspace.service.store.updateRun(after.run.id, {
+    contextUsage: {
+      contextTokens: 227400,
+      contextWindow: 258400,
+      cachedTokens: null,
+      estimated: true,
+    },
+  } as any)
+  await page.reload()
+  await expect(indicator).toHaveText('Context ≈ 88%')
   await page.screenshot({ path: testInfo.outputPath('context-header-full.png'), animations: 'disabled' })
   await indicator.click()
   const confirmCompaction = page.getByRole('dialog', { name: 'Compact the agent context?', exact: true })

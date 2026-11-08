@@ -296,7 +296,7 @@ const planning = ref(false)
 const history = ref(false)
 const deletingConversation = ref<ChatDetail>()
 const deletionOpener = ref<HTMLElement>()
-const renamingConversation = ref<ChatDetail>()
+const renaming = ref(false)
 const renameOpener = ref<HTMLElement>()
 const detailsOpen = ref(false)
 const detailsButton = ref<HTMLButtonElement>()
@@ -976,7 +976,7 @@ function closeDeletion() {
 }
 
 function closeRename() {
-  renamingConversation.value = undefined
+  renaming.value = false
   void refocus(renameOpener.value)
 }
 
@@ -1021,7 +1021,7 @@ const conversationActions = computed(() => {
       dialog: true,
       run: (anchor) => {
         renameOpener.value = anchor
-        renamingConversation.value = chat
+        renaming.value = true
       },
     })
   }
@@ -1268,6 +1268,7 @@ async function implementPlan(sourceId: string) {
 watch(chatId, (id) => {
   openedSubagent.value = null
   history.value = false
+  renaming.value = false
   // Coming back to a conversation opens it again, so its current status is not news; the previous
   // conversation's status no longer applies.
   openedId = undefined
@@ -1401,8 +1402,8 @@ function key(event: KeyboardEvent) {
     @deleted="() => { deletingConversation = undefined; newConversation() }"
   />
   <ConversationRename
-    v-if="renamingConversation"
-    :chat="renamingConversation"
+    v-if="renaming && detail"
+    :chat="detail"
     @close="closeRename"
     @renamed="renamed"
   />

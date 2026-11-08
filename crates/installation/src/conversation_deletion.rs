@@ -431,11 +431,18 @@ mod tests {
             .transaction(|db| {
                 db.add_run_fixture(&json!({ "id": "run", "taskId": "chat", "status": "succeeded", "createdAt": 0 }), None)?;
                 db.save_conversation_boundary(&json!({ "id": "chat", "runId": "run" }))?;
-                for key in ["turn-speed:run", "chat-error:chat"] {
+                let keys = [
+                    "turn-speed:run",
+                    "chat-error:chat",
+                    "chat-title-pending:chat",
+                    "chat-title-checked:chat",
+                    "chat-title-manual:chat",
+                ];
+                for key in keys {
                     db.set(key, &json!({ "messageId": "message" }), None)?;
                 }
                 forget(db, "chat", "run")?;
-                for key in ["turn-speed:run", "chat-error:chat"] {
+                for key in keys {
                     assert!(db.kv(key)?.is_none(), "{key}");
                 }
                 Ok(())

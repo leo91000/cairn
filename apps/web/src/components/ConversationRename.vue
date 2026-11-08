@@ -6,6 +6,7 @@ import { api } from '../api'
 import Modal from './Modal.vue'
 import UiButton from './UiButton.vue'
 
+// `chat` follows the live conversation, so a retry sends the revision the person now sees.
 const props = defineProps<{ chat: ChatView }>()
 
 const emit = defineEmits<{ close: [], renamed: [chat: ChatView] }>()
@@ -17,7 +18,10 @@ const title = ref(props.chat.title)
 const saving = ref(false)
 const error = ref('')
 const trimmed = computed(() => title.value.trim())
-const changed = computed(() => !!trimmed.value && trimmed.value !== props.chat.title)
+// Counted in characters like the installation, so emoji and longer existing titles stay editable.
+const length = computed(() => [...trimmed.value].length)
+const tooLong = computed(() => length.value > MAX_TITLE)
+const changed = computed(() => !!trimmed.value && !tooLong.value && trimmed.value !== props.chat.title)
 
 async function save() {
   if (saving.value || !changed.value)
@@ -40,12 +44,16 @@ async function save() {
       <label>Title<input
         v-model="title"
         required
-        :maxlength="MAX_TITLE"
         autocomplete="off"
+        :aria-invalid="tooLong || undefined"
+        :aria-describedby="tooLong ? 'rename-too-long' : undefined"
         :disabled="saving"
         autofocus
         @focus="($event.target as HTMLInputElement).select()"
       ></label>
+      <p v-if="tooLong" id="rename-too-long" class="m-0! text-sm text-danger">
+        Use at most {{ MAX_TITLE }} characters ({{ length }} now).
+      </p>
       <p class="m-0! text-sm text-muted">
         Cairn stops naming this conversation automatically once you rename it.
       </p>

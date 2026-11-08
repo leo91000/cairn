@@ -43,17 +43,40 @@ internal fun ConversationRename(
 ) {
     var value by remember { mutableStateOf(TextFieldValue(title, TextRange(0, title.length))) }
     val trimmed = value.text.trim()
-    val changed = trimmed.isNotEmpty() && trimmed != title
+    // Counted in characters like the installation, so emoji and longer titles stay editable.
+    val length = trimmed.codePointCount(0, trimmed.length)
+    val tooLong = length > MAX_CONVERSATION_TITLE
+    val changed = trimmed.isNotEmpty() && !tooLong && trimmed != title
     val focus = remember { FocusRequester() }
-    LaunchedEffect(Unit) { focus.requestFocus() }
     AlertDialog(
         onDismissRequest = { if (!busy) dismiss() },
         title = { Text("Renommer la conversation") },
         text = {
+            // The field exists once the dialog's content composes; a window not yet attached is
+            // simply left unfocused.
+            LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
             Column {
                 OutlinedTextField(
                     value = value,
-                    onValueChange = { if (it.text.length <= MAX_CONVERSATION_TITLE) value = it },
+                    // Typing stops at the limit; deleting, moving the cursor or selecting never
+                    // does.
+                    onValueChange = {
+                        val next = it.text.codePointCount(0, it.text.length)
+                        if (
+                            next <= MAX_CONVERSATION_TITLE ||
+                                next <= value.text.codePointCount(0, value.text.length)
+                        )
+                            value = it
+                    },
+                    isError = tooLong,
+                    supportingText =
+                        if (tooLong) {
+                            {
+                                Text(
+                                    "$MAX_CONVERSATION_TITLE caractères au plus ($length actuellement)."
+                                )
+                            }
+                        } else null,
                     label = { Text("Titre") },
                     singleLine = true,
                     enabled = !busy,
