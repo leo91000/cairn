@@ -1093,13 +1093,16 @@ test('compact mobile toolbar keeps details and workspace controls accessible', a
   // Screen readers hear the agent, its status and context with the menu, not only its actions.
   await expect(menu).toHaveAccessibleDescription(/Main agent.*Ready.*Context/)
   await expect(menu.getByRole('group', { name: 'Advanced', exact: true }).getByRole('menuitem', { name: 'Connection', exact: true })).toBeVisible()
-  // Clicking the summary keeps the menu's keys working.
-  await menu.locator('..').getByText('Ready', { exact: true }).click()
-  await page.keyboard.press('ArrowDown')
-  await expect(menu.getByRole('menuitem').first()).toBeFocused()
   await expect(menu.getByRole('menuitem').first()).toBeFocused()
   await expect(menu.getByRole('menuitem', { name: 'Open activity fullscreen', exact: true })).toBeVisible()
   await page.keyboard.press('End')
+  await expect(menu.getByRole('menuitem', { name: 'Delete conversation', exact: true })).toBeFocused()
+  // Clicking the summary keeps the menu's keys working, from either end.
+  await menu.locator('..').getByText('Ready', { exact: true }).click()
+  await page.keyboard.press('ArrowDown')
+  await expect(menu.getByRole('menuitem').first()).toBeFocused()
+  await menu.locator('..').getByText('Ready', { exact: true }).click()
+  await page.keyboard.press('ArrowUp')
   await expect(menu.getByRole('menuitem', { name: 'Delete conversation', exact: true })).toBeFocused()
   await page.keyboard.press('Escape')
   await expect(menu).toBeHidden()

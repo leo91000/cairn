@@ -344,6 +344,7 @@ defineExpose({
   nodeName,
   status,
   attention,
+  loaded,
 })
 onUnmounted(() => {
   clearInterval(timer)

@@ -80,7 +80,8 @@ async function show(focus: 'first' | 'last' = 'first') {
   item?.focus({ preventScroll: true })
   item?.scrollIntoView({ block: 'nearest' })
   // An item that is removed or disabled while focused would drop focus to the page, where the
-  // menu's keys no longer reach it: focus moves to the next enabled item instead.
+  // menu's keys no longer reach it: focus moves to the next enabled item (the first one when the
+  // focused item was removed) instead.
   contents = new MutationObserver(() => {
     const active = document.activeElement as HTMLElement | null
     if (!open.value || (menu.value?.contains(active) && !active?.matches(':disabled, [aria-disabled="true"]')))
@@ -172,7 +173,13 @@ function menuKeydown(event: KeyboardEvent) {
     event.preventDefault()
     const list = items()
     const current = list.indexOf(document.activeElement as HTMLElement)
-    const next = event.key === 'Home' ? 0 : event.key === 'End' ? list.length - 1 : (current + (event.key === 'ArrowDown' ? 1 : -1) + list.length) % list.length
+    // With no item focused (after a click on the menu's own content), arrows start from either end.
+    const step = event.key === 'ArrowDown' ? 1 : -1
+    const next = event.key === 'Home'
+      ? 0
+      : event.key === 'End' || (current < 0 && step < 0)
+        ? list.length - 1
+        : (current + step + list.length) % list.length
     list[next]?.focus()
   }
 }
