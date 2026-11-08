@@ -316,11 +316,11 @@ jobs:
       - name: Measure the bounded bootstrap observer without filesystem work
         if: inputs.ci-diagnostic == 'backend' || inputs.backend-only != true || inputs.publication-measurement != true
         working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
-        run: node scripts/test-backend.mjs -p cairn-installation --lib native::bootstrap::tests::observation_hot_path_measurement -- --exact --nocapture
+        run: node scripts/test-backend.mjs --workspace --lib native::bootstrap::tests::observation_hot_path_measurement -- --exact --nocapture
       - name: Measure bounded Native terminal-reason metadata
         if: inputs.ci-diagnostic == 'backend' || inputs.backend-only != true || inputs.publication-measurement != true
         working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}
-        run: node scripts/test-backend.mjs -p cairn-installation --lib native::service::terminal_tests::terminal_reason_metadata_measurement -- --exact --ignored --nocapture
+        run: node scripts/test-backend.mjs --workspace --lib native::service::terminal_tests::terminal_reason_metadata_measurement -- --exact --ignored --nocapture
       - name: Qualify native backend namespace isolation with ordinary private bind mounts
         if: inputs.ci-diagnostic == 'backend' || inputs.backend-only != true || inputs.publication-measurement != true
         working-directory: ${{ env.CI_DIAGNOSTIC_SOURCE || github.workspace }}

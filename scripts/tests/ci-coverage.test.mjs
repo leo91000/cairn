@@ -16,6 +16,16 @@ const pr = parse(readFileSync(new URL('../../.github/workflows/pr.yaml', import.
 const chatJourneySource = readFileSync(new URL('../../tests/e2e/chats.spec.ts', import.meta.url), 'utf8')
 
 describe('parallel CI coverage', () => {
+  it('keeps both post-suite measurements in the workspace test graph with exact case selection', () => {
+    for (const [name, selection] of [
+      ['Measure the bounded bootstrap observer without filesystem work', 'native::bootstrap::tests::observation_hot_path_measurement -- --exact --nocapture'],
+      ['Measure bounded Native terminal-reason metadata', 'native::service::terminal_tests::terminal_reason_metadata_measurement -- --exact --ignored --nocapture'],
+    ]) {
+      expect(quality.jobs.backend.steps.find(step => step.name === name).run)
+        .toBe(`node scripts/test-backend.mjs --workspace --lib ${selection}`)
+    }
+  })
+
   it('bounds nextest acquisition and refuses an unsupported version instead of installing fallback tools', () => {
     const backend = quality.jobs.backend
     const installers = backend.steps.filter(step => step.run === 'node scripts/install-nextest-ci.mjs')
