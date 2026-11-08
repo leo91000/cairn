@@ -29,7 +29,7 @@ import {
   UPLOADER_SHA,
 } from '../ci-backend-durable.mjs'
 
-function fixture(t, mode = 'success') {
+function fixture(t, mode = 'success', periodicDelayMs = 0) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'cairn-durable-'))
   onTestFinished(() => rmSync(root, { recursive: true, force: true }))
   const output = path.join(root, 'proof')
@@ -48,6 +48,7 @@ function fixture(t, mode = 'success') {
     else{
       const file=process.env.INPUT_PATH;
       const data=fs.readFileSync(file);
+      if(${periodicDelayMs}>0&&JSON.parse(data).acquisition==='periodic') await new Promise(resolve=>setTimeout(resolve,${periodicDelayMs}));
       if(mode==='periodic-failure'&&JSON.parse(data).acquisition==='periodic'){console.error(process.env.ACTIONS_RUNTIME_TOKEN);process.exit(7)}
       if(mode===JSON.parse(data).acquisition+'-hang'){hang();await new Promise(()=>{})}
       fs.writeFileSync(${JSON.stringify(sink)}+'/'+process.env.INPUT_NAME+'.json', data, {flag:'wx'});
@@ -65,20 +66,32 @@ function fixture(t, mode = 'success') {
     GITHUB_RUN_ATTEMPT: '1',
     INPUT_PRIVATE: 'private-input-fixture',
   }
+  const uploadMs = 1000
+  const closeMs = 50
+  const firstCheckpointMs = 30
+  const checkpointMs = 35
+
+  // Startup and five rolling uploads are sequential and each may use its full
+  // bound. Leave the guard's one-second containment startup allowance as well;
+  // only the final upload belongs in the evidence reserve after the deadline.
+  const publicationsBeforeDeadline = PUBLICATION_LIMIT - 1
+  const publicationWindowMs = uploadMs + closeMs + Math.max(firstCheckpointMs, checkpointMs)
+  const workloadWindowMs = 1000 + publicationsBeforeDeadline * publicationWindowMs
+
   const receipt = {
     diagnosticOnly: true,
     qualificationClaim: false,
     observer: 'f'.repeat(40),
     candidate: '3'.repeat(40),
-    clock: { jobId: 123, startedAt: Date.now() - 28 * 60000 + 1000 },
+    clock: { jobId: 123, startedAt: Date.now() - 28 * 60000 + workloadWindowMs },
   }
   env.CI_JOB_STARTED_AT = receipt.clock.startedAt / 1000
   const publish = artifactPublisher({
     uploader,
     directory,
     env,
-    uploadMs: 1000,
-    closeMs: 50,
+    uploadMs,
+    closeMs,
   })
   const options = {
     output,
@@ -87,8 +100,8 @@ function fixture(t, mode = 'success') {
     command: process.execPath,
     args: ['-e', 'setInterval(()=>{},1000)'],
     publish,
-    firstCheckpointMs: 30,
-    checkpointMs: 35,
+    firstCheckpointMs,
+    checkpointMs,
     observeOptions: { sampleMs: 20, graceMs: 30, closeGraceMs: 100 },
   }
   return {
@@ -276,8 +289,10 @@ it('preserves individual fixture outcomes while always running cleanup', async (
   assert.equal(await withCleanup(() => 7, () => {}), 7)
 })
 
-it('commits source/clock/startup before the real child, checkpoints a never-exiting child, and keeps timeout nonzero', async (t) => {
-  const f = fixture(t)
+// A 250 ms upload fits its individual bound, but five cannot fit the old
+// one-second window even without contention. Exercise both publisher timings.
+it.each([0, 250])('commits source/clock/startup before the real child, checkpoints a never-exiting child, and keeps timeout nonzero (periodic upload delay %i ms)', async (periodicDelayMs, t) => {
+  const f = fixture(t, 'success', periodicDelayMs)
   const marker = path.join(f.root, 'child.json')
   f.options.args = ['-e', `
     const fs=require('node:fs');
@@ -293,7 +308,16 @@ it('commits source/clock/startup before the real child, checkpoints a never-exit
   assert.equal(receipts[0].acquisition, 'admitted-before-command')
   assert.deepEqual(receipts[0].clock, f.receipt.clock)
   assert.equal(receipts[0].proof.samples.at(-1).processCount, 0)
-  assert.equal(receipts.at(-1).proof.timedOut, true)
+
+  const finalProof = receipts.at(-1).proof
+  assert.equal(finalProof.timedOut, true)
+  assert.equal(finalProof.cleanupUnknown, false)
+  assert.equal(finalProof.inventoryComplete, true)
+  assert.equal(finalProof.ownershipUncertain, false)
+  assert.equal(finalProof.containmentReady, true)
+  assert.equal(finalProof.samples.at(-1).reason, 'finished')
+  assert.equal(finalProof.samples.at(-1).processCount, 0)
+
   assert.ok(receipts.some(item => item.acquisition === 'periodic' && item.proof.samples.some(sample => sample.processCount >= 2)))
   assert.ok(receipts.every(item => item.qualificationClaim === false))
   for (const item of receipts.flatMap(item => item.proof.samples).flatMap(sample => sample.processes))
