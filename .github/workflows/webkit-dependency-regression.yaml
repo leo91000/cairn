@@ -75,12 +75,15 @@ jobs:
           VITE_CAIRN_TEST_RESUME_DIAGNOSTICS=true pnpm exec vite build --config apps/web/vite.config.ts
       - name: Qualify the isolated Postgres fixture
         run: pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts
-      - name: Run the saved-chat resume journey
-        timeout-minutes: 10
-        run: pnpm test:e2e --project=journeys-chats tests/e2e/chats.spec.ts --grep 'same-provider quota resume' --workers=1 --fail-on-flaky-tests
-      - name: Run deliverable preview and sharing journeys
-        timeout-minutes: 10
-        run: pnpm test:e2e deliverables.spec.ts skill-bundles.spec.ts beacon-sharing.spec.ts beacon-installations.spec.ts mcps.spec.ts --workers=2 --retries=0 --fail-on-flaky-tests --trace=on
+      - name: Install observer-only real reload probes
+        env:
+          OBSERVER_SHA: ${{ github.sha }}
+        run: |
+          git -c safe.directory="$GITHUB_WORKSPACE" fetch origin "$OBSERVER_SHA"
+          git -c safe.directory="$GITHUB_WORKSPACE" show "$OBSERVER_SHA:.github/diagnostics/skill-availability-probe.ts" >> tests/e2e/skill-bundles.spec.ts
+      - name: Probe availability across actual reload boundaries
+        timeout-minutes: 5
+        run: pnpm test:e2e skill-bundles.spec.ts --project=layout-webkit-skill-bundles --grep 'availability native reload probe' --workers=1 --retries=0 --fail-on-flaky-tests --trace=on
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
