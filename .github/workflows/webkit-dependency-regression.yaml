@@ -39,9 +39,11 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v7.0.1
+        timeout-minutes: 5
         with:
           ref: ${{ matrix.sha }}
       - name: Record immutable diagnostic source
+        timeout-minutes: 5
         env:
           EXPECTED_SHA: ${{ matrix.sha }}
         run: |
@@ -50,9 +52,11 @@ jobs:
           git -c safe.directory="$GITHUB_WORKSPACE" log -1 --format='commit=%H tree=%T'
           test -z "$(git -c safe.directory="$GITHUB_WORKSPACE" status --porcelain)"
       - uses: ./.github/actions/setup-pnpm
+        timeout-minutes: 5
         with:
           cache: true
       - name: Check browser image version
+        timeout-minutes: 5
         run: |
           node --input-type=module <<'JS'
           import { readFileSync } from 'node:fs'
@@ -90,6 +94,7 @@ jobs:
           console.log('Exact native regression collection: four cases, two per browser project; no runtime fixture execution.')
           JS
       - uses: actions/upload-artifact@v7.0.1
+        timeout-minutes: 5
         if: always()
         with:
           name: availability-repair-collection
@@ -132,19 +137,20 @@ jobs:
         timeout-minutes: 5
         env:
           PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/specialists
-        run: pnpm test:e2e beacon-relay.spec.ts direct-capacity.spec.ts chat-switch.spec.ts --project=journeys-beacon-relay --project=journeys-chat-switch --project=layout-webkit-chat-switch --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results-specialists
+        run: pnpm test:e2e beacon-relay.spec.ts direct-capacity.spec.ts chat-switch.spec.ts --project=journeys-beacon-relay --project=journeys-chat-switch --project=layout-webkit-chat-switch --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results/specialists
       - name: Require final source identity
+        timeout-minutes: 5
         env:
           EXPECTED_SHA: ${{ matrix.sha }}
         run: |
           test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = "$EXPECTED_SHA"
           test -z "$(git -c safe.directory="$GITHUB_WORKSPACE" status --porcelain)"
       - uses: actions/upload-artifact@v7.0.1
+        timeout-minutes: 5
         if: always()
         with:
           name: availability-repair-browser-evidence
           path: |
             playwright-report/
             test-results/
-            test-results-specialists/
           retention-days: 14
