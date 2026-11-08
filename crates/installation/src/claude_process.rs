@@ -885,6 +885,15 @@ impl Turn<'_> {
         Ok(())
     }
 
+    /// Stop admitting questions as soon as this turn stops consuming its inbox.
+    async fn close_side_admission(&mut self) -> Result<()> {
+        if self.side_available {
+            self.side_available = false;
+            self.emit(json!({ "type": "chat.side.closed" })).await?;
+        }
+        Ok(())
+    }
+
     async fn withdraw_side(&mut self, question: &str) -> Result<()> {
         let request = self
             .sides
@@ -1702,6 +1711,7 @@ impl Turn<'_> {
             }
             return Ok(false);
         }
+        self.close_side_admission().await?;
         self.withdraw_sides().await?;
         if self.context_pending.is_some() {
             // Claude Code answers the compaction's context request after its result: wait
@@ -1935,6 +1945,10 @@ pub async fn run(
         side_available: false,
     };
     let operation = turn.execute(&mut stdout, auth.as_mut(), &cancel).await;
+    let closed = turn.close_side_admission().await;
+    // Preserve an original stop/provider error while retiring admission before
+    // the potentially slow child-group and stderr cleanup.
+    let operation = operation.and(closed);
     // Closes Claude Code's stdin.
     drop(turn);
     stop(&mut child, pid).await;

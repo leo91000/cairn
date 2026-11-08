@@ -226,15 +226,18 @@ async fn lightweight_cards_match_full_execution_metadata() {
         }
         // A running Claude reply that announced side questions takes them in lists too,
         // unless it is stopping.
-        for (stopping, compacting) in [(false, false), (true, false), (false, true), (true, true)] {
-            let id = format!("side-{stopping}-{compacting}");
+        for (stopping, compacting, closed) in [
+            (false, false, false), (true, false, false), (false, true, false),
+            (true, true, false), (false, false, true), (true, true, true),
+        ] {
+            let id = format!("side-{stopping}-{compacting}-{closed}");
             let state = serde_json::from_value(json!({
                 "id": id, "taskId": id, "status": "running",
                 "cancelRequestedAt": if stopping { json!(7) } else { Value::Null },
             }))?;
             db.admit_run(&state, None, &json!({
                 "chatExecution": { "operation": "message" }, "sideQuestions": true,
-                "sideQuestionsCompacting": compacting,
+                "sideQuestionsCompacting": compacting, "sideQuestionsClosed": closed,
             }), None)?;
             db.0.execute("UPDATE runs SET snapshot=? WHERE id=?", rusqlite::params![
                 json!({ "agent": { "provider": "claude" } }).to_string(), id,
@@ -244,7 +247,7 @@ async fn lightweight_cards_match_full_execution_metadata() {
             let expected = conversation_view_with_run(db, chat.clone(), full_run.as_ref())?;
             let actual = conversation_view(db, chat)?;
             assert_eq!(serde_json::to_value(&actual)?, serde_json::to_value(expected)?, "{id}");
-            assert_eq!(actual.can_ask_side_question, !stopping && !compacting, "{id}");
+            assert_eq!(actual.can_ask_side_question, !stopping && !compacting && !closed, "{id}");
         }
         let chat: Conversation = serde_json::from_value(json!({ "id": "no-run" }))?;
         let expected = conversation_view_with_run(db, chat.clone(), None)?;

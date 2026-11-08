@@ -174,8 +174,9 @@ side question. Before that (while starting, and again after a resume, retry or
 recovery) and between replies, the action is unavailable and the API returns 409
 with the reason. Adapters from earlier releases never announce it, so their inbox
 never contains side questions they could mistake for steering. Side questions never
-delay the reply: when it ends, questions still being answered are withdrawn and,
-like those still pending, marked unanswered with an explanation. Retried submissions
+delay the reply: admission closes when the native reply ends, before its final
+context report or process cleanup. Questions still being answered are withdrawn
+and, like those still pending, marked unanswered with an explanation. Retried submissions
 return the retained question for the same UUID and content. Once a question is pruned, a small identity marker remains until conversation deletion and any reuse is refused. The answer uses the subscription of the account running
 the turn, and secrets masked in the conversation are masked in it too. A conversation
 keeps its 30 latest side questions, at most 5 waiting at once, with answers of up to

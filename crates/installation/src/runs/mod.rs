@@ -360,6 +360,7 @@ impl Db<'_> {
                 'cancelRequestedAt',cancel_requested_at,
                 'sideQuestions',json(boundary -> '$.sideQuestions'),
                 'sideQuestionsCompacting',json(boundary -> '$.sideQuestionsCompacting'),
+                'sideQuestionsClosed',json(boundary -> '$.sideQuestionsClosed'),
                 'chatExecution',json_object(
                     'operation',json_extract(boundary,'$.chatExecution.operation'),
                     'plan',json(CASE WHEN boundary -> '$.chatExecution.plan'='true' THEN 'true' ELSE 'false' END),

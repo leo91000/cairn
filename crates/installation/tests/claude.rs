@@ -2009,9 +2009,10 @@ async fn a_withdrawn_side_question_cancels_the_native_request_silently() {
 
     assert!(completes(&events));
     assert!(!events.iter().any(|event| {
-        event["type"]
-            .as_str()
-            .is_some_and(|kind| kind.starts_with("chat.side.") && kind != "chat.side.available")
+        event["type"].as_str().is_some_and(|kind| {
+            kind.starts_with("chat.side.")
+                && !matches!(kind, "chat.side.available" | "chat.side.closed")
+        })
     }));
     let cancelled =
         std::fs::read_to_string(c.home.join(".claude/side-cancellations.jsonl")).unwrap();
@@ -2298,6 +2299,7 @@ async fn engine_retries_limits_and_notices_are_reported_without_ending_the_turn(
         "thread.started",
         "chat.side.available",
         "chat.side.unavailable",
+        "chat.side.closed",
         "chat.side.compacting",
         "context.usage",
         "chat.delivered",
@@ -3126,6 +3128,48 @@ async fn a_resumed_compaction_shows_as_its_own_divider() {
         attempts.push(items[0].clone());
     }
     assert_ne!(attempts[0], attempts[1]);
+}
+
+#[tokio::test]
+async fn side_admission_closes_before_waiting_for_a_final_context_report() {
+    let root = TempDir::new().unwrap();
+    let c = setup(&root);
+    run_to_end(&c, plan(&root, "Inspect the workspace"))
+        .await
+        .0
+        .unwrap();
+    std::fs::write(c.home.join(".claude/fixture-context-unanswered"), "").unwrap();
+    let p = compaction_plan(&root);
+    let (tx, mut rx) = mpsc::channel(64);
+    let task =
+        tokio::spawn(async move { claude_process::run(&c, p, tx, CancellationToken::new()).await });
+    let mut closed = false;
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(event) = rx.recv().await {
+            if event["type"] == "chat.side.closed" {
+                assert!(!closed);
+                closed = true;
+                // The native result has ended inbox consumption, but its context
+                // deadline has not elapsed. No completion is needed to close admission.
+                assert!(!task.is_finished());
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), rx.recv())
+                        .await
+                        .is_err()
+                );
+            }
+            if event["type"] == "turn.completed" {
+                assert!(closed);
+            }
+            events.push(event);
+        }
+    })
+    .await
+    .unwrap();
+    task.await.unwrap().unwrap();
+    assert!(closed);
+    assert!(completes(&events));
 }
 
 #[tokio::test]

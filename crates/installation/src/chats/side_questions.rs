@@ -93,6 +93,7 @@ fn turn(run: &Value) -> &str {
 fn answers(run: Option<&Value>, open: &Open) -> bool {
     run.is_some_and(|run| {
         RunStatus::of(run) == Some(RunStatus::Running)
+            && run["sideQuestionsClosed"] != true
             && text(run, "id") == open.run_id
             && turn(run) == open.turn
     })
@@ -268,7 +269,10 @@ fn reply_start(
 pub(crate) fn unavailable(run: Option<&Value>) -> Option<SideQuestionUnavailable> {
     // Queued and recovering runs have no adapter that announced it yet.
     let executing = |run: &&Value| RunStatus::of(run) == Some(RunStatus::Running);
-    let Some(run) = run.filter(executing) else {
+    let Some(run) = run
+        .filter(executing)
+        .filter(|run| run["sideQuestionsClosed"] != true)
+    else {
         return Some(SideQuestionUnavailable::BetweenReplies);
     };
     match Provider::of_run(run) {
@@ -672,13 +676,27 @@ pub(crate) async fn withdraw_announcement(
     run_id: &str,
     run_directory: &std::path::Path,
 ) -> Result<()> {
+    retire_announcement(store, run_id, run_directory, false).await
+}
+
+/// Retire the current native consumer, or reset it before the next attempt starts.
+async fn retire_announcement(
+    store: &crate::store::Store,
+    run_id: &str,
+    run_directory: &std::path::Path,
+    closed: bool,
+) -> Result<()> {
     let _inbox = INBOX.lock().await;
     let id = run_id.to_owned();
     store
         .transaction(move |db| {
             db.update_run_boundary(
                 &id,
-                &json!({ "sideQuestions": null, "sideQuestionsCompacting": null }),
+                &json!({
+                    "sideQuestions": null,
+                    "sideQuestionsCompacting": null,
+                    "sideQuestionsClosed": if closed { json!(true) } else { Value::Null },
+                }),
             )?;
             if let Some(chat) = chat_for_run(db, &id)? {
                 expire_attempt(db, text(&chat, "id"), &id)?;
@@ -733,6 +751,13 @@ pub(crate) async fn publish_inbox(
 }
 
 impl Service {
+    /// Native completion closes admission before context reporting or process cleanup.
+    /// A later announcement cannot reopen it; only a fresh turn/attempt resets closure.
+    pub(crate) async fn side_questions_closed(&self, run_id: &str) -> Result<()> {
+        let directory = self.config.data_dir.join("runs").join(run_id);
+        retire_announcement(&self.store, run_id, &directory, true).await
+    }
+
     pub(crate) async fn side_question_ask_live(
         &self,
         chat_id: &str,

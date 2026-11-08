@@ -475,6 +475,7 @@ async fn handle_chat_control(
         }
         "chat.side.available" => s.side_questions_available(id, true).await?,
         "chat.side.unavailable" => s.side_questions_available(id, false).await?,
+        "chat.side.closed" => s.side_questions_closed(id).await?,
         "chat.side.compacting" => {
             s.side_questions_compacting(id, event["compacting"] != false)
                 .await?;
@@ -544,6 +545,13 @@ async fn apply_event(
     let completed = event["type"] == "turn.completed";
     if completed && !event["usage"].is_null() {
         changes.boundary = Some(json!({ "usage": event["usage"] }));
+        changed = true;
+    }
+    if completed || provider_failure || controller_failure {
+        // The native consumer has ended even while controller/process finalization
+        // still owns a Running run. Commit closure with the terminal frame itself.
+        let boundary = changes.boundary.get_or_insert_with(|| json!({}));
+        boundary["sideQuestionsClosed"] = json!(true);
         changed = true;
     }
     checkpoint

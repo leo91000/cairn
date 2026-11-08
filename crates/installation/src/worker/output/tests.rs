@@ -939,6 +939,139 @@ fn question_event(id: &str, blocking: bool) -> Value {
 }
 
 #[tokio::test]
+async fn native_completion_closes_side_admission_before_worker_finalization() {
+    for terminal in [
+        "chat.side.closed",
+        "turn.completed",
+        "turn.failed",
+        "runner.failed",
+    ] {
+        let mut fixture = Fixture::new().await;
+        let chat = question_chat(&fixture).await;
+        let run = fixture.id.clone();
+        fixture
+            .service
+            .store
+            .write(move |db| {
+                db.update_run_boundary_fixture(
+                    &run,
+                    &json!({
+                        "status": "running",
+                        "snapshot": { "agent": { "provider": "claude" } },
+                        "chatExecution": { "messageId": "native-turn", "operation": "message" },
+                        "sideQuestions": true,
+                    }),
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture.service.chat_detail(&chat).await.unwrap()["canAskSideQuestion"],
+            true
+        );
+        let input: cairn_contracts::SideQuestionInput = serde_json::from_value(json!({
+            "id": "a1b2c3d4-0000-4000-8000-000000000001",
+            "text": "Why?",
+        }))
+        .unwrap();
+        let retained = fixture
+            .service
+            .side_question_ask_live(&chat, input.clone(), Default::default())
+            .await
+            .unwrap();
+        fixture
+            .event(json!({
+                "type": terminal,
+                "error": { "message": "Native failure" },
+            }))
+            .await;
+        assert_eq!(
+            fixture.checkpoint.snapshot().await.completed(),
+            terminal == "turn.completed"
+        );
+        // Finalization is deliberately not called: the manager still owns a running
+        // execution while the native completion has already crossed its recorder.
+        assert_eq!(
+            fixture.service.store.run(&fixture.id).await.unwrap()["status"],
+            "running"
+        );
+        let detail = fixture.service.chat_detail(&chat).await.unwrap();
+        assert_eq!(detail["canAskSideQuestion"], false);
+        assert_eq!(detail["sideQuestionUnavailable"], "between-replies");
+        let listed = fixture
+            .service
+            .chat_list()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|value| value["id"] == chat)
+            .unwrap();
+        assert_eq!(listed["canAskSideQuestion"], false);
+        assert_eq!(
+            listed["sideQuestionUnavailable"],
+            detail["sideQuestionUnavailable"]
+        );
+        let retried = fixture
+            .service
+            .side_question_ask_live(&chat, input.clone(), Default::default())
+            .await
+            .unwrap();
+        assert_eq!(retried["id"], retained["id"]);
+        let mut fresh = input.clone();
+        fresh.id = "a1b2c3d4-0000-4000-8000-000000000002".into();
+        let error = fixture
+            .service
+            .side_question_ask_live(&chat, fresh, Default::default())
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, 409);
+        // A late announcement on the old native attempt cannot reopen admission.
+        fixture
+            .event(json!({ "type": "chat.side.available" }))
+            .await;
+        assert_eq!(
+            fixture.service.chat_detail(&chat).await.unwrap()["canAskSideQuestion"],
+            false
+        );
+        // Pending work expires even though controller finalization is deliberately held.
+        let expiring_chat = chat.clone();
+        fixture
+            .service
+            .store
+            .transaction(move |db| crate::chats::side_questions::expire(db, &expiring_chat))
+            .await
+            .unwrap();
+        let retried = fixture
+            .service
+            .side_question_ask_live(&chat, input, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(retried["status"], "failed");
+        // Only an explicit new-attempt reset permits the next announcement.
+        crate::chats::side_questions::withdraw_announcement(
+            &fixture.service.store,
+            &fixture.id,
+            &fixture
+                .service
+                .config
+                .data_dir
+                .join("runs")
+                .join(&fixture.id),
+        )
+        .await
+        .unwrap();
+        fixture
+            .event(json!({ "type": "chat.side.available" }))
+            .await;
+        assert_eq!(
+            fixture.service.chat_detail(&chat).await.unwrap()["canAskSideQuestion"],
+            true
+        );
+    }
+}
+
+#[tokio::test]
 async fn side_answers_are_stored_redacted() {
     for collision in ["unrelated-secret", "answered", "a1b2c3d4"] {
         let mut fixture = Fixture::new().await;

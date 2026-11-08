@@ -1292,6 +1292,7 @@ fn continue_run(
             // The next turn's adapter announces again whether it can answer side questions.
             "sideQuestions": null,
             "sideQuestionsCompacting": null,
+            "sideQuestionsClosed": null,
         })),
         ..Default::default()
     };
