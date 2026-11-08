@@ -24,6 +24,23 @@ def fingerprint():
 
 
 class ObservationTests(unittest.TestCase):
+    def test_non_object_json_roots_keep_closed_failure_receipts(self):
+        for value in [[], None, 'private-sentinel']:
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                directory = root / 'fixture-1234'
+                directory.mkdir()
+                (directory / 'lib-fixture.json').write_text(json.dumps(value))
+                output = root / 'receipt.json'
+                result = subprocess.run([sys.executable, str(Path(__file__).with_name('backend-tail-fingerprints.py')),
+                                         str(root), str(output)], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1)
+                receipt = json.loads(output.read_text())
+                self.assertEqual(receipt['error']['reason'], 'invalid_fingerprint_object')
+                self.assertEqual(receipt['error']['stage'], 'json_projection')
+                self.assertNotIn('private-sentinel', json.dumps(receipt) + result.stderr)
+                self.assertNotIn('Traceback', result.stderr)
+
     def test_failed_snapshot_retains_closed_receipt_and_nonzero_exit(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

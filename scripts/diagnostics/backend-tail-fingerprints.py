@@ -21,6 +21,7 @@ REASONS = frozenset([
     'invalid_fingerprint_root', 'observation_budget_exhausted',
     'invalid_fingerprint_directory', 'invalid_fingerprint_name',
     'invalid_fingerprint_marker',
+    'invalid_fingerprint_object',
 ])
 
 
@@ -67,6 +68,8 @@ def strings(value):
 
 def project(data):
     source = json.loads(data)
+    if not isinstance(source, dict):
+        raise ValueError('invalid_fingerprint_object')
     result = {"jsonSha256": hashlib.sha256(data).hexdigest()}
     for name in ("rustc", "target", "profile", "path", "config", "compile_kind"):
         value = source.get(name)
