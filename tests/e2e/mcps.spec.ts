@@ -237,7 +237,9 @@ for (const pending of ['authorization', 'offer'] as const) {
 
 test('initial pageshow cannot restart direct authorization during OAuth callback canonicalization', async ({ page, workspace, browserName }) => {
   test.skip(browserName !== 'webkit', 'Exercises the observed native WebKit load/pageshow ordering')
-  const provider = await mcpProvider()
+  // An HTTP redirect chain bypasses page.route on its callback target. Use the
+  // provider's document navigation so the callback's native-load barrier applies.
+  const provider = await mcpProvider({ authorizationNavigation: 'document' })
   const probes: CallbackBootstrapProbe[] = []
   const errors: string[] = []
   const accountHeld = Promise.withResolvers<void>()
