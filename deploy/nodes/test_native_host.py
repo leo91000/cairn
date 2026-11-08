@@ -252,12 +252,71 @@ class DockerToolPreparationTests(unittest.TestCase):
         self.assertEqual([1], self.sleeps)
         self.assert_unpublished()
 
-    def test_stop_prevents_retry(self):
-        self.open_url.side_effect = self.error(504)
-        with patch.object(host, 'STOP', True), self.assertRaises(urllib.error.HTTPError):
+    def test_stop_before_acquisition_prevents_any_request(self):
+        self.open_url.side_effect = None
+        self.open_url.return_value = io.BytesIO(self.payload)
+        with patch.object(host, 'STOP', True), self.assertRaises(InterruptedError):
             host.prepare_docker_tools()
-        self.assertEqual(1, self.open_url.call_count)
+        self.assertEqual(0, self.open_url.call_count)
         self.assertEqual([], self.sleeps)
+        self.assert_unpublished()
+
+    def test_stop_while_opening_closes_response_before_reading(self):
+        response = io.BytesIO(self.payload)
+        def acquire(*args, **kwargs):
+            host.STOP = True
+            return response
+        self.open_url.side_effect = acquire
+        with patch.object(response, 'read', wraps=response.read) as read, self.assertRaises(InterruptedError):
+            host.prepare_docker_tools()
+        self.assertTrue(response.closed)
+        read.assert_not_called()
+        self.assert_unpublished()
+
+    def test_stop_after_successful_transfer_prevents_next_acquisition_and_publish(self):
+        class CompletedResponse(io.BytesIO):
+            def __exit__(self, *args):
+                result = super().__exit__(*args)
+                host.STOP = True
+                return result
+        tools = self.tools + (('https://example.test/next', self.tools[0][1], {'': 'plugins/docker-buildx'}),)
+        for cancelled_index in (0, 1):
+            with self.subTest(cancelled_index=cancelled_index):
+                host.STOP = False
+                self.open_url.reset_mock()
+                def acquire(*args, **kwargs):
+                    kind = CompletedResponse if self.open_url.call_count - 1 == cancelled_index else io.BytesIO
+                    return kind(self.payload)
+                self.open_url.side_effect = acquire
+                with patch.object(host, 'DOCKER_TOOLS', tools), self.assertRaises(InterruptedError):
+                    host.prepare_docker_tools()
+                self.assertEqual(cancelled_index + 1, self.open_url.call_count)
+                self.assert_unpublished()
+
+    def test_stop_during_transfer_is_terminal_before_another_read(self):
+        class InterruptedResponse(io.BytesIO):
+            reads = 0
+            def read(self, size):
+                self.reads += 1
+                host.STOP = True
+                return super().read(size)
+        response = InterruptedResponse(self.payload)
+        self.open_url.side_effect = None
+        self.open_url.return_value = response
+        with self.assertRaises(InterruptedError):
+            host.prepare_docker_tools()
+        self.assertEqual(1, response.reads)
+        self.assertTrue(response.closed)
+        self.assert_unpublished()
+
+    def test_stop_during_client_metadata_prevents_final_publication(self):
+        def probe(*args, **kwargs):
+            host.STOP = True
+            return Mock(stdout='{"ApiVersion":"1.53"}')
+        self.open_url.side_effect = None
+        self.open_url.return_value = io.BytesIO(self.payload)
+        with patch.object(host.subprocess, 'run', side_effect=probe), self.assertRaises(InterruptedError):
+            host.prepare_docker_tools()
         self.assert_unpublished()
 
     def test_permanent_http_and_transport_errors_are_not_retried(self):

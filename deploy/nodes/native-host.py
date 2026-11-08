@@ -203,13 +203,16 @@ def open_docker_tool(url):
     }) if asset else url)
     deadline = time.monotonic() + 60
     for attempt in range(3):
-        if attempt and STOP:
+        if STOP:
             raise InterruptedError('Native Docker tool acquisition interrupted.')
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError('Native Docker tool acquisition deadline exhausted.')
         try:
             response = urllib.request.urlopen(request, timeout=min(60, remaining))
+            if STOP:
+                response.close()
+                raise InterruptedError('Native Docker tool acquisition interrupted.')
             if time.monotonic() >= deadline:
                 response.close()
                 raise TimeoutError('Native Docker tool acquisition deadline exhausted.')
@@ -246,7 +249,14 @@ def prepare_docker_tools():
             # These public downloads carry no enrollment/node credential.
             with open_docker_tool(url) as response, archive.open('wb') as output:
                 total = 0
-                while chunk := response.read(65536):
+                while True:
+                    if STOP:
+                        raise InterruptedError('Native Docker tool transfer interrupted.')
+                    chunk = response.read(65536)
+                    if STOP:
+                        raise InterruptedError('Native Docker tool transfer interrupted.')
+                    if not chunk:
+                        break
                     total += len(chunk)
                     if total > 256 * 1024 * 1024:
                         raise ValueError('Native Docker tool download exceeds its size bound.')
@@ -264,6 +274,8 @@ def prepare_docker_tools():
             else:
                 shutil.copyfile(archive, stage / names[''])
             archive.unlink()
+        if STOP:
+            raise InterruptedError('Native Docker tool preparation interrupted.')
         (stage / 'docker').write_text(DOCKER_WRAPPER)
         # Extract the paired client's API version without ever contacting a daemon.
         # Client version output is emitted even when the explicit missing socket
@@ -284,6 +296,8 @@ def prepare_docker_tools():
             inventory[str(path.relative_to(stage))] = hashlib.sha256(path.read_bytes()).hexdigest()
         atomic_json(stage / 'manifest.json', inventory)
         (stage / 'manifest.json').chmod(0o444)
+        if STOP:
+            raise InterruptedError('Native Docker tool preparation interrupted.')
         os.rename(stage, target)
     return target
 
