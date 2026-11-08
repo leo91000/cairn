@@ -2076,6 +2076,7 @@ async fn ui_timeline_capability_refusal_is_authenticated_and_precedes_peer_setup
         }
         let anonymous = reqwest::Client::new()
             .post(format!("{}{}", relay.app.url, route))
+            .header("origin", &relay.app.url)
             .json(&input)
             .send()
             .await

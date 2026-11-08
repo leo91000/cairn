@@ -2335,13 +2335,22 @@ async fn conversation_stream_refuses_missing_card_capability_after_authenticatio
         let (_, batch) = current.batch().await;
         assert!(text(&batch, "history").starts_with("v2:"));
         assert!(batch["entries"].is_array());
+
+        // JSON history keeps its existing revision requirement, without a UI capability.
+        let history_path = path.strip_suffix("/stream").unwrap();
+        let response = client
+            .get(format!("{}{history_path}/history", f.url))
+            .query(&[("history", text(&batch, "history"))])
+            .header("x-test-relay-token", &f.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let history: Value = response.json().await.unwrap();
+        assert!(history["entries"].is_array());
     }
-    // The metadata-only Fil and JSON history remain usable without a UI capability.
+    // The metadata-only Fil remains usable without a UI capability.
     let mut list = f.open_path("/api/chats/stream", None).await;
     let (_, batch) = list.batch().await;
     assert!(batch["state"]["chats"].is_array());
-    let response = f.history("").await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let history: Value = response.json().await.unwrap();
-    assert!(history["entries"].is_array());
 }
