@@ -980,20 +980,36 @@ impl Service {
             if !allowed(db, &proposed, &destination)? {
                 return Err(Error::forbidden("Destination permission was revoked during migration."));
             }
-            let mut checkpoint = nodes::db_checkpoint(db, &run_id)?;
-            checkpoint["prepared"]["backend"] = args["backend"].clone();
-            checkpoint["prepared"]["diskFormat"] = if args["backend"] == "firecracker" { "vm" } else { "native" }.into();
-            checkpoint["nodeId"] = node["id"].clone();
-            checkpoint["runtimeId"] = node["runtimeId"].clone();
-            checkpoint["resources"] = placement["resources"].clone();
-            checkpoint["runnerId"] = run_id.clone().into();
-            checkpoint["launched"] = false.into();
-            checkpoint["freshSession"] = true.into();
+            let previous = crate::worker::checkpoint::RunCheckpoint::from_value(
+                nodes::db_checkpoint(db, &run_id)?
+            )?;
+            let mut prepared = previous.prepared().cloned().unwrap_or_default();
+            prepared["backend"] = args["backend"].clone();
+            prepared["diskFormat"] = if args["backend"] == "firecracker" { "vm" } else { "native" }.into();
             let resume_mission = chat["mission"] == true && migration["resumeMission"] == true;
-            checkpoint["workspaceInitialized"] = true.into();
-            checkpoint["completed"] = (!resume_mission).into();
-            for key in ["process", "settled", "controllerRecoveries"] { checkpoint[key] = Value::Null; }
-            db.save_checkpoint_boundary(&run_id, &checkpoint)?;
+
+            // Publication/restoration settled the new environment. Old attempt
+            // failures cannot describe it or block its next idle transfer. A
+            // continuing mission keeps its remaining budget, never a fresh one.
+            crate::worker::checkpoint::RunCheckpoint {
+                prepared: Some(Some(prepared)),
+                node_id: Some(Some(text(&node, "id").to_owned())),
+                runtime_id: Some(Some(node["runtimeId"].clone())),
+                resources: serde_json::from_value(placement["resources"].clone())?,
+                runner_id: Some(Some(run_id.clone())),
+                launched: Some(false),
+                fresh_session: Some(true),
+                workspace_initialized: Some(true),
+                completed: Some(!resume_mission),
+                terminal_code: Some(if resume_mission { None } else { Some(0) }),
+                remaining_ms: if resume_mission {
+                    previous.remaining_ms
+                } else {
+                    Some(None)
+                },
+                ..Default::default()
+            }.store_in(db, &run_id)?;
+
             // This boundary replaces the backup pointer. Preserve only the
             // historical diagnosis; the migration owns the new pointer/status.
             let mut migrated_backup = json!({

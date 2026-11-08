@@ -367,7 +367,18 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     .await;
     let mut native_prepared = prepared.clone();
     native_prepared["backend"] = "native".into();
-    owner.set_checkpoint(&run, json!({ "nodeId": native_node, "runnerId": run, "runtimeId": "development", "completed": true, "prepared": native_prepared.clone() })).await;
+    owner
+        .set_checkpoint(
+            &run,
+            json!({
+                "nodeId": native_node, "runnerId": run, "runtimeId": "development",
+                "completed": true, "terminalCode": 70, "providerFailed": true,
+                "outputInterrupted": true, "lastError": "Retired native attempt failed",
+                "finalizationFailureAttempt": run, "remainingMs": null,
+                "prepared": native_prepared.clone()
+            }),
+        )
+        .await;
     let mut native_snapshot = owner.run(&run).await["snapshot"].clone();
     native_snapshot["agent"]["access"]["backend"] = "native".into();
     owner
@@ -377,7 +388,7 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
             &run,
             json!({
                 "snapshot": native_snapshot,
-                "status": RunStatus::Succeeded,
+                "status": RunStatus::Failed,
                 "nodeId": native_node,
                 "executionBackend": "native",
                 "nativePrincipals": ["fixture-owner"],
@@ -522,7 +533,13 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     // The VM image constraint from conversion must not poison the next native
     // admission, including an idle move whose reservation has been released.
     assert!(owner.run(&run).await["sessionId"].is_null());
+    // Keep the queued follow-up from starting a turn: the converted environment
+    // must be movable through scheduler recovery before any fresh engine session.
+    let mut paused_chat = owner.stored("chats", &chat).await.unwrap();
+    paused_chat["paused"] = true.into();
+    owner.save_conversation_boundary(paused_chat).await;
     for destination in [&native_node, &vm_node] {
+        let before_move = owner.run(&run).await;
         let response = moves::request_by_agent(
             &owner.service,
             &owner.run(&run).await,
@@ -531,12 +548,23 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         .await
         .unwrap();
         assert_eq!(response["status"], "moving");
-        moves::advance(&owner.service, &owner.run(&run).await)
-            .await
-            .unwrap();
-        let settled = owner.run(&run).await;
+        let settled = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                owner.service.worker.tick(&owner.service).await.unwrap();
+                let current = owner.run(&run).await;
+                if current["moveRequest"].is_null() {
+                    break current;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
         assert!(settled["movementError"].is_null(), "{settled}");
         assert_eq!(settled["nodeId"], *destination);
+        assert_eq!(settled["status"], RunStatus::Succeeded);
+        assert_eq!(settled["startedAt"], before_move["startedAt"]);
+        assert_eq!(settled["resumeCount"], before_move["resumeCount"]);
         assert!(
             settled["sessionId"].is_null(),
             "An idle move must not invent an engine session"
@@ -567,7 +595,17 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
         true,
     )
     .await;
-    owner.set_checkpoint(&run, json!({ "nodeId": native_node, "runnerId": run, "runtimeId": "development", "completed": false, "prepared": native_prepared })).await;
+    owner
+        .set_checkpoint(
+            &run,
+            json!({
+                "nodeId": native_node, "runnerId": run, "runtimeId": "development",
+                "completed": false, "terminalCode": 70, "providerFailed": true,
+                "outputInterrupted": true, "lastError": "Retired mission attempt failed",
+                "remainingMs": 12345, "prepared": native_prepared
+            }),
+        )
+        .await;
     let mission = owner.service.task_fixture(json!({"name": "Original mission", "prompt": "Continue the original mission", "agentId": agent}), None).await.unwrap();
     let mut snapshot = owner.run(&run).await["snapshot"].clone();
     snapshot["task"] = mission.clone();
@@ -614,6 +652,21 @@ async fn backend_migration_keeps_chat_and_files_both_directions_and_preserves_so
     assert!(mission["sessionId"].is_null());
     assert_eq!(mission["recoveryPending"], true);
     assert_eq!(mission["requiredTags"], json!(["cpu"]));
+    let mission_checkpoint = owner
+        .service
+        .store
+        .checkpoint_boundary(&run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        mission_checkpoint["remainingMs"], 12345,
+        "Conversion must not renew a mission's time budget"
+    );
+    assert!(mission_checkpoint["terminalCode"].is_null());
+    assert_ne!(mission_checkpoint["providerFailed"], true);
+    assert_ne!(mission_checkpoint["outputInterrupted"], true);
+    assert!(mission_checkpoint["lastError"].is_null());
     let prompt = cairn_installation::run_output::prompt(&mission, false);
     assert!(prompt.contains("Continue the original mission"));
     assert!(prompt.contains("Already completed the first step"));
