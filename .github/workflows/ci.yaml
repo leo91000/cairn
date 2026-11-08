@@ -1,5 +1,5 @@
-# Disposable qualification observer; all original selected jobs/commands/timeouts retained.
-# Every checkout binds candidate dacb93120f2aaf980a5061e29f0ca9a38110300c / tree 98a32a0c16d4b432a6fc161f78fbdce66491406c.
+# Disposable instrumented qualification; original jobs/commands/timeouts retained, no retries.
+# Every checkout binds candidate 5c60466a6c61bf428d8ae5c5cdacd53806690712 / tree 6a9fc6fc7540cbaa73a8df99af12fcd05d0b6047.
 name: Nextest backend and CLI source-bound qualification
 on:
   workflow_dispatch:
@@ -98,15 +98,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: dacb93120f2aaf980a5061e29f0ca9a38110300c
+          ref: 5c60466a6c61bf428d8ae5c5cdacd53806690712
           persist-credentials: false
       - name: Verify immutable candidate source before qualification
         run: >
           test "$(git rev-parse HEAD)" =
-          dacb93120f2aaf980a5061e29f0ca9a38110300c
+          5c60466a6c61bf428d8ae5c5cdacd53806690712
 
           test "$(git rev-parse 'HEAD^{tree}')" =
-          98a32a0c16d4b432a6fc161f78fbdce66491406c
+          6a9fc6fc7540cbaa73a8df99af12fcd05d0b6047
 
           test -z "$(git status --porcelain)"
 
@@ -145,15 +145,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: dacb93120f2aaf980a5061e29f0ca9a38110300c
+          ref: 5c60466a6c61bf428d8ae5c5cdacd53806690712
           persist-credentials: false
       - name: Verify immutable candidate source before qualification
         run: >
           test "$(git rev-parse HEAD)" =
-          dacb93120f2aaf980a5061e29f0ca9a38110300c
+          5c60466a6c61bf428d8ae5c5cdacd53806690712
 
           test "$(git rev-parse 'HEAD^{tree}')" =
-          98a32a0c16d4b432a6fc161f78fbdce66491406c
+          6a9fc6fc7540cbaa73a8df99af12fcd05d0b6047
 
           test -z "$(git status --porcelain)"
 
@@ -206,15 +206,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: dacb93120f2aaf980a5061e29f0ca9a38110300c
+          ref: 5c60466a6c61bf428d8ae5c5cdacd53806690712
           persist-credentials: false
       - name: Verify immutable candidate source before qualification
         run: >
           test "$(git rev-parse HEAD)" =
-          dacb93120f2aaf980a5061e29f0ca9a38110300c
+          5c60466a6c61bf428d8ae5c5cdacd53806690712
 
           test "$(git rev-parse 'HEAD^{tree}')" =
-          98a32a0c16d4b432a6fc161f78fbdce66491406c
+          6a9fc6fc7540cbaa73a8df99af12fcd05d0b6047
 
           test -z "$(git status --porcelain)"
 
@@ -271,15 +271,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: dacb93120f2aaf980a5061e29f0ca9a38110300c
+          ref: 5c60466a6c61bf428d8ae5c5cdacd53806690712
           persist-credentials: false
       - name: Verify immutable candidate source before qualification
         run: >
           test "$(git rev-parse HEAD)" =
-          dacb93120f2aaf980a5061e29f0ca9a38110300c
+          5c60466a6c61bf428d8ae5c5cdacd53806690712
 
           test "$(git rev-parse 'HEAD^{tree}')" =
-          98a32a0c16d4b432a6fc161f78fbdce66491406c
+          6a9fc6fc7540cbaa73a8df99af12fcd05d0b6047
 
           test -z "$(git status --porcelain)"
 
@@ -406,15 +406,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
-          ref: dacb93120f2aaf980a5061e29f0ca9a38110300c
+          ref: 5c60466a6c61bf428d8ae5c5cdacd53806690712
           persist-credentials: false
       - name: Verify immutable candidate source before qualification
         run: >
           test "$(git rev-parse HEAD)" =
-          dacb93120f2aaf980a5061e29f0ca9a38110300c
+          5c60466a6c61bf428d8ae5c5cdacd53806690712
 
           test "$(git rev-parse 'HEAD^{tree}')" =
-          98a32a0c16d4b432a6fc161f78fbdce66491406c
+          6a9fc6fc7540cbaa73a8df99af12fcd05d0b6047
 
           test -z "$(git status --porcelain)"
 
