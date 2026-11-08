@@ -355,6 +355,154 @@ async fn open_imports_once_reuses_seed_and_restores_loaded_catalog_without_check
 }
 
 #[tokio::test]
+async fn open_reports_import_timeout_and_retries_with_the_preserved_seed() {
+    use axum::{
+        Json,
+        body::{Body, Bytes},
+        extract::Path as RoutePath,
+        http::StatusCode,
+        response::IntoResponse,
+        routing::post,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // None returns successful headers but stalls the body until the caller's
+    // own deadline, rather than returning a timeout status from the node.
+    for failure in [
+        Some(StatusCode::GATEWAY_TIMEOUT),
+        Some(StatusCode::SERVICE_UNAVAILABLE),
+        None,
+    ] {
+        let (_root, mut service, projects) = fixture().await;
+        let run = run(&service, Value::Null, MAIN_AGENT_ID).await;
+        let project = text(&projects[0], "id").to_owned();
+        let attempt = id();
+        let credential = execution::secret(&service.config.data_dir, "runner-secret")
+            .await
+            .unwrap();
+        let expected = (attempt.clone(), project.clone(), run["id"].clone());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let reading_body = Arc::new(tokio::sync::Notify::new());
+        let body_entered = reading_body.clone();
+        let router = axum::Router::new().route(
+            "/runs/{attempt}/projects/{project}",
+            post(
+                move |headers: axum::http::HeaderMap,
+                      RoutePath((attempt, project)): RoutePath<(String, String)>,
+                      Json(body): Json<Value>| {
+                    let expected = expected.clone();
+                    let credential = credential.clone();
+                    let observed = observed.clone();
+                    let body_entered = body_entered.clone();
+                    async move {
+                        assert_eq!(headers["authorization"], format!("Bearer {credential}"));
+                        assert_eq!((attempt, project), (expected.0, expected.1));
+                        assert_eq!(body["runId"], expected.2);
+                        assert_eq!(body["source"], body["target"]);
+                        if observed.fetch_add(1, Ordering::SeqCst) == 0 {
+                            if let Some(status) = failure {
+                                (status, Json(json!({ "error": "fixture import failed" })))
+                                    .into_response()
+                            } else {
+                                Body::from_stream(futures_util::stream::once(async move {
+                                    body_entered.notify_one();
+                                    std::future::pending::<std::io::Result<Bytes>>().await
+                                }))
+                                .into_response()
+                            }
+                        } else {
+                            Json(json!({ "ok": true, "reused": true })).into_response()
+                        }
+                    }
+                },
+            ),
+        );
+        let (listener, address) = common::bind().await;
+        reconfigure(&mut service, |config| {
+            config.runner_url = format!("http://{address}");
+        })
+        .await;
+        let server = common::serve(listener, router);
+        let prepared = execution::prepare(
+            &run,
+            &service.config,
+            &RunCredentials::default(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        patch_run(
+            &service,
+            &run,
+            json!({ "status": RunStatus::Running, "workspaces": [] }),
+        )
+        .await;
+        let token = run_token(&service, &run).await;
+        common::set_checkpoint(
+            &service.store,
+            text(&run, "id"),
+            json!({ "runnerId": attempt, "prepared": prepared }),
+        )
+        .await;
+
+        let (opening_service, opening_token, opening_project) =
+            (service.clone(), token.clone(), project.clone());
+        let opening = tokio::spawn(async move {
+            opening_service
+                .projects
+                .open(&opening_service, &opening_token, &opening_project)
+                .await
+        });
+        if failure.is_none() {
+            tokio::time::timeout(std::time::Duration::from_secs(10), reading_body.notified())
+                .await
+                .unwrap();
+            tokio::time::pause();
+            tokio::time::advance(std::time::Duration::from_secs(301)).await;
+            tokio::time::resume();
+        }
+        let error = opening.await.unwrap().unwrap_err();
+        if failure != Some(StatusCode::SERVICE_UNAVAILABLE) {
+            assert_eq!(error.status, 504);
+            assert!(error.message.contains("timed out"));
+        } else {
+            assert_eq!(error.status, 503);
+            assert!(error.message.contains("execution node could not import"));
+        }
+        assert!(!error.message.contains("run is active"));
+        let saved = service.store.run(text(&run, "id")).await.unwrap();
+        assert!(saved["workspaces"].as_array().unwrap().is_empty());
+        let seed = Path::new(text(&prepared, "projectRoot")).join(&project);
+        assert_eq!(
+            std::fs::read_to_string(seed.join("hello")).unwrap(),
+            "First"
+        );
+        std::fs::write(
+            Path::new(text(&projects[0], "path")).join("hello"),
+            "upstream changed",
+        )
+        .unwrap();
+
+        let opened = service
+            .projects
+            .open(&service, &token, &project)
+            .await
+            .unwrap();
+        assert_eq!(opened["reused"], true);
+        assert_eq!(
+            std::fs::read_to_string(seed.join("hello")).unwrap(),
+            "First"
+        );
+        let saved = service.store.run(text(&run, "id")).await.unwrap();
+        assert_eq!(saved["workspaces"].as_array().unwrap().len(), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn delivered_message_retains_its_original_submission_timestamp() {
     let (_root, s, _) = fixture().await;
     let chat = s

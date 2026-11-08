@@ -90,17 +90,17 @@ impl Transport {
         path: &str,
         body: Vec<u8>,
     ) -> Result<Response> {
-        self.request_before(node, method, path, body, head_timeout(method, path, false))
+        self.request_for_backend(node, method, path, body, false)
             .await
     }
 
-    async fn request_before(
+    async fn request_for_backend(
         self: &Arc<Self>,
         node: &str,
         method: &str,
         path: &str,
         body: Vec<u8>,
-        deadline: Duration,
+        native: bool,
     ) -> Result<Response> {
         let id = crate::config::id();
         let (head_tx, head_rx) = oneshot::channel();
@@ -137,10 +137,17 @@ impl Transport {
             id,
         };
         self.changed.notify_waiters();
-        let (status, length, kind) = tokio::time::timeout(deadline, head_rx)
-            .await
-            .map_err(|_| Error::unavailable("Node did not acknowledge execution."))?
-            .map_err(|_| Error::unavailable("Node disconnected."))?;
+        let (status, length, kind) =
+            tokio::time::timeout(head_timeout(method, path, native), head_rx)
+                .await
+                .map_err(|_| {
+                    if native && super::is_project_import_request(method, path) {
+                        Error::gateway_timeout("Project import node response timed out.")
+                    } else {
+                        Error::unavailable("Node did not acknowledge execution.")
+                    }
+                })?
+                .map_err(|_| Error::unavailable("Node disconnected."))?;
         let stream = futures_util::stream::try_unfold(
             (body_rx, pending, false),
             |(mut rx, guard, done)| async move {
@@ -458,12 +465,12 @@ pub async fn proxy(State(app): State<App>, request: Request) -> Result<Response>
         .await
         .map_err(|_| Error::bad("Execution request too large."))?;
     s.node_transport
-        .request_before(
+        .request_for_backend(
             &node,
             &method,
             &path,
             body.to_vec(),
-            head_timeout(&method, &path, crate::native::policy::node_native(&record)),
+            crate::native::policy::node_native(&record),
         )
         .await
 }
@@ -494,11 +501,10 @@ mod tests {
         let hub = Arc::new(Transport::default());
         let node = crate::config::id();
         let path = format!("/snapshots/{}/publication", crate::config::id());
-        let timeout = head_timeout("POST", &path, true);
         let (request_hub, request_node) = (hub.clone(), node.clone());
         let request = tokio::spawn(async move {
             request_hub
-                .request_before(&request_node, "POST", &path, vec![], timeout)
+                .request_for_backend(&request_node, "POST", &path, vec![], true)
                 .await
         });
         let command = hub.poll(&node).await.unwrap();
@@ -540,7 +546,7 @@ mod tests {
         let (request_hub, request_node) = (hub.clone(), node.clone());
         let request = tokio::spawn(async move {
             request_hub
-                .request_before(&request_node, "POST", &path, vec![], project_timeout)
+                .request_for_backend(&request_node, "POST", &path, vec![], true)
                 .await
         });
         let command = hub.poll(&node).await.unwrap();
@@ -569,13 +575,7 @@ mod tests {
         let (request_hub, request_node) = (ordinary.clone(), ordinary_node.clone());
         let request = tokio::spawn(async move {
             request_hub
-                .request_before(
-                    &request_node,
-                    "GET",
-                    "/health",
-                    vec![],
-                    head_timeout("GET", "/health", true),
-                )
+                .request_for_backend(&request_node, "GET", "/health", vec![], true)
                 .await
         });
         let _command = ordinary.poll(&ordinary_node).await.unwrap();
@@ -590,11 +590,10 @@ mod tests {
             let hub = Arc::new(Transport::default());
             let node = crate::config::id();
             let path = format!("/runs/{}", crate::config::id());
-            let timeout = head_timeout("DELETE", &path, native);
             let (request_hub, request_node) = (hub.clone(), node.clone());
             let request = tokio::spawn(async move {
                 request_hub
-                    .request_before(&request_node, "DELETE", &path, vec![], timeout)
+                    .request_for_backend(&request_node, "DELETE", &path, vec![], native)
                     .await
             });
             let command = hub.poll(&node).await.unwrap();

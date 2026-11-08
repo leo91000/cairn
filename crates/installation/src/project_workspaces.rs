@@ -215,7 +215,15 @@ async fn import(
             "The execution node could not import this project. Retry open_project.",
         ));
     }
-    let response: Value = response.json().await.map_err(Error::internal)?;
+    let response: Value = response.json().await.map_err(|error| {
+        if error.is_timeout() {
+            Error::gateway_timeout(
+                "Project transfer or import timed out. Retry open_project; a completed import will be reused.",
+            )
+        } else {
+            Error::internal(error)
+        }
+    })?;
     authorization.recheck().await?;
     if response["ok"] != true {
         return Err(Error::unavailable("Project import was not acknowledged."));

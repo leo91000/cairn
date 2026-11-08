@@ -8,7 +8,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 const MAX_CONCURRENT_COMMANDS: usize = 64;
@@ -294,15 +294,6 @@ fn controller_timeout(method: &str, path: &str, native: bool) -> Duration {
     })
 }
 
-async fn within_controller_deadline<F: Future>(
-    method: &str,
-    path: &str,
-    native: bool,
-    operation: F,
-) -> std::result::Result<F::Output, tokio::time::error::Elapsed> {
-    tokio::time::timeout(controller_timeout(method, path, native), operation).await
-}
-
 async fn forward(
     master: &Master<'_>,
     runner: &url::Url,
@@ -331,28 +322,29 @@ async fn forward(
         };
         return master.send(&End::with_status(id, status)).await;
     }
-    let native = crate::native::enabled();
+    let native = executor.native();
     let project_import = native && crate::nodes::is_project_import_request(method, path);
     let operation = call_controller(master, runner, runner_token, command, executor);
-    let mut response = match within_controller_deadline(method, path, native, operation).await {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) if project_import => {
-            tracing::warn!(
-                status = error.status,
-                error = %error,
-                "Native project import failed before reaching the controller"
-            );
-            return master.send(&End::with_status(id, error.status)).await;
-        }
-        Err(_) if project_import => return master.send(&End::with_status(id, 504)).await,
-        _ => {
-            let unavailable = End {
-                data: Some(STANDARD.encode(b"VM controller unavailable")),
-                ..End::with_status(id, 503)
-            };
-            return master.send(&unavailable).await;
-        }
-    };
+    let mut response =
+        match tokio::time::timeout(controller_timeout(method, path, native), operation).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) if project_import => {
+                tracing::warn!(
+                    status = error.status,
+                    error = %error,
+                    "Native project import failed before reaching the controller"
+                );
+                return master.send(&End::with_status(id, error.status)).await;
+            }
+            Err(_) if project_import => return master.send(&End::with_status(id, 504)).await,
+            _ => {
+                let unavailable = End {
+                    data: Some(STANDARD.encode(b"VM controller unavailable")),
+                    ..End::with_status(id, 503)
+                };
+                return master.send(&unavailable).await;
+            }
+        };
     let content_type = response
         .headers()
         .get("content-type")
@@ -552,80 +544,6 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn native_project_import_deadline_covers_seed_and_controller_work() {
-        struct Cancelled(Option<tokio::sync::oneshot::Sender<()>>);
-
-        impl Drop for Cancelled {
-            fn drop(&mut self) {
-                if let Some(sender) = self.0.take() {
-                    let _ = sender.send(());
-                }
-            }
-        }
-
-        let path = format!(
-            "/runs/{}/projects/{}",
-            crate::config::id(),
-            crate::config::id()
-        );
-        assert!(crate::nodes::is_project_import_request("POST", &path));
-        assert!(!crate::nodes::is_project_import_request("GET", &path));
-        assert!(!crate::nodes::is_project_import_request(
-            "POST",
-            "/runs/invalid/projects/invalid"
-        ));
-        assert_eq!(
-            controller_timeout("POST", &path, true),
-            crate::nodes::PROJECT_OPEN_RELAY_TIMEOUT
-        );
-        assert_eq!(
-            controller_timeout("POST", &path, false),
-            Duration::from_secs(25)
-        );
-        assert!(crate::nodes::PROJECT_OPEN_RELAY_TIMEOUT < crate::nodes::PROJECT_OPEN_HEAD_TIMEOUT);
-        assert!(
-            crate::nodes::PROJECT_OPEN_HEAD_TIMEOUT < crate::nodes::PROJECT_OPEN_REQUEST_TIMEOUT
-        );
-
-        let started = tokio::time::Instant::now();
-        within_controller_deadline("POST", &path, true, async {
-            tokio::time::sleep(Duration::from_secs(160)).await;
-            tokio::time::sleep(Duration::from_secs(100)).await;
-            Ok::<_, Error>(())
-        })
-        .await
-        .unwrap()
-        .unwrap();
-        assert_eq!(started.elapsed(), Duration::from_secs(260));
-
-        let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
-        let started = tokio::time::Instant::now();
-        let timed_out = within_controller_deadline("POST", &path, true, async move {
-            let _cancelled = Cancelled(Some(cancelled_tx));
-            tokio::time::sleep(Duration::from_secs(250)).await;
-            tokio::time::sleep(Duration::from_secs(21)).await;
-            Ok::<_, Error>(())
-        })
-        .await;
-        assert!(timed_out.is_err());
-        cancelled_rx.await.unwrap();
-        assert_eq!(started.elapsed(), crate::nodes::PROJECT_OPEN_RELAY_TIMEOUT);
-
-        let started = tokio::time::Instant::now();
-        assert!(
-            within_controller_deadline(
-                "POST",
-                "/storage-policy",
-                true,
-                tokio::time::sleep(Duration::from_secs(26)),
-            )
-            .await
-            .is_err()
-        );
-        assert_eq!(started.elapsed(), Duration::from_secs(25));
-    }
-
     #[test]
     fn idle_cache_eviction_reaches_the_controller_only_with_a_canonical_run_and_post() {
         let path = format!("/disks/{}/evict", crate::config::id());
@@ -802,3 +720,7 @@ mod tests {
         assert!(route("POST", "/snapshots/invalid/publication").is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "relay/project_import_tests.rs"]
+mod project_import_tests;
