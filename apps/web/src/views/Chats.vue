@@ -1225,8 +1225,11 @@ async function implementPlan(sourceId: string) {
 watch(chatId, (id) => {
   openedSubagent.value = null
   history.value = false
-  // Coming back to a conversation opens it again, so its current status is not news.
+  // Coming back to a conversation opens it again, so its current status is not news; the previous
+  // conversation's status no longer applies.
   openedId = undefined
+  clearTimeout(announcement)
+  announcedStatus.value = ''
   detailsOpen.value = false
   // Focus inside the dropdown returns to its trigger rather than to the page.
   menuButton.value?.hide()

@@ -81,10 +81,12 @@ async function show(focus: 'first' | 'last' = 'first') {
   item?.scrollIntoView({ block: 'nearest' })
   // An item that is removed or disabled while focused would drop focus to the page, where the
   // menu's keys no longer reach it: focus moves to the next enabled item (the first one when the
-  // focused item was removed) instead.
+  // focused item was removed) instead. Focus the app moved elsewhere on purpose stays there.
   contents = new MutationObserver(() => {
     const active = document.activeElement as HTMLElement | null
-    if (!open.value || (menu.value?.contains(active) && !active?.matches(':disabled, [aria-disabled="true"]')))
+    const lost = !active || active === document.body
+    const disabledHere = !!active && !!menu.value?.contains(active) && active.matches(':disabled, [aria-disabled="true"]')
+    if (!open.value || (!lost && !disabledHere))
       return
     const all = Array.from(menu.value?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
     const at = active ? all.indexOf(active) : -1
