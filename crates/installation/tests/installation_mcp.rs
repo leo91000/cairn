@@ -6272,6 +6272,119 @@ async fn eventless_side_question_stays_on_its_reply_after_item_id_reuse() {
 }
 
 #[tokio::test]
+async fn oversized_numeric_reply_identities_are_refused_on_http_and_both_tools() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let claude = s
+        .agent_fixture(json!({ "name": "Claude", "provider": "claude" }), None)
+        .await
+        .unwrap();
+    let (run, _) = active_run(&s, &claude).await;
+    let run_id = run["id"].as_str().unwrap();
+    let mut chat = s.chat_create(json!({})).await.unwrap();
+    chat["runId"] = run["id"].clone();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+    s.store.save_conversation_boundary(chat).await.unwrap();
+    s.side_questions_available(run_id, true).await.unwrap();
+    s.store
+        .event(
+            run_id,
+            &EventKind::ItemCompleted,
+            "First",
+            Some(json!({
+                "item": {
+                    "id": "reply-1",
+                    "type": "agent_message",
+                    "text": "First",
+                },
+            })),
+        )
+        .await
+        .unwrap();
+    let valid = public_call(
+        &s,
+        &["run"],
+        "ask_chat_side_question",
+        json!({
+            "chatId": chat_id,
+            "question": {
+                "id": uuid::Uuid::new_v4(),
+                "text": "Why?",
+                "itemId": "reply-1",
+            },
+        }),
+    )
+    .await;
+    let event_id = result(&valid)["replyEventId"].as_str().unwrap();
+    let app = common::relay_fixture::router(s.clone()).await.unwrap();
+    let owner = common::RelayContext::new(&common::relay_fixture::context(&s).await);
+    for padded in [
+        format!("{event_id:0>17}"),
+        format!("{}{event_id}", "0".repeat(300_000)),
+    ] {
+        let question = || {
+            json!({
+                "id": uuid::Uuid::new_v4(),
+                "text": "Why?",
+                "itemId": "reply-1",
+                "replyEventId": padded,
+            })
+        };
+        // The short overlength case reaches validation within the HTTP body cap.
+        // The public MCP also admits the larger request at its transport boundary.
+        if padded.len() == 17 {
+            let request = owner
+                .authorize(common::request(
+                    "POST",
+                    &format!("/api/chats/{chat_id}/side-questions"),
+                ))
+                .body(Body::from(question().to_string()))
+                .unwrap();
+            let response = common::send(&app, request).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(
+                common::read_json(response)
+                    .await
+                    .to_string()
+                    .contains("too long")
+            );
+        }
+        for response in [
+            public_call(
+                &s,
+                &["run"],
+                "ask_chat_side_question",
+                json!({ "chatId": chat_id, "question": question() }),
+            )
+            .await,
+            call(
+                &s,
+                &configuration,
+                "ask_chat_side_question",
+                json!({ "chatId": chat_id, "question": question() }),
+            )
+            .await,
+        ] {
+            assert_eq!(response["result"]["isError"], true);
+            assert!(response.to_string().contains("too long"));
+        }
+    }
+    let listed = public_call(
+        &s,
+        &["read"],
+        "list_chat_side_questions",
+        json!({ "chatId": chat_id }),
+    )
+    .await;
+    assert_eq!(
+        result(&listed)["sideQuestions"].as_array().unwrap().len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn pruned_side_question_ids_cannot_be_replayed_or_reused() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;

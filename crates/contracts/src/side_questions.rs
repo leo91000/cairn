@@ -107,6 +107,7 @@ impl SideQuestionInput {
         if self.text.chars().count() > 4000
             || self.quote.chars().count() > 4000
             || self.item_id.chars().count() > 200
+            || self.reply_event_id.len() > 16
             || (!self.reply_event_id.is_empty()
                 && !self
                     .reply_event_id
@@ -148,4 +149,35 @@ pub struct ListChatSideQuestionsOutput {
     // An open string, so older clients keep decoding when a code is added.
     #[schemars(with = "Option<String>")]
     pub side_question_unavailable: Option<SideQuestionUnavailable>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reply_event_identity_enforces_its_string_bound_before_numeric_lookup() {
+        let mut input: SideQuestionInput = serde_json::from_value(serde_json::json!({
+            "id": "a1b2c3d4-0000-4000-8000-000000000001",
+            "text": "Why?",
+            "itemId": "reply-1",
+        }))
+        .unwrap();
+        for valid in ["", "1", "9007199254740991", "0000000000000001"] {
+            input.reply_event_id = valid.into();
+            input.validate().unwrap();
+        }
+        for invalid in [
+            format!("{}1", "0".repeat(16)),
+            format!("{}1", "0".repeat(300_000)),
+            "9007199254740992".into(),
+        ] {
+            input.reply_event_id = invalid;
+            assert!(
+                input.validate().is_err(),
+                "Reply event identity of {} bytes must be refused",
+                input.reply_event_id.len(),
+            );
+        }
+    }
 }

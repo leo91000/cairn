@@ -1375,10 +1375,16 @@ mod tests {
                     question.answer = Some("é".repeat(MAX_ANSWER));
                     save(db, &question)?;
                 }
-                Ok(())
+                prune(db, &filled)
             })
             .await
             .unwrap();
+        let kept_chat = heaviest.clone();
+        let kept_questions = store
+            .read(move |db| Ok(side_questions(db, &kept_chat)?.len()))
+            .await
+            .unwrap();
+        assert_eq!(kept_questions, MAX_KEPT);
         let mut views = Vec::new();
         let mut view_bytes = 0;
         for _ in 0..50 {
@@ -1410,7 +1416,7 @@ mod tests {
                 "records": CHATS,
             },
             "largestView": {
-                "questions": MAX_KEPT,
+                "questions": kept_questions,
                 "encodedBytes": view_bytes,
                 "readAndEncode": distribution(views),
             },
