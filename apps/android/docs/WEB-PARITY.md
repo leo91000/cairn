@@ -1,5 +1,19 @@
 # Android 0.6.0 / web parity
 
+## One search button in the Android Fil (2026-11-08)
+
+Android drops the Fil's own filter button (« Filtrer le fil ») and its field,
+which duplicated the installation header's search button right above it. That
+search finds conversations by title, agent or project, and missions by name,
+tags or prompt; a mission result opens the Missions tab, not one of its runs.
+The filter matched each Fil row's title, status line, agent and project within
+the selected view, so Android no longer narrows a view, finds a row by its
+status line (a failure, a waiting question, a required account), finds a mission
+run by its agent, or finds a run whose mission is gone. The title row keeps its
+height when its read-all action comes and goes. Platform difference: web keeps
+the Fil filter beside the title (`/`). Presentation only: no contract, MCP,
+`cairn_installation` or stored schema changes.
+
 ## Explicit VM/native moves (2026-11-07)
 
 Web and Android label node destinations with their backend and permit an explicit
@@ -29,7 +43,8 @@ Two or more missions in a row that finished as expected and were read fold into
 one row: two stacked avatars, “3 missions finished” / « 3 missions terminées »,
 their names and the latest time. Tapping it unfolds them on a thread line. A
 lone one, a mission with delegated work below it, unread or unfinished work stay
-rows, and filtering shows every match unfolded. Web also unfolds the fold that
+rows, and filtering (web only since 2026-11-08) shows every match
+unfolded. Web also unfolds the fold that
 holds the work open beside the Fil.
 
 Unread finished work with a result preview can be read without opening it. Web
@@ -64,7 +79,8 @@ avatar alone. The detail line gives the project, or the agent without one, with
 a repeat arrow for missions. The header names the agents at work as a stack of
 up to three avatars (“2 at work” / « 2 au travail »), which opens En cours. The
 filter hides behind a search button and unfolds below the title (`/` on web),
-staying open while it holds a query. À lire / En cours / Tout become a segmented
+staying open while it holds a query; since 2026-11-08 the Fil filter is web
+only. À lire / En cours / Tout become a segmented
 control whose selection slides between views, with the counts beside each
 label. Web orbits a working agent's avatar; Android marks it in the corner.
 
