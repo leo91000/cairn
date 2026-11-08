@@ -34,7 +34,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7.0.1
       with:
-        ref: 276c5431b4f3aa4e06a37d2d86807efc9252980d
+        ref: 59d805247c872688fa59f84c77d9ffd560d9399a
     - name: Verify immutable candidate and closed qualification inputs
       id: source
       run: |
@@ -51,8 +51,8 @@ jobs:
         }
         checked_head="$(source_git rev-parse HEAD)"
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
-        test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
-        test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        test "$checked_head" = '59d805247c872688fa59f84c77d9ffd560d9399a'
+        test "$checked_tree" = '19946a7fcffa5b9539cc3e2a427e5c3fe3fc3c40'
         index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
         trap 'rm -f "$index_entries"' EXIT
         source_git ls-files -v -z > "$index_entries"
@@ -67,8 +67,8 @@ jobs:
         printf '{"observer":"%s","candidate":"%s","tree":"%s","phase":"before","trackedClean":%s,"trackedSourceClean":true,"allowedGeneratedEvidence":%s,"sourceIdentityVerified":true,"releaseProvenance":false}\n' '${{ github.sha }}' "$checked_head" "$checked_tree" "$tracked_clean" "$allowed_evidence" > "$RUNNER_TEMP/browser-qualification-source/before.json"
         cat "$RUNNER_TEMP/browser-qualification-source/before.json"
         echo 'reuse=false' >> "$GITHUB_OUTPUT"
-        echo 'commit=276c5431b4f3aa4e06a37d2d86807efc9252980d' >> "$GITHUB_OUTPUT"
-        echo 'tree=61e07c22b23e6f32ea4a73d2c1cde7d626efe08d' >> "$GITHUB_OUTPUT"
+        echo 'commit=59d805247c872688fa59f84c77d9ffd560d9399a' >> "$GITHUB_OUTPUT"
+        echo 'tree=19946a7fcffa5b9539cc3e2a427e5c3fe3fc3c40' >> "$GITHUB_OUTPUT"
     - name: Verify frozen source after the complete selected job
       if: always()
       run: |
@@ -85,8 +85,8 @@ jobs:
         }
         checked_head="$(source_git rev-parse HEAD)"
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
-        test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
-        test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        test "$checked_head" = '59d805247c872688fa59f84c77d9ffd560d9399a'
+        test "$checked_tree" = '19946a7fcffa5b9539cc3e2a427e5c3fe3fc3c40'
         index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
         trap 'rm -f "$index_entries"' EXIT
         source_git ls-files -v -z > "$index_entries"
@@ -118,7 +118,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7.0.1
       with:
-        ref: 276c5431b4f3aa4e06a37d2d86807efc9252980d
+        ref: 59d805247c872688fa59f84c77d9ffd560d9399a
     - name: Verify immutable candidate source before qualification
       run: |
         set -euo pipefail
@@ -134,8 +134,8 @@ jobs:
         }
         checked_head="$(source_git rev-parse HEAD)"
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
-        test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
-        test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        test "$checked_head" = '59d805247c872688fa59f84c77d9ffd560d9399a'
+        test "$checked_tree" = '19946a7fcffa5b9539cc3e2a427e5c3fe3fc3c40'
         index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
         trap 'rm -f "$index_entries"' EXIT
         source_git ls-files -v -z > "$index_entries"
@@ -209,8 +209,8 @@ jobs:
         }
         checked_head="$(source_git rev-parse HEAD)"
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
-        test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
-        test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        test "$checked_head" = '59d805247c872688fa59f84c77d9ffd560d9399a'
+        test "$checked_tree" = '19946a7fcffa5b9539cc3e2a427e5c3fe3fc3c40'
         index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
         trap 'rm -f "$index_entries"' EXIT
         source_git ls-files -v -z > "$index_entries"
@@ -289,7 +289,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7.0.1
       with:
-        ref: 276c5431b4f3aa4e06a37d2d86807efc9252980d
+        ref: 59d805247c872688fa59f84c77d9ffd560d9399a
     - name: Verify immutable candidate source before qualification
       run: |
         set -euo pipefail
@@ -305,8 +305,8 @@ jobs:
         }
         checked_head="$(source_git rev-parse HEAD)"
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
-        test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
-        test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        test "$checked_head" = '59d805247c872688fa59f84c77d9ffd560d9399a'
+        test "$checked_tree" = '19946a7fcffa5b9539cc3e2a427e5c3fe3fc3c40'
         index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
         trap 'rm -f "$index_entries"' EXIT
         source_git ls-files -v -z > "$index_entries"
@@ -381,8 +381,8 @@ jobs:
         }
         checked_head="$(source_git rev-parse HEAD)"
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
-        test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
-        test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        test "$checked_head" = '59d805247c872688fa59f84c77d9ffd560d9399a'
+        test "$checked_tree" = '19946a7fcffa5b9539cc3e2a427e5c3fe3fc3c40'
         index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
         trap 'rm -f "$index_entries"' EXIT
         source_git ls-files -v -z > "$index_entries"
@@ -466,7 +466,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7.0.1
       with:
-        ref: 276c5431b4f3aa4e06a37d2d86807efc9252980d
+        ref: 59d805247c872688fa59f84c77d9ffd560d9399a
     - name: Verify immutable candidate source before qualification
       run: |
         set -euo pipefail
@@ -482,8 +482,8 @@ jobs:
         }
         checked_head="$(source_git rev-parse HEAD)"
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
-        test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
-        test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        test "$checked_head" = '59d805247c872688fa59f84c77d9ffd560d9399a'
+        test "$checked_tree" = '19946a7fcffa5b9539cc3e2a427e5c3fe3fc3c40'
         index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
         trap 'rm -f "$index_entries"' EXIT
         source_git ls-files -v -z > "$index_entries"
@@ -553,8 +553,8 @@ jobs:
         }
         checked_head="$(source_git rev-parse HEAD)"
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
-        test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
-        test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        test "$checked_head" = '59d805247c872688fa59f84c77d9ffd560d9399a'
+        test "$checked_tree" = '19946a7fcffa5b9539cc3e2a427e5c3fe3fc3c40'
         index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
         trap 'rm -f "$index_entries"' EXIT
         source_git ls-files -v -z > "$index_entries"
@@ -583,7 +583,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7.0.1
       with:
-        ref: 276c5431b4f3aa4e06a37d2d86807efc9252980d
+        ref: 59d805247c872688fa59f84c77d9ffd560d9399a
     - name: Verify immutable candidate source before qualification
       run: |
         set -euo pipefail
@@ -599,8 +599,8 @@ jobs:
         }
         checked_head="$(source_git rev-parse HEAD)"
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
-        test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
-        test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        test "$checked_head" = '59d805247c872688fa59f84c77d9ffd560d9399a'
+        test "$checked_tree" = '19946a7fcffa5b9539cc3e2a427e5c3fe3fc3c40'
         index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
         trap 'rm -f "$index_entries"' EXIT
         source_git ls-files -v -z > "$index_entries"
@@ -653,8 +653,8 @@ jobs:
         }
         checked_head="$(source_git rev-parse HEAD)"
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
-        test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
-        test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        test "$checked_head" = '59d805247c872688fa59f84c77d9ffd560d9399a'
+        test "$checked_tree" = '19946a7fcffa5b9539cc3e2a427e5c3fe3fc3c40'
         index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
         trap 'rm -f "$index_entries"' EXIT
         source_git ls-files -v -z > "$index_entries"
@@ -709,7 +709,7 @@ jobs:
     steps:
     - uses: actions/checkout@v7.0.1
       with:
-        ref: 276c5431b4f3aa4e06a37d2d86807efc9252980d
+        ref: 59d805247c872688fa59f84c77d9ffd560d9399a
     - name: Verify immutable candidate source before qualification
       run: |
         set -euo pipefail
@@ -725,8 +725,8 @@ jobs:
         }
         checked_head="$(source_git rev-parse HEAD)"
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
-        test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
-        test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        test "$checked_head" = '59d805247c872688fa59f84c77d9ffd560d9399a'
+        test "$checked_tree" = '19946a7fcffa5b9539cc3e2a427e5c3fe3fc3c40'
         index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
         trap 'rm -f "$index_entries"' EXIT
         source_git ls-files -v -z > "$index_entries"
@@ -811,8 +811,8 @@ jobs:
         }
         checked_head="$(source_git rev-parse HEAD)"
         checked_tree="$(source_git rev-parse 'HEAD^{tree}')"
-        test "$checked_head" = '276c5431b4f3aa4e06a37d2d86807efc9252980d'
-        test "$checked_tree" = '61e07c22b23e6f32ea4a73d2c1cde7d626efe08d'
+        test "$checked_head" = '59d805247c872688fa59f84c77d9ffd560d9399a'
+        test "$checked_tree" = '19946a7fcffa5b9539cc3e2a427e5c3fe3fc3c40'
         index_entries="$(mktemp "$RUNNER_TEMP/browser-qualification-index.XXXXXX")"
         trap 'rm -f "$index_entries"' EXIT
         source_git ls-files -v -z > "$index_entries"

@@ -5,7 +5,11 @@ import { createMcpHandler, McpServer } from '@modelcontextprotocol/server'
 import Fastify from 'fastify'
 import { z } from 'zod'
 
-export async function mcpProvider(options: { clientSecret?: string, beforeAuthorize?: () => Promise<void> } = {}) {
+export async function mcpProvider(options: {
+  clientSecret?: string
+  beforeAuthorize?: () => Promise<void>
+  authorizationNavigation?: 'http-redirect' | 'document'
+} = {}) {
   // The manager outlives this fixture and can retain HTTP/SSE connections.
   // Closing the provider must also close those sockets, without waiting for the client.
   const app = Fastify({ forceCloseConnections: true })
@@ -38,6 +42,13 @@ export async function mcpProvider(options: { clientSecret?: string, beforeAuthor
     callback.searchParams.set('code', 'fixture-code')
     callback.searchParams.set('state', query.state)
     callback.searchParams.set('iss', origin)
+    if (options.authorizationNavigation === 'document') {
+      // A separate browser navigation makes the callback an interceptable request.
+      // Playwright routes only the first request in an HTTP redirect chain.
+      const destination = JSON.stringify(callback.toString()).replaceAll('<', '\\u003c')
+      return reply.type('text/html').send(`<script>window.location.replace(${destination})</script>`)
+    }
+
     return reply.redirect(callback.toString())
   })
   app.post('/token', (request, reply) => {
