@@ -28,11 +28,12 @@ fn snapshot(db: &Connection) -> BTreeMap<String, (String, Vec<Vec<SqlValue>>)> {
         .into_iter()
         .filter(|(name, _)| name != "runs")
         .map(|(name, sql)| {
-            // A10 changes these physical layouts after the attachment upgrade.
+            // Later migrations change these physical layouts after the attachment upgrade.
             // Preserve their logical values while all other tables retain exact DDL.
             let (schema, query) = match name.as_str() {
                 "nodes" => {
-                    let columns: Vec<String> = db.prepare("SELECT name FROM pragma_table_info('nodes') WHERE name!='exclusive_reservation' ORDER BY cid")
+                    // Compare retained values; the added capability is checked separately.
+                    let columns: Vec<String> = db.prepare("SELECT name FROM pragma_table_info('nodes') WHERE name NOT IN ('exclusive_reservation','vm_disks') ORDER BY cid")
                         .unwrap().query_map([], |row| row.get(0)).unwrap()
                         .collect::<rusqlite::Result<_>>().unwrap();
                     let fields = columns.iter().map(|column| format!("\"{column}\"")).collect::<Vec<_>>().join(",");
@@ -98,6 +99,12 @@ async fn real_v16_upgrade_preserves_metadata_files_quota_and_every_unrelated_tab
         assert_eq!(serde_json::to_value(saved.metadata).unwrap(), a);
     }
     let after = snapshot(&db);
+    let vm_disk_nodes: i64 = db
+        .query_row("SELECT count(*) FROM nodes WHERE vm_disks!=0", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(vm_disk_nodes, 0, "old nodes need a fresh capability report");
     assert_eq!(placement_migration_fixture::run_views(&db), runs_before);
     assert_eq!(
         placement_migration_fixture::retained_run_columns(&db),
@@ -152,7 +159,7 @@ async fn real_v16_upgrade_preserves_metadata_files_quota_and_every_unrelated_tab
     assert_eq!(
         db.pragma_query_value::<i64, _>(None, "user_version", |r| r.get(0))
             .unwrap(),
-        27
+        28
     );
     let s = Service::new(common::config(root.path())).await.unwrap();
     let proof = s.store.kv("d2-fixture-proof").await.unwrap().unwrap();
