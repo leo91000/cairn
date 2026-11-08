@@ -104,9 +104,20 @@ jobs:
         timeout-minutes: 5
         run: |
           node scripts/prepare-browser-build-dependencies.mjs
+          timeout --signal=TERM --kill-after=5s 60s apt-get -o Acquire::Retries=0 -o Acquire::https::Timeout=20 install -y --no-install-recommends zip
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
           "$HOME/.cargo/bin/rustup" component add rustfmt
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          for tool in git node pnpm python3 tar bash curl timeout cc pkg-config; do
+            command -v "$tool" > /dev/null
+          done
+          test -x /usr/bin/zip
+          test -x /usr/bin/python3
+          test -x /usr/bin/strip
+          test -x node_modules/.bin/vue-tsc
+          test -x node_modules/.bin/vite
+          "$HOME/.cargo/bin/cargo" --version
+          "$HOME/.cargo/bin/rustfmt" --version
       - name: Format and require unchanged product source
         timeout-minutes: 5
         env:
