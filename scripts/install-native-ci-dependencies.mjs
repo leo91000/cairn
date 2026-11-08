@@ -1,5 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs'
 import { createConnection, createServer } from 'node:net'
 import { constants, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -24,7 +29,10 @@ const aptOwner = String.raw`
 set +e
 set +m
 grace="$1"
-shift
+controller_pid="$2"
+controller_started="$3"
+cancel_path="$4"
+shift 4
 stopped=0
 trap 'stopped=124' ALRM
 trap 'stopped=130' INT
@@ -36,13 +44,26 @@ fi
 # The session leader reports its group before waiting for admission. EOF refuses
 # package work, including if the controller disappears before registering it.
 setsid bash -c '
+  cancel_path="$1"
+  shift
   printf "%s\n" "$$" >&3 || exit 1
   IFS= read -r admission <&4 || exit 143
   [ "$admission" = START ] || exit 143
+  [ ! -d "$cancel_path" ] || exit 143
   exec 3>&- 4<&-
   exec "$@"
-' cairn-native-apt-worker "$@" &
+' cairn-native-apt-worker "$cancel_path" "$@" &
 apt_pid=$!
+# The private cancellation marker is independent of Node's control socket and
+# sudo's signal relay. Polling schedules observation; the GNU work bound remains
+# authoritative even if this loop cannot progress.
+while [ "$stopped" -eq 0 ] && kill -0 "$apt_pid" 2>/dev/null; do
+  if [ -d "$cancel_path" ]; then
+    stopped=143
+    break
+  fi
+  sleep 0.05
+done
 if [ "$stopped" -eq 0 ]; then
   wait "$apt_pid" 2>/dev/null
   status=$?
@@ -61,6 +82,16 @@ if kill -0 -- "-$apt_pid" 2>/dev/null; then
 fi
 wait "$apt_pid" 2>/dev/null || :
 printf "CLOSED\n" >&3 || exit 1
+if [ -d "$cancel_path" ]; then
+  # A blocked controller cannot acknowledge socket cancellation. Package work
+  # is settled now; retire only that known parent, never a global process name.
+  if IFS= read -r controller_stat < "/proc/$controller_pid/stat"; then
+    read -r -a controller_fields <<< "${'$'}{controller_stat##*) }"
+    if [ "${'$'}{controller_fields[19]}" = "$controller_started" ]; then
+      kill -KILL "$controller_pid" 2>/dev/null || :
+    fi
+  fi
+fi
 exit "$status"
 `
 
@@ -181,6 +212,13 @@ export async function runAptPhase(phase, seconds, cleanupGraceMs = 1000, profile
     function startApt() {
       const args = phase === 'install' ? [...specification.args, ...profileSpecification.packages] : specification.args
       const graceSeconds = cleanupGraceMs / 1000
+      const controllerStat = readFileSync('/proc/self/stat', 'utf8')
+      const controllerStarted = controllerStat.slice(controllerStat.lastIndexOf(')') + 2).split(' ')[19]
+      if (!/^\d+$/.test(controllerStarted)) {
+        cleanup(1)
+        return
+      }
+
       child = spawn('timeout', [
         '--preserve-status',
         '--signal=ALRM',
@@ -191,6 +229,9 @@ export async function runAptPhase(phase, seconds, cleanupGraceMs = 1000, profile
         aptOwner,
         'cairn-native-apt-owner',
         `${graceSeconds}`,
+        `${process.pid}`,
+        controllerStarted,
+        `${controlPath}.cancel`,
         'apt-get',
         ...args,
       ], { detached: true, stdio: ['ignore', 'inherit', 'inherit', 'pipe', 'pipe'] })
@@ -294,9 +335,24 @@ export async function installNativeCiDependencies({
     if (interruptedCode)
       return
     interruptedCode = 128 + constants.signals[signal]
+    let cancellationRecorded = false
+    if (controlDirectory) {
+      try {
+        mkdirSync(join(controlDirectory, 'owner.sock.cancel'), { recursive: true })
+        cancellationRecorded = true
+      }
+      catch {
+        marker(write, 'control', 'cancel-marker-error')
+      }
+    }
+
     controlSocket?.end(`${signal}\n`)
     // Privilege entry might stall before it can consume the control request.
     // Keep the existing timeout supervisor as a bounded fallback in that case.
+    // If marker acquisition failed after admission, retain the original work
+    // deadline instead of abandoning a possibly blocked privileged owner early.
+    if (!cancellationRecorded && controlSocket)
+      return
     interruptionTimer = setTimeout(() => {
       try {
         process.kill(-child.pid, 'SIGTERM')

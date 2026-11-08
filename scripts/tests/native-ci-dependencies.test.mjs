@@ -24,6 +24,7 @@ async function executeSetup(fault = '', {
   closeOutput = false,
   blockedOutput = false,
   throwingMarker = false,
+  cancelMarkerFailure = false,
   interruptSignal,
   interruptPhase = 'descendant',
 } = {}) {
@@ -34,7 +35,7 @@ async function executeSetup(fault = '', {
   const closedControl = fault === 'closed-control' ? createServer(socket => socket.end()) : undefined
   if (closedControl)
     await new Promise(resolve => closedControl.listen(closedControlPath, resolve))
-  const recordSpawn = `import childProcess from 'node:child_process';import{syncBuiltinESMExports}from'node:module';import{appendFileSync}from'node:fs';const original=childProcess.spawn;childProcess.spawn=function(command,...args){const child=original.call(this,command,...args);if(command==='apt-get')appendFileSync(${JSON.stringify(history)},JSON.stringify({phase:'apt-spawn',pid:process.pid})+'\\n');return child};const originalSync=childProcess.spawnSync;childProcess.spawnSync=function(command,...args){const result=originalSync.call(this,command,...args);if(${JSON.stringify(fault)}==='stalled-supervision'&&command==='/usr/bin/printf'&&args[0].some(value=>value.includes('event=apt-start')))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5000);return result};syncBuiltinESMExports();`
+  const recordSpawn = `import childProcess from 'node:child_process';import{syncBuiltinESMExports}from'node:module';import{appendFileSync}from'node:fs';if(${JSON.stringify(fault)}==='stalled-supervision')appendFileSync(${JSON.stringify(history)},JSON.stringify({phase:'controller',pid:process.pid})+'\\n');const original=childProcess.spawn;childProcess.spawn=function(command,...args){const child=original.call(this,command,...args);if(command==='apt-get')appendFileSync(${JSON.stringify(history)},JSON.stringify({phase:'apt-spawn',pid:process.pid})+'\\n');return child};const originalSync=childProcess.spawnSync;childProcess.spawnSync=function(command,...args){const result=originalSync.call(this,command,...args);if(${JSON.stringify(fault)}==='stalled-supervision'&&command==='/usr/bin/printf'&&args[0].some(value=>value.includes('event=apt-start')))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,5000);return result};syncBuiltinESMExports();`
   const fixture = `#!${process.execPath}
 const { spawn, spawnSync } = require('node:child_process')
 const { appendFileSync } = require('node:fs')
@@ -78,8 +79,9 @@ if (phase === fault) {
 
   const started = Date.now()
   const fillOutput = `let full = false; const bytes = Buffer.alloc(64 * 1024); for (let i = 0; i < 256; i++) { try { writeSync(process.stdout.fd, bytes); } catch (error) { full = error.code === 'EAGAIN'; break; } } appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase: 'blocked-output', pid: process.pid, full }) + '\\n');`
-  const workSeconds = interruptSignal ? 5 : 0.15
-  const driver = `import { writeSync, appendFileSync } from 'node:fs'; import { installNativeCiDependencies } from ${JSON.stringify(new URL('scripts/install-native-ci-dependencies.mjs', root).href)}; ${blockedOutput ? fillOutput : ''} process.exitCode = await installNativeCiDependencies({ profile: ${JSON.stringify(profile)}, phaseSeconds: { update: ${workSeconds}, install: ${workSeconds} }, entryAllowanceSeconds: 0.65, killAfterSeconds: 0.4${throwingMarker ? ', write: () => { throw new Error("fixture marker failure") }' : ''} });`
+  const workSeconds = interruptSignal && !cancelMarkerFailure ? 5 : 0.15
+  const cancelFault = cancelMarkerFailure ? `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module'; const mkdir = fs.mkdirSync; fs.mkdirSync = function(candidate, ...args) { if (candidate.endsWith('owner.sock.cancel')) throw new Error('fixture metadata refusal'); return mkdir.call(this, candidate, ...args); }; syncBuiltinESMExports();` : ''
+  const driver = `${cancelFault} import { writeSync, appendFileSync } from 'node:fs'; import { installNativeCiDependencies } from ${JSON.stringify(new URL('scripts/install-native-ci-dependencies.mjs', root).href)}; ${blockedOutput ? fillOutput : ''} process.exitCode = await installNativeCiDependencies({ profile: ${JSON.stringify(profile)}, phaseSeconds: { update: ${workSeconds}, install: ${workSeconds} }, entryAllowanceSeconds: 0.65, killAfterSeconds: 0.4${throwingMarker ? ', write: () => { throw new Error("fixture marker failure") }' : ''} });`
   const unsupportedProfile = !['native', 'android-network'].includes(profile)
   const useDriver = fault || closeOutput || blockedOutput || throwingMarker
   const androidCommand = 'node scripts/install-native-ci-dependencies.mjs --profile android-network'
@@ -278,6 +280,33 @@ describe('native CI dependency setup', () => {
     expect(result.status).toBe(137)
     expect(result.harnessKilled).toBe(false)
     expect(result.calls.filter(call => call.phase === 'descendant')).toHaveLength(1)
+    expect(result.liveAtPublicExit).toEqual([])
+    expect(result.survivingFixturePids).toEqual([])
+    expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(0)
+  })
+
+  it.each([
+    ['native', 'SIGINT', 130],
+    ['native', 'SIGTERM', 143],
+    ['android-network', 'SIGINT', 130],
+    ['android-network', 'SIGTERM', 143],
+  ])('settles stalled privileged supervision before public cancellation (%s, %s)', async (profile, interruptSignal, code) => {
+    const result = await executeSetup('stalled-supervision', { profile, interruptSignal, interruptPhase: 'update' })
+    expect(result.status).toBe(code)
+    expect(result.signalSent).toBe(true)
+    expect(result.harnessKilled).toBe(false)
+    expect(result.calls.filter(call => call.phase === 'descendant')).toHaveLength(1)
+    expect(result.liveAtPublicExit).toEqual([])
+    expect(result.survivingFixturePids).toEqual([])
+    expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(0)
+  })
+
+  it.each([['SIGINT', 130], ['SIGTERM', 143]])('retains owned cleanup if cancellation metadata fails (%s)', async (interruptSignal, code) => {
+    const result = await executeSetup('stalled-supervision', { interruptSignal, interruptPhase: 'update', cancelMarkerFailure: true })
+    expect(result.status).toBe(code)
+    expect(result.signalSent).toBe(true)
+    expect(result.harnessKilled).toBe(false)
+    expect(result.output).toContain('phase=control event=cancel-marker-error')
     expect(result.liveAtPublicExit).toEqual([])
     expect(result.survivingFixturePids).toEqual([])
     expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(0)

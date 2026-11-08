@@ -127,7 +127,11 @@ limits remain unchanged. Setup is not retried. An independent privileged GNU
 `timeout`/Bash guard keeps the APT deadline and group cleanup live when Node's
 control loop stalls. A private group-registration/admission exchange precedes
 package execution; the controller retains that group for cleanup if the shell
-is lost. Neither side starts subsequent phases after failure.
+is lost. A private cancellation marker reaches the shell independently of Node's
+control socket and sudo's signal relay; after APT cleanup the shell retires a
+blocked controller before the launcher can return. If marker acquisition fails,
+the launcher retains the admitted owner's original work deadline instead of
+abandoning it early. Neither side starts subsequent phases after failure.
 
 The helper retains a closed `android-network` profile (90/90 seconds), but the
 Android direct job uses the newer `prepare-network-tools.mjs` preflight instead;
@@ -136,7 +140,8 @@ outside this helper.
 
 `pnpm exec vitest run scripts/tests/native-ci-dependencies.test.mjs` exercises
 success, failure, timeout, interruptions, delayed privilege entry, orphan cleanup,
-stalled Node supervision, lost privileged shells and bounded diagnostic output. Repeat with `CAIRN_TEST_REAL_SUDO=1` on a disposable
+stalled Node supervision (including cancellation), lost privileged shells and
+bounded diagnostic output. Repeat with `CAIRN_TEST_REAL_SUDO=1` on a disposable
 or authorized sudo-capable host to run the same cases through `/usr/bin/sudo -n`
 and assert UID 0 in the synthetic APT executable. No real packages are changed by
 these fixture tests. The short PR quality job runs both routes. Full validation
