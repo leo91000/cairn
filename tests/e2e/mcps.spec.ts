@@ -13,12 +13,13 @@ import {
 type OAuthDepartureProbe = { kind: 'background' } | { kind: 'offer', closed: boolean }
 
 interface CallbackBootstrapProbe {
-  kind: 'session-held' | 'load' | 'retired' | 'pageshow' | 'authorize'
+  kind: 'account-held' | 'load' | 'retired' | 'pageshow' | 'authorize'
   documentId: string
   retired: boolean
   trusted?: boolean
   persisted?: boolean
-  sessionHeld?: boolean
+  account?: 'session' | 'options'
+  heldResponses?: number
 }
 
 declare global {
@@ -239,20 +240,24 @@ test('initial pageshow cannot restart direct authorization during OAuth callback
   const provider = await mcpProvider()
   const probes: CallbackBootstrapProbe[] = []
   const errors: string[] = []
-  const sessionHeld = Promise.withResolvers<void>()
+  const accountHeld = Promise.withResolvers<void>()
+  const heldResponses = new Set<'session' | 'options'>()
   const callbackPath = `/installations/${workspace.installationId}/mcps/callback`
   page.on('pageerror', error => errors.push(error.message))
   await page.exposeFunction('cairnCallbackBootstrapProbe', (probe: CallbackBootstrapProbe) => {
     probes.push(probe)
-    if (probe.kind === 'session-held')
-      sessionHeld.resolve()
+    if (probe.kind === 'account-held' && probe.account) {
+      heldResponses.add(probe.account)
+      if (heldResponses.size === 2)
+        accountHeld.resolve()
+    }
   })
   await page.addInitScript((legacyCallbackPath) => {
     if (location.pathname !== legacyCallbackPath)
       return
     const documentId = crypto.randomUUID()
     let retired = false
-    let releaseSession: (() => void) | undefined
+    const releaseAccount: (() => void)[] = []
     const report = (probe: Omit<CallbackBootstrapProbe, 'documentId' | 'retired'>) => {
       void window.cairnCallbackBootstrapProbe({ documentId, retired, ...probe })
     }
@@ -265,11 +270,12 @@ test('initial pageshow cannot restart direct authorization during OAuth callback
       report({ kind: 'retired' })
     }
 
-    // Deliver the real session response at the native load checkpoint so the
-    // production account shell canonicalizes before initial native pageshow.
+    // Both account bodies must be ready: the production bootstrap awaits them
+    // together. Deliver them at native load, before initial native pageshow.
     window.addEventListener('load', (event) => {
-      report({ kind: 'load', trusted: event.isTrusted, sessionHeld: !!releaseSession })
-      releaseSession?.()
+      report({ kind: 'load', trusted: event.isTrusted, heldResponses: releaseAccount.length })
+      for (const release of releaseAccount)
+        release()
     }, { once: true })
     window.addEventListener('pageshow', event => report({ kind: 'pageshow', trusted: event.isTrusted, persisted: event.persisted }))
     const fetch = window.fetch
@@ -281,14 +287,15 @@ test('initial pageshow cannot restart direct authorization during OAuth callback
         report({ kind: 'authorize' })
 
       const pending = fetch(...args)
-      if (pathname !== '/api/account/session')
+      const account = pathname === '/api/account/session' ? 'session' : pathname === '/api/account/options' ? 'options' : undefined
+      if (!account)
         return pending
 
       return pending.then(async (response) => {
         const text = await response.text()
         return new Promise<Response>((resolve) => {
-          releaseSession = () => resolve(new Response(text, { status: response.status, headers: response.headers }))
-          report({ kind: 'session-held' })
+          releaseAccount.push(() => resolve(new Response(text, { status: response.status, headers: response.headers })))
+          report({ kind: 'account-held', account })
         })
       })
     }
@@ -299,7 +306,7 @@ test('initial pageshow cannot restart direct authorization during OAuth callback
     await route.fulfill({ response, body })
   })
   await page.route('**/__cairn-callback-load.svg', async (route) => {
-    await sessionHeld.promise
+    await accountHeld.promise
     await route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>' })
   })
   try {
@@ -318,7 +325,7 @@ test('initial pageshow cannot restart direct authorization during OAuth callback
     await expect(card.getByText('Connected', { exact: true })).toBeVisible()
     expect(provider.exchanges).toBe(1)
     expect(probes.filter(probe => probe.kind === 'load')).toEqual([
-      expect.objectContaining({ trusted: true, sessionHeld: true }),
+      expect.objectContaining({ trusted: true, heldResponses: 2 }),
     ])
     expect(probes.filter(probe => probe.kind === 'pageshow')).toEqual([
       expect.objectContaining({ trusted: true, persisted: false, retired: true }),
@@ -327,7 +334,7 @@ test('initial pageshow cannot restart direct authorization during OAuth callback
     expect(errors).toEqual([])
   }
   finally {
-    sessionHeld.resolve()
+    accountHeld.resolve()
     try {
       await page.unrouteAll({ behavior: 'wait' })
     }
