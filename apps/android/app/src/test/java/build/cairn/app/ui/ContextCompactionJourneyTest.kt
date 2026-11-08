@@ -395,10 +395,12 @@ class ContextCompactionJourneyTest {
                 compose.onNodeWithContentDescription("Options de la conversation").performClick()
                 compose.onNodeWithText("Renommer").performClick()
                 waitText("Renommer la conversation")
-                // A refused save is reported, and its error does not follow the dialog once closed.
+                // A rename refused again after reading the conversation once more is reported, and
+                // its error does not follow the sheet once closed.
                 compose.onNodeWithTag("rename-title").performTextReplacement("Titre concurrent")
                 compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
                 waitText("This conversation changed. Reload before renaming.")
+                assertEquals(3, renames.size)
                 compose.onNodeWithText("Annuler").performClick()
                 compose.onNodeWithContentDescription("Options de la conversation").performClick()
                 compose.onNodeWithText("Renommer").performClick()
@@ -415,7 +417,7 @@ class ContextCompactionJourneyTest {
                         .fetchSemanticsNodes()
                         .isEmpty()
                 }
-                assertEquals(3, renames.size)
+                assertEquals(4, renames.size)
                 val rename = wireJson.parseToJsonElement(renames.last()).jsonObject
                 assertEquals("Notes de version", rename["title"]!!.jsonPrimitive.content)
                 assertEquals(chat.revision, rename["revision"]!!.jsonPrimitive.content)

@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test'
+import type { Page, Route } from '@playwright/test'
 import type { Workspace } from './fixtures'
 import type { ResumeDiagnosticRecord } from './resume-diagnostic'
 import { randomUUID } from 'node:crypto'
@@ -2211,8 +2211,13 @@ test('a renamed conversation keeps its title and Cairn stops naming it', async (
   await action('Rename conversation').click()
   await expect(title).toHaveValue('Release notes')
   const before = (await workspace.api(`/api/chats/${chat.id}`)).revision
-  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Add the migration notes too' })
-  await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status).toBe('succeeded')
+  const followUp = randomUUID()
+  await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: followUp, text: 'Add the migration notes too' })
+  // The conversation's run is reused, so its turn is done once it took the message and succeeded.
+  await expect.poll(() => {
+    const current = workspace.service.chats.detail(chat.id)
+    return current.messages.some(message => message.id === followUp && message.status === 'delivered') && current.run?.status === 'succeeded'
+  }).toBe(true)
   expect((await workspace.api(`/api/chats/${chat.id}`)).revision).not.toBe(before)
   await title.fill('Release notes 0.52')
   await dialog.getByRole('button', { name: 'Save', exact: true }).click()
@@ -2267,17 +2272,38 @@ test('a renamed conversation keeps its title and Cairn stops naming it', async (
   await page.unroute(renamePath)
   await expect(page.locator('.chat-header').getByRole('heading', { name: 'Found title', exact: true })).toBeVisible()
 
-  // A refused save is reported and the field takes focus back, keeping what the person typed.
+  // A revision that moves between reading and renaming is read once more, unseen.
+  let refusals = 1
+  let renames = 0
+  await page.route(renamePath, (route: Route) => {
+    if (route.request().method() !== 'PUT')
+      return route.continue()
+    renames++
+    if (refusals === 0)
+      return route.continue()
+    refusals--
+    return route.fulfill({ status: 409, json: { error: 'This conversation changed. Reload before renaming.' } })
+  })
   ;({ action } = await openChatDetails(page))
   await action('Rename conversation').click()
   await expect(title).toHaveValue('Found title')
+  await title.fill('Retried title')
+  await dialog.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(page.locator('.chat-header').getByRole('heading', { name: 'Retried title', exact: true })).toBeVisible()
+  expect(renames).toBe(2)
+
+  // A rename refused again is reported and the field takes focus back, keeping what the person typed.
+  refusals = 2
+  renames = 0
+  ;({ action } = await openChatDetails(page))
+  await action('Rename conversation').click()
+  await expect(title).toHaveValue('Retried title')
   await expect(dialog.getByRole('alert')).toHaveCount(0)
-  await page.route(renamePath, route => route.request().method() === 'PUT'
-    ? route.fulfill({ status: 409, json: { error: 'This conversation changed. Reload before renaming.' } })
-    : route.continue())
   await title.fill('Final title')
   await dialog.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(dialog.getByRole('alert')).toContainText('This conversation changed. Reload before renaming.')
+  expect(renames).toBe(2)
   await expect(title).toBeFocused()
   await page.keyboard.press('End')
   await page.keyboard.type('!')

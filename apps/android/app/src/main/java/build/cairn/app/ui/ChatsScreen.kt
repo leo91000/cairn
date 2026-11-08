@@ -2223,19 +2223,25 @@ internal fun ChatPage(
                     found ->
                     vm.perform {
                         // Messages and turns change the revision too, and the live conversation
-                        // can trail it.
-                        val latest = api.getChat(ChatInput(chatId = chat.id))
-                        if (latest.title != current) found(latest.title)
-                        else {
-                            api.renameChat(
-                                RenameChatInput(
-                                    chatId = chat.id,
-                                    revision = latest.revision,
-                                    title = title,
+                        // can trail it: a revision that moves between reading and renaming is
+                        // read once more.
+                        suspend fun rename(retry: Boolean) {
+                            val latest = api.getChat(ChatInput(chatId = chat.id))
+                            if (latest.title != current) return found(latest.title)
+                            try {
+                                api.renameChat(
+                                    RenameChatInput(
+                                        chatId = chat.id,
+                                        revision = latest.revision,
+                                        title = title,
+                                    )
                                 )
-                            )
-                            renaming = false
+                                renaming = false
+                            } catch (e: ApiException) {
+                                if (retry && e.status == 409) rename(false) else throw e
+                            }
                         }
+                        rename(true)
                     }
                 }
             if (compacting && chat != null)

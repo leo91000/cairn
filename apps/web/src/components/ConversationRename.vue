@@ -8,7 +8,7 @@ import {
 } from 'vue'
 import { getChat } from '../../../../packages/contracts/generated/getChat'
 import { renameChat } from '../../../../packages/contracts/generated/renameChat'
-import { api } from '../api'
+import { api, ApiError } from '../api'
 import Modal from './Modal.vue'
 import UiButton from './UiButton.vue'
 
@@ -39,21 +39,35 @@ const tooLong = computed(() => length.value > MAX_TITLE)
 // Compared with the conversation's current title, which the dialog names when it changed.
 const changed = computed(() => !!trimmed.value && !tooLong.value && trimmed.value !== current.value)
 
+// Messages and turns change the revision too, and the live conversation can trail it: a revision
+// that moves between reading and renaming is read once more.
+async function rename(retry: boolean): Promise<boolean> {
+  const chatId = props.chat.id
+  const latest = await getChat(api, { chatId })
+  if (latest.title !== current.value) {
+    found.value = latest.title
+    return false
+  }
+
+  try {
+    emit('renamed', await renameChat(api, { chatId, revision: latest.revision, title: trimmed.value }))
+    return true
+  }
+  catch (e) {
+    if (retry && e instanceof ApiError && e.status === 409)
+      return rename(false)
+    throw e
+  }
+}
+
 async function save() {
   if (saving.value || !changed.value)
     return
-  const chatId = props.chat.id
   saving.value = true
   error.value = ''
   try {
-    // Messages and turns change the revision too, and the live conversation can trail it.
-    const latest = await getChat(api, { chatId })
-    if (latest.title === current.value) {
-      emit('renamed', await renameChat(api, { chatId, revision: latest.revision, title: trimmed.value }))
+    if (await rename(true))
       return
-    }
-
-    found.value = latest.title
   }
   catch (e) {
     error.value = (e as Error).message

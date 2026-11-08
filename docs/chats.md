@@ -37,8 +37,8 @@ the person's: neither the first message nor automatic evaluation replaces it aga
 evaluation already in progress is discarded. Saving reads the conversation first, so nothing that
 happens while the dialog is open blocks the rename: a message, a turn, an automatic title or a
 rename elsewhere. A title that changed meanwhile is never replaced unseen: the dialog names it and
-the next save replaces it. The installation still refuses a rename sent with a stale revision,
-which the dialog reports. Public MCP
+the next save replaces it. A revision that moves between that read and the rename is read once
+more; a second refusal from the installation is reported in the dialog. Public MCP
 and `cairn_installation` agents rename through `rename_chat`, with the same effect.
 
 When an agent reports completion, **Task completed** appears beneath the reply in the conversation. **View evidence** expands the report and supporting details, including clickable commit and workflow links; **Hide evidence** collapses it. Reports without evidence use **View details**. **Blocked** and **Your input needed** show their reason immediately. These are agent-reported outcomes, and a new reply clears the previous report. The composer remains available while reading the evidence.
