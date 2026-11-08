@@ -468,7 +468,9 @@ internal fun ChatPage(
     var queueExpanded by rememberSaveable(id) { mutableStateOf(false) }
     var newSession by remember(id) { mutableStateOf(false) }
     var compacting by remember(id) { mutableStateOf(false) }
-    var renaming by remember(id) { mutableStateOf(false) }
+    // The conversation as the rename dialog opened on it: a title changed meanwhile is reported
+    // by the installation instead of being overwritten.
+    var renaming by remember(id) { mutableStateOf<Chat?>(null) }
     var cancelledExpanded by rememberSaveable(id) { mutableStateOf(false) }
     BackHandler(selected && fullscreen) { fullscreen = false }
     var choosing by rememberSaveable(id) { mutableStateOf(false) }
@@ -1100,7 +1102,7 @@ internal fun ChatPage(
                                         leadingIcon = { Icon(Icons.Default.Edit, null) },
                                         onClick = {
                                             menu = false
-                                            renaming = true
+                                            renaming = chat
                                         },
                                     )
                                 chat
@@ -2215,20 +2217,27 @@ internal fun ChatPage(
                         newSession = false
                     }
                 }
-            if (renaming && chat != null)
-                ConversationRename(chat.title, state.busy, state.error, { renaming = false }) {
-                    title ->
+            renaming?.let { shown ->
+                ConversationRename(shown.title, state.busy, state.error, { renaming = null }) {
+                    title,
+                    conflict ->
                     vm.perform {
-                        api.renameChat(
-                            RenameChatInput(
-                                chatId = chat.id,
-                                revision = chat.revision,
-                                title = title,
+                        try {
+                            api.renameChat(
+                                RenameChatInput(
+                                    chatId = shown.id,
+                                    revision = shown.revision,
+                                    title = title,
+                                )
                             )
-                        )
-                        renaming = false
+                        } catch (e: ApiException) {
+                            if (e.status == 409) conflict()
+                            throw e
+                        }
+                        renaming = null
                     }
                 }
+            }
             if (compacting && chat != null)
                 Confirm(
                     "Compacter le contexte de l’agent ?",

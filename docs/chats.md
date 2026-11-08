@@ -34,9 +34,9 @@ Android through the existing live stream and do not change the chat's recency.
 **Rename conversation** in **Chat details** (« Renommer » in Android's ⋮ menu) sets a
 title of up to 90 characters, trimmed and without control characters. The title is then
 the person's: neither the first message nor automatic evaluation replaces it again, and an
-evaluation already in progress is discarded. Renaming checks the conversation's revision: the dialog
-follows the live conversation, so a change made at the same moment elsewhere is reported instead
-of overwritten, and saving again applies to what the person then sees. Public MCP
+evaluation already in progress is discarded. Renaming checks the revision the dialog opened on:
+a title changed elsewhere while it is open shows in the header but not in the field, saving over it
+is reported instead of overwriting it, and reopening the dialog starts from the current title. Public MCP
 and `cairn_installation` agents rename through `rename_chat`, with the same effect.
 
 When an agent reports completion, **Task completed** appears beneath the reply in the conversation. **View evidence** expands the report and supporting details, including clickable commit and workflow links; **Hide evidence** collapses it. Reports without evidence use **View details**. **Blocked** and **Your input needed** show their reason immediately. These are agent-reported outcomes, and a new reply clears the previous report. The composer remains available while reading the evidence.

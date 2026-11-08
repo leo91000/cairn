@@ -31,7 +31,8 @@ internal const val MAX_CONVERSATION_TITLE = 90
 
 /**
  * Renames a conversation. Once renamed, Cairn no longer names it automatically, so the dialog says
- * so; [save] receives the trimmed title only when it changed.
+ * so; [save] receives the trimmed title only when it changed, and a way to report that the
+ * conversation changed meanwhile, after which saving again waits for the dialog to reopen.
  */
 @Composable
 internal fun ConversationRename(
@@ -39,7 +40,7 @@ internal fun ConversationRename(
     busy: Boolean,
     error: String?,
     dismiss: () -> Unit,
-    save: (String) -> Unit,
+    save: (title: String, conflict: () -> Unit) -> Unit,
 ) {
     var value by remember { mutableStateOf(TextFieldValue(title, TextRange(0, title.length))) }
     val trimmed = value.text.trim()
@@ -47,6 +48,14 @@ internal fun ConversationRename(
     val length = trimmed.codePointCount(0, trimmed.length)
     val tooLong = length > MAX_CONVERSATION_TITLE
     val changed = trimmed.isNotEmpty() && !tooLong && trimmed != title
+    var stale by remember { mutableStateOf(false) }
+    // The shared error belongs to this dialog only once it has tried to save.
+    var tried by remember { mutableStateOf(false) }
+    val savable = changed && !stale && !busy
+    val submit = {
+        tried = true
+        save(trimmed) { stale = true }
+    }
     val focus = remember { FocusRequester() }
     AlertDialog(
         onDismissRequest = { if (!busy) dismiss() },
@@ -58,16 +67,8 @@ internal fun ConversationRename(
             Column {
                 OutlinedTextField(
                     value = value,
-                    // Typing stops at the limit; deleting, moving the cursor or selecting never
-                    // does.
-                    onValueChange = {
-                        val next = it.text.codePointCount(0, it.text.length)
-                        if (
-                            next <= MAX_CONVERSATION_TITLE ||
-                                next <= value.text.codePointCount(0, value.text.length)
-                        )
-                            value = it
-                    },
+                    // A longer title stays in the field with its length, like on the web.
+                    onValueChange = { value = it },
                     isError = tooLong,
                     supportingText =
                         if (tooLong) {
@@ -87,7 +88,7 @@ internal fun ConversationRename(
                         ),
                     keyboardActions =
                         androidx.compose.foundation.text.KeyboardActions(
-                            onDone = { if (changed && !busy) save(trimmed) }
+                            onDone = { if (savable) submit() }
                         ),
                     modifier =
                         Modifier.fillMaxWidth().focusRequester(focus).testTag("rename-title"),
@@ -99,11 +100,11 @@ internal fun ConversationRename(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 ConnectionFeedbackNotice()
-                if (error != null) Text(error, color = MaterialTheme.colorScheme.error)
+                if (tried && error != null) Text(error, color = MaterialTheme.colorScheme.error)
             }
         },
         confirmButton = {
-            TextButton(onClick = { save(trimmed) }, enabled = changed && !busy) {
+            TextButton(onClick = submit, enabled = savable) {
                 Text("Enregistrer")
             }
         },

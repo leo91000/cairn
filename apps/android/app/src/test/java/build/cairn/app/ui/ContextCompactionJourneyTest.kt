@@ -182,6 +182,13 @@ class ContextCompactionJourneyTest {
                                     .jsonObject["title"]!!
                                     .jsonPrimitive
                                     .content
+                            if (title == "Titre concurrent")
+                                return MockResponse()
+                                    .setResponseCode(409)
+                                    .setHeader("Content-Type", "application/json")
+                                    .setBody(
+                                        """{"error":"This conversation changed. Reload before renaming."}"""
+                                    )
                             return MockResponse()
                                 .setHeader("Content-Type", "application/json")
                                 .setBody(wireJson.encodeToString(chat.copy(title = title)))
@@ -339,10 +346,27 @@ class ContextCompactionJourneyTest {
                     .onNodeWithText("Cairn ne renommera plus cette conversation automatiquement.")
                     .assertExists()
                 compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                // A longer title stays in the field and says why it cannot be saved.
+                compose.onNodeWithTag("rename-title").performTextReplacement("é".repeat(91))
+                waitText("90 caractères au plus (91 actuellement).")
+                compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                // A conversation changed meanwhile is reported, and saving again waits for the
+                // dialog to reopen on the current title.
+                compose.onNodeWithTag("rename-title").performTextReplacement("Titre concurrent")
+                compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
+                waitText("This conversation changed. Reload before renaming.")
+                compose.onNodeWithText("Enregistrer").assertIsNotEnabled()
+                compose.onNodeWithText("Annuler").performClick()
+                compose.onNodeWithContentDescription("Options de la conversation").performClick()
+                compose.onNodeWithText("Renommer").performClick()
+                waitText("Renommer la conversation")
+                compose
+                    .onAllNodesWithText("This conversation changed. Reload before renaming.")
+                    .assertCountEquals(0)
                 compose.onNodeWithTag("rename-title").performTextReplacement("  Notes de version  ")
                 compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
-                compose.waitUntil(10000) { renames.isNotEmpty() }
-                val rename = wireJson.parseToJsonElement(renames.single()).jsonObject
+                compose.waitUntil(10000) { renames.size == 2 }
+                val rename = wireJson.parseToJsonElement(renames.last()).jsonObject
                 assertEquals("Notes de version", rename["title"]!!.jsonPrimitive.content)
                 assertEquals(chat.revision, rename["revision"]!!.jsonPrimitive.content)
                 assertEquals(chatId, rename["chatId"]!!.jsonPrimitive.content)

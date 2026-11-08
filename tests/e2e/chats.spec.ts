@@ -2204,23 +2204,29 @@ test('a renamed conversation keeps its title and Cairn stops naming it', async (
   await expect(fil.locator(`[data-fil-key="chat:${chat.id}"]`)).toContainText('Release notes')
   await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).title).toBe('Release notes')
 
-  // Another client renamed it meanwhile: the live title shows, and the dialog keeps the revision it
-  // now reads, so saving applies to what the person sees.
+  // Another client renames it while the dialog is open: the live title shows, the untouched field
+  // keeps what the person saw, and saving over the change is refused instead of overwriting it.
+  ;({ action } = await openChatDetails(page))
+  await action('Rename conversation').click()
+  await expect(title).toHaveValue('Release notes')
   const current = await workspace.api(`/api/chats/${chat.id}`)
   await workspace.api(`/api/chats/${chat.id}`, 'PUT', { revision: current.revision, title: 'Renamed elsewhere' })
   await expect(page.locator('.chat-header').getByRole('heading', { name: 'Renamed elsewhere', exact: true })).toBeVisible()
-  ;({ action } = await openChatDetails(page))
-  await action('Rename conversation').click()
-  await expect(title).toHaveValue('Renamed elsewhere')
-  // A change racing the save is refused and reported; saving again uses the current revision.
-  const renamePath = `**/chats/${chat.id}`
-  await page.route(renamePath, route => route.request().method() === 'PUT'
-    ? route.fulfill({ status: 409, json: { error: 'This conversation changed. Reload before renaming.' } })
-    : route.continue())
+  await expect(title).toHaveValue('Release notes')
+  await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeDisabled()
   await title.fill('Racing title')
   await dialog.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(dialog.getByRole('alert')).toContainText('This conversation changed. Reload before renaming.')
-  await page.unroute(renamePath)
+  await expect(dialog.getByRole('button', { name: 'Save', exact: true })).toBeDisabled()
+  await expect(title).toBeFocused()
+  expect((await workspace.api(`/api/chats/${chat.id}`)).title).toBe('Renamed elsewhere')
+  // Reopened, the dialog starts from the current title and saves over it knowingly.
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  ;({ action } = await openChatDetails(page))
+  await action('Rename conversation').click()
+  await expect(title).toHaveValue('Renamed elsewhere')
+  await expect(dialog.getByRole('alert')).toHaveCount(0)
+  await title.fill('Racing title')
   await dialog.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(dialog).toHaveCount(0)
   await expect(page.locator('.chat-header').getByRole('heading', { name: 'Racing title', exact: true })).toBeVisible()
