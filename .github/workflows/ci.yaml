@@ -1,5 +1,5 @@
 # Observer branch only. Complete prerequisite acquisition, never runtime/release provenance.
-name: Native tool preparation qualification (not native runtime)
+name: Reference tool preparation diagnostic (not native runtime)
 on:
   workflow_dispatch:
 permissions:
@@ -13,7 +13,7 @@ jobs:
       - name: Fetch immutable candidate and reference source
         run: git fetch --no-tags --depth=1 origin 35d151a14a912ff5436ae152813c66321a6bb469 c186d11e048cdcb8d2d1ae31a11a277a03411baf
       - name: Verify complete acquisition, extraction, publication and cache reuse
-        run: timeout --signal=TERM --kill-after=5s 360s python3 scripts/native-tool-preparation-qualification.py --output native-tool-preparation-qualification.json
+        run: timeout --signal=TERM --kill-after=5s 360s python3 scripts/native-tool-preparation-qualification.py --output native-tool-preparation-qualification.json --role reference
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:

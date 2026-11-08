@@ -32,11 +32,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', required=True)
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--role', choices=('candidate', 'reference'), default='candidate')
     args = parser.parse_args()
-    raw, baseline = source(CANDIDATE), source(REFERENCE)
+    selected = CANDIDATE if args.role == 'candidate' else REFERENCE
+    raw, baseline = source(selected), source(REFERENCE)
     assert pins(raw) == pins(baseline)
     assert ast.literal_eval(assignment(raw, 'DOCKER_WRAPPER')) == ast.literal_eval(assignment(baseline, 'DOCKER_WRAPPER'))
-    report = {'candidate': CANDIDATE, 'reference': REFERENCE,
+    report = {'source': selected, 'role': args.role, 'candidate': CANDIDATE, 'reference': REFERENCE,
               'nativeHostSha256': hashlib.sha256(raw).hexdigest(),
               'canonicalPinsUnchanged': True, 'wrapperUnchanged': True,
               'pins': pins(raw), 'acquisitions': [], 'acquisitionQualified': False,
@@ -58,21 +60,26 @@ def main():
             host = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(host)
             host.INSTALL = root / 'i'
-            original_open = host.open_docker_tool
+            legacy_opener = not hasattr(host, 'open_docker_tool')
+            report['legacyDirectOpener'] = legacy_opener
+            original_open = host.urllib.request.urlopen if legacy_opener else host.open_docker_tool
             allowed = dict(pins(raw))
-            def observe_open(url):
+            def observe_open(url, *open_args, **open_kwargs):
                 assert url in allowed
                 event = {'canonicalUrl': url, 'expectedSha256': allowed[url], 'opened': False}
                 report['acquisitions'].append(event)
                 record()
                 print(json.dumps({'phase': 'acquire', **event}), flush=True)
-                response = original_open(url)
+                response = original_open(url, *open_args, **open_kwargs)
                 event['opened'] = True
                 event['status'] = response.code
                 record()
                 return response
             # Observation only: preserve the exact opener, response and all checks.
-            host.open_docker_tool = observe_open
+            if legacy_opener:
+                host.urllib.request.urlopen = observe_open
+            else:
+                host.open_docker_tool = observe_open
             original_probe = host.subprocess.run
             def observe_probe(command, **kwargs):
                 assert command[-3:] == ['version', '--format', '{{json .Client}}']
@@ -106,7 +113,7 @@ def main():
             report['manifest'] = manifest
             report['engineApi'] = json.loads((target / 'engine-api.json').read_text())
             report['cacheReuseVerified'] = True
-            report['completePinnedPayloadsVerifiedBy'] = 'prepare_docker_tools@' + CANDIDATE
+            report['completePinnedPayloadsVerifiedBy'] = 'prepare_docker_tools@' + selected
             report['acquisitionQualified'] = True
     except Exception as error:
         report['acquisitionQualified'] = False
