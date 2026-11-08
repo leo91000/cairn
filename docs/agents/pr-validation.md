@@ -114,6 +114,46 @@ tags, dispatch `ci.yaml` with `validation-only=true`. This still runs the
 applicable backend, node, native-runtime, browser and device jobs; image build,
 publish, promotion and deployment jobs are skipped.
 
+### Bounded native dependency setup
+
+The five native test-dependency callers (`rust-check`, `backend`,
+`cli-qualification`, `backend-migration-qualification` and `node-checks`) use
+`scripts/install-native-ci-dependencies.mjs`. Its closed native profile preserves
+`libclang-dev age e2fsprogs fakeroot`; update/install have 120/360-second work
+budgets, noninteractive sudo and bounded acquisition/lock waits. Phase markers
+contain fixed status fields, and owned process groups are cleaned before returning
+failure, timeout or interruption. The ten-minute step bound and existing job
+limits remain unchanged. Setup is not retried. An independent privileged GNU
+`timeout`/Bash guard keeps the APT deadline and group cleanup live when Node's
+control loop stalls. A private group-registration/admission exchange precedes
+package execution; the controller retains that group for cleanup if the shell
+is lost. A private cancellation marker reaches the shell independently of Node's
+control socket and sudo's signal relay; after APT cleanup the shell retires a
+blocked controller before the launcher can return. If marker acquisition fails,
+the launcher retains the admitted owner's original work deadline instead of
+abandoning it early. The guard also verifies the controller's PID/start-time
+identity and settles its registered APT group if that controller disappears.
+A private per-phase closure receipt is published after cleanup; the launcher
+waits for it even after a failed sudo/controller exit. Receipt acquisition uses
+the existing kill-after allowance clipped to the original outer phase budget.
+Missing or unreadable closure remains explicit unknown/non-green, retaining an
+original failure code and refusing the next phase. Neither side starts subsequent
+phases after failure.
+
+The helper retains a closed `android-network` profile (90/90 seconds), but the
+Android direct job uses the newer `prepare-network-tools.mjs` preflight instead;
+it must not regain broad APT installation. Other distinct package sets remain
+outside this helper.
+
+`pnpm exec vitest run scripts/tests/native-ci-dependencies.test.mjs` exercises
+success, failure, timeout, interruptions, delayed privilege entry, orphan cleanup,
+stalled Node supervision (including cancellation), lost privileged controllers
+or shells, closure-receipt failure and bounded diagnostic output. Repeat with
+`CAIRN_TEST_REAL_SUDO=1` on a disposable or authorized sudo-capable host to run the same cases through `/usr/bin/sudo -n`
+and assert UID 0 in the synthetic APT executable. No real packages are changed by
+these fixture tests. The short PR quality job runs both routes. Full validation
+also runs the real package setup in its selected native jobs.
+
 ### Bounded deadline diagnostics
 
 When a backend/native job reaches its deadline before preserving evidence,
