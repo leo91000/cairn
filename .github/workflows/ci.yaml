@@ -13,7 +13,7 @@ jobs:
       - name: Fetch immutable source bindings without building
         run: git fetch --no-tags --depth=1 origin 272f4f3bbe5b276b0b9339cf38bab53b04bef8b2 ca526fc46e8aae81c0955a2dd6e116a9bac45d60 c7dc7fb78aeb9f50fdf0e8ed8295659dec6e9b93 c186d11e048cdcb8d2d1ae31a11a277a03411baf
       - name: Observe public acquisition with fixed request and byte bounds
-        run: python3 scripts/native-tool-acquisition-diagnostic.py --output native-tool-acquisition-diagnostic.json
+        run: python3 scripts/native-tool-acquisition-diagnostic.py --output native-tool-acquisition-diagnostic.json --official-routes
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:

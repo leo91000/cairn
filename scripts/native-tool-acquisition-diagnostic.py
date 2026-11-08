@@ -20,12 +20,36 @@ SOURCES = {
     'repair-candidate': 'c7dc7fb78aeb9f50fdf0e8ed8295659dec6e9b93',
     'current-main': 'c186d11e048cdcb8d2d1ae31a11a277a03411baf',
 }
-HEADERS = ('server', 'via', 'x-cache', 'age', 'content-type', 'content-length')
+HEADERS = ('server', 'via', 'x-cache', 'age', 'content-type', 'content-length',
+           'x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset')
 PROFILES = (
     ('native-default', {}),
     ('cache-revalidate', {'Cache-Control': 'no-cache', 'Pragma': 'no-cache'}),
     ('curl-user-agent', {'User-Agent': 'curl/8.5.0'}),
 )
+
+
+# Asset identities/digests independently observed in official release metadata.
+API_ASSETS = {
+    'https://github.com/rootless-containers/rootlesskit/releases/download/v3.3.0/rootlesskit-x86_64.tar.gz':
+        ('https://api.github.com/repos/rootless-containers/rootlesskit/releases/assets/638878224',
+         '0e757c8f80510d764df8c9a5f169805580b48d02329f0a200900e261ecec27ed'),
+    'https://github.com/rootless-containers/slirp4netns/releases/download/v1.3.6/slirp4netns-x86_64':
+        ('https://api.github.com/repos/rootless-containers/slirp4netns/releases/assets/606623788',
+         '411167abceff1fc8a7c562f53ed9f26d3ec8a17df4e2fe6eaa3bd53f1c1e1d48'),
+    'https://github.com/docker/compose/releases/download/v5.6.1/docker-compose-linux-x86_64':
+        ('https://api.github.com/repos/docker/compose/releases/assets/661714739',
+         '47737f4236e6d3ccea7291995203f8f018058783b4c3a9469119811a0b5db8c0'),
+    'https://github.com/docker/buildx/releases/download/v0.38.1/buildx-v0.38.1.linux-amd64':
+        ('https://api.github.com/repos/docker/buildx/releases/assets/660618355',
+         'e25d5cd675092bb5d1d03632fdc46cdf3fede7b514dc5f023a105e00d3ce5ad4'),
+    'https://github.com/cargo-bins/cargo-binstall/releases/download/v1.25.3/cargo-binstall-x86_64-unknown-linux-musl.tgz':
+        ('https://api.github.com/repos/cargo-bins/cargo-binstall/releases/assets/628279880',
+         '1f72931713e9091478538c6c78c3f11f205b4f6f394f35e61835036b23929d2a'),
+    'https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.149/cargo-nextest-0.9.149-x86_64-unknown-linux-gnu.tar.gz':
+        ('https://api.github.com/repos/nextest-rs/nextest/releases/assets/660814555',
+         '32d1d8c0567b7a80bee2bad8bb09125c846da96bc009b2de11ec08557290c770'),
+}
 
 
 def bindings():
@@ -85,14 +109,28 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--output', required=True)
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--official-routes', action='store_true')
     args = parser.parse_args()
     sources, tools = bindings()
     urls = [url for url, _ in tools] + [
         'https://github.com/cargo-bins/cargo-binstall/releases/download/v1.25.3/cargo-binstall-x86_64-unknown-linux-musl.tgz',
         'https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.149/cargo-nextest-0.9.149-x86_64-unknown-linux-gnu.tar.gz',
     ]
+    requests = [(url, profile, headers) for url in urls for profile, headers in PROFILES]
+    if args.official_routes:
+        pins = dict(tools)
+        for url, (_, digest) in API_ASSETS.items():
+            assert url not in pins or pins[url] == digest
+        requests = []
+        for canonical, (api, _) in API_ASSETS.items():
+            requests.append((canonical + '?download=1', 'canonical-download-query', {}))
+            requests.append((api, 'official-asset-api', {
+                'Accept': 'application/octet-stream', 'X-GitHub-Api-Version': '2022-11-28',
+            }))
     report = {'purpose': 'bounded-public-acquisition-diagnostic', 'qualified': False,
-              'sourceBindings': sources, 'nativePins': tools, 'observations': []}
+              'sourceBindings': sources, 'nativePins': tools, 'observations': [],
+              'officialAssetIdentities': API_ASSETS if args.official_routes else {},
+              'requestPlan': [{'url': url, 'profile': profile} for url, profile, _ in requests]}
     output = Path(args.output)
     output.write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps({'sourceBindings': sources, 'qualified': False}), flush=True)
@@ -100,34 +138,33 @@ def main():
         return 0
     deadline = time.monotonic() + 480
     context = multiprocessing.get_context('spawn')
-    for url in urls:
-        for profile, headers in PROFILES:
-            remaining = deadline - time.monotonic()
-            if remaining <= 2:
-                report['diagnosticDeadlineReached'] = True
-                output.write_text(json.dumps(report, indent=2) + '\n')
-                return 1
-            results = context.Queue(maxsize=1)
-            process = context.Process(target=observe, args=(url, headers, results))
-            process.start()
-            process.join(min(22, remaining - 1))
-            if process.is_alive():
-                process.kill()
-                process.join()
-                observation = {'status': None, 'errorKind': 'probe-deadline'}
-            else:
-                try:
-                    observation = results.get(timeout=0.5)
-                except queue.Empty:
-                    observation = {'status': None, 'errorKind': 'probe-process-exit'}
-            results.close()
-            results.join_thread()
-            observation.update({'url': url, 'profile': profile})
-            report['observations'].append(observation)
+    for url, profile, headers in requests:
+        remaining = deadline - time.monotonic()
+        if remaining <= 2:
+            report['diagnosticDeadlineReached'] = True
             output.write_text(json.dumps(report, indent=2) + '\n')
-            print(json.dumps(observation), flush=True)
+            return 1
+        results = context.Queue(maxsize=1)
+        process = context.Process(target=observe, args=(url, headers, results))
+        process.start()
+        process.join(min(22, remaining - 1))
+        if process.is_alive():
+            process.kill()
+            process.join()
+            observation = {'status': None, 'errorKind': 'probe-deadline'}
+        else:
+            try:
+                observation = results.get(timeout=0.5)
+            except queue.Empty:
+                observation = {'status': None, 'errorKind': 'probe-process-exit'}
+        results.close()
+        results.join_thread()
+        observation.update({'url': url, 'profile': profile})
+        report['observations'].append(observation)
+        output.write_text(json.dumps(report, indent=2) + '\n')
+        print(json.dumps(observation), flush=True)
     return 0 if all(item['status'] == 200 for item in report['observations']
-                    if item['profile'] == 'native-default') else 1
+                    if args.official_routes or item['profile'] == 'native-default') else 1
 
 
 if __name__ == '__main__':
