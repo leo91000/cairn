@@ -191,7 +191,8 @@ local function assignments(encoded)
 end
 
 -- Applies assignments to an item's fields by ID, then label, like read-fields.
--- Unknown fields are added, concealed unless a type is given.
+-- Unknown fields are added, concealed unless a type is given; existing fields keep theirs,
+-- so an edit never reveals a concealed value.
 local function assign(item, entries)
     item.fields = item.fields or cairn.array()
     for _, entry in entries do
@@ -211,10 +212,10 @@ local function assign(item, entries)
         end
 
         if selected then
-            selected.value = entry.value
-            if entry.type then
-                selected.type = entry.type
+            if entry.type and entry.type ~= selected.type then
+                cairn.fail("type applies only to new fields. Leave it out to keep the field's type.")
             end
+            selected.value = entry.value
         else
             table.insert(item.fields, { label = entry.field, type = entry.type or "CONCEALED", value = entry.value })
         end

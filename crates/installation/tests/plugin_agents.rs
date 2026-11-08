@@ -910,6 +910,32 @@ esac
                 .unwrap_err();
         assert!(error.message.contains("cannot edit"), "{item}: {error:?}");
     }
+    // An edit never changes an existing field's type, which could reveal a concealed value.
+    std::fs::write(
+        &stored,
+        r#"{"id":"item-id","category":"PASSWORD","fields":[{"id":"password","label":"password","type":"CONCEALED","value":"old-secret"}]}"#,
+    )
+    .unwrap();
+    let reveal = command(
+        "set-fields",
+        &[
+            "--account",
+            &account,
+            "--vault",
+            "vault",
+            "--item",
+            "Deploy",
+            "--fields",
+            r#"[{"field":"password","value":"new-secret","type":"STRING"}]"#,
+        ],
+    );
+    let error =
+        f.s.plugins
+            .command(&f.s, &f.bearer, &reveal)
+            .await
+            .unwrap_err();
+    assert!(error.message.contains("only to new fields"), "{error:?}");
+
     // Like read-fields, a label shared by two fields must be named by ID.
     std::fs::write(
         &stored,
