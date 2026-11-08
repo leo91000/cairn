@@ -149,6 +149,18 @@ class DockerToolPreparationTests(unittest.TestCase):
         self.assertEqual(4, self.open_url.call_count)
         self.assert_unpublished()
 
+    def test_stop_during_backoff_prevents_the_next_request_and_publication(self):
+        def interrupted_sleep(seconds):
+            self.sleep(seconds)
+            host.STOP = True
+        self.open_url.side_effect = [self.error(504), io.BytesIO(self.payload)]
+        with patch.object(host.time, 'sleep', side_effect=interrupted_sleep), \
+                self.assertRaises(InterruptedError):
+            host.prepare_docker_tools()
+        self.assertEqual(1, self.open_url.call_count)
+        self.assertEqual([1], self.sleeps)
+        self.assert_unpublished()
+
     def test_stop_prevents_retry(self):
         self.open_url.side_effect = self.error(504)
         with patch.object(host, 'STOP', True), self.assertRaises(urllib.error.HTTPError):

@@ -183,6 +183,8 @@ def open_docker_tool(url):
     # transfer, size, digest and extraction failures remain terminal.
     deadline = time.monotonic() + 60
     for attempt in range(3):
+        if attempt and STOP:
+            raise InterruptedError('Native Docker tool acquisition interrupted.')
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError('Native Docker tool acquisition deadline exhausted.')
