@@ -1,5 +1,19 @@
 # Android 0.6.0 / web parity
 
+## One search button in the Android Fil (2026-11-08)
+
+Android drops the Fil's own filter button (« Filtrer le fil ») and its field,
+which duplicated the installation header's search button right above it. That
+search finds conversations by title, agent or project, and missions by name,
+tags or prompt; a mission result opens the Missions tab, not one of its runs.
+The filter matched each Fil row's title, status line, agent and project within
+the selected view, so Android no longer narrows a view, finds a row by its
+status line (a failure, a waiting question, a required account), finds a mission
+run by its agent, or finds a run whose mission is gone. The title row keeps its
+height when its read-all action comes and goes. Platform difference: web keeps
+the Fil filter beside the title (`/`). Presentation only: no contract, MCP,
+`cairn_installation` or stored schema changes.
+
 ## Explicit VM/native moves (2026-11-07)
 
 Web and Android label node destinations with their backend and permit an explicit
@@ -29,7 +43,8 @@ Two or more missions in a row that finished as expected and were read fold into
 one row: two stacked avatars, “3 missions finished” / « 3 missions terminées »,
 their names and the latest time. Tapping it unfolds them on a thread line. A
 lone one, a mission with delegated work below it, unread or unfinished work stay
-rows, and filtering shows every match unfolded. Web also unfolds the fold that
+rows, and filtering (web only since 2026-11-08) shows every match
+unfolded. Web also unfolds the fold that
 holds the work open beside the Fil.
 
 Unread finished work with a result preview can be read without opening it. Web
@@ -64,7 +79,8 @@ avatar alone. The detail line gives the project, or the agent without one, with
 a repeat arrow for missions. The header names the agents at work as a stack of
 up to three avatars (“2 at work” / « 2 au travail »), which opens En cours. The
 filter hides behind a search button and unfolds below the title (`/` on web),
-staying open while it holds a query. À lire / En cours / Tout become a segmented
+staying open while it holds a query; since 2026-11-08 the Fil filter is web
+only. À lire / En cours / Tout become a segmented
 control whose selection slides between views, with the counts beside each
 label. Web orbits a working agent's avatar; Android marks it in the corner.
 
@@ -359,7 +375,7 @@ The public MCP and built-in installation tool return the same inventory fields.
 | Skills and MCPs | Skill content/files, scopes and validation, MCP configuration/authentication/discovery/tool restrictions | Existing API and MCP/Compose cases; form/API comparison |
 | Account/installation scope cleanup | Android centralizes streams, read markers, drafts, notification scope and session cleanup in a private ViewModel transition. Same account/installation/role/CSRF preserves cached history and files; changing any clears them. Beacon outages retain a restorable session. When the last access is removed, the « Aucune installation » page now hosts the snackbar, so the access-change and account notices appear there (web reports an inaccessible installation inline); web behavior is unchanged. | `ScopeTransitionTest`; shared `CairnAccountCases` HTTP 403 journey in JVM/device wrappers; `OlderPagesScopeTest` API/page cancellation; web `api-connection.test.ts` |
 | Connections and access | OAuth, Codex and Claude Code accounts/usage, token grants, authorization, logout and encrypted sessions | Existing network/authorization/cache suite |
-| Plugins | Instance and panel forms share defaults on opening, typed numbers, omitted blank text/numbers, explicit false/empty choices, exact choice identifiers (including admitted whitespace), hidden declared values and no secret prefilling. Text trimming and secret blankness on both clients follow existing Kotlin `Char.isWhitespace` (Java WhiteSpace/SpaceChar union): U+001C–U+001F are blank; U+0085 and U+FEFF remain meaningful. Instance secrets are trimmed; nonblank action secrets retain raw bytes. Shared boundary corpus checks the actual Kotlin/JDK runtime and both production helpers; server instance control rejection remains independent. Required selects use null/empty missingness, including whitespace-only option IDs, while required text still uses blankness. Unchanged returned forms retain drafts; changed form definitions reset their controls on both clients. Web centralizes these rules in `plugin-form-values.ts`; Android retains native controls and the existing `formValue`/`pluginSettings` contract, with a shared JSON scenario corpus (`PluginFormValuesTest`). Shared server admission rejects inconsistent manifest constraints/defaults (text cap 10,000; secret cap 16,384); package upload uses the web file selector and the Android native folder picker; both review the same validated manifest. A package with no usable version shows its stored version errors in review, and its page offers that review on both clients. Catalogue, instances, manifest-driven settings and secrets, read-only agent grants (set on agent pages), version/file review and approval, declarative panels/actions/tests, native Discord setup and delegation/access/activity, 1Password instances; JSON/TOML manifest review and package-owned program check/install/restore (native folder uploads on Android) | `PluginsJourneyTest`, shared `PluginsCases` / `PluginsDeviceTest`; browser plugin journeys |
+| Plugins | Instance and panel forms share defaults on opening, typed numbers, omitted blank text/numbers, explicit false/empty choices, exact choice identifiers (including admitted whitespace), hidden declared values and no secret prefilling. Text trimming and secret blankness on both clients follow existing Kotlin `Char.isWhitespace` (Java WhiteSpace/SpaceChar union): U+001C–U+001F are blank; U+0085 and U+FEFF remain meaningful. Instance secrets are trimmed; nonblank action secrets retain raw bytes. Shared boundary corpus checks the actual Kotlin/JDK runtime and both production helpers; server instance control rejection remains independent. Required selects use null/empty missingness, including whitespace-only option IDs, while required text still uses blankness. Unchanged returned forms retain drafts; changed form definitions reset their controls on both clients. Web centralizes these rules in `plugin-form-values.ts`; Android retains native controls and the existing `formValue`/`pluginSettings` contract, with a shared JSON scenario corpus (`PluginFormValuesTest`). Shared server admission rejects inconsistent manifest constraints/defaults (text cap 10,000; secret cap 16,384); package upload uses the web file selector and the Android native folder picker; both review the same validated manifest. A package with no usable version shows its stored version errors in review, and its page offers that review on both clients. Catalogue, instances, manifest-driven settings and secrets, read-only agent grants (set on agent pages), version/file review and approval, declarative panels/actions/tests, native Discord setup and delegation/access/activity, 1Password instances (a Permissions step with the owner-only « Create items and edit fields » switch; the agent page's 1Password note says writing needs that switch and nothing is deleted); JSON/TOML manifest review and package-owned program check/install/restore (native folder uploads on Android) | `PluginsJourneyTest`, shared `PluginsCases` / `PluginsDeviceTest`; browser plugin journeys |
 | Typed plugin instances (A12) | Web and Android use generated instance/configuration, form and sign-in models and the same generated typed management command. Existing native presentation, OAuth account binding, shared setup, initial additive owner grants, people approval/removal, test/panel/action, pause/delete/disconnect and visible errors remain equivalent. Replacements carry the instance revision; agents keep the explicit grant/native-authority refusal. Public views omit credentials and internal authority. | Shared plugin Rust/TS/Kotlin corpus; plugin browser journeys; `PluginsCases` / `PluginsDeviceTest`; backend plugins, plugin_agents, Discord, Gmail, program installers and live-revocation scenarios |
 | Typed plugin packages and preparation (A13) | Both apps consume the generated catalog, manifest, setup, package, program and operation contracts. Package upload selects files on web and a directory with Android’s system picker; cancellation is inert. Approval, activation and program check/install/restore retain asynchronous polling and the same owner checks. No visual redesign. | Shared package wire corpus (Rust/TS/Kotlin); `PluginPackagesTest`; `PluginsCases.packageUploadUsesTheNativeFolderPickerAndCancellationIsInert`; browser package/program journeys; backend cancellation, concurrency and live-revocation cases |
 | Plugin device sign-in | A package whose credential declares `deviceFlow` (GitHub) offers sign-in in the instance editor beside the token field, which stays available: start, show the user code (copyable), open `verificationUriComplete` or `verificationUri`, poll every 2 s (404 = expired), cancel; the form handler and the save then send `credentialFlow`, never a token. Platform difference: Android shows the code in large monospace with a native copy button and opens the page in a Custom Tab; leaving the editor or pasting a token cancels an unfinished sign-in. | `PluginsCases` device sign-in cases on JVM/device; web plugin unit tests and plugin journey; backend `github_plugin` device-flow test |

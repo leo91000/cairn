@@ -74,6 +74,11 @@ impl Authority {
         }
     }
 
+    /// An installation agent acts, rather than the owner or a public grant.
+    pub(crate) fn is_agent(&self) -> bool {
+        self.bearer.is_some()
+    }
+
     pub(crate) fn snapshot(&self) -> Option<super::grant_authorization::Snapshot> {
         self.snapshot.as_deref().cloned()
     }

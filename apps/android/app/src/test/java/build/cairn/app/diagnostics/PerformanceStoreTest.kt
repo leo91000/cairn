@@ -51,11 +51,17 @@ class PerformanceStoreTest {
         assertEquals(40, data.recentSlowSamples.size)
         assertEquals(996_100L, data.recentSlowSamples.first().elapsedMs)
         assertEquals(1_000_000L, data.elapsedMs)
+        store.frame(PerfScreen.FIL, false, 80_000_000, 16_000_000)
+        val beforeReset = store.snapshot()
+        assertEquals(1, beforeReset.frames.size)
         store.clear()
-        assertEquals(0L, store.snapshot().elapsedMs)
-        assertTrue(store.snapshot().operations.isEmpty())
-        assertTrue(store.snapshot().frames.isEmpty())
-        assertTrue(store.snapshot().recentSlowSamples.isEmpty())
+        val afterReset = store.snapshot()
+        assertEquals(0L, afterReset.elapsedMs)
+        assertEquals(0L, afterReset.sequence)
+        assertNotEquals(beforeReset.windowId, afterReset.windowId)
+        assertTrue(afterReset.operations.isEmpty())
+        assertTrue(afterReset.frames.isEmpty())
+        assertTrue(afterReset.recentSlowSamples.isEmpty())
     }
 
     @Test

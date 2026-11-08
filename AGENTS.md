@@ -27,9 +27,10 @@
   marks and set-aside outcomes belong to the calling Cairn account: a public grant
   acts for the account that authorized it, and an execution without an account
   delegation is refused rather than acting as the owner. Through `cairn_installation`,
-  agents may read and reduce agent grants but never widen them; they write hook rules
-  only for one person, in a conversation that meets every provenance condition of
-  ADR-0075, never in tasks or missions; they never touch another account's rule, never
+  agents may read and reduce agent grants but never widen them; they may turn a plugin
+  setting declared `ownerOnly` off, never on, and never change an instance's credential
+  while one is on; they write hook rules only for one person, in a conversation that
+  meets every provenance condition of ADR-0075, never in tasks or missions; they never touch another account's rule, never
   lift an owner's emergency pause or an exhausted budget, and only deactivate rules
   for an account while one of its rules is so blocked, and never reduce a grant used
   by a rule of another current account (owner or member), or of any account outside
