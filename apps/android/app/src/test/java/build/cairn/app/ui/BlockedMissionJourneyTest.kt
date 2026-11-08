@@ -383,8 +383,7 @@ class BlockedMissionJourneyTest {
             capture("android-blocked-set-aside")
         }
 
-    @Test
-    fun `archiving from the Fil uses the current mission revision`() = archiveJourney()
+    @Test fun `archiving from the Fil uses the current mission revision`() = archiveJourney()
 
     @Test
     fun `archiving from the Fil waits for the initial mission refresh`() =
