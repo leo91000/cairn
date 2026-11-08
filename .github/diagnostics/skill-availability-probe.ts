@@ -25,7 +25,7 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
     await page.goto(workspacePath('/skills'))
     await authenticateWorkspace(page)
     await expect(page.getByRole('heading', { name: 'Skills library', exact: true })).toBeVisible()
-    await page.clock.pauseAt(new Date())
+    await page.clock.pauseAt(new Date(Date.now() + 1000))
     const pollHeld = Promise.withResolvers<void>()
     const releasePoll = Promise.withResolvers<void>()
     const reloadHeld = Promise.withResolvers<void>()
