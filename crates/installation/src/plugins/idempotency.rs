@@ -18,6 +18,8 @@ pub enum Claim {
     Cached(Value),
 }
 
+/// An absent or null key returns without yielding or I/O. HTTP pre-send
+/// authorization relies on that synchronous path when there is no receipt.
 pub async fn claim(
     s: &Service,
     connection: &Connection,
@@ -115,4 +117,25 @@ pub async fn complete(
             Ok(())
         })
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::FutureExt;
+
+    #[tokio::test]
+    async fn unkeyed_claims_do_not_yield_between_authorization_and_send() {
+        let f = crate::plugin_grant_fixture::Fixture::new().await;
+        let connection = connections::get(&f.s, "grant-probe", &f.instance)
+            .await
+            .unwrap();
+        for args in [json!({}), json!({ "idempotencyKey": null })] {
+            assert!(matches!(
+                claim(&f.s, &connection, &args, None).now_or_never(),
+                Some(Ok(None))
+            ));
+        }
+        f.s.shutdown.cancel();
+    }
 }
