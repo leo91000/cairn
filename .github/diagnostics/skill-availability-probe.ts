@@ -12,10 +12,18 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
       saveJournal()
     }
     const requests = new Map<import('@playwright/test').Request, 'pending' | 'finished' | 'cancelled' | 'failed'>()
+    const statuses = new Map<import('@playwright/test').Request, number>()
     const availabilityRequest = (request: import('@playwright/test').Request) => new URL(request.url()).pathname === '/api/installations'
     page.on('request', (request) => {
       if (availabilityRequest(request))
         requests.set(request, 'pending')
+    })
+    page.on('response', (response) => {
+      const request = response.request()
+      if (availabilityRequest(request)) {
+        statuses.set(request, response.status())
+        record(`network-poll-status-${response.status()}`)
+      }
     })
     page.on('requestfinished', (request) => {
       if (requests.has(request)) {
@@ -188,6 +196,8 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
         for (const [request, terminal] of requests) {
           if (request === targetPoll)
             record(`target-network-${terminal}`)
+          if (terminal === 'finished' && statuses.get(request) !== 200)
+            throw new Error(`An observed availability response has unexpected HTTP status ${statuses.get(request) ?? 'unknown'}`)
           if (terminal === 'failed')
             throw new Error('An observed availability request failed unexpectedly')
           if (terminal === 'cancelled' && request !== targetPoll)
