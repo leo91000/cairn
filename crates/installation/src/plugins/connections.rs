@@ -602,26 +602,39 @@ pub async fn save(
 }
 
 /// An `ownerOnly` switch widens what granted agents may do, like a grant. `previous`
-/// is set only when an installation agent saves: it may turn the switch off, never on.
+/// is set only when an installation agent saves: it may turn the switch off, never on,
+/// and may not move an enabled switch to another credential.
 fn owner_only_unchanged(
     manifest: &Manifest,
     previous: Option<&Value>,
     settings: &Value,
+    credential_changed: bool,
 ) -> Result<()> {
     let Some(previous) = previous else {
         return Ok(());
     };
-    let widened = manifest.settings.iter().find(|field| {
+    for field in manifest
+        .settings
+        .iter()
+        .filter(|field| field["ownerOnly"] == true)
+    {
         let key = text(field, "key");
-        field["ownerOnly"] == true && settings[key] == true && previous[key] != true
-    });
-    match widened {
-        Some(field) => Err(Error::forbidden(format!(
-            "Only the owner can turn on “{}”.",
-            text(field, "title")
-        ))),
-        None => Ok(()),
+        if settings[key] != true {
+            continue;
+        }
+        let title = text(field, "title");
+        if previous[key] != true {
+            return Err(Error::forbidden(format!(
+                "Only the owner can turn on “{title}”."
+            )));
+        }
+        if credential_changed {
+            return Err(Error::forbidden(format!(
+                "Only the owner can change the credential while “{title}” is on."
+            )));
+        }
     }
+    Ok(())
 }
 
 pub(crate) async fn save_authorized<F>(
@@ -661,6 +674,7 @@ where
         .map(|shared| shared.source.clone())
         .into_iter()
         .collect::<Vec<_>>();
+    let mut current_settings = None;
     let expected_revision = match existing {
         Some(instance) => {
             let current = get(s, plugin_id, instance).await?;
@@ -674,6 +688,7 @@ where
                 ));
             }
             prepared.push(current.clone());
+            current_settings = Some(current.settings);
             Some(current.revision)
         }
         None => None,
@@ -685,15 +700,32 @@ where
         return Err(Error::bad("Enter a connection name."));
     }
     let mut settings = settings(&manifest, &settings_input)?;
-    // Installation agents may turn an owner-only switch off, never on.
-    let previous_settings = match (&management, existing) {
-        (Some(authority), Some(id)) if authority.is_agent() => {
-            Some(get(s, plugin_id, id).await?.settings)
-        }
-        (Some(authority), None) if authority.is_agent() => Some(json!({})),
-        _ => None,
-    };
-    owner_only_unchanged(&manifest, previous_settings.as_ref(), &settings)?;
+    // Installation agents may turn an owner-only switch off, never on, nor give it
+    // another credential.
+    let previous_settings = management
+        .as_ref()
+        .filter(|authority| authority.is_agent())
+        .map(|_| current_settings.unwrap_or_else(|| json!({})));
+    let credential_changed = source.is_some()
+        || command
+            .token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty())
+        || command
+            .credential_flow
+            .as_deref()
+            .is_some_and(|flow| !flow.is_empty())
+        || secrets_input.as_object().is_some_and(|secrets| {
+            secrets
+                .values()
+                .any(|value| value.as_str().is_some_and(|text| !text.trim().is_empty()))
+        });
+    owner_only_unchanged(
+        &manifest,
+        previous_settings.as_ref(),
+        &settings,
+        credential_changed,
+    )?;
     let delegates = manifest.permits_capability("conversations.submit");
     let agent_id = if delegates {
         command.agent_id.as_str()
@@ -867,7 +899,12 @@ where
         }
     }
     // The package's form may set values too: check them again before saving.
-    owner_only_unchanged(&manifest, previous_settings.as_ref(), &settings)?;
+    owner_only_unchanged(
+        &manifest,
+        previous_settings.as_ref(),
+        &settings,
+        credential_changed,
+    )?;
     if let Some(flow) = flow {
         super::oauth::flow_credential(s, plugin_id, flow, existing, &settings, false).await?;
     }

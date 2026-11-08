@@ -431,7 +431,8 @@ boolean settings. Checklist links are HTTPS; `copy = "callbackUrl"` needs OAuth.
 most 8 steps, 8 tasks and 6 presets per step. Boolean settings may declare
 `risk = "low" | "medium" | "high"`, shown beside the switch. A switch that widens
 what granted agents may do, like a grant, declares `ownerOnly = true` and starts off:
-installation agents may turn it off, never on, even on an instance they hold.
+installation agents may turn it off, never on, even on an instance they hold, and may
+not replace the credential or secrets of an instance while it is on.
 Presets refresh each changed field marked `refresh`, just like its individual
 switch. Form errors apply only to the checked input; changing an ordinary field
 clears its stale error without requiring `refresh`. Save still runs the package's

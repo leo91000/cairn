@@ -2864,7 +2864,7 @@ async fn plugin_setup_is_available_on_both_endpoints_without_granting_private_ac
 }
 
 #[tokio::test]
-async fn installation_agents_can_turn_risky_switches_off_but_never_on() {
+async fn installation_agents_can_turn_owner_only_switches_off_but_never_on() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let main = enabled_main(&s).await;
@@ -2929,11 +2929,30 @@ async fn installation_agents_can_turn_risky_switches_off_but_never_on() {
     .await;
     let allowed = &result(&allowed)["instance"];
     assert_eq!(allowed["settings"]["allowWrite"], true, "{allowed}");
+    // Nor may it point the owner's approval at another service account.
+    let mut swapped = save(true, &allowed["revision"]);
+    swapped["data"]["secrets"] = json!({ "token": "ops_fixture_wider" });
+    let swapped = call(&s, &configuration, "manage_plugin", swapped).await;
+    assert_eq!(swapped["result"]["isError"], true, "{swapped}");
+    assert!(
+        swapped.to_string().contains("change the credential"),
+        "{swapped}"
+    );
+    let unchanged = call(
+        &s,
+        &configuration,
+        "manage_plugin",
+        save(true, &allowed["revision"]),
+    )
+    .await;
+    let unchanged = &result(&unchanged)["instance"];
+    assert_eq!(unchanged["settings"]["allowWrite"], true, "{unchanged}");
+
     let reduced = call(
         &s,
         &configuration,
         "manage_plugin",
-        save(false, &allowed["revision"]),
+        save(false, &unchanged["revision"]),
     )
     .await;
     assert_eq!(
