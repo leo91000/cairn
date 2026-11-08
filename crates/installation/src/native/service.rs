@@ -2505,6 +2505,7 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
 // Called only after old workloads and block devices are fenced. Temporary
 // anonymous bases/clones have no authority; conventional committed disks remain.
 async fn recover_preparations(data: &Path, state: &Path) -> Result<()> {
+    super::staging::recover(data, state).await?;
     storage::environment::recover(state).await?;
     super::bases::recover_pins(data).await
 }

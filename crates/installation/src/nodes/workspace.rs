@@ -352,7 +352,21 @@ async fn seed_owned(
         .parent()
         .ok_or_else(|| Error::bad("Invalid seed directory."))?;
     crate::skills::private_dir(parent).await?;
-    let temp = tempfile::TempDir::new_in(parent)?;
+    let native_directory = if let Some(storage) = &storage {
+        Some(crate::native::staging::Directory::new(storage).await?)
+    } else {
+        None
+    };
+    let ordinary_directory = if native_directory.is_none() {
+        Some(tempfile::TempDir::new_in(parent)?)
+    } else {
+        None
+    };
+    let (temp, container) = match (&native_directory, &ordinary_directory) {
+        (Some(directory), _) => (directory.path(), directory.container()),
+        (_, Some(directory)) => (directory.path(), directory.path()),
+        _ => unreachable!(),
+    };
     let attempt = session.attempt.as_str();
     let mut transport_interrupted = false;
     let mut received_bytes = 0u64;
@@ -382,7 +396,7 @@ async fn seed_owned(
         });
     let mut reader = BufReader::new(tokio_util::io::StreamReader::new(Box::pin(stream)));
     let replacement = if native && selection["kind"] == "inbox" {
-        Some(tempfile::NamedTempFile::new_in(parent)?)
+        Some(tempfile::NamedTempFile::new_in(container)?)
     } else {
         None
     };
@@ -402,10 +416,10 @@ async fn seed_owned(
                     .map(|file| file.as_file().try_clone())
                     .transpose()?,
             };
-            super::files::receive_admitted(&mut reader, temp.path(), SEED_BUDGET_BYTES, &mut admission)
+            super::files::receive_admitted(&mut reader, temp, SEED_BUDGET_BYTES, &mut admission)
                 .await?;
         } else {
-            super::files::receive(&mut reader, temp.path(), SEED_BUDGET_BYTES).await?;
+            super::files::receive(&mut reader, temp, SEED_BUDGET_BYTES).await?;
         }
 
         // The protocol marker alone cannot prove the HTTP body arrived intact.
@@ -432,19 +446,19 @@ async fn seed_owned(
         return Err(Error::unavailable("Workspace transfer cancelled."));
     }
     if native && selection["kind"] == "initial" {
-        prepare_native_inbox(&temp.path().join("chat-input")).await?;
+        prepare_native_inbox(&temp.join("chat-input")).await?;
     }
     // Preserve the directory inode mounted into a native workload. Replacing a
     // bind-mounted directory would leave it reading the previous inbox forever.
     if native && selection["kind"] == "inbox" {
         drop(replacement);
-        return install_native_inbox(temp.path(), target).await;
+        return install_native_inbox(temp, target).await;
     }
     // Only host staging files are replaced. Guest disks remain authoritative.
     if target.exists() {
         tokio::fs::remove_dir_all(target).await?;
     }
-    tokio::fs::rename(temp.path(), target).await?;
+    tokio::fs::rename(temp, target).await?;
     Ok(())
 }
 

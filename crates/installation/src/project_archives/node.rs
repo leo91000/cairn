@@ -222,6 +222,9 @@ async fn stage_owned(
             return Ok(Some(key.to_owned()));
         }
     }
+    drop(_disk);
+    let receiving = crate::native::staging::Directory::new(&storage).await?;
+    let _disk = crate::native::disk::lock_staging(&storage.state).await?;
     let guard = lock().lock().await;
     let data = storage.data.clone();
     clean_interrupted_downloads(&data).await?;
@@ -277,15 +280,11 @@ async fn stage_owned(
     }
     // Every promised byte is represented by a sparse private file before
     // releasing the pool gate. Cache cleanup never traverses run staging.
-    let parent = root
-        .parent()
-        .ok_or_else(|| Error::bad("Missing project seed parent."))?;
-    let receiving = tempfile::TempDir::new_in(parent)?;
-    let promise = tempfile::NamedTempFile::new_in(receiving.path())?;
+    let promise = tempfile::NamedTempFile::new_in(receiving.container())?;
     promise.as_file().set_len(logical)?;
     let mut incoming = Vec::new();
     for descriptor in missing {
-        let temporary = tempfile::NamedTempFile::new_in(receiving.path())?;
+        let temporary = tempfile::NamedTempFile::new_in(receiving.container())?;
         temporary.as_file().set_len(descriptor.bytes)?;
         incoming.push((descriptor, temporary));
     }

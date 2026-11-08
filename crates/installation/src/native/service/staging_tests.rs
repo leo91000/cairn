@@ -17,8 +17,13 @@ async fn seed(State(server): State<Server>) -> Response {
     let header = json!({ "kind": "file", "path": "asset", "size": PAYLOAD, "mode": 384 });
     let data = json!({ "data": STANDARD.encode(vec![37; 65536]) });
     let first = Bytes::from(format!("{header}\n{data}\n"));
+    let messages = format!(
+        "{}\n{}\n",
+        json!({ "kind": "file", "path": "messages.json", "size": 2, "mode": 384 }),
+        json!({ "data": STANDARD.encode(b"[]") })
+    );
     let tail = Bytes::from(format!(
-        "{}{{\"complete\":true}}\n",
+        "{}{messages}{{\"complete\":true}}\n",
         format!("{data}\n").repeat(15)
     ));
     let stream = futures_util::stream::unfold(
@@ -121,10 +126,10 @@ impl Fixture {
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 if let Ok(mut entries) =
-                    tokio::fs::read_dir(self.controller.data.join("runs")).await
+                    tokio::fs::read_dir(self.controller.data.join("native-staging")).await
                 {
                     while let Some(entry) = entries.next_entry().await.unwrap() {
-                        if let Ok(bytes) = tokio::fs::read(entry.path().join("asset")).await
+                        if let Ok(bytes) = tokio::fs::read(entry.path().join("payload/asset")).await
                             && bytes.first() == Some(&37)
                         {
                             return;
