@@ -7,6 +7,7 @@ import json
 import subprocess
 import tempfile
 import time
+import traceback
 from pathlib import Path
 
 CANDIDATE = '35d151a14a912ff5436ae152813c66321a6bb469'
@@ -72,7 +73,24 @@ def main():
                 return response
             # Observation only: preserve the exact opener, response and all checks.
             host.open_docker_tool = observe_open
-            target = host.prepare_docker_tools()
+            original_probe = host.subprocess.run
+            def observe_probe(command, **kwargs):
+                assert command[-3:] == ['version', '--format', '{{json .Client}}']
+                assert set(kwargs['env']) == {'PATH', 'HOME', 'DOCKER_CONFIG', 'DOCKER_HOST'}
+                result = original_probe(command, **kwargs)
+                report['offlineClientProbe'] = {
+                    'returnCode': result.returncode,
+                    'stdout': result.stdout[:2048].replace(str(root), '<private-preparation>'),
+                    'stderr': result.stderr[:2048].replace(str(root), '<private-preparation>'),
+                    'environmentKeys': sorted(kwargs['env']),
+                }
+                record()
+                return result
+            host.subprocess.run = observe_probe
+            try:
+                target = host.prepare_docker_tools()
+            finally:
+                host.subprocess.run = original_probe
             assert len(report['acquisitions']) == len(allowed)
             manifest = json.loads((target / 'manifest.json').read_text())
             for name, expected in manifest.items():
@@ -87,6 +105,9 @@ def main():
             report['completePinnedPayloadsVerifiedBy'] = 'prepare_docker_tools@' + CANDIDATE
             report['acquisitionQualified'] = True
     except Exception as error:
+        report['acquisitionQualified'] = False
+        report['errorFrames'] = [{'file': Path(frame.filename).name, 'line': frame.lineno, 'function': frame.name}
+                                 for frame in traceback.extract_tb(error.__traceback__)[-6:]]
         report['errorKind'] = type(error).__name__
         report['httpStatus'] = getattr(error, 'code', None)
     report['elapsedSeconds'] = round(time.monotonic() - started, 3)
