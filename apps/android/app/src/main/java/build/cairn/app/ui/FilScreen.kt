@@ -5,18 +5,12 @@
 
 package build.cairn.app.ui
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -36,7 +30,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -49,8 +42,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -653,22 +644,11 @@ fun FilScreen(
     val chats = live.state?.chats?.filter { it.id !in trash.hidden }
     val feed = buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads, now)
     var selectedView by rememberSaveable { mutableIntStateOf(0) }
-    var filter by rememberSaveable { mutableStateOf("") }
-    // The filter opens on demand and stays open while it holds a query.
-    var searchOpen by rememberSaveable { mutableStateOf(false) }
     var unfolded by rememberSaveable { mutableStateOf(listOf<String>()) }
     // A finished result previewed by a long press, without opening or reading it.
     var peeked by remember { mutableStateOf<FeedItem?>(null) }
-    val searching = searchOpen || filter.isNotEmpty()
     val views = listOf(feed.unread, feed.ongoing, feed.all)
-    val query = filter.trim()
-    val visible =
-        views[selectedView].filter {
-            query.isEmpty() ||
-                listOfNotNull(it.title, it.subtitle, it.agent, it.project).any { value ->
-                    value.contains(query, ignoreCase = true)
-                }
-        }
+    val visible = views[selectedView]
     fun retry(item: FeedItem) {
         val task = item.taskId ?: return
         vm.perform { openRun(api.runMission(RunMissionInput(task)).id) }
@@ -720,24 +700,8 @@ fun FilScreen(
                 FilHeader(
                     working = feed.running.filter { it.working }.distinctBy { it.agentKey },
                     unread = feed.unread.isNotEmpty(),
-                    searching = searching,
-                    toggleSearch = {
-                        if (searching) {
-                            filter = ""
-                            searchOpen = false
-                        } else searchOpen = true
-                    },
                     showOngoing = { selectedView = 1 },
                     readAll = { vm.markRead(feed.unread.map { it.read }) },
-                )
-                FilSearch(
-                    searching,
-                    filter,
-                    { filter = it },
-                    close = {
-                        filter = ""
-                        searchOpen = false
-                    },
                 )
                 FilViews(
                     listOf("À lire", "En cours", "Tout"),
@@ -765,17 +729,13 @@ fun FilScreen(
         if (chats != null && visible.isEmpty() && !feed.empty)
             item(key = "view-empty") {
                 Text(
-                    if (filter.isNotBlank()) "Aucun résultat"
-                    else if (selectedView == 0) "Tout est lu." else "Aucune tâche en cours.",
+                    if (selectedView == 0) "Tout est lu." else "Aucune tâche en cours.",
                     Modifier.padding(20.dp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-        // Quiet missions fold together, except while filtering, which looks for each row.
-        val rows = threadFeed(visible)
-        val entries =
-            if (query.isEmpty()) foldFeed(rows)
-            else rows.map { (item, nested) -> FeedEntry.Line(item, nested) }
+        // Quiet missions fold together.
+        val entries = foldFeed(threadFeed(visible))
         val lines = entries.flatMap { entry ->
             when (entry) {
                 is FeedEntry.Line -> listOf(entry)
@@ -967,13 +927,11 @@ internal fun PeekSheet(item: FeedItem, now: Long, close: () -> Unit, open: () ->
     }
 }
 
-/** The Fil's title, the agents at work, and its filter and read-all actions. */
+/** The Fil's title, the agents at work, and its read-all action. */
 @Composable
 private fun FilHeader(
     working: List<FeedItem>,
     unread: Boolean,
-    searching: Boolean,
-    toggleSearch: () -> Unit,
     showOngoing: () -> Unit,
     readAll: () -> Unit,
 ) {
@@ -1019,18 +977,7 @@ private fun FilHeader(
             }
         }
         Spacer(Modifier.weight(1f))
-        RoundAction(
-            "Filtrer le fil",
-            CairnIcons.Search,
-            Modifier.testTag("fil-search"),
-            container =
-                if (searching) MaterialTheme.colorScheme.secondaryContainer
-                else MaterialTheme.colorScheme.surface,
-            size = 36.dp,
-            onClick = toggleSearch,
-        )
         if (unread) {
-            Spacer(Modifier.width(6.dp))
             RoundAction(
                 "Tout marquer comme lu",
                 CairnIcons.Check,
@@ -1039,41 +986,6 @@ private fun FilHeader(
                 onClick = readAll,
             )
         }
-    }
-}
-
-/** The filter field, which unfolds from the header when the user asks to filter. */
-@Composable
-private fun FilSearch(
-    open: Boolean,
-    value: String,
-    change: (String) -> Unit,
-    close: () -> Unit,
-) {
-    val focus = remember { FocusRequester() }
-    AnimatedVisibility(
-        open,
-        enter =
-            expandVertically(tween(220)) +
-                fadeIn(tween(220)) +
-                slideInVertically(tween(220)) { -it / 3 },
-        exit = shrinkVertically(tween(180)) + fadeOut(tween(140)),
-    ) {
-        LaunchedEffect(Unit) { focus.requestFocus() }
-        OutlinedTextField(
-            value = value,
-            onValueChange = change,
-            modifier = Modifier.fillMaxWidth().padding(top = 12.dp).focusRequester(focus),
-            placeholder = { Text("Titre, agent ou projet") },
-            leadingIcon = { Icon(CairnIcons.Search, null, Modifier.size(18.dp)) },
-            trailingIcon = {
-                androidx.compose.material3.IconButton(onClick = close) {
-                    Icon(CairnIcons.Close, "Fermer le filtre", Modifier.size(18.dp))
-                }
-            },
-            shape = RoundedCornerShape(50),
-            singleLine = true,
-        )
     }
 }
 
