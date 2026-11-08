@@ -9,6 +9,7 @@ use crate::{
     validation::text,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
+use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -113,6 +114,17 @@ fn shell_environment_failed(item: &Value, block: &Value) -> bool {
 async fn send(stdin: &mut ChildStdin, value: Value) -> Result<()> {
     stdin.write_all(format!("{value}\n").as_bytes()).await?;
     Ok(())
+}
+
+async fn cancel_finished_side(stdin: &mut ChildStdin, request: &str) {
+    let cancel = json!({
+        "type": "control_cancel_request",
+        "request_id": request,
+    });
+    // UUID-based cancellation frames are below PIPE_BUF, so a single poll either
+    // writes the whole frame or writes nothing. Never await control readiness at
+    // main completion; normal CLI shutdown handles a request that cannot be sent.
+    let _ = send(stdin, cancel).now_or_never();
 }
 
 async fn emit(events: &mpsc::Sender<Value>, value: Value) -> Result<()> {
@@ -867,7 +879,7 @@ impl Turn<'_> {
     /// they never delay it, and can be asked again during the next one.
     async fn withdraw_sides(&mut self) -> Result<()> {
         for (request, question) in std::mem::take(&mut self.sides) {
-            self.cancel_side_request(&request).await;
+            cancel_finished_side(&mut self.stdin, &request).await;
             self.side_failed(&question, crate::chats::side_questions::EXPIRED)
                 .await?;
         }
@@ -887,8 +899,8 @@ impl Turn<'_> {
         Ok(())
     }
 
-    /// A side request must never hold or fail the main reply if Claude has stopped
-    /// reading its control channel. Each bounded send is best effort.
+    /// Explicit withdrawals have a bounded, best-effort send while the turn runs.
+    /// Completion uses cancel_finished_side instead, without waiting on the pipe.
     async fn cancel_side_request(&mut self, request: &str) {
         let cancel = json!({ "type": "control_cancel_request", "request_id": request });
         let _ = tokio::time::timeout(SIDE_CONTROL_WAIT, send(&mut self.stdin, cancel)).await;
@@ -2052,8 +2064,59 @@ fn resolved(path: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-mod side_question_release_tests {
+mod side_question_tests {
     use super::answers_side_questions;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn finishing_side_cancellation_never_waits_on_a_full_open_control_pipe() {
+        use std::{os::fd::AsRawFd, process::Stdio, task::Poll};
+
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let fd = stdin.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert!(flags >= 0 && flags & libc::O_NONBLOCK != 0);
+        // The child keeps its read end open but never reads it. Fill even the
+        // final partial page so no cancellation frame can fit atomically.
+        let mut filled = 0;
+        for size in [libc::PIPE_BUF, 1] {
+            let bytes = vec![b'x'; size];
+            loop {
+                let written = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+                if written < 0 {
+                    assert_eq!(
+                        std::io::Error::last_os_error().kind(),
+                        std::io::ErrorKind::WouldBlock
+                    );
+                    break;
+                }
+                filled += written;
+            }
+        }
+
+        let mut all_ready = true;
+        for index in 0..5 {
+            let request = format!("side-question-{index}");
+            let cancellation = super::cancel_finished_side(&mut stdin, &request);
+            tokio::pin!(cancellation);
+            all_ready &= matches!(futures_util::poll!(&mut cancellation), Poll::Ready(()));
+        }
+        child.start_kill().unwrap();
+        child.wait().await.unwrap();
+        assert!(filled > 0);
+        assert!(
+            all_ready,
+            "Main completion must not wait for side-control readiness or a deadline"
+        );
+    }
 
     #[test]
     fn only_the_qualified_release_answers_side_questions() {
