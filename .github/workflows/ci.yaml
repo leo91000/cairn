@@ -267,9 +267,9 @@ jobs:
       - uses: ./.github/actions/observe-rust-build
         with:
           phase: before-build
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2
-        with:
-          tool: cargo-nextest@0.9.149
+      - name: Install the pinned nextest binary without fallback
+        timeout-minutes: 3
+        run: node scripts/install-nextest-ci.mjs
       - name: Acquire the existing artifact publisher at its immutable version
         if: inputs.ci-diagnostic == 'backend'
         uses: actions/checkout@v7.0.1
