@@ -50,17 +50,21 @@ fn snapshot(db: &Connection) -> Snapshot {
                 .unwrap()
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .unwrap();
-            let plan_table = matches!(name.as_str(), "chat_messages" | "chat_questions");
+            let added_column = match name.as_str() {
+                "chat_messages" | "chat_questions" => Some("plan"),
+                "nodes" => Some("vm_disks"),
+                _ => None,
+            };
             let columns = columns
                 .into_iter()
-                .filter(|column| !plan_table || column != "plan")
+                .filter(|column| Some(column.as_str()) != added_column)
                 .collect::<Vec<_>>();
-            let signature = if plan_table {
+            let signature = if added_column.is_some() {
                 format!("columns:{}", columns.join(","))
             } else {
                 sql
             };
-            let projection = if plan_table {
+            let projection = if added_column.is_some() {
                 columns.join(",")
             } else {
                 "*".to_owned()
@@ -133,7 +137,18 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
     let after = snapshot(&db);
     let after_schema = schema(&db);
     for ((kind, name), definition) in before_schema {
-        if kind != "table" || !matches!(name.as_str(), "kv" | "chat_messages" | "chat_questions") {
+        if kind == "table" && name == "nodes" {
+            let retained_schema = after_schema[&(kind, name)].replace(
+                ", vm_disks INTEGER NOT NULL DEFAULT 0 CHECK(vm_disks IN (0,1))",
+                "",
+            );
+            assert_eq!(
+                retained_schema, definition,
+                "Retained node schema must remain unchanged"
+            );
+        } else if kind != "table"
+            || !matches!(name.as_str(), "kv" | "chat_messages" | "chat_questions")
+        {
             assert_eq!(
                 after_schema.get(&(kind, name)),
                 Some(&definition),
@@ -141,6 +156,12 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
             );
         }
     }
+    let vm_disk_nodes: i64 = db
+        .query_row("SELECT count(*) FROM nodes WHERE vm_disks!=0", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(vm_disk_nodes, 0, "old nodes need a fresh capability report");
     for (table, (signature, rows)) in before {
         if table != "kv" {
             assert_eq!(after[&table], (signature, rows), "{table}");
