@@ -887,6 +887,18 @@ function openCompactionFromHeader() {
   compacting.value = true
 }
 
+// Focus goes back to whatever opened the dialog while it is still on the page (the header pill may
+// have left meanwhile), else to the visible ⋯ trigger.
+async function closeCompaction() {
+  compacting.value = false
+  await nextTick()
+  const opener = compactionOpener.value
+  const target = opener?.isConnected && opener.getClientRects().length
+    ? opener
+    : [menuButton.value?.trigger, detailsButton.value].find(button => button?.getClientRects().length)
+  target?.focus()
+}
+
 // The pill leaves once compaction frees the window: focus on it moves to the ⋯ menu.
 watch(contextAlert, async (alert) => {
   if (alert || !contextPill.value || document.activeElement !== contextPill.value)
@@ -1194,8 +1206,7 @@ function key(event: KeyboardEvent) {
   <Modal
     v-if="compacting"
     title="Compact the agent context?"
-    :return-focus="compactionOpener?.isConnected ? compactionOpener : menuButton?.trigger"
-    @close="compacting = false"
+    @close="closeCompaction"
   >
     <div class="p-6">
       <p>The coding agent summarizes its earlier context to free space in its window. This uses the agent's model, like a short turn.</p>
@@ -1203,7 +1214,7 @@ function key(event: KeyboardEvent) {
       <p v-if="detail?.compaction?.reason && !detail.compaction.available" class="text-muted">
         {{ detail.compaction.reason }}
       </p>
-      <UiButton :disabled="busy || !detail?.compaction?.available" @click="action('compact').then((succeeded) => { if (succeeded) compacting = false })">
+      <UiButton :disabled="busy || !detail?.compaction?.available" @click="action('compact').then((succeeded) => { if (succeeded) closeCompaction() })">
         Compact context
       </UiButton>
     </div>

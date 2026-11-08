@@ -2400,6 +2400,11 @@ test('context usage shows the latest request and an explicit compaction keeps th
   await expect(confirmCompaction).toHaveCount(0)
   await expect(indicator).toBeFocused()
   await expect(indicator).toHaveAccessibleDescription('Opens compaction')
+  await page.keyboard.press('Enter')
+  await confirmCompaction.getByRole('button', { name: 'Compact context', exact: true }).click()
+  await expect(confirmCompaction).toHaveCount(0)
+  await expect(indicator).toHaveCount(0, { timeout: 15000 })
+  await expect(page.getByRole('button', { name: 'Chat details', exact: true })).toBeFocused()
 })
 
 test('compaction is unavailable while a turn runs and explains why', async ({ page, workspace }) => {

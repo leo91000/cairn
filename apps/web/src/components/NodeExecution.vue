@@ -149,7 +149,7 @@ const status = computed((): { tone: 'bad' | 'warn' | 'busy' | 'ok' | 'idle', lab
 // An exclusive suspension is the conversation's own status, which the header already names.
 const attention = computed(() => {
   const run = props.run
-  return !!(run.movementError || run.backup?.error || run.storage?.waitingFor || run.storage?.backupDegraded || run.capacityWaitUntil || run.nodeState)
+  return relevant.value && !!(run.movementError || run.backup?.error || run.storage?.waitingFor || run.storage?.backupDegraded || run.capacityWaitUntil || run.nodeState)
 })
 // A chip whose panel is open stays until it closes, so focus can return to it.
 const showChip = computed(() => props.variant === 'chip' || attention.value || (open.value && !opener.value))
