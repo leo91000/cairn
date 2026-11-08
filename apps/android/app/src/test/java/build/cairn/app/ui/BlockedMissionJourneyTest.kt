@@ -13,6 +13,7 @@ import build.cairn.contracts.SetOutcomeAsideOutput
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.*
@@ -39,6 +40,7 @@ class BlockedMissionJourneyTest {
     private val calls = CopyOnWriteArrayList<Triple<String, String, String>>()
     private val activityReads = CopyOnWriteArrayList<List<Run>>()
     private val savedMissions = ConcurrentHashMap<String, Task>()
+    private val initialProjectsReleased = CountDownLatch(1)
     private val now = System.currentTimeMillis()
     private val claude =
         Agent(
@@ -193,7 +195,7 @@ class BlockedMissionJourneyTest {
         )
     }
 
-    private fun journey(body: (CairnViewModel) -> Unit) {
+    private fun journey(holdInitialRefresh: Boolean = false, body: (CairnViewModel) -> Unit) {
         MockWebServer().use { server ->
             server.dispatcher =
                 object : Dispatcher() {
@@ -255,7 +257,13 @@ class BlockedMissionJourneyTest {
                                 stream(LiveState(run = activity().first { it.id == id }))
                             }
                             path == "$api/accounts" -> json("{\"accounts\":[],\"required\":[]}")
-                            path == "$api/projects" -> json("""{"projects":[]}""")
+                            path == "$api/projects" -> {
+                                if (holdInitialRefresh)
+                                    check(initialProjectsReleased.await(15, TimeUnit.SECONDS)) {
+                                        "Initial workspace refresh was not released"
+                                    }
+                                json("""{"projects":[]}""")
+                            }
                             path == "$api/mcps" -> json("""{"mcps":[]}""")
                             path == "$api/skills" ||
                                 path == "$api/onepassword" ||
@@ -282,6 +290,7 @@ class BlockedMissionJourneyTest {
                 compose.onNodeWithText("Tout").performClick()
                 body(vm)
             } finally {
+                initialProjectsReleased.countDown()
                 vm.api.closeStreams()
             }
         }
@@ -359,14 +368,38 @@ class BlockedMissionJourneyTest {
         }
 
     @Test
-    fun `archiving from the Fil uses the current mission revision`() = journey { vm ->
+    fun `archiving from the Fil uses the current mission revision`() = archiveJourney()
+
+    @Test
+    fun `archiving from the Fil waits for the initial mission refresh`() =
+        archiveJourney(holdInitialRefresh = true)
+
+    private fun archiveJourney(holdInitialRefresh: Boolean = false) =
+        journey(holdInitialRefresh) { vm ->
         waitText("Preuve appareil F8")
         compose
             .onNodeWithContentDescription("Autres actions pour Preuve appareil F8")
             .performScrollTo()
             .performClick()
         waitText("Archiver la mission")
-        compose.onNodeWithText("Archiver la mission").performClick()
+        val archive = compose.onNodeWithText("Archiver la mission")
+        if (holdInitialRefresh) {
+            // Activity can render a mission from its run snapshot before refresh loads tasks.
+            assertTrue(vm.state.value.busy)
+            assertTrue(vm.state.value.tasks.isEmpty())
+            archive.assertIsNotEnabled().performClick()
+            assertTrue(calls.none { it.first == "POST" && it.second.endsWith("/state") })
+            initialProjectsReleased.countDown()
+        }
+
+        // A visible menu item is still disabled while the workspace is loading.
+        compose.waitUntil(15000) {
+            compose
+                .onAllNodes(hasText("Archiver la mission") and isEnabled())
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        archive.assertIsEnabled().performClick()
         val statePath = "/api/installations/fixture/api/tasks/${proof.id}/state"
         waitCall("POST", statePath)
         val command =
