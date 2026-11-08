@@ -109,12 +109,25 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - name: Format and require unchanged product source
         timeout-minutes: 5
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: safe.directory
+          GIT_CONFIG_VALUE_0: ${{ github.workspace }}
         run: |
-          pnpm lint:fix
+          format_result=0
+          pnpm lint:fix || format_result=$?
           git -c safe.directory="$GITHUB_WORKSPACE" diff --binary > test-results/formatter.patch
-          git -c safe.directory="$GITHUB_WORKSPACE" diff --exit-code
+          source_result=0
+          git -c safe.directory="$GITHUB_WORKSPACE" diff --exit-code || source_result=$?
+          printf '{"formatterExit":%s,"sourceDiffExit":%s}\n' "$format_result" "$source_result" > test-results/formatter-result.json
+          test "$format_result" -eq 0
+          test "$source_result" -eq 0
       - name: Qualify all web quality checks
         timeout-minutes: 5
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: safe.directory
+          GIT_CONFIG_VALUE_0: ${{ github.workspace }}
         run: pnpm check
       - name: Build the manager fixtures
         timeout-minutes: 5
