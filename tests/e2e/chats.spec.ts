@@ -2395,10 +2395,11 @@ test('context usage shows the latest request and an explicit compaction keeps th
   await indicator.click()
   const confirmCompaction = page.getByRole('dialog', { name: 'Compact the agent context?', exact: true })
   await expect(confirmCompaction).toBeVisible()
-  // The pill leaves once compaction lands, so focus returns to the ⋯ menu instead.
+  // Cancelling returns to the pill; once compaction frees the window, the pill leaves and focus goes to ⋯.
   await page.keyboard.press('Escape')
   await expect(confirmCompaction).toHaveCount(0)
-  await expect(page.getByRole('button', { name: 'Chat details', exact: true })).toBeFocused()
+  await expect(indicator).toBeFocused()
+  await expect(indicator).toHaveAccessibleDescription('Opens compaction')
 })
 
 test('compaction is unavailable while a turn runs and explains why', async ({ page, workspace }) => {

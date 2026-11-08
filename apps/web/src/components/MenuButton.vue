@@ -38,16 +38,20 @@ function place() {
   const height = box ? box.scrollHeight + box.offsetHeight - box.clientHeight : 0
   const left = Math.max(8, Math.min(props.align === 'start' ? rect.left : rect.right - props.width, innerWidth - props.width - 8))
   const below = rect.bottom + 6
-  const above = rect.top - height - 6
-  const top = Math.max(8, props.placement === 'above'
-    ? (above >= 8 ? above : below)
-    : (below + height > innerHeight - 8 && above >= 8 ? above : below))
-  // A short window scrolls a long menu instead of cutting off its last items.
+  const roomBelow = innerHeight - 8 - below
+  const roomAbove = rect.top - 6 - 8
+  // When neither side fits, the roomier one scrolls the menu instead of cutting off its last items.
+  const fitsBelow = height <= roomBelow
+  const fitsAbove = height <= roomAbove
+  const useAbove = props.placement === 'above'
+    ? fitsAbove || (!fitsBelow && roomAbove > roomBelow)
+    : !fitsBelow && (fitsAbove || roomAbove > roomBelow)
+  const top = useAbove ? Math.max(8, rect.top - 6 - height) : below
   position.value = {
     left: `${left}px`,
     top: `${top}px`,
     width: `${props.width}px`,
-    maxHeight: `${innerHeight - top - 8}px`,
+    maxHeight: `${useAbove ? rect.top - 6 - top : roomBelow}px`,
   }
 }
 

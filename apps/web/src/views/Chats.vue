@@ -547,6 +547,8 @@ const chatStatus = computed(() => {
   return 'Ready'
 })
 const headerState = computed(() => detail.value ? headerStatus(chatStatus.value) : null)
+// One region stays mounted so screen readers hear a new status; a countdown would repeat every minute.
+const announcedStatus = computed(() => headerState.value && chatStatus.value !== sleepStatus.value ? headerState.value.label : '')
 // A conversation not created yet already names the project it will start in.
 const headerProject = computed(() => heading.value ? heading.value.projectName : state.projects.find(project => project.id === projectId.value)?.name)
 // The avatar's ring is the header's only sign of work, on every width.
@@ -874,11 +876,20 @@ const contextAlert = computed(() => contextNeedsAttention(context.value))
 const canCompact = computed(() => !!detail.value?.compaction?.supported && !inactive.value)
 const nodeExecution = ref<InstanceType<typeof NodeExecution>>()
 const menuButton = ref<InstanceType<typeof MenuButton>>()
+const contextPill = ref<HTMLElement>()
 
 function openCompactionFromHeader() {
-  compactionOpener.value = menuButton.value?.trigger
+  compactionOpener.value = contextPill.value
   compacting.value = true
 }
+
+// The pill leaves once compaction frees the window: focus on it moves to the ⋯ menu.
+watch(contextAlert, async (alert) => {
+  if (alert || !contextPill.value || document.activeElement !== contextPill.value)
+    return
+  await nextTick()
+  menuButton.value?.trigger?.focus()
+})
 
 interface ConversationAction {
   id: string
@@ -1179,7 +1190,7 @@ function key(event: KeyboardEvent) {
   <Modal
     v-if="compacting"
     title="Compact the agent context?"
-    :return-focus="compactionOpener"
+    :return-focus="compactionOpener === contextPill && !contextAlert ? menuButton?.trigger : compactionOpener"
     @close="compacting = false"
   >
     <div class="p-6">
@@ -1229,7 +1240,7 @@ function key(event: KeyboardEvent) {
       <div
         v-for="group in actionGroups"
         :key="group.id"
-        role="group"
+        :role="group.label ? 'group' : undefined"
         :aria-label="group.label || undefined"
       >
         <div v-if="group.id === 'danger'" class="my-1 border-t border-line" />
@@ -1281,6 +1292,7 @@ function key(event: KeyboardEvent) {
       />
       <!-- One row, as on Android: who and what on the left, files and the ⋯ menu on the right. -->
       <header class="chat-header flex min-h-15 shrink-0 items-center gap-3 border-b border-line/70 pb-3 phone:h-15 phone:gap-2 phone:pb-0">
+        <span role="status" class="sr-only">{{ announcedStatus }}</span>
         <h1 class="sr-only hidden phone:block">
           {{ heading?.title || 'New conversation' }}
         </h1>
@@ -1311,7 +1323,7 @@ function key(event: KeyboardEvent) {
               </span>
               <span class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11.5px] font-normal leading-tight" :class="headerState?.failed ? 'text-coral' : 'text-muted'" :title="connectionDescription || undefined">
                 <span class="size-1.5 shrink-0 rounded-full" :class="connectionTone(currentInstallation, state.transportRoute)" />
-                <span class="truncate" :role="headerState ? 'status' : undefined">{{ headerState?.label || headerProject || heading?.agentName || selectedAgent?.name || 'Main agent' }}</span>
+                <span class="truncate" :data-header-status="headerState ? '' : undefined">{{ headerState?.label || headerProject || heading?.agentName || selectedAgent?.name || 'Main agent' }}</span>
               </span>
             </span>
           </span>
@@ -1352,7 +1364,7 @@ function key(event: KeyboardEvent) {
             <!-- A crowded row truncates these rather than pushing into the actions. -->
             <span
               v-if="headerState"
-              role="status"
+              data-header-status
               class="flex min-w-0 items-center gap-1.5 rounded-full px-2.5 leading-6 font-medium"
               :class="headerState.failed ? 'bg-coral-soft text-coral' : 'bg-hover'"
               :title="headerState.label"
@@ -1365,6 +1377,8 @@ function key(event: KeyboardEvent) {
             <component
               :is="canCompact ? 'button' : 'span'"
               v-if="contextAlert"
+              ref="contextPill"
+              :aria-description="canCompact ? 'Opens compaction' : undefined"
               class="flex shrink-0 items-center gap-1.5 rounded-full px-2.5 leading-6 font-medium tabular-nums whitespace-nowrap"
               :class="(context.percent ?? 0) >= 85 ? 'bg-coral-soft text-coral' : 'bg-warning-surface text-warning'"
               :title="[context.label, ...context.details].join('\n')"
@@ -1432,7 +1446,7 @@ function key(event: KeyboardEvent) {
               <div
                 v-for="group in actionGroups"
                 :key="group.id"
-                role="group"
+                :role="group.label ? 'group' : undefined"
                 :aria-label="group.label || undefined"
               >
                 <div v-if="group.id === 'danger'" role="separator" class="my-1 h-px bg-line" />

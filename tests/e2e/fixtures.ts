@@ -444,7 +444,7 @@ export async function closeChatDetails(page: Page) {
 
 // The status the conversation header names when it needs a look: beside the title, or under it on phones.
 export function headerStatus(page: Page, text: string | RegExp) {
-  return page.locator('.chat-header').getByRole('status').filter({ hasText: text }).filter({ visible: true })
+  return page.locator('.chat-header [data-header-status]').filter({ hasText: text }).filter({ visible: true })
 }
 
 // The header stays quiet while the agent works or waits: its status lives in the conversation menu.
