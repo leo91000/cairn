@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import tarfile
 import unittest
 import urllib.error
 from unittest.mock import Mock, patch
@@ -70,6 +71,96 @@ class DockerToolPreparationTests(unittest.TestCase):
         self.assertTrue(all(body.closed for body in self.errors))
         self.assertNotIn('private response body', self.log.getvalue())
         self.assertNotIn(self.url, self.log.getvalue())
+
+    def github_fixture(self):
+        payload = b'approved synthetic rootless executable'
+        archive = io.BytesIO()
+        with tarfile.open(fileobj=archive, mode='w:gz') as bundle:
+            member = tarfile.TarInfo('rootlesskit')
+            member.size = len(payload)
+            bundle.addfile(member, io.BytesIO(payload))
+        return payload, archive.getvalue()
+
+    def github_response(self, api, payload):
+        def acquire(request, **kwargs):
+            if request == self.url:
+                return io.BytesIO(self.payload)
+            if isinstance(request, host.urllib.request.Request) and request.full_url == api:
+                return io.BytesIO(payload)
+            raise self.error(504)
+        return acquire
+
+    def test_official_github_asset_bytes_keep_the_pinned_archive_and_binary_layouts(self):
+        executable, archive = self.github_fixture()
+        cases = [
+            ('https://github.com/rootless-containers/rootlesskit/releases/download/v3.3.0/rootlesskit-x86_64.tar.gz',
+             'https://api.github.com/repos/rootless-containers/rootlesskit/releases/assets/638878224',
+             archive, {'rootlesskit': 'bin/rootlesskit'}, 'bin/rootlesskit', executable),
+            ('https://github.com/docker/compose/releases/download/v5.6.1/docker-compose-linux-x86_64',
+             'https://api.github.com/repos/docker/compose/releases/assets/661714739',
+             self.payload, {'': 'plugins/docker-compose'}, 'plugins/docker-compose', self.payload),
+        ]
+        for url, api, payload, names, installed, expected in cases:
+            with self.subTest(url=url):
+                self.open_url.reset_mock()
+                self.open_url.side_effect = self.github_response(api, payload)
+                tools = self.tools + ((url, hashlib.sha256(payload).hexdigest(), names),)
+                with patch.object(host, 'DOCKER_TOOLS', tools):
+                    target = host.prepare_docker_tools()
+                self.assertEqual(expected, (target / installed).read_bytes())
+                self.assertEqual(2, self.open_url.call_count)
+                request = self.open_url.call_args_list[-1].args[0]
+                self.assertEqual(api, request.full_url)
+                headers = {key.lower(): value for key, value in request.header_items()}
+                self.assertEqual('application/octet-stream', headers['accept'])
+                self.assertEqual('2022-11-28', headers['x-github-api-version'])
+                self.assertNotIn('authorization', headers)
+                self.assertNotIn('cookie', headers)
+                self.assertEqual([target], list(target.parent.iterdir()))
+                host.shutil.rmtree(target)
+
+    def test_github_api_metadata_or_wrong_bytes_cannot_publish_a_tool_set(self):
+        api = 'https://api.github.com/repos/rootless-containers/rootlesskit/releases/assets/638878224'
+        url = 'https://github.com/rootless-containers/rootlesskit/releases/download/v3.3.0/rootlesskit-x86_64.tar.gz'
+        _, archive = self.github_fixture()
+        tools = self.tools + ((url, hashlib.sha256(archive).hexdigest(), {'rootlesskit': 'bin/rootlesskit'}),)
+        for payload in (b'{"id":638878224,"name":"rootlesskit-x86_64.tar.gz"}', archive[:-1]):
+            with self.subTest(payload=payload[:20]):
+                self.open_url.side_effect = self.github_response(api, payload)
+                with patch.object(host, 'DOCKER_TOOLS', tools), \
+                        self.assertRaisesRegex(ValueError, 'digest mismatch'):
+                    host.prepare_docker_tools()
+                self.assert_unpublished()
+
+    def test_github_api_retries_share_the_budget_and_permanent_denials_are_terminal(self):
+        api = 'https://api.github.com/repos/docker/compose/releases/assets/661714739'
+        url = 'https://github.com/docker/compose/releases/download/v5.6.1/docker-compose-linux-x86_64'
+        tools = self.tools + ((url, hashlib.sha256(self.payload).hexdigest(), {'': 'plugins/docker-compose'}),)
+        attempts = []
+        def acquire(request, **kwargs):
+            if request == self.url:
+                return io.BytesIO(self.payload)
+            if not isinstance(request, host.urllib.request.Request) or request.full_url != api:
+                raise AssertionError('Expected the fixed official asset API')
+            attempts.append(kwargs['timeout'])
+            if len(attempts) == 1:
+                self.now += 20
+                raise self.error(504)
+            return io.BytesIO(self.payload)
+        self.open_url.side_effect = acquire
+        with patch.object(host, 'DOCKER_TOOLS', tools):
+            target = host.prepare_docker_tools()
+        self.assertEqual([60, 39], attempts)
+        self.assertEqual(self.payload, (target / 'plugins/docker-compose').read_bytes())
+        host.shutil.rmtree(target)
+        self.sleeps.clear()
+        self.open_url.reset_mock()
+        self.open_url.side_effect = [io.BytesIO(self.payload), self.error(403)]
+        with patch.object(host, 'DOCKER_TOOLS', tools), self.assertRaises(urllib.error.HTTPError):
+            host.prepare_docker_tools()
+        self.assertEqual(2, self.open_url.call_count)
+        self.assertEqual([], self.sleeps)
+        self.assert_unpublished()
 
     def test_gateway_failures_recover_only_before_the_verified_atomic_publish(self):
         for status in (502, 503, 504):

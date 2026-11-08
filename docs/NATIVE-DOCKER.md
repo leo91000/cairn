@@ -159,6 +159,12 @@ host state and does not claim the protected conversation isolation boundary.
 The native installer provisions verified, versioned binaries under its managed
 directory: Docker 29.9.0, RootlessKit 3.3.0, slirp4netns 1.3.6, Buildx 0.38.1 and
 Compose 5.6.1. Exact archive/executable SHA-256 pins are in `native-host.py`.
+GitHub-hosted tools are requested through the official public release-asset API,
+using fixed asset identities and the binary media type without a credential. Their
+canonical release URLs, versions and SHA-256 pins stay authoritative; archive format
+is determined from that canonical URL. API metadata or corrupt payloads fail the same
+complete-byte digest check before extraction or atomic publication. Docker's own
+static download keeps its existing route.
 Public tool acquisition retries HTTP 502/503/504 at most twice, with one- and
 two-second backoffs within the original shared 60-second acquisition budget.
 Each request uses only the remaining timeout. Transfer, size, digest and archive
