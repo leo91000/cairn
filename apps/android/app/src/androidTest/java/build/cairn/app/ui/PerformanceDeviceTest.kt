@@ -78,8 +78,10 @@ class PerformanceDeviceTest {
                     bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
                 }
             }
+            val windowBeforeReset = Performance.store.snapshot().windowId
             compose.onNodeWithText("Remettre à zéro").performScrollTo().performClick()
-            assertTrue(Performance.store.snapshot().operations.isEmpty())
+            val windowAfterReset = Performance.store.snapshot().windowId
+            assertNotEquals(windowBeforeReset, windowAfterReset)
         } finally {
             compose.runOnUiThread { monitor.stop() }
         }
