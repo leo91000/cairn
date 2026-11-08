@@ -22,7 +22,7 @@ allows it, through its relay otherwise, and does not keep the agents' work.
 - Edit global and project `.agents/skills`, including supporting files and Markdown previews. In chats, type `$` to pick a skill with autocomplete on web and Android; both Codex and Claude Code apply the invoked skill.
 - Connect multiple ChatGPT accounts through Codex device sign-in. Runs select available capacity automatically, resume across account exhaustion, and show live usage and reset windows.
 - Connect GitHub accounts through the bundled GitHub plugin (sign in with GitHub or a token) and grant them to agents: their runs push and use the `gh` CLI, owners import repositories and skills, and agents wait for CI. See [GitHub](docs/PLUGINS.md#github).
-- Store multiple 1Password service account tokens and explicitly grant each agent read access on web or Android. See [1Password setup and access](docs/ONEPASSWORD.md).
+- Store multiple 1Password service account tokens and explicitly grant each agent read access on web or Android; owners may also let an account's agents create items and edit fields. See [1Password setup and access](docs/ONEPASSWORD.md).
 - Add remote and command MCP servers from the UI, sign in with OAuth on any device, discover tools, and choose each agent’s connections and tool access.
 - Expose scoped tools through a **stateless MCP 2026-07-28** endpoint, with stateless compatibility for older Streamable HTTP clients, OAuth, PKCE, refresh rotation, and revocation.
 

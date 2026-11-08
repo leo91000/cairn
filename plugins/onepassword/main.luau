@@ -203,6 +203,8 @@ local function assign(item, entries)
             return type(field.label) == "string" and string.lower(field.label) == string.lower(name)
         end,
     }
+    -- Entries are distinct by the field they resolve to, not only by how they name it.
+    local assigned = {}
     for _, entry in entries do
         local selected
         for _, matches in matchers do
@@ -220,13 +222,18 @@ local function assign(item, entries)
         end
 
         if selected then
+            if assigned[selected] then
+                cairn.fail(FIELDS_FORMAT)
+            end
             if entry.type and entry.type ~= selected.type then
                 cairn.fail("type applies only to new fields. Leave it out to keep the field's type.")
             end
             selected.value = entry.value
         else
-            table.insert(item.fields, { label = entry.field, type = entry.type or "CONCEALED", value = entry.value })
+            selected = { label = entry.field, type = entry.type or "CONCEALED", value = entry.value }
+            table.insert(item.fields, selected)
         end
+        assigned[selected] = true
     end
 end
 

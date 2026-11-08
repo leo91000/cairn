@@ -988,6 +988,8 @@ esac
         r#"[{"field":"credential","value":1}]"#,
         r#"[{"field":"credential","value":"a","type":"FILE"}]"#,
         r#"[{"field":"credential","value":"a"},{"field":"credential","value":"b"}]"#,
+        r#"[{"field":"credential","value":"a"},{"field":"Credential","value":"b"}]"#,
+        r#"[{"field":"extra","value":"a"},{"field":"EXTRA","value":"b"}]"#,
     ] {
         let invalid = command(
             "create-item",
@@ -1035,6 +1037,20 @@ exit 1
             .unwrap_err();
     assert!(error.message.contains("100/100"), "{error:?}");
     assert!(error.message.contains("3500 seconds"), "{error:?}");
+
+    // Turning writing off again stops the next write.
+    save(
+        &f.s,
+        json!({ "name": "Production", "enabled": true, "settings": { "allowWrite": false } }),
+        Some(&account),
+    )
+    .await;
+    let error =
+        f.s.plugins
+            .command(&f.s, &f.bearer, &create)
+            .await
+            .unwrap_err();
+    assert!(error.message.contains("Writing is disabled"), "{error:?}");
 
     // The metadata tool never writes.
     for operation in ["create-item", "set-fields"] {

@@ -77,7 +77,7 @@ ownerOnly = true
 description = "Lets granted agents create items and change fields in the vaults this service account can write to. Agents never delete items. 1Password permissions still apply."
 
 [agentAccess]
-description = "Off by default, including for Main agent. Removing an agent blocks its next reads immediately; secrets already read cannot be recalled."
+description = "Off by default, including for Main agent. Removing an agent blocks its next reads and writes immediately; secrets already read cannot be recalled."
 
 [[commands]]
 name = "accounts"
