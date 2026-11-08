@@ -428,7 +428,8 @@ packages and an `agents` step, last, with `agentAccess`. Only settings steps lis
 settings, may be `shared` and may have presets, whose values name the step's
 boolean settings. Checklist links are HTTPS; `copy = "callbackUrl"` needs OAuth. At
 most 8 steps, 8 tasks and 6 presets per step. Boolean settings may declare
-`risk = "low" | "medium" | "high"`, shown beside the switch.
+`risk = "low" | "medium" | "high"`, shown beside the switch. Installation agents may
+turn such a switch off, never on, even on an instance they hold: only the owner widens it.
 Presets refresh each changed field marked `refresh`, just like its individual
 switch. Form errors apply only to the checked input; changing an ordinary field
 clears its stale error without requiring `refresh`. Save still runs the package's
@@ -888,8 +889,9 @@ When the owner allows writing on a service account (`allowWrite`, off by default
 its agents can create an item or change and add fields:
 
 ```sh
-token=$(openssl rand -hex 32)
-fields=$(jq -nc --arg token "$token" '[{field: "credential", value: $token}]')
+# jq reads the value from the environment, so it never appears in a command's text.
+TOKEN=$(openssl rand -hex 32) && export TOKEN
+fields=$(jq -nc '[{field: "credential", value: env.TOKEN}]')
 cairn plugin onepassword create-item --account ACCOUNT_ID --vault VAULT_ID \
   --category "API Credential" --title Deploy --fields "$fields"
 cairn plugin onepassword set-fields --account ACCOUNT_ID --vault VAULT_ID \
@@ -901,8 +903,12 @@ matches by ID, then label, like `read-fields`; an unknown one is added, `CONCEAL
 unless `type` is `STRING`, `EMAIL`, `URL`, `PHONE` or `OTP`. `create-item` starts
 from the category's template. Both send the item JSON to `op` through stdin, so values
 never enter its arguments, and return field references without values. `set-fields`
-refuses Login items: a JSON rewrite loses passkeys, which the CLI does not export.
-Neither is available through the metadata tool, and nothing deletes items.
+reads the item and rewrites it from its JSON, so a change made in between is
+overwritten. It refuses Login items, whose passkeys the CLI does not export, as well as
+Document and SSH Key items and items with attachments. `accounts` reports which
+accounts allow writing. Neither command is available through the metadata tool, and
+nothing deletes items. Only the owner can turn writing on: an installation agent may
+turn it off, like any switch declared with a `risk`.
 
 `limits` is also available through the metadata tool. It reports the CLI's
 hourly token and daily account limits, usage, remaining requests and `reset` in

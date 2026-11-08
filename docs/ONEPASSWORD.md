@@ -29,7 +29,9 @@ values arrive as a JSON argument that agents build from variables or command
 substitution, so a value never appears literally in the command text. Cairn sends
 them to `op` through stdin, as an item JSON template, never in its arguments, and
 returns field references without values. `set-fields` rewrites the item from its
-JSON, which carries no passkey, so it refuses Login items. Nothing deletes items.
+JSON, which carries no passkey, so it refuses Login items, as well as Document and SSH
+Key items and items with attachments. Nothing deletes items. Installation agents can
+turn writing off but never on.
 Write requests have their own hourly quota and share the daily account quota.
 Tool results containing secrets enter the authorized agent's context and may be
 stored in run history; avoid asking

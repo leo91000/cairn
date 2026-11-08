@@ -834,6 +834,27 @@ where
             }
         }
     }
+    // A risky switch widens what granted agents may do, like a grant: installation
+    // agents may turn one off, never on.
+    if management
+        .as_ref()
+        .is_some_and(super::management::Authority::is_agent)
+    {
+        let previous = match existing {
+            Some(id) => get(s, plugin_id, id).await?.settings,
+            None => json!({}),
+        };
+        let widened = manifest.settings.iter().find(|field| {
+            let key = text(field, "key");
+            field.get("risk").is_some() && settings[key] == true && previous[key] != true
+        });
+        if let Some(field) = widened {
+            return Err(Error::forbidden(format!(
+                "Only the owner can turn on “{}”.",
+                text(field, "title")
+            )));
+        }
+    }
     if let Some(flow) = flow {
         super::oauth::flow_credential(s, plugin_id, flow, existing, &settings, false).await?;
     }

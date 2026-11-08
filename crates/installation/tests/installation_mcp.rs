@@ -2864,6 +2864,86 @@ async fn plugin_setup_is_available_on_both_endpoints_without_granting_private_ac
 }
 
 #[tokio::test]
+async fn installation_agents_can_turn_risky_switches_off_but_never_on() {
+    let root = TempDir::new().unwrap();
+    let s = service(&root).await;
+    let main = enabled_main(&s).await;
+    let (_, configuration) = active_run(&s, &main).await;
+    let saved = common::save_plugin(
+        &s,
+        "onepassword",
+        &json!({
+            "name": "Shared", "enabled": true, "secrets": { "token": "ops_fixture" },
+            "agentIds": [MAIN_AGENT_ID],
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    let save = |allow_write: bool, revision: &Value| {
+        json!({
+            "pluginId": "onepassword", "kind": "save", "instanceId": saved["id"],
+            "data": {
+                "name": "Shared", "enabled": true, "revision": revision,
+                "settings": { "allowWrite": allow_write },
+            },
+        })
+    };
+
+    // Writing widens what granted agents may do: only the owner turns it on.
+    let widened = call(
+        &s,
+        &configuration,
+        "manage_plugin",
+        save(true, &saved["revision"]),
+    )
+    .await;
+    assert_eq!(widened["result"]["isError"], true, "{widened}");
+    assert!(widened.to_string().contains("Only the owner"), "{widened}");
+    let created = call(
+        &s,
+        &configuration,
+        "manage_plugin",
+        json!({
+            "pluginId": "onepassword", "kind": "save",
+            "data": {
+                "name": "Another", "enabled": true, "secrets": { "token": "ops_fixture" },
+                "settings": { "allowWrite": true },
+            },
+        }),
+    )
+    .await;
+    assert_eq!(created["result"]["isError"], true, "{created}");
+    let current = s
+        .instance_fixture(saved["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(current["settings"]["allowWrite"], false);
+
+    let allowed = public_call(
+        &s,
+        &["manage"],
+        "manage_plugin",
+        save(true, &current["revision"]),
+    )
+    .await;
+    let allowed = &result(&allowed)["instance"];
+    assert_eq!(allowed["settings"]["allowWrite"], true, "{allowed}");
+    let reduced = call(
+        &s,
+        &configuration,
+        "manage_plugin",
+        save(false, &allowed["revision"]),
+    )
+    .await;
+    assert_eq!(
+        result(&reduced)["instance"]["settings"]["allowWrite"],
+        false,
+        "{reduced}"
+    );
+}
+
+#[tokio::test]
 async fn both_mcp_endpoints_can_pause_and_delete_instances_pending_package_reapproval() {
     use cairn_installation::{
         plugins::{connections, registry},

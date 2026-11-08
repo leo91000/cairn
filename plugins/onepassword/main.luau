@@ -113,11 +113,15 @@ local function account(input)
     return id
 end
 
+local function allows_write(instance)
+    return instance.settings ~= nil and instance.settings.allowWrite == true
+end
+
 -- The same account, only when its owner allowed agents to write with it.
 local function writable_account(input)
     local id = account(input)
     for _, instance in input.instances do
-        if instance.id == id and instance.settings.allowWrite == true then
+        if instance.id == id and allows_write(instance) then
             return id
         end
     end
@@ -222,7 +226,7 @@ local operations = {}
 function operations.accounts(input)
     local accounts = cairn.array()
     for _, instance in input.instances do
-        table.insert(accounts, { id = instance.id, name = instance.name })
+        table.insert(accounts, { id = instance.id, name = instance.name, write = allows_write(instance) })
     end
     return { accounts = accounts }
 end
@@ -332,7 +336,10 @@ operations["create-item"] = function(input)
     return written(decode(created))
 end
 
--- Edits rewrite the item from its JSON, which carries no passkey: Login items are refused.
+-- Edits rewrite the item from its JSON. It carries no passkey, and attachments, documents
+-- and SSH keys may not survive the round trip: those items are refused.
+local REWRITE_UNSAFE = { LOGIN = true, DOCUMENT = true, SSH_KEY = true }
+
 operations["set-fields"] = function(input)
     local id = writable_account(input)
     local entries = assignments(input.arguments.fields)
@@ -340,8 +347,11 @@ operations["set-fields"] = function(input)
     local item = decode(op(id, {
         "item", "get", "--vault=" .. input.arguments.vault, "--format=json", "--", input.arguments.item,
     }))
-    if item.category == "LOGIN" or type(item.id) ~= "string" or item.id == "" then
-        cairn.fail("set-fields cannot edit Login items, which may hold passkeys. Edit it in 1Password, or create a new item.")
+    if type(item.id) ~= "string" or item.id == "" then
+        cairn.fail("Invalid 1Password response.")
+    end
+    if REWRITE_UNSAFE[item.category] or (type(item.files) == "table" and next(item.files) ~= nil) then
+        cairn.fail("set-fields cannot edit Login, Document or SSH Key items, or items with attachments. Edit it in 1Password, or create a new item.")
     end
     assign(item, entries)
 

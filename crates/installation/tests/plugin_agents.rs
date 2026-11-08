@@ -742,7 +742,7 @@ async fn writes_need_the_owner_switch_send_values_through_stdin_and_return_refer
     let account = text(&saved, "id").to_owned();
     let calls = f.root.path().join("calls");
     let input = f.root.path().join("stdin");
-    let login = f.root.path().join("login");
+    let stored = f.root.path().join("item.json");
     write_program(
         &f.program,
         &format!(
@@ -751,14 +751,12 @@ printf '%s\n' "$*" >> '{calls}'
 case "$2" in
 template) printf '{{"title":"","category":"API_CREDENTIAL","fields":[{{"id":"credential","label":"credential","type":"CONCEALED","value":""}}]}}' ;;
 create|edit) /usr/bin/tee '{input}' ;;
-get) [ -f '{login}' ] && category=LOGIN || category=API_CREDENTIAL
-    printf '{{"id":"item-id","title":"Deploy","category":"%s","vault":{{"id":"vault-id"}},"fields":[{{"id":"credential","label":"credential","type":"CONCEALED","value":"old-secret","reference":"op://vault/Deploy/credential"}}]}}' "$category" ;;
+get) printf '{{"id":"item-id","title":"Deploy","category":"API_CREDENTIAL","vault":{{"id":"vault-id"}},"fields":[{{"id":"credential","label":"credential","type":"CONCEALED","value":"old-secret","reference":"op://vault/Deploy/credential"}}]}}' ;;
 *) exit 1 ;;
 esac
 "#,
             calls = calls.display(),
             input = input.display(),
-            login = login.display(),
         ),
     );
     let fields = r#"[{"field":"credential","value":"new-secret"},{"field":"host","value":"db.example","type":"STRING"}]"#;
@@ -856,22 +854,64 @@ esac
         "item get --vault=vault --format=json -- Deploy\nitem edit --vault=vault --format=json -- item-id\n"
     ));
 
-    // A JSON rewrite would drop passkeys, so Login items are never edited.
-    std::fs::write(&login, "").unwrap();
-    let error =
-        f.s.plugins
-            .command(&f.s, &f.bearer, &set)
-            .await
-            .unwrap_err();
-    assert!(error.message.contains("Login items"), "{error:?}");
-    assert!(
-        !std::fs::read_to_string(&calls)
-            .unwrap()
-            .lines()
-            .last()
-            .unwrap()
-            .starts_with("item edit")
+    assert_eq!(
+        run(&f, command("accounts", &[])).await.unwrap()["value"]["accounts"][0]["write"],
+        true
     );
+
+    // A template needs no fields: the category's template is created with its title.
+    let bare = command(
+        "create-item",
+        &[
+            "--account",
+            &account,
+            "--vault",
+            "vault",
+            "--category",
+            "Secure Note",
+            "--title",
+            "Notes",
+        ],
+    );
+    assert_eq!(
+        run(&f, bare).await.unwrap()["value"]["fields"][0]["id"],
+        "credential"
+    );
+    let template: Value = serde_json::from_str(&std::fs::read_to_string(&input).unwrap()).unwrap();
+    assert_eq!(template["title"], "Notes");
+    assert_eq!(template["fields"][0]["value"], "");
+
+    // A JSON rewrite would drop passkeys and may damage attachments, documents or SSH
+    // keys, so those items are never edited.
+    let edits = std::fs::read_to_string(&calls)
+        .unwrap()
+        .matches("item edit")
+        .count();
+    for item in [
+        r#"{"id":"item-id","category":"LOGIN","fields":[]}"#,
+        r#"{"id":"item-id","category":"DOCUMENT","fields":[]}"#,
+        r#"{"id":"item-id","category":"SSH_KEY","fields":[]}"#,
+        r#"{"id":"item-id","category":"PASSWORD","files":[{"id":"file"}],"fields":[]}"#,
+    ] {
+        std::fs::write(&stored, item).unwrap();
+        write_program(
+            &f.program,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n/bin/cat '{}'\n",
+                calls.display(),
+                stored.display()
+            ),
+        );
+        let error =
+            f.s.plugins
+                .command(&f.s, &f.bearer, &set)
+                .await
+                .unwrap_err();
+        assert!(error.message.contains("cannot edit"), "{item}: {error:?}");
+    }
+    let invoked = std::fs::read_to_string(&calls).unwrap();
+    assert_eq!(invoked.matches("item edit").count(), edits);
+    assert!(!invoked.contains("new-secret"));
 
     for fields in [
         "[]",
@@ -981,7 +1021,7 @@ async fn service_accounts_are_instances_with_encrypted_tokens_and_live_grants() 
     save(s, update.clone(), Some(&account)).await; // an omitted token is kept
     assert_eq!(
         run(&f, command("accounts", &[])).await.unwrap()["value"]["accounts"],
-        json!([{ "id": account, "name": "Production" }])
+        json!([{ "id": account, "name": "Production", "write": false }])
     );
     assert_eq!(
         run(&f, read.clone()).await.unwrap(),
