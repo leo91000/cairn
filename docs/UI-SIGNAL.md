@@ -75,8 +75,8 @@ are cleared when the account or installation changes.
   the conversation header reads « Background task ». `backgroundWait` ends the wait
   as soon as the agent acts again, the tasks finish or the user writes.
 - **Live avatars** (`AgentAvatar.vue`): a comet arc orbits working agents; it
-  overflows the avatar so rows stay aligned. "Working" is followed by three dots
-  rising in a wave. Queued and paused work keeps a static badge.
+  overflows the avatar so rows stay aligned. In the conversation header the ring
+  replaces any "Working" label. Queued and paused work keeps a static badge.
 - Fil rows enter, leave and reorder with FLIP transitions; places rise in; the
   palette and shortcut sheet spring open; cards lift on hover.
 

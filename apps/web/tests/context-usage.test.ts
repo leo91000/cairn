@@ -1,6 +1,6 @@
 import type { RunEvent } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
-import { compactionText, contextSummary } from '../src/context-usage'
+import { compactionText, contextNeedsAttention, contextSummary } from '../src/context-usage'
 import { fixtureEntries } from './timeline-fixture'
 
 function event(id: number, type: string, payload: Record<string, unknown> = {}): RunEvent {
@@ -15,6 +15,19 @@ function event(id: number, type: string, payload: Record<string, unknown> = {}):
 }
 
 describe('context usage', () => {
+  it('asks for the header only once the window is nearly full', () => {
+    const usage = (contextTokens: number, contextWindow: number | null) => contextSummary({
+      contextTokens,
+      contextWindow,
+      cachedTokens: null,
+      estimated: false,
+    })
+    expect(contextNeedsAttention(usage(158_000, 200_000))).toBe(false)
+    expect(contextNeedsAttention(usage(160_000, 200_000))).toBe(true)
+    expect(contextNeedsAttention(usage(900_000, null))).toBe(false)
+    expect(contextNeedsAttention(contextSummary(null))).toBe(false)
+  })
+
   it('shows the latest request against the reported window', () => {
     const summary = contextSummary({
       contextTokens: 42_202,

@@ -22,7 +22,7 @@ import kotlin.math.roundToInt
 import kotlinx.serialization.json.JsonObject
 
 internal data class ContextSummary(
-    /** Short form for the header: `41 k / 258 k · 16 %`, or `indisponible`. */
+    /** Short form for the conversation menu: `41 k / 258 k · 16 %`, or `indisponible`. */
     val short: String,
     /** The occupancy, or why it is unknown. */
     val label: String,

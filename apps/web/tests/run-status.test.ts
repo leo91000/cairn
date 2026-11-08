@@ -1,6 +1,11 @@
 import type { Run } from '../../../packages/contracts/contracts'
 import { describe, expect, it } from 'vitest'
-import { isExclusivelySuspended, runDisplayStatus } from '../src/run-status'
+import {
+  exclusiveSuspensionLabel,
+  headerStatus,
+  isExclusivelySuspended,
+  runDisplayStatus,
+} from '../src/run-status'
 
 const reservation: NonNullable<Run['suspendedByExclusive']> = {
   id: 'reservation',
@@ -34,4 +39,18 @@ describe('exclusive suspension presentation', () => {
       expect(runDisplayStatus(run)).toBe(status)
     },
   )
+})
+
+describe('conversation header status', () => {
+  it.each(['Working', 'Ready'])('stays quiet while %s', (status) => {
+    expect(headerStatus(status)).toBeNull()
+  })
+
+  it.each(['Background task', 'Background tasks', 'Queued', 'Paused', 'Waiting for quota', exclusiveSuspensionLabel, 'Resumes in 7 min'])('names %s', (status) => {
+    expect(headerStatus(status)).toEqual({ label: status, failed: false })
+  })
+
+  it.each(['Failed', 'Interrupted'])('marks %s as a failure', (status) => {
+    expect(headerStatus(status)).toEqual({ label: status, failed: true })
+  })
 })

@@ -35,7 +35,13 @@ import VirtualSelect from './VirtualSelect.vue'
 
 type Mode = 'automatic' | 'preferred' | 'fixed'
 
-const props = defineProps<{ run: Run }>()
+const props = withDefaults(defineProps<{
+  run: Run
+  /** `attention` shows the chip only while the node needs attention or is changing; routine sync stays in the menu. */
+  variant?: 'chip' | 'attention'
+  /** The visible control that takes focus when neither the opener nor the chip can. */
+  fallbackFocus?: () => HTMLElement | undefined
+}>(), { variant: 'chip' })
 // Lets hosts drop the row around the chip while it renders nothing.
 const emit = defineEmits<{ relevance: [relevant: boolean] }>()
 const nodes = ref<ExecutionNode[]>([])
@@ -85,6 +91,8 @@ const saved = ref('')
 const open = ref(false)
 const moving = ref(false)
 const chip = ref<HTMLButtonElement>()
+// Where focus returns when the panel was opened from elsewhere, such as the conversation menu.
+const opener = ref<HTMLElement>()
 const panel = ref<HTMLDialogElement>()
 const position = ref<Record<string, string>>({ left: '16px', top: '80px', maxHeight: 'calc(100dvh - 96px)' })
 const sheet = ref(false)
@@ -118,7 +126,8 @@ const status = computed((): { tone: 'bad' | 'warn' | 'busy' | 'ok' | 'idle', lab
     return { tone: 'bad', label: 'Sync failed' }
   if (waiting)
     return { tone: waiting === 'integrity' ? 'bad' : 'warn', label: storageShort[waiting] || waiting }
-  if (run.status === 'running' && run.suspendedByExclusive)
+  // The attention chip names the node's own cause: the header already names a suspension.
+  if (run.status === 'running' && run.suspendedByExclusive && props.variant === 'chip')
     return { tone: 'busy', label: 'Suspended for exclusive work' }
   if (run.nodeState)
     return { tone: 'busy', label: labels[run.nodeState] || run.nodeState }
@@ -136,6 +145,23 @@ const status = computed((): { tone: 'bad' | 'warn' | 'busy' | 'ok' | 'idle', lab
   if (run.backup?.capturedAt)
     return { tone: 'ok', label: `Synced ${relativeAge(run.backup.capturedAt, now.value)}` }
   return { tone: 'idle', label: 'No sync yet' }
+})
+// Failures, waits and moves interrupt the work; saving, unsaved bytes and sync age are routine.
+// An exclusive suspension is the conversation's own status, which the header already names.
+const attention = computed(() => {
+  const run = props.run
+  return relevant.value && !!(run.movementError || run.backup?.error || run.storage?.waitingFor || run.storage?.backupDegraded || run.capacityWaitUntil || run.nodeState)
+})
+// A chip whose panel is open stays until it closes, so focus can return to it.
+// The first placement answered, or failed: either way the node's state is known for now.
+const settled = computed(() => loaded.value || !!error.value)
+const showChip = computed(() => props.variant === 'chip' || attention.value || (open.value && !opener.value))
+// A focused chip that goes away hands focus on instead of dropping it to the page.
+watch(showChip, async (shown) => {
+  if (shown || !chip.value || document.activeElement !== chip.value)
+    return
+  await nextTick()
+  props.fallbackFocus?.()?.focus()
 })
 const chipTone = {
   bad: 'border-coral/40 bg-coral-soft text-coral',
@@ -243,16 +269,29 @@ function move() {
 function close(returnFocus = false) {
   panel.value?.close()
   open.value = false
-  if (returnFocus)
-    chip.value?.focus()
-}
-
-async function toggle() {
-  if (open.value) {
-    close(true)
-    return
+  if (returnFocus) {
+    // A window crossing a breakpoint can hide the opener or the chip: focus the first one still shown.
+    const chipStays = props.variant === 'chip' || attention.value
+    const target = [opener.value, chipStays ? chip.value : undefined].find(element => element?.isConnected && element.getClientRects().length)
+      ?? props.fallbackFocus?.()
+    target?.focus()
   }
 
+  opener.value = undefined
+}
+
+function toggle() {
+  if (open.value)
+    close(true)
+  else
+    void show()
+}
+
+/** Opens the details, below `anchor` when given (the chip may be hidden), else below the chip. */
+async function show(anchor?: HTMLElement) {
+  if (open.value)
+    return
+  opener.value = anchor
   open.value = true
   await nextTick()
   // Phones open the details as a bottom sheet: the chip can sit low (in the Connection sheet),
@@ -270,9 +309,11 @@ async function toggle() {
     }
   }
   else {
-    const rect = chip.value?.getBoundingClientRect()
+    const rect = (anchor ?? chip.value)?.getBoundingClientRect()
     const top = Math.min((rect?.bottom ?? 60) + 8, window.innerHeight - 220)
-    position.value = { maxHeight: `${window.innerHeight - top - 16}px`, left: `${Math.max(16, Math.min(rect?.left ?? 16, window.innerWidth - 416))}px`, top: `${top}px` }
+    // An anchor at the end of the header aligns the panel's right edge with it.
+    const left = anchor && rect ? rect.right - 400 : rect?.left ?? 16
+    position.value = { maxHeight: `${window.innerHeight - top - 16}px`, left: `${Math.max(16, Math.min(left, window.innerWidth - 416))}px`, top: `${top}px` }
   }
 
   panel.value?.showModal()
@@ -300,6 +341,14 @@ function resized() {
 }
 
 window.addEventListener('resize', resized)
+defineExpose({
+  show,
+  relevant,
+  nodeName,
+  status,
+  attention,
+  settled,
+})
 onUnmounted(() => {
   clearInterval(timer)
   window.removeEventListener('resize', resized)
@@ -307,21 +356,22 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div v-if="relevant" class="relative inline-flex max-w-full" @keydown.esc.stop="close(true)">
+  <div v-if="relevant" :class="showChip ? (variant === 'chip' ? 'relative inline-flex min-w-0 max-w-full' : 'relative inline-flex min-w-0 max-w-[35%]') : 'hidden'" @keydown.esc.stop="close(true)">
     <button
+      v-if="showChip"
       ref="chip"
       type="button"
       class="flex min-w-0 max-w-full items-center gap-1.5 rounded-full border py-0.5 pr-2.5 pl-2 text-[11px] leading-5 transition-colors hover:border-control hover:text-ink"
       :class="chipTone[status.tone]"
       aria-haspopup="dialog"
       :aria-expanded="open"
-      aria-label="Execution node"
+      :aria-label="variant === 'attention' ? `Execution node: ${status.label}` : 'Execution node'"
       @click="toggle"
     >
       <Icon :name="Server" :size="13" class="shrink-0" />
-      <span class="truncate">{{ nodeName }}</span>
+      <span v-if="variant === 'chip'" class="truncate">{{ nodeName }}</span>
       <template v-if="status.label">
-        <span aria-hidden="true" class="opacity-40">|</span>
+        <span v-if="variant === 'chip'" aria-hidden="true" class="opacity-40">|</span>
         <Icon
           v-if="status.tone === 'busy' || (status.tone === 'warn' && run.backup?.status === 'saving')"
           :name="LoaderCircle"
@@ -340,7 +390,8 @@ onUnmounted(() => {
           :size="12"
           class="shrink-0"
         />
-        <span role="status" class="whitespace-nowrap">{{ status.label }}</span>
+        <!-- The attention chip appears already filled: the header's own live region announces it. -->
+        <span :role="variant === 'chip' ? 'status' : undefined" :class="variant === 'chip' ? 'whitespace-nowrap' : 'truncate'">{{ status.label }}</span>
       </template>
     </button>
     <Teleport to="body">

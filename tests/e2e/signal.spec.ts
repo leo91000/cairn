@@ -9,6 +9,7 @@ import {
   signIn as authenticateWorkspace,
   expect,
   expectSingleScroll,
+  headerStatus,
   test,
   useRelayForHttpMocks,
   workspacePath,
@@ -333,7 +334,10 @@ test('exclusive suspension stays live and suppresses working indicators until re
     await expect(live.locator('.avatar-orbit')).toHaveCount(0)
     await live.locator(`[data-fil-key="chat:${chat.id}"]`).click()
     await expect(page.getByRole('region', { name: 'Activity output' }).getByText('Suspended for exclusive work.')).toBeVisible()
-    await expect(page.locator('.agent-working, .working-wave')).toHaveCount(0)
+    await expect(page.locator('.agent-working')).toHaveCount(0)
+    // The header names the suspension and stops the avatar's ring.
+    await expect(headerStatus(page, 'Suspended for exclusive work')).toBeVisible()
+    await expect(page.locator('.chat-header .avatar-orbit').filter({ visible: true })).toHaveCount(0)
     workspace.service.store.updateRun(runId, { suspendedByExclusive: null })
     await expect(live.getByText('Working', { exact: true })).toBeVisible()
     await expect(page.locator('.agent-working')).toHaveCount(1)
@@ -423,7 +427,7 @@ test('the Fil, rail and shortcuts lead through the workspace', async ({ page, wo
   const working = page.locator('.agent-working')
   await expect(working).toBeVisible()
   await expect(working).toHaveAttribute('aria-live', 'polite')
-  await expect(page.locator('.chat-page .avatar-orbit')).toHaveCount(1)
+  await expect(page.locator('.chat-page .avatar-orbit').filter({ visible: true })).toHaveCount(1)
   await expectSingleScroll(page)
   await capture(page, testInfo, 'signal-conversation-desktop')
 

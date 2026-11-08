@@ -7,7 +7,7 @@
   "build.cairn.app.ui.AgentPageDeviceTest#onePasswordAccountIsGrantedFromTheAgentWithReadableSkills": 2.7,
   "build.cairn.app.ui.AgentPageDeviceTest#unsavedChangesAskBeforeLeavingAndAConflictKeepsTheDraft": 5.7,
   "build.cairn.app.ui.BackgroundWaitDeviceTest#failedResponseBannerCanBeDismissed": 8,
-  "build.cairn.app.ui.BackgroundWaitDeviceTest#headerWaitTimeAdvancesWithoutStreamEvents": 8.3,
+  "build.cairn.app.ui.BackgroundWaitDeviceTest#headerNamesABackgroundWaitWithoutAWorkingLabel": 8.3,
   "build.cairn.app.ui.BackgroundWaitDeviceTest#relayedBackgroundWaitReplacesWorking": 7.7,
   "build.cairn.app.ui.CairnAccountDeviceTest#emailCodeOpensInstallationAndLogsOut": 24.2,
   "build.cairn.app.ui.CairnAccountDeviceTest#installationSelectionAndMemberRole": 24.2,

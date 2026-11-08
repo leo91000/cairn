@@ -1,7 +1,7 @@
 import type { ContextUsage } from '../../../packages/contracts/chats'
 
 export interface ContextSummary {
-  /** Short form for the header: `42K / 200K · 21%`, or `Unavailable`. */
+  /** Short form for the conversation menu: `42K / 200K · 21%`, or `Unavailable`. */
   short: string
   /** The occupancy, or why it is unknown. */
   label: string
@@ -51,6 +51,11 @@ export function contextSummary(usage: ContextUsage | null | undefined): ContextS
     details,
     percent,
   }
+}
+
+/** A nearly full window is worth a glance in the header; below that, the occupancy waits in the menu. */
+export function contextNeedsAttention(summary: ContextSummary) {
+  return (summary.percent ?? 0) >= 80
 }
 
 export interface CompactionEntry {
