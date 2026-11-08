@@ -1549,9 +1549,7 @@ abstract class PluginsCases {
             capture("plugin-setup-checklist")
             continueSetup()
             // Writing is a separate, high-risk permission that stays off unless turned on.
-            compose
-                .onNode(hasText("Create items and edit fields") and isToggleable())
-                .assertIsOff()
+            compose.onNode(hasText("Create items and edit fields") and isToggleable()).assertIsOff()
             compose.onNodeWithText("Risque élevé").assertExists()
             continueSetup()
             // A new account is granted to the agents ticked here; later on, on agent pages.
