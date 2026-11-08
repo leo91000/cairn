@@ -1,6 +1,6 @@
 # B534 first-attempt native navigation diagnostic
 
-This observer is diagnostic only and must never be merged. Root explicitly ceded the sole heavy slot for this B534 case. The historical fbd/59d skill probes remain preserved but are not selected by this workflow. No new B534 diagnostic run has been dispatched yet; a fresh independent full-diff review is required first.
+This observer is diagnostic only and must never be merged. Root explicitly ceded the sole heavy slot for this B534 case. The historical fbd/59d skill probes remain preserved but are not selected by this workflow. This document records preparation before run42528187935. That single paired run subsequently completed; see availability-repair-context.md for the current selected qualification. The historical probes are no longer selected.
 
 ## Original failure and privacy
 

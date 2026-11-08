@@ -1,20 +1,18 @@
-name: B534 native navigation paired diagnostic
+name: Availability navigation repair qualification
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   browser:
-    name: B534 native navigation (${{ matrix.label }})
+    name: Availability repair (${{ matrix.label }})
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
         include:
-          - label: base-7028fbfd
-            sha: 7028fbfdd6d13e27b8f4e7db767899828d631b42
-          - label: B-5d1645ea
-            sha: 5d1645ea808cb18f7b64aa0dcd92987cc3ceeb2d
+          - label: focused-repair
+            sha: b32fa1e6abc787b7192d248a64dfaa07a748ddc3
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -63,126 +61,90 @@ jobs:
           if (installed !== preinstalled)
             throw new Error(`Update the pinned browser image: Playwright package ${installed}, image ${preinstalled}`)
           JS
-      - name: Collect the exact B534 controls before native compilation
-        timeout-minutes: 3
-        env:
-          OBSERVER_SHA: ${{ github.sha }}
+      - name: Collect the real native regression cases before compilation
+        timeout-minutes: 5
         run: |
           test ! -e target/debug/cairn
           test ! -e target/debug/examples/browser_fixture
-          git -c safe.directory="$GITHUB_WORKSPACE" fetch origin "$OBSERVER_SHA"
-          evidence_dir="$PWD/test-results/b534-collection"
-          mkdir -p "$evidence_dir"
-          original="$evidence_dir/mcps.original"
-          cp tests/e2e/mcps.spec.ts "$original"
-          trap 'cp "$original" tests/e2e/mcps.spec.ts' EXIT
-          git -c safe.directory="$GITHUB_WORKSPACE" show "$OBSERVER_SHA:.github/diagnostics/b534-navigation-probe.ts" >> tests/e2e/mcps.spec.ts
-          for control in native-cancel abort-before-goto; do
-            for selection in fixed old; do
-              expression='B534 native Agents navigation'
-              if [ "$selection" = old ]; then expression='^B534 native Agents navigation'; fi
-              set +e
-              CAIRN_B534_CONTROL="$control" PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$control" PLAYWRIGHT_JSON_OUTPUT_FILE="$evidence_dir/$control-$selection.json" pnpm test:e2e mcps.spec.ts --config=playwright.config.ts --project=layout-webkit-mcps --grep "$expression" --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --output="test-results/$control" --list --reporter=json > "$evidence_dir/$control-$selection.stdout" 2> "$evidence_dir/$control-$selection.stderr"
-              code=$?
-              set -e
-              printf '%s\n' "$code" > "$evidence_dir/$control-$selection.exit"
-            done
-          done
+          mkdir -p test-results/collection
+          PLAYWRIGHT_JSON_OUTPUT_FILE=test-results/collection/cases.json pnpm test:e2e mcps.spec.ts --project=journeys-mcps --project=layout-webkit-mcps --grep 'availability keeps direct readers stable' --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --list --reporter=json
           node --input-type=module <<'JS'
+          import { readFileSync, writeFileSync } from 'node:fs'
           import assert from 'node:assert/strict'
-          import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-          const root = 'test-results/b534-collection'
-          const records = (report) => {
-            const found = []
-            const walk = (suites) => {
-              for (const suite of suites || []) {
-                for (const spec of suite.specs || []) {
-                  for (const test of spec.tests || []) {
-                    assert.equal(test.results?.length || 0, 0, 'Collection must not execute test fixtures')
-                    found.push({ title: spec.title, project: test.projectName })
-                  }
-                }
-                walk(suite.suites)
+          const report = JSON.parse(readFileSync('test-results/collection/cases.json', 'utf8'))
+          const cases = []
+          function collect(suite) {
+            for (const spec of suite.specs || []) {
+              for (const test of spec.tests) {
+                assert.equal(test.results.length, 0)
+                cases.push([test.projectName, spec.title])
               }
             }
-            walk(report.suites)
-            return found
+            for (const child of suite.suites || []) collect(child)
           }
-          const controls = []
-          for (const control of ['native-cancel', 'abort-before-goto']) {
-            const prefix = `${root}/${control}`
-            const fixedExit = Number(readFileSync(`${prefix}-fixed.exit`, 'utf8'))
-            const fixed = JSON.parse(readFileSync(`${prefix}-fixed.json`, 'utf8'))
-            const selected = records(fixed)
-            assert.equal(fixedExit, 0)
-            assert.equal(fixed.errors?.length || 0, 0)
-            assert.deepEqual(selected, [{ title: `B534 native Agents navigation (${control})`, project: 'layout-webkit-mcps' }])
-            const oldExit = Number(readFileSync(`${prefix}-old.exit`, 'utf8'))
-            const old = existsSync(`${prefix}-old.json`) ? JSON.parse(readFileSync(`${prefix}-old.json`, 'utf8')) : undefined
-            const oldSelected = old ? records(old) : []
-            const diagnostic = readFileSync(`${prefix}-old.stdout`, 'utf8') + readFileSync(`${prefix}-old.stderr`, 'utf8') + JSON.stringify(old?.errors || [])
-            assert.equal(oldExit, 1, 'Preserve the actual NoTests failure from the old grep')
-            assert.equal(oldSelected.length, 0)
-            assert.ok(diagnostic.includes('No tests found'), 'A loader/configuration error is not the old NoTests control')
-            controls.push({ control, fixedExit, selected, oldExit, oldCount: oldSelected.length, oldNoTests: true })
-          }
-          assert.equal(controls.flatMap(control => control.selected).length, 2)
-          const version = JSON.parse(readFileSync('node_modules/@playwright/test/package.json', 'utf8')).version
-          assert.equal(version, '1.64.1')
-          writeFileSync(`${root}/receipt.json`, JSON.stringify({ collectionOnly: true, version, config: 'playwright.config.ts', controls }, null, 2))
-          console.log('Pinned real CLI collection: old grep NoTests=1/0 cases; fixed grep exactly two named controls; no fixtures executed')
+          for (const suite of report.suites) collect(suite)
+          assert.deepEqual(report.errors, [])
+          const expected = ['journeys-mcps', 'layout-webkit-mcps'].flatMap(project => ['committed', 'cancelled'].map(destination => [project, `availability keeps direct readers stable until native navigation is ${destination}`]))
+          assert.deepEqual(cases.sort(), expected.sort())
+          writeFileSync('test-results/collection/receipt.json', JSON.stringify({ collectionOnly: true, cases }))
+          console.log('Exact native regression collection: four cases, two per browser project; no runtime fixture execution.')
           JS
-          cp "$original" tests/e2e/mcps.spec.ts
-          cmp "$original" tests/e2e/mcps.spec.ts
-          git -c safe.directory="$GITHUB_WORKSPACE" diff --exit-code -- tests/e2e/mcps.spec.ts
-          trap - EXIT
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: b534-collection-${{ matrix.label }}
-          path: test-results/b534-collection/
+          name: availability-repair-collection
+          path: test-results/collection/
           retention-days: 14
-      - name: Install the pinned Rust toolchain and build dependencies
+      - name: Install pinned Rust tools and browser build dependencies
+        timeout-minutes: 5
         run: |
           node scripts/prepare-browser-build-dependencies.mjs
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
+          "$HOME/.cargo/bin/rustup" component add rustfmt
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Build the manager fixtures and web assets
-        run: |
-          cargo build --locked --bin cairn --example worker_fixture --example browser_fixture --example network_direct_client --example network_qualification --example native_storage_qualifier
-          cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server --example beacon_sql_fixture
-          pnpm exec vite build --config apps/web/vite.config.ts
-      - name: Qualify the isolated Postgres fixture
-        run: pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts
-      - name: Install observer-only B534 navigation probe
-        env:
-          OBSERVER_SHA: ${{ github.sha }}
-          EXPECTED_SOURCE_SHA: ${{ matrix.sha }}
-        run: |
-          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
-          test -z "$(git -c safe.directory="$GITHUB_WORKSPACE" status --porcelain)"
-          git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD:tests/e2e/mcps.spec.ts
-          git -c safe.directory="$GITHUB_WORKSPACE" cat-file -e "$OBSERVER_SHA^{commit}"
-          git -c safe.directory="$GITHUB_WORKSPACE" show "$OBSERVER_SHA:.github/diagnostics/b534-navigation-probe.ts" >> tests/e2e/mcps.spec.ts
-      - name: Observe both single-variable native navigation controls
+      - name: Format and require unchanged product source
         timeout-minutes: 5
         run: |
-          result=0
-          for control in native-cancel abort-before-goto; do
-            set +e
-            CAIRN_B534_CONTROL="$control" PLAYWRIGHT_HTML_OUTPUT_DIR="playwright-report/$control" pnpm test:e2e mcps.spec.ts --config=playwright.config.ts --project=layout-webkit-mcps --grep 'B534 native Agents navigation' --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --output="test-results/$control"
-            code=$?
-            set -e
-            printf '%s exit=%s\n' "$control" "$code" >> b534-control-results.txt
-            if [ "$code" -ne 0 ]; then result=1; fi
-          done
-          exit "$result"
+          pnpm lint:fix
+          git -c safe.directory="$GITHUB_WORKSPACE" diff --binary > test-results/formatter.patch
+          git -c safe.directory="$GITHUB_WORKSPACE" diff --exit-code
+      - name: Qualify all web quality checks
+        timeout-minutes: 5
+        run: pnpm check
+      - name: Build the manager fixtures
+        timeout-minutes: 5
+        run: cargo build --locked --bin cairn --example worker_fixture --example browser_fixture --example network_direct_client --example network_qualification --example native_storage_qualifier
+      - name: Build the Beacon fixtures
+        timeout-minutes: 5
+        run: cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server --example beacon_sql_fixture
+      - name: Build ordinary browser assets
+        timeout-minutes: 5
+        run: pnpm exec vite build --config apps/web/vite.config.ts
+      - name: Qualify the isolated Postgres fixture
+        timeout-minutes: 5
+        run: pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts
+      - name: Qualify the exact PR browser command on the product head
+        timeout-minutes: 5
+        env:
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/primary
+        run: pnpm test:e2e deliverables.spec.ts skill-bundles.spec.ts beacon-sharing.spec.ts beacon-installations.spec.ts mcps.spec.ts --workers=2 --retries=0 --fail-on-flaky-tests --trace=on
+      - name: Qualify direct relay and saved-reader dependants
+        timeout-minutes: 5
+        env:
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/specialists
+        run: pnpm test:e2e beacon-relay.spec.ts direct-capacity.spec.ts chat-switch.spec.ts --project=journeys-beacon-relay --project=journeys-chat-switch --project=layout-webkit-chat-switch --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results-specialists
+      - name: Require final source identity
+        env:
+          EXPECTED_SHA: ${{ matrix.sha }}
+        run: |
+          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git -c safe.directory="$GITHUB_WORKSPACE" status --porcelain)"
       - uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
-          name: b534-navigation-${{ matrix.label }}
+          name: availability-repair-browser-evidence
           path: |
             playwright-report/
             test-results/
-            b534-control-results.txt
+            test-results-specialists/
           retention-days: 14
