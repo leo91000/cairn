@@ -11,6 +11,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import process from 'node:process'
@@ -50,6 +51,112 @@ function fixture(version = nextestArtifact.version) {
 }
 
 describe('fixed nextest acquisition', () => {
+  it('retains closed API and asset refusal metadata without signed queries or response bodies', async () => {
+    const value = fixture()
+    try {
+      const records = []
+      let requests = 0
+      await expect(installNextest(value.bin, {
+        ...value,
+        report: record => records.push(record),
+        fetchAsset: async () => {
+          if (requests++ === 0) {
+            return new Response(null, {
+              status: 302,
+              headers: {
+                'location': 'https://release-assets.githubusercontent.com/asset?private-signed-query',
+                'x-ratelimit-remaining': '53',
+                'x-ratelimit-limit': 'private quota header',
+              },
+            })
+          }
+
+          return new Response('private response body', { status: 403, headers: { 'content-type': 'text/html' } })
+        },
+      })).rejects.toThrow('CI_NEXTEST_DOWNLOAD_FAILED')
+      expect(requests).toBe(2)
+      expect(records).toEqual([
+        {
+          event: 'nextest-response',
+          stage: 'api',
+          status: 302,
+          contentType: 'other-or-missing',
+          contentBytes: null,
+          rateLimitRemaining: '53',
+          rateLimitLimit: null,
+        },
+        {
+          event: 'nextest-response',
+          stage: 'asset',
+          status: 403,
+          contentType: 'text/html',
+          contentBytes: null,
+          rateLimitRemaining: null,
+          rateLimitLimit: null,
+        },
+        { event: 'nextest-failure', stage: 'asset', code: 'CI_NEXTEST_DOWNLOAD_FAILED' },
+      ])
+      expect(JSON.stringify(records)).not.toContain('private')
+      expect(value.calls).toEqual([])
+    }
+    finally {
+      value.close()
+    }
+  })
+
+  it.each([false, true])('reporter failure cannot change an acquisition outcome (HTTP refusal: %s)', async (refused) => {
+    const value = fixture()
+    try {
+      const attempt = installNextest(value.bin, {
+        ...value,
+        fetchAsset: refused ? async () => new Response('private body', { status: 504 }) : value.fetchAsset,
+        report: () => {
+          throw new Error('private diagnostic failure')
+        },
+      })
+      if (refused) {
+        await expect(attempt).rejects.toThrow('CI_NEXTEST_DOWNLOAD_FAILED')
+        expect(value.calls).toEqual([])
+      }
+      else {
+        await expect(attempt).resolves.toMatchObject({ sha256: value.artifact.sha256 })
+      }
+    }
+    finally {
+      value.close()
+    }
+  })
+
+  it('aborts a real stalled response body under the shared deadline without another request', async () => {
+    const value = fixture()
+    let requests = 0
+    const server = createServer((_request, response) => {
+      requests++
+      response.writeHead(200, { 'content-type': 'application/octet-stream' })
+      response.write(Buffer.from([0]))
+    })
+    try {
+      await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+      await expect(installNextest(value.bin, {
+        ...value,
+        artifact: { ...value.artifact, url: `http://127.0.0.1:${server.address().port}/asset` },
+        fetchAsset: fetch,
+        createTimeoutSignal: (budget) => {
+          expect(budget).toBe(120000)
+          return AbortSignal.timeout(1000)
+        },
+      })).rejects.toThrow('CI_NEXTEST_INSTALL_FAILED')
+      expect(requests).toBe(1)
+      expect(value.calls).toEqual([])
+      expect(existsSync(value.bin)).toBe(false)
+    }
+    finally {
+      server.closeAllConnections()
+      await new Promise(resolve => server.close(resolve))
+      value.close()
+    }
+  })
+
   it('requests only the pinned official asset and verifies bytes before extraction and publication', async () => {
     const value = fixture()
     try {

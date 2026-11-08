@@ -35,8 +35,38 @@ export async function installNextest(binDirectory, {
   fetchAsset = fetch,
   createTimeoutSignal = AbortSignal.timeout,
   run = spawnSync,
+  report = () => {},
 } = {}) {
   const signal = createTimeoutSignal(120000)
+  let stage = 'api'
+
+  function observe(record) {
+    try {
+      report(record)
+    }
+    catch {
+      // Advisory metadata cannot alter installation or failure behavior.
+    }
+  }
+
+  function observeResponse(response) {
+    const contentType = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase()
+    const numericHeader = (name) => {
+      const value = response.headers.get(name)
+      return value && /^\d{1,15}$/.test(value) ? value : null
+    }
+
+    observe({
+      event: 'nextest-response',
+      stage,
+      status: response.status,
+      contentType: ['application/octet-stream', 'application/json', 'text/html', 'text/plain'].includes(contentType) ? contentType : 'other-or-missing',
+      contentBytes: numericHeader('content-length'),
+      rateLimitRemaining: numericHeader('x-ratelimit-remaining'),
+      rateLimitLimit: numericHeader('x-ratelimit-limit'),
+    })
+  }
+
   let response
   try {
     response = await fetchAsset(artifact.url, {
@@ -44,6 +74,7 @@ export async function installNextest(binDirectory, {
       redirect: 'manual',
       signal,
     })
+    observeResponse(response)
     if ([301, 302, 303, 307, 308].includes(response.status)) {
       discard(response)
       const location = new URL(response.headers.get('location'))
@@ -53,7 +84,9 @@ export async function installNextest(binDirectory, {
       }
 
       signal.throwIfAborted()
+      stage = 'asset'
       response = await fetchAsset(location.href, { redirect: 'manual', signal })
+      observeResponse(response)
     }
 
     if (response.status !== 200 || !response.body
@@ -72,6 +105,7 @@ export async function installNextest(binDirectory, {
     }
 
     signal.throwIfAborted()
+    stage = 'integrity'
     const contents = Buffer.concat(chunks)
     if (bytes !== artifact.bytes || createHash('sha256').update(contents).digest('hex') !== artifact.sha256)
       fail('INTEGRITY_FAILED')
@@ -83,6 +117,7 @@ export async function installNextest(binDirectory, {
       const binary = path.join(staging, 'cargo-nextest')
       writeFileSync(archive, contents, { flag: 'wx', mode: 0o600 })
 
+      stage = 'extract'
       const extracted = run('tar', ['-xzf', archive, '--directory', staging, '--no-same-owner', '--no-same-permissions', '--', 'cargo-nextest'], {
         encoding: 'utf8',
         timeout: 10000,
@@ -92,12 +127,14 @@ export async function installNextest(binDirectory, {
         fail('EXTRACTION_FAILED')
       chmodSync(binary, 0o755)
 
+      stage = 'version'
       const verified = run(binary, ['nextest', '--version'], { encoding: 'utf8', timeout: 5000, maxBuffer: 4096 })
       if (verified.error || verified.status !== 0
         || !verified.stdout?.startsWith(`cargo-nextest ${artifact.version} `)) {
         fail('VERSION_MISMATCH')
       }
 
+      stage = 'publish'
       renameSync(binary, path.join(binDirectory, 'cargo-nextest'))
     }
     finally {
@@ -107,9 +144,9 @@ export async function installNextest(binDirectory, {
     return { version: artifact.version, bytes, sha256: artifact.sha256 }
   }
   catch (error) {
-    if (error instanceof Error && /^CI_NEXTEST_[A-Z_]+$/.test(error.message))
-      throw error
-    fail('INSTALL_FAILED')
+    const code = error instanceof Error && /^CI_NEXTEST_[A-Z_]{1,64}$/.test(error.message) ? error.message : 'CI_NEXTEST_INSTALL_FAILED'
+    observe({ event: 'nextest-failure', stage, code })
+    throw new Error(code)
   }
 }
 
@@ -121,7 +158,9 @@ if (import.meta.main) {
     }
 
     const binDirectory = path.join(process.env.CARGO_HOME || path.join(process.env.HOME, '.cargo'), 'bin')
-    console.log(JSON.stringify(await installNextest(binDirectory)))
+    console.log(JSON.stringify(await installNextest(binDirectory, {
+      report: record => console.error(JSON.stringify(record)),
+    })))
   }
   catch (error) {
     console.error(error.message)
