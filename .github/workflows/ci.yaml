@@ -207,7 +207,8 @@ jobs:
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - name: Install native test dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
+        timeout-minutes: 10
+        run: node scripts/install-native-ci-dependencies.mjs
       - uses: ./.github/actions/observe-rust-build
         with:
           phase: before-build
@@ -259,7 +260,8 @@ jobs:
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - name: Install native test dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
+        timeout-minutes: 10
+        run: node scripts/install-native-ci-dependencies.mjs
       - uses: ./.github/actions/prepare-rust-runner
         timeout-minutes: 3
       - uses: ./.github/actions/observe-rust-build
@@ -346,7 +348,8 @@ jobs:
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - name: Install native test dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
+        timeout-minutes: 10
+        run: node scripts/install-native-ci-dependencies.mjs
       - uses: ./.github/actions/prepare-rust-runner
         timeout-minutes: 3
       - uses: ./.github/actions/observe-rust-build
@@ -466,7 +469,8 @@ jobs:
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - name: Install native test dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
+        timeout-minutes: 10
+        run: node scripts/install-native-ci-dependencies.mjs
       - name: Qualify physical backend migration from this commit
         run: |
           set -o pipefail
@@ -506,7 +510,8 @@ jobs:
           cache: true
       - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy && rustup default 1.97.1
       - name: Install native test dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends libclang-dev age e2fsprogs fakeroot
+        timeout-minutes: 10
+        run: node scripts/install-native-ci-dependencies.mjs
       - uses: ./.github/actions/observe-rust-build
         with:
           phase: before-build

@@ -1,5 +1,17 @@
 # Android 0.6.0 / web parity
 
+## Direct conversation read action in the Fil (2026-11-07)
+
+Conversation rows no longer have an overflow menu on web or Android. Unread
+conversations that can be acknowledged show a check button instead: “Mark … as
+read” / « Marquer comme lu : … ». One click marks the result read without opening
+the conversation; read conversations and work without a read action have no row
+button. Web reveals the check on hover or keyboard focus and keeps it visible on
+phones; Android uses its native round check action. Mission menus retain their
+existing actions. This changes presentation only: both apps still use the same
+account-scoped read operation already exposed by public MCP and
+`cairn_installation`; no authorization or contract changes.
+
 ## Folded missions and result previews in the Fil (2026-11-06)
 
 Two or more missions in a row that finished as expected and were read fold into
@@ -295,7 +307,7 @@ The public MCP and built-in installation tool return the same inventory fields.
 | Gmail plugin icon | Both clients render the Gmail mark in white on red from the shared plugin manifest on plugin lists and detail pages, and Android also shows it in its Atelier summary. Android uses a native vector; web uses inline SVG. | Chromium/mobile WebKit `gmail-plugin` journey checks the normalized catalog and rendered logo |
 | Gmail publishing guidance | The shared manifest separates branding from audience/publishing status. Both clients explain the seven-day limit conditionally for External apps in Testing, personal-use publication with Google's warning/user cap, and the Internal app exemption from the Testing limit. | Gmail browser journey checks the conditional warning and Audience link; native clients render the same manifest checklist |
 | Plugin setup validation and reuse | Editing a setting removes an error for its previous value even when the field does not request form refresh; save still validates on the installation. Presets refresh every changed `refresh` field in order. Shared configurations with secrets remain individually selectable even when visible labels match, and missing optional secrets do not prevent reuse. Both clients follow these same rules with native controls. | Shared `plugin-setup.json` source cases, `PluginsCases.ordinaryFieldsClearStaleErrorsAndPresetsRefreshDependentChoices`, browser TOML package journey, backend optional-secret reuse regression |
-| Navigation | Since 0.32.0: Fil / Missions / Atelier floating dock with an always-available new-conversation button (rail on large windows), universal search with direct actions; no workspace-owner decorations | Workspace and Signal journeys; device review |
+| Navigation | Since 0.32.0: Fil / Missions / Atelier floating dock with an always-available new-conversation button (rail on large windows), universal search with direct actions; no workspace-owner decorations. Web includes Plugins in the Atelier section bar on its catalogue and detail pages; Android keeps its native Plugins tile in Atelier and opens the plugin screens through native navigation. | Workspace and Signal journeys; device review; browser plugin journey |
 | Conversation backend migration | Both clients offer an explicit destination and confirmation after the agent profile switches Linux backend. The same fil, history and durable files remain; the next message starts a fresh engine session. Progress and retry errors survive closing the screen. Web uses English copy and Android French Material controls. Public MCP and `cairn_installation` expose the same preview/mutation with live management/native grants. | S3 VM/native roundtrip and interrupted restore tests; MCP authorization regression; Chromium/WebKit migration journey; `NodePlacementCases.backendMigrationRequiresConfirmationAndFollowsItsCompletion` on JVM/device |
 | Restored session restart | Both clients consume installation-provided `canRequestNewSession`, including current run restorations and historical chat restorations. The offer remains available on later failures after a successful turn, preserving the historical lifetime; accepting pauses the queue and cancels its wakeup. Web keeps its confirmation panel; Android keeps its native button/dialog. | Lifecycle/continuation regressions; fresh-session browser journey; `ConversationLifecycleCases` on JVM/device |
 | Conversation retention | Owner setting shared with web: 7 days by default, custom whole days or 0 to disable. Confirmation explains irreversible working-environment expiration, including existing conversations, while retaining history, uploaded attachments, all artifact versions and shared links. Both clients show expired/pending cleanup notices and retries; the next message starts a fresh environment with preserved history and an agent warning. An expired conversation can explicitly confirm a backend change to an empty environment with the same authorization checks; both clients explain that old working files are gone. Explicit deletion still erases the conversation. Android uses French native text/input/dialog; web uses Settings → Installation and an inline notice. | Backend lifecycle tests; settings browser journey; `ConversationRetentionTest` / `ConversationRetentionDeviceTest`; backend-change browser and shared node-placement JVM/device journeys |

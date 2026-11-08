@@ -259,8 +259,10 @@ class FilUnreadJourneyTest {
                 theme = "dark"
                 compose
                     .onNodeWithContentDescription("Autres actions pour Rédiger le changelog 0.53")
+                    .assertDoesNotExist()
+                compose
+                    .onNodeWithContentDescription("Marquer comme lu : Rédiger le changelog 0.53")
                     .performClick()
-                compose.onNodeWithText("Marquer comme lu").performClick()
                 compose.waitUntil(10000) {
                     compose.onAllNodes(isRoot()).fetchSemanticsNodes()
                     reads.isNotEmpty()
@@ -273,6 +275,12 @@ class FilUnreadJourneyTest {
                 compose.onNodeWithText("À lire 1").assertExists()
                 compose.onNodeWithText("Tout").performClick()
                 compose.onNodeWithText("Rédiger le changelog 0.53").assertExists()
+                compose
+                    .onNodeWithContentDescription("Marquer comme lu : Rédiger le changelog 0.53")
+                    .assertDoesNotExist()
+                compose
+                    .onNodeWithContentDescription("Autres actions pour Rédiger le changelog 0.53")
+                    .assertDoesNotExist()
                 compose.onNodeWithText("En cours 1").performClick()
                 compose.onNodeWithText("Répondre").assertExists()
                 compose.onNodeWithText("À lire 1").performClick()

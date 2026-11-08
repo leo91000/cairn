@@ -13,7 +13,6 @@ use std::{
     collections::HashMap,
     path::Path,
     sync::{Arc, Weak},
-    time::Duration,
 };
 use tokio::sync::Mutex;
 
@@ -191,21 +190,40 @@ async fn import(
         .post(format!("{node}/runs/{attempt}/projects/{project_id}"))
         .bearer_auth(credential)
         .json(&body)
-        .timeout(Duration::from_secs(300))
+        .timeout(crate::nodes::PROJECT_OPEN_REQUEST_TIMEOUT)
         .send()
         .await
-        .map_err(|_| {
-            Error::unavailable(
-                "Project transfer was interrupted. Retry open_project; saved files are preserved.",
-            )
+        .map_err(|error| {
+            if error.is_timeout() {
+                Error::gateway_timeout(
+                    "Project transfer or import timed out. Retry open_project; a completed import will be reused.",
+                )
+            } else {
+                Error::unavailable(
+                    "Project transfer was interrupted. Retry open_project; a completed import will be reused.",
+                )
+            }
         })?;
     authorization.recheck().await?;
     if !response.status().is_success() {
+        if response.status() == reqwest::StatusCode::GATEWAY_TIMEOUT {
+            return Err(Error::gateway_timeout(
+                "Project transfer or import timed out. Retry open_project; a completed import will be reused.",
+            ));
+        }
         return Err(Error::unavailable(
-            "Project could not be opened in this VM. Retry when the run is active.",
+            "The execution node could not import this project. Retry open_project.",
         ));
     }
-    let response: Value = response.json().await.map_err(Error::internal)?;
+    let response: Value = response.json().await.map_err(|error| {
+        if error.is_timeout() {
+            Error::gateway_timeout(
+                "Project transfer or import timed out. Retry open_project; a completed import will be reused.",
+            )
+        } else {
+            Error::internal(error)
+        }
+    })?;
     authorization.recheck().await?;
     if response["ok"] != true {
         return Err(Error::unavailable("Project import was not acknowledged."));
@@ -515,7 +533,7 @@ mod tests {
             )
             .await
         });
-        tokio::time::timeout(Duration::from_secs(10), entered.notified())
+        tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
             .await
             .unwrap();
         live.store(false, Ordering::SeqCst);
