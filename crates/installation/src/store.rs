@@ -36,7 +36,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 28;
+pub(crate) const DATABASE_VERSION: i64 = 29;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -225,15 +225,26 @@ impl Store {
             crate::chats::migration::plan_requests(&mut writer)?;
             version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
         }
-        if !fresh && version == 27 {
+        if !fresh && (27..=28).contains(&version) {
             let tx = writer.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             let current: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            if current == 27 {
+            if (27..=28).contains(&current) {
+                // Version 28 on main added this index. Keep it when upgrading
+                // main, and create it when upgrading directly from version 27.
                 tx.execute_batch("CREATE INDEX IF NOT EXISTS events_turn_boundaries ON events(run_id,id) WHERE (type IN ('turn.started','turn.completed','turn.failed') OR (type='status' AND json_type(payload,'$.attempt')='true'));")?;
+                let has_capability = tx
+                    .prepare("PRAGMA table_info(nodes)")?
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+                    .iter()
+                    .any(|name| name == "vm_disks");
+                if !has_capability {
+                    tx.execute_batch("ALTER TABLE nodes ADD COLUMN vm_disks INTEGER NOT NULL DEFAULT 0 CHECK(vm_disks IN (0,1));")?;
+                }
                 tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
             } else if current != DATABASE_VERSION {
                 return Err(Error::bad(
-                    "Unexpected database version during event index upgrade.",
+                    "Unexpected database version during native VM disk capability upgrade.",
                 ));
             }
             tx.commit()?;
@@ -1372,6 +1383,73 @@ pub fn merge(value: &mut Value, patch: &Value) {
 mod schema_tests {
     use super::*;
     use crate::agent_fixture::StoreAgentFixture;
+
+    #[tokio::test]
+    async fn historical_layouts_upgrade_capabilities_without_adopting_unreported_vm_support() {
+        use crate::node_fixture::StoreNodeFixture;
+        for version in [27, 28] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Store::open(root.path()).unwrap();
+            let node = crate::config::id();
+            store
+                .put_node_fixture(json!({ "id": node, "name": "Retained node" }))
+                .await
+                .unwrap();
+            drop(store);
+            let connection = Connection::open(root.path().join("manager.db")).unwrap();
+            connection
+                .execute_batch(&format!(
+                    "ALTER TABLE nodes DROP COLUMN vm_disks; PRAGMA user_version={version};"
+                ))
+                .unwrap();
+            if version == 27 {
+                connection
+                    .execute_batch("DROP INDEX events_turn_boundaries;")
+                    .unwrap();
+            }
+            drop(connection);
+            let upgraded = Store::open(root.path()).unwrap();
+            let mut retained = upgraded.node_boundary(&node).await.unwrap().unwrap();
+            assert_eq!(retained["name"], "Retained node");
+            assert_eq!(retained["capabilities"]["vmDisks"], false);
+            retained["capabilities"]["vmDisks"] = true.into();
+            upgraded.put_node_fixture(retained).await.unwrap();
+            drop(upgraded);
+            let reopened = Store::open(root.path()).unwrap();
+            assert_eq!(
+                reopened.node_boundary(&node).await.unwrap().unwrap()["capabilities"]["vmDisks"],
+                true
+            );
+            let connection = Connection::open(root.path().join("manager.db")).unwrap();
+            assert_eq!(
+                connection
+                    .pragma_query_value::<i64, _>(None, "user_version", |row| row.get(0))
+                    .unwrap(),
+                DATABASE_VERSION
+            );
+            assert_eq!(
+                connection
+                    .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                    .unwrap(),
+                "ok"
+            );
+            assert!(
+                !connection
+                    .prepare("PRAGMA foreign_key_check")
+                    .unwrap()
+                    .exists([])
+                    .unwrap()
+            );
+            let turn_index_exists = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='events_turn_boundaries')",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap();
+            assert!(turn_index_exists);
+        }
+    }
 
     #[test]
     fn wal_contention_has_one_timeout_budget_and_can_be_retried_after_release() {

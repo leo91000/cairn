@@ -116,6 +116,7 @@ impl<'a> Request<'a> {
             || !matches!(self.access["backend"].as_str(), Some("auto") | None)
                 && self.access["backend"] != backend
             || native && node["capabilities"]["ublk"] != true
+            || native && super::vm_disk(self.checkpoint) && node["capabilities"]["vmDisks"] != true
         {
             return false;
         }

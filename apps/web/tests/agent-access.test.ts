@@ -83,6 +83,7 @@ const gpu = {
   capabilities: {
     backend: 'firecracker',
     ublk: false,
+    vmDisks: false,
     nativeModeProtocol: 0,
     diskTotalMiB: 0,
     cpu: 8,

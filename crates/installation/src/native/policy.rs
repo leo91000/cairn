@@ -856,6 +856,17 @@ pub async fn authorize_request(s: &Service, input: &crate::http::Input) -> Resul
         // This endpoint reads an immutable source snapshot; use the same admission as history GET.
         return Ok(());
     }
+    // These operations validate their destination grant in their own writer
+    // transaction, including explicit owner adoption of a revoked old lineage.
+    // Requiring the old execution grant here would prevent that repair.
+    if input.method == "POST"
+        && matches!(
+            parts.as_slice(),
+            ["nodes", "placement", _, "move" | "backend-migration"]
+        )
+    {
+        return Ok(());
+    }
     let reduces_execution = input.method == "POST"
         && match parts.as_slice() {
             ["runs", _, "cancel" | "cleanup"] | ["chats", _, "stop"] => true,

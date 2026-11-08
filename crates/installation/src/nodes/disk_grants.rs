@@ -134,6 +134,9 @@ pub(crate) fn authorize_id_db(db: &crate::store::Db<'_>, grant_id: &str) -> Resu
     {
         run = crate::backend_migration::candidate(&run);
     }
+    if run["moveRequest"]["nodeId"] == node && run["moveRequest"]["backend"].is_string() {
+        run["snapshot"]["agent"]["access"]["backend"] = run["moveRequest"]["backend"].clone();
+    }
     authorize_owner(db, &run, node)?;
     Ok(Some(grant))
 }
