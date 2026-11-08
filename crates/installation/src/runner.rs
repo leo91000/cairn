@@ -6,6 +6,7 @@ mod client;
 pub(crate) mod exclusive;
 pub(crate) mod logs;
 mod routes;
+pub(crate) mod startup;
 
 pub(crate) use broker::validate as validate_plan;
 pub(crate) use client::{ControllerResult, wait_for_exit};

@@ -3076,6 +3076,186 @@ async fn refused_local_budget_keeps_presence_and_exposes_the_reason() {
 }
 
 #[tokio::test]
+async fn waiting_controller_start_delivers_chat_once_without_recovery_or_pause() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let controller = Arc::new(Controller {
+        data: fixture.service.config.data_dir.clone(),
+        plans: tokio::sync::Mutex::new(Vec::new()),
+        failures: 0,
+        slots: 4,
+        hold: std::sync::atomic::AtomicBool::new(false),
+    });
+    let requests = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let premature_logs = Arc::new(AtomicUsize::new(0));
+    let app = Router::new().fallback(any({
+        let (requests, release, entered, premature_logs) =
+            (requests.clone(), release.clone(), entered.clone(), premature_logs.clone());
+        move |state: State<Arc<Controller>>, request: Request| {
+            let (requests, release, entered, premature_logs) =
+                (requests.clone(), release.clone(), entered.clone(), premature_logs.clone());
+            async move {
+                let path = request.uri().path();
+                if request.method() == "POST" && path.starts_with("/runs/")
+                    && path.trim_matches('/').split('/').count() == 2 {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    let operation = tokio::spawn(async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        let response = serve_controller(state, request).await;
+                        assert_eq!(response.status(), StatusCode::OK);
+                    });
+                    let stream = futures_util::stream::unfold(Some(operation), |operation| async move {
+                        let mut operation = operation?;
+                        tokio::select! {
+                            result = &mut operation => {
+                                result.unwrap();
+                                Some((Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"{\"status\":200,\"error\":null}")), None))
+                            }
+                            () = tokio::time::sleep(Duration::from_millis(100)) => {
+                                Some((Ok(axum::body::Bytes::from_static(b" ")), Some(operation)))
+                            }
+                        }
+                    });
+                    return ([("content-type", "application/vnd.cairn.start-result+json")], Body::from_stream(stream)).into_response();
+                }
+                if path.ends_with("/logs") && state.0.plans.lock().await.is_empty() {
+                    premature_logs.fetch_add(1, Ordering::SeqCst);
+                    return StatusCode::NOT_FOUND.into_response();
+                }
+                serve_controller(state, request).await
+            }
+        }
+    })).with_state(controller.clone());
+    let (listener, address) = common::bind().await;
+    common::reconfigure(&mut fixture.service, |config| {
+        config.runner_url = format!("http://{address}");
+    })
+    .await;
+    let server = common::serve(listener, app);
+    let service = fixture.service.clone();
+    tokio::fs::create_dir_all(service.config.home.join(".codex"))
+        .await
+        .unwrap();
+    tokio::fs::write(service.config.home.join(".codex/auth.json"), "{}")
+        .await
+        .unwrap();
+    tokio::fs::write(
+        service.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+    )
+    .await
+    .unwrap();
+    let chat = fixture
+        .start_chat(message("Start this waiting conversation once."))
+        .await;
+    fixture.start().await;
+    let run = fixture.chat_run(&chat).await;
+    tokio::time::timeout(Duration::from_secs(10), entered.notified())
+        .await
+        .unwrap();
+    // Multiple real heartbeat frames cross the HTTP client while admission is held.
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    let waiting = service.store.run(&run).await.unwrap();
+    assert_eq!(waiting["status"], RunStatus::Running, "{waiting}");
+    assert_eq!(service.chat_detail(&chat).await.unwrap()["paused"], false);
+    release.notify_one();
+    let completed = fixture.until_finished(&run).await;
+    assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
+    fixture.until_worker_quiescent().await;
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert_eq!(premature_logs.load(Ordering::SeqCst), 0);
+    assert_eq!(controller.plans.lock().await.len(), 1);
+    assert_ne!(fixture.checkpoint(&run).await["startRejected"], true);
+    assert_eq!(
+        fixture.checkpoint(&run).await["controllerRecoveries"]
+            .as_u64()
+            .unwrap_or(0),
+        0
+    );
+    assert_eq!(service.chat_detail(&chat).await.unwrap()["paused"], false);
+    fixture.stop(false).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn an_unavailable_relay_does_not_refuse_a_late_accepted_attempt_or_launch_twice() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let mut fixture = Fixture::new().await;
+    fixture.stop(false).await;
+    let controller = Arc::new(Controller {
+        data: fixture.service.config.data_dir.clone(),
+        plans: tokio::sync::Mutex::new(Vec::new()),
+        failures: 0,
+        slots: 4,
+        hold: AtomicBool::new(true),
+    });
+    let posts = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .fallback(any({
+            let posts = posts.clone();
+            move |state: State<Arc<Controller>>, request: Request| {
+                let posts = posts.clone();
+                async move {
+                    let path = request.uri().path();
+                    if request.method() == "POST"
+                        && path.starts_with("/runs/")
+                        && path.trim_matches('/').split('/').count() == 2
+                    {
+                        posts.fetch_add(1, Ordering::SeqCst);
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                            let controller = state.0.clone();
+                            let response = serve_controller(state, request).await;
+                            assert_eq!(response.status(), StatusCode::OK);
+                            controller.hold.store(false, Ordering::SeqCst);
+                        });
+                        // Exact response produced by the deployed relay on timeout.
+                        return (StatusCode::SERVICE_UNAVAILABLE, "VM controller unavailable")
+                            .into_response();
+                    }
+                    serve_controller(state, request).await
+                }
+            }
+        }))
+        .with_state(controller.clone());
+    let (listener, address) = common::bind().await;
+    common::reconfigure(&mut fixture.service, |config| {
+        config.runner_url = format!("http://{address}");
+    })
+    .await;
+    let server = common::serve(listener, app);
+    let service = fixture.service.clone();
+    tokio::fs::create_dir_all(service.config.home.join(".codex"))
+        .await
+        .unwrap();
+    tokio::fs::write(service.config.home.join(".codex/auth.json"), "{}")
+        .await
+        .unwrap();
+    tokio::fs::write(
+        service.config.data_dir.join("storage-s3.json"),
+        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
+    )
+    .await
+    .unwrap();
+    let run = fixture
+        .enqueue("Reconcile the exact late attempt without replay")
+        .await;
+    let run = text(&run, "id").to_owned();
+    fixture.start().await;
+    let completed = fixture.until_finished(&run).await;
+    assert_eq!(completed["status"], RunStatus::Succeeded, "{completed}");
+    assert_ne!(fixture.checkpoint(&run).await["startRejected"], true);
+    assert_eq!(posts.load(Ordering::SeqCst), 1);
+    assert_eq!(controller.plans.lock().await.len(), 1);
+    fixture.stop(false).await;
+    server.abort();
+}
+
+#[tokio::test]
 async fn paid_recovery_survives_confirmed_capacity_rejection_and_restart() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     for provider in [false, true] {

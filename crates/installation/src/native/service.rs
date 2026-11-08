@@ -4,6 +4,8 @@ mod exclusive;
 mod exclusive_tests;
 mod health;
 #[cfg(test)]
+mod staging_tests;
+#[cfg(test)]
 mod terminal_tests;
 
 use super::{atomic_write, block, bootstrap, disk, mode, systemd, workspace};
@@ -60,8 +62,7 @@ struct TerminalMetadata {
 
 const DISK_RELEASE_WAIT: Duration = Duration::from_secs(120);
 
-const DISK_WAIT_TIMEOUT: &str =
-    "Native disk ownership was not released before the preparation deadline.";
+const DISK_WAIT_TIMEOUT: &str = crate::runner::startup::STORAGE_ADMISSION_BUSY;
 
 fn disk_admission_deadline(plan: &Value, wait: Duration) -> (tokio::time::Instant, bool) {
     let execution_wait = plan["expires"].as_i64().map(|until| {
@@ -381,7 +382,7 @@ impl Controller {
     /// wait bounded too, and observe stop markers without blocking DELETE.
     async fn start_storage(&self, id: &str, plan: &Value) -> Result<disk::StorageGuard> {
         let (deadline, time_limited) = disk_admission_deadline(plan, DISK_RELEASE_WAIT);
-        let waiting = disk::lock(&self.state);
+        let waiting = disk::lock_start(&self.state);
         tokio::pin!(waiting);
         let mut acquired = None;
         loop {
@@ -1995,6 +1996,13 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             json!({ "ok": true })
         }
         ("POST", ["runs", id]) => {
+            let options = input(request, 1024).await?;
+            if options["startResult"] == true {
+                let (controller, id) = (controller.clone(), (*id).to_owned());
+                return Ok(crate::runner::startup::response(async move {
+                    controller.start(&id).await
+                }));
+            }
             controller.start(id).await?;
             json!({})
         }
@@ -3288,6 +3296,83 @@ pub(crate) mod tests {
         assert_eq!(phase["status"], "preparing");
         assert_eq!(controller.health().await["activeRuns"], 0);
         drop(scope);
+    }
+
+    #[tokio::test]
+    async fn streamed_start_keeps_owned_storage_wait_after_caller_disconnect() {
+        let (_fixture, controller) = fixture().await;
+        let (run, id, _) = busy_disk_fixture(&controller).await;
+        private_dir(&controller.data.join("runner-plans"))
+            .await
+            .unwrap();
+        let plan = json!({
+            "id": id, "runId": run, "backend": "native",
+            "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 }
+        });
+        atomic_write(
+            &controller
+                .data
+                .join("runner-plans")
+                .join(format!("{id}.json")),
+            plan.to_string().as_bytes(),
+        )
+        .await
+        .unwrap();
+        let held =
+            crate::file_lock::exclusive(&controller.state.join("storage.lock"), "fixture owner")
+                .unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/runs/{id}"))
+            .header("authorization", "Bearer synthetic-private-controller-token")
+            .body(Body::from(r#"{"startResult":true}"#))
+            .unwrap();
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            handler(State(controller.clone()), request),
+        )
+        .await;
+        let early = response.is_ok();
+        if let Ok(response) = response {
+            let response = response.unwrap();
+            assert_eq!(
+                response.headers()["content-type"],
+                crate::runner::startup::CONTENT_TYPE
+            );
+            drop(response);
+        }
+        // The handler is owned independently of the HTTP response, even before
+        // registration in active. Neither disconnect nor a second caller may launch it again.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if controller.admission.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(controller.active.lock().await.is_empty());
+        atomic_write(&controller.file(&id, "stopped"), b"1")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if controller.admission.try_lock().is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(controller.active.lock().await.is_empty());
+        assert!(
+            early,
+            "a storage wait must expose streaming headers before the relay deadline"
+        );
+        drop(held);
     }
 
     async fn busy_disk_fixture(controller: &Controller) -> (String, String, Value) {

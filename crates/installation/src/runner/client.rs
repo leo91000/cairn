@@ -42,6 +42,7 @@ fn startup_rejection(status: StatusCode, reason: Option<&str>) -> String {
                 "All VM slots are occupied."
                     | "The native execution slot is occupied."
                     | "Shared node resources are under pressure."
+                    | super::startup::STORAGE_ADMISSION_BUSY
             )
         );
     if capacity {
@@ -55,27 +56,66 @@ fn startup_rejection(status: StatusCode, reason: Option<&str>) -> String {
 
 impl Controller {
     async fn start(&self) -> Result<()> {
-        let mut response = self
+        let request = self
             .http
             .post(&self.url)
             .bearer_auth(&self.token)
-            .timeout(Duration::from_secs(30))
-            .send()
+            .json(&json!({ "startResult": true }))
+            .send();
+        let mut response = tokio::time::timeout(Duration::from_secs(30), request)
             .await
+            .map_err(|_| Error::unavailable("Execution startup outcome is unknown."))?
             .map_err(|_| Error::unavailable("Execution controller could not start the run."))?;
-        if !response.status().is_success() {
-            let status = response.status();
+        let streamed = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            == Some(super::startup::CONTENT_TYPE);
+        if streamed || !response.status().is_success() {
+            let mut status = response.status();
             let mut body = Vec::new();
-            while let Ok(Some(chunk)) = response.chunk().await {
+            while let Some(chunk) = tokio::time::timeout(Duration::from_secs(10), response.chunk())
+                .await
+                .map_err(|_| Error::unavailable("Execution startup outcome is unknown."))?
+                .map_err(|_| Error::unavailable("Execution startup outcome is unknown."))?
+            {
+                let chunk = if body.is_empty() {
+                    chunk.trim_ascii_start()
+                } else {
+                    &chunk
+                };
                 if body.len() + chunk.len() > ERROR_BODY_LIMIT {
-                    body.clear();
-                    break;
+                    return Err(Error::unavailable("Execution startup outcome is unknown."));
                 }
                 body.extend_from_slice(&chunk);
             }
 
-            let error = serde_json::from_slice::<Value>(&body).unwrap_or_default();
-            let message = startup_rejection(status, error["error"].as_str());
+            let reason = if streamed {
+                let reply: super::startup::Reply = serde_json::from_slice(&body)
+                    .map_err(|_| Error::unavailable("Execution startup outcome is unknown."))?;
+                if reply.status == 200 && reply.error.is_none() {
+                    return Ok(());
+                }
+                status = StatusCode::from_u16(reply.status)
+                    .ok()
+                    .filter(|status| status.is_client_error() || status.is_server_error())
+                    .ok_or_else(|| Error::unavailable("Execution startup outcome is unknown."))?;
+                reply.error
+            } else {
+                serde_json::from_slice::<Value>(&body)
+                    .ok()
+                    .and_then(|value| value["error"].as_str().map(str::to_owned))
+            };
+            let reason = reason
+                .filter(|reason| !reason.is_empty())
+                .ok_or_else(|| Error::unavailable("Execution startup outcome is unknown."))?;
+            let message = startup_rejection(status, Some(&reason));
+            if !streamed
+                && status.is_server_error()
+                && !message.starts_with(crate::nodes::placement::NO_CAPACITY)
+            {
+                return Err(Error::unavailable("Execution startup outcome is unknown."));
+            }
             let message = run_output::redact(&message, std::slice::from_ref(&self.token));
 
             // Only an explicit rejection proves that the native agent never started.
@@ -484,6 +524,60 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn streamed_start_does_not_acknowledge_headers_or_replay_the_post() {
+        use axum::{Router, routing::post};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let posts = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let app = Router::new().route(
+            "/runs/fixture",
+            post({
+                let (posts, entered, release) = (posts.clone(), entered.clone(), release.clone());
+                move || {
+                    let (posts, entered, release) =
+                        (posts.clone(), entered.clone(), release.clone());
+                    async move {
+                        posts.fetch_add(1, Ordering::SeqCst);
+                        super::super::startup::response(async move {
+                            entered.notify_one();
+                            release.notified().await;
+                            Ok(())
+                        })
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let controller = Controller {
+            http: reqwest::Client::new(),
+            url: format!("http://{address}/runs/fixture"),
+            token: "fixture".into(),
+        };
+        let starting = controller.start();
+        tokio::pin!(starting);
+        tokio::select! {
+            () = entered.notified() => {},
+            result = &mut starting => panic!("headers cannot acknowledge startup: {result:?}"),
+        }
+        // A heartbeat is transport progress, never startup acceptance.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1200), &mut starting)
+                .await
+                .is_err()
+        );
+        release.notify_one();
+        starting.await.unwrap();
+        assert_eq!(posts.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn broken_output_preserves_terminal_status_in_both_orders() {
         use axum::{
             Router,
@@ -657,6 +751,7 @@ mod tests {
         for reason in [
             "All VM slots are occupied.",
             "The native execution slot is occupied.",
+            super::super::startup::STORAGE_ADMISSION_BUSY,
         ] {
             let message = startup_rejection(StatusCode::SERVICE_UNAVAILABLE, Some(reason));
             assert!(message.starts_with(crate::nodes::placement::NO_CAPACITY));

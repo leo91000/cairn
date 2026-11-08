@@ -213,6 +213,17 @@ impl Fixture {
                 post(controller_response),
             )
             .route("/storage-policy", post(ordinary_response))
+            .route(
+                "/runs/{attempt}",
+                post(|State(state): State<FixtureState>| async move {
+                    crate::runner::startup::response(async move {
+                        state.controller_calls.fetch_add(1, Ordering::SeqCst);
+                        state.controller.entered.notify_one();
+                        state.controller.release.notified().await;
+                        Ok(())
+                    })
+                }),
+            )
             .route("/internal/nodes/reply", post(reply))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -330,6 +341,42 @@ async fn native_import_relay_stages_the_current_workspace_generation() {
     ready(operation).await.unwrap().unwrap();
     assert_eq!(fixture.state.controller_calls.load(Ordering::SeqCst), 1);
     assert_eq!(ready(fixture.replies.recv()).await.unwrap()["status"], 200);
+}
+
+#[tokio::test]
+async fn startup_result_crosses_the_real_relay_after_its_ordinary_header_deadline() {
+    let mut fixture = Fixture::new().await;
+    let (operation, _) = fixture
+        .start(
+            format!("/runs/{}", fixture.state.attempt),
+            json!({ "startResult": true }),
+        )
+        .await;
+    ready(fixture.state.controller.entered.notified()).await;
+    let head = ready(fixture.replies.recv()).await.unwrap();
+    assert_eq!(head["status"], 200);
+    assert_eq!(head["contentType"], crate::runner::startup::CONTENT_TYPE);
+    advance(Duration::from_secs(30)).await;
+    assert!(!operation.is_finished());
+    fixture.state.controller.release.notify_one();
+    ready(operation).await.unwrap().unwrap();
+    let mut body = Vec::new();
+    loop {
+        let frame = ready(fixture.replies.recv()).await.unwrap();
+        assert!(
+            frame["status"].is_null(),
+            "no synthetic 503 may replace this admitted response"
+        );
+        if let Some(data) = frame["data"].as_str() {
+            body.extend(STANDARD.decode(data).unwrap());
+        }
+        if frame["done"] == true {
+            break;
+        }
+    }
+    let result: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(result["status"], 200);
+    assert_eq!(fixture.state.controller_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

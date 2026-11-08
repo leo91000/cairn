@@ -115,6 +115,51 @@ pub(crate) async fn recover_exports(state: &Path) -> Result<()> {
 pub(crate) struct StorageGuard {
     _storage: crate::file_lock::Guard,
     _priority: crate::file_lock::Guard,
+    _startup: Option<crate::file_lock::Guard>,
+}
+
+/// Announce startup before joining the pool gate. Repeated small seed
+/// reservations must not overtake an execution already waiting for admission.
+pub(crate) async fn lock_start(state: &Path) -> Result<StorageGuard> {
+    let intent = loop {
+        match crate::file_lock::shared(
+            &state.join("storage-startup.lock"),
+            "Storage startup probe in progress.",
+        ) {
+            Ok(intent) => break intent,
+            Err(error) if error.status == 409 => tokio::time::sleep(Duration::from_millis(1)).await,
+            Err(error) => return Err(error),
+        }
+    };
+    let mut owner = lock(state).await?;
+    owner._startup = Some(intent);
+    Ok(owner)
+}
+
+pub(crate) async fn lock_staging(state: &Path) -> Result<StorageGuard> {
+    tokio::time::timeout(Duration::from_secs(300), async {
+        loop {
+            let owner = lock(state).await?;
+            match crate::file_lock::exclusive(
+                &state.join("storage-startup.lock"),
+                "An execution is waiting for storage.",
+            ) {
+                Ok(probe) => {
+                    // The probe never spans an await. A new starter may announce
+                    // intent while this bounded local reservation is completed.
+                    drop(probe);
+                    return Ok(owner);
+                }
+                Err(error) if error.status == 409 => drop(owner),
+                Err(error) => return Err(error),
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        Error::unavailable("Native staging admission did not finish before its deadline.")
+    })?
 }
 
 pub(crate) async fn lock(state: &Path) -> Result<StorageGuard> {
@@ -142,6 +187,7 @@ pub(crate) async fn lock(state: &Path) -> Result<StorageGuard> {
                     return Ok(StorageGuard {
                         _storage: owner,
                         _priority: priority,
+                        _startup: None,
                     });
                 }
                 Err(error) if error.status == 409 => {
@@ -163,7 +209,7 @@ pub(crate) async fn staging_budget() -> Result<u64> {
     staging_budget_from(&crate::nodes::local_client()?, "http://localhost").await
 }
 
-pub(super) async fn staging_budget_from(client: &reqwest::Client, origin: &str) -> Result<u64> {
+pub(crate) async fn staging_budget_from(client: &reqwest::Client, origin: &str) -> Result<u64> {
     let started = std::time::Instant::now();
     let response = client
         .get(format!("{origin}/staging-budget"))

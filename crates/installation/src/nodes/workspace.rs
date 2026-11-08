@@ -301,87 +301,111 @@ pub async fn seed(
     selection: Value,
     target: &Path,
 ) -> Result<()> {
+    let storage = crate::native::enabled()
+        .then(crate::native::staging::Storage::local)
+        .transpose()?;
+    seed_with_storage(client, master, token, attempt, selection, target, storage).await
+}
+
+pub(crate) async fn seed_with_storage(
+    client: &reqwest::Client,
+    master: &url::Url,
+    token: &str,
+    attempt: &str,
+    selection: Value,
+    target: &Path,
+    storage: Option<crate::native::staging::Storage>,
+) -> Result<()> {
+    // Cancellation closes network admission, but this owned task drains pending
+    // file IO and retires its private promises before dropping temporary trees.
+    let stop = tokio_util::sync::CancellationToken::new();
+    let _cancel = stop.clone().drop_guard();
+    let session = super::executor::Session {
+        client: client.clone(),
+        master: master.clone(),
+        token: token.to_owned(),
+        attempt: attempt.to_owned(),
+    };
+    if storage.is_none() {
+        return seed_owned(&session, selection, target, storage, stop).await;
+    }
+    let target = target.to_owned();
+    tokio::spawn(async move { seed_owned(&session, selection, &target, storage, stop).await })
+        .await
+        .map_err(Error::internal)?
+}
+
+async fn seed_owned(
+    session: &super::executor::Session,
+    selection: Value,
+    target: &Path,
+    storage: Option<crate::native::staging::Storage>,
+    stop: tokio_util::sync::CancellationToken,
+) -> Result<()> {
     use futures_util::StreamExt;
-    let _disk = if crate::native::enabled() {
-        Some(crate::native::disk::lock(&crate::native::state_dir()).await?)
-    } else {
-        None
+    let native = storage.is_some();
+    let response = tokio::select! {
+        result = fetch(&session.client, &session.master, &session.token, &session.attempt, "seed", &selection) => result?,
+        () = stop.cancelled() => return Err(Error::unavailable("Workspace transfer cancelled.")),
     };
-    let budget = if crate::native::enabled() {
-        let available = crate::native::disk::staging_budget().await?;
-        // Inbox refresh copies into an inode already mounted by the workload;
-        // its received temporary tree and the replacement can coexist briefly.
-        let available = if selection["kind"] == "inbox" {
-            available / 2
-        } else {
-            available
-        };
-        SEED_BUDGET_BYTES.min(available)
-    } else {
-        SEED_BUDGET_BYTES
-    };
-    let response = fetch(client, master, token, attempt, "seed", &selection).await?;
     let parent = target
         .parent()
         .ok_or_else(|| Error::bad("Invalid seed directory."))?;
     crate::skills::private_dir(parent).await?;
     let temp = tempfile::TempDir::new_in(parent)?;
+    let attempt = session.attempt.as_str();
     let mut transport_interrupted = false;
     let mut received_bytes = 0u64;
-    let stream = response.bytes_stream().map(|result| match result {
-        Ok(bytes) => {
-            received_bytes = received_bytes.saturating_add(bytes.len() as u64);
-            Ok(bytes)
-        }
-        Err(error) => {
-            transport_interrupted = true;
-            tracing::warn!(
-                attempt,
-                received_bytes,
-                timeout = error.is_timeout(),
-                connect = error.is_connect(),
-                body = error.is_body(),
-                decode = error.is_decode(),
-                "Workspace seed HTTP stream interrupted"
-            );
-            Err(std::io::Error::other(
-                "Workspace seed HTTP stream interrupted.",
-            ))
-        }
-    });
-    let mut reader = BufReader::new(tokio_util::io::StreamReader::new(stream));
+    let stream = response
+        .bytes_stream()
+        .take_until(stop.clone().cancelled_owned())
+        .map(|result| match result {
+            Ok(bytes) => {
+                received_bytes = received_bytes.saturating_add(bytes.len() as u64);
+                Ok(bytes)
+            }
+            Err(error) => {
+                transport_interrupted = true;
+                tracing::warn!(
+                    attempt,
+                    received_bytes,
+                    timeout = error.is_timeout(),
+                    connect = error.is_connect(),
+                    body = error.is_body(),
+                    decode = error.is_decode(),
+                    "Workspace seed HTTP stream interrupted"
+                );
+                Err(std::io::Error::other(
+                    "Workspace seed HTTP stream interrupted.",
+                ))
+            }
+        });
+    let mut reader = BufReader::new(tokio_util::io::StreamReader::new(Box::pin(stream)));
+    let replacement = if native && selection["kind"] == "inbox" {
+        Some(tempfile::NamedTempFile::new_in(parent)?)
+    } else {
+        None
+    };
     let received = async {
-        if crate::native::enabled() {
-            let keep = selection["keepArchives"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            let data = super::node_data_dir();
-            let multiplier = if selection["kind"] == "inbox" { 2 } else { 1 };
-            super::files::receive_with_reclaim(
-                &mut reader,
-                temp.path(),
-                budget,
-                SEED_BUDGET_BYTES,
-                |needed| {
-                    let (data, keep) = (data.clone(), keep.clone());
-                    async move {
-                        Ok(crate::project_archives::reclaim_for_foreground(
-                            &data,
-                            needed.saturating_mul(multiplier),
-                            &keep,
-                        )
-                        .await?
-                            / multiplier)
-                    }
-                },
-            )
-            .await?;
+        if let Some(storage) = &storage {
+            let mut admission = crate::native::staging::Admission {
+                storage: storage.clone(),
+                keep: selection["keepArchives"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect(),
+                replacement: replacement
+                    .as_ref()
+                    .map(|file| file.as_file().try_clone())
+                    .transpose()?,
+            };
+            super::files::receive_admitted(&mut reader, temp.path(), SEED_BUDGET_BYTES, &mut admission)
+                .await?;
         } else {
-            super::files::receive(&mut reader, temp.path(), budget).await?;
+            super::files::receive(&mut reader, temp.path(), SEED_BUDGET_BYTES).await?;
         }
 
         // The protocol marker alone cannot prove the HTTP body arrived intact.
@@ -399,12 +423,21 @@ pub async fn seed(
         ));
     }
     received?;
-    if crate::native::enabled() && selection["kind"] == "initial" {
+    let _disk = if let Some(storage) = &storage {
+        Some(crate::native::disk::lock(&storage.state).await?)
+    } else {
+        None
+    };
+    if stop.is_cancelled() {
+        return Err(Error::unavailable("Workspace transfer cancelled."));
+    }
+    if native && selection["kind"] == "initial" {
         prepare_native_inbox(&temp.path().join("chat-input")).await?;
     }
     // Preserve the directory inode mounted into a native workload. Replacing a
     // bind-mounted directory would leave it reading the previous inbox forever.
-    if crate::native::enabled() && selection["kind"] == "inbox" {
+    if native && selection["kind"] == "inbox" {
+        drop(replacement);
         return install_native_inbox(temp.path(), target).await;
     }
     // Only host staging files are replaced. Guest disks remain authoritative.

@@ -17,6 +17,7 @@ pub mod policy;
 mod protection;
 pub mod releases;
 mod service;
+pub(crate) mod staging;
 mod suspension;
 mod systemd;
 mod watchdog;

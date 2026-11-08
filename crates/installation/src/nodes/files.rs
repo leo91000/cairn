@@ -152,14 +152,70 @@ pub async fn receive(
 pub(crate) async fn receive_with_reclaim<F, Fut>(
     reader: &mut (impl AsyncBufRead + Unpin),
     root: &Path,
-    mut budget: u64,
+    budget: u64,
     maximum: u64,
-    mut reclaim: F,
+    reclaim: F,
 ) -> Result<()>
 where
     F: FnMut(u64) -> Fut + Send,
     Fut: std::future::Future<Output = Result<u64>> + Send,
 {
+    struct Budget<F> {
+        used: u64,
+        budget: u64,
+        maximum: u64,
+        reclaim: F,
+    }
+
+    impl<F, Fut> FileAdmission for Budget<F>
+    where
+        F: FnMut(u64) -> Fut + Send,
+        Fut: std::future::Future<Output = Result<u64>> + Send,
+    {
+        async fn open(&mut self, target: &Path, size: u64, mode: u32) -> Result<tokio::fs::File> {
+            self.used = self
+                .used
+                .checked_add(size)
+                .ok_or_else(|| Error::bad("Workspace exceeds node disk budget."))?;
+            if self.used > self.budget {
+                let reclaimed = (self.reclaim)(self.used - self.budget)
+                    .await?
+                    .min(self.maximum.saturating_sub(self.budget));
+                self.budget = self.budget.saturating_add(reclaimed);
+                if self.used > self.budget {
+                    return Err(Error::bad("Workspace exceeds node disk budget."));
+                }
+            }
+            open_file(target, mode).await
+        }
+    }
+
+    let mut admission = Budget {
+        used: 0,
+        budget,
+        maximum,
+        reclaim,
+    };
+    receive_admitted(reader, root, maximum, &mut admission).await
+}
+
+pub(crate) trait FileAdmission: Send {
+    fn open(
+        &mut self,
+        target: &Path,
+        size: u64,
+        mode: u32,
+    ) -> impl std::future::Future<Output = Result<tokio::fs::File>> + Send;
+}
+
+/// Admission may reserve the complete announced file before any network data is
+/// received. No admission guard is retained while waiting for the next frame.
+pub(crate) async fn receive_admitted(
+    reader: &mut (impl AsyncBufRead + Unpin),
+    root: &Path,
+    maximum: u64,
+    admission: &mut impl FileAdmission,
+) -> Result<()> {
     crate::skills::private_dir(root).await?;
     let mut used = 0u64;
     let mut entries = 0u64;
@@ -198,16 +254,8 @@ where
                 if used > maximum {
                     return Err(Error::bad("Workspace exceeds node disk budget."));
                 }
-                if used > budget {
-                    let reclaimed = reclaim(used - budget)
-                        .await?
-                        .min(maximum.saturating_sub(budget));
-                    budget = budget.saturating_add(reclaimed);
-                    if used > budget {
-                        return Err(Error::bad("Workspace exceeds node disk budget."));
-                    }
-                }
-                receive_file(reader, &target, size, mode).await?;
+                let file = admission.open(&target, size, mode).await?;
+                receive_file(reader, file, size, mode).await?;
             }
             _ => return Err(Error::bad("Invalid workspace entry.")),
         }
@@ -215,37 +263,47 @@ where
     Err(Error::bad("Incomplete workspace transfer."))
 }
 
-async fn receive_file(
-    reader: &mut (impl AsyncBufRead + Unpin),
-    target: &Path,
-    size: u64,
-    mode: u32,
-) -> Result<()> {
-    let mut file = tokio::fs::OpenOptions::new()
+pub(crate) async fn open_file(target: &Path, mode: u32) -> Result<tokio::fs::File> {
+    Ok(tokio::fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .mode(mode)
         .custom_flags(libc::O_NOFOLLOW)
         .open(target)
-        .await?;
-    let mut left = size;
-    while left > 0 {
-        let frame = wire::read(reader)
-            .await?
-            .ok_or_else(|| Error::bad("Incomplete workspace transfer."))?;
-        let bytes = STANDARD
-            .decode(text(&frame, "data"))
-            .map_err(|_| Error::bad("Invalid workspace bytes."))?;
-        if bytes.is_empty() || bytes.len() > CHUNK || bytes.len() as u64 > left {
-            return Err(Error::bad("Invalid workspace chunk size."));
-        }
-        file.write_all(&bytes).await?;
-        left -= bytes.len() as u64;
-    }
+        .await?)
+}
 
-    // Creation applies the node's umask; restore the transmitted mode on the open file.
-    file.set_permissions(std::fs::Permissions::from_mode(mode))
-        .await?;
-    file.sync_all().await?;
-    Ok(())
+async fn receive_file(
+    reader: &mut (impl AsyncBufRead + Unpin),
+    mut file: tokio::fs::File,
+    size: u64,
+    mode: u32,
+) -> Result<()> {
+    let result = async {
+        let mut left = size;
+        while left > 0 {
+            let frame = wire::read(reader)
+                .await?
+                .ok_or_else(|| Error::bad("Incomplete workspace transfer."))?;
+            let bytes = STANDARD
+                .decode(text(&frame, "data"))
+                .map_err(|_| Error::bad("Invalid workspace bytes."))?;
+            if bytes.is_empty() || bytes.len() > CHUNK || bytes.len() as u64 > left {
+                return Err(Error::bad("Invalid workspace chunk size."));
+            }
+            file.write_all(&bytes).await?;
+            left -= bytes.len() as u64;
+        }
+
+        // Creation applies the node's umask; restore the transmitted mode on the open file.
+        file.set_permissions(std::fs::Permissions::from_mode(mode))
+            .await?;
+        file.sync_all().await?;
+        Ok(())
+    }
+    .await;
+    // A malformed/short stream must drain the last buffered filesystem write
+    // before its caller can retire staging or release its reservation.
+    let drained = file.flush().await.map_err(Error::from);
+    result.and(drained)
 }

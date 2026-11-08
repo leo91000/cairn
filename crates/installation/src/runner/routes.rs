@@ -440,6 +440,18 @@ async fn run_route(broker: Broker, request: Request, segments: &[&str]) -> Resul
         ("POST", ["runs", id, "lease"]) => renew_lease(&broker, request, id).await,
         ("POST", ["runs", id, "artifact"]) => export_artifact(&broker, request, id).await,
         ("POST", ["runs", id]) => {
+            let bytes = body(request, 1024, "Invalid startup options.").await?;
+            let options: Value = if bytes.is_empty() {
+                json!({})
+            } else {
+                serde_json::from_slice(&bytes)?
+            };
+            if options["startResult"] == true {
+                let id = (*id).to_owned();
+                return Ok(super::startup::response(
+                    async move { broker.start(&id).await },
+                ));
+            }
             broker.start(id).await?;
             json_response(json!({}))
         }
