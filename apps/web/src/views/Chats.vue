@@ -569,9 +569,11 @@ watch(timeline, (cards) => {
     outgoing.value = null
 })
 const selectedAgent = computed(() => state.agents.find(agent => agent.id === (detail.value?.agentId || agentId.value)))
+// A conversation still loading names no agent yet; a new one names the agent it will start with.
+const headerAgent = computed(() => route.params.id && !heading.value ? '' : heading.value?.agentName || selectedAgent.value?.name || 'Main agent')
 // The phone title button's description carries what its subtitle shows, then the harness and route.
 const phoneDescription = computed(() => [
-  headerState.value?.label || headerProject.value || heading.value?.agentName || selectedAgent.value?.name || 'Main agent',
+  headerState.value?.label || headerProject.value || headerAgent.value,
   heading.value?.provider ? `Latest harness: ${providers[heading.value.provider].label}` : '',
   connectionDescription.value,
 ].filter(Boolean).join(' · '))
@@ -1406,7 +1408,7 @@ function key(event: KeyboardEvent) {
               </span>
               <span class="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11.5px] font-normal leading-tight" :class="headerState?.failed ? 'text-coral' : 'text-muted'" :title="connectionDescription || undefined">
                 <span class="size-1.5 shrink-0 rounded-full" :class="connectionTone(currentInstallation, state.transportRoute)" />
-                <span class="truncate" :data-header-status="headerState ? '' : undefined">{{ headerState?.label || headerProject || heading?.agentName || selectedAgent?.name || 'Main agent' }}</span>
+                <span class="truncate" :data-header-status="headerState ? '' : undefined">{{ headerState?.label || headerProject || headerAgent }}</span>
               </span>
             </span>
           </span>

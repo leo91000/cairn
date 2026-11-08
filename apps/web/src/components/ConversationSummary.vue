@@ -15,7 +15,7 @@ defineProps<{
   failed?: boolean
   /** Only work in progress takes the accent; other statuses read plainly. */
   working?: boolean
-  /** A conversation still loading does not claim to have no project yet. */
+  /** A conversation still loading names neither its agent nor its project yet. */
   loading?: boolean
   context?: ContextSummary
 }>()
@@ -23,7 +23,7 @@ defineProps<{
 
 <template>
   <div>
-    <div class="flex items-center gap-2.5 px-2.5 pt-2 pb-3">
+    <div v-if="!loading" class="flex items-center gap-2.5 px-2.5 pt-2 pb-3">
       <AgentAvatar
         :name="agentName"
         :identity="agentId"
@@ -38,7 +38,7 @@ defineProps<{
           </template>
         </p>
         <p class="m-0! truncate text-muted">
-          {{ [provider && providers[provider].label, projectName ? `Project ${projectName}` : loading ? '' : 'No project'].filter(Boolean).join(' · ') }}
+          {{ [provider && providers[provider].label, projectName ? `Project ${projectName}` : 'No project'].filter(Boolean).join(' · ') }}
         </p>
       </div>
     </div>
