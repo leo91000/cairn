@@ -618,17 +618,20 @@ let availabilityTimer: ReturnType<typeof setTimeout> | undefined
 let availabilityRequest: AbortController | undefined
 let availabilityFailures = 0
 let availabilityStopped = false
+let availabilitySuspended = false
 
 async function refreshAvailability() {
   clearTimeout(availabilityTimer)
-  if (availabilityStopped || !session.value?.authenticated || document.hidden || state.redirecting || state.signingOut)
+  if (availabilityStopped || availabilitySuspended || !session.value?.authenticated || document.hidden || state.redirecting || state.signingOut)
     return
   availabilityRequest?.abort()
   const controller = new AbortController()
   availabilityRequest = controller
   const current = session.value
   try {
-    const response = await fetch('/api/installations', { credentials: 'same-origin', signal: controller.signal })
+    // Keep the read alive until pagehide can explicitly withdraw its caller.
+    // Native navigation may cancel ordinary fetches before pagehide runs.
+    const response = await fetch('/api/installations', { credentials: 'same-origin', signal: controller.signal, keepalive: true })
     if (controller.signal.aborted)
       return
     if (response.status === 401 && session.value === current && !availabilityStopped) {
@@ -640,7 +643,7 @@ async function refreshAvailability() {
     if (!response.ok)
       throw new Error('Installation status unavailable')
     const statuses = await response.json() as AccountSession['installations']
-    if (session.value !== current || availabilityStopped)
+    if (controller.signal.aborted || session.value !== current || availabilityStopped)
       return
     for (const item of current.installations) {
       const status = statuses.find(status => status.id === item.id)
@@ -668,13 +671,13 @@ async function refreshAvailability() {
   finally {
     if (availabilityRequest === controller)
       availabilityRequest = undefined
-    if (!availabilityStopped && !controller.signal.aborted && !state.signingOut && session.value?.authenticated)
+    if (!availabilityStopped && !availabilitySuspended && !controller.signal.aborted && !state.signingOut && !state.redirecting && session.value?.authenticated)
       availabilityTimer = setTimeout(refreshAvailability, Math.min(15000, 3000 * 2 ** Math.min(availabilityFailures, 3)))
   }
 }
 
-watch(() => [session.value?.authenticated, state.signingOut], () => {
-  if (state.signingOut || !session.value?.authenticated)
+watch(() => [session.value?.authenticated, state.signingOut, state.redirecting], () => {
+  if (state.signingOut || state.redirecting || !session.value?.authenticated)
     availabilityRequest?.abort()
   void refreshAvailability()
 }, { flush: 'sync' })
@@ -684,12 +687,27 @@ function visibleAvailability() {
     void refreshAvailability()
 }
 
+function suspendAvailability() {
+  availabilitySuspended = true
+  availabilityRequest?.abort()
+  clearTimeout(availabilityTimer)
+}
+
+function resumeAvailability() {
+  availabilitySuspended = false
+  void refreshAvailability()
+}
+
 document.addEventListener('visibilitychange', visibleAvailability)
+window.addEventListener('pagehide', suspendAvailability)
+window.addEventListener('pageshow', resumeAvailability)
 onScopeDispose(() => {
   availabilityStopped = true
   availabilityRequest?.abort()
   clearTimeout(availabilityTimer)
   document.removeEventListener('visibilitychange', visibleAvailability)
+  window.removeEventListener('pagehide', suspendAvailability)
+  window.removeEventListener('pageshow', resumeAvailability)
 })
 
 function installationStatus(value: { online: boolean, updateRequired: boolean }) {

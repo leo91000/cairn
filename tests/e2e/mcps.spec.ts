@@ -13,7 +13,11 @@ import {
 type OAuthDepartureProbe = { kind: 'background' } | { kind: 'offer', closed: boolean }
 
 declare global {
-  interface Window { cairnOAuthProbe: (probe: OAuthDepartureProbe) => Promise<void> }
+  interface Window {
+    cairnOAuthProbe: (probe: OAuthDepartureProbe) => Promise<void>
+    cairnObserveAvailability?: boolean
+    cairnAvailabilityAbort: (afterPagehide: boolean) => Promise<void>
+  }
 }
 
 test('failed saves keep feedback visible above a scrolled MCP form', async ({ page }) => {
@@ -304,3 +308,161 @@ test('manages MCP connections, OAuth consent, tools and agent access on desktop 
   }
   finally { await provider.close() }
 })
+
+for (const destination of ['committed', 'cancelled'] as const) {
+  test(`availability keeps direct readers stable until native navigation is ${destination}`, async ({ page }) => {
+    const errors: string[] = []
+    page.on('pageerror', error => errors.push(error.message))
+    const callerAborts: boolean[] = []
+    await page.exposeFunction('cairnAvailabilityAbort', (afterPagehide: boolean) => {
+      callerAborts.push(afterPagehide)
+    })
+    await page.addInitScript(() => {
+      let pageHidden = false
+      let observed = false
+      window.addEventListener('pagehide', () => pageHidden = true)
+      const request = window.fetch
+      window.fetch = (...args) => {
+        if (window.cairnObserveAvailability && !observed && args[0] === '/api/installations') {
+          observed = true
+          args[1]?.signal?.addEventListener('abort', () => {
+            void window.cairnAvailabilityAbort(pageHidden)
+          }, { once: true })
+        }
+        return request(...args)
+      }
+    })
+    const pollRelease = Promise.withResolvers<void>()
+    const navigationRelease = Promise.withResolvers<void>()
+    let pollHeld = false
+    let navigationHeld = false
+    let pollCount = 0
+    let pollRequest: import('@playwright/test').Request | undefined
+    let pollCancelled = false
+    page.on('requestfailed', (request) => {
+      if (request === pollRequest)
+        pollCancelled = true
+    })
+    let routeFailure: unknown
+    let navigation: Promise<unknown> | undefined
+    await page.clock.install()
+    await page.goto(workspacePath('/mcps'))
+    await authenticateWorkspace(page)
+    await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
+    const transport = page.locator('[data-transport-route]').first()
+    await expect(transport).toHaveAttribute('data-transport-route', 'direct')
+    await page.clock.pauseAt(new Date(Date.now() + 1000))
+    await page.evaluate(() => window.cairnObserveAvailability = true)
+    try {
+      await page.route('**/api/installations', async (route) => {
+        pollCount++
+        if (pollCount !== 1)
+          return route.continue()
+        pollRequest = route.request()
+        try {
+          const response = await route.fetch()
+          expect(response.status()).toBe(200)
+          pollHeld = true
+          await pollRelease.promise
+          // Committing the destination explicitly withdraws this old caller.
+          await route.fulfill({ response }).catch((error) => {
+            if (destination !== 'committed' || !pollCancelled)
+              throw error
+          })
+        }
+        catch (error) {
+          routeFailure = error
+          await route.abort().catch(() => {})
+        }
+      })
+      await page.route('**/agents', async (route) => {
+        if (!route.request().isNavigationRequest())
+          return route.continue()
+        try {
+          const response = await route.fetch()
+          expect(response.status()).toBe(200)
+          navigationHeld = true
+          await navigationRelease.promise
+          if (destination === 'cancelled')
+            await route.abort('aborted')
+          else
+            await route.fulfill({ response })
+        }
+        catch (error) {
+          routeFailure = error
+          await route.abort().catch(() => {})
+        }
+      })
+      await page.clock.runFor(3100)
+      await expect.poll(() => {
+        if (routeFailure)
+          throw routeFailure
+        return pollHeld
+      }).toBe(true)
+      navigation = page.goto(workspacePath('/agents'))
+      // Register both outcomes before intentionally cancelling the destination.
+      const arrival = navigation.then(() => 'committed', () => 'cancelled')
+      await expect.poll(() => {
+        if (routeFailure)
+          throw routeFailure
+        return navigationHeld
+      }).toBe(true)
+      // The real destination response is held. Do not evaluate the old frame:
+      // Chromium can defer evaluations until this navigation commits.
+      expect(pollCount).toBe(1)
+      expect(callerAborts).toEqual([])
+      expect(errors).toEqual([])
+      navigationRelease.resolve()
+      expect(await arrival).toBe(destination)
+      if (destination === 'committed') {
+        await expect.poll(() => pollCancelled).toBe(true)
+        await expect.poll(() => callerAborts).toEqual([true])
+      }
+      else {
+        expect(callerAborts).toEqual([])
+      }
+      const resumedPoll = destination === 'cancelled'
+        ? page.waitForResponse(response => response.request() === pollRequest)
+        : undefined
+      pollRelease.resolve()
+      if (destination === 'committed') {
+        await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
+      }
+      else {
+        await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
+        // The same document must consume its response and continue real polling.
+        expect(await (await resumedPoll!).finished()).toBeNull()
+        await page.evaluate(() => {})
+        await page.unrouteAll({ behavior: 'wait' })
+        await expect(transport).toHaveAttribute('data-transport-route', 'direct')
+        const nextPoll = page.waitForResponse(response => new URL(response.url()).pathname === '/api/installations' && response.status() === 200)
+        await page.clock.runFor(3100)
+        expect(await (await nextPoll).finished()).toBeNull()
+        await page.evaluate(() => {})
+        // A real HTTP failure in this retained document still reports offline
+        // and falls back. Recovery uses the existing availability backoff.
+        await page.route('**/api/installations', route => route.fulfill({ status: 503, json: { error: 'Installation status unavailable' } }))
+        const unavailable = page.waitForResponse(response => new URL(response.url()).pathname === '/api/installations' && response.status() === 503)
+        await page.clock.runFor(3100)
+        await unavailable
+        await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Offline')
+        await expect(transport).toHaveAttribute('data-transport-route', 'relay')
+        await page.unrouteAll({ behavior: 'wait' })
+        const recovered = page.waitForResponse(response => new URL(response.url()).pathname === '/api/installations' && response.status() === 200)
+        await page.clock.runFor(6100)
+        await recovered
+        await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
+      }
+      await expect(transport).toHaveAttribute('data-transport-route', 'direct')
+    }
+    finally {
+      pollRelease.resolve()
+      navigationRelease.resolve()
+      await navigation?.catch(() => {})
+      await page.unrouteAll({ behavior: 'wait' })
+    }
+    if (routeFailure)
+      throw routeFailure
+    expect(errors).toEqual([])
+  })
+}
