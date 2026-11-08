@@ -393,17 +393,18 @@ class ContextCompactionJourneyTest {
                     .assertCountEquals(0)
                 compose.onNodeWithTag("rename-title").performTextReplacement("  Notes de version  ")
                 compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
-                compose.waitUntil(10000) { renames.size == 2 }
-                val rename = wireJson.parseToJsonElement(renames.last()).jsonObject
-                assertEquals("Notes de version", rename["title"]!!.jsonPrimitive.content)
-                assertEquals(chat.revision, rename["revision"]!!.jsonPrimitive.content)
-                assertEquals(chatId, rename["chatId"]!!.jsonPrimitive.content)
+                // The save reads the conversation first; the sheet closes once the rename is done.
                 compose.waitUntil(10000) {
                     compose
                         .onAllNodesWithText("Renommer la conversation")
                         .fetchSemanticsNodes()
                         .isEmpty()
                 }
+                assertEquals(2, renames.size)
+                val rename = wireJson.parseToJsonElement(renames.last()).jsonObject
+                assertEquals("Notes de version", rename["title"]!!.jsonPrimitive.content)
+                assertEquals(chat.revision, rename["revision"]!!.jsonPrimitive.content)
+                assertEquals(chatId, rename["chatId"]!!.jsonPrimitive.content)
             } finally {
                 vm.api.closeStreams()
             }

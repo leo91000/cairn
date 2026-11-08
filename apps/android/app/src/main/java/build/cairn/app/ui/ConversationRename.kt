@@ -12,6 +12,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -20,6 +21,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -70,9 +72,15 @@ internal fun ConversationRename(
         save(trimmed, shown) { found = it }
     }
     val focus = remember { FocusRequester() }
+    // A sheet hides before it reports its dismissal, so it stays up while a save is in flight.
+    val saving by rememberUpdatedState(busy)
     ModalBottomSheet(
-        onDismissRequest = { if (!busy) dismiss() },
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        onDismissRequest = dismiss,
+        sheetState =
+            rememberModalBottomSheetState(
+                skipPartiallyExpanded = true,
+                confirmValueChange = { it != SheetValue.Hidden || !saving },
+            ),
         containerColor = MaterialTheme.colorScheme.surface,
     ) {
         // The field exists once the sheet's content composes; a window not yet attached is simply
