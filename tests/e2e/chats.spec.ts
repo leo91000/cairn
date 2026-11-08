@@ -1164,7 +1164,7 @@ test('phone headers carry the installation, its route and the conversation conne
   await page.goto(workspacePath(`/chats/${chat.id}`))
   const header = page.locator('.chat-header')
   await expect(header.getByRole('button', { name: 'Conversations', exact: true }).getByTitle(/^Browser workspace · /)).toBeVisible()
-  await expect(header.getByRole('button', { name: 'Conversations', exact: true })).toHaveAccessibleDescription(/^Latest harness: Codex · Browser workspace · Online · (Direct|Relais)$/)
+  await expect(header.getByRole('button', { name: 'Conversations', exact: true })).toHaveAccessibleDescription(/^Main agent · Latest harness: Codex · Browser workspace · Online · (Direct|Relais)$/)
   expect(Math.round((await header.boundingBox())!.height)).toBeLessThanOrEqual(60)
   await expect(header.getByRole('button', { name: /^Files: \d+$/ })).toBeVisible()
   await expect(page.getByRole('link', { name: 'New chat', exact: true })).toBeHidden()

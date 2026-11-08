@@ -13,6 +13,8 @@ defineProps<{
   projectName?: string | null
   status?: string
   failed?: boolean
+  /** Only work in progress takes the accent; other statuses read plainly. */
+  working?: boolean
   context?: ContextSummary
 }>()
 </script>
@@ -29,7 +31,7 @@ defineProps<{
       <div class="min-w-0 text-xs leading-snug">
         <p class="m-0! truncate font-semibold text-ink">
           {{ agentName }}<template v-if="status">
-            <span aria-hidden="true" class="text-muted"> · </span><span :class="failed ? 'text-coral' : 'font-normal text-accent'">{{ status }}</span>
+            <span aria-hidden="true" class="text-muted"> · </span><span :class="failed ? 'text-coral' : working ? 'font-normal text-accent' : 'font-normal text-muted'">{{ status }}</span>
           </template>
         </p>
         <p class="m-0! truncate text-muted">

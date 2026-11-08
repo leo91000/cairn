@@ -560,11 +560,6 @@ const working = computed(() => detail.value?.run?.status === 'running' && !detai
 const connectionDescription = computed(() => currentInstallation.value
   ? `${currentInstallation.value.name} · ${currentInstallation.value.status} · ${routeLabel(state.transportRoute)}`
   : '')
-const phoneDescription = computed(() => [
-  headerState.value?.label ?? headerProject.value ?? '',
-  heading.value?.provider ? `Latest harness: ${providers[heading.value.provider].label}` : '',
-  connectionDescription.value,
-].filter(Boolean).join(' · '))
 const outgoing = ref<ChatMessage | null>(null)
 const delivery = computed(() => chatDelivery(detail.value, timeline.value, outgoing.value))
 const pending = computed(() => delivery.value.queued)
@@ -574,6 +569,12 @@ watch(timeline, (cards) => {
     outgoing.value = null
 })
 const selectedAgent = computed(() => state.agents.find(agent => agent.id === (detail.value?.agentId || agentId.value)))
+// The phone title button's description carries what its subtitle shows, then the harness and route.
+const phoneDescription = computed(() => [
+  headerState.value?.label || headerProject.value || heading.value?.agentName || selectedAgent.value?.name || 'Main agent',
+  heading.value?.provider ? `Latest harness: ${providers[heading.value.provider].label}` : '',
+  connectionDescription.value,
+].filter(Boolean).join(' · '))
 const agents = computed(() => state.agents.map(agent => ({
   value: agent.id,
   label: agent.name,
@@ -881,11 +882,19 @@ const nodeExecution = ref<InstanceType<typeof NodeExecution>>()
 const menuButton = ref<InstanceType<typeof MenuButton>>()
 const contextPill = ref<HTMLElement>()
 // One region stays mounted so screen readers hear a new status, the conversation's or its node's;
-// a countdown would repeat every minute.
-const announcedStatus = computed(() => [
+// a countdown would repeat every minute. A status must hold for a second, so the brief queue every
+// message passes through is not read out on each send.
+const liveStatus = computed(() => [
   headerState.value && chatStatus.value !== sleepStatus.value ? headerState.value.label : '',
   nodeExecution.value?.attention ? nodeExecution.value.status.label : '',
 ].filter(Boolean).join(' · '))
+const announcedStatus = ref('')
+let announcement: ReturnType<typeof setTimeout> | undefined
+watch(liveStatus, (text) => {
+  clearTimeout(announcement)
+  announcement = setTimeout(() => announcedStatus.value = text, 1000)
+}, { immediate: true })
+onBeforeUnmount(() => clearTimeout(announcement))
 
 function openCompactionFromHeader() {
   compactionOpener.value = contextPill.value
@@ -966,7 +975,8 @@ const conversationActions = computed(() => {
     })
   }
 
-  if (chat?.run) {
+  // A trashed conversation shows no activity to enlarge.
+  if (chat?.run && !inactive.value) {
     actions.push({
       id: 'fullscreen',
       label: 'Open activity fullscreen',
@@ -1193,7 +1203,8 @@ watch(chatId, (id) => {
   openedSubagent.value = null
   history.value = false
   detailsOpen.value = false
-  menuButton.value?.hide(false)
+  // Focus inside the dropdown returns to its trigger rather than to the page.
+  menuButton.value?.hide()
   connectionOpen.value = false
   newSession.value = false
   editing.value = null
@@ -1274,6 +1285,7 @@ function key(event: KeyboardEvent) {
         :project-name="headerProject"
         :status="detail ? chatStatus : undefined"
         :failed="headerState?.failed"
+        :working="working"
         :context="detail?.run ? context : undefined"
       />
       <RouterLink
@@ -1486,6 +1498,7 @@ function key(event: KeyboardEvent) {
                 :project-name="headerProject"
                 :status="detail ? chatStatus : undefined"
                 :failed="headerState?.failed"
+                :working="working"
                 :context="detail?.run ? context : undefined"
               />
             </template>
