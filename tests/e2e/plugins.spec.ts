@@ -97,9 +97,13 @@ test('Discord bots are set up through the package’s own form and keep the toke
   await page.goto(workspacePath('/plugins'))
   await signIn(page)
 
+  const atelierSections = page.getByRole('navigation', { name: 'Atelier sections' })
+  const pluginsSection = atelierSections.getByRole('link', { name: 'Plugins', exact: true })
+  await expect(pluginsSection).toHaveAttribute('aria-current', 'page')
   await expect(page.getByRole('link', { name: '1Password · Set up' })).toBeVisible()
   await expect(page.getByRole('link', { name: 'Discord · Set up' }).getByText('Paste a token')).toBeVisible()
   await page.getByRole('link', { name: 'Discord · Set up' }).click()
+  await expect(pluginsSection).toHaveAttribute('aria-current', 'page')
   // Before the first bot, the page says what it takes and lists the steps.
   const first = page.getByRole('region', { name: 'Set up your first bot' })
   await expect(first).toContainText('Discord Developer Portal')
