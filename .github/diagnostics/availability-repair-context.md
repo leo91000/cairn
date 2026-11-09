@@ -24,7 +24,7 @@ All eight factual scopes precede cleanup, but no whole-run/global product green
 is inferred. FullEightCellRunComplete and prior globalflags remainFALSE. The source
 hash pins and bounded gate comparison remain in archived native script/context history.
 
-Current base update preserves main e88bd38c (#737 CI failure fixture budget readiness) with no conflict; repair nine files byte-identical to a78 before this base merge. All inherited main tests must still run in selected fullquality; no main checks are claimed as product qualification.
+Inherited main e88bd38c (#737 CI failure fixture budget readiness) and dc249039 (Android smoke system-command probe) are included unchanged with no conflict; neither main update changes the repair payload. The new application-outage regression is a separate change after a78, and needs exact newhead qualification. All inherited main tests must still run in selected fullquality; no main checks are claimed as product qualification.
 
 Formatting qualification42633640027 on7df remainsFAILURE: realCLI6+2 andactualSDKidentity PASS, formatterExit1/sourceDiff1, patch17416B SHA25666c6cff476c7be72d040172e069435c5e3ae915866349b5f0b719e8eacbc7423. Exactformatterpatch applied to7files + manual expansion of remaining single-line BFcleanuptry; new product head above is NOT qualified by those prior results. Factory comparison to7df adds ONLY2 blank lines, BeaconApp BYTEIDENTICAL; probe/tests formatting changed and need fresh review/actualexactCI. Archived native script intentionally retains its7df sourcehash pins and is NOT executed by this product qualification; historicalnativefacts are not a newhead/globalqualification.
 
