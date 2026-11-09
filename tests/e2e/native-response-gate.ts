@@ -26,6 +26,7 @@ export async function nativeResponseGate(origin: string) {
   const controls = new Set<ReturnType<typeof control>>()
   const requests = new Set<ClientRequest>()
   const requestClosures = new Set<Promise<void>>()
+  const responseClosures = new Set<Promise<void>>()
   const deliveries = new Set<Promise<void>>()
   const failures: unknown[] = []
   let closing = false
@@ -55,6 +56,9 @@ export async function nativeResponseGate(origin: string) {
   }
 
   const server = createServer((request, response) => {
+    const responseClosed = new Promise<void>(resolve => response.once('close', () => resolve()))
+    responseClosures.add(responseClosed)
+    void responseClosed.then(() => responseClosures.delete(responseClosed))
     let target: URL
     try {
       target = new URL(request.url || '/', upstreamOrigin)
@@ -208,7 +212,8 @@ export async function nativeResponseGate(origin: string) {
           request.destroy()
         agent.destroy()
         await stopped
-        await Promise.all([...requestClosures, ...deliveries])
+        await Promise.all([...requestClosures, ...responseClosures])
+        await Promise.all(deliveries)
         check()
       })()
 
