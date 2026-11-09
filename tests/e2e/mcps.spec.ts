@@ -15,7 +15,6 @@ import type { AvailabilityReadEvent } from './availability-probe'
 import { installAvailabilityProbe } from './availability-probe'
 import { nativeResponseGate } from './native-response-gate'
 
-
 type OAuthDepartureProbe = { kind: 'background' } | { kind: 'offer', closed: boolean }
 
 declare global {
@@ -94,6 +93,21 @@ for (const pending of ['authorization', 'offer'] as const) {
         if (background && departing)
           void window.cairnOAuthProbe({ kind: 'background' })
         return request(...args)
+      }
+
+      const availability = new WeakSet<XMLHttpRequest>()
+      const open = XMLHttpRequest.prototype.open
+      const send = XMLHttpRequest.prototype.send
+      XMLHttpRequest.prototype.open = function (method, url, async = true, username, password) {
+        availability.delete(this)
+        if (method === 'GET' && String(url) === '/api/installations')
+          availability.add(this)
+        return open.call(this, method, url, async, username, password)
+      }
+      XMLHttpRequest.prototype.send = function (body) {
+        if (availability.has(this) && departing)
+          void window.cairnOAuthProbe({ kind: 'background' })
+        return send.call(this, body)
       }
 
       if (!holdOffer || !location.pathname.endsWith('/mcps'))
