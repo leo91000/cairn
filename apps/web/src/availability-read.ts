@@ -1,4 +1,4 @@
-// This account-shell GET may be withdrawn before pagehide. Keep it independent
+// This account-shell GET may be withdrawn at document departure. Keep it independent
 // of the provisional document loader while retaining its original native result.
 export class AvailabilityDeparture extends Error {
   constructor() {
@@ -24,6 +24,7 @@ export function readAvailability(signal: AbortSignal) {
   const removeListener = () => {
     if (listening) {
       ownerWindow.removeEventListener('beforeunload', beforeUnload)
+      ownerWindow.removeEventListener('pagehide', pageHide, true)
       listening = false
     }
   }
@@ -66,12 +67,22 @@ export function readAvailability(signal: AbortSignal) {
     abort('caller')
   }
 
-  function beforeUnload(event: BeforeUnloadEvent) {
-    const ownIntent = event.isTrusted && event.type === 'beforeunload'
-      && typeof ownerWindow.BeforeUnloadEvent === 'function' && event instanceof ownerWindow.BeforeUnloadEvent
-      && event.target === ownerDocument && event.currentTarget === ownerWindow
+  function ownDocumentEvent(event: Event) {
+    return event.isTrusted && event.target === ownerDocument && event.currentTarget === ownerWindow
       && ownerWindow.document === ownerDocument && ownerDocument.defaultView === ownerWindow
       && ownerWindow.top === ownerWindow
+  }
+
+  function beforeUnload(event: BeforeUnloadEvent) {
+    const ownIntent = event.type === 'beforeunload' && ownDocumentEvent(event)
+      && typeof ownerWindow.BeforeUnloadEvent === 'function' && event instanceof ownerWindow.BeforeUnloadEvent
+    if (ownIntent && !settled)
+      abort('departure')
+  }
+
+  function pageHide(event: PageTransitionEvent) {
+    const ownIntent = event.type === 'pagehide' && ownDocumentEvent(event)
+      && typeof ownerWindow.PageTransitionEvent === 'function' && event instanceof ownerWindow.PageTransitionEvent
     if (ownIntent && !settled)
       abort('departure')
   }
@@ -97,6 +108,10 @@ export function readAvailability(signal: AbortSignal) {
   controller.signal.addEventListener('abort', nativeSignalAborted)
   signal.addEventListener('abort', callerAbort, { once: true })
   ownerWindow.addEventListener('beforeunload', beforeUnload)
+  // A new read may start after beforeunload while the destination is pending.
+  // Capture withdrawal before ordinary pagehide observers can drain its body.
+  // An earlier native load failure remains a failure; no terminal is invented.
+  ownerWindow.addEventListener('pagehide', pageHide, true)
   listening = true
   let response: Promise<{
     status: number

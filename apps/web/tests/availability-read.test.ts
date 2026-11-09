@@ -15,6 +15,7 @@ const hostAbort = AbortController.prototype.abort
 const HostEvent = Event
 const HostException = DOMException
 const listeners = new Set<(event: Intent) => void>()
+const hiddenListeners = new Set<(event: Intent) => void>()
 let ownerWindow: Record<string, unknown>
 let ownerDocument: Record<string, unknown>
 let calls: Call[]
@@ -26,6 +27,10 @@ class Intent {
   type = 'beforeunload'
   isTrusted = true
   constructor(readonly target: unknown, readonly currentTarget: unknown) {}
+}
+
+class PageHide extends Intent {
+  override type = 'pagehide'
 }
 
 interface Call {
@@ -99,9 +104,15 @@ function departure(event = new Intent(ownerDocument, ownerWindow)) {
     listener(event)
 }
 
+function hide(event = new PageHide(ownerDocument, ownerWindow)) {
+  for (const listener of [...hiddenListeners])
+    listener(event)
+}
+
 beforeEach(() => {
   calls = []
   listeners.clear()
+  hiddenListeners.clear()
   loseReason = false
   deferAbort = false
   omitAbort = false
@@ -132,13 +143,18 @@ beforeEach(() => {
     Event: HostEvent,
     DOMException: HostException,
     BeforeUnloadEvent: Intent,
-    addEventListener(type: string, callback: (event: Intent) => void) {
+    PageTransitionEvent: PageHide,
+    addEventListener(type: string, callback: (event: Intent) => void, capture?: boolean) {
       if (type === 'beforeunload')
         listeners.add(callback)
+      if (type === 'pagehide' && capture === true)
+        hiddenListeners.add(callback)
     },
-    removeEventListener(type: string, callback: (event: Intent) => void) {
+    removeEventListener(type: string, callback: (event: Intent) => void, capture?: boolean) {
       if (type === 'beforeunload')
         listeners.delete(callback)
+      if (type === 'pagehide' && capture === true)
+        hiddenListeners.delete(callback)
     },
   }
   ownerDocument = { defaultView: ownerWindow }
@@ -208,6 +224,49 @@ it('requires the original body terminal after an owned native signal and rearms 
   value([{ online: true }])
   assert.deepEqual(await nextBody, [{ online: true }])
   assert.equal(listeners.size, 0)
+})
+
+it('captures a later read at native pagehide while requiring its original body terminal', async () => {
+  loseReason = true
+  const first = readAvailability(new HostController().signal)
+  const initial = assert.rejects(first.response, AvailabilityDeparture)
+  departure()
+  await initial
+  const next = readAvailability(new HostController().signal)
+  assert.equal(hiddenListeners.size, 1)
+  headers()
+  const body = (await next.response).json()
+  const rejected = assert.rejects(body, AvailabilityDeparture)
+  const synthetic = new PageHide(ownerDocument, ownerWindow)
+  synthetic.isTrusted = false
+  hide(synthetic)
+  hide(new PageHide({}, ownerWindow))
+  hide(new PageHide(ownerDocument, {}))
+  hide({
+    type: 'pagehide',
+    isTrusted: true,
+    target: ownerDocument,
+    currentTarget: ownerWindow,
+  } as PageHide)
+  assert.equal(calls.at(-1)!.aborts, 0)
+  assert.equal(hiddenListeners.size, 1)
+  hide()
+  await rejected
+  assert.equal(hiddenListeners.size, 0)
+  assert.equal(listeners.size, 0)
+})
+
+it('preserves a body failure settled before captured pagehide', async () => {
+  const read = readAvailability(new HostController().signal)
+  assert.equal(hiddenListeners.size, 1)
+  headers()
+  const body = (await read.response).json()
+  const cause = new TypeError('genuine earlier native body failure')
+  const rejected = assert.rejects(body, error => error === cause)
+  failure(cause)
+  hide()
+  await rejected
+  assert.equal(hiddenListeners.size, 0)
 })
 
 it('does not disarm the listener for synthetic, foreign or wrong-interface intent', async () => {
