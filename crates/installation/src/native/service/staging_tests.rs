@@ -11,6 +11,13 @@ struct Server {
     controller: Controller,
     entered: mpsc::UnboundedSender<()>,
     release: watch::Receiver<bool>,
+    finish: Option<Finish>,
+}
+
+#[derive(Clone)]
+struct Finish {
+    entered: mpsc::UnboundedSender<()>,
+    release: watch::Receiver<bool>,
 }
 
 async fn seed(State(server): State<Server>) -> Response {
@@ -37,6 +44,15 @@ async fn seed(State(server): State<Server>) -> Response {
                 server.release.wait_for(|released| *released).await.unwrap();
                 return Some((Ok(tail), (None, None, server)));
             }
+            if let Some(mut finish) = server.finish.take() {
+                let _ = finish.entered.send(());
+                finish.release.wait_for(|released| *released).await.unwrap();
+                let error = std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "synthetic HTTP failure after the completion marker",
+                );
+                return Some((Err(error), (None, None, server)));
+            }
             None
         },
     );
@@ -54,6 +70,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new(files: u64) -> Self {
+        Self::with_finish(files, None).await
+    }
+
+    async fn with_finish(files: u64, finish: Option<Finish>) -> Self {
         let (root, controller) = super::tests::fixture().await;
         // Account for the metadata reserve and runner secret independently.
         controller.budget.lock().await["limits"]["diskMiB"] = (files + 2).into();
@@ -73,6 +93,7 @@ impl Fixture {
                 controller: controller.clone(),
                 entered: entered_tx,
                 release: release_rx,
+                finish,
             });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -215,6 +236,61 @@ async fn a_blocked_network_seed_allows_another_native_admission_and_preserves_by
     assert!(
         free,
         "another native admission waited for the network seed: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn native_seed_keeps_the_old_tree_until_http_eof_and_retires_failed_promises() {
+    let (entered, mut finishing) = mpsc::unbounded_channel();
+    let (release, receiver) = watch::channel(false);
+    let mut fixture = Fixture::with_finish(
+        4,
+        Some(Finish {
+            entered,
+            release: receiver,
+        }),
+    )
+    .await;
+    let target = fixture.controller.data.join("runs/retained");
+    private_dir(&target).await.unwrap();
+    tokio::fs::write(target.join("asset"), b"previous files")
+        .await
+        .unwrap();
+
+    let (_, mut transfer) = fixture.transfer("retained", false);
+    fixture.receiving().await;
+    fixture.release.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), finishing.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    // All protocol frames have crossed the server, but HTTP has not ended.
+    // Always release its controlled failure before asserting either outcome.
+    let pending = tokio::time::timeout(Duration::from_secs(1), &mut transfer).await;
+    release.send(true).unwrap();
+    let waited_for_http = pending.is_err();
+    let result = match pending {
+        Ok(result) => result.unwrap(),
+        Err(_) => tokio::time::timeout(Duration::from_secs(5), transfer)
+            .await
+            .unwrap()
+            .unwrap(),
+    };
+
+    assert!(
+        waited_for_http,
+        "protocol completion cannot publish before HTTP EOF"
+    );
+    assert_eq!(result.unwrap_err().status, 502);
+    assert_eq!(
+        tokio::fs::read(target.join("asset")).await.unwrap(),
+        b"previous files"
+    );
+    assert!(
+        disk::used(&fixture.controller.data, &fixture.controller.state)
+            .await
+            .unwrap()
+            < PAYLOAD
     );
 }
 
