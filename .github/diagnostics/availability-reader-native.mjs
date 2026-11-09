@@ -188,10 +188,10 @@ function client(reader, scenario) {
           const value = await response.json()
           finish('body', { status: response.status, online: value[0]?.online })
         }
-        catch {
-          finish('body-error')
+        catch (error) {
+          finish('body-error', { sameAbortReason: controller.signal.aborted && error === controller.signal.reason })
         }
-      }, () => finish('fetch-error'))
+      }, error => finish('fetch-error', { sameAbortReason: controller.signal.aborted && error === controller.signal.reason }))
 
       return
     }
@@ -529,8 +529,6 @@ async function observe(browser, engine, reader, scenario) {
         return journal.some(event => event.document === documentId && event.read === 1 && event.kind === 'native-fetch-rejected' && event.sameAbortReason)
       if (reader === 'intent-fetch' && ['download', 'failure-before-intent'].includes(scenario))
         return journal.some(event => event.document === documentId && event.read === 2 && event.kind === 'body')
-      if (scenario === 'committed' && journal.some(event => event.read === 1 && event.kind === 'signal-abort' && event.hidden))
-        return true
       if (scenario === 'download' && first.some(event => event.kind === 'native-abort'))
         return journal.some(event => event.read === 2 && terminal(event))
       return first.length > 0
@@ -659,7 +657,10 @@ async function observe(browser, engine, reader, scenario) {
   const trustedNativeCancel = first.some(event => event.kind === 'native-abort' && event.trusted && event.exactTarget && !event.explicitAbort && !event.signalAborted)
   const freshBody = originalEvents.filter(event => event.read === 2 && event.kind === 'body' && event.status === 200 && event.online === true && (reader !== 'intent-fetch' || event.exactBody)).length === 1
   const originalBody = first.filter(event => event.kind === 'body' && event.status === 200 && event.online === true && (reader !== 'intent-fetch' || event.exactBody)).length === 1
-  const ownedWithdrawal = events.some(event => event.read === 1 && event.kind === 'signal-abort' && event.hidden && event.signalAborted)
+  const nativeOwnerTerminal = reader === 'xhr'
+    ? originalEvents.some(event => event.read === 1 && event.kind === 'platform-abort' && event.trusted && event.exactTarget && event.explicitAbort && event.signalAborted)
+    : first.some(event => ['fetch-error', 'body-error'].includes(event.kind) && event.signalAborted && event.sameAbortReason)
+  const ownedWithdrawal = nativeOwnerTerminal && originalEvents.some(event => event.read === 1 && event.kind === 'signal-abort' && event.hidden && event.signalAborted)
   const unexpectedNativeError = ['success', 'committed', 'download', 'owner-abort'].includes(scenario)
     && events.some(event => ['platform-error', 'platform-timeout'].includes(event.kind) && !event.explicitAbort && !event.signalAborted)
   let usable = false
@@ -670,7 +671,7 @@ async function observe(browser, engine, reader, scenario) {
   else if (scenario === 'download')
     usable = identityRetained && (trustedNativeCancel ? freshBody && !originalBody : originalBody)
   else if (scenario === 'owner-abort')
-    usable = first.some(event => event.signalAborted && ['owner-cancelled', 'fetch-error'].includes(event.kind)) && !trustedNativeCancel
+    usable = nativeOwnerTerminal && first.some(event => event.signalAborted && ['owner-cancelled', 'fetch-error'].includes(event.kind)) && !trustedNativeCancel
   else if (scenario === 'http503')
     usable = first.some(event => event.kind === 'http-error' && event.status === 503)
   else if (scenario === 'malformed')
