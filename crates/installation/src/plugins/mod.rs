@@ -11,6 +11,7 @@ pub mod files;
 pub mod forms;
 pub mod grant_authorization;
 pub mod grants;
+mod help;
 pub mod hooks;
 mod idempotency;
 pub mod instances;

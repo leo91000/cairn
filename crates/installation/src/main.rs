@@ -10,6 +10,8 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
+mod cli_help;
+
 /// The supervisor passes its control socket as file descriptor 3.
 fn has_control_socket() -> bool {
     let mut kind = 0_i32;
@@ -37,13 +39,32 @@ where
     F: FnOnce(Arc<Service>) -> Fut,
     Fut: std::future::Future<Output = Result<axum::Router>>,
 {
-    if std::env::args().nth(1).as_deref() == Some("plugin-worker") {
+    let args = match cli_help::normalize(std::env::args().skip(1).collect()) {
+        Ok(args) => args,
+        Err(error) => {
+            eprintln!("{}", error.message);
+            return ExitCode::FAILURE;
+        }
+    };
+    match cli_help::render(&args) {
+        Ok(Some(help)) => {
+            print!("{help}");
+            return ExitCode::SUCCESS;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("{}", error.message);
+            return ExitCode::FAILURE;
+        }
+    }
+
+    if args.first().is_some_and(|arg| arg == "plugin-worker") {
         return match cairn_plugin_runtime::worker() {
             Ok(()) => ExitCode::SUCCESS,
             Err(_) => ExitCode::FAILURE,
         };
     }
-    if std::env::args().nth(1).as_deref() == Some("mcp-code-worker") {
+    if args.first().is_some_and(|arg| arg == "mcp-code-worker") {
         return match cairn_installation::mcp_server::code_mode::worker() {
             Ok(()) => ExitCode::SUCCESS,
             Err(_) => ExitCode::FAILURE,
@@ -51,14 +72,13 @@ where
     }
     cairn_installation::tls::install_provider();
 
-    if std::env::args().nth(1).as_deref() == Some("native-enclave")
+    if args.first().is_some_and(|arg| arg == "native-enclave")
         && let Err(error) = cairn_installation::native::docker::harden_enclave()
     {
         eprintln!("Could not harden the native enclave: {error}");
         return ExitCode::FAILURE;
     }
 
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
     // Validate the inherited control socket before Tokio creates any FDs.
     if args.first().is_some_and(|a| a == "supervise") && !has_control_socket() {
         eprintln!("Missing supervisor control socket.");
@@ -233,7 +253,7 @@ where
         "serve" => serve(stop, router).await?,
         _ => {
             return Err(Error::bad(
-                "Unknown command. Use serve, claim, rotate-token, runner-broker, runner-entry, runner-client, chat, or --version.",
+                "Unknown command. Run 'cairn --help' for available commands.",
             ));
         }
     }
