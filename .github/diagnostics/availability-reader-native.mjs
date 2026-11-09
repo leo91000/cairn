@@ -87,8 +87,8 @@ function client(reader, scenario) {
     const ownerAbort = () => {
       explicitAbort = true
       record('caller-abort', read, { signalAborted: controller.signal.aborted })
-      request.abort()
       finish('owner-cancelled', { explicitAbort: true })
+      request.abort()
     }
 
     controller.signal.addEventListener('abort', ownerAbort, { once: true })
@@ -121,12 +121,22 @@ function client(reader, scenario) {
     }
 
     request.onerror = (event) => {
-      record('platform-error', read, { trusted: event.isTrusted, explicitAbort, status: request.status })
+      record('platform-error', read, {
+        trusted: event.isTrusted,
+        explicitAbort,
+        signalAborted: controller.signal.aborted,
+        status: request.status,
+      })
       finish('error', { status: request.status })
     }
 
     request.ontimeout = (event) => {
-      record('platform-timeout', read, { trusted: event.isTrusted, explicitAbort, status: request.status })
+      record('platform-timeout', read, {
+        trusted: event.isTrusted,
+        explicitAbort,
+        signalAborted: controller.signal.aborted,
+        status: request.status,
+      })
       finish('timeout', { status: request.status })
     }
 
@@ -390,7 +400,7 @@ async function observe(browser, engine, reader, scenario) {
   const originalBody = first.filter(event => event.kind === 'body' && event.status === 200 && event.online === true).length === 1
   const ownedWithdrawal = events.some(event => event.read === 1 && event.kind === 'signal-abort' && event.hidden && event.signalAborted)
   const unexpectedNativeError = ['success', 'committed', 'download', 'owner-abort'].includes(scenario)
-    && events.some(event => ['platform-error', 'platform-timeout'].includes(event.kind))
+    && events.some(event => ['platform-error', 'platform-timeout'].includes(event.kind) && !event.explicitAbort && !event.signalAborted)
   let usable = false
   if (scenario === 'success')
     usable = originalBody && first.length === 1 && !trustedNativeCancel
@@ -416,7 +426,12 @@ async function observe(browser, engine, reader, scenario) {
     identityRetained,
     usable: usable && !firstFailure && !pageErrors.length && !unexpectedNativeError && (!held || httpClosedDuringObservation),
     httpClosedDuringObservation,
-    http: held && { closed: held.closed, terminal: held.terminal },
+    http: held && {
+      ready: held.ready,
+      status: held.status,
+      closed: held.closed,
+      terminal: held.terminal,
+    },
     events,
   }
   rows.push(row)
@@ -464,11 +479,37 @@ for (const [engine, type] of [['chromium', chromium], ['webkit', webkit]]) {
   }
 }
 
-const xhrControlsPassed = rows.length === 36 && rows.filter(row => row.reader === 'xhr').every(row => row.usable) && cleanupFailures.length === 0
+const allPageErrorsStrict = rows.every(row => row.pageErrors.length === 0)
+const baselineControlsComplete = rows.filter(row => row.reader === 'fetch').every((row) => {
+  if (!['committed', 'download'].includes(row.scenario))
+    return row.usable
+  if (!row.firstFailure)
+    return true
+  const original = row.events.filter(event => event.read === 1)
+  const pendingOriginal = original.filter(event => event.kind === 'start').length === 1 && !original.some(terminal)
+  return row.scenario === 'download'
+    && row.identityRetained
+    && row.firstFailure.phase === 'exact read terminal and replacement'
+    && pendingOriginal
+    && row.http?.ready
+    && row.http.status === 200
+})
+const expectedCells = ['chromium', 'webkit'].flatMap(engine => ['fetch', 'xhr'].flatMap(reader => scenarios.map(scenario => engine + ':' + reader + ':' + scenario))).sort()
+const observedCells = rows.map(row => row.engine + ':' + row.reader + ':' + row.scenario).sort()
+const allCellsObserved = JSON.stringify(observedCells) === JSON.stringify(expectedCells)
+const xhrControlsPassed = rows.length === 36
+  && allCellsObserved
+  && rows.filter(row => row.reader === 'xhr').every(row => row.usable)
+  && allPageErrorsStrict
+  && baselineControlsComplete
+  && cleanupFailures.length === 0
 await writeEvidence('result.json', {
   diagnosticOnly: true,
   productQualified: false,
   xhrControlsPassed,
+  allPageErrorsStrict,
+  baselineControlsComplete,
+  allCellsObserved,
   rows: rows.length,
   cleanupFailures,
 })
@@ -476,6 +517,9 @@ console.log(JSON.stringify({
   diagnosticOnly: true,
   productQualified: false,
   xhrControlsPassed,
+  allPageErrorsStrict,
+  baselineControlsComplete,
+  allCellsObserved,
   rows: rows.length,
   cleanupFailures: cleanupFailures.length,
 }))
