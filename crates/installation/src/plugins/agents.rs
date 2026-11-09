@@ -126,7 +126,7 @@ fn words(input: &Value) -> Result<Vec<String>> {
 
 /// A live, authorized command catalog. No instance settings, secrets or script calls.
 async fn help(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
-    let run = authorize(s, bearer).await?;
+    let run = super::help::authorize_metadata(s, bearer).await?;
     let (agent_id, _) = agent(&run);
     let plugin = text(input, "plugin");
     let selected = text(input, "helpCommand");
@@ -136,7 +136,6 @@ async fn help(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
         let snapshot =
             super::grant_authorization::Snapshot::capture(s, &agent_id, Some(bearer), &package)
                 .await?;
-        snapshot.recheck(s).await?;
         let manifest = package.manifest.clone();
         let commands = s
             .store
@@ -203,13 +202,23 @@ pub async fn command(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
     if input["help"] == true || ["--help", "-h"].contains(&text(input, "command")) {
         return help(s, bearer, input).await;
     }
-    let run = authorize(s, bearer).await?;
-    let (agent_id, agent) = agent(&run);
+    super::help::authorize_metadata(s, bearer).await?;
     let plugin = text(input, "plugin");
     let unavailable = || Error::not_found("Plugin command not available.");
     let package = registry::active(s, plugin)
         .await
         .map_err(|_| unavailable())?;
+    let name = text(input, "command");
+    if !input["file"].is_object()
+        && let Some(command) = package.manifest.command(name)
+        && super::help::requested(command, &words(input)?)
+    {
+        return help(s, bearer, &json!({ "plugin": plugin, "helpCommand": name })).await;
+    }
+    // Metadata discovery above cannot resolve provider resources. Every real
+    // command and file transfer retains the full asynchronous authority checks.
+    let run = authorize(s, bearer).await?;
+    let (agent_id, agent) = agent(&run);
     if let Some(file) = input.get("file").filter(|value| value.is_object()) {
         let instances = granted(s, &agent_id, Some(plugin), None)
             .await?
@@ -261,18 +270,12 @@ pub async fn command(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
         })??;
         return Ok(json!({ "output": "json", "value": result }));
     }
-    let name = text(input, "command");
     let Some(command) = package.manifest.command(name) else {
         return Err(Error::bad(format!(
             "Unknown command. Run 'cairn plugin {plugin} --help' for commands granted to this agent."
         )));
     };
-    let words = words(input)?;
-    if super::help::requested(command, &words) {
-        let input = json!({ "plugin": plugin, "helpCommand": name });
-        return help(s, bearer, &input).await;
-    }
-    let values = parse_arguments(command, &words).map_err(Error::bad)?;
+    let values = parse_arguments(command, &words(input)?).map_err(Error::bad)?;
     let instances = granted(s, &agent_id, Some(plugin), Some((Kind::Command, name)))
         .await?
         .into_iter()

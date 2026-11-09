@@ -1,5 +1,16 @@
 //! Help renders declared metadata only; it never calls a plugin or its programs.
+use crate::{error::Result, service::Service};
 use cairn_plugin_api::{Command, Output, usage};
+use serde_json::Value;
+
+/// Local run, delegation and contribution-ceiling checks for metadata only.
+/// Real invocations must still perform asynchronous resource authorization.
+pub(super) async fn authorize_metadata(s: &Service, bearer: &str) -> Result<Value> {
+    let bearer = bearer.to_owned();
+    s.store
+        .read(move |db| crate::project_workspaces::authorize_in(db, &bearer))
+        .await
+}
 
 /// Match the command parser: flags take one value; `--` escapes one positional value.
 pub(super) fn requested(command: &Command, words: &[String]) -> bool {

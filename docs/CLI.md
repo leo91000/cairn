@@ -7,6 +7,8 @@ requirements. Local help exits successfully, writes to stdout and works without
 installation configuration, a running server or credentials. It never starts a
 service, worker or privileged runtime setup. Unknown commands and malformed help
 topics fail on stderr with a hint to the general help.
+Local help flags also work after command arguments. `supervise` preserves flags
+after its executable as child arguments; use `cairn help supervise` for its help.
 
 ## Plugin discovery inside a conversation
 

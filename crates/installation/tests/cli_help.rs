@@ -101,7 +101,6 @@ fn invalid_help_topics_and_commands_fail_with_a_recovery_hint() {
         vec!["not-a-command"],
         vec!["help", "not-a-command"],
         vec!["help", "serve", "unexpected"],
-        vec!["serve", "--help", "unexpected"],
     ] {
         let output = cairn(&args);
         assert!(!output.status.success(), "{args:?}");
@@ -112,6 +111,38 @@ fn invalid_help_topics_and_commands_fail_with_a_recovery_hint() {
                 .contains("cairn --help")
         );
     }
+}
+
+#[test]
+fn help_after_local_arguments_does_not_read_configuration_or_start_work() {
+    for args in [
+        vec!["serve", "ignored", "--help"],
+        vec!["serve", "--help", "ignored"],
+        vec!["node-daemon", "/private/node", "--help"],
+        vec![
+            "node-enroll",
+            "https://manager.example",
+            "/private/node",
+            "-h",
+        ],
+        vec!["claim", "ignored", "--help"],
+    ] {
+        let output = bounded_output(
+            Command::new(env!("CARGO_BIN_EXE_cairn"))
+                .args(&args)
+                .env_clear()
+                .env("PORT", "invalid-configuration"),
+        );
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        assert!(String::from_utf8(output.stdout).unwrap().contains("Usage:"));
+    }
+    let output = cairn(&["supervise", "/bin/true", "--help"]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("control socket")
+    );
 }
 
 #[test]

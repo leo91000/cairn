@@ -35,7 +35,7 @@ const COMMANDS: &[Command] = &[
         name: "node-enroll",
         arguments: "<manager-https-origin> <private-node-directory>",
         description: "Enroll an execution node with an installation.",
-        details: "Uses the manager's HTTPS origin and stores the node identity in the private directory.",
+        details: "Reads the enrollment code from stdin. Copy the code from the installation's node\nsetup, then supply it to this command. Uses the manager's HTTPS origin and stores\nthe node identity in the private directory.",
         internal: false,
     },
     Command {
@@ -244,14 +244,21 @@ pub fn render(args: &[String]) -> Result<Option<String>> {
     if transfer_help || list_help {
         return Ok(Some(format!("{PLUGIN_HELP}\n")));
     }
+    // `supervise` forwards its remaining words to the executable; a child's
+    // --help must not become help for Cairn. Plugins have their own value-aware parser.
+    let help_words = if mode == "plugin" || mode == "supervise" {
+        &args[1..args.len().min(2)]
+    } else {
+        &args[1..]
+    };
     let local_help = (mode == "plugin" && args.len() == 1)
-        || args
-            .get(1)
-            .is_some_and(|arg| ["-h", "--help"].contains(&arg.as_str()));
+        || help_words
+            .iter()
+            .any(|arg| ["-h", "--help"].contains(&arg.as_str()));
     if !local_help {
         return Ok(None);
     }
-    if args.len() > 2 {
+    if mode == "plugin" && args.len() > 2 {
         return Err(unknown());
     }
     let command = COMMANDS
