@@ -25,6 +25,7 @@ async function executeSetup(fault = '', {
   blockedOutput = false,
   throwingMarker = false,
   cancelMarkerFailure = false,
+  aptStartupDelayMs = 0,
   interruptSignal,
   interruptPhase = 'descendant',
 } = {}) {
@@ -45,6 +46,8 @@ const name = basename(process.argv[1])
 const args = process.argv.slice(2)
 const phase = name === 'sudo' ? 'entry' : args.includes('update') ? 'update' : 'install'
 appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase, pid: process.pid, uid: process.getuid(), args }) + '\\n')
+if (phase !== 'entry' && ${aptStartupDelayMs} > 0)
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${aptStartupDelayMs})
 const fault = ${JSON.stringify(fault)}
 if (phase === 'entry' && fault === 'delayed-entry') {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150)
@@ -85,9 +88,14 @@ if (phase === fault) {
 
   const started = Date.now()
   const fillOutput = `let full = false; const bytes = Buffer.alloc(64 * 1024); for (let i = 0; i < 256; i++) { try { writeSync(process.stdout.fd, bytes); } catch (error) { full = error.code === 'EAGAIN'; break; } } appendFileSync(${JSON.stringify(history)}, JSON.stringify({ phase: 'blocked-output', pid: process.pid, full }) + '\\n');`
-  const workSeconds = fault === 'controller-crash' ? 2 : interruptSignal && !cancelMarkerFailure ? 5 : 0.15
+  // Only deadline scenarios need a shortened work budget. Ordinary failures use
+  // the production profile: startup and bounded marker writes may exceed 150 ms.
+  // The independent two-second harness still rejects a stuck setup or cleanup.
+  const exercisesDeadline = ['entry', 'update', 'install', 'hard-stall', 'orphan-stall', 'stalled-supervision'].includes(fault)
+  const workSeconds = fault === 'controller-crash' ? 2 : interruptSignal && !cancelMarkerFailure ? 5 : exercisesDeadline ? 0.15 : undefined
+  const phaseSeconds = workSeconds === undefined ? {} : { update: workSeconds, install: workSeconds }
   const cancelFault = cancelMarkerFailure ? `import fs from 'node:fs'; import { syncBuiltinESMExports } from 'node:module'; const mkdir = fs.mkdirSync; fs.mkdirSync = function(candidate, ...args) { if (candidate.endsWith('owner.sock.cancel')) throw new Error('fixture metadata refusal'); return mkdir.call(this, candidate, ...args); }; syncBuiltinESMExports();` : ''
-  const driver = `${cancelFault} import { writeSync, appendFileSync } from 'node:fs'; import { installNativeCiDependencies } from ${JSON.stringify(new URL('scripts/install-native-ci-dependencies.mjs', root).href)}; ${blockedOutput ? fillOutput : ''} process.exitCode = await installNativeCiDependencies({ profile: ${JSON.stringify(profile)}, phaseSeconds: { update: ${workSeconds}, install: ${workSeconds} }, entryAllowanceSeconds: 0.65, killAfterSeconds: 0.4${throwingMarker ? ', write: () => { throw new Error("fixture marker failure") }' : ''} });`
+  const driver = `${cancelFault} import { writeSync, appendFileSync } from 'node:fs'; import { installNativeCiDependencies } from ${JSON.stringify(new URL('scripts/install-native-ci-dependencies.mjs', root).href)}; ${blockedOutput ? fillOutput : ''} process.exitCode = await installNativeCiDependencies({ profile: ${JSON.stringify(profile)}, phaseSeconds: ${JSON.stringify(phaseSeconds)}, entryAllowanceSeconds: 0.65, killAfterSeconds: 0.4${throwingMarker ? ', write: () => { throw new Error("fixture marker failure") }' : ''} });`
   const unsupportedProfile = !['native', 'android-network'].includes(profile)
   const useDriver = fault || closeOutput || blockedOutput || throwingMarker
   const androidCommand = 'node scripts/install-native-ci-dependencies.mjs --profile android-network'
@@ -409,6 +417,17 @@ describe('native CI dependency setup', () => {
     expect(result.status).toBe(fault === 'update' ? 124 : 42)
     expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(0)
     expect(result.survivingFixturePids).toEqual([])
+  })
+
+  it('preserves ordinary failure after startup outlasts the shortened timeout fixture budget', async () => {
+    const result = await executeSetup('fail-descendant', { blockedOutput: true, aptStartupDelayMs: 200 })
+    expect(result.calls.find(call => call.phase === 'blocked-output')?.full).toBe(true)
+    expect(result.harnessKilled).toBe(false)
+    expect(result.status).toBe(42)
+    expect(result.calls.filter(call => call.phase === 'descendant')).toHaveLength(1)
+    expect(result.calls.filter(call => call.phase === 'install')).toHaveLength(0)
+    expect(result.survivingFixturePids).toEqual([])
+    expect(result.liveAtPublicExit).toEqual([])
   })
 
   it('uses the same bounded installer in all native dependency callers with the same package set', () => {
