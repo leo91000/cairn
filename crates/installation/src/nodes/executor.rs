@@ -348,10 +348,13 @@ async fn resume_import_directories(plan: &Value, root: &Path) -> Result<()> {
         return Ok(());
     };
     for import in plan["imports"].as_array().into_iter().flatten() {
-        let source = Path::new(text(import, "source"));
-        if !source.starts_with(project_root) {
+        // Native sources have already been remapped to node storage; targets
+        // and projectRoot still use the execution's paths.
+        let target = Path::new(text(import, "target"));
+        if !target.starts_with(project_root) {
             continue;
         }
+        let source = Path::new(text(import, "source"));
         let relative = source.strip_prefix(root).map_err(Error::internal)?;
         let mut directory = root.to_owned();
         for part in relative.components() {
@@ -433,6 +436,144 @@ mod tests {
     use super::*;
     use axum::{Json, Router, body::Body, routing::post};
 
+    #[test]
+    fn native_archive_resume_stages_generated_imports_for_controller_validation() {
+        let fixture = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "nodes::executor::tests::native_archive_resume_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("CAIRN_NODE_BACKEND", "native")
+            .env("DATA_DIR", fixture.path().join("data"))
+            .env("RUNNER_STATE_DIR", fixture.path().join("state"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "isolated native node environment; run by its parent"]
+    async fn native_archive_resume_child() {
+        let data = crate::nodes::node_data_dir();
+        let state = crate::native::state_dir();
+        crate::skills::private_dir(&state).await.unwrap();
+        let budget = Router::new().route(
+            "/staging-budget",
+            axum::routing::get(|| async { Json(json!({ "availableBytes": 1_000_000 })) }),
+        );
+        let socket = tokio::net::UnixListener::bind(state.join("controller.sock")).unwrap();
+        let budget_server = tokio::spawn(async move { axum::serve(socket, budget).await.unwrap() });
+
+        let source = tempfile::tempdir().unwrap();
+        tokio::fs::create_dir(source.path().join("home"))
+            .await
+            .unwrap();
+        tokio::fs::write(source.path().join("home/config"), b"fresh configuration")
+            .await
+            .unwrap();
+        let mut frames = Vec::new();
+        crate::nodes::files::send(source.path(), &mut frames)
+            .await
+            .unwrap();
+        let seed = Router::new().route(
+            "/internal/node-workspace/{attempt}/seed",
+            post(move |Json(selection): Json<Value>| {
+                let frames = frames.clone();
+                async move {
+                    assert_eq!(selection["workspace"], false);
+                    assert_eq!(selection["projectArchives"], true);
+                    Body::from(frames)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let master: url::Url = format!("http://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        let seed_server = tokio::spawn(async move { axum::serve(listener, seed).await.unwrap() });
+
+        for workspace in ["workspace", "workspace-fdeab5b6"] {
+            let (run, attempt, project) = (
+                crate::config::id(),
+                crate::config::id(),
+                crate::config::id(),
+            );
+            let retained = state.join("native").join(&run);
+            crate::skills::private_dir(&retained).await.unwrap();
+            tokio::fs::write(retained.join("block-initialized"), b"1")
+                .await
+                .unwrap();
+            tokio::fs::write(retained.join("preserved"), b"existing workspace")
+                .await
+                .unwrap();
+            let guest = Path::new("/data").join("runs").join(&run).join(workspace);
+            let descriptor = json!({
+                "dataRoot": "/data",
+                "projectArchives": [{
+                    "projectId": project,
+                    "revision": "a".repeat(40),
+                    "key": "b".repeat(64),
+                    "hash": "c".repeat(64),
+                    "bytes": 100,
+                    "logicalBytes": 15
+                }],
+                "plan": {
+                    "id": attempt,
+                    "runId": run,
+                    "backend": "native",
+                    "expires": null,
+                    "cwd": guest.join(&project),
+                    "projectRoot": guest,
+                    "resumeWorkspace": true,
+                    "imports": [
+                        { "source": guest, "target": guest },
+                        { "source": guest.join(&project), "target": guest.join(&project) }
+                    ]
+                }
+            });
+            let session = Session {
+                client: reqwest::Client::new(),
+                master: master.clone(),
+                token: "fixture".into(),
+                attempt: attempt.clone(),
+            };
+            let staged = stage_plan(&session, &data, descriptor).await.unwrap();
+            assert_eq!(staged["workspaceSeeded"], false);
+            assert!(staged["nativeProjectArchives"].is_array());
+            crate::native::validate_staged_plan(&data, &attempt)
+                .await
+                .unwrap();
+            let root = data.join("runs").join(&run);
+            assert_eq!(
+                tokio::fs::read(root.join("home/config")).await.unwrap(),
+                b"fresh configuration"
+            );
+            assert_eq!(
+                tokio::fs::read(retained.join("preserved")).await.unwrap(),
+                b"existing workspace"
+            );
+            assert!(
+                tokio::fs::read_dir(root.join(workspace).join(&project))
+                    .await
+                    .unwrap()
+                    .next_entry()
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        seed_server.abort();
+        budget_server.abort();
+    }
+
     #[tokio::test]
     async fn failed_archive_staging_requests_full_seed_files_but_never_bypasses_revocation() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -503,24 +644,63 @@ mod tests {
     async fn resume_import_directories_reject_symlinks_and_parent_traversal() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        let project = root.path().join("workspace");
-        tokio::fs::create_dir(&project).await.unwrap();
-        tokio::fs::symlink(outside.path(), project.join("link"))
-            .await
-            .unwrap();
-        for source in [project.join("link/child"), project.join("../escape")] {
-            let plan = json!({"projectRoot":project,"imports":[{"source":source}]});
-            let error = resume_import_directories(&plan, root.path())
+        for remapped in [false, true] {
+            let project = root.path().join(if remapped {
+                "workspace-generation"
+            } else {
+                "workspace"
+            });
+            let guest = if remapped {
+                PathBuf::from("/data/runs/fixture/workspace-generation")
+            } else {
+                project.clone()
+            };
+            tokio::fs::create_dir(&project).await.unwrap();
+            tokio::fs::symlink(outside.path(), project.join("link"))
                 .await
-                .unwrap_err();
-            assert_eq!(error.status, 400);
-            assert!(!outside.path().join("child").exists());
-            assert!(!root.path().join("escape").exists());
+                .unwrap();
+            for source in [project.join("link/child"), project.join("../escape")] {
+                let plan = json!({
+                    "projectRoot": guest,
+                    "imports": [{ "source": source, "target": guest.join("child") }]
+                });
+                let error = resume_import_directories(&plan, root.path())
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.status, 400);
+                assert!(!outside.path().join("child").exists());
+                assert!(!root.path().join("escape").exists());
+            }
+            let source = project.join("safe/child");
+            let plan = json!({
+                "projectRoot": guest,
+                "imports": [{ "source": source, "target": guest.join("safe/child") }]
+            });
+            resume_import_directories(&plan, root.path()).await.unwrap();
+            assert_eq!(tokio::fs::canonicalize(&source).await.unwrap(), source);
         }
-        let source = project.join("safe/child");
-        let plan = json!({"projectRoot":project,"imports":[{"source":source}]});
+    }
+
+    #[tokio::test]
+    async fn resume_import_directories_selects_guest_workspace_without_leaving_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let guest = Path::new("/data/runs/fixture/workspace-generation");
+        let source = outside.path().join("unrelated/child");
+        let plan = json!({
+            "projectRoot": guest,
+            "imports": [{ "source": source, "target": guest.join("project") }]
+        });
+        assert!(resume_import_directories(&plan, root.path()).await.is_err());
+        assert!(!source.exists());
+
+        let source = root.path().join("workspace-generation/home");
+        let plan = json!({
+            "projectRoot": guest,
+            "imports": [{ "source": source, "target": "/home/node" }]
+        });
         resume_import_directories(&plan, root.path()).await.unwrap();
-        assert_eq!(tokio::fs::canonicalize(&source).await.unwrap(), source);
+        assert!(!source.exists());
     }
 
     #[tokio::test]
