@@ -31,7 +31,7 @@ captured INSIDE bound. Reject genericError/Timeout/sharedSDKbase and validate pr
 hierarchy/constructor descriptor. Second closed title +closed goto must match. Ordinary,
 Timeout/commonbase/independent name-lookalike errors must NOT match. Names/messages
 diagnostic ONLY; no serverpredicate/bundleeval/name whitelist. All context/browser
-owners mustclose evenonfailure. Prototype never serialized/reused in another process.
+owners mustclose evenonfailure. Each acquisition promise is owned BEFORE observation: cleanup requests closure of both existing and late returned handles, close is memoized once, and cleanup observes acquisition+closure inside existing7s bound. Observation deadlines stay failed; unknown creation/close blocks all next phases. SDK launch uses the same7s timeout internally, not an extended budget. Native archived browser/context/page/gate acquisitions use the same ownership helper. Prototype never serialized/reused in another process.
 Archived native script retains RAW gotoerror and compares exact immediate prototype,
 preserving pendingwaiter/pageclosecomplete/rejection-afterclose guards and
 cancellationEvidenceFALSE. Its SDK reference is acquired per consuming process.
