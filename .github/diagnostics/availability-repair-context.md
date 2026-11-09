@@ -27,7 +27,7 @@ Fixed eight selected boundaries, sequential in one job:
   body MUST settle before destination commit. Pending alone never passes this cell.
 
 Negative adapters return every original fetch/json promise and Response unchanged.
-One combined init script installs adapters before the unmodified actual probe callback;
+Native producer callbacks also post source-side MessageChannel receipts after the native terminal microtasks: exact old-document identity, actual poll state and synchronous journal copied BEFORE destination release. No host Page.evaluate occurs while Page.goto is pending; metadata tasks never settle or replace product promises. Each channel closes on receipt or pagehide, and required receipts must report zero pending channels. One combined init script installs adapters before the unmodified actual probe callback;
 this fixes capture order for deferred-call evidence. No clone/body/stream getter.
 Known injected negative failures are identified by exact cell/read/kind; all pageerrors
 remain strict and unexpected failures/orphan/duplicate/missing phase terminals red.

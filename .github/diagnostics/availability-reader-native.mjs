@@ -70,6 +70,27 @@ function nativeDiagnostics(mode) {
   let read = 0
   const fetch = window.fetch
   const abort = AbortController.prototype.abort
+  const json = Response.prototype.json
+  const responses = new WeakMap()
+  const snapshots = new Set()
+  const snapshot = (trigger, selectedRead) => {
+    const channel = new MessageChannel()
+    snapshots.add(channel)
+    channel.port1.onmessage = () => {
+      channel.port1.close(); channel.port2.close(); snapshots.delete(channel)
+      void window.nativeStateReceipt({
+        document: window.cairnAvailabilityDocument, read: selectedRead, trigger, pendingSnapshots: snapshots.size,
+        state: window.diagnosticState?.() ?? null,
+        journal: JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]'),
+        native: JSON.parse(sessionStorage.getItem('cairn-native-fetch-journal') || '[]'),
+      })
+    }
+    channel.port2.postMessage(null)
+  }
+  window.addEventListener('pagehide', () => {
+    for (const channel of snapshots) { channel.port1.close(); channel.port2.close() }
+    snapshots.clear()
+  })
   const record = (kind, extra = {}) => {
     const journal = JSON.parse(sessionStorage.getItem('cairn-native-fetch-journal') || '[]')
     journal.push({ kind, sequence: journal.length + 1, ...extra })
@@ -92,24 +113,41 @@ function nativeDiagnostics(mode) {
     const signal = init?.signal
     if (signal) {
       signals.set(signal, current)
-      signal.addEventListener('abort', event => record('private-native-signal', {
-        read: current, trusted: event.isTrusted,
-        exactTarget: event.target === signal && event.currentTarget === signal && event instanceof Event,
-        aborted: signal.aborted,
-      }))
+      signal.addEventListener('abort', event => {
+        record('private-native-signal', {
+          read: current, trusted: event.isTrusted,
+          exactTarget: event.target === signal && event.currentTarget === signal && event instanceof Event,
+          aborted: signal.aborted,
+        })
+        snapshot('signal', current)
+      })
     }
+    let request = init
     if (mode === 'proof-without-terminal' && current === 2) {
       const wire = new AbortController()
       record('negative-wire-substitution', { read: current, distinctSignal: wire.signal !== signal })
-      return fetch.call(this, input, { ...init, signal: wire.signal })
+      request = { ...init, signal: wire.signal }
     }
-    return fetch.call(this, input, init)
+    const original = fetch.call(this, input, request)
+    void original.then(response => {
+      responses.set(response, current)
+      snapshot('fetch-fulfilled', current)
+    }, () => snapshot('fetch-rejected', current))
+    return original
+  }
+  Response.prototype.json = function () {
+    const original = json.call(this)
+    const current = responses.get(this)
+    if (current)
+      void original.then(() => snapshot('body', current), () => snapshot('body-rejected', current))
+    return original
   }
 }
 
 async function observe(browser, cell) {
   const arm = cell.engine + '-' + cell.mode
   const received = []
+  const stateReceipts = []
   const pageErrors = []
   const failures = []
   const writes = new Set()
@@ -137,6 +175,12 @@ async function observe(browser, cell) {
   const terminal = read => events(read).filter(event => ['rejected', 'body-rejected', 'body'].includes(event.kind))
   const poll = operation => expect.poll(() => { gate.check(); return operation() }, { timeout: 7000 }).toBe(true)
   const addGate = (label, response) => { gates.push({ label, response }); return response }
+  const stateReceipt = async (read, trigger) => {
+    await poll(() => stateReceipts.some(item => item.document === documentId && item.read === read
+      && item.trigger === trigger && item.pendingSnapshots === 0 && item.state !== null))
+    return stateReceipts.findLast(item => item.document === documentId && item.read === read
+      && item.trigger === trigger && item.pendingSnapshots === 0 && item.state !== null)
+  }
   const harvest = async () => {
     checkpoint = await evaluate(() => ({
       document: window.cairnAvailabilityDocument,
@@ -183,6 +227,17 @@ async function observe(browser, cell) {
       exposeFunction: (...args) => page.exposeFunction(...args),
       addInitScript: callback => { initializers.push(callback.toString()) },
     }, record)
+    await page.exposeFunction('nativeStateReceipt', receipt => {
+      stateReceipts.push(receipt)
+      for (const event of receipt.journal) {
+        if (!received.some(item => item.document === event.document && item.sequence === event.sequence))
+          received.push(event)
+      }
+      nativeEvents = receipt.native
+      const pending = appendFile(output + '/' + arm + '.states.jsonl', JSON.stringify(receipt) + '\n')
+      writes.add(pending)
+      void pending.catch(error => cleanupFailure('state-write', error)).finally(() => writes.delete(pending))
+    })
     assert.equal(initializers.length, 1)
     await page.addInitScript(`(${nativeDiagnostics.toString()})(${JSON.stringify(cell.mode)});(${initializers[0]})();`)
     await stage('same actual poll and clock seed')
@@ -208,7 +263,7 @@ async function observe(browser, cell) {
       await poll(() => events(2).some(event => event.kind === 'abort' && event.trusted && event.exactTarget && event.insideAbortCall))
       await poll(() => initial.closed && initial.terminal === 'cancelled')
       initialClosureBeforeRelease = true
-      state = await evaluate(() => window.diagnosticState())
+      state = (await stateReceipt(2, 'signal')).state
       assert.equal(state.online, false)
       assert.equal(state.failures, 1)
       assert.equal(events(2).some(event => ['body-start', 'body', 'body-rejected', 'rejected'].includes(event.kind)), false)
@@ -222,7 +277,7 @@ async function observe(browser, cell) {
         assert.equal(terminal(2)[0].kind, cell.mode === 'fetch-failure-first' ? 'rejected' : 'body-rejected')
         assert.equal(terminal(2)[0].aborted, false)
         assert.equal(terminal(2)[0].errorName, 'TypeError')
-        state = await evaluate(() => window.diagnosticState())
+        state = (await stateReceipt(2, cell.mode === 'fetch-failure-first' ? 'fetch-rejected' : 'body-rejected')).state
         assert.equal(state.online, false)
         assert.equal(state.failures, 1)
         await poll(() => initial.closed && initial.terminal === 'cancelled')
@@ -241,11 +296,8 @@ async function observe(browser, cell) {
       else if (cell.mode === 'proof-without-terminal') {
         await stage('owned signal alone cannot settle the original held fetch')
         await poll(() => events(2).some(event => event.kind === 'abort' && event.trusted && event.exactTarget && event.insideAbortCall))
-        pendingProof = await evaluate(async () => {
-          await Promise.resolve(); await Promise.resolve()
-          return { ...window.diagnosticState(), journal: JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]') }
-        })
-        assert.equal(pendingProof.requestActive, true)
+        pendingProof = await stateReceipt(2, 'signal')
+        assert.equal(pendingProof.state.requestActive, true)
         assert.equal(pendingProof.journal.some(event => event.document === documentId && event.read === 2 && ['rejected', 'body-rejected', 'body', 'fetch-fulfilled'].includes(event.kind)), false)
         assert.equal(initial.closed, false)
         initial.release()
@@ -265,14 +317,14 @@ async function observe(browser, cell) {
           assert.equal(proof[0].insideAbortCall, false)
           assert.equal(outcome.aborted, false)
           assert.equal(outcome.reasonMatches || outcome.errorName === 'AbortError', true)
-          state = await evaluate(() => window.diagnosticState())
+          state = (await stateReceipt(2, cell.mode === 'owned-body' ? 'body-rejected' : 'fetch-rejected')).state
           assert.equal(state.online, false)
           assert.equal(state.failures, 1)
         }
         else {
           assert.equal(proof[0].insideAbortCall, true)
           assert.equal(outcome.aborted, true)
-          state = await evaluate(() => window.diagnosticState())
+          state = (await stateReceipt(2, cell.mode === 'owned-body' ? 'body-rejected' : 'fetch-rejected')).state
           assert.equal(state.online, true)
           assert.equal(state.failures, 0)
         }
@@ -286,14 +338,19 @@ async function observe(browser, cell) {
         next.release()
         await poll(() => events(3).some(event => event.kind === 'body' && event.exactBody && !event.aborted && !event.afterPagehide))
         await poll(() => next.closed && next.terminal === 'finished')
-        state = await evaluate(() => window.diagnosticState())
+        state = (await stateReceipt(3, 'body')).state
         assert.equal(state.online, true)
         assert.equal(state.failures, 0)
       }
       assert.equal(destination.closed, false)
       assert.equal(destination.terminal, 'pending')
       assert.equal(received.some(event => event.document === documentId && event.kind === 'pagehide'), false)
-      await harvest()
+      // Acquire a synchronous old-document journal receipt BEFORE commit;
+      // page.evaluate is intentionally absent while Page.goto is outstanding.
+      const lastRead = next ? 3 : 2
+      const lastTrigger = next || cell.mode === 'proof-without-terminal' ? 'body'
+        : cell.mode === 'owned-body' || cell.mode === 'body-failure-first' ? 'body-rejected' : 'fetch-rejected'
+      checkpoint = await stateReceipt(lastRead, lastTrigger)
       destination.release()
       const arrival = await observed(() => navigation, 'destination commit')
       assert.equal(arrival.kind, 'committed')
@@ -353,7 +410,7 @@ async function observe(browser, cell) {
   const observationComplete = journalAcknowledged && navigationValidated && !failures.length && !pageErrors.length
     && !ownCleanup.length && !finalAudit.unknown.length && !finalAudit.unexpected.length
   const row = { arm, control, diagnosticOnly: true, productQualified: false, observationComplete, phase,
-    documentId, state, pendingProof, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
+    documentId, state, pendingProof, stateReceipts, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
     allPageErrorsStrict: pageErrors.length === 0, pageErrors, failures, reads: received, nativeEvents, finalAudit,
     gates: gates.map(({ label, response }) => ({ label, received: response.received, ready: response.ready, status: response.status ?? null, terminal: response.terminal, closed: response.closed })), cleanupFailures: ownCleanup }
   rows.push(row)
