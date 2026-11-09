@@ -713,6 +713,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
           label,
           document,
           read,
+          received: response.received,
           ready: response.ready,
           status: response.status ?? null,
           forcedStatus: label === '503-availability' ? 503 : null,
@@ -723,6 +724,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         pageErrors: errors,
         poll: poll
           ? {
+              received: poll.received,
               ready: poll.ready,
               status: poll.status ?? null,
               terminal: poll.terminal,
@@ -731,6 +733,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
           : null,
         secondPoll: secondPoll
           ? {
+              received: secondPoll.received,
               ready: secondPoll.ready,
               status: secondPoll.status ?? null,
               terminal: secondPoll.terminal,
@@ -739,6 +742,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
           : null,
         navigation: navigationResponse
           ? {
+              received: navigationResponse.received,
               ready: navigationResponse.ready,
               status: navigationResponse.status ?? null,
               terminal: navigationResponse.terminal,

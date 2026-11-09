@@ -143,6 +143,7 @@ cacheTest('availability restores the same native document from BFCache with an e
       pageErrors: errors,
       poll: poll
         ? {
+            received: poll.received,
             ready: poll.ready,
             status: poll.status ?? null,
             terminal: poll.terminal,

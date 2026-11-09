@@ -5,6 +5,7 @@ import { Agent, createServer, request as httpRequest } from 'node:http'
 export type ResponseKind = 'availability' | 'agents'
 
 export interface HeldResponse {
+  received: boolean
   ready: boolean
   status?: number
   terminal: 'pending' | 'finished' | 'cancelled' | 'failed'
@@ -37,6 +38,7 @@ export async function nativeResponseGate(origin: string) {
     const released = Promise.withResolvers<void>()
     let download = false
     const response: HeldResponse = {
+      received: false,
       ready: false,
       terminal: 'pending',
       closed: false,
@@ -81,8 +83,10 @@ export async function nativeResponseGate(origin: string) {
       ? 'availability'
       : request.method === 'GET' && /^\/installations\/[\w-]+\/agents$/.test(target.pathname) ? 'agents' : undefined
     const held = kind ? next.get(kind) : undefined
-    if (kind && held)
+    if (kind && held) {
+      held.response.received = true
       next.delete(kind)
+    }
 
     const headers = { ...request.headers }
     delete headers['proxy-connection']

@@ -43,7 +43,7 @@ it('attempts every owned closure even when an earlier closure fails', async () =
   expect(cleanup).toEqual([])
 })
 
-async function fixture() {
+async function fixture(availabilityHeaders = Promise.resolve()) {
   const received: Array<{
     method?: string
     cookie?: string
@@ -60,6 +60,9 @@ async function fixture() {
       origin: incoming.headers.origin,
       body: Buffer.concat(chunks).toString(),
     })
+    if (incoming.url === '/api/installations')
+      await availabilityHeaders
+
     response.writeHead(200, { 'content-type': 'application/json' }).end('[{"online":true}]')
   })
   backend.listen(0, '127.0.0.1')
@@ -128,6 +131,32 @@ it('holds real HTTP headers until release and observes complete delivery', async
   expect(await read.result).toEqual({ status: 200, body: '[{"online":true}]' })
   await vi.waitFor(() => expect(held.terminal).toBe('finished'))
   gate.check()
+})
+
+it('records HTTP ingress before upstream headers even when the caller cancels', async () => {
+  const headers = Promise.withResolvers<void>()
+  const { gate, call } = await fixture(headers.promise)
+  const held = gate.hold('availability')
+  const read = call('/api/installations')
+  const rejected = expect(read.result).rejects.toThrow('owned cancellation before headers')
+  try {
+    await vi.waitFor(() => expect(held.received).toBe(true))
+    expect(held.ready).toBe(false)
+    expect(held.status).toBeUndefined()
+    read.client.destroy(new Error('owned cancellation before headers'))
+    await rejected
+    await vi.waitFor(() => expect(held.closed).toBe(true))
+    expect(held.terminal).toBe('cancelled')
+    expect(held.ready).toBe(false)
+    expect(held.received).toBe(true)
+    gate.check()
+  }
+  finally {
+    read.client.destroy(new Error('owned cancellation before headers'))
+    headers.resolve()
+    held.release()
+    await rejected
+  }
 })
 
 it('preserves account context and forwards a mutation exactly once', async () => {
