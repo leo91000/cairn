@@ -1,14 +1,23 @@
-import { writeFileSync as saveAvailabilityObservation } from 'node:fs'
 import type { AvailabilityReadEvent } from './availability-probe'
+import { writeFileSync as saveAvailabilityObservation } from 'node:fs'
 import { installAvailabilityProbe } from './availability-probe'
-import { expect, signIn, test, workspacePath } from './fixtures'
+import {
+  expect,
+  signIn,
+  test,
+  workspacePath,
+} from './fixtures'
 import { nativeResponseGate } from './native-response-gate'
 
 const cacheTest = test.extend<{ responseGate: Awaited<ReturnType<typeof nativeResponseGate>> }>({
   responseGate: async ({ workspace }, use) => {
     const gate = await nativeResponseGate(workspace.url)
-    try { await use(gate) }
-    finally { await gate.close() }
+    try {
+      await use(gate)
+    }
+    finally {
+      await gate.close()
+    }
   },
   proxy: async ({ responseGate }, use) => use({ server: responseGate.server }),
 })
@@ -20,10 +29,12 @@ cacheTest('availability restores the same native document from BFCache with an e
     if (!reads.some(event => event.document === entry.document && event.sequence === entry.sequence))
       reads.push(entry)
   }
+
   const harvest = async () => {
     for (const event of await page.evaluate(() => JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]') as AvailabilityReadEvent[]))
       record(event)
   }
+
   const events = (document: string, read: number) => reads.filter(event => event.document === document && event.read === read)
   page.on('pageerror', error => errors.push(error.message))
   await workspace.restart()
@@ -52,7 +63,10 @@ cacheTest('availability restores the same native document from BFCache with an e
     await harvest()
     const earlierReads = reads.filter(event => event.document === original && event.kind === 'start').length
     poll = responseGate.hold('availability')
-    await expect.poll(() => { responseGate.check(); return poll!.ready }).toBe(true)
+    await expect.poll(() => {
+      responseGate.check()
+      return poll!.ready
+    }).toBe(true)
     // A binding may lag the server's ready receipt. Read the synchronous journal
     // before assigning the held request's identity; never select an older read.
     await harvest()
@@ -92,14 +106,18 @@ cacheTest('availability restores the same native document from BFCache with an e
       try {
         await Promise.race([Promise.resolve().then(close), new Promise((_, reject) => timer = setTimeout(() => reject(new Error('BFCache owned cleanup deadline')), 7000))])
       }
-      finally { clearTimeout(timer) }
+      finally {
+        clearTimeout(timer)
+      }
     }
+
     const closures = await Promise.allSettled([bounded(() => page.close()), bounded(() => responseGate.close())])
     for (const closure of closures) {
       if (closure.status === 'rejected')
         failures.push(closure.reason)
     }
   }
+
   // Audit independently so simultaneous native/HTTP/page errors all survive.
   const audits = [
     () => responseGate.check(),
@@ -108,9 +126,14 @@ cacheTest('availability restores the same native document from BFCache with an e
     () => expect(errors).toEqual([]),
   ]
   for (const audit of audits) {
-    try { audit() }
-    catch (cause) { failures.push(cause) }
+    try {
+      audit()
+    }
+    catch (cause) {
+      failures.push(cause)
+    }
   }
+
   try {
     saveAvailabilityObservation(testInfo.outputPath('availability-bfcache-observation.json'), JSON.stringify({
       journalAcknowledged,
@@ -118,12 +141,20 @@ cacheTest('availability restores the same native document from BFCache with an e
       heldRead: heldRead ?? null,
       reads,
       pageErrors: errors,
-      poll: poll ? { ready: poll.ready, status: poll.status ?? null, terminal: poll.terminal, closed: poll.closed } : null,
+      poll: poll
+        ? {
+            ready: poll.ready,
+            status: poll.status ?? null,
+            terminal: poll.terminal,
+            closed: poll.closed,
+          }
+        : null,
     }))
   }
   catch (cause) {
     failures.push(cause)
   }
+
   if (primaryFailure || failures.length)
     throw new AggregateError([...(primaryFailure ? [primaryFailure] : []), ...failures], 'Physical BFCache availability qualification failed')
 })

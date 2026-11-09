@@ -56,28 +56,47 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
       })
     }
 
-    const metadata = new WeakMap<XMLHttpRequest, { read: number, started: boolean, headers: boolean, insideAbortCall: boolean, aborted: boolean }>()
+    const metadata = new WeakMap<XMLHttpRequest, {
+      read: number
+      started: boolean
+      headers: boolean
+      insideAbortCall: boolean
+      aborted: boolean
+    }>()
     const open = XMLHttpRequest.prototype.open
     const send = XMLHttpRequest.prototype.send
     const abort = XMLHttpRequest.prototype.abort
     XMLHttpRequest.prototype.open = function (method, url, async = true, username, password) {
       if (method === 'GET' && String(url) === '/api/installations') {
-        const request = this
-        const meta = { read: ++sequence, started: false, headers: false, insideAbortCall: false, aborted: false }
-        metadata.set(request, meta)
-        const recordRead = (kind: AvailabilityReadEvent['kind'], detail: Partial<AvailabilityReadEvent> = {}) => {
-          record({ kind, document: documentId, read: meta.read, aborted: meta.aborted, afterPagehide: pageHidden, ...detail })
+        const meta = {
+          read: ++sequence,
+          started: false,
+          headers: false,
+          insideAbortCall: false,
+          aborted: false,
         }
+        metadata.set(this, meta)
+        const recordRead = (kind: AvailabilityReadEvent['kind'], detail: Partial<AvailabilityReadEvent> = {}) => {
+          record({
+            kind,
+            document: documentId,
+            read: meta.read,
+            aborted: meta.aborted,
+            afterPagehide: pageHidden,
+            ...detail,
+          })
+        }
+
         const settled = (kind: AvailabilityReadEvent['kind'], detail: Partial<AvailabilityReadEvent> = {}) => queueMicrotask(() => recordRead(kind, detail))
         const nativeEvent = (event: ProgressEvent, type: string) => event.type === type && event.isTrusted
-          && event instanceof ProgressEvent && event.target === request && event.currentTarget === request
-        request.addEventListener('readystatechange', () => {
-          if (request.readyState >= 2 && request.status && !meta.headers) {
+          && event instanceof ProgressEvent && event.target === this && event.currentTarget === this
+        this.addEventListener('readystatechange', () => {
+          if (this.readyState >= 2 && this.status && !meta.headers) {
             meta.headers = true
-            recordRead('headers', { status: request.status })
+            recordRead('headers', { status: this.status })
           }
         })
-        request.addEventListener('abort', (event) => {
+        this.addEventListener('abort', (event) => {
           const native = nativeEvent(event, 'abort')
           meta.aborted = native && meta.insideAbortCall
           recordRead('abort', { trusted: event.isTrusted, exactTarget: native, insideAbortCall: meta.insideAbortCall })
@@ -85,47 +104,72 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
             settled('rejected')
         })
         for (const kind of ['error', 'timeout'] as const) {
-          request.addEventListener(kind, (event) => {
+          this.addEventListener(kind, (event) => {
             if (nativeEvent(event, kind))
               settled('rejected')
           })
         }
-        request.addEventListener('load', (event) => {
-          if (!nativeEvent(event, 'load') || request.status !== 200)
+
+        this.addEventListener('load', (event) => {
+          if (!nativeEvent(event, 'load') || this.status !== 200)
             return
           try {
-            const value = JSON.parse(request.responseText) as unknown
+            const value = JSON.parse(this.responseText) as unknown
             const exactBody = window.cairnExpectedAvailability !== undefined
               && JSON.stringify(value) === JSON.stringify(window.cairnExpectedAvailability)
-            settled('body', { status: request.status, exactBody })
+            settled('body', { status: this.status, exactBody })
           }
           catch {
             settled('body-rejected')
           }
         })
       }
+
       return open.call(this, method, url, async, username, password)
     }
+
     XMLHttpRequest.prototype.send = function (body) {
       const meta = metadata.get(this)
       if (meta && !meta.started) {
         meta.started = true
-        record({ kind: 'start', document: documentId, read: meta.read, aborted: false, afterPagehide: pageHidden })
+        record({
+          kind: 'start',
+          document: documentId,
+          read: meta.read,
+          aborted: false,
+          afterPagehide: pageHidden,
+        })
       }
+
       return send.call(this, body)
     }
+
     XMLHttpRequest.prototype.abort = function () {
       const meta = metadata.get(this)
       if (!meta)
         return abort.call(this)
       meta.insideAbortCall = true
-      record({ kind: 'abort-call-enter', document: documentId, read: meta.read, aborted: false, insideAbortCall: true, afterPagehide: pageHidden })
+      record({
+        kind: 'abort-call-enter',
+        document: documentId,
+        read: meta.read,
+        aborted: false,
+        insideAbortCall: true,
+        afterPagehide: pageHidden,
+      })
       try {
         return abort.call(this)
       }
       finally {
         meta.insideAbortCall = false
-        record({ kind: 'abort-call-return', document: documentId, read: meta.read, aborted: meta.aborted, insideAbortCall: false, afterPagehide: pageHidden })
+        record({
+          kind: 'abort-call-return',
+          document: documentId,
+          read: meta.read,
+          aborted: meta.aborted,
+          insideAbortCall: false,
+          afterPagehide: pageHidden,
+        })
       }
     }
   })

@@ -1,6 +1,8 @@
 import type { Download } from '@playwright/test'
+import type { AvailabilityReadEvent } from './availability-probe'
 import { writeFileSync as saveAvailabilityObservation } from 'node:fs'
 import { mcpProvider } from '../fixtures/mcp-provider'
+import { installAvailabilityProbe } from './availability-probe'
 import {
   signIn as authenticateWorkspace,
   createAgent,
@@ -11,8 +13,6 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
-import type { AvailabilityReadEvent } from './availability-probe'
-import { installAvailabilityProbe } from './availability-probe'
 import { nativeResponseGate } from './native-response-gate'
 
 type OAuthDepartureProbe = { kind: 'background' } | { kind: 'offer', closed: boolean }
@@ -104,6 +104,7 @@ for (const pending of ['authorization', 'offer'] as const) {
           availability.add(this)
         return open.call(this, method, url, async, username, password)
       }
+
       XMLHttpRequest.prototype.send = function (body) {
         if (availability.has(this) && departing)
           void window.cairnOAuthProbe({ kind: 'background' })
@@ -376,10 +377,16 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       response: ReturnType<typeof responseGate.hold>
     }> = []
     const observeGate = (label: string, response: ReturnType<typeof responseGate.hold>) => {
-      const gate = { label, document: departingDocumentId ?? null, read: null as number | null, response }
+      const gate = {
+        label,
+        document: departingDocumentId ?? null,
+        read: null as number | null,
+        response,
+      }
       gates.push(gate)
       return gate
     }
+
     page.on('pageerror', error => errors.push(error.message))
     // Accepted grants belong to this worker's earlier pages until expiry. Use
     // the existing tunnel reset to establish real capacity before this case.
@@ -423,6 +430,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         navigationResponse = responseGate.hold('agents')
         observeGate('first-navigation', navigationResponse)
       }
+
       stage = 'server holds the real availability response'
       await page.clock.runFor(3100)
       await expect.poll(() => {
@@ -470,8 +478,16 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         expect(navigationResponse!.status).toBe(200)
         expect(errors).toEqual([])
         await expect.poll(() => events(departingDocument, targetRead).filter(event => event.kind === 'abort').map(event => ({
-          trusted: event.trusted, exactTarget: event.exactTarget, insideAbortCall: event.insideAbortCall, afterPagehide: event.afterPagehide,
-        }))).toEqual([{ trusted: true, exactTarget: true, insideAbortCall: true, afterPagehide: false }])
+          trusted: event.trusted,
+          exactTarget: event.exactTarget,
+          insideAbortCall: event.insideAbortCall,
+          afterPagehide: event.afterPagehide,
+        }))).toEqual([{
+          trusted: true,
+          exactTarget: true,
+          insideAbortCall: true,
+          afterPagehide: false,
+        }])
         await expect.poll(() => events(departingDocument, targetRead).filter(event => event.kind === 'rejected').map(event => event.aborted)).toEqual([true])
         if (destination === 'cancelled') {
           navigationResponse!.downloadNavigation()
@@ -568,8 +584,16 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         const secondArrival = navigation.then(() => undefined, error => error)
         await expect.poll(() => navigationResponse!.ready).toBe(true)
         await expect.poll(() => events(departingDocument, secondRead!).filter(event => event.kind === 'abort').map(event => ({
-          trusted: event.trusted, exactTarget: event.exactTarget, insideAbortCall: event.insideAbortCall, afterPagehide: event.afterPagehide,
-        }))).toEqual([{ trusted: true, exactTarget: true, insideAbortCall: true, afterPagehide: false }])
+          trusted: event.trusted,
+          exactTarget: event.exactTarget,
+          insideAbortCall: event.insideAbortCall,
+          afterPagehide: event.afterPagehide,
+        }))).toEqual([{
+          trusted: true,
+          exactTarget: true,
+          insideAbortCall: true,
+          afterPagehide: false,
+        }])
         await expect.poll(() => events(departingDocument, secondRead!).filter(event => event.kind === 'rejected').map(event => event.aborted)).toEqual([true])
         expect(events(departingDocument, secondRead!).filter(event => event.kind === 'body')).toEqual([])
         secondPoll.release()
@@ -619,6 +643,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
           clearTimeout(deadline)
         }
       }
+
       // Start independent owners before awaiting any of them: a blocked page
       // close must not prevent download cancellation or HTTP gate closure.
       const closures = [closeOwned(() => responseGate.close(), 'HTTP gate')]
@@ -636,6 +661,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
           }
         })())
       }
+
       for (const closure of await Promise.allSettled(closures)) {
         if (closure.status === 'rejected')
           cleanupFailures.push(closure.reason)
@@ -661,8 +687,12 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       () => expect(errors).toEqual([]),
     ]
     for (const audit of audits) {
-      try { audit() }
-      catch (error) { cleanupFailures.push(error) }
+      try {
+        audit()
+      }
+      catch (error) {
+        cleanupFailures.push(error)
+      }
     }
 
     try {
@@ -674,7 +704,12 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         secondRead: secondRead ?? null,
         expectedFailure: expectedFailure ?? null,
         navigationValidated,
-        gates: gates.map(({ label, document, read, response }) => ({
+        gates: gates.map(({
+          label,
+          document,
+          read,
+          response,
+        }) => ({
           label,
           document,
           read,
@@ -686,24 +721,30 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         })),
         reads,
         pageErrors: errors,
-        poll: poll ? {
-          ready: poll.ready,
-          status: poll.status ?? null,
-          terminal: poll.terminal,
-          closed: poll.closed,
-        } : null,
-        secondPoll: secondPoll ? {
-          ready: secondPoll.ready,
-          status: secondPoll.status ?? null,
-          terminal: secondPoll.terminal,
-          closed: secondPoll.closed,
-        } : null,
-        navigation: navigationResponse ? {
-          ready: navigationResponse.ready,
-          status: navigationResponse.status ?? null,
-          terminal: navigationResponse.terminal,
-          closed: navigationResponse.closed,
-        } : null,
+        poll: poll
+          ? {
+              ready: poll.ready,
+              status: poll.status ?? null,
+              terminal: poll.terminal,
+              closed: poll.closed,
+            }
+          : null,
+        secondPoll: secondPoll
+          ? {
+              ready: secondPoll.ready,
+              status: secondPoll.status ?? null,
+              terminal: secondPoll.terminal,
+              closed: secondPoll.closed,
+            }
+          : null,
+        navigation: navigationResponse
+          ? {
+              ready: navigationResponse.ready,
+              status: navigationResponse.status ?? null,
+              terminal: navigationResponse.terminal,
+              closed: navigationResponse.closed,
+            }
+          : null,
       }))
     }
     catch (error) {

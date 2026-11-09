@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict'
-import { afterEach, beforeEach, it, vi } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  it,
+  vi,
+} from 'vitest'
 import { AvailabilityDeparture, readAvailability } from '../src/availability-read'
 
 class NativeProgress {
@@ -127,7 +132,12 @@ it('keeps the listener after untrusted, foreign-target or wrong-interface events
   departure(untrusted)
   departure(new NativeBeforeUnload({}, ownerWindow))
   departure(new NativeBeforeUnload(ownerDocument, {}))
-  departure({ type: 'beforeunload', isTrusted: true, target: ownerDocument, currentTarget: ownerWindow })
+  departure({
+    type: 'beforeunload',
+    isTrusted: true,
+    target: ownerDocument,
+    currentTarget: ownerWindow,
+  })
   assert.equal(listeners.size, 1)
   assert.equal(Request.instances[0]!.abortListenerCounts.length, 0)
   departure()

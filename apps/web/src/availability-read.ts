@@ -38,6 +38,7 @@ export function readAvailability(signal: AbortSignal) {
       listening = false
     }
   }
+
   const headers = () => {
     if (delivered || !request.status)
       return
@@ -56,6 +57,7 @@ export function readAvailability(signal: AbortSignal) {
       },
     })
   }
+
   const finish = (outcome: NonNullable<typeof terminal>) => {
     if (terminal)
       return
@@ -71,12 +73,14 @@ export function readAvailability(signal: AbortSignal) {
       headers()
       body?.resolve(outcome.text)
     }
+
     request.onreadystatechange = null
     request.onload = null
     request.onerror = null
     request.ontimeout = null
     request.onabort = null
   }
+
   const callerReason = () => signal.reason ?? new DOMException('Availability caller withdrawn', 'AbortError')
   const abort = (owner: 'departure' | 'caller') => {
     if (terminal)
@@ -92,14 +96,17 @@ export function readAvailability(signal: AbortSignal) {
     finally {
       insideAbort = undefined
     }
+
     // Caller disposal must release its JS resources even if the UA has already
     // stopped this request. This is not evidence of a native departure terminal.
     if (owner === 'caller' && !terminal)
       finish({ error: callerReason() })
   }
+
   function callerAbort() {
     abort('caller')
   }
+
   function beforeUnload(event: BeforeUnloadEvent) {
     const ownIntent = event.isTrusted && event.type === 'beforeunload'
       && typeof ownerWindow.BeforeUnloadEvent === 'function' && event instanceof ownerWindow.BeforeUnloadEvent
@@ -111,6 +118,7 @@ export function readAvailability(signal: AbortSignal) {
     removeListener()
     abort('departure')
   }
+
   const nativeEvent = (event: ProgressEvent, type: string) => event.type === type && event.isTrusted
     && typeof ownerWindow.ProgressEvent === 'function' && event instanceof ownerWindow.ProgressEvent
     && event.target === request && event.currentTarget === request
@@ -118,18 +126,22 @@ export function readAvailability(signal: AbortSignal) {
     if (request.readyState >= 2)
       headers()
   }
+
   request.onload = (event) => {
     if (nativeEvent(event, 'load'))
       finish(request.status ? { text: request.responseText } : { error: new TypeError('Installation status unavailable') })
   }
+
   request.onerror = (event) => {
     if (nativeEvent(event, 'error'))
       finish({ error: new TypeError('Installation status unavailable') })
   }
+
   request.ontimeout = (event) => {
     if (nativeEvent(event, 'timeout'))
       finish({ error: new TypeError('Installation status timed out') })
   }
+
   request.onabort = (event) => {
     if (nativeEvent(event, 'abort')) {
       const cause = insideAbort === 'departure'
@@ -138,6 +150,7 @@ export function readAvailability(signal: AbortSignal) {
       finish({ error: cause })
     }
   }
+
   try {
     if (signal.aborted) {
       finish({ error: callerReason() })
