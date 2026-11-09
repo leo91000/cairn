@@ -6,7 +6,7 @@ import { createServer } from 'node:http'
 import { stripTypeScriptTypes } from 'node:module'
 import { chromium, devices, errors, expect, webkit } from '@playwright/test'
 
-import { acquireClosedTargetReference, isClosedTargetError } from './closed-target-error.mjs'
+import { acquireClosedTargetReference, isClosedTargetError, ownSdkResource } from './closed-target-error.mjs'
 
 const output = 'test-results/reader-native'
 await mkdir(output, { recursive: true })
@@ -211,7 +211,7 @@ async function observe(browser, cell, closedPrototype) {
   const writes = new Set()
   const gates = []
   let phase = 'setup'
-  let context, page, gate, navigation, documentId, initial, destination, next, outage
+  let context, page, gate, navigation, documentId, initial, destination, next, outage, contextOwner, pageOwner, gateOwner
   let outageEvidence
   let checkpoint, nativeEvents = [], initialClosureBeforeRelease = false, journalAcknowledged = false, navigationValidated = false
   let initialHeaderAdvance, initialClosureBoundary, nativeNavigationCheckpoint, navigationOutcome, rawNavigationError, navigationRetirement
@@ -273,13 +273,16 @@ async function observe(browser, cell, closedPrototype) {
     backend.listen(0, '127.0.0.1')
     await observed(() => once(backend, 'listening'), 'backend listening')
     const origin = 'http://127.0.0.1:' + backend.address().port
-    gate = await observed(() => nativeResponseGate(origin), 'gate setup')
+    gateOwner = ownSdkResource(() => nativeResponseGate(origin), value => value.close())
+    gate = await observed(() => gateOwner.result, 'gate setup')
     const { defaultBrowserType: _, ...device } = devices['Desktop Chrome']
-    context = await observed(() => browser.newContext({ ...device, isMobile: true, hasTouch: true, proxy: { server: gate.server } }), 'context setup')
+    contextOwner = ownSdkResource(() => browser.newContext({ ...device, isMobile: true, hasTouch: true, proxy: { server: gate.server } }), value => value.close())
+    context = await observed(() => contextOwner.result, 'context setup')
     context.setDefaultTimeout(7000)
     context.setDefaultNavigationTimeout(30000)
     await observed(() => context.tracing.start({ screenshots: false, snapshots: true, sources: true }), 'trace setup')
-    page = await observed(() => context.newPage(), 'page setup')
+    pageOwner = ownSdkResource(() => context.newPage(), async (value) => { pageCloseAttempted = true; await value.close(); pageCloseCompleted = true })
+    page = await observed(() => pageOwner.result, 'page setup')
     page.on('pageerror', error => pageErrors.push(errorRecord(error)))
     page.on('dialog', dialog => {
       const receipt = { type: dialog.type(), dismissed: false }
@@ -526,8 +529,8 @@ async function observe(browser, cell, closedPrototype) {
     outage?.restore()
     for (const item of gates) item.response.release()
     const closures = [
-      ...(page ? [['page', async () => { pageCloseAttempted = true; await page.close(); pageCloseCompleted = true }]] : []),
-      ...(gate ? [['gate', () => gate.close()]] : []),
+      ...(pageOwner ? [['page', () => pageOwner.release()]] : []),
+      ...(gateOwner ? [['gate', () => gateOwner.release()]] : []),
       ['backend', () => {
         const closed = new Promise((resolve, reject) => backend.close(error => error ? reject(error) : resolve()))
         backend.closeAllConnections()
@@ -541,7 +544,9 @@ async function observe(browser, cell, closedPrototype) {
     if (context) {
       try { await observed(() => context.tracing.stop({ path: output + '/' + arm + '.zip' }), 'trace close') }
       catch (error) { cleanupFailure('trace', error) }
-      try { await observed(() => context.close(), 'context close') }
+    }
+    if (contextOwner) {
+      try { await observed(() => contextOwner.release(), 'context close') }
       catch (error) { cleanupFailure('context', error) }
     }
     if (navigation) {
@@ -595,9 +600,10 @@ async function observe(browser, cell, closedPrototype) {
 }
 
 for (const engine of new Set(planned.map(cell => cell.engine))) {
-  let browser
+  let browser, browserOwner
   try {
-    browser = await observed(() => ({ chromium, webkit })[engine].launch(), engine + ' launch')
+    browserOwner = ownSdkResource(() => ({ chromium, webkit })[engine].launch({ timeout: 7000 }), value => value.close())
+    browser = await observed(() => browserOwner.result, engine + ' launch')
     const closedReference = await acquireClosedTargetReference(browser, errors, observed)
     await write(engine + '-closed-target-sdk.json', closedReference.receipt)
     for (const cell of planned.filter(item => item.engine === engine)) {
@@ -608,8 +614,8 @@ for (const engine of new Set(planned.map(cell => cell.engine))) {
   }
   catch (error) { engineFailures.push({ engine, error: errorRecord(error) }) }
   finally {
-    if (browser) {
-      try { await observed(() => browser.close(), engine + ' browser close') }
+    if (browserOwner) {
+      try { await observed(() => browserOwner.release(), engine + ' browser close') }
       catch (error) { cleanupFailures.push({ actor: engine + '-browser', error: errorRecord(error) }) }
     }
   }

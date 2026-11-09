@@ -11,6 +11,26 @@ export async function closedTargetBound(operation, label) {
   finally { clearTimeout(timer) }
 }
 
+// Register the acquisition before observing it. Cleanup owns both the returned
+// handle and a late successful acquisition; a missed deadline never drops it.
+export function ownSdkResource(create, close) {
+  let closing = false
+  let closeResult
+  const closeOnce = value => closeResult ??= Promise.resolve().then(() => close(value))
+  const result = Promise.resolve().then(create).then(async (value) => {
+    if (closing)
+      await closeOnce(value)
+    return value
+  })
+  return {
+    result,
+    release() {
+      closing = true
+      return result.then(closeOnce)
+    },
+  }
+}
+
 export function closedTargetPrototype(reference, errors) {
   assert.equal(reference instanceof Error, true)
   assert.equal(reference instanceof errors.TimeoutError, false)
@@ -33,7 +53,7 @@ export function isClosedTargetError(error, prototype) {
 // The reference belongs to this loaded SDK instance. Never serialize or reuse
 // the prototype in another Node process; names/messages are diagnostics only.
 export async function acquireClosedTargetReference(browser, errors, within = closedTargetBound) {
-  let context, page, prototype, primaryFailure
+  let context, page, prototype, primaryFailure, contextOwner, pageOwner
   let pageClosed = false
   let contextClosed = false
   let crashed = false
@@ -42,13 +62,14 @@ export async function acquireClosedTargetReference(browser, errors, within = clo
   let referenceType
   try {
     assert.equal(browser.isConnected(), true)
-    context = await within(() => browser.newContext(), 'reference context')
-    page = await within(() => context.newPage(), 'reference blank page')
+    contextOwner = ownSdkResource(() => browser.newContext(), async (value) => { await value.close(); contextClosed = true })
+    context = await within(() => contextOwner.result, 'reference context')
+    pageOwner = ownSdkResource(() => context.newPage(), async (value) => { await value.close(); pageClosed = true })
+    page = await within(() => pageOwner.result, 'reference blank page')
     page.on('pageerror', error => pageErrors.push(error))
     page.on('crash', () => { crashed = true })
     assert.equal(page.url(), 'about:blank')
-    await within(() => page.close(), 'reference page close')
-    pageClosed = true
+    await within(() => pageOwner.release(), 'reference page close')
     assert.equal(page.isClosed(), true)
     assert.equal(browser.isConnected(), true)
     assert.equal(browser.contexts().includes(context), true)
@@ -95,8 +116,8 @@ export async function acquireClosedTargetReference(browser, errors, within = clo
   catch (error) { primaryFailure = error }
   finally {
     const owners = [
-      ...(page && !page.isClosed() ? [['reference page', async () => { await page.close(); pageClosed = true }]] : []),
-      ...(context ? [['reference context', async () => { await context.close(); contextClosed = true }]] : []),
+      ...(pageOwner ? [['reference page', () => pageOwner.release()]] : []),
+      ...(contextOwner ? [['reference context', () => contextOwner.release()]] : []),
     ]
     await Promise.all(owners.map(async ([actor, close]) => {
       try { await within(close, actor + ' cleanup') }
@@ -113,21 +134,24 @@ export async function acquireClosedTargetReference(browser, errors, within = clo
   }
 }
 
-export async function qualifyClosedTargetSdk(browserType, errors) {
-  let browser, reference, primaryFailure
+export async function qualifyClosedTargetSdk(browserType, errors, within = closedTargetBound) {
+  let browser, reference, primaryFailure, browserOwner
   const failures = []
   let browserClosed = false
   try {
-    browser = await closedTargetBound(() => browserType.launch(), 'SDK browser launch')
-    reference = await acquireClosedTargetReference(browser, errors)
+    browserOwner = ownSdkResource(() => browserType.launch({ timeout: 7000 }), async (value) => {
+      await value.close()
+      assert.equal(value.isConnected(), false)
+      browserClosed = true
+    })
+    browser = await within(() => browserOwner.result, 'SDK browser launch')
+    reference = await acquireClosedTargetReference(browser, errors, within)
   }
   catch (error) { primaryFailure = error }
   finally {
-    if (browser) {
+    if (browserOwner) {
       try {
-        await closedTargetBound(() => browser.close(), 'SDK browser close')
-        assert.equal(browser.isConnected(), false)
-        browserClosed = true
+        await within(() => browserOwner.release(), 'SDK browser close')
       }
       catch (error) { failures.push(error) }
     }
