@@ -37,7 +37,7 @@ jobs:
           mkdir -p test-results/reader-native
           git -c safe.directory="$GITHUB_WORKSPACE" show "$OBSERVER_SHA:.github/diagnostics/availability-reader-native.mjs" > test-results/reader-native/run.mjs
           sha256sum test-results/reader-native/run.mjs tests/e2e/native-response-gate.ts tests/e2e/availability-probe.ts apps/web/src/availability-read.ts apps/web/src/BeaconApp.vue > test-results/reader-native/sources.sha256
-          printf 'observer=%s\nproduct=7df2ac2bb0f34fa917e64cc2fa928dcf5d1f5224\nmode=owned-keepalive-fetch-remaining-negatives\n' "$OBSERVER_SHA" > test-results/reader-native/source.txt
+          printf 'observer=%s\nproduct=7df2ac2bb0f34fa917e64cc2fa928dcf5d1f5224\nmode=owned-keepalive-fetch-original-terminal-only\n' "$OBSERVER_SHA" > test-results/reader-native/source.txt
       - uses: ./.github/actions/setup-pnpm
         timeout-minutes: 5
         with:

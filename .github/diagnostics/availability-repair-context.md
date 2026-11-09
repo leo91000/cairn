@@ -19,8 +19,8 @@ The script requires byte-identical factory, polling shell and actual probe hashe
 from that acquired evidence. The new gate branch is conditional on an explicit
 readonly outage; inactive default and existing positive mechanisms are unchanged.
 Review the bounded gate diff against721b; do not infer new positive execution.
-This run observes ONLY the FIVE remaining negatives below, in order. Its
-allCellsObserved covers only its planned five; fullEightCellRunComplete remains
+Run42620213392/artifact13676760496 SHA2562479ca417a480c67769eaf7a852a7ef9e2c573f6feed706398939ef60a91b127 already observes FOUR negatives complete: fetchfailurefirst, bodyfailurefirst, unread503 andoutsidecall. Its last original-terminal cell remainsFAILED, neverrelabelledgreen. Require exactfour sourcehashes of7df for this reuse. This run observes ONLY the ONE last original-terminal negative. Its
+allCellsObserved covers only its planned ONE; fullEightCellRunComplete remains
 FALSE. No whole-product/global qualification follows from combining these sources.
 
 Original positive frontiers retained by immutable reference:
@@ -48,7 +48,7 @@ The pre-header fault stays active across HTTP attempts until the ONE original
 fetch settles TypeError, preventing a transparent transport retry from reaching a
 healthy unheld origin. Record all availability ingress/rejected attempts and restore
 the origin BEFORE later Page.goto intent. No application retry is added. The body
-failure control remains unchanged. All FIVE remaining cells and owned closure must complete; interruption/unknown never green.
+failure control remains unchanged. The ONE selected cell and owned closure must complete; interruption/unknown never green.
 Native terminal evidence only: product/retained-polling/global genuine-failure/BFCache
 qualification flags remain false even if controls pass. Application DirectRelay,
 retained download/second departure, physical BFCache, auth401, exact primary command,
@@ -67,6 +67,27 @@ https://github.com/chromium/chromium/blob/156.0.8078.4/third_party/blink/rendere
 https://github.com/chromium/chromium/blob/156.0.8078.4/content/browser/loader/keep_alive_url_loader.cc#L651-L715
 https://github.com/chromium/chromium/blob/156.0.8078.4/content/browser/loader/keep_alive_url_loader.cc#L1201-L1245
 Failure at this changed boundary stays red; this source explanation is not native proof.
+Last-negative lifecycle boundary: admitted pending navigation can stop the old
+WebKit loader and retire a preheaders callback without settling that fetch; later
+HTTP200 is not evidence of native promise settlement. Download reordering is already
+countered by run42554377471, which had keepalive:true/same document/Live heading and
+still no original terminal after release. DO NOT rerun it. Test-only beforeunload
+confirmation is installed ONLY in this mock negative (never product), actual page
+is activated by a real input click, actual Page.goto raises a native beforeunload
+dialog which is dismissed automatically. Require exactly one dismissed native dialog,
+navigation rejection, SAME document/Live heading/no pagehide, zero destination ingress
+BEFORE and AFTER owned closures. This cancels in shouldClose BEFORE stopAllLoaders.
+The destination gate remains armed but MUST NOT be ready; do not wait for admission.
+Then require owned private proof + originalrequestActive true/NOterminal; release the
+original HTTP, require SAMEread2 nativefetch200/JSON exactbody/finishedwire and actual
+settled Online/0failures. Pending alone still RED. This changes only the last negative's
+admission/commit expectation, not the acquired positive delayed-navigation contracts.
+Missing native datum is exactly original200 after this pre-stop cancellation; source
+predicts feasibility but does NOT qualify it. User prompt is fixture-only, not a feature.
+Dialog actions/receipts/page/context/gate closures must settle on every outcome.
+Pinnedsource:
+https://github.com/WebKit/WebKit/blob/56453fdfe0b0ca6258c23e6453b34f70b885d13f/Source/WebCore/loader/FrameLoader.cpp#L4275
+https://github.com/WebKit/WebKit/blob/56453fdfe0b0ca6258c23e6453b34f70b885d13f/Source/WebCore/Modules/fetch/FetchResponse.cpp#L327
 Prior XHR/native scheduler failures remain unchanged in history; no baseline is rerun.
 The old skill-availability-probe is unselected. Its two P2 lifecycle/body barriers remain
 OPEN, not resolved by any selected-control verdict. Product P1 remains OPEN until

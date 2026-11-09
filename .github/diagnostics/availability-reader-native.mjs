@@ -8,7 +8,7 @@ import { chromium, devices, expect, webkit } from '@playwright/test'
 
 const output = 'test-results/reader-native'
 await mkdir(output, { recursive: true })
-const control = 'owned-keepalive-fetch-remaining-negatives'
+const control = 'owned-keepalive-fetch-original-terminal-only'
 const paths = {
   gate: 'tests/e2e/native-response-gate.ts',
   probe: 'tests/e2e/availability-probe.ts',
@@ -39,6 +39,29 @@ const acquiredPositiveEvidence = {
 }
 for (const [key, sha256] of Object.entries(acquiredPositiveEvidence.runtimeSourceHashes))
   assert.equal(sourceHashes[key], sha256, 'Previously observed positive runtime source changed: ' + key)
+const acquiredNegativeEvidence = {
+  "runId": 42620213392,
+  "observer": "bcea1b2da05daf60427b35a48bfa6e91045c96e6",
+  "product": "7df2ac2bb0f34fa917e64cc2fa928dcf5d1f5224",
+  "artifactId": 13676760496,
+  "artifactSha256": "2479ca417a480c67769eaf7a852a7ef9e2c573f6feed706398939ef60a91b127",
+  "originalRunConclusion": "failure",
+  "fullEightCellRunComplete": false,
+  "observedNegativeCells": [
+    "webkit-fetch-failure-first",
+    "webkit-body-failure-first",
+    "webkit-unread-503",
+    "webkit-outside-call"
+  ],
+  "sourceHashes": {
+    "gate": "2d7a23c328f0a8486f13ca7499abea475a4b127e505d26b1518e513ad92be467",
+    "probe": "6f7a76ea28c5f3a3ff0bae411e9541d6ff93e5a7e178def116de4a8d914eecfa",
+    "transport": "ce1137a3b2e13b31186ac5871678e5b05316a9a99349f388dd9ce197411f400b",
+    "shell": "805ddd3d9fb33f0b1bea89ce1bd1860bedb8d8a0eb815355ac50f878e62b0bb1"
+  }
+}
+for (const [key, sha256] of Object.entries(acquiredNegativeEvidence.sourceHashes))
+  assert.equal(sourceHashes[key], sha256, 'Previously observed negative source changed: ' + key)
 const loadTypeScript = text => import('data:text/javascript;base64,' + Buffer.from(stripTypeScriptTypes(text)).toString('base64'))
 const { nativeResponseGate } = await loadTypeScript(sources.gate)
 const { installAvailabilityProbe, incompleteAvailabilityReads } = await loadTypeScript(sources.probe)
@@ -61,10 +84,6 @@ const bootstrap = `window.startDiagnosticPoll = () => {
   void refreshAvailability();
 };`
 const planned = [
-  { engine: 'webkit', mode: 'fetch-failure-first' },
-  { engine: 'webkit', mode: 'body-failure-first' },
-  { engine: 'webkit', mode: 'unread-503' },
-  { engine: 'webkit', mode: 'outside-call' },
   { engine: 'webkit', mode: 'proof-without-terminal' },
 ]
 const rows = []
@@ -121,6 +140,16 @@ function nativeDiagnostics(mode) {
     journal.push({ kind, sequence: journal.length + 1, ...extra })
     sessionStorage.setItem('cairn-native-fetch-journal', JSON.stringify(journal))
   }
+  // Test-only admission control: cancel within native shouldClose(), BEFORE
+  // the engine stops this original request's document loader. Production has no prompt.
+  if (mode === 'proof-without-terminal') {
+    window.addEventListener('beforeunload', event => {
+      if (event.isTrusted) {
+        event.preventDefault()
+        event.returnValue = 'diagnostic-only'
+      }
+    })
+  }
   const signals = new WeakMap()
   AbortController.prototype.abort = function (reason) {
     const target = signals.get(this.signal)
@@ -173,6 +202,8 @@ async function observe(browser, cell) {
   const arm = cell.engine + '-' + cell.mode
   const received = []
   const stateReceipts = []
+  const dialogs = []
+  const dialogActions = new Set()
   const pageErrors = []
   const failures = []
   const writes = new Set()
@@ -181,7 +212,7 @@ async function observe(browser, cell) {
   let context, page, gate, navigation, documentId, initial, destination, next, outage
   let outageEvidence
   let checkpoint, nativeEvents = [], initialClosureBeforeRelease = false, journalAcknowledged = false, navigationValidated = false
-  let initialHeaderAdvance, initialClosureBoundary
+  let initialHeaderAdvance, initialClosureBoundary, activatedViaClick = false, retainedAfterDialog = false
   let pendingProof, state, finalAudit = { unknown: [], unexpected: [] }
   const remember = (stage, error) => failures.push({ stage, error: errorRecord(error) })
   const cleanupFailure = (actor, error) => cleanupFailures.push({ arm, actor, error: errorRecord(error) })
@@ -247,6 +278,22 @@ async function observe(browser, cell) {
     await observed(() => context.tracing.start({ screenshots: false, snapshots: true, sources: true }), 'trace setup')
     page = await observed(() => context.newPage(), 'page setup')
     page.on('pageerror', error => pageErrors.push(errorRecord(error)))
+    page.on('dialog', dialog => {
+      const receipt = { type: dialog.type(), dismissed: false }
+      dialogs.push(receipt)
+      if (cell.mode !== 'proof-without-terminal' || dialog.type() !== 'beforeunload')
+        remember('unexpected native dialog', new Error('Unexpected native dialog type'))
+      const action = (async () => {
+        try {
+          await observed(() => dialog.dismiss(), 'native beforeunload dismissal')
+          receipt.dismissed = true
+        }
+        catch (error) { cleanupFailure('native-dialog-dismissal', error) }
+      })()
+      dialogActions.add(action)
+      void action.finally(() => dialogActions.delete(action))
+    })
+
     // One init script fixes adapter ordering before the actual product captures
     // its producer functions. The probe itself is the unmodified source callback.
     const initializers = []
@@ -323,10 +370,30 @@ async function observe(browser, cell) {
       destination = addGate('destination', gate.hold('agents'))
       if (cell.mode.startsWith('owned-'))
         next = addGate('replacement', gate.hold('availability'))
+      if (cell.mode === 'proof-without-terminal') {
+        await stage('activate test-only native beforeunload confirmation')
+        await observed(() => page.getByRole('heading', { name: 'Live', exact: true }).click(), 'trusted activation click')
+        activatedViaClick = true
+      }
       await stage('original Page.goto with destination response held')
       navigation = page.goto(origin + '/installations/fixture/agents').then(() => ({ kind: 'committed' }), error => ({ kind: 'rejected', error: errorRecord(error) }))
-      await poll(() => destination.ready)
-      assert.equal(destination.status, 200)
+      if (cell.mode === 'proof-without-terminal') {
+        await stage('native dialog cancels navigation before loader stopping')
+        const cancelled = await observed(() => navigation, 'pre-stop native navigation cancellation')
+        await poll(() => dialogs.length === 1 && dialogs[0].type === 'beforeunload' && dialogs[0].dismissed)
+        assert.equal(cancelled.kind, 'rejected')
+        assert.equal(await evaluate(() => window.cairnAvailabilityDocument), documentId)
+        await expect(page.getByRole('heading', { name: 'Live', exact: true })).toBeVisible()
+        assert.equal(destination.received, false)
+        assert.equal(destination.ready, false)
+        assert.equal(received.some(event => event.document === documentId && event.kind === 'pagehide'), false)
+        retainedAfterDialog = true
+        navigationValidated = true
+      }
+      else {
+        await poll(() => destination.ready)
+        assert.equal(destination.status, 200)
+      }
       if (cell.mode.endsWith('failure-first')) {
         assert.equal(events(2).some(event => event.kind === 'abort'), false)
       }
@@ -338,8 +405,12 @@ async function observe(browser, cell) {
         assert.equal(pendingProof.journal.some(event => event.document === documentId && event.read === 2 && ['rejected', 'body-rejected', 'body', 'fetch-fulfilled'].includes(event.kind)), false)
         assert.equal(initial.closed, false)
         initial.release()
-        await poll(() => events(2).some(event => event.kind === 'body' && event.exactBody))
+        await poll(() => events(2).some(event => event.kind === 'body' && event.exactBody && !event.afterPagehide))
         await poll(() => initial.closed && initial.terminal === 'finished')
+        state = (await stateReceipt(2, 'body')).state
+        assert.equal(state.online, true)
+        assert.equal(state.failures, 0)
+        assert.equal(state.requestActive, false)
       }
       else {
         await poll(() => terminal(2).length === 1)
@@ -391,6 +462,7 @@ async function observe(browser, cell) {
         assert.equal(state.online, true)
         assert.equal(state.failures, 0)
       }
+      if (cell.mode !== 'proof-without-terminal') {
       assert.equal(destination.closed, false)
       assert.equal(destination.terminal, 'pending')
       assert.equal(received.some(event => event.document === documentId && event.kind === 'pagehide'), false)
@@ -406,6 +478,8 @@ async function observe(browser, cell) {
       navigationValidated = true
       await expect(page.getByRole('heading', { name: 'Destination', exact: true })).toBeVisible()
       await poll(() => destination.closed && destination.terminal === 'finished')
+      }
+
     }
     await harvest()
     journalAcknowledged = true
@@ -438,9 +512,13 @@ async function observe(browser, cell) {
       try { await observed(() => navigation, 'navigation settlement') }
       catch (error) { cleanupFailure('navigation', error) }
     }
+    try { await observed(() => Promise.all([...dialogActions]), 'native dialog action drain') }
+    catch (error) { cleanupFailure('native-dialog-drain', error) }
     try { await observed(() => Promise.all([...writes]), 'receipt drain') }
     catch (error) { cleanupFailure('receipt-drain', error) }
   }
+  if (cell.mode === 'proof-without-terminal' && destination?.received)
+    remember('final pre-stop admission audit', new Error('Cancelled pre-stop navigation reached the destination gate'))
   finalAudit.unknown = incompleteAvailabilityReads(received)
   for (const event of received) {
     if (event.kind === 'body' && !event.exactBody)
@@ -460,7 +538,7 @@ async function observe(browser, cell) {
   const observationComplete = journalAcknowledged && navigationValidated && !failures.length && !pageErrors.length
     && !ownCleanup.length && !finalAudit.unknown.length && !finalAudit.unexpected.length
   const row = { arm, control, diagnosticOnly: true, productQualified: false, observationComplete, phase,
-    documentId, state, pendingProof, stateReceipts, outageEvidence, initialHeaderAdvance, initialClosureBoundary, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
+    documentId, state, pendingProof, stateReceipts, dialogs, activatedViaClick, retainedAfterDialog, destinationAdmission: cell.mode === 'proof-without-terminal' && navigationValidated && !destination?.received ? 'cancelled-before-request' : null, outageEvidence, initialHeaderAdvance, initialClosureBoundary, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
     allPageErrorsStrict: pageErrors.length === 0, pageErrors, failures, reads: received, nativeEvents, finalAudit,
     gates: gates.map(({ label, response }) => ({ label, received: response.received, ready: response.ready, status: response.status ?? null, terminal: response.terminal, closed: response.closed, headersDelivered: response.headersDelivered, bodyReleased: response.bodyReleased })), cleanupFailures: ownCleanup }
   rows.push(row)
@@ -490,7 +568,7 @@ for (const engine of new Set(planned.map(cell => cell.engine))) {
 }
 const allCellsObserved = rows.length === planned.length && rows.every(row => row.observationComplete)
 const result = { control, diagnosticOnly: true, productQualified: false, retainedPollingQualified: false, bfCacheQualified: false,
-  genuineFailureHandlingQualified: false, sourceHashes, acquiredPositiveEvidence, fullEightCellRunComplete: false, planned, allCellsObserved,
+  genuineFailureHandlingQualified: false, sourceHashes, acquiredPositiveEvidence, acquiredNegativeEvidence, fullEightCellRunComplete: false, planned, allCellsObserved,
   allPageErrorsStrict: rows.every(row => row.allPageErrorsStrict), rows, cleanupFailures, engineFailures }
 await write('result.json', result)
 console.log(JSON.stringify({ ...result, rows: rows.length, cleanupFailures: cleanupFailures.length, engineFailures: engineFailures.length }))
