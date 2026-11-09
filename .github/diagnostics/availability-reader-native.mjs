@@ -161,6 +161,7 @@ async function observe(browser, cell) {
   let phase = 'setup'
   let context, page, gate, navigation, documentId, initial, destination, next
   let checkpoint, nativeEvents = [], initialClosureBeforeRelease = false, journalAcknowledged = false, navigationValidated = false
+  let initialHeaderAdvance, initialClosureBoundary
   let pendingProof, state, finalAudit = { unknown: [], unexpected: [] }
   const remember = (stage, error) => failures.push({ stage, error: errorRecord(error) })
   const cleanupFailure = (actor, error) => cleanupFailures.push({ arm, actor, error: errorRecord(error) })
@@ -267,7 +268,7 @@ async function observe(browser, cell) {
       await stage('real HTTP503 with unread body and caller-owned wire disposal')
       await poll(() => events(2).some(event => event.kind === 'fetch-fulfilled' && event.status === 503 && !event.ok))
       await poll(() => events(2).some(event => event.kind === 'abort' && event.trusted && event.exactTarget && event.insideAbortCall))
-      await poll(() => initial.closed && initial.terminal === 'cancelled')
+      await poll(() => initial.closed && initial.terminal === 'cancelled' && !initial.bodyReleased)
       initialClosureBeforeRelease = true
       state = (await stateReceipt(2, 'signal')).state
       assert.equal(state.online, false)
@@ -286,7 +287,7 @@ async function observe(browser, cell) {
         state = (await stateReceipt(2, cell.mode === 'fetch-failure-first' ? 'fetch-rejected' : 'body-rejected')).state
         assert.equal(state.online, false)
         assert.equal(state.failures, 1)
-        await poll(() => initial.closed && initial.terminal === 'cancelled')
+        await poll(() => initial.closed && initial.terminal === 'cancelled' && !initial.bodyReleased)
         initialClosureBeforeRelease = true
       }
       destination = addGate('destination', gate.hold('agents'))
@@ -334,8 +335,20 @@ async function observe(browser, cell) {
           assert.equal(state.online, true)
           assert.equal(state.failures, 0)
         }
-        await poll(() => initial.closed && initial.terminal === 'cancelled')
+        if (!initial.headersDelivered) {
+          const receipt = await stateReceipt(2, cell.mode === 'owned-body' ? 'body-rejected' : 'fetch-rejected')
+          assert.equal(initial.bodyReleased, false)
+          initialHeaderAdvance = {
+            document: receipt.document, read: receipt.read, sourceSequence: receipt.journal.at(-1)?.sequence ?? null,
+            closedBefore: initial.closed, headersDeliveredBefore: initial.headersDelivered, bodyReleasedBefore: initial.bodyReleased,
+          }
+          await stage('advance original headers only after the native terminal; body stays held')
+          initial.releaseHeaders()
+        }
+        await poll(() => initial.closed && initial.terminal === 'cancelled' && !initial.bodyReleased)
         initialClosureBeforeRelease = true
+        initialClosureBoundary = { closed: initial.closed, terminal: initial.terminal, headersDelivered: initial.headersDelivered, bodyReleased: initial.bodyReleased }
+        assert.equal(events(2).some(event => event.kind === 'body'), false)
       }
       if (next) {
         await stage('next real periodic keepalive read before destination commit')
@@ -416,9 +429,9 @@ async function observe(browser, cell) {
   const observationComplete = journalAcknowledged && navigationValidated && !failures.length && !pageErrors.length
     && !ownCleanup.length && !finalAudit.unknown.length && !finalAudit.unexpected.length
   const row = { arm, control, diagnosticOnly: true, productQualified: false, observationComplete, phase,
-    documentId, state, pendingProof, stateReceipts, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
+    documentId, state, pendingProof, stateReceipts, initialHeaderAdvance, initialClosureBoundary, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
     allPageErrorsStrict: pageErrors.length === 0, pageErrors, failures, reads: received, nativeEvents, finalAudit,
-    gates: gates.map(({ label, response }) => ({ label, received: response.received, ready: response.ready, status: response.status ?? null, terminal: response.terminal, closed: response.closed })), cleanupFailures: ownCleanup }
+    gates: gates.map(({ label, response }) => ({ label, received: response.received, ready: response.ready, status: response.status ?? null, terminal: response.terminal, closed: response.closed, headersDelivered: response.headersDelivered, bodyReleased: response.bodyReleased })), cleanupFailures: ownCleanup }
   rows.push(row)
   await write(arm + '.json', row)
   console.log(JSON.stringify({ control, arm, observationComplete, pageErrors: pageErrors.length, cleanupFailures: ownCleanup.length }))

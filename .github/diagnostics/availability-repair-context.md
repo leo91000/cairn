@@ -1,6 +1,6 @@
 # Scoped original-fetch terminal evidence, not product qualification
 
-Frozen product `0d275abd83d31ded94ece22963a5515d1256c42a` tree `40a40f4bda0765ef6cbc8eec2f9e2ba4468f4f3c`, main base `da00f92aee9afb2c125f7aa8bb903999548a35be`.
+Frozen product `4e9b4a6fef7e27e5bf140d27e13e73dbb0b168f0` tree `721d2027eef668dc53506eea80bf16417d01bd77`, main base `da00f92aee9afb2c125f7aa8bb903999548a35be`.
 Existing observer only; no new framework, environment, ref or Cairn pilot.
 Playwright1.64.1 image unchanged. No Cargo, Cairn runtime/fixtures or local browser.
 Original actual product readAvailability factory and BeaconApp polling source are
@@ -12,7 +12,7 @@ and independent owned closures7s. Source and script identity required before/aft
 
 Fixed eight selected boundaries, sequential in one job:
 1 Chromium fetch held before headers: native owned abort, original rejection,
-  wire cancelled BEFORE gate release/cleanup; precise next200 on3s cadence with destination held.
+  after original owned rejection, advance ONLY original upstream headers while body stays held; wire cancelled BEFORE BODYrelease/cleanup; precise next200 on3s cadence with destination held.
 2 WebKit same.
 3 WebKit headers200/body held: original JSON started, owned abort and original
   body rejection, same precise periodic replacement before destination commit.
@@ -37,6 +37,19 @@ qualification flags remain false even if controls pass. Application DirectRelay,
 retained download/second departure, physical BFCache, auth401, exact primary command,
 quality/format and full mapped dependants still require exact product qualification.
 
+Initial pre-header protocol: Chromium156.0.8078.4 KeepAliveURLLoader::ForwardingClient::OnDisconnected
+can retain the loader until response headers arrive. After exact owned native rejection
+and actual poll-state receipt, the existing gate may advance ONLY that request's original
+status/headers; bodyReleased MUST remain false. The source journal sequence and pre-advance
+wire/header/body states are retained. Actual closed/cancelled BEFORE BODYrelease/cleanup
+remains mandatory, as does absence of old body. Native promise/reason is unchanged; no error
+or physical cancellation is inferred from headers alone. The unread503 control ALREADY
+has real headers and retains its original strict pre-body-release wire assertion.
+Primary exact-tag sources:
+https://github.com/chromium/chromium/blob/156.0.8078.4/third_party/blink/renderer/core/fetch/fetch_manager.cc#L935-L977
+https://github.com/chromium/chromium/blob/156.0.8078.4/content/browser/loader/keep_alive_url_loader.cc#L651-L715
+https://github.com/chromium/chromium/blob/156.0.8078.4/content/browser/loader/keep_alive_url_loader.cc#L1201-L1245
+Failure at this changed boundary stays red; this source explanation is not native proof.
 Prior XHR/native scheduler failures remain unchanged in history; no baseline is rerun.
 The old skill-availability-probe is unselected. Its two P2 lifecycle/body barriers remain
 OPEN, not resolved by any selected-control verdict. Product P1 remains OPEN until
