@@ -12,7 +12,7 @@ jobs:
       matrix:
         include:
           - label: focused-repair
-            sha: ca47c9008ce499169e324992a7c466bf8d618d7a
+            sha: e24afba7b89c1c36a13579d233d0c663eb6a9e8b
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -71,7 +71,7 @@ jobs:
           test ! -e target/debug/cairn
           test ! -e target/debug/examples/browser_fixture
           mkdir -p test-results/collection
-          PLAYWRIGHT_JSON_OUTPUT_FILE=test-results/collection/cases.json pnpm test:e2e mcps.spec.ts --project=journeys-mcps --project=layout-webkit-mcps --grep 'availability keeps direct readers stable' --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --list --reporter=json
+          PLAYWRIGHT_JSON_OUTPUT_FILE=test-results/collection/cases.json pnpm test:e2e mcps.spec.ts --project=journeys-mcps --project=layout-webkit-mcps --grep 'availability (keeps direct readers stable|resumes real reads after same-document persisted lifecycle)' --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --list --reporter=json
           node --input-type=module <<'JS'
           import { readFileSync, writeFileSync } from 'node:fs'
           import assert from 'node:assert/strict'
@@ -88,10 +88,12 @@ jobs:
           }
           for (const suite of report.suites) collect(suite)
           assert.deepEqual(report.errors, [])
-          const expected = ['journeys-mcps', 'layout-webkit-mcps'].flatMap(project => ['committed', 'cancelled'].map(destination => [project, `availability keeps direct readers stable until native navigation is ${destination}`]))
+          const titles = ['committed', 'cancelled'].map(destination => `availability keeps direct readers stable until native navigation is ${destination}`)
+          titles.push('availability resumes real reads after same-document persisted lifecycle')
+          const expected = ['journeys-mcps', 'layout-webkit-mcps'].flatMap(project => titles.map(title => [project, title]))
           assert.deepEqual(cases.sort(), expected.sort())
           writeFileSync('test-results/collection/receipt.json', JSON.stringify({ collectionOnly: true, cases }))
-          console.log('Exact native regression collection: four cases, two per browser project; no runtime fixture execution.')
+          console.log('Exact native regression collection: six cases, three per browser project; no runtime fixture execution.')
           JS
       - uses: actions/upload-artifact@v7.0.1
         timeout-minutes: 5
@@ -162,6 +164,11 @@ jobs:
         env:
           PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/specialists
         run: pnpm test:e2e beacon-relay.spec.ts direct-capacity.spec.ts chat-switch.spec.ts --project=journeys-beacon-relay --project=journeys-chat-switch --project=layout-webkit-chat-switch --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results/specialists
+      - name: Qualify account authentication and expired availability polling
+        timeout-minutes: 5
+        env:
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/account
+        run: pnpm test:e2e beacon-account.spec.ts --project=journeys-beacon-account --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results/account
       - name: Require final source identity
         timeout-minutes: 5
         env:
