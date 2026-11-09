@@ -81,6 +81,7 @@ export function readAvailability(signal: AbortSignal) {
   const abort = (owner: 'departure' | 'caller') => {
     if (terminal)
       return
+    removeListener()
     insideAbort = owner
     try {
       nativeAbort.call(request)

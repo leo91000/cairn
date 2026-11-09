@@ -512,15 +512,19 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         await expect(transport).toHaveAttribute('data-transport-route', 'relay')
         stage = 'production backoff and direct recovery'
         await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
+        await expect(transport).toHaveAttribute('data-transport-route', 'direct')
         stage = 'second real departure rearms the same document listener'
         await expect.poll(() => pendingReads(departingDocument)).toEqual([])
+        const recoveredRead = reads.filter(event => event.document === departingDocument && event.kind === 'start').at(-1)!.read
         secondPoll = responseGate.hold('availability')
         await expect.poll(() => {
           responseGate.check()
           return secondPoll!.ready
         }).toBe(true)
         expect(secondPoll.status).toBe(200)
+        await harvestReads()
         secondRead = reads.filter(event => event.document === departingDocument && event.kind === 'start').at(-1)!.read
+        expect(secondRead).toBeGreaterThan(recoveredRead)
         expect(secondRead).toBeGreaterThan(targetRead)
         navigationResponse = responseGate.hold('agents')
         navigationValidated = false

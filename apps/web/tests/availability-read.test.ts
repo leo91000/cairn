@@ -216,6 +216,7 @@ it('aborts body consumption on explicit caller withdrawal and detaches all liste
   const rejection = assert.rejects(body, DOMException)
   controller.abort()
   await rejection
+  assert.deepEqual(Request.instances[0]!.abortListenerCounts, [0])
   assert.equal(listeners.size, 0)
   const before = Request.instances[0]!.abortListenerCounts.length
   departure()
