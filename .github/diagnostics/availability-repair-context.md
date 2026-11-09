@@ -1,75 +1,57 @@
-# Focused availability product qualification
+# Single native original JSON state observation — not product qualification
 
-Product 9da5f39aa9170444789708a0c5e6b2183934c303 tree 6332536596ea2be7c60653bb7e4b42c448182847, base actual main dc24903967c7443d5c3e61587440240d05fa3c76.
-Existing observer only, NEVER merge observer. Pinned product checkout; only hash-checked
-SDK helper and immutable collection/checksum/formatter evidence copied into TASK-SCOPED RUNNER_TEMP, outsideALLPlaywright output/reportdirs. C40_EVIDENCE_DIR is exported throughGITHUB_ENV afterinitialcreation. InlineSDKimportsfromfileURL withactualrootSDKpassedbyparameter; no SDKcopy/environmentduplication. Both prebuildcollection andfinalalwaysartifact includeonlythatdedicatedfolder, notallRunnerTemp. Primarydefaulttest-results cleanupcannotdeleteproof/finalchecksum inputs. No localheavy/SDKinstall/newenv/ref/pilot.
-One sequential25minjob/allsteps5min/owned7s bounds. No retry/flaky/skip/error masking.
+Product `9da5f39aa9170444789708a0c5e6b2183934c303` tree `6332536596ea2be7c60653bb7e4b42c448182847`, base `dc24903967c7443d5c3e61587440240d05fa3c76`. Existing observer/ref/pilot only.
+Actual whole-product qualification42665955888 (observer5ee) is FAILURE47PASS1FAIL;
+SDK/CLI8+2/format/fullquality1846/typecheck/builds/assets/Postgres passed, all specialists
+and finalidentity skipped/unqualified. Private original artifact13696858536 SHA256
+b43079cfacbce2b1e2ef8048c0141ebe551cce87c9d563630dbb44005d0afcf9 retained, not replayed.
+Chromium committed read3ownedabort worked; laterread4 originalJSONTypeError/noabort
+remained despite capturepagehide. Native producer originalpromise never reclassified.
 
-Native evidence acquired separately, NEVER rerun for globalgreen:
-- 42618105477/art13673846042 SHAb3f9a74e690495005f9afc641801a3e7ba5f211e60c9bc7d330714aa7648ccea:
-  three complete positives Chromium/WebKit ownedfetch +WebKit ownedJSONbody. Exact
-  private nativeproof+originalreject, wirecancel BEFOREBODYrelease and precise periodic
-  replacement200 before destinationcommit. Overall FAILURE on later fault-control.
-- 42620213392/art13676760496 SHA2479ca417a480c67769eaf7a852a7ef9e2c573f6feed706398939ef60a91b127:
-  four complete negatives fetch/bodyTypeErrorfirst preserved, unread503/noJSON/wirecancel
-  beforebodyrelease, actualabortoutsideownedcallrefused. Overall FAILURE on later
-  same-originalterminal at unsuitable post-loader-stop boundary.
-- 42626827955/art13679615050 SHA0f5069b80037adab79b5f9385bc3b6745b97d33455be4e381e2555d18d426f48:
-  lastnativefacts BEFOREcleanup: realdialogdismissACK+freshCURRENTsameDoc/visibleLive/
-  noPagehide/zeroDestIngress, ownedprivateproof+originalread2active/noTerminal; then
-  SAMEread2nativefetch200/originalJSONprecisebody/finishedwire/settledOnline0/finalsameDoc
-  journal. Overall FAILURE solely comparing constructorname TargetClosedError to bundled
-  TargetClosedError2 during automationwaiter cleanup; original outcome stays FAILURE.
-All eight factual scopes precede cleanup, but no whole-run/global product green
-is inferred. FullEightCellRunComplete and prior globalflags remainFALSE. The source
-hash pins and bounded gate comparison remain in archived native script/context history.
+Missing datum after independent adjudication R17: is the ORIGINAL native JSON
+promise already rejected before the VERY FIRST pagehide listener body executes?
+This source graph can reject response body before pagehide: pinnedChromium156.0.8078.4
+LocalFrame::DetachImpl StopAllLoaders before unload; once headers exist ResourceLoader
+ShouldBeKeptAliveWhenDetached false. Window dispatches pagehide AT_TARGET in registration
+order (capture doesnotpromote), with microtask scopes between JS listener callbacks.
+This is source evidence, not proof of the selected runtime cancel stack.
 
-Inherited main e88bd38c (#737 CI failure fixture budget readiness) and dc249039 (Android smoke system-command probe) are included unchanged with no conflict; neither main update changes the repair payload. The new application-outage regression is a separate change after a78, and needs exact newhead qualification. All inherited main tests must still run in selected fullquality; no main checks are claimed as product qualification.
+ONE Chromium cell in the existing native reader script, actual current factory +
+BeaconApp poll block, actual unmodified probe and native HTTP response gate. Minimal
+state/session adapters are not the full Vue application. No Cargo/Cairn fixtures,
+new SDK environment, new ref/framework, retry, sleep or deadline change. Native timers
+resume after the same clockinstall/pause/runFor3100 seed. Original read2 owned abort
+and wirecancel before bodyrelease are required, then a NEW real3s read3 gets genuine
+200headers and ORIGINAL nativeJSON starts while its body AND destination stay held.
 
-Formatting qualification42633640027 on7df remainsFAILURE: realCLI6+2 andactualSDKidentity PASS, formatterExit1/sourceDiff1, patch17416B SHA25666c6cff476c7be72d040172e069435c5e3ae915866349b5f0b719e8eacbc7423. Exactformatterpatch applied to7files + manual expansion of remaining single-line BFcleanuptry; new product head above is NOT qualified by those prior results. Current factory includes a new focused per-read trusted capture-pagehide withdrawal for reads started AFTER the navigation beforeunload. It requires native PageTransitionEvent/owner document+window/top scope and still exact private nativeSignalproof DURING actual abort plus ORIGINALnativeabortterminal. It NEVER convertsTypeError or a prior settled failure. Both departure listeners are removed onwithdrawal/settlement/disposal. BeaconApp byte-identical; prior7dfnativefacts doNOTqualifythisnewcapturepath. Model18casespasses/captureoldRED; unchangedcommittedUIcase isrequirednativecounterproof, preservingexactoriginalJSONabort+wirecancelBEFOREBODYrelease. CaptureremainsunprovenuntilthisCI. Archived native script intentionally retains its7df sourcehash pins and is NOT executed by this product qualification; historicalnativefacts are not a newhead/globalqualification.
+Fixture wrapper stores a reference to that SAME original native JSON promise and
+returns it unchanged, adding its existing observer only. Chromium CDP Debugger event
+listener breakpoint pagehide is armed after body-start, then destination is released.
+Before the FIRST listener body, evaluate ONLY the plain fixture global promise reference
+in the exact owned default execution context (CDP uniqueId/mainFrame/origin checked), only while paused; Runtime.getProperties reads internal PromiseState/Result. throwOnSideEffect refuses side-effecting evaluation. Native callback stacks need not contain a JS callFrame. No producer,
+body getter, clone, abort, mutation or fabricated terminal. Required result is original
+promise REJECTED/TypeError while bodyheld, followed by SAMEread3 nonaborted JSONTypeError
+and no private abort. A pending state, missing object/pause, wrong event or any ambiguous
+failure stays RED; do not turn it into accepted cancellation. The one expected native
+TypeError is identified by exact document/read/kind AND intrinsic promise-state receipt;
+all pageerrors and other nativeerrors/orphan/missing outcomes remain strict. No product
+assertion/filter is changed. If firstlistener state is pending this negative proof fails,
+requiring further attribution rather than pretending it proves impossibility.
 
-Closed-target classifier fix: acquire process-local exact client prototype from
-an isolated owned about:blank page using SAME installed SDK. Strict pageerror/crash,
-successful pageclose/isClosed, live context/browser, raw closed page.title rejection
-captured INSIDE bound. Reject genericError/Timeout/sharedSDKbase and validate prototype
-hierarchy/constructor descriptor. Second closed title +closed goto must match. Ordinary,
-Timeout/commonbase/independent name-lookalike errors must NOT match. Names/messages
-diagnostic ONLY; no serverpredicate/bundleeval/name whitelist. All context/browser
-owners mustclose evenonfailure. Each acquisition promise is owned BEFORE observation: cleanup requests closure of both existing and late returned handles, close is memoized once, and cleanup observes acquisition+closure inside existing7s bound. Observation deadlines stay failed; unknown creation/close blocks all next phases. SDK launch uses the same7s timeout internally, not an extended budget. Native archived browser/context/page/gate acquisitions use the same ownership helper. Prototype never serialized/reused in another process.
-Archived native script retains RAW gotoerror and compares exact immediate prototype,
-preserving pendingwaiter/pageclosecomplete/rejection-afterclose guards and
-cancellationEvidenceFALSE. Its SDK reference is acquired per consuming process.
-This full job executes actual installed SDK conformance AFTER frozen deps/version/
-realCLIcollection and BEFORECargo, repairing missing classifier proof WITHOUT
-replaying acquired native cases. It is classifier-only, not product qualification.
-Primary:
-https://raw.githubusercontent.com/microsoft/playwright/v1.64.1/packages/playwright-core/src/client/errors.ts
-https://raw.githubusercontent.com/microsoft/playwright/v1.64.1/packages/playwright-core/src/client/playwright.ts
-https://raw.githubusercontent.com/microsoft/playwright/v1.64.1/packages/playwright-core/src/coreBundle.ts
+Debugger resumes in owned finally; disable/detach/drain and page/context/gate/backend
+close are independently bounded and recorded. SDK late acquisitions use existing
+owned resource helper, actual canonical SDK prototype observed. Job25m/step5m/7s waits
+unchanged. Source/script/helper hashes before/after mandatory. Historical native matrices
+and their immutable sourcehashes remain as historical metadata ONLY, are NOT rerun or
+credited to this new product; current four exact hashes are separately required.
+All productQualified/retainedPollingQualified/BFCache/genuineFailureHandling flags false.
+FullEightCellRunComplete false; allCellsObserved covers ONE planned cell only. ProductP1
+OPEN and all original whole-product assertions untouched. A technical source review
+cannot count as native proof or resolve two archived skill-probe P2s (stillunselected).
 
-Qualification exact-head map:
-- Real1.64.1CLI --list EXACT8 newMCP +EXACT2physicalBFCache, ordinaryconfig, BEFOREcompile (four MCPcases perbrowser includingthepermanentactualapplicationoutage).
-  Prior oldanchoredgrep0/exit1 evidence425281 preserved, not rerun to getgreen.
-- pnpm lint:fix + unchangedsourceguard, fullpnpmcheck; preserveformatter.patch/error.
-  Process-scoped Gittrust +established disposablezip/deps/Rust setup retained.
-- Primary EXACTUNCHANGED:
-  pnpm test:e2e deliverables.spec.ts skill-bundles.spec.ts beacon-sharing.spec.ts beacon-installations.spec.ts mcps.spec.ts --workers=2 --retries=0 --fail-on-flaky-tests --trace=on
-- PrimaryMCP includesactualapplication readonlyoutage: originalGET held, persistenttransportfault acrossHTTPattempts, originalTypeError/nonaborted/Offline preserved, then existing6spollbackoffadvancedwhilefaultSTILLactive requiringanewstartedread+secondoriginalTypeError andnonzerorefusedHTTPattempts. Healthyhealthroutewhilefaultactive, exacttwofailureIDs/HTTPcounts +restorationBEFORElaterPagegoto, finalfreshAgentsOnline/journal andallpageerrorsstrict. No JSretry/mutation/sleep/newdeadline. Actualqualification42659455207 reachedallquality/builds/SQL andprimary47PASS1FAIL Chromiumcommitted read4: headers200/JSONstart then trustedpagehide and ORIGINALbodyTypeError, NOprivateabortevent. Thisisnotownedcancellation/cleanupnoise; thatrunremainsFAILURE andskippedspecialistsunqualified. Visibilityhiddenisnotassumedearlier(pinnedChromiumorderspagehidefirst). Newtrustedper-readcapturehandler isONLYcandidate, currentcaseunchanged; anysurvivingTypeError ormissingproof/wireclosurestaysRED. Every recordedabort requires completecall/signal/return counts, native trusted/exactsignal and an insideflag consistentwithintrinsicsequence. Explicitoutside-call negative keepsabortedFALSE and isnotownedattribution; orphan/untrusted/incompletepairsfail EVENiforiginalreadsuccess. AnyterminalclaimingabortedmustFOLLOWtheownedcallreturn; earlierfetch/bodyterminals cannotborrowfutureabortproof. Genuineunabortedfailuresbeforelatercall remainoriginalfailures.
-- DirectRelay/savedreaders: existing beacon-relay/direct-capacity/chat-switch projects.
-- PhysicalBFCache ordinaryMCPprojects, workers1 budget unchanged, actual trusted
-  persisted SAMEdoc/exactfreshbody; synthetic lifecycle doesNOTreplacephysical.
-  Full browser/all matrix selectsit; imposed shortPRfivefilenames excludesit/NOcredit.
-- FullBeaconaccount ANDbeacon-oauth specs inaccountproject, inclactual401polling/revocation/OAuth/signout. Both filenames explicitlyselected, no projectmatch-onlycoverage claim.
-- Restored-body assertions require requestSTART andexactBODY afterthetrustedpersistedpageshow sequence. Canceled-navigation recovery usesa freshsameDocsourcecheckpoint beforethequalifyingnewread; predeparture/oldpendingbodies neverqualify. Both sequenceboundaries are retained inprivateevidence, notinferredfromhostcallbackarrival.
-- Real manager/Beacon/networkfixtures/assets +disposablePostgres inCI, final product/
-  helper identities unchanged. No Rust/Android/networkprotocol or typed API capability
-  source changes in this internal account-shell readonlyGET repair; their unaffected
-  scopes are justified in mapping, never claimedqualified here.
-
-Every first failure retained. Unexecuted/skipped/flaky/timeout/cancel NOTpassed.
-Corrections/baseupdates need newcompleteFULL/affectedexactCI, noidenticalrerunforgreen.
-P1/app/globalqualification remainsOPEN until actualselectedsuccess; PRrequiredchecks,
-ordinary pinnedmerge withoutadmin/bypass/branchdelete and merge/date/tree/main/postCI
-muststillbeverified. No release/tag/deploy/Slack/livegrant/UI534679merge. Root73159d/B5d
-branches untouched. Old skill-probe twoP2 at220–224/238–253 remainOPEN/unselected and
-notresolvedbythisqualification; priorindependentscopeadjudicationretained.
+After bounded datum: correction only if supported and contract-preserving, otherwise
+report concrete remaining acceptance-contract decision to requester. No TypeErrorwaiver,
+permanent intention latch or guessed timeout, no replaymutation/auth/cache/history/cursor
+change. Fresh COMPLETE FULL required on any source/harness correction before dispatch.
+Actual exact affected qualification/PR/RUC/requiredchecks/pinnedordinarymerge/postCI remain
+required. No UImerge534679/capturewaiver/Slack/release/tag/deploy/livegrant.
