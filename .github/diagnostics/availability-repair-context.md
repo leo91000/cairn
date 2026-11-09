@@ -1,47 +1,43 @@
-# Focused WebKit gate-retirement diagnostic
+# Scoped original-fetch terminal evidence, not product qualification
 
-Product `b9f1e7010345e5e0d1172c79a540344f7a1b0772` tree `4bd409a19890fe30a4ef4d6e8ec5b99eaea6bca4`, base main `7028fbfdd6d13e27b8f4e7db767899828d631b42`.
-Diagnostic only: no Cargo, Cairn runtime, fixtures or product qualification.
-Pinned Playwright 1.64.1; real loopback HTTP proxy; actual product availability
-transport, BeaconApp polling block and e2e observer. Minimal session/state adapters
-are not Vue/application integration coverage. The ordinary MCP WebKit device
-settings, Page.goto stimulus and original clock install/pause/runFor/resume
-sequence are used in both arms.
+Frozen product `0d275abd83d31ded94ece22963a5515d1256c42a` tree `40a40f4bda0765ef6cbc8eec2f9e2ba4468f4f3c`, main base `da00f92aee9afb2c125f7aa8bb903999548a35be`.
+Existing observer only; no new framework, environment, ref or Cairn pilot.
+Playwright1.64.1 image unchanged. No Cargo, Cairn runtime/fixtures or local browser.
+Original actual product readAvailability factory and BeaconApp polling source are
+embedded with minimal state/session adapters; these are NOT application/Vue coverage.
+The actual unmodified source probe and loopback HTTP gate are used. Same clock
+install/pause/runFor3100/resume seed and real Page.goto, no native timer substitution,
+no timeout changes, no sleeps/retries/filtering. Job25min and steps5min; observations
+and independent owned closures7s. Source and script identity required before/after.
 
-Exactly ONE WebKit initial-retired cell. The only new variable after the
-unchanged clock.install/pauseAt/runFor3100/resume seed, BEFORE Page.goto, is
-window.setTimeout/clearTimeout replaced with bound native originals captured by
-pinned Playwright globalThis.__pwClock.builtins before fake install(). Require
-both original functions and successful distinct-to-identical identity receipts;
-missing/ambiguous originals are red. Do NOT uninstall the clock, change Date,
-performance or AbortSignal, or alter the 3000ms poll interval. This private pinned
-clock interface is diagnostic only and must not become a product dependency.
+Fixed eight selected boundaries, sequential in one job:
+1 Chromium fetch held before headers: native owned abort, original rejection,
+  wire cancelled BEFORE gate release/cleanup; precise next200 on3s cadence with destination held.
+2 WebKit same.
+3 WebKit headers200/body held: original JSON started, owned abort and original
+  body rejection, same precise periodic replacement before destination commit.
+4/5 WebKit real connection failure BEFORE headers / DURING JSON body, actual
+  TypeError terminal BEFORE later Page.goto, offline/failure retained, no attribution.
+6 WebKit genuine503 headers, JSON deliberately not invoked, native caller abort
+  and held wire closed/cancelled BEFORE release/pageclose/gateclose; offline/status kept.
+7 WebKit actual native abort deferred until OUTSIDE factory/probe owned call,
+  original exact-reason or native AbortError terminal retained, poll offline/refusal.
+8 WebKit negative private signal/native proof with deliberately distinct wire signal:
+  original promise MUST remain active under gate after proof; then exact original200
+  body MUST settle before destination commit. Pending alone never passes this cell.
 
-Previous same initial-retired control: run42595694869/artifact13663865688 SHA256
-947f7915a598303db47fce13f827d3ef3cbf8c9b16bbbab9e5525a376aa57b64.
-That control acquired initial HTTP closure+browsercheckpoint before read3, but
-still observed native error/no ingress/one pageerror; it remains red. It is NOT
-rerun. Source clock.resume resumes the fake-clock pump; this does not prove clock
-causality. Compare only actual native read/gate receipts under the single timeout
-scheduler substitution; no sleeps, retry, lease, filter or broad cancellation.
+Negative adapters return every original fetch/json promise and Response unchanged.
+One combined init script installs adapters before the unmodified actual probe callback;
+this fixes capture order for deferred-call evidence. No clone/body/stream getter.
+Known injected negative failures are identified by exact cell/read/kind; all pageerrors
+remain strict and unexpected failures/orphan/duplicate/missing phase terminals red.
+All eight cells and owned closure must complete; interruption/unknown never green.
+Native terminal evidence only: product/retained-polling/global genuine-failure/BFCache
+qualification flags remain false even if controls pass. Application DirectRelay,
+retained download/second departure, physical BFCache, auth401, exact primary command,
+quality/format and full mapped dependants still require exact product qualification.
 
-Keep actual b9 transport/poll/probe/gate, engine/device, Page.goto, first HTTP
-retirement boundary, all journal and closure/error guards. baselineMatched=false
-and contrastObserved=false; any causal interpretation must cite both original
-receipts and limits. Positive exact body is only scheduler evidence; native error,
-pageerror, unknown or closure failure remains red. No product, retained-polling,
-physical BFCache or genuine-failure qualification here. The proposed product
-branch may contain later test-only corrections but this diagnostic MUST checkout
-immutable b9f1e7010345e5e0d1172c79a540344f7a1b0772 for the paired comparison.
-
-The original 7-second observation/closure budgets, 5-minute steps and 25-minute job
-remain. Source and diagnostic hashes must agree before/after. All first failures
-and traces remain private. No headers/cookies/query values/tokens are projected.
-
-Retained download polling, physical BFCache, genuine failure handling, DirectRelay,
-auth and full product qualification remain unqualified here. The exact full
-qualification workflow remains preserved in observer history at d393b882bd2cc80b68734263ac453ef1556eba84.
-
-Archive note: the old skill-availability-probe is unselected and must not run.
-Its two previously identified P2 lifecycle/body barriers remain open; this
-observation does not resolve them. Only availability-reader-native.mjs executes.
+Prior XHR/native scheduler failures remain unchanged in history; no baseline is rerun.
+The old skill-availability-probe is unselected. Its two P2 lifecycle/body barriers remain
+OPEN, not resolved by any selected-control verdict. Product P1 remains OPEN until
+real corrected application qualification succeeds. No remote effects from reviewers.
