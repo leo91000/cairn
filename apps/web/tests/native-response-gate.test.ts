@@ -83,6 +83,7 @@ async function fixture(availabilityHeaders = Promise.resolve()) {
   function call(path: string, method = 'GET', body = '', target = origin) {
     const result = Promise.withResolvers<{ status?: number, body: string }>()
     let responseSeen = false
+    let responseStatus: number | undefined
     let disposition: string | undefined
     const client = request(gate.server, {
       method,
@@ -90,6 +91,7 @@ async function fixture(availabilityHeaders = Promise.resolve()) {
       headers: { host: new URL(target).host, cookie: 'fixture-only', origin },
     }, (response) => {
       responseSeen = true
+      responseStatus = response.statusCode
       disposition = response.headers['content-disposition']
       void (async () => {
         const chunks: Buffer[] = []
@@ -104,6 +106,7 @@ async function fixture(availabilityHeaders = Promise.resolve()) {
       client,
       result: result.promise,
       responseSeen: () => responseSeen,
+      responseStatus: () => responseStatus,
       disposition: () => disposition,
     }
   }
@@ -130,6 +133,7 @@ it('holds real HTTP headers until release and observes complete delivery', async
   held.release()
   expect(await read.result).toEqual({ status: 200, body: '[{"online":true}]' })
   await vi.waitFor(() => expect(held.terminal).toBe('finished'))
+  expect(held.headersDelivered).toBe(true)
   gate.check()
 })
 
@@ -140,6 +144,7 @@ it('delivers genuine headers while holding the native response body', async () =
   let delivered = false
   void read.result.then(() => delivered = true, () => delivered = true)
   await vi.waitFor(() => expect(read.responseSeen()).toBe(true))
+  expect(read.responseStatus()).toBe(200)
   expect(held.ready).toBe(true)
   expect(held.received).toBe(true)
   expect(held.status).toBe(200)
@@ -160,6 +165,7 @@ it('advances only genuine headers while retaining the body until caller cancella
   expect(read.responseSeen()).toBe(false)
   held.releaseHeaders()
   await vi.waitFor(() => expect(read.responseSeen()).toBe(true))
+  expect(read.responseStatus()).toBe(200)
   expect(held.status).toBe(200)
   expect(held.headersDelivered).toBe(true)
   expect(held.bodyReleased).toBe(false)
@@ -168,6 +174,21 @@ it('advances only genuine headers while retaining the body until caller cancella
   await vi.waitFor(() => expect(held.closed).toBe(true))
   expect(held.terminal).toBe('cancelled')
   expect(held.bodyReleased).toBe(false)
+  gate.check()
+})
+
+it('holds the real inert health destination until the old document has retired its read', async () => {
+  const { gate, call } = await fixture()
+  const held = gate.hold('health')
+  const read = call('/health')
+  await vi.waitFor(() => expect(held.ready).toBe(true))
+  expect(read.responseSeen()).toBe(false)
+  expect(() => held.releaseHeaders()).toThrow('Only an unchanged availability response')
+  held.release()
+  expect(await read.result).toEqual({ status: 200, body: '[{"online":true}]' })
+  await vi.waitFor(() => expect(held.closed).toBe(true))
+  expect(held.terminal).toBe('finished')
+  expect(held.headersDelivered).toBe(true)
   gate.check()
 })
 

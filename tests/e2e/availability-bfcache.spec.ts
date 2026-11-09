@@ -22,6 +22,9 @@ const cacheTest = test.extend<{ responseGate: Awaited<ReturnType<typeof nativeRe
   proxy: async ({ responseGate }, use) => use({ server: responseGate.server }),
 })
 
+// Only Chromium has this default disabling switch; filtering it is inert for WebKit.
+cacheTest.use({ launchOptions: { ignoreDefaultArgs: ['--disable-back-forward-cache'] } })
+
 cacheTest('availability restores the same native document from BFCache with an exact fresh body', async ({ page, workspace, responseGate }, testInfo) => {
   const reads: AvailabilityReadEvent[] = []
   const errors: string[] = []
@@ -40,6 +43,9 @@ cacheTest('availability restores the same native document from BFCache with an e
   await workspace.restart()
   await installAvailabilityProbe(page, record)
   let poll: ReturnType<typeof responseGate.hold> | undefined
+  let destination: ReturnType<typeof responseGate.hold> | undefined
+  let navigation: Promise<unknown> | undefined
+  let withdrawalReceipt: { headersDelivered: boolean, bodyReleased: boolean, closed: boolean, terminal: string } | undefined
   let originalDocument: string | undefined
   let heldRead: number | undefined
   let journalAcknowledged = false
@@ -62,7 +68,7 @@ cacheTest('availability restores the same native document from BFCache with an e
     await expect.poll(() => reads.some(event => event.document === original && event.kind === 'body')).toBe(true)
     await harvest()
     const earlierReads = reads.filter(event => event.document === original && event.kind === 'start').length
-    poll = responseGate.hold('availability')
+    poll = responseGate.holdBody()
     await expect.poll(() => {
       responseGate.check()
       return poll!.ready
@@ -74,16 +80,31 @@ cacheTest('availability restores the same native document from BFCache with an e
     const target = reads.filter(event => event.document === original && event.kind === 'start').at(-1)!.read
     heldRead = target
     expect(poll.status).toBe(200)
-    const departed = await page.goto(new URL('/health', workspace.url).href)
-    expect(departed?.status()).toBe(200)
-    poll.release()
-    await harvest()
-    expect(events(original, target).filter(event => event.kind === 'abort').map(event => ({ trusted: event.trusted, exactTarget: event.exactTarget, insideAbortCall: event.insideAbortCall })))
+    await expect.poll(() => events(original, target).filter(event => event.kind === 'body-start').length).toBe(1)
+    destination = responseGate.hold('health')
+    const arrival = page.goto(new URL('/health', workspace.url).href).then(response => ({ response }), (error: unknown) => ({ error }))
+    navigation = arrival
+    await expect.poll(() => destination!.ready).toBe(true)
+    expect(destination.status).toBe(200)
+    await expect.poll(() => events(original, target).filter(event => event.kind === 'abort').map(event => ({ trusted: event.trusted, exactTarget: event.exactTarget, insideAbortCall: event.insideAbortCall })))
       .toEqual([{ trusted: true, exactTarget: true, insideAbortCall: true }])
+    await expect.poll(() => events(original, target).filter(event => event.kind === 'body-rejected').map(event => event.aborted)).toEqual([true])
     expect(events(original, target).filter(event => event.kind === 'body')).toEqual([])
+    await expect.poll(() => {
+      responseGate.check()
+      return poll!.closed && poll!.terminal === 'cancelled' && !poll!.bodyReleased
+    }).toBe(true)
+    withdrawalReceipt = { headersDelivered: poll.headersDelivered, bodyReleased: poll.bodyReleased, closed: poll.closed, terminal: poll.terminal }
+    poll.release()
+    destination.release()
+    const departed = await arrival
+    if ('error' in departed)
+      throw departed.error
+    expect(departed.response?.status()).toBe(200)
+    await harvest()
     expect(reads.filter(event => event.document === original && event.kind === 'pagehide').map(event => ({ persisted: event.persisted, trusted: event.trusted })))
       .toEqual([{ persisted: true, trusted: true }])
-    await expect.poll(() => poll!.closed && ['cancelled', 'finished'].includes(poll!.terminal)).toBe(true)
+    expect(poll.terminal).toBe('cancelled')
     await page.goBack()
     expect(await page.evaluate(() => window.cairnAvailabilityDocument)).toBe(original)
     await harvest()
@@ -101,6 +122,7 @@ cacheTest('availability restores the same native document from BFCache with an e
   }
   finally {
     poll?.release()
+    destination?.release()
     const bounded = async (close: () => Promise<unknown>) => {
       let timer: ReturnType<typeof setTimeout> | undefined
       try {
@@ -115,6 +137,10 @@ cacheTest('availability restores the same native document from BFCache with an e
     for (const closure of closures) {
       if (closure.status === 'rejected')
         failures.push(closure.reason)
+    }
+    if (navigation) {
+      try { await bounded(() => navigation!) }
+      catch (cause) { failures.push(cause) }
     }
   }
 
@@ -140,6 +166,8 @@ cacheTest('availability restores the same native document from BFCache with an e
       journalAcknowledged,
       originalDocument: originalDocument ?? null,
       heldRead: heldRead ?? null,
+      withdrawalReceipt: withdrawalReceipt ?? null,
+      destination: destination ? { received: destination.received, ready: destination.ready, status: destination.status ?? null, terminal: destination.terminal, closed: destination.closed } : null,
       reads,
       pageErrors: errors,
       poll: poll

@@ -2,7 +2,7 @@ import type { ClientRequest } from 'node:http'
 import { once } from 'node:events'
 import { Agent, createServer, request as httpRequest } from 'node:http'
 
-export type ResponseKind = 'availability' | 'agents'
+export type ResponseKind = 'availability' | 'agents' | 'health'
 
 export interface HeldResponse {
   received: boolean
@@ -112,7 +112,9 @@ export async function nativeResponseGate(origin: string) {
 
     const kind = request.method === 'GET' && target.pathname === '/api/installations'
       ? 'availability'
-      : request.method === 'GET' && /^\/installations\/[\w-]+\/agents$/.test(target.pathname) ? 'agents' : undefined
+      : request.method === 'GET' && /^\/installations\/[\w-]+\/agents$/.test(target.pathname)
+        ? 'agents'
+        : request.method === 'GET' && target.pathname === '/health' ? 'health' : undefined
     const held = kind ? next.get(kind) : undefined
     if (kind && held) {
       held.response.received = true
@@ -162,14 +164,20 @@ export async function nativeResponseGate(origin: string) {
         if (held?.unavailable) {
           source.resume()
           response.writeHead(503, { 'content-type': 'application/json' }).end('{"error":"Installation status unavailable"}')
+          held.response.headersDelivered = true
           return
         }
 
         const headers = held?.downloads()
           ? { ...source.headers, 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="availability-navigation.html"' }
           : source.headers
-        if (!response.headersSent)
+        if (!response.headersSent) {
           response.writeHead(source.statusCode || 502, headers)
+          response.flushHeaders()
+        }
+        if (held)
+          held.response.headersDelivered = true
+
         source.pipe(response)
       })()
       deliveries.add(delivery)
