@@ -66,7 +66,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
     const open = XMLHttpRequest.prototype.open
     const send = XMLHttpRequest.prototype.send
     const abort = XMLHttpRequest.prototype.abort
-    XMLHttpRequest.prototype.open = function (method, url, async = true, username, password) {
+    XMLHttpRequest.prototype.open = function (this: XMLHttpRequest, method: string, url: string | URL, async = true, username?: string | null, password?: string | null) {
       if (method === 'GET' && String(url) === '/api/installations') {
         const meta = {
           read: ++sequence,
@@ -128,7 +128,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
       return open.call(this, method, url, async, username, password)
     }
 
-    XMLHttpRequest.prototype.send = function (body) {
+    XMLHttpRequest.prototype.send = function (this: XMLHttpRequest, body?: Document | XMLHttpRequestBodyInit | null) {
       const meta = metadata.get(this)
       if (meta && !meta.started) {
         meta.started = true
@@ -144,7 +144,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
       return send.call(this, body)
     }
 
-    XMLHttpRequest.prototype.abort = function () {
+    XMLHttpRequest.prototype.abort = function (this: XMLHttpRequest) {
       const meta = metadata.get(this)
       if (!meta)
         return abort.call(this)

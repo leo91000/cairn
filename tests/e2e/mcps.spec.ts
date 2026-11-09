@@ -98,14 +98,14 @@ for (const pending of ['authorization', 'offer'] as const) {
       const availability = new WeakSet<XMLHttpRequest>()
       const open = XMLHttpRequest.prototype.open
       const send = XMLHttpRequest.prototype.send
-      XMLHttpRequest.prototype.open = function (method, url, async = true, username, password) {
+      XMLHttpRequest.prototype.open = function (this: XMLHttpRequest, method: string, url: string | URL, async = true, username?: string | null, password?: string | null) {
         availability.delete(this)
         if (method === 'GET' && String(url) === '/api/installations')
           availability.add(this)
         return open.call(this, method, url, async, username, password)
       }
 
-      XMLHttpRequest.prototype.send = function (body) {
+      XMLHttpRequest.prototype.send = function (this: XMLHttpRequest, body?: Document | XMLHttpRequestBodyInit | null) {
         if (availability.has(this) && departing)
           void window.cairnOAuthProbe({ kind: 'background' })
         return send.call(this, body)
