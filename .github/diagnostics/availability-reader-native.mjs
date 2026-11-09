@@ -8,7 +8,7 @@ import { chromium, devices, expect, webkit } from '@playwright/test'
 
 const output = 'test-results/reader-native'
 await mkdir(output, { recursive: true })
-const control = 'owned-keepalive-fetch-original-terminals'
+const control = 'owned-keepalive-fetch-remaining-negatives'
 const paths = {
   gate: 'tests/e2e/native-response-gate.ts',
   probe: 'tests/e2e/availability-probe.ts',
@@ -17,6 +17,28 @@ const paths = {
 }
 const sources = Object.fromEntries(await Promise.all(Object.entries(paths).map(async ([key, path]) => [key, await readFile(path, 'utf8')])))
 const sourceHashes = Object.fromEntries(Object.entries(sources).map(([key, value]) => [key, createHash('sha256').update(value).digest('hex')]))
+const acquiredPositiveEvidence = {
+  "runId": 42618105477,
+  "observer": "52fdc119a120c75580ff883ae4f1e90b43e2f18f",
+  "product": "721b3028d0b5464ec2ba019a87697bfb460d67df",
+  "artifactId": 13673846042,
+  "artifactSha256": "b3f9a74e690495005f9afc641801a3e7ba5f211e60c9bc7d330714aa7648ccea",
+  "originalRunConclusion": "failure",
+  "fullEightCellRunComplete": false,
+  "observedPositiveCells": [
+    "chromium-owned-fetch",
+    "webkit-owned-fetch",
+    "webkit-owned-body"
+  ],
+  "runtimeSourceHashes": {
+    "transport": "ce1137a3b2e13b31186ac5871678e5b05316a9a99349f388dd9ce197411f400b",
+    "probe": "6f7a76ea28c5f3a3ff0bae411e9541d6ff93e5a7e178def116de4a8d914eecfa",
+    "shell": "805ddd3d9fb33f0b1bea89ce1bd1860bedb8d8a0eb815355ac50f878e62b0bb1"
+  },
+  "originalGateSha256": "535feba4da7fefc2f78f08d664980d7d71959efb54849a26cd3499958ce0fa4f"
+}
+for (const [key, sha256] of Object.entries(acquiredPositiveEvidence.runtimeSourceHashes))
+  assert.equal(sourceHashes[key], sha256, 'Previously observed positive runtime source changed: ' + key)
 const loadTypeScript = text => import('data:text/javascript;base64,' + Buffer.from(stripTypeScriptTypes(text)).toString('base64'))
 const { nativeResponseGate } = await loadTypeScript(sources.gate)
 const { installAvailabilityProbe, incompleteAvailabilityReads } = await loadTypeScript(sources.probe)
@@ -39,9 +61,6 @@ const bootstrap = `window.startDiagnosticPoll = () => {
   void refreshAvailability();
 };`
 const planned = [
-  { engine: 'chromium', mode: 'owned-fetch' },
-  { engine: 'webkit', mode: 'owned-fetch' },
-  { engine: 'webkit', mode: 'owned-body' },
   { engine: 'webkit', mode: 'fetch-failure-first' },
   { engine: 'webkit', mode: 'body-failure-first' },
   { engine: 'webkit', mode: 'unread-503' },
@@ -159,7 +178,8 @@ async function observe(browser, cell) {
   const writes = new Set()
   const gates = []
   let phase = 'setup'
-  let context, page, gate, navigation, documentId, initial, destination, next
+  let context, page, gate, navigation, documentId, initial, destination, next, outage
+  let outageEvidence
   let checkpoint, nativeEvents = [], initialClosureBeforeRelease = false, journalAcknowledged = false, navigationValidated = false
   let initialHeaderAdvance, initialClosureBoundary
   let pendingProof, state, finalAudit = { unknown: [], unexpected: [] }
@@ -279,6 +299,10 @@ async function observe(browser, cell) {
     else {
       if (cell.mode.endsWith('failure-first')) {
         await stage('real transport failure settles before any departure intent')
+        if (cell.mode === 'fetch-failure-first') {
+          outage = gate.failAvailabilityReads()
+          outageEvidence = { attemptsBeforeFault: gate.availabilityRequests, rejectedRequests: null, restoredBeforeIntent: false }
+        }
         initial.disconnect()
         await poll(() => terminal(2).length === 1)
         assert.equal(terminal(2)[0].kind, cell.mode === 'fetch-failure-first' ? 'rejected' : 'body-rejected')
@@ -289,6 +313,12 @@ async function observe(browser, cell) {
         assert.equal(state.failures, 1)
         await poll(() => initial.closed && initial.terminal === 'cancelled' && !initial.bodyReleased)
         initialClosureBeforeRelease = true
+        if (outage) {
+          outageEvidence.rejectedRequests = outage.rejectedRequests
+          outageEvidence.attemptsAfterTerminal = gate.availabilityRequests
+          outage.restore()
+          outageEvidence.restoredBeforeIntent = true
+        }
       }
       destination = addGate('destination', gate.hold('agents'))
       if (cell.mode.startsWith('owned-'))
@@ -383,6 +413,7 @@ async function observe(browser, cell) {
   catch (error) { remember(phase, error) }
   finally {
     // All failed observations remain red; closing one owner never gates another.
+    outage?.restore()
     for (const item of gates) item.response.release()
     const closures = [
       ...(page ? [['page', () => page.close()]] : []),
@@ -429,7 +460,7 @@ async function observe(browser, cell) {
   const observationComplete = journalAcknowledged && navigationValidated && !failures.length && !pageErrors.length
     && !ownCleanup.length && !finalAudit.unknown.length && !finalAudit.unexpected.length
   const row = { arm, control, diagnosticOnly: true, productQualified: false, observationComplete, phase,
-    documentId, state, pendingProof, stateReceipts, initialHeaderAdvance, initialClosureBoundary, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
+    documentId, state, pendingProof, stateReceipts, outageEvidence, initialHeaderAdvance, initialClosureBoundary, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
     allPageErrorsStrict: pageErrors.length === 0, pageErrors, failures, reads: received, nativeEvents, finalAudit,
     gates: gates.map(({ label, response }) => ({ label, received: response.received, ready: response.ready, status: response.status ?? null, terminal: response.terminal, closed: response.closed, headersDelivered: response.headersDelivered, bodyReleased: response.bodyReleased })), cleanupFailures: ownCleanup }
   rows.push(row)
@@ -437,7 +468,7 @@ async function observe(browser, cell) {
   console.log(JSON.stringify({ control, arm, observationComplete, pageErrors: pageErrors.length, cleanupFailures: ownCleanup.length }))
 }
 
-for (const engine of ['chromium', 'webkit']) {
+for (const engine of new Set(planned.map(cell => cell.engine))) {
   let browser
   try {
     browser = await observed(() => ({ chromium, webkit })[engine].launch(), engine + ' launch')
@@ -459,7 +490,7 @@ for (const engine of ['chromium', 'webkit']) {
 }
 const allCellsObserved = rows.length === planned.length && rows.every(row => row.observationComplete)
 const result = { control, diagnosticOnly: true, productQualified: false, retainedPollingQualified: false, bfCacheQualified: false,
-  genuineFailureHandlingQualified: false, sourceHashes, planned, allCellsObserved,
+  genuineFailureHandlingQualified: false, sourceHashes, acquiredPositiveEvidence, fullEightCellRunComplete: false, planned, allCellsObserved,
   allPageErrorsStrict: rows.every(row => row.allPageErrorsStrict), rows, cleanupFailures, engineFailures }
 await write('result.json', result)
 console.log(JSON.stringify({ ...result, rows: rows.length, cleanupFailures: cleanupFailures.length, engineFailures: engineFailures.length }))
