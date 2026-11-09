@@ -315,7 +315,7 @@ async function observe(browser, arm) {
   }
   const readAudit = auditReadJournal(received, documentId, nextRead, nextOutcome)
   const ownFailures = cleanupFailures.filter(entry => entry.arm === arm)
-  const observationComplete = !failures.length && !ownFailures.length && navigationValidated && journalAcknowledged
+  const observationComplete = !failures.length && !ownFailures.length && !pageErrors.length && navigationValidated && journalAcknowledged
     && nextOutcome !== 'unknown' && readAudit.unknownReads.length === 0 && readAudit.unexpectedFailures.length === 0
   const row = {
     arm, control, diagnosticOnly: true, productQualified: false,
