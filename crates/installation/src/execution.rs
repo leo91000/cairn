@@ -61,6 +61,36 @@ fn run_directory(run: &Value, config: &Config) -> PathBuf {
     config.data_dir.join("runs").join(text(run, "id"))
 }
 
+/// Validate the active plan's manager-side project path before mapping it onto a node.
+pub(crate) fn project_seed_path(root: &Path, plan: &Value, project: &str) -> Result<PathBuf> {
+    crate::validation::uuid(project)?;
+    let project_root = Path::new(text(plan, "projectRoot"));
+    let name = project_root.file_name().and_then(|name| name.to_str());
+    let managed = name.is_some_and(|name| {
+        name == "workspace"
+            || name
+                .strip_prefix("workspace-")
+                .is_some_and(|suffix| !suffix.is_empty())
+    });
+    if !project_root.is_absolute() || project_root.parent() != Some(root) || !managed {
+        return Err(Error::bad("Project seed is outside this run's workspace."));
+    }
+    Ok(project_root.join(project))
+}
+
+/// Open only a canonical immutable host seed, never a redirected guest workspace.
+pub(crate) async fn project_seed_source(
+    root: &Path,
+    plan: &Value,
+    project: &str,
+) -> Result<PathBuf> {
+    let source = project_seed_path(root, plan, project)?;
+    if tokio::fs::canonicalize(&source).await? != source {
+        return Err(Error::bad("Project seed changed location."));
+    }
+    Ok(source)
+}
+
 /// Workspace mounts follow the agent's read-only sandbox.
 fn read_only_workspaces(run: &Value) -> bool {
     Sandbox::is_read_only(&policy(&run["snapshot"]["agent"])["sandbox"])
@@ -288,3 +318,71 @@ pub(crate) async fn restore_authorized(
 }
 
 pub use home::{clear_run_credentials, credential_files};
+
+#[cfg(test)]
+mod seed_source_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn project_seed_sources_are_scoped_to_the_current_managed_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("run");
+        let project = crate::config::id();
+        for name in ["workspace", "workspace-fdeab5b6"] {
+            let project_root = root.join(name);
+            let source = project_root.join(&project);
+            std::fs::create_dir_all(&source).unwrap();
+            assert_eq!(
+                project_seed_source(&root, &json!({ "projectRoot": project_root }), &project)
+                    .await
+                    .unwrap(),
+                source
+            );
+        }
+        for project_root in [
+            PathBuf::new(),
+            PathBuf::from("workspace"),
+            root.clone(),
+            root.join("home"),
+            root.join("workspace-"),
+            root.join("workspace/../workspace-fdeab5b6"),
+            directory.path().join("another-run/workspace"),
+        ] {
+            assert!(
+                project_seed_source(&root, &json!({ "projectRoot": project_root }), &project)
+                    .await
+                    .is_err()
+            );
+        }
+        let workspace = root.join("workspace-symlink");
+        std::os::unix::fs::symlink(root.join("workspace"), &workspace).unwrap();
+        assert!(
+            project_seed_source(&root, &json!({ "projectRoot": workspace }), &project)
+                .await
+                .is_err()
+        );
+
+        let project_root = root.join("workspace-project-symlink");
+        std::fs::create_dir(&project_root).unwrap();
+        std::os::unix::fs::symlink(
+            root.join("workspace").join(&project),
+            project_root.join(&project),
+        )
+        .unwrap();
+        assert!(
+            project_seed_source(&root, &json!({ "projectRoot": project_root }), &project)
+                .await
+                .is_err()
+        );
+        assert!(
+            project_seed_source(
+                &root,
+                &json!({ "projectRoot": root.join("workspace") }),
+                "../home"
+            )
+            .await
+            .is_err()
+        );
+    }
+}
