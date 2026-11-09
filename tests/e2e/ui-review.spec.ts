@@ -61,12 +61,13 @@ test('reviews the open workspace layout and compact chat controls across themes 
   }
 
   await page.setViewportSize({ width: 1440, height: 1000 })
-  await page.getByRole('button', { name: 'Conversations', exact: true }).click()
-  await expect(page.getByRole('dialog', { name: 'Conversations' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Conversations', exact: true })).toBeHidden()
+  await page.keyboard.press('Control+k')
+  await expect(page.getByRole('dialog', { name: 'Search and commands' })).toBeVisible()
   await expect(page.locator('.activity-scroll')).toBeVisible()
   await expectSingleScroll(page)
-  await page.screenshot({ animations: 'disabled', path: testInfo.outputPath('chat-history-dark.png') })
-  await page.getByRole('button', { name: 'Close conversations' }).click()
+  await page.screenshot({ animations: 'disabled', path: testInfo.outputPath('chat-search-dark.png') })
+  await page.keyboard.press('Escape')
   await page.getByRole('button', { name: 'Stop response' }).click()
 
   for (const route of ['/tasks', '/agents', '/projects', '/skills', '/runs', '/mcps', '/connections', '/settings']) {
