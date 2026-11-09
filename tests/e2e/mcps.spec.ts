@@ -805,3 +805,171 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       throw new AggregateError([...(primaryFailure ? [primaryFailure] : []), ...cleanupFailures], `Availability navigation failed at ${stage}`)
   })
 }
+
+availabilityTest('availability preserves a scoped readonly outage before native navigation', async ({ page, workspace, responseGate }, testInfo) => {
+  const reads: AvailabilityReadEvent[] = []
+  const errors: string[] = []
+  const failures: unknown[] = []
+  const record = (event: AvailabilityReadEvent) => {
+    if (!reads.some(previous => previous.document === event.document && previous.sequence === event.sequence))
+      reads.push(event)
+  }
+  const harvest = async () => {
+    for (const event of await page.evaluate(() => JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]') as AvailabilityReadEvent[]))
+      record(event)
+  }
+  let stage = 'initial application'
+  let original: string | undefined
+  let target: number | undefined
+  let poll: ReturnType<typeof responseGate.hold> | undefined
+  let outage: ReturnType<typeof responseGate.failAvailabilityReads> | undefined
+  let expectedFailure: AvailabilityReadEvent | undefined
+  let faultWireReceipt: { closed: boolean, terminal: string, bodyReleased: boolean } | undefined
+  let primaryFailure: unknown
+  let journalAcknowledged = false
+  const evidence = {
+    attemptsBeforeFault: null as number | null,
+    attemptsAfterTerminal: null as number | null,
+    rejectedRequests: null as number | null,
+    healthyRouteStatus: null as number | null,
+    restoredBeforeNavigation: false,
+  }
+  page.on('pageerror', error => errors.push(error.message))
+  await workspace.restart()
+  await installAvailabilityProbe(page, record)
+  try {
+    await page.clock.install()
+    await page.goto(workspacePath('/mcps'))
+    await authenticateWorkspace(page)
+    await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
+    await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
+    original = await page.evaluate(() => window.cairnAvailabilityDocument)
+    await expect.poll(() => reads.some(event => event.document === original && event.kind === 'body')).toBe(true)
+    await expect.poll(() => incompleteAvailabilityReads(reads)).toEqual([])
+    await page.clock.pauseAt(new Date(Date.now() + 1000))
+    await harvest()
+    const earlier = reads.filter(event => event.document === original && event.kind === 'start').length
+    poll = responseGate.hold('availability')
+    stage = 'real periodic read held before headers'
+    await page.clock.runFor(3100)
+    await expect.poll(() => {
+      responseGate.check()
+      return poll!.ready
+    }).toBe(true)
+    expect(poll.status).toBe(200)
+    await harvest()
+    const started = reads.filter(event => event.document === original && event.kind === 'start')
+    expect(started.length).toBe(earlier + 1)
+    target = started.at(-1)!.read
+    const attemptsBeforeFault = responseGate.availabilityRequests
+    evidence.attemptsBeforeFault = attemptsBeforeFault
+    outage = responseGate.failAvailabilityReads()
+    poll.disconnect()
+    stage = 'original native failure during the owned readonly outage'
+    await expect.poll(() => reads.filter(event => event.document === original && event.read === target && event.kind === 'rejected').length).toBe(1)
+    expectedFailure = reads.find(event => event.document === original && event.read === target && event.kind === 'rejected')!
+    expect(expectedFailure.errorName).toBe('TypeError')
+    expect(expectedFailure.aborted).toBe(false)
+    expect(expectedFailure.afterPagehide).toBe(false)
+    expect(reads.filter(event => event.document === original && event.read === target && event.kind === 'abort')).toEqual([])
+    await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Offline')
+    evidence.healthyRouteStatus = await page.evaluate(async () => {
+      const response = await fetch('/health', { credentials: 'same-origin' })
+      await response.text()
+      return response.status
+    })
+    expect(evidence.healthyRouteStatus).toBe(200)
+    const rejectedRequests = outage.rejectedRequests
+    const attemptsAfterTerminal = responseGate.availabilityRequests
+    evidence.rejectedRequests = rejectedRequests
+    evidence.attemptsAfterTerminal = attemptsAfterTerminal
+    expect(attemptsAfterTerminal).toBe(attemptsBeforeFault + rejectedRequests)
+    await expect.poll(() => poll!.closed && poll!.terminal === 'cancelled' && !poll!.bodyReleased).toBe(true)
+    faultWireReceipt = { closed: poll.closed, terminal: poll.terminal, bodyReleased: poll.bodyReleased }
+    outage.restore()
+    evidence.restoredBeforeNavigation = true
+    stage = 'origin restored before the later native departure'
+    await page.clock.resume()
+    stage = 'restored origin serves the native destination'
+    await page.goto(workspacePath('/agents'))
+    await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
+    await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
+    expect(reads.filter(event => event.document === original && event.read === target && event.kind === 'abort')).toEqual([])
+    await expect.poll(() => incompleteAvailabilityReads(reads)).toEqual([])
+    stage = 'retire application and acknowledge its final journal'
+    await page.goto(new URL('/health', workspace.url).href)
+    await harvest()
+    journalAcknowledged = true
+  }
+  catch (cause) {
+    primaryFailure = cause
+  }
+  finally {
+    outage?.restore()
+    poll?.release()
+    const bounded = async (close: () => Promise<unknown>) => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        await Promise.race([
+          Promise.resolve().then(close),
+          new Promise((_, reject) => timer = setTimeout(() => reject(new Error('Outage owned cleanup deadline')), 7000)),
+        ])
+      }
+      finally {
+        clearTimeout(timer)
+      }
+    }
+    const closed = await Promise.allSettled([bounded(() => page.close()), bounded(() => responseGate.close())])
+    for (const result of closed) {
+      if (result.status === 'rejected')
+        failures.push(result.reason)
+    }
+  }
+  const audits = [
+    () => expect(incompleteAvailabilityReads(reads)).toEqual([]),
+    () => responseGate.check(),
+    () => expect(reads.filter(event => ['rejected', 'body-rejected'].includes(event.kind) && !event.aborted
+      && !(expectedFailure && event.document === expectedFailure.document && event.sequence === expectedFailure.sequence))).toEqual([]),
+    () => expect(reads.filter(event => event.kind === 'headers' && event.status !== 200)).toEqual([]),
+    () => expect(errors).toEqual([]),
+  ]
+  for (const audit of audits) {
+    try {
+      audit()
+    }
+    catch (cause) {
+      failures.push(cause)
+    }
+  }
+  try {
+    saveAvailabilityObservation(testInfo.outputPath('availability-outage-observation.json'), JSON.stringify({
+      stage,
+      original: original ?? null,
+      target: target ?? null,
+      expectedFailure: expectedFailure ?? null,
+      faultWireReceipt: faultWireReceipt ?? null,
+      finalAvailabilityRequests: responseGate.availabilityRequests,
+      finalRejectedRequests: outage?.rejectedRequests ?? null,
+      poll: poll
+        ? {
+            received: poll.received,
+            ready: poll.ready,
+            status: poll.status ?? null,
+            terminal: poll.terminal,
+            closed: poll.closed,
+            headersDelivered: poll.headersDelivered,
+            bodyReleased: poll.bodyReleased,
+          }
+        : null,
+      evidence,
+      journalAcknowledged,
+      reads,
+      pageErrors: errors,
+    }))
+  }
+  catch (cause) {
+    failures.push(cause)
+  }
+  if (primaryFailure || failures.length)
+    throw new AggregateError([...(primaryFailure ? [primaryFailure] : []), ...failures], 'Application availability outage qualification failed')
+})
