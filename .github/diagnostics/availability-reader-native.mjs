@@ -8,7 +8,7 @@ import { devices, expect, webkit } from '@playwright/test'
 
 const output = 'test-results/reader-native'
 await mkdir(output, { recursive: true })
-const control = 'webkit-next-read-with-initial-gate-retired-only'
+const control = 'webkit-next-read-native-scheduler-initial-retired-only'
 const paths = {
   gate: 'tests/e2e/native-response-gate.ts',
   probe: 'tests/e2e/availability-probe.ts',
@@ -146,6 +146,7 @@ async function observe(browser, arm) {
   let journalAcknowledged = false
   let initialRetiredBeforeNextStart = false
   let retirementBoundary
+  let schedulerProof
   let nextOutcome = 'unknown'
   let initial, destination, next
   const ownedFailure = (actor, error) => cleanupFailures.push({ arm, actor, error: errorRecord(error) })
@@ -213,6 +214,27 @@ async function observe(browser, arm) {
     await poll(() => received.filter(event => event.document === documentId && event.kind === 'start').length === earlierReads + 1)
     firstRead = received.filter(event => event.document === documentId && event.kind === 'start').at(-1).read
     await observed(() => page.clock.resume(), 'same primary real-time clock resume')
+    await stage('substitute only native timeout scheduling after the unchanged seed')
+    schedulerProof = await evaluate(() => {
+      // Playwright1.64.1 inject() captures bound native builtins BEFORE install().
+      // Do not uninstall the clock or change Date/performance/AbortSignal here.
+      const originals = globalThis.__pwClock?.builtins
+      if (typeof originals?.setTimeout !== 'function' || typeof originals?.clearTimeout !== 'function')
+        throw new Error('Pinned Playwright native timeout originals unavailable')
+      const installedTimeout = window.setTimeout
+      const installedClear = window.clearTimeout
+      if (installedTimeout === originals.setTimeout || installedClear === originals.clearTimeout)
+        throw new Error('Expected the installed fake timeout pair before substitution')
+      window.setTimeout = originals.setTimeout
+      window.clearTimeout = originals.clearTimeout
+      return {
+        timeoutChanged: installedTimeout !== window.setTimeout,
+        clearChanged: installedClear !== window.clearTimeout,
+        timeoutMatchesOriginal: window.setTimeout === originals.setTimeout,
+        clearMatchesOriginal: window.clearTimeout === originals.clearTimeout,
+      }
+    })
+    assert.deepEqual(schedulerProof, { timeoutChanged: true, clearChanged: true, timeoutMatchesOriginal: true, clearMatchesOriginal: true })
     await stage('native Page.goto destination held')
     navigation = page.goto(origin + '/installations/fixture/agents').then(() => ({ kind: 'committed' }), error => ({ kind: 'rejected', error: errorRecord(error) }))
     await poll(() => destination.ready)
@@ -320,7 +342,7 @@ async function observe(browser, arm) {
   const row = {
     arm, control, diagnosticOnly: true, productQualified: false,
     observationComplete, nextOutcome, firstRead, nextRead, documentId,
-    initialRetiredBeforeNextStart, retirementBoundary, navigationValidated, journalAcknowledged,
+    initialRetiredBeforeNextStart, retirementBoundary, schedulerProof, navigationValidated, journalAcknowledged,
     allPageErrorsStrict: pageErrors.length === 0, pageErrors, failures,
     reads: received, nativeEvents, readAudit,
     gates: gates.map(({ label, response }) => ({ label, received: response.received, ready: response.ready, status: response.status ?? null, terminal: response.terminal, closed: response.closed })),
@@ -356,9 +378,9 @@ const result = {
   retainedPollingQualified: false, genuineFailureHandlingQualified: false,
   sourceHashes, observeFunctionSha256: createHash('sha256').update(observe.toString()).digest('hex'), planned, allCellsObserved,
   baselineMatched: false, contrastObserved: false,
-  priorBaselineReference: { runId: 42593972210, artifactId: 13662287543, sha256: '869c4eed43fc93f4cb333a3b1b8e9170493389ecab89e4137337cb4665d20f17' },
+  priorBaselineReference: { runId: 42595694869, artifactId: 13663865688, sha256: '947f7915a598303db47fce13f827d3ef3cbf8c9b16bbbab9e5525a376aa57b64' },
   initialRetiredArmObserved: Boolean(initialRetiredArmObserved),
-  earlyRetirementAdmitsExactBody: initialRetiredArmObserved ? rows[0].nextOutcome === 'exact-200-body' : null,
+  nativeSchedulerAdmitsExactBody: initialRetiredArmObserved ? rows[0].nextOutcome === 'exact-200-body' : null,
   allPageErrorsStrict: rows.every(row => row.allPageErrorsStrict),
   rows, cleanupFailures, engineFailures,
 }

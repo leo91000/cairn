@@ -1,6 +1,6 @@
 # Focused WebKit gate-retirement diagnostic
 
-Product `b9f1e7010345e5e0d1172c79a540344f7a1b0772` tree `4bd409a19890fe30a4ef4d6e8ec5b99eaea6bca4`, base main `7028fbfdd6d13e27b8f4e7db767899828d631b42`.
+Product `b9f1e7010345e5e0d1172c79a540344f7a1b0772` tree `1046270fa120e8a3156f44cfcb63532dd8fe6c7c`, base main `7028fbfdd6d13e27b8f4e7db767899828d631b42`.
 Diagnostic only: no Cargo, Cairn runtime, fixtures or product qualification.
 Pinned Playwright 1.64.1; real loopback HTTP proxy; actual product availability
 transport, BeaconApp polling block and e2e observer. Minimal session/state adapters
@@ -8,23 +8,31 @@ are not Vue/application integration coverage. The ordinary MCP WebKit device
 settings, Page.goto stimulus and original clock install/pause/runFor/resume
 sequence are used in both arms.
 
-Exactly ONE WebKit cell: initial-retired. The previously acquired initial-held
-cell is NOT rerun. Run42593972210/artifact13662287543 SHA256
-869c4eed43fc93f4cb333a3b1b8e9170493389ecab89e4137337cb4665d20f17
-retains its native read3 error, zero proxy ingress after owned closure, exact
-initial read2 abort, complete read journal, one native access-control pageerror
-and strict red exit. That pageerror stopped the second cell. No baseline is
-turned green or represented as a new complete two-cell contrast.
+Exactly ONE WebKit initial-retired cell. The only new variable after the
+unchanged clock.install/pauseAt/runFor3100/resume seed, BEFORE Page.goto, is
+window.setTimeout/clearTimeout replaced with bound native originals captured by
+pinned Playwright globalThis.__pwClock.builtins before fake install(). Require
+both original functions and successful distinct-to-identical identity receipts;
+missing/ambiguous originals are red. Do NOT uninstall the clock, change Date,
+performance or AbortSignal, or alter the 3000ms poll interval. This private pinned
+clock interface is diagnostic only and must not become a product dependency.
 
-The SAME observe() implementation now acquires only the missing cell: release
-initial bytes, acknowledge HTTP closure and a synchronous browser journal
-boundary BEFORE the next ordinary poll; keep destination held. Actual source,
-engine, device, clock, Page.goto, deadlines, error guards and cleanup are
-unchanged. A native rejection or any pageerror stays red. Pending, unknown,
-missing terminal, unexpected error or cleanup failure stays non-green. The
-result has baselineMatched=false and contrastObserved=false; any comparison
-with the prior baseline must cite both original receipts and its limitations.
-Retained polling, BFCache and product integration are NOT qualified.
+Previous same initial-retired control: run42595694869/artifact13663865688 SHA256
+947f7915a598303db47fce13f827d3ef3cbf8c9b16bbbab9e5525a376aa57b64.
+That control acquired initial HTTP closure+browsercheckpoint before read3, but
+still observed native error/no ingress/one pageerror; it remains red. It is NOT
+rerun. Source clock.resume resumes the fake-clock pump; this does not prove clock
+causality. Compare only actual native read/gate receipts under the single timeout
+scheduler substitution; no sleeps, retry, lease, filter or broad cancellation.
+
+Keep actual b9 transport/poll/probe/gate, engine/device, Page.goto, first HTTP
+retirement boundary, all journal and closure/error guards. baselineMatched=false
+and contrastObserved=false; any causal interpretation must cite both original
+receipts and limits. Positive exact body is only scheduler evidence; native error,
+pageerror, unknown or closure failure remains red. No product, retained-polling,
+physical BFCache or genuine-failure qualification here. The proposed product
+branch may contain later test-only corrections but this diagnostic MUST checkout
+immutable b9f1e7010345e5e0d1172c79a540344f7a1b0772 for the paired comparison.
 
 The original 7-second observation/closure budgets, 5-minute steps and 25-minute job
 remain. Source and diagnostic hashes must agree before/after. All first failures

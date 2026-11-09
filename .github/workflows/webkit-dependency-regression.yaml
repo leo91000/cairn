@@ -1,11 +1,11 @@
-name: Availability retired initial gate diagnostic only
+name: Availability native timeout scheduler diagnostic only
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   reader:
-    name: WebKit initial gate retired ONLY (NOT product qualification)
+    name: WebKit native timeouts ONLY (NOT product qualification)
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -37,7 +37,7 @@ jobs:
           mkdir -p test-results/reader-native
           git -c safe.directory="$GITHUB_WORKSPACE" show "$OBSERVER_SHA:.github/diagnostics/availability-reader-native.mjs" > test-results/reader-native/run.mjs
           sha256sum test-results/reader-native/run.mjs tests/e2e/native-response-gate.ts tests/e2e/availability-probe.ts apps/web/src/availability-read.ts apps/web/src/BeaconApp.vue > test-results/reader-native/sources.sha256
-          printf 'observer=%s\nproduct=b9f1e7010345e5e0d1172c79a540344f7a1b0772\nmode=webkit-next-read-with-initial-gate-retired-only\n' "$OBSERVER_SHA" > test-results/reader-native/source.txt
+          printf 'observer=%s\nproduct=b9f1e7010345e5e0d1172c79a540344f7a1b0772\nmode=webkit-next-read-native-scheduler-initial-retired-only\n' "$OBSERVER_SHA" > test-results/reader-native/source.txt
       - uses: ./.github/actions/setup-pnpm
         timeout-minutes: 5
         with:
@@ -53,7 +53,7 @@ jobs:
           assert.equal(installed, '1.64.1')
           assert.equal(image, installed)
           JS
-      - name: Observe only the missing initial-retired WebKit cell once
+      - name: Observe only native timeouts after the identical WebKit seed
         timeout-minutes: 5
         run: node test-results/reader-native/run.mjs
       - name: Require unchanged product and diagnostic bytes
