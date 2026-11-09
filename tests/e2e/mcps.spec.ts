@@ -359,6 +359,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
     let poll: ReturnType<typeof responseGate.hold> | undefined
     let navigationResponse: ReturnType<typeof responseGate.hold> | undefined
     let navigation: Promise<unknown> | undefined
+    let navigationValidated = false
     page.on('pageerror', error => errors.push(error.message))
     // Accepted grants belong to this worker's earlier pages until expiry. Use
     // the existing tunnel reset to establish real capacity before this case.
@@ -514,6 +515,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
           expect(await arrival).toBeUndefined()
         }
 
+        navigationValidated = true
         await harvestReads()
         // Always release owned HTTP bytes before waiting for their terminal receipt.
         poll.release()
@@ -567,7 +569,6 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       poll?.release()
       navigationResponse?.release()
       try {
-        await navigation?.catch(() => {})
         if (!page.isClosed())
           await page.close()
       }
@@ -596,6 +597,16 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       }
       catch (error) {
         cleanupFailures.push(error)
+      }
+
+      // Page and HTTP closure can terminate a still-pending navigation. Never
+      // gate those cleanup attempts on the navigation they need to terminate.
+      try {
+        await navigation
+      }
+      catch (error) {
+        if (!navigationValidated)
+          cleanupFailures.push(error)
       }
     }
 
