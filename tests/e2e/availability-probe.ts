@@ -174,3 +174,14 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
     }
   })
 }
+
+// A final journal must account for every producer, including retired documents.
+// A known HTTP status alone does not establish native request/body settlement.
+export function incompleteAvailabilityReads(reads: readonly AvailabilityReadEvent[]) {
+  const starts = reads.filter(event => event.kind === 'start')
+  const terminals = reads.filter(event => ['body', 'body-rejected', 'rejected'].includes(event.kind))
+  return starts.filter((start) => {
+    const sameRead = (event: AvailabilityReadEvent) => event.document === start.document && event.read === start.read
+    return starts.filter(sameRead).length !== 1 || terminals.filter(sameRead).length !== 1
+  })
+}

@@ -1,6 +1,6 @@
 import type { AvailabilityReadEvent } from './availability-probe'
 import { writeFileSync as saveAvailabilityObservation } from 'node:fs'
-import { installAvailabilityProbe } from './availability-probe'
+import { incompleteAvailabilityReads, installAvailabilityProbe } from './availability-probe'
 import {
   expect,
   signIn,
@@ -120,6 +120,7 @@ cacheTest('availability restores the same native document from BFCache with an e
 
   // Audit independently so simultaneous native/HTTP/page errors all survive.
   const audits = [
+    () => expect(incompleteAvailabilityReads(reads)).toEqual([]),
     () => responseGate.check(),
     () => expect(reads.filter(event => ['rejected', 'body-rejected'].includes(event.kind) && !event.aborted)).toEqual([]),
     () => expect(reads.filter(event => event.kind === 'headers' && event.status !== 200)).toEqual([]),

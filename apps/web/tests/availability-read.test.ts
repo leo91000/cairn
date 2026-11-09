@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test'
+import type { AvailabilityReadEvent } from '../../../tests/e2e/availability-probe'
 import assert from 'node:assert/strict'
 import {
   afterEach,
@@ -6,7 +7,7 @@ import {
   it,
   vi,
 } from 'vitest'
-import { installAvailabilityProbe } from '../../../tests/e2e/availability-probe'
+import { incompleteAvailabilityReads, installAvailabilityProbe } from '../../../tests/e2e/availability-probe'
 import { AvailabilityDeparture, readAvailability } from '../src/availability-read'
 
 class NativeProgress {
@@ -306,4 +307,26 @@ it('observes genuine HTTP headers before application disposal resets the native 
   assert.equal(Request.instances[0]!.status, 0)
   const journal = JSON.parse(storage.get('cairn-e2e-availability-journal') || '[]') as Array<{ kind: string, status?: number }>
   assert.equal(journal.filter(event => event.kind === 'headers' && event.status === 503).length, 1)
+})
+
+it('requires exactly one terminal for each current or retired journal read', () => {
+  const start: AvailabilityReadEvent = {
+    sequence: 1,
+    kind: 'start',
+    document: 'retired-document',
+    read: 1,
+    aborted: false,
+    afterPagehide: false,
+  }
+  const headers: AvailabilityReadEvent = { ...start, sequence: 2, kind: 'headers', status: 503 }
+  const terminal: AvailabilityReadEvent = { ...start, sequence: 3, kind: 'rejected', aborted: true }
+  assert.deepEqual(incompleteAvailabilityReads([start]), [start])
+  assert.deepEqual(incompleteAvailabilityReads([start, headers]), [start])
+  assert.deepEqual(incompleteAvailabilityReads([start, { ...terminal, document: 'current-document' }]), [start])
+  assert.deepEqual(incompleteAvailabilityReads([start, { ...terminal, read: 2 }]), [start])
+  assert.deepEqual(incompleteAvailabilityReads([start, headers, terminal]), [])
+  assert.deepEqual(incompleteAvailabilityReads([start, { ...terminal, kind: 'body', exactBody: true }]), [])
+  assert.deepEqual(incompleteAvailabilityReads([start, { ...terminal, kind: 'body-rejected' }]), [])
+  assert.deepEqual(incompleteAvailabilityReads([start, terminal, { ...terminal, sequence: 4 }]), [start])
+  assert.deepEqual(incompleteAvailabilityReads([start, { ...start, sequence: 2 }, terminal]), [start, { ...start, sequence: 2 }])
 })

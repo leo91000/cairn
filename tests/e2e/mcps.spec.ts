@@ -2,7 +2,7 @@ import type { Download } from '@playwright/test'
 import type { AvailabilityReadEvent } from './availability-probe'
 import { writeFileSync as saveAvailabilityObservation } from 'node:fs'
 import { mcpProvider } from '../fixtures/mcp-provider'
-import { installAvailabilityProbe } from './availability-probe'
+import { incompleteAvailabilityReads, installAvailabilityProbe } from './availability-probe'
 import {
   signIn as authenticateWorkspace,
   createAgent,
@@ -681,6 +681,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
     // Audit independent failure categories after every owned producer closes.
     // One late rejection must not discard an HTTP failure or a pageerror.
     const audits = [
+      () => expect(incompleteAvailabilityReads(reads)).toEqual([]),
       () => expect(reads.filter(event => ['rejected', 'body-rejected'].includes(event.kind) && !event.aborted)).toEqual([]),
       () => expect(reads.filter(event => event.kind === 'headers' && event.status !== 200
         && !(expectedFailure && event.document === expectedFailure.document && event.read === expectedFailure.read && event.status === 503))).toEqual([]),
