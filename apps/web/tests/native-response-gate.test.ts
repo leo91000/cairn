@@ -31,7 +31,9 @@ afterEach(closeOwnedServers)
 it('attempts every owned closure even when an earlier closure fails', async () => {
   const closed: string[] = []
   const failure = new Error('fixture close failure')
-  cleanup.push(async () => { closed.push('backend') })
+  cleanup.push(async () => {
+    closed.push('backend')
+  })
   cleanup.push(async () => {
     closed.push('gate')
     throw failure
