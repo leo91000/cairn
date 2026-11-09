@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { once } from 'node:events'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { stripTypeScriptTypes } from 'node:module'
 import { chromium, expect, webkit } from '@playwright/test'
@@ -24,7 +24,7 @@ function client(reader, scenario) {
   let failureCount = 0
   const record = (kind, read, detail = {}) => {
     const journal = JSON.parse(sessionStorage.getItem(key) || '[]')
-    journal.push({
+    const entry = {
       document: documentId,
       read,
       kind,
@@ -32,8 +32,10 @@ function client(reader, scenario) {
       sequence: journal.length + 1,
       time: performance.now(),
       ...detail,
-    })
+    }
+    journal.push(entry)
     sessionStorage.setItem(key, JSON.stringify(journal))
+    void window.readerReceipt?.(entry).catch(() => {})
   }
 
   if (!sessionStorage.getItem(key))
@@ -301,8 +303,27 @@ async function writeEvidence(name, value, firstFailure) {
   }
 }
 
+// Page.evaluate has no native timeout. A matcher timing out does not stop its
+// pending protocol call; the controller must still reach independent closure.
+async function observed(operation, stage) {
+  let timer
+  try {
+    return await Promise.race([
+      Promise.resolve().then(operation),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Observation deadline: ' + stage)), 7000)
+      }),
+    ])
+  }
+  finally {
+    clearTimeout(timer)
+  }
+}
+
 async function observe(browser, engine, reader, scenario) {
   const events = []
+  const received = []
+  const receiptWrites = new Set()
   const downloads = []
   const pageErrors = []
   const ownedFailure = (actor, error) => cleanupFailures.push({
@@ -322,10 +343,22 @@ async function observe(browser, engine, reader, scenario) {
   let apiRequests = 0
   let navigation
   let navigationKind = 'not-started'
+  let navigationValidated = false
   let identityRetained = false
   let firstFailure
   let phase = 'backend setup'
   let httpClosedDuringObservation = false
+  const cell = engine + '-' + reader + '-' + scenario
+  const stage = async (next) => {
+    phase = next
+    console.log(JSON.stringify({ engine, reader, scenario, phase }))
+    try {
+      await writeFile(output + '/active.json', JSON.stringify({ diagnosticOnly: true, productQualified: false, complete: false, completedCells: rows.length, expectedCells: 66, engine, reader, scenario, phase, received, firstFailure }, null, 2))
+    }
+    catch (error) {
+      ownedFailure('stage-write', error)
+    }
+  }
   const backend = createServer((request, response) => {
     if (request.url === '/api/installations') {
       apiRequests++
@@ -364,9 +397,10 @@ async function observe(browser, engine, reader, scenario) {
     response.writeHead(200, { 'content-type': 'text/html' }).end('<!doctype html><h1>Destination</h1>')
   })
 
-  const readJournal = async () => JSON.parse(await page.evaluate(() => sessionStorage.getItem('cairn-reader-mechanism') || '[]'))
+  const readJournal = async () => JSON.parse(await observed(() => page.evaluate(() => sessionStorage.getItem('cairn-reader-mechanism') || '[]'), 'journal read'))
 
   try {
+    await stage('backend setup')
     backend.listen(0, '127.0.0.1')
     await once(backend, 'listening')
     const origin = 'http://127.0.0.1:' + backend.address().port
@@ -377,18 +411,40 @@ async function observe(browser, engine, reader, scenario) {
       ...(engine === 'webkit' ? { isMobile: true, hasTouch: true, viewport: { width: 390, height: 844 } } : {}),
       ...(gate ? { proxy: { server: gate.server } } : {}),
     })
+    context.setDefaultTimeout(7000)
+    context.setDefaultNavigationTimeout(7000)
+    await context.exposeBinding('readerReceipt', async (source, entry) => {
+      let write
+      try {
+        assert.equal(source.page, page)
+        assert.equal(source.frame, page.mainFrame())
+        assert.equal(typeof entry.document, 'string')
+        assert.equal(Number.isSafeInteger(entry.sequence), true)
+        write = appendFile(output + '/' + cell + '.events.jsonl', JSON.stringify(entry) + '\n')
+        receiptWrites.add(write)
+        await write
+        received.push(entry)
+      }
+      catch (error) {
+        ownedFailure('receipt-write', error)
+        throw error
+      }
+      finally {
+        receiptWrites.delete(write)
+      }
+    })
     await context.tracing.start({ screenshots: false, snapshots: true, sources: true })
     page = await context.newPage()
     page.on('download', download => downloads.push(download))
     page.on('pageerror', error => pageErrors.push(errorRecord(error)))
-    phase = 'initial document'
+    await stage('initial document')
     await page.goto(origin + (scenario === 'reload' ? '/installations/fixture/agents' : '/live'))
     documentId = await page.evaluate(() => window.readerDocument)
     if (controlled)
       held = gate.hold('availability')
     await page.evaluate(() => window.beginReader())
     if (controlled) {
-      phase = 'held response ready'
+      await stage('held response ready')
       await expect.poll(() => {
         gate.check()
         return held.ready
@@ -416,23 +472,22 @@ async function observe(browser, engine, reader, scenario) {
         destination = gate.hold('agents')
         navigation = scenario === 'reload' ? page.reload() : page.goto(origin + '/installations/fixture/agents')
         const arrival = navigation.then(() => 'committed', () => 'rejected')
-        phase = 'navigation response ready'
+        await stage('navigation response ready')
         await expect.poll(() => {
           gate.check()
           return destination.ready
         }, { timeout: 7000 }).toBe(true)
         assert.equal(destination.status, 200)
         if (reader === 'intent-fetch') {
-          phase = 'owned intent and actual native rejection before destination release'
-          await expect.poll(async () => {
-            const journal = await readJournal()
-            return journal.some(event => event.document === documentId && event.read === 1 && event.kind === 'native-fetch-rejected' && event.sameAbortReason)
+          await stage('owned intent and actual native rejection before destination release')
+          await expect.poll(() => {
+            return received.some(event => event.document === documentId && event.read === 1 && event.kind === 'native-fetch-rejected' && event.sameAbortReason)
           }, { timeout: 7000 }).toBe(true)
         }
         if (scenario === 'delayed-commit') {
           secondHeld = gate.hold('availability')
           held.release()
-          phase = 'ordinary cadence starts read two while destination pending'
+          await stage('ordinary cadence starts read two while destination pending')
           await expect.poll(() => {
             gate.check()
             return secondHeld.ready
@@ -443,8 +498,8 @@ async function observe(browser, engine, reader, scenario) {
           destination.downloadNavigation()
         else
           destination.release()
-        navigationKind = await arrival
-        phase = 'native navigation outcome'
+        navigationKind = await observed(() => arrival, 'native navigation outcome')
+        await stage('native navigation outcome')
         if (scenario === 'download') {
           await expect.poll(() => downloads.length, { timeout: 7000 }).toBe(1)
           assert.equal(downloads[0].suggestedFilename(), 'availability-navigation.html')
@@ -457,12 +512,13 @@ async function observe(browser, engine, reader, scenario) {
           await expect(page.getByRole('heading', { name: scenario === 'reload' ? 'Live' : 'Destination', exact: true })).toBeVisible()
           assert.notEqual(await page.evaluate(() => window.readerDocument), documentId)
         }
+        navigationValidated = true
       }
       held.release()
       secondHeld?.release()
     }
 
-    phase = 'exact read terminal and replacement'
+    await stage('exact read terminal and replacement')
     await expect.poll(async () => {
       const journal = await readJournal()
       const first = journal.filter(event => event.document === documentId && event.read === 1 && terminal(event))
@@ -479,7 +535,7 @@ async function observe(browser, engine, reader, scenario) {
       return first.length > 0
     }, { timeout: 7000 }).toBe(true)
     if (scenario === 'failure-before-intent') {
-      phase = 'failure remains genuine across later native download intent'
+      await stage('failure remains genuine across later native download intent')
       await expect.poll(() => downloads.length, { timeout: 7000 }).toBe(1)
       assert.equal(downloads[0].suggestedFilename(), 'availability-navigation.html')
       identityRetained = await page.evaluate(() => window.readerDocument) === documentId
@@ -487,7 +543,7 @@ async function observe(browser, engine, reader, scenario) {
       await expect(page.getByRole('heading', { name: 'Live', exact: true })).toBeVisible()
     }
     if (held) {
-      phase = 'positive HTTP close'
+      await stage('positive HTTP close')
       await expect.poll(() => {
         gate.check()
         return [held, ...(secondHeld ? [secondHeld] : [])].every(control => control.closed && ['finished', 'cancelled'].includes(control.terminal))
@@ -504,14 +560,19 @@ async function observe(browser, engine, reader, scenario) {
     destination?.release()
     if (page && !page.isClosed()) {
       try {
+        await stage('final journal acquisition')
+        if (navigation && !navigationValidated)
+          throw new Error('Final journal unavailable before unvalidated navigation closure')
         events.push(...await readJournal())
       }
       catch (error) {
         firstFailure ??= { phase: 'journal read', error: errorRecord(error) }
         ownedFailure('journal-read', error)
+        events.push(...received)
       }
       try {
-        await page.close()
+        await stage('page close')
+        await observed(() => page.close(), 'page close')
       }
       catch (error) {
         ownedFailure('page', error)
@@ -521,7 +582,8 @@ async function observe(browser, engine, reader, scenario) {
     for (const download of downloads) {
       for (const operation of ['cancel', 'delete']) {
         try {
-          await download[operation]()
+          await stage('download-' + operation)
+          await observed(() => download[operation](), 'download-' + operation)
         }
         catch (error) {
           ownedFailure('download-' + operation, error)
@@ -531,22 +593,39 @@ async function observe(browser, engine, reader, scenario) {
 
     if (context) {
       try {
-        await context.tracing.stop({ path: output + '/' + engine + '-' + reader + '-' + scenario + '.zip' })
+        await stage('trace close')
+        await observed(() => context.tracing.stop({ path: output + '/' + cell + '.zip' }), 'trace close')
       }
       catch (error) {
         ownedFailure('trace', error)
       }
       try {
-        await context.close()
+        await stage('context close')
+        await observed(() => context.close(), 'context close')
       }
       catch (error) {
         ownedFailure('context', error)
       }
     }
 
+    try {
+      await stage('receipt drain after context closure')
+      await observed(() => Promise.all([...receiptWrites]), 'receipt drain')
+    }
+    catch (error) {
+      ownedFailure('receipt-drain', error)
+    }
+    const captured = new Set(events.map(event => event.document + ':' + event.sequence))
+    for (const entry of received) {
+      if (!captured.has(entry.document + ':' + entry.sequence))
+        events.push(entry)
+    }
+    events.sort((left, right) => left.sequence - right.sequence)
+
     if (gate) {
       try {
-        await gate.close()
+        await stage('gate close')
+        await observed(() => gate.close(), 'gate close')
       }
       catch (error) {
         ownedFailure('gate', error)
@@ -554,15 +633,24 @@ async function observe(browser, engine, reader, scenario) {
     }
 
     try {
+      await stage('backend close')
       const closed = new Promise((resolve, reject) => backend.close(error => error ? reject(error) : resolve()))
       backend.closeAllConnections()
-      await closed
+      await observed(() => closed, 'backend close')
     }
     catch (error) {
       ownedFailure('backend', error)
     }
 
-    await navigation?.catch(() => {})
+    if (navigation) {
+      try {
+        await stage('navigation settlement after closure')
+        await observed(() => navigation.catch(() => {}), 'navigation settlement after closure')
+      }
+      catch (error) {
+        ownedFailure('navigation-close', error)
+      }
+    }
   }
 
   const originalEvents = events.filter(event => event.document === documentId)
@@ -678,19 +766,24 @@ async function observe(browser, engine, reader, scenario) {
   }))
 }
 
-for (const [engine, type] of [['chromium', chromium], ['webkit', webkit]]) {
+engineLoop: for (const [engine, type] of [['chromium', chromium], ['webkit', webkit]]) {
   let browser
   try {
     browser = await type.launch()
     for (const reader of ['fetch', 'xhr', 'intent-fetch']) {
-      for (const scenario of reader === 'intent-fetch' ? intentScenarios : scenarios)
+      for (const scenario of reader === 'intent-fetch' ? intentScenarios : scenarios) {
         await observe(browser, engine, reader, scenario)
+        // Unknown closure is a red partial run, never overlap another case with
+        // an owned resource that may still be active.
+        if (cleanupFailures.length)
+          break engineLoop
+      }
     }
   }
   finally {
     if (browser) {
       try {
-        await browser.close()
+        await observed(() => browser.close(), 'browser close')
       }
       catch (error) {
         cleanupFailures.push({ engine, actor: 'browser', error: errorRecord(error) })
@@ -700,7 +793,10 @@ for (const [engine, type] of [['chromium', chromium], ['webkit', webkit]]) {
 }
 
 const allPageErrorsStrict = rows.every(row => row.pageErrors.length === 0)
-const baselineControlsComplete = rows.filter(row => row.reader === 'fetch').every((row) => {
+const baselineExpectedCells = ['chromium', 'webkit'].flatMap(engine => ['fetch', 'xhr'].flatMap(reader => scenarios.map(scenario => engine + ':' + reader + ':' + scenario))).sort()
+const baselineObservedCells = rows.filter(row => row.reader !== 'intent-fetch').map(row => row.engine + ':' + row.reader + ':' + row.scenario).sort()
+const baselineAllCellsObserved = JSON.stringify(baselineExpectedCells) === JSON.stringify(baselineObservedCells)
+const baselineControlsComplete = baselineAllCellsObserved && rows.filter(row => row.reader === 'fetch').every((row) => {
   if (!['committed', 'download'].includes(row.scenario))
     return row.usable
   if (!row.firstFailure)
@@ -732,6 +828,7 @@ await writeEvidence('result.json', {
   intentControlsPassed,
   allPageErrorsStrict,
   baselineControlsComplete,
+  baselineAllCellsObserved,
   allCellsObserved,
   rows: rows.length,
   cleanupFailures,
@@ -743,6 +840,7 @@ console.log(JSON.stringify({
   intentControlsPassed,
   allPageErrorsStrict,
   baselineControlsComplete,
+  baselineAllCellsObserved,
   allCellsObserved,
   rows: rows.length,
   cleanupFailures: cleanupFailures.length,
