@@ -75,16 +75,16 @@ still no original terminal after release. DO NOT rerun it. Test-only beforeunloa
 confirmation is installed ONLY in this mock negative (never product), actual page
 is activated by a real input click, actual Page.goto raises a native beforeunload
 dialog which is dismissed automatically. Require exactly one dismissed native dialog,
-navigation rejection, SAME document/Live heading/no pagehide, zero destination ingress
+native dismissal ACK plus fresh current-context SAME document/visible Live/no pagehide checkpoint, zero destination ingress
 BEFORE and AFTER owned closures. This cancels in shouldClose BEFORE stopAllLoaders.
 The destination gate remains armed but MUST NOT be ready; do not wait for admission.
-Then require owned private proof + originalrequestActive true/NOterminal; release the
+The checkpoint is acquired by one bounded read-only Page.evaluate AFTER native dismiss ACK, even if the automation goto waiter is still pending. Pinned Playwright can omit or mismatch an early cancellation document ID; pending goto does NOT prove native navigation active. This is a narrow exception to the admitted-navigation no-evaluate rule, not a producer change. Then require owned private proof + originalrequestActive true/NOterminal; release the
 original HTTP, require SAMEread2 nativefetch200/JSON exactbody/finishedwire and actual
 settled Online/0failures. Pending alone still RED. This changes only the last negative's
 admission/commit expectation, not the acquired positive delayed-navigation contracts.
 Missing native datum is exactly original200 after this pre-stop cancellation; source
 predicts feasibility but does NOT qualify it. User prompt is fixture-only, not a feature.
-Dialog actions/receipts/page/context/gate closures must settle on every outcome.
+Dialog actions/receipts/page/context/gate closures must settle on every outcome. Drain goto AFTER owned page.close: if pending at cleanup require pageClose completed + actual client TargetClosedError constructor type observed after close started (its public Error.name is Error in pinned client/errors.ts); label it automation retirement/cancellationEvidence=false. Never use that error as native cancellation evidence. A destination commit or automation TimeoutError remains RED; waiter unknown or closure failure remains RED. Original200 and final current-document journal MUST be acquired BEFORE cleanup.
 Pinnedsource:
 https://github.com/WebKit/WebKit/blob/56453fdfe0b0ca6258c23e6453b34f70b885d13f/Source/WebCore/loader/FrameLoader.cpp#L4275
 https://github.com/WebKit/WebKit/blob/56453fdfe0b0ca6258c23e6453b34f70b885d13f/Source/WebCore/Modules/fetch/FetchResponse.cpp#L327

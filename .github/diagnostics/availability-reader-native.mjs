@@ -89,7 +89,7 @@ const planned = [
 const rows = []
 const cleanupFailures = []
 const engineFailures = []
-const errorRecord = error => ({ name: error?.name ?? typeof error, message: String(error?.message ?? error) })
+const errorRecord = error => ({ name: error?.name ?? typeof error, type: error?.constructor?.name ?? typeof error, message: String(error?.message ?? error) })
 const write = (name, value) => writeFile(output + '/' + name, JSON.stringify(value, null, 2))
 async function observed(operation, label) {
   let timer
@@ -212,7 +212,8 @@ async function observe(browser, cell) {
   let context, page, gate, navigation, documentId, initial, destination, next, outage
   let outageEvidence
   let checkpoint, nativeEvents = [], initialClosureBeforeRelease = false, journalAcknowledged = false, navigationValidated = false
-  let initialHeaderAdvance, initialClosureBoundary, activatedViaClick = false, retainedAfterDialog = false
+  let initialHeaderAdvance, initialClosureBoundary, nativeNavigationCheckpoint, navigationOutcome, navigationRetirement
+  let activatedViaClick = false, retainedAfterDialog = false, pageCloseAttempted = false, pageCloseCompleted = false, waiterPendingAtCleanup = false
   let pendingProof, state, finalAudit = { unknown: [], unexpected: [] }
   const remember = (stage, error) => failures.push({ stage, error: errorRecord(error) })
   const cleanupFailure = (actor, error) => cleanupFailures.push({ arm, actor, error: errorRecord(error) })
@@ -376,17 +377,41 @@ async function observe(browser, cell) {
         activatedViaClick = true
       }
       await stage('original Page.goto with destination response held')
-      navigation = page.goto(origin + '/installations/fixture/agents').then(() => ({ kind: 'committed' }), error => ({ kind: 'rejected', error: errorRecord(error) }))
+      navigation = page.goto(origin + '/installations/fixture/agents').then(() => {
+        navigationOutcome = { kind: 'committed' }
+        return navigationOutcome
+      }, error => {
+        navigationOutcome = { kind: 'rejected', error: errorRecord(error), observedAfterPageCloseStarted: pageCloseAttempted }
+        return navigationOutcome
+      })
       if (cell.mode === 'proof-without-terminal') {
-        await stage('native dialog cancels navigation before loader stopping')
-        const cancelled = await observed(() => navigation, 'pre-stop native navigation cancellation')
+        await stage('post-dismissal native retained-document checkpoint before releasing original HTTP')
         await poll(() => dialogs.length === 1 && dialogs[0].type === 'beforeunload' && dialogs[0].dismissed)
-        assert.equal(cancelled.kind, 'rejected')
-        assert.equal(await evaluate(() => window.cairnAvailabilityDocument), documentId)
-        await expect(page.getByRole('heading', { name: 'Live', exact: true })).toBeVisible()
+        // The native UI decision and a fresh current-context receipt establish
+        // this boundary. A pending Playwright goto waiter is not its native state.
+        nativeNavigationCheckpoint = await evaluate(() => {
+          const heading = document.querySelector('h1')
+          const rect = heading?.getBoundingClientRect()
+          return {
+            document: window.cairnAvailabilityDocument, read: 2, trigger: 'post-native-dismissal',
+            liveVisible: Boolean(heading?.textContent === 'Live' && rect && rect.width > 0 && rect.height > 0 && getComputedStyle(heading).visibility === 'visible'),
+            livePath: location.pathname === '/live',
+            state: window.diagnosticState(),
+            journal: JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]'),
+            native: JSON.parse(sessionStorage.getItem('cairn-native-fetch-journal') || '[]'),
+          }
+        })
+        for (const event of nativeNavigationCheckpoint.journal) {
+          if (!received.some(item => item.document === event.document && item.sequence === event.sequence))
+            received.push(event)
+        }
+        nativeEvents = nativeNavigationCheckpoint.native
+        assert.equal(nativeNavigationCheckpoint.document, documentId)
+        assert.equal(nativeNavigationCheckpoint.liveVisible, true)
+        assert.equal(nativeNavigationCheckpoint.livePath, true)
+        assert.equal(nativeNavigationCheckpoint.journal.some(event => event.document === documentId && event.kind === 'pagehide'), false)
         assert.equal(destination.received, false)
         assert.equal(destination.ready, false)
-        assert.equal(received.some(event => event.document === documentId && event.kind === 'pagehide'), false)
         retainedAfterDialog = true
         navigationValidated = true
       }
@@ -400,9 +425,11 @@ async function observe(browser, cell) {
       else if (cell.mode === 'proof-without-terminal') {
         await stage('owned signal alone cannot settle the original held fetch')
         await poll(() => events(2).some(event => event.kind === 'abort' && event.trusted && event.exactTarget && event.insideAbortCall))
-        pendingProof = await stateReceipt(2, 'signal')
+        pendingProof = nativeNavigationCheckpoint
         assert.equal(pendingProof.state.requestActive, true)
-        assert.equal(pendingProof.journal.some(event => event.document === documentId && event.read === 2 && ['rejected', 'body-rejected', 'body', 'fetch-fulfilled'].includes(event.kind)), false)
+        assert.equal(pendingProof.state.online, true)
+        assert.equal(pendingProof.state.failures, 0)
+        assert.equal(pendingProof.journal.some(event => event.document === documentId && event.read === 2 && ['headers', 'rejected', 'body-start', 'body-rejected', 'body', 'fetch-fulfilled'].includes(event.kind)), false)
         assert.equal(initial.closed, false)
         initial.release()
         await poll(() => events(2).some(event => event.kind === 'body' && event.exactBody && !event.afterPagehide))
@@ -487,10 +514,11 @@ async function observe(browser, cell) {
   catch (error) { remember(phase, error) }
   finally {
     // All failed observations remain red; closing one owner never gates another.
+    waiterPendingAtCleanup = Boolean(navigation && !navigationOutcome)
     outage?.restore()
     for (const item of gates) item.response.release()
     const closures = [
-      ...(page ? [['page', () => page.close()]] : []),
+      ...(page ? [['page', async () => { pageCloseAttempted = true; await page.close(); pageCloseCompleted = true }]] : []),
       ...(gate ? [['gate', () => gate.close()]] : []),
       ['backend', () => {
         const closed = new Promise((resolve, reject) => backend.close(error => error ? reject(error) : resolve()))
@@ -509,8 +537,20 @@ async function observe(browser, cell) {
       catch (error) { cleanupFailure('context', error) }
     }
     if (navigation) {
-      try { await observed(() => navigation, 'navigation settlement') }
-      catch (error) { cleanupFailure('navigation', error) }
+      try {
+        const outcome = await observed(() => navigation, 'automation navigation waiter retirement')
+        navigationRetirement = { waiterPendingAtCleanup, pageCloseCompleted, ...outcome, cancellationEvidence: false }
+        if (cell.mode === 'proof-without-terminal') {
+          assert.equal(outcome.kind, 'rejected')
+          assert.notEqual(outcome.error?.name, 'TimeoutError')
+          if (waiterPendingAtCleanup) {
+            assert.equal(pageCloseCompleted, true)
+            assert.equal(outcome.observedAfterPageCloseStarted, true)
+            assert.equal(outcome.error?.type, 'TargetClosedError')
+          }
+        }
+      }
+      catch (error) { cleanupFailure('automation-navigation-waiter', error) }
     }
     try { await observed(() => Promise.all([...dialogActions]), 'native dialog action drain') }
     catch (error) { cleanupFailure('native-dialog-drain', error) }
@@ -538,7 +578,7 @@ async function observe(browser, cell) {
   const observationComplete = journalAcknowledged && navigationValidated && !failures.length && !pageErrors.length
     && !ownCleanup.length && !finalAudit.unknown.length && !finalAudit.unexpected.length
   const row = { arm, control, diagnosticOnly: true, productQualified: false, observationComplete, phase,
-    documentId, state, pendingProof, stateReceipts, dialogs, activatedViaClick, retainedAfterDialog, destinationAdmission: cell.mode === 'proof-without-terminal' && navigationValidated && !destination?.received ? 'cancelled-before-request' : null, outageEvidence, initialHeaderAdvance, initialClosureBoundary, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
+    documentId, state, pendingProof, stateReceipts, dialogs, nativeNavigationCheckpoint, navigationRetirement, activatedViaClick, retainedAfterDialog, destinationAdmission: cell.mode === 'proof-without-terminal' && navigationValidated && !destination?.received ? 'cancelled-before-request' : null, outageEvidence, initialHeaderAdvance, initialClosureBoundary, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
     allPageErrorsStrict: pageErrors.length === 0, pageErrors, failures, reads: received, nativeEvents, finalAudit,
     gates: gates.map(({ label, response }) => ({ label, received: response.received, ready: response.ready, status: response.status ?? null, terminal: response.terminal, closed: response.closed, headersDelivered: response.headersDelivered, bodyReleased: response.bodyReleased })), cleanupFailures: ownCleanup }
   rows.push(row)
