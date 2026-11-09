@@ -1415,6 +1415,15 @@ async fn workspace_seed_omits_projects_only_for_an_explicit_vm_resume() {
 
 #[tokio::test]
 async fn native_project_archive_handshake_skips_the_tree_and_rechecks_cache_grants() {
+    assert_native_project_archive_handshake("workspace").await;
+}
+
+#[tokio::test]
+async fn native_project_archive_handshake_uses_the_current_workspace_generation() {
+    assert_native_project_archive_handshake("workspace-fdeab5b6").await;
+}
+
+async fn assert_native_project_archive_handshake(workspace_directory: &str) {
     let owner = Owner::new().await;
     let (node, token, person, project, run, attempt) =
         (id(), auth::token(), id(), id(), id(), id());
@@ -1438,7 +1447,8 @@ async fn native_project_archive_handshake_skips_the_tree_and_rechecks_cache_gran
         .await
         .unwrap();
     let root = owner.service.config.data_dir.join("runs").join(&run);
-    let project_path = root.join("workspace").join(&project);
+    let project_root = root.join(workspace_directory);
+    let project_path = project_root.join(&project);
     std::fs::create_dir_all(&project_path).unwrap();
     std::fs::create_dir_all(root.join("home")).unwrap();
     std::fs::write(project_path.join("file"), "project seed").unwrap();
@@ -1487,7 +1497,7 @@ async fn native_project_archive_handshake_skips_the_tree_and_rechecks_cache_gran
     std::fs::write(
         plans.join(format!("{attempt}.json")),
         json!({
-            "id": attempt, "runId": run, "backend": "native", "projectRoot": root.join("workspace"),
+            "id": attempt, "runId": run, "backend": "native", "projectRoot": project_root,
         })
         .to_string(),
     )
@@ -1502,9 +1512,21 @@ async fn native_project_archive_handshake_skips_the_tree_and_rechecks_cache_gran
         .await;
     assert_eq!(status, StatusCode::OK, "{plan}");
     let archive = &plan["projectArchives"][0];
+    assert!(
+        archive.is_object(),
+        "the current seed must be available as an archive: {plan}"
+    );
     assert_eq!(archive["projectId"], project);
     for (kind, path) in [
         ("seed", format!("/internal/node-workspace/{attempt}/seed")),
+        (
+            "project",
+            format!("/internal/node-workspace/{attempt}/seed"),
+        ),
+        (
+            "run-archive",
+            format!("/internal/node-workspace/{attempt}/archive"),
+        ),
         (
             "archive",
             format!("/internal/node-workspace/cache/{project}"),
@@ -1512,6 +1534,10 @@ async fn native_project_archive_handshake_skips_the_tree_and_rechecks_cache_gran
     ] {
         let body = if kind == "seed" {
             json!({ "kind": "initial", "workspace": false, "projectArchives": true })
+        } else if kind == "project" {
+            json!({ "kind": "project", "projectId": project })
+        } else if kind == "run-archive" {
+            json!({ "projectId": project, "hash": archive["hash"] })
         } else {
             json!({ "hash": archive["hash"] })
         };
@@ -1524,13 +1550,20 @@ async fn native_project_archive_handshake_skips_the_tree_and_rechecks_cache_gran
         let response = common::send(&owner.app, request).await;
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = to_bytes(response.into_body(), 1_000_000).await.unwrap();
-        if kind == "seed" {
+        if matches!(kind, "seed" | "project") {
             let destination = TempDir::new().unwrap();
             files::receive(&mut bytes.as_ref(), destination.path(), 1_000_000)
                 .await
                 .unwrap();
-            assert!(!destination.path().join("workspace").exists());
-            assert!(destination.path().join("home/config").exists());
+            if kind == "seed" {
+                assert!(!destination.path().join(workspace_directory).exists());
+                assert!(destination.path().join("home/config").exists());
+            } else {
+                assert_eq!(
+                    std::fs::read(destination.path().join("file")).unwrap(),
+                    b"project seed"
+                );
+            }
         } else {
             assert_eq!(
                 blake3::hash(&bytes).to_hex().as_str(),
@@ -2109,6 +2142,105 @@ async fn node_responses_keep_their_length_when_a_proxy_asks_for_compression() {
     let response = common::send(&owner.app, api).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert!(response.headers().contains_key("content-encoding"));
+}
+
+#[tokio::test]
+async fn interrupted_workspace_seed_preserves_the_existing_tree_until_a_complete_transfer() {
+    use tokio::io::AsyncReadExt;
+
+    for (finish_http, finish_transfer, expected_status) in [
+        (false, false, 502),
+        (false, true, 502),
+        (true, false, 400),
+        (true, true, 200),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            loop {
+                let read = stream.read(&mut buffer).await.unwrap();
+                assert_ne!(read, 0);
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    let headers = std::str::from_utf8(&request[..end]).unwrap();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            let mut body = b"{\"kind\":\"file\",\"path\":\"file\",\"size\":3,\"mode\":384}\n{\"data\":\"bmV3\"}\n".to_vec();
+            if finish_transfer {
+                body.extend_from_slice(b"{\"complete\":true}\n");
+            }
+            stream
+                .write_all(format!("{:x}\r\n", body.len()).as_bytes())
+                .await
+                .unwrap();
+            stream.write_all(&body).await.unwrap();
+            stream.write_all(b"\r\n").await.unwrap();
+            if finish_http {
+                stream.write_all(b"0\r\n\r\n").await.unwrap();
+            }
+            stream.shutdown().await.unwrap();
+        });
+        let root = TempDir::new().unwrap();
+        let target = root.path().join("retained");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("file"), b"old private work").unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            workspace::seed(
+                &reqwest::Client::new(),
+                &format!("http://{address}/").parse().unwrap(),
+                "synthetic-secret-token",
+                &id(),
+                json!({ "kind": "initial" }),
+                &target,
+            ),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        if expected_status == 200 {
+            result.unwrap();
+            assert_eq!(std::fs::read(target.join("file")).unwrap(), b"new");
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.status, expected_status, "{error}");
+            if expected_status == 502 {
+                assert_eq!(
+                    error.message,
+                    "Workspace transfer was interrupted; source files are preserved."
+                );
+            }
+            assert_eq!(
+                std::fs::read(target.join("file")).unwrap(),
+                b"old private work"
+            );
+        }
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            1,
+            "failed staging must be removed"
+        );
+    }
 }
 
 #[tokio::test]

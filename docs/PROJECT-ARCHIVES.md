@@ -70,6 +70,17 @@ invalidates node leases. Invalid or interrupted downloads never become cache hit
 current agent project/node grants, backend, node admission and trusted native
 people; run-scoped downloads also retain the existing attempt/provenance checks.
 
+Run-scoped archives and project transfers resolve the immutable manager seed from
+the current execution plan's `projectRoot`, including `workspace-<generation>`
+directories. The source must remain inside that run's managed workspace and cannot
+redirect through a symlink. Retained guest files remain authoritative on resume.
+
+An interrupted seed HTTP body returns a transport error before replacing host
+staging. Its partial temporary tree is discarded and the previous tree is retained.
+Source and receive failures log the attempt and closed status/transport fields;
+receive diagnostics also count the bytes received. They contain no source paths,
+URLs, tokens or file contents. This does not add automatic execution retries.
+
 ## Reproducible local measurements
 
 Run the production archive/file-frame implementations through the isolated
@@ -86,7 +97,10 @@ Workload: 4,096 files of 4 KiB repeated text plus 8 MiB pseudorandom bytes
 path receives existing JSON/base64 file frames with per-file `sync_all`; the new
 path extracts ZIP and finishes with filesystem synchronization. Archive encoding
 and frame encoding are timed separately. The command prints process CPU time,
-encoded bytes, installation latency, first/warm archive read latency and host load.
+encoded bytes, installation latency, cold/warm reads of both representations and
+host load. Cold reads request eviction of only the synthetic file with
+`POSIX_FADV_DONTNEED` after synchronization; this is advisory and does not control
+other host or device caches. These local costs do not measure production network latency.
 
 Native nodes can also prepare [local disk bases](NATIVE-BASES.md) from verified
 ZIPs to avoid expanding the same project for each new conversation.

@@ -19,7 +19,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
 const MAX_RESULT_BYTES: usize = 1_000_000;
 const MAX_AUTH_REQUEST_BYTES: usize = 32768;
@@ -110,7 +110,7 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
             let mut descriptor = json!({ "plan": plan, "dataRoot": s.config.data_dir });
             if plan["backend"] == "native"
                 && let Some(archives) =
-                    crate::project_archives::run_archives(s, &run, &root).await?
+                    crate::project_archives::run_archives(s, &run, &root, &plan).await?
             {
                 descriptor["projectArchives"] = serde_json::to_value(archives)?;
             }
@@ -138,12 +138,12 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
         "seed" => {
             let archives = plan["backend"] == "native"
                 && input.body["projectArchives"] == true
-                && crate::project_archives::run_archives(s, &run, &root)
+                && crate::project_archives::run_archives(s, &run, &root, &plan)
                     .await?
                     .is_some();
             seed_source(&run, &plan, &root, &input.body, archives).await
         }
-        "archive" => crate::project_archives::serve_run(s, &run, &root, &input.body).await,
+        "archive" => crate::project_archives::serve_run(s, &run, &root, &plan, &input.body).await,
         "auth" => {
             let socket = root
                 .join("home")
@@ -207,7 +207,7 @@ async fn seed_source(
             {
                 return Err(Error::forbidden("Project outside run scope."));
             }
-            root.join("workspace").join(project)
+            crate::execution::project_seed_source(root, plan, project).await?
         }
         _ => return Err(Error::bad("Invalid seed selection.")),
     };
@@ -229,12 +229,20 @@ async fn seed_source(
         None
     };
     let (mut writer, reader) = tokio::io::duplex(131072);
+    let attempt = text(plan, "id").to_owned();
     tokio::spawn(async move {
         // A failed transfer ends the stream early, which the receiver rejects.
-        let _ = super::files::send_filtered(&source, &mut writer, |path| {
+        if let Err(error) = super::files::send_filtered(&source, &mut writer, |path| {
             project_root.as_deref() != Some(path)
         })
-        .await;
+        .await
+        {
+            tracing::warn!(
+                attempt,
+                status = error.status,
+                "Workspace seed source transfer failed"
+            );
+        }
     });
     Ok(Response::new(Body::from_stream(
         tokio_util::io::ReaderStream::new(reader),
@@ -318,42 +326,79 @@ pub async fn seed(
         .ok_or_else(|| Error::bad("Invalid seed directory."))?;
     crate::skills::private_dir(parent).await?;
     let temp = tempfile::TempDir::new_in(parent)?;
-    let stream = response
-        .bytes_stream()
-        .map(|r| r.map_err(std::io::Error::other));
+    let mut transport_interrupted = false;
+    let mut received_bytes = 0u64;
+    let stream = response.bytes_stream().map(|result| match result {
+        Ok(bytes) => {
+            received_bytes = received_bytes.saturating_add(bytes.len() as u64);
+            Ok(bytes)
+        }
+        Err(error) => {
+            transport_interrupted = true;
+            tracing::warn!(
+                attempt,
+                received_bytes,
+                timeout = error.is_timeout(),
+                connect = error.is_connect(),
+                body = error.is_body(),
+                decode = error.is_decode(),
+                "Workspace seed HTTP stream interrupted"
+            );
+            Err(std::io::Error::other(
+                "Workspace seed HTTP stream interrupted.",
+            ))
+        }
+    });
     let mut reader = BufReader::new(tokio_util::io::StreamReader::new(stream));
-    if crate::native::enabled() {
-        let keep = selection["keepArchives"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        let data = super::node_data_dir();
-        let multiplier = if selection["kind"] == "inbox" { 2 } else { 1 };
-        super::files::receive_with_reclaim(
-            &mut reader,
-            temp.path(),
-            budget,
-            SEED_BUDGET_BYTES,
-            |needed| {
-                let (data, keep) = (data.clone(), keep.clone());
-                async move {
-                    Ok(crate::project_archives::reclaim_for_foreground(
-                        &data,
-                        needed.saturating_mul(multiplier),
-                        &keep,
-                    )
-                    .await?
-                        / multiplier)
-                }
-            },
-        )
-        .await?;
-    } else {
-        super::files::receive(&mut reader, temp.path(), budget).await?;
+    let received = async {
+        if crate::native::enabled() {
+            let keep = selection["keepArchives"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let data = super::node_data_dir();
+            let multiplier = if selection["kind"] == "inbox" { 2 } else { 1 };
+            super::files::receive_with_reclaim(
+                &mut reader,
+                temp.path(),
+                budget,
+                SEED_BUDGET_BYTES,
+                |needed| {
+                    let (data, keep) = (data.clone(), keep.clone());
+                    async move {
+                        Ok(crate::project_archives::reclaim_for_foreground(
+                            &data,
+                            needed.saturating_mul(multiplier),
+                            &keep,
+                        )
+                        .await?
+                            / multiplier)
+                    }
+                },
+            )
+            .await?;
+        } else {
+            super::files::receive(&mut reader, temp.path(), budget).await?;
+        }
+
+        // The protocol marker alone cannot prove the HTTP body arrived intact.
+        let mut trailing = [0; 1];
+        if reader.read(&mut trailing).await? != 0 {
+            return Err(Error::bad("Unexpected data after workspace transfer."));
+        }
+        Ok(())
     }
+    .await;
+    drop(reader);
+    if transport_interrupted {
+        return Err(Error::bad_gateway(
+            "Workspace transfer was interrupted; source files are preserved.",
+        ));
+    }
+    received?;
     if crate::native::enabled() && selection["kind"] == "initial" {
         prepare_native_inbox(&temp.path().join("chat-input")).await?;
     }

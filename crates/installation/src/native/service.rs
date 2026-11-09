@@ -2437,24 +2437,21 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             if stop.is_cancelled() {
                 return Err(Error::conflict("Native project import stopped."));
             }
-            let source = controller
-                .data
-                .join("runs")
-                .join(&run)
-                .join("workspace")
-                .join(project);
-            let expected = Path::new(text(&plan, "projectRoot")).join(project);
-            if value["source"]
-                != guest_data(&plan, &controller.data)
-                    .join("runs")
-                    .join(&run)
-                    .join("workspace")
-                    .join(project)
-                    .to_string_lossy()
-                    .as_ref()
+            let manager = guest_data(&plan, &controller.data);
+            let expected = crate::execution::project_seed_path(
+                &manager.join("runs").join(&run),
+                &plan,
+                project,
+            )?;
+            if value["source"] != expected.to_string_lossy().as_ref()
                 || value["target"] != expected.to_string_lossy().as_ref()
             {
                 return Err(Error::forbidden("Invalid native project path."));
+            }
+            let relative = expected.strip_prefix(&manager).map_err(Error::internal)?;
+            let source = controller.data.join(relative);
+            if tokio::fs::canonicalize(&source).await? != source {
+                return Err(Error::bad("Native project seed changed location."));
             }
             let view = block::view(&controller.state, &run).await?;
             let target = view.workspace.join(project);
@@ -3928,6 +3925,106 @@ pub(crate) mod tests {
             .header("authorization", "Bearer synthetic-private-controller-token")
             .body(Body::from(body.to_string()))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn native_project_import_uses_the_current_generation_and_preserves_retained_files() {
+        let (fixture, controller) = fixture().await;
+        let (run, attempt, project) = (
+            crate::config::id(),
+            crate::config::id(),
+            crate::config::id(),
+        );
+        let manager = fixture.path().join("manager");
+        let project_root = manager.join("runs").join(&run).join("workspace-fdeab5b6");
+        let stage = controller.data.join("runs").join(&run);
+        let source = stage.join("workspace-fdeab5b6").join(&project);
+        for directory in [
+            &source,
+            &stage.join("home"),
+            &controller.data.join("runner-plans"),
+        ] {
+            private_dir(directory).await.unwrap();
+        }
+        tokio::fs::write(source.join("file"), b"original seed")
+            .await
+            .unwrap();
+        let plan = json!({
+            "id": attempt,
+            "runId": run,
+            "backend": "native",
+            "expires": crate::config::now() + 60_000,
+            "nodeLeaseRequired": true,
+            "guestDataRoot": manager,
+            "cwd": project_root,
+            "projectRoot": project_root,
+            "sandbox": "workspace-write",
+            "args": [],
+            "prompt": "fixture",
+            "resources": { "cpu": 1, "memoryMiB": 128, "diskMiB": 128 },
+            "imports": [
+                { "source": stage.join("workspace-fdeab5b6"), "target": project_root },
+                { "source": stage.join("home"), "target": "/home/node" }
+            ],
+        });
+        atomic_write(
+            &controller
+                .data
+                .join("runner-plans")
+                .join(format!("{attempt}.json")),
+            plan.to_string().as_bytes(),
+        )
+        .await
+        .unwrap();
+        controller.active.lock().await.insert(
+            attempt.clone(),
+            Attempt {
+                run: run.clone(),
+                expires: None,
+                stop: CancellationToken::new(),
+                started: true,
+                protection: None,
+                suspension: Arc::new(super::super::suspension::Suspension::new(
+                    &controller.state,
+                    &attempt,
+                )),
+            },
+        );
+        let view = block::view(&controller.state, &run).await.unwrap();
+        let retained = view.workspace.join(&project);
+        private_dir(&retained).await.unwrap();
+        tokio::fs::write(retained.join("file"), b"private edits")
+            .await
+            .unwrap();
+        let path = format!("/runs/{attempt}/projects/{project}");
+        let body = json!({
+            "runId": run,
+            "source": project_root.join(&project),
+            "target": project_root.join(&project),
+        });
+        route(controller.clone(), request(&path, &body))
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::fs::read(retained.join("file")).await.unwrap(),
+            b"private edits"
+        );
+        let mut wrong = body;
+        wrong["source"] = manager
+            .join("runs")
+            .join(&run)
+            .join("workspace")
+            .join(&project)
+            .to_string_lossy()
+            .into_owned()
+            .into();
+        assert_eq!(
+            route(controller, request(&path, &wrong))
+                .await
+                .unwrap_err()
+                .status,
+            403
+        );
     }
 
     #[tokio::test]
