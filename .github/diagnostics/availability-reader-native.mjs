@@ -54,6 +54,38 @@ async function observed(operation, label) {
   finally { clearTimeout(timer) }
 }
 
+function auditReadJournal(reads, selectedDocument, selectedRead, selectedOutcome) {
+  const starts = new Map()
+  for (const event of reads) {
+    if (event.kind === 'start') {
+      const key = event.document + ':' + event.read
+      starts.set(key, [...(starts.get(key) ?? []), event])
+    }
+  }
+  const unknownReads = []
+  const runtimeFailures = []
+  for (const [key, begun] of starts) {
+    const events = reads.filter(event => event.document === begun[0].document && event.read === begun[0].read)
+    const terminals = events.filter(event => ['body', 'body-rejected', 'rejected'].includes(event.kind))
+    if (begun.length !== 1 || terminals.length !== 1) {
+      unknownReads.push({ key, starts: begun.length, terminals: terminals.length })
+      continue
+    }
+    const terminal = terminals[0]
+    const failedStatus = events.find(event => event.kind === 'headers' && event.status !== 200)
+    const ownedAbort = terminal.kind === 'rejected' && terminal.aborted
+      && events.some(event => event.kind === 'abort' && event.trusted && event.exactTarget && event.insideAbortCall)
+    const preciseSuccess = terminal.kind === 'body' && terminal.exactBody && !terminal.aborted && !terminal.afterPagehide
+    if (failedStatus || (!ownedAbort && !preciseSuccess)) {
+      const selectedFailure = !failedStatus && terminal.document === selectedDocument && terminal.read === selectedRead
+        && selectedOutcome === 'unowned-rejection-without-http' && terminal.kind === 'rejected'
+        && !terminal.aborted && !terminal.afterPagehide
+      runtimeFailures.push({ key, kind: terminal.kind, status: failedStatus?.status ?? null, selectedFailure })
+    }
+  }
+  return { startedReads: starts.size, unknownReads, runtimeFailures, unexpectedFailures: runtimeFailures.filter(failure => !failure.selectedFailure) }
+}
+
 // Adds metadata only. The actual transport, poll and probe remain source-bound.
 function nativeDiagnostics() {
   let nextRead = 0
@@ -281,14 +313,16 @@ async function observe(browser, arm) {
     nextOutcome = 'unowned-rejection-after-http'
     remember('final HTTP ingress audit', new Error('Replacement HTTP request arrived before owned closure'))
   }
+  const readAudit = auditReadJournal(received, documentId, nextRead, nextOutcome)
   const ownFailures = cleanupFailures.filter(entry => entry.arm === arm)
-  const observationComplete = !failures.length && !ownFailures.length && navigationValidated && journalAcknowledged && nextOutcome !== 'unknown'
+  const observationComplete = !failures.length && !ownFailures.length && navigationValidated && journalAcknowledged
+    && nextOutcome !== 'unknown' && readAudit.unknownReads.length === 0 && readAudit.unexpectedFailures.length === 0
   const row = {
     arm, control, diagnosticOnly: true, productQualified: false,
     observationComplete, nextOutcome, firstRead, nextRead, documentId,
     initialRetiredBeforeNextStart, retirementBoundary, navigationValidated, journalAcknowledged,
     allPageErrorsStrict: pageErrors.length === 0, pageErrors, failures,
-    reads: received, nativeEvents,
+    reads: received, nativeEvents, readAudit,
     gates: gates.map(({ label, response }) => ({ label, received: response.received, ready: response.ready, status: response.status ?? null, terminal: response.terminal, closed: response.closed })),
     cleanupFailures: ownFailures,
   }
