@@ -1,3 +1,4 @@
+import { writeFileSync as saveAvailabilityObservation } from 'node:fs'
 import { mcpProvider } from '../fixtures/mcp-provider'
 import {
   signIn as authenticateWorkspace,
@@ -9,14 +10,24 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+import { nativeResponseGate } from './native-response-gate'
+
+interface AvailabilityReadEvent {
+  kind: 'start' | 'headers' | 'body' | 'rejected' | 'body-rejected' | 'abort'
+  document: string
+  read: number
+  status?: number
+  aborted: boolean
+  afterPagehide: boolean
+}
 
 type OAuthDepartureProbe = { kind: 'background' } | { kind: 'offer', closed: boolean }
 
 declare global {
   interface Window {
     cairnOAuthProbe: (probe: OAuthDepartureProbe) => Promise<void>
-    cairnObserveAvailability?: boolean
-    cairnAvailabilityAbort: (afterPagehide: boolean) => Promise<void>
+    cairnAvailabilityDocument: string
+    cairnAvailabilityRecord: (event: AvailabilityReadEvent) => Promise<void>
   }
 }
 
@@ -309,164 +320,190 @@ test('manages MCP connections, OAuth consent, tools and agent access on desktop 
   finally { await provider.close() }
 })
 
+const availabilityTest = test.extend<{ responseGate: Awaited<ReturnType<typeof nativeResponseGate>> }>({
+  responseGate: async ({ workspace }, use) => {
+    const gate = await nativeResponseGate(workspace.url)
+    try {
+      await use(gate)
+    }
+    finally {
+      await gate.close()
+    }
+  },
+  proxy: async ({ responseGate }, use) => {
+    await use({ server: responseGate.server })
+  },
+})
+
 for (const destination of ['committed', 'cancelled'] as const) {
-  test(`availability keeps direct readers stable until native navigation is ${destination}`, async ({ page }) => {
+  availabilityTest('availability keeps direct readers stable until native navigation is ' + destination, async ({ page, workspace, responseGate }, testInfo) => {
     const errors: string[] = []
+    const reads: AvailabilityReadEvent[] = []
+    let stage = 'fixture reset'
+    let primaryFailure: unknown
+    const cleanupFailures: unknown[] = []
+    let poll: ReturnType<typeof responseGate.hold> | undefined
+    let navigationResponse: ReturnType<typeof responseGate.hold> | undefined
+    let navigation: Promise<unknown> | undefined
     page.on('pageerror', error => errors.push(error.message))
-    const callerAborts: boolean[] = []
-    await page.exposeFunction('cairnAvailabilityAbort', (afterPagehide: boolean) => {
-      callerAborts.push(afterPagehide)
-    })
+    // Accepted grants belong to this worker's earlier pages until expiry. Use
+    // the existing tunnel reset to establish real capacity before this case.
+    await workspace.restart()
+    await page.exposeFunction('cairnAvailabilityRecord', (event: AvailabilityReadEvent) => reads.push(event))
     await page.addInitScript(() => {
+      const documentId = crypto.randomUUID()
+      window.cairnAvailabilityDocument = documentId
       let pageHidden = false
-      let observed = false
+      let sequence = 0
       window.addEventListener('pagehide', () => pageHidden = true)
       const request = window.fetch
       window.fetch = (...args) => {
-        if (window.cairnObserveAvailability && !observed && args[0] === '/api/installations') {
-          observed = true
-          args[1]?.signal?.addEventListener('abort', () => {
-            void window.cairnAvailabilityAbort(pageHidden)
-          }, { once: true })
-        }
-
-        return request(...args)
-      }
-    })
-    const pollRelease = Promise.withResolvers<void>()
-    const navigationRelease = Promise.withResolvers<void>()
-    let pollHeld = false
-    let navigationHeld = false
-    let pollCount = 0
-    let pollRequest: import('@playwright/test').Request | undefined
-    let pollCancelled = false
-    page.on('requestfailed', (request) => {
-      if (request === pollRequest)
-        pollCancelled = true
-    })
-    let routeFailure: unknown
-    let navigation: Promise<unknown> | undefined
-    await page.clock.install()
-    await page.goto(workspacePath('/mcps'))
-    await authenticateWorkspace(page)
-    await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
-    const transport = page.locator('[data-transport-route]').first()
-    await expect(transport).toHaveAttribute('data-transport-route', 'direct')
-    await page.clock.pauseAt(new Date(Date.now() + 1000))
-    await page.evaluate(() => window.cairnObserveAvailability = true)
-    try {
-      await page.route('**/api/installations', async (route) => {
-        pollCount++
-        if (pollCount !== 1)
-          return route.continue()
-        pollRequest = route.request()
-        try {
-          const response = await route.fetch()
-          expect(response.status()).toBe(200)
-          pollHeld = true
-          await pollRelease.promise
-          // Committing the destination explicitly withdraws this old caller.
-          await route.fulfill({ response }).catch((error) => {
-            if (destination !== 'committed' || !pollCancelled)
-              throw error
+        if (args[0] !== '/api/installations')
+          return request(...args)
+        const read = ++sequence
+        const signal = args[1]?.signal
+        const record = (kind: AvailabilityReadEvent['kind'], status?: number) => {
+          void window.cairnAvailabilityRecord({
+            kind,
+            document: documentId,
+            read,
+            status,
+            aborted: !!signal?.aborted,
+            afterPagehide: pageHidden,
           })
         }
-        catch (error) {
-          routeFailure = error
-          await route.abort().catch(() => {})
-        }
-      })
-      await page.route('**/agents', async (route) => {
-        if (!route.request().isNavigationRequest())
-          return route.continue()
-        try {
-          const response = await route.fetch()
-          expect(response.status()).toBe(200)
-          navigationHeld = true
-          await navigationRelease.promise
-          if (destination === 'cancelled')
-            await route.abort('aborted')
-          else
-            await route.fulfill({ response })
-        }
-        catch (error) {
-          routeFailure = error
-          await route.abort().catch(() => {})
-        }
-      })
+        // Report completion after the application's await/catch/finally cycle,
+        // without replacing or waiting on its native fetch/body promises.
+        const settled = (kind: AvailabilityReadEvent['kind']) => queueMicrotask(() => record(kind))
+        signal?.addEventListener('abort', () => record('abort'), { once: true })
+        record('start')
+        const pending = request(...args)
+        void pending.then((response) => {
+          record('headers', response.status)
+          const json = response.json.bind(response)
+          response.json = () => {
+            const body = json()
+            void body.then(() => settled('body'), () => settled('body-rejected'))
+            return body
+          }
+        }, () => settled('rejected'))
+        return pending
+      }
+    })
+    const events = (document: string, read: number) => reads.filter(event => event.document === document && event.read === read)
+    const pendingReads = (document: string) => reads.filter(event => event.document === document && event.kind === 'start'
+      && !events(document, event.read).some(outcome => ['body', 'rejected', 'body-rejected', 'abort'].includes(outcome.kind)
+        || (outcome.kind === 'headers' && outcome.status !== 200)))
+    let expectedFailure: AvailabilityReadEvent | undefined
+    try {
+      stage = 'initial direct reads'
+      await page.clock.install()
+      await page.goto(workspacePath('/mcps'))
+      await authenticateWorkspace(page)
+      await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
+      const transport = page.locator('[data-transport-route]').first()
+      await expect(transport).toHaveAttribute('data-transport-route', 'direct')
+      const departingDocument = await page.evaluate(() => window.cairnAvailabilityDocument)
+      await expect.poll(() => reads.some(event => event.document === departingDocument && event.kind === 'body')).toBe(true)
+      await expect.poll(() => pendingReads(departingDocument)).toEqual([])
+      await page.clock.pauseAt(new Date(Date.now() + 1000))
+      await expect.poll(() => pendingReads(departingDocument)).toEqual([])
+      const earlierReads = reads.filter(event => event.document === departingDocument && event.kind === 'start').length
+      poll = responseGate.hold('availability')
+      navigationResponse = responseGate.hold('agents')
+      stage = 'server holds the real availability response'
       await page.clock.runFor(3100)
       await expect.poll(() => {
-        if (routeFailure)
-          throw routeFailure
-        return pollHeld
+        responseGate.check()
+        return poll!.ready
       }).toBe(true)
+      expect(poll.status).toBe(200)
+      await expect.poll(() => reads.filter(event => event.document === departingDocument && event.kind === 'start').length).toBe(earlierReads + 1)
+      const targetRead = reads.filter(event => event.document === departingDocument && event.kind === 'start').at(-1)!.read
+      expect(events(departingDocument, targetRead).some(event => event.kind === 'abort')).toBe(false)
+      await expect(transport).toHaveAttribute('data-transport-route', 'direct')
+      // Restore ordinary production timers before a navigation can stall clock
+      // evaluations. Subsequent polling/recovery must progress on its real cadence.
+      await page.clock.resume()
+      stage = 'native destination response'
       navigation = page.goto(workspacePath('/agents'))
-      // Register both outcomes before intentionally cancelling the destination.
       const arrival = navigation.then(() => 'committed', () => 'cancelled')
       await expect.poll(() => {
-        if (routeFailure)
-          throw routeFailure
-        return navigationHeld
+        responseGate.check()
+        return navigationResponse!.ready
       }).toBe(true)
-      // The real destination response is held. Do not evaluate the old frame:
-      // Chromium can defer evaluations until this navigation commits.
-      expect(pollCount).toBe(1)
-      expect(callerAborts).toEqual([])
+      expect(navigationResponse.status).toBe(200)
       expect(errors).toEqual([])
-      navigationRelease.resolve()
+      if (destination === 'cancelled')
+        navigationResponse.cancelNavigation()
+      else
+        navigationResponse.release()
       expect(await arrival).toBe(destination)
+      // Always release owned HTTP bytes before waiting for their terminal receipt.
+      poll.release()
       if (destination === 'committed') {
-        await expect.poll(() => pollCancelled).toBe(true)
-        await expect.poll(() => callerAborts).toEqual([true])
-      }
-      else {
-        expect(callerAborts).toEqual([])
-      }
-
-      const resumedPoll = destination === 'cancelled'
-        ? page.waitForResponse(response => response.request() === pollRequest)
-        : undefined
-      pollRelease.resolve()
-      if (destination === 'committed') {
+        stage = 'caller and native request withdrawal after pagehide'
+        await expect.poll(() => events(departingDocument, targetRead).filter(event => event.kind === 'abort').map(event => event.afterPagehide)).toEqual([true])
+        await expect.poll(() => poll!.terminal).toBe('cancelled')
+        expect(events(departingDocument, targetRead).filter(event => event.kind === 'body')).toEqual([])
         await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
+        expect(await page.evaluate(() => window.cairnAvailabilityDocument)).not.toBe(departingDocument)
       }
       else {
+        stage = 'retained document consumes its actual fetch body'
         await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
-        // The same document must consume its response and continue real polling.
-        expect(await (await resumedPoll!).finished()).toBeNull()
-        await page.evaluate(() => {})
-        await page.unrouteAll({ behavior: 'wait' })
+        expect(await page.evaluate(() => window.cairnAvailabilityDocument)).toBe(departingDocument)
+        await expect.poll(() => events(departingDocument, targetRead).filter(event => event.kind === 'body').length).toBe(1)
+        expect(events(departingDocument, targetRead).some(event => event.kind === 'abort' || event.kind === 'rejected' || event.kind === 'body-rejected')).toBe(false)
+        await expect.poll(() => poll!.terminal).toBe('finished')
         await expect(transport).toHaveAttribute('data-transport-route', 'direct')
-        const nextPoll = page.waitForResponse(response => new URL(response.url()).pathname === '/api/installations' && response.status() === 200)
-        await page.clock.runFor(3100)
-        expect(await (await nextPoll).finished()).toBeNull()
-        await page.evaluate(() => {})
-        // A real HTTP failure in this retained document still reports offline
-        // and falls back. Recovery uses the existing availability backoff.
-        await page.route('**/api/installations', route => route.fulfill({ status: 503, json: { error: 'Installation status unavailable' } }))
-        const unavailable = page.waitForResponse(response => new URL(response.url()).pathname === '/api/installations' && response.status() === 503)
-        await page.clock.runFor(3100)
-        await unavailable
+        stage = 'real periodic polling continues'
+        await expect.poll(() => reads.filter(event => event.document === departingDocument && event.read > targetRead && event.kind === 'body').length).toBeGreaterThan(0)
+        stage = 'genuine active HTTP failure'
+        const unavailable = responseGate.unavailable()
+        await expect.poll(() => unavailable.ready).toBe(true)
+        expect(unavailable.status).toBe(200)
+        await expect.poll(() => reads.filter(event => event.document === departingDocument && event.kind === 'headers' && event.status === 503).length).toBe(1)
+        expectedFailure = reads.find(event => event.document === departingDocument && event.kind === 'headers' && event.status === 503)!
         await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Offline')
         await expect(transport).toHaveAttribute('data-transport-route', 'relay')
-        await page.unrouteAll({ behavior: 'wait' })
-        const recovered = page.waitForResponse(response => new URL(response.url()).pathname === '/api/installations' && response.status() === 200)
-        await page.clock.runFor(6100)
-        await recovered
+        stage = 'production backoff and direct recovery'
         await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
       }
-
+      stage = 'current direct readers and settled finite work'
       await expect(transport).toHaveAttribute('data-transport-route', 'direct')
+      const currentDocument = await page.evaluate(() => window.cairnAvailabilityDocument)
+      await expect.poll(() => pendingReads(currentDocument)).toEqual([])
+      responseGate.check()
+      expect(reads.filter(event => ['rejected', 'body-rejected'].includes(event.kind) && !event.aborted)).toEqual([])
+      expect(reads.filter(event => event.kind === 'headers' && event.status !== 200
+        && !(expectedFailure && event.document === expectedFailure.document && event.read === expectedFailure.read && event.status === 503))).toEqual([])
+      stage = 'completed'
+    }
+    catch (error) {
+      primaryFailure = error
     }
     finally {
-      pollRelease.resolve()
-      navigationRelease.resolve()
-      await navigation?.catch(() => {})
-      await page.unrouteAll({ behavior: 'wait' })
+      poll?.release()
+      navigationResponse?.release()
+      try {
+        await navigation?.catch(() => {})
+        if (!page.isClosed())
+          await page.close()
+      }
+      catch (error) {
+        cleanupFailures.push(error)
+      }
+      saveAvailabilityObservation(testInfo.outputPath('availability-native-observation.json'), JSON.stringify({
+        stage,
+        reads,
+        pageErrors: errors.length,
+        poll: poll && { ready: poll.ready, status: poll.status, terminal: poll.terminal },
+        navigation: navigationResponse && { ready: navigationResponse.ready, status: navigationResponse.status, terminal: navigationResponse.terminal },
+      }))
     }
-
-    if (routeFailure)
-      throw routeFailure
+    if (primaryFailure || cleanupFailures.length)
+      throw new AggregateError([...(primaryFailure ? [primaryFailure] : []), ...cleanupFailures], 'Availability navigation failed at ' + stage)
     expect(errors).toEqual([])
   })
 }
