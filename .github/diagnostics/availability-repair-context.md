@@ -1,6 +1,6 @@
 # Focused availability product qualification
 
-Product 0b46948adb5953141176e9c67b9f29abff05a866 tree 78da60a4d80b800b6eac2554c2e73675cbdfc1bd, base actual main dc24903967c7443d5c3e61587440240d05fa3c76.
+Product 8835fa792c12633b1cca830659ebaf04a6cd5547 tree fad7349032277265381cb87bff9252590034ffb4, base actual main dc24903967c7443d5c3e61587440240d05fa3c76.
 Existing observer only, NEVER merge observer. Pinned product checkout; only hash-checked
 SDK helper and immutable collection/checksum/formatter evidence copied into TASK-SCOPED RUNNER_TEMP, outsideALLPlaywright output/reportdirs. C40_EVIDENCE_DIR is exported throughGITHUB_ENV afterinitialcreation. InlineSDKimportsfromfileURL withactualrootSDKpassedbyparameter; no SDKcopy/environmentduplication. Both prebuildcollection andfinalalwaysartifact includeonlythatdedicatedfolder, notallRunnerTemp. Primarydefaulttest-results cleanupcannotdeleteproof/finalchecksum inputs. No localheavy/SDKinstall/newenv/ref/pilot.
 One sequential25minjob/allsteps5min/owned7s bounds. No retry/flaky/skip/error masking.
@@ -54,7 +54,7 @@ Qualification exact-head map:
   Process-scoped Gittrust +established disposablezip/deps/Rust setup retained.
 - Primary EXACTUNCHANGED:
   pnpm test:e2e deliverables.spec.ts skill-bundles.spec.ts beacon-sharing.spec.ts beacon-installations.spec.ts mcps.spec.ts --workers=2 --retries=0 --fail-on-flaky-tests --trace=on
-- PrimaryMCP includesactualapplication readonlyoutage: originalGET held, persistenttransportfault acrossHTTPattempts, originalTypeError/nonaborted/Offline preserved, healthyhealthroutewhilefaultactive, counts +restorationBEFORElaterPagegoto, finalfreshAgentsOnline/journal andallpageerrorsstrict. No JSretry/mutation/sleep/newdeadline. Every recordedabort requires completecall/signal/return counts, native trusted/exactsignal and an insideflag consistentwithintrinsicsequence. Explicitoutside-call negative keepsabortedFALSE and isnotownedattribution; orphan/untrusted/incompletepairsfail EVENiforiginalreadsuccess.
+- PrimaryMCP includesactualapplication readonlyoutage: originalGET held, persistenttransportfault acrossHTTPattempts, originalTypeError/nonaborted/Offline preserved, then existing6spollbackoffadvancedwhilefaultSTILLactive requiringanewstartedread+secondoriginalTypeError andnonzerorefusedHTTPattempts. Healthyhealthroutewhilefaultactive, exacttwofailureIDs/HTTPcounts +restorationBEFORElaterPagegoto, finalfreshAgentsOnline/journal andallpageerrorsstrict. No JSretry/mutation/sleep/newdeadline. Every recordedabort requires completecall/signal/return counts, native trusted/exactsignal and an insideflag consistentwithintrinsicsequence. Explicitoutside-call negative keepsabortedFALSE and isnotownedattribution; orphan/untrusted/incompletepairsfail EVENiforiginalreadsuccess. AnyterminalclaimingabortedmustFOLLOWtheownedcallreturn; earlierfetch/bodyterminals cannotborrowfutureabortproof. Genuineunabortedfailuresbeforelatercall remainoriginalfailures.
 - DirectRelay/savedreaders: existing beacon-relay/direct-capacity/chat-switch projects.
 - PhysicalBFCache ordinaryMCPprojects, workers1 budget unchanged, actual trusted
   persisted SAMEdoc/exactfreshbody; synthetic lifecycle doesNOTreplacephysical.
