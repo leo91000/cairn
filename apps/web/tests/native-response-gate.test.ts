@@ -133,6 +133,24 @@ it('holds real HTTP headers until release and observes complete delivery', async
   gate.check()
 })
 
+it('delivers genuine headers while holding the native response body', async () => {
+  const { gate, call } = await fixture()
+  const held = gate.holdBody()
+  const read = call('/api/installations')
+  let delivered = false
+  void read.result.then(() => delivered = true, () => delivered = true)
+  await vi.waitFor(() => expect(read.responseSeen()).toBe(true))
+  expect(held.ready).toBe(true)
+  expect(held.received).toBe(true)
+  expect(held.status).toBe(200)
+  expect(delivered).toBe(false)
+  held.release()
+  expect(await read.result).toEqual({ status: 200, body: '[{"online":true}]' })
+  await vi.waitFor(() => expect(held.closed).toBe(true))
+  expect(held.terminal).toBe('finished')
+  gate.check()
+})
+
 it('records HTTP ingress before upstream headers even when the caller cancels', async () => {
   const headers = Promise.withResolvers<void>()
   const { gate, call } = await fixture(headers.promise)

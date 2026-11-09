@@ -34,7 +34,7 @@ export async function nativeResponseGate(origin: string) {
   let closing = false
   let closeResult: Promise<void> | undefined
 
-  function control(kind: ResponseKind, unavailable = false) {
+  function control(kind: ResponseKind, unavailable = false, headersFirst = false) {
     const released = Promise.withResolvers<void>()
     let download = false
     const response: HeldResponse = {
@@ -56,6 +56,7 @@ export async function nativeResponseGate(origin: string) {
       released: released.promise,
       downloads: () => download,
       unavailable,
+      headersFirst,
     }
   }
 
@@ -102,6 +103,10 @@ export async function nativeResponseGate(origin: string) {
         source.pause()
         held.response.status = source.statusCode
         held.response.ready = true
+        if (held.headersFirst) {
+          response.writeHead(source.statusCode || 502, source.headers)
+          response.flushHeaders()
+        }
       }
 
       const delivery = (async () => {
@@ -123,7 +128,8 @@ export async function nativeResponseGate(origin: string) {
         const headers = held?.downloads()
           ? { ...source.headers, 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="availability-navigation.html"' }
           : source.headers
-        response.writeHead(source.statusCode || 502, headers)
+        if (!held?.headersFirst)
+          response.writeHead(source.statusCode || 502, headers)
         source.pipe(response)
       })()
       deliveries.add(delivery)
@@ -191,10 +197,10 @@ export async function nativeResponseGate(origin: string) {
     throw error
   }
 
-  function hold(kind: ResponseKind, unavailable = false) {
+  function hold(kind: ResponseKind, unavailable = false, headersFirst = false) {
     if (closing || next.has(kind))
       throw new Error('A response gate must be closed before arming another')
-    const held = control(kind, unavailable)
+    const held = control(kind, unavailable, headersFirst)
     next.set(kind, held)
     controls.add(held)
     return held.response
@@ -208,6 +214,7 @@ export async function nativeResponseGate(origin: string) {
   return {
     server: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
     hold: (kind: ResponseKind) => hold(kind),
+    holdBody: () => hold('availability', false, true),
     unavailable: () => {
       const held = hold('availability', true)
       held.release()

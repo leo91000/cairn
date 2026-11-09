@@ -1,128 +1,125 @@
 import type { Page } from '@playwright/test'
 import type { AvailabilityReadEvent } from '../../../tests/e2e/availability-probe'
 import assert from 'node:assert/strict'
-import {
-  afterEach,
-  beforeEach,
-  it,
-  vi,
-} from 'vitest'
+import { afterEach, beforeEach, it, vi } from 'vitest'
 import { incompleteAvailabilityReads, installAvailabilityProbe } from '../../../tests/e2e/availability-probe'
 import { AvailabilityDeparture, readAvailability } from '../src/availability-read'
 
-class NativeProgress {
-  isTrusted = true
-  constructor(readonly type: string, readonly target: unknown, readonly currentTarget = target) {}
-}
+const HostController = AbortController
+const hostAbort = AbortController.prototype.abort
+const HostEvent = Event
+const HostException = DOMException
+const listeners = new Set<(event: Intent) => void>()
+let ownerWindow: Record<string, unknown>
+let ownerDocument: Record<string, unknown>
+let calls: Call[]
+let loseReason = false
+let deferAbort = false
+let omitAbort = false
 
-class NativeBeforeUnload {
+class Intent {
   type = 'beforeunload'
   isTrusted = true
   constructor(readonly target: unknown, readonly currentTarget: unknown) {}
 }
 
-const listeners = new Set<(event: NativeBeforeUnload) => void>()
-let ownerWindow: Record<string, unknown>
-let ownerDocument: Record<string, unknown>
+interface Call {
+  input: unknown
+  init: RequestInit
+  response: ReturnType<typeof Promise.withResolvers<NativeResponse>>
+  headerStatus?: number
+  outcome?: { value: unknown } | { error: unknown }
+  body?: ReturnType<typeof Promise.withResolvers<unknown>>
+  jsonCalls: number
+  aborts: number
+}
 
-class Request {
-  static instances: Request[] = []
-  readyState = 0
-  status = 0
-  responseText = ''
-  withCredentials = false
-  abortMode: 'sync' | 'deferred' | 'error' | 'none' = 'sync'
-  onreadystatechange: (() => void) | null = null
-  onabort: ((event: NativeProgress) => void) | null = null
-  onload: ((event: NativeProgress) => void) | null = null
-  onerror: ((event: NativeProgress) => void) | null = null
-  ontimeout: ((event: NativeProgress) => void) | null = null
-  method = ''
-  url = ''
-  abortListenerCounts: number[] = []
-  events = new Map<string, Array<{ callback: (event: NativeProgress) => void, capture: boolean }>>()
-  constructor() { Request.instances.push(this) }
-  open(method: string, url: string) {
-    this.method = method
-    this.url = url
-    this.readyState = 1
-    this.onreadystatechange?.()
-  }
-
-  send() {}
-  addEventListener(type: string, callback: (event: NativeProgress) => void, options?: { capture?: boolean }) {
-    this.events.set(type, [...(this.events.get(type) || []), { callback, capture: options?.capture === true }])
-  }
-
-  nativeAbort() {
-    const event = new NativeProgress('abort', this)
-    this.status = 0
-    this.onabort?.(event)
-    for (const listener of this.events.get('abort') || [])
-      listener.callback(event)
-  }
-
-  abort() {
-    this.abortListenerCounts.push(listeners.size)
-    if (this.abortMode === 'sync')
-      this.nativeAbort()
-    else if (this.abortMode === 'error')
-      this.onerror?.(new NativeProgress('error', this))
-    else if (this.abortMode === 'deferred')
-      queueMicrotask(() => this.onabort?.(new NativeProgress('abort', this)))
-  }
-
-  headers(status: number) {
-    this.status = status
-    this.readyState = 2
-    this.onreadystatechange?.()
-  }
-
-  async observedHeaders(status: number, checkpoint: () => Promise<unknown>) {
-    this.status = status
-    this.readyState = 2
-    const event = new NativeProgress('readystatechange', this)
-    for (const listener of this.events.get('readystatechange') || []) {
-      if (listener.capture)
-        listener.callback(event)
+class NativeController extends HostController {
+  abort(reason?: unknown) {
+    if (omitAbort)
+      return
+    if (deferAbort) {
+      queueMicrotask(() => hostAbort.call(this, reason))
+      return
     }
-    this.onreadystatechange?.()
-    // DOM callbacks drain application microtasks before invoking the next
-    // ordinary listener. The caller can dispose and reset the XHR's status.
-    await checkpoint()
-    for (const listener of this.events.get('readystatechange') || []) {
-      if (!listener.capture)
-        listener.callback(event)
-    }
-  }
-
-  load(text: string, status = 200) {
-    this.headers(status)
-    this.responseText = text
-    this.readyState = 4
-    this.onload?.(new NativeProgress('load', this))
+    hostAbort.call(this, reason)
   }
 }
 
-function departure(event = new NativeBeforeUnload(ownerDocument, ownerWindow)) {
+class NativeResponse {
+  constructor(readonly call: Call, readonly status: number) {}
+  get ok() { return this.status >= 200 && this.status < 300 }
+  get body() { throw new Error('The availability factory must not create or expose a stream') }
+  clone() { throw new Error('The availability factory must not clone its native response') }
+  json() {
+    this.call.jsonCalls++
+    if (this.call.outcome)
+      return 'value' in this.call.outcome ? Promise.resolve(this.call.outcome.value) : Promise.reject(this.call.outcome.error)
+    this.call.body ??= Promise.withResolvers<unknown>()
+    return this.call.body.promise
+  }
+}
+
+const originalJson = NativeResponse.prototype.json
+const originalAbort = NativeController.prototype.abort
+const headers = (status = 200, call = calls.at(-1)!) => {
+  call.headerStatus = status
+  call.response.resolve(new NativeResponse(call, status))
+}
+const value = (data: unknown, call = calls.at(-1)!) => {
+  call.outcome = { value: data }
+  call.body?.resolve(data)
+}
+const failure = (cause: unknown, call = calls.at(-1)!) => {
+  if (call.headerStatus === undefined)
+    call.response.reject(cause)
+  else {
+    call.outcome = { error: cause }
+    call.body?.reject(cause)
+  }
+}
+const flush = async () => {
+  for (let index = 0; index < 10; index++)
+    await Promise.resolve()
+}
+const departure = (event = new Intent(ownerDocument, ownerWindow)) => {
   for (const listener of [...listeners])
     listener(event)
 }
 
 beforeEach(() => {
-  Request.instances = []
+  calls = []
   listeners.clear()
+  loseReason = false
+  deferAbort = false
+  omitAbort = false
+  NativeResponse.prototype.json = originalJson
+  NativeController.prototype.abort = originalAbort
+  const fetch = (input: unknown, init: RequestInit) => {
+    const call: Call = { input, init, response: Promise.withResolvers<NativeResponse>(), jsonCalls: 0, aborts: 0 }
+    calls.push(call)
+    init.signal?.addEventListener('abort', () => {
+      if (!init.signal?.aborted)
+        return
+      call.aborts++
+      failure(loseReason ? new HostException('Fetch is aborted', 'AbortError') : init.signal.reason, call)
+    }, { once: true })
+    return call.response.promise
+  }
   ownerWindow = {
-    BeforeUnloadEvent: NativeBeforeUnload,
-    ProgressEvent: NativeProgress,
-    XMLHttpRequest: Request,
-    addEventListener(type: string, listener: (event: NativeBeforeUnload) => void) {
+    fetch,
+    Response: NativeResponse,
+    AbortController: NativeController,
+    Event: HostEvent,
+    DOMException: HostException,
+    BeforeUnloadEvent: Intent,
+    addEventListener(type: string, callback: (event: Intent) => void) {
       if (type === 'beforeunload')
-        listeners.add(listener)
+        listeners.add(callback)
     },
-    removeEventListener(type: string, listener: (event: NativeBeforeUnload) => void) {
+    removeEventListener(type: string, callback: (event: Intent) => void) {
       if (type === 'beforeunload')
-        listeners.delete(listener)
+        listeners.delete(callback)
     },
   }
   ownerDocument = { defaultView: ownerWindow }
@@ -130,212 +127,230 @@ beforeEach(() => {
   ownerWindow.top = ownerWindow
   vi.stubGlobal('window', ownerWindow)
   vi.stubGlobal('document', ownerDocument)
-  vi.stubGlobal('XMLHttpRequest', Request)
+  vi.stubGlobal('Response', NativeResponse)
+  vi.stubGlobal('AbortController', NativeController)
 })
-afterEach(() => vi.unstubAllGlobals())
 
-it('uses one same-origin GET, delivers headers promptly and consumes the exact native body once', async () => {
-  const read = readAvailability(new AbortController().signal)
-  const request = Request.instances[0]!
-  assert.equal(request.method, 'GET')
-  assert.equal(request.url, '/api/installations')
-  assert.equal(request.withCredentials, false)
-  request.headers(200)
-  const response = await read.response
-  assert.equal(response.ok, true)
-  const parsed = response.json()
+afterEach(() => {
+  NativeResponse.prototype.json = originalJson
+  NativeController.prototype.abort = originalAbort
+  vi.unstubAllGlobals()
+})
+
+it('uses one private same-origin keepalive GET and only the original native JSON consumer', async () => {
+  const parent = new HostController()
+  const read = readAvailability(parent.signal)
+  const call = calls[0]!
+  assert.equal(call.input, '/api/installations')
+  assert.equal(call.init.credentials, 'same-origin')
+  assert.equal(call.init.keepalive, true)
+  assert.notEqual(call.init.signal, parent.signal)
   assert.equal(listeners.size, 1)
-  request.load('[{"online":true,"updateRequired":false}]')
-  assert.deepEqual(await parsed, [{ online: true, updateRequired: false }])
+  headers()
+  const response = await read.response
+  assert.equal(response.status, 200)
+  assert.equal(response.ok, true)
+  const body = response.json()
+  value([{ id: 'installation', online: true }])
+  assert.deepEqual(await body, [{ id: 'installation', online: true }])
   await assert.rejects(response.json(), TypeError)
+  assert.equal(call.jsonCalls, 1)
   assert.equal(listeners.size, 0)
   read.dispose()
-  assert.equal(request.abortListenerCounts.length, 0)
+  parent.abort()
+  assert.equal(call.aborts, 0)
 })
 
-it('withdraws only in the trusted native abort handler inside its own call, before a second departure', async () => {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const read = readAvailability(new AbortController().signal)
-    const rejection = assert.rejects(read.response, AvailabilityDeparture)
+it('requires a trusted exact native signal event inside its own call and the original fetch terminal', async () => {
+  for (const generic of [false, true]) {
+    loseReason = generic
+    const read = readAvailability(new HostController().signal)
+    const rejected = assert.rejects(read.response, AvailabilityDeparture)
     departure()
-    await rejection
-    assert.deepEqual(Request.instances.at(-1)!.abortListenerCounts, [0])
+    await rejected
+    assert.equal(calls.at(-1)!.aborts, 1)
+    assert.equal(listeners.size, 0)
+    read.dispose()
+  }
+})
+
+it('requires the original body terminal after an owned native signal and rearms the next read', async () => {
+  loseReason = true
+  const read = readAvailability(new HostController().signal)
+  headers()
+  const body = (await read.response).json()
+  const rejected = assert.rejects(body, AvailabilityDeparture)
+  departure()
+  await rejected
+  assert.equal(listeners.size, 0)
+  const next = readAvailability(new HostController().signal)
+  headers()
+  const nextBody = (await next.response).json()
+  value([{ online: true }])
+  assert.deepEqual(await nextBody, [{ online: true }])
+  assert.equal(listeners.size, 0)
+})
+
+it('does not disarm the listener for synthetic, foreign or wrong-interface intent', async () => {
+  const read = readAvailability(new HostController().signal)
+  const untrusted = new Intent(ownerDocument, ownerWindow)
+  untrusted.isTrusted = false
+  departure(untrusted)
+  departure(new Intent({}, ownerWindow))
+  departure(new Intent(ownerDocument, {}))
+  departure({ type: 'beforeunload', isTrusted: true, target: ownerDocument, currentTarget: ownerWindow } as Intent)
+  assert.equal(listeners.size, 1)
+  assert.equal(calls[0]!.aborts, 0)
+  const rejected = assert.rejects(read.response, AvailabilityDeparture)
+  departure()
+  await rejected
+})
+
+it('refuses a genuine abort delivered outside the owned-call bracket even with its unique reason', async () => {
+  for (const generic of [false, true]) {
+    loseReason = generic
+    deferAbort = true
+    const read = readAvailability(new HostController().signal)
+    const rejected = assert.rejects(read.response, cause => !(cause instanceof AvailabilityDeparture))
+    departure()
+    await rejected
+    assert.equal(calls.at(-1)!.aborts, 1)
     assert.equal(listeners.size, 0)
   }
 })
 
-it('keeps the listener after untrusted, foreign-target or wrong-interface events', async () => {
-  const read = readAvailability(new AbortController().signal)
-  const rejection = assert.rejects(read.response, AvailabilityDeparture)
-  const untrusted = new NativeBeforeUnload(ownerDocument, ownerWindow)
-  untrusted.isTrusted = false
-  departure(untrusted)
-  departure(new NativeBeforeUnload({}, ownerWindow))
-  departure(new NativeBeforeUnload(ownerDocument, {}))
-  departure({
-    type: 'beforeunload',
-    isTrusted: true,
-    target: ownerDocument,
-    currentTarget: ownerWindow,
-  })
-  assert.equal(listeners.size, 1)
-  assert.equal(Request.instances[0]!.abortListenerCounts.length, 0)
-  departure()
-  await rejection
+it('keeps a prior fetch or body failure even when intent arrives before its promise reaction', async () => {
+  for (const bodyStage of [false, true]) {
+    const read = readAvailability(new HostController().signal)
+    let original = read.response as Promise<unknown>
+    if (bodyStage) {
+      headers()
+      original = (await read.response).json()
+    }
+    const cause = new TypeError('genuine native network failure')
+    const rejected = assert.rejects(original, error => error === cause)
+    failure(cause)
+    departure()
+    await rejected
+    assert.equal(listeners.size, 0)
+  }
 })
 
-it('rejects a late native abort as a genuine failure rather than a departure', async () => {
-  const read = readAvailability(new AbortController().signal)
-  Request.instances[0]!.abortMode = 'deferred'
-  const rejection = assert.rejects(read.response, cause => cause instanceof DOMException && !(cause instanceof AvailabilityDeparture))
-  departure()
-  await rejection
-})
-
-it('never converts native error during abort or a previously settled error into departure', async () => {
-  const read = readAvailability(new AbortController().signal)
-  Request.instances[0]!.abortMode = 'error'
-  const rejection = assert.rejects(read.response, TypeError)
-  departure()
-  await rejection
-  const prior = readAvailability(new AbortController().signal)
-  const priorRequest = Request.instances.at(-1)!
-  const priorFailure = assert.rejects(prior.response, TypeError)
-  priorRequest.onerror?.(new NativeProgress('error', priorRequest))
-  departure()
-  prior.dispose()
-  await priorFailure
-  assert.equal(priorRequest.abortListenerCounts.length, 0)
-  assert.equal(listeners.size, 0)
-})
-
-it('does not treat an armed state, pending request or synthetic callback as a native terminal', async () => {
-  const controller = new AbortController()
-  const read = readAvailability(controller.signal)
-  const request = Request.instances[0]!
-  request.abortMode = 'none'
-  let settled = false
-  void read.response.then(() => settled = true, () => settled = true)
-  departure()
-  const synthetic = new NativeProgress('abort', request)
-  synthetic.isTrusted = false
-  request.onabort?.(synthetic)
-  await Promise.resolve()
-  assert.equal(settled, false)
-  controller.abort()
-  await assert.rejects(read.response, DOMException)
-  assert.equal(listeners.size, 0)
-})
-
-it('observes 401 and HTTP failure headers before a stalled body and disposes the unread body', async () => {
+it('preserves already fulfilled HTTP failure headers and never hides their body error', async () => {
+  loseReason = true
   for (const status of [401, 503]) {
-    const read = readAvailability(new AbortController().signal)
-    Request.instances.at(-1)!.headers(status)
+    const read = readAvailability(new HostController().signal)
+    headers(status)
+    departure()
     const response = await read.response
     assert.equal(response.status, status)
     assert.equal(response.ok, false)
-    read.dispose()
+    await assert.rejects(response.json(), cause => cause instanceof DOMException && !(cause instanceof AvailabilityDeparture))
     assert.equal(listeners.size, 0)
-    await assert.rejects(response.json(), DOMException)
   }
 })
 
-it('preserves native body failure, malformed JSON and status zero as failures', async () => {
-  const read = readAvailability(new AbortController().signal)
-  const request = Request.instances[0]!
-  request.headers(200)
-  const response = await read.response
-  const rejected = assert.rejects(response.json(), TypeError)
-  request.onerror?.(new NativeProgress('error', request))
+it('does not manufacture a terminal when an abort produces no original rejection', async () => {
+  omitAbort = true
+  const read = readAvailability(new HostController().signal)
+  let settled = false
+  void read.response.then(() => settled = true, () => settled = true)
   departure()
-  await rejected
-  const malformed = readAvailability(new AbortController().signal)
-  Request.instances.at(-1)!.load('not JSON')
-  await assert.rejects((await malformed.response).json(), SyntaxError)
-  const zero = readAvailability(new AbortController().signal)
-  const failure = assert.rejects(zero.response, TypeError)
-  Request.instances.at(-1)!.load('', 0)
-  await failure
+  await flush()
+  assert.equal(settled, false)
+  assert.equal(calls[0]!.aborts, 0)
+  headers()
+  const body = (await read.response).json()
+  value({ original: 'precise body' })
+  assert.deepEqual(await body, { original: 'precise body' })
 })
 
-it('aborts body consumption on explicit caller withdrawal and detaches all listeners', async () => {
-  const controller = new AbortController()
-  const read = readAvailability(controller.signal)
-  Request.instances[0]!.headers(200)
-  const body = (await read.response).json()
-  const rejection = assert.rejects(body, DOMException)
-  controller.abort()
-  await rejection
-  assert.deepEqual(Request.instances[0]!.abortListenerCounts, [0])
+it('does not turn a non-native signal interface into an owned departure', async () => {
+  ownerWindow.Event = class DifferentEvent {}
+  loseReason = true
+  const read = readAvailability(new HostController().signal)
+  const rejected = assert.rejects(read.response, cause => !(cause instanceof AvailabilityDeparture))
+  departure()
+  await rejected
+})
+
+it('keeps caller withdrawal distinct and releases lifecycle listeners', async () => {
+  loseReason = true
+  const parent = new HostController()
+  const read = readAvailability(parent.signal)
+  const rejected = assert.rejects(read.response, cause => cause instanceof DOMException && !(cause instanceof AvailabilityDeparture))
+  parent.abort()
+  await rejected
   assert.equal(listeners.size, 0)
-  const before = Request.instances[0]!.abortListenerCounts.length
+  const before = calls[0]!.aborts
   departure()
   read.dispose()
-  assert.equal(Request.instances[0]!.abortListenerCounts.length, before)
+  assert.equal(calls[0]!.aborts, before)
 })
 
 it('does not start an already withdrawn caller', async () => {
-  const controller = new AbortController()
-  controller.abort()
-  await assert.rejects(readAvailability(controller.signal).response, DOMException)
-  assert.equal(Request.instances[0]!.method, '')
+  const parent = new HostController()
+  parent.abort()
+  await assert.rejects(readAvailability(parent.signal).response, DOMException)
+  assert.equal(calls.length, 0)
   assert.equal(listeners.size, 0)
 })
 
-it('observes genuine HTTP headers before application disposal resets the native status', async () => {
+it('preserves parsing failures and a successful original body settled before later intent', async () => {
+  const read = readAvailability(new HostController().signal)
+  headers()
+  const body = (await read.response).json()
+  const cause = new SyntaxError('genuine malformed JSON')
+  const rejected = assert.rejects(body, error => error === cause)
+  failure(cause)
+  departure()
+  await rejected
+  const next = readAvailability(new HostController().signal)
+  headers()
+  const complete = (await next.response).json()
+  value({ original: true })
+  departure()
+  assert.deepEqual(await complete, { original: true })
+})
+
+it('observes the original fetch and JSON promises without clones, replacement promises or missing HTTP status', async () => {
   const storage = new Map<string, string>()
-  vi.stubGlobal('ProgressEvent', NativeProgress)
   vi.stubGlobal('sessionStorage', {
     getItem: (key: string) => storage.get(key) ?? null,
-    setItem: (key: string, value: string) => storage.set(key, value),
+    setItem: (key: string, data: string) => storage.set(key, data),
   })
   const page = {
-    async exposeFunction(name: string, callback: (event: unknown) => void) {
-      ownerWindow[name] = async (event: unknown) => callback(event)
-    },
+    async exposeFunction(name: string, callback: (event: unknown) => void) { ownerWindow[name] = async (event: unknown) => callback(event) },
     async addInitScript(callback: () => void) { callback() },
   }
   await installAvailabilityProbe(page as unknown as Page, () => {})
-  const read = readAvailability(new AbortController().signal)
-  let rejectedHttp = false
-  const application = read.response.then((response) => {
-    assert.equal(response.status, 503)
-    rejectedHttp = !response.ok
-  }).finally(() => read.dispose())
-  await Request.instances[0]!.observedHeaders(503, () => application)
-  assert.equal(rejectedHttp, true)
-  assert.equal(Request.instances[0]!.status, 0)
-  const journal = JSON.parse(storage.get('cairn-e2e-availability-journal') || '[]') as Array<{ kind: string, status?: number }>
+  const fetch = ownerWindow.fetch as (input: string, init: RequestInit) => Promise<NativeResponse>
+  const original = fetch('/api/installations', { signal: new HostController().signal })
+  assert.equal(original, calls[0]!.response.promise)
+  headers()
+  const response = await original
+  const body = response.json()
+  assert.equal(body, calls[0]!.body!.promise)
+  value([{ online: true }])
+  await body
+  const read = readAvailability(new HostController().signal)
+  headers(503)
+  const bad = await read.response
+  assert.equal(bad.status, 503)
+  read.dispose()
+  await flush()
+  const journal = JSON.parse(storage.get('cairn-e2e-availability-journal') || '[]') as AvailabilityReadEvent[]
   assert.equal(journal.filter(event => event.kind === 'headers' && event.status === 503).length, 1)
+  assert.equal(journal.filter(event => event.kind === 'body').length, 1)
 })
 
-it('requires exactly one terminal for each current or retired journal read', () => {
-  const start: AvailabilityReadEvent = {
-    sequence: 1,
-    kind: 'start',
-    document: 'retired-document',
-    read: 1,
-    aborted: false,
-    afterPagehide: false,
-  }
-  const headers: AvailabilityReadEvent = { ...start, sequence: 2, kind: 'headers', status: 503 }
-  const terminal: AvailabilityReadEvent = { ...start, sequence: 3, kind: 'rejected', aborted: true }
+it('requires exactly one start and terminal for every final journal identity', () => {
+  const start: AvailabilityReadEvent = { sequence: 1, kind: 'start', document: 'retired', read: 1, aborted: false, afterPagehide: false }
+  const terminal: AvailabilityReadEvent = { ...start, sequence: 2, kind: 'body', exactBody: true }
   assert.deepEqual(incompleteAvailabilityReads([start]), [start])
-  assert.deepEqual(incompleteAvailabilityReads([start, headers]), [start])
-  assert.deepEqual(incompleteAvailabilityReads([start, { ...terminal, document: 'current-document' }]), [start, { ...terminal, document: 'current-document' }])
-  assert.deepEqual(incompleteAvailabilityReads([start, { ...terminal, read: 2 }]), [start, { ...terminal, read: 2 }])
-  assert.deepEqual(incompleteAvailabilityReads([start, headers, terminal]), [])
-  assert.deepEqual(incompleteAvailabilityReads([start, { ...terminal, kind: 'body', exactBody: true }]), [])
-  assert.deepEqual(incompleteAvailabilityReads([start, { ...terminal, kind: 'body-rejected' }]), [])
-  assert.deepEqual(incompleteAvailabilityReads([start, terminal, { ...terminal, sequence: 4 }]), [start])
-  assert.deepEqual(incompleteAvailabilityReads([start, { ...start, sequence: 2 }, terminal]), [start])
-  const body: AvailabilityReadEvent = { ...terminal, kind: 'body', exactBody: true }
-  assert.deepEqual(incompleteAvailabilityReads([body]), [body])
-  assert.deepEqual(incompleteAvailabilityReads([body, { ...body, sequence: 4 }]), [body])
   assert.deepEqual(incompleteAvailabilityReads([terminal]), [terminal])
-  assert.deepEqual(incompleteAvailabilityReads([headers]), [headers])
-  assert.deepEqual(incompleteAvailabilityReads([
-    { ...start, kind: 'pagehide', read: 0 },
-    { ...start, kind: 'pageshow', read: 0, document: 'current-document' },
-  ]), [])
+  assert.deepEqual(incompleteAvailabilityReads([start, terminal]), [])
+  assert.deepEqual(incompleteAvailabilityReads([start, terminal, { ...terminal, sequence: 3 }]), [start])
+  assert.deepEqual(incompleteAvailabilityReads([{ ...terminal, kind: 'headers', status: 200 }]), [{ ...terminal, kind: 'headers', status: 200 }])
+  assert.deepEqual(incompleteAvailabilityReads([{ ...start, kind: 'pagehide', read: 0 }, { ...start, kind: 'pageshow', read: 0 }]), [])
 })

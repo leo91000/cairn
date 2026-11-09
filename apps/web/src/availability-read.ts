@@ -1,6 +1,5 @@
-// Only the account shell's readonly availability GET uses this transport. A
-// native departure can cancel fetch before pagehide and incorrectly mark an
-// otherwise healthy installation offline.
+// This account-shell GET may be withdrawn before pagehide. Keep it independent
+// of the provisional document loader while retaining its original native result.
 export class AvailabilityDeparture extends Error {
   constructor() {
     super('Availability read withdrawn by this document')
@@ -8,30 +7,20 @@ export class AvailabilityDeparture extends Error {
   }
 }
 
-interface AvailabilityResponse {
-  status: number
-  ok: boolean
-  json: () => Promise<unknown>
-}
-
 export function readAvailability(signal: AbortSignal) {
   const ownerWindow = window
   const ownerDocument = document
-  const request = new XMLHttpRequest()
-  const nativeAbort = ownerWindow.XMLHttpRequest.prototype.abort
+  const nativeFetch = ownerWindow.fetch
+  const nativeJson = ownerWindow.Response.prototype.json
+  const nativeAbort = ownerWindow.AbortController.prototype.abort
+  const controller = new ownerWindow.AbortController()
   let listening = false
-  let delivered = false
+  let settled = false
   let consumed = false
-  let insideAbort: 'departure' | 'caller' | undefined
-  let terminal: { text: string } | { error: unknown } | undefined
-  let body: { resolve: (text: string) => void, reject: (cause: unknown) => void } | undefined
-  let resolveResponse!: (response: AvailabilityResponse) => void
-  let rejectResponse!: (cause: unknown) => void
-  const response = new Promise<AvailabilityResponse>((resolve, reject) => {
-    resolveResponse = resolve
-    rejectResponse = reject
-  })
+  let insideAbort: { owner: 'departure' | 'caller', reason: unknown } | undefined
+  let proof: NonNullable<typeof insideAbort> | undefined
 
+  const callerReason = () => signal.reason ?? new DOMException('Availability caller withdrawn', 'AbortError')
   const removeListener = () => {
     if (listening) {
       ownerWindow.removeEventListener('beforeunload', beforeUnload)
@@ -39,68 +28,38 @@ export function readAvailability(signal: AbortSignal) {
     }
   }
 
-  const headers = () => {
-    if (delivered || !request.status)
-      return
-    delivered = true
-    resolveResponse({
-      status: request.status,
-      ok: request.status >= 200 && request.status < 300,
-      json() {
-        if (consumed)
-          return Promise.reject(new TypeError('Availability body already consumed'))
-        consumed = true
-        const text = terminal
-          ? 'text' in terminal ? Promise.resolve(terminal.text) : Promise.reject(terminal.error)
-          : new Promise<string>((resolve, reject) => body = { resolve, reject })
-        return text.then(value => JSON.parse(value) as unknown)
-      },
-    })
-  }
-
-  const finish = (outcome: NonNullable<typeof terminal>) => {
-    if (terminal)
-      return
-    terminal = outcome
+  const cleanup = () => {
     removeListener()
     signal.removeEventListener('abort', callerAbort)
-    if ('error' in outcome) {
-      if (!delivered)
-        rejectResponse(outcome.error)
-      body?.reject(outcome.error)
-    }
-    else {
-      headers()
-      body?.resolve(outcome.text)
-    }
-
-    request.onreadystatechange = null
-    request.onload = null
-    request.onerror = null
-    request.ontimeout = null
-    request.onabort = null
+    controller.signal.removeEventListener('abort', nativeSignalAborted)
   }
 
-  const callerReason = () => signal.reason ?? new DOMException('Availability caller withdrawn', 'AbortError')
-  const abort = (owner: 'departure' | 'caller') => {
-    if (terminal)
+  const finish = () => {
+    settled = true
+    cleanup()
+  }
+
+  function nativeSignalAborted(event: Event) {
+    if (insideAbort && event.type === 'abort' && event.isTrusted
+      && event instanceof ownerWindow.Event && event.target === controller.signal && event.currentTarget === controller.signal
+      && controller.signal.aborted && controller.signal.reason === insideAbort.reason) {
+      // This records provenance only. The original fetch/json promise, never
+      // this signal event, must supply the terminal result.
+      proof = insideAbort
+    }
+  }
+
+  function abort(owner: 'departure' | 'caller') {
+    if (settled || controller.signal.aborted)
       return
     removeListener()
-    insideAbort = owner
+    insideAbort = { owner, reason: owner === 'departure' ? {} : callerReason() }
     try {
-      nativeAbort.call(request)
-    }
-    catch (cause) {
-      finish({ error: cause })
+      nativeAbort.call(controller, insideAbort.reason)
     }
     finally {
       insideAbort = undefined
     }
-
-    // Caller disposal must release its JS resources even if the UA has already
-    // stopped this request. This is not evidence of a native departure terminal.
-    if (owner === 'caller' && !terminal)
-      finish({ error: callerReason() })
   }
 
   function callerAbort() {
@@ -113,62 +72,86 @@ export function readAvailability(signal: AbortSignal) {
       && event.target === ownerDocument && event.currentTarget === ownerWindow
       && ownerWindow.document === ownerDocument && ownerDocument.defaultView === ownerWindow
       && ownerWindow.top === ownerWindow
-    if (!ownIntent || terminal)
-      return
-    removeListener()
-    abort('departure')
+    if (ownIntent && !settled)
+      abort('departure')
   }
 
-  const nativeEvent = (event: ProgressEvent, type: string) => event.type === type && event.isTrusted
-    && typeof ownerWindow.ProgressEvent === 'function' && event instanceof ownerWindow.ProgressEvent
-    && event.target === request && event.currentTarget === request
-  request.onreadystatechange = () => {
-    if (request.readyState >= 2)
-      headers()
-  }
-
-  request.onload = (event) => {
-    if (nativeEvent(event, 'load'))
-      finish(request.status ? { text: request.responseText } : { error: new TypeError('Installation status unavailable') })
-  }
-
-  request.onerror = (event) => {
-    if (nativeEvent(event, 'error'))
-      finish({ error: new TypeError('Installation status unavailable') })
-  }
-
-  request.ontimeout = (event) => {
-    if (nativeEvent(event, 'timeout'))
-      finish({ error: new TypeError('Installation status timed out') })
-  }
-
-  request.onabort = (event) => {
-    if (nativeEvent(event, 'abort')) {
-      const cause = insideAbort === 'departure'
-        ? new AvailabilityDeparture()
-        : insideAbort === 'caller' ? callerReason() : new DOMException('Installation status read aborted', 'AbortError')
-      finish({ error: cause })
+  const departureCause = (cause: unknown, httpFailure = false) => {
+    const nativeAbortError = cause instanceof ownerWindow.DOMException && cause.name === 'AbortError'
+      && cause.code === ownerWindow.DOMException.ABORT_ERR
+    // Keep the fetch operation closed: only the native GET and native json()
+    // are used; no raw Response, stream, clone or supplied body is exposed.
+    // Network failures and native JSON parse errors must retain their causes.
+    if (!httpFailure && proof?.owner === 'departure' && controller.signal.reason === proof.reason
+      && (cause === proof.reason || nativeAbortError)) {
+      return new AvailabilityDeparture()
     }
+    return cause
   }
 
+  if (signal.aborted) {
+    return { response: Promise.reject(callerReason()), dispose() {} }
+  }
+
+  controller.signal.addEventListener('abort', nativeSignalAborted)
+  signal.addEventListener('abort', callerAbort, { once: true })
+  ownerWindow.addEventListener('beforeunload', beforeUnload)
+  listening = true
+  let response: Promise<{
+    status: number
+    ok: boolean
+    json: () => Promise<unknown>
+  }>
   try {
-    if (signal.aborted) {
-      finish({ error: callerReason() })
-    }
-    else {
-      request.open('GET', '/api/installations')
-      ownerWindow.addEventListener('beforeunload', beforeUnload)
-      listening = true
-      signal.addEventListener('abort', callerAbort, { once: true })
-      request.send()
-    }
+    const original = nativeFetch.call(ownerWindow, '/api/installations', {
+      credentials: 'same-origin',
+      keepalive: true,
+      signal: controller.signal,
+    })
+    response = original.then(value => ({
+      status: value.status,
+      ok: value.ok,
+      json() {
+        if (consumed)
+          return Promise.reject(new TypeError('Availability body already consumed'))
+        consumed = true
+        let body: Promise<unknown>
+        try {
+          body = nativeJson.call(value)
+        }
+        catch (cause) {
+          finish()
+          return Promise.reject(cause)
+        }
+        return body.then((data) => {
+          finish()
+          return data
+        }, (cause: unknown) => {
+          const result = departureCause(cause, !value.ok)
+          finish()
+          throw result
+        })
+      },
+    }), (cause: unknown) => {
+      const result = departureCause(cause)
+      finish()
+      throw result
+    })
   }
   catch (cause) {
-    finish({ error: cause })
+    finish()
+    response = Promise.reject(cause)
   }
 
   return {
     response,
-    dispose: callerAbort,
+    dispose() {
+      try {
+        abort('caller')
+      }
+      finally {
+        cleanup()
+      }
+    },
   }
 }
