@@ -192,6 +192,23 @@ it('holds the real inert health destination until the old document has retired i
   gate.check()
 })
 
+it('keeps a controlled readonly outage active across HTTP attempts and restores the origin', async () => {
+  const { gate, call, received } = await fixture()
+  const outage = gate.failAvailabilityReads()
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const read = call('/api/installations')
+    await expect(read.result).rejects.toThrow()
+    expect(read.responseSeen()).toBe(false)
+  }
+  expect(outage.rejectedRequests).toBe(2)
+  expect(await call('/health').result).toEqual({ status: 200, body: '[{"online":true}]' })
+  outage.restore()
+  expect(await call('/api/installations').result).toEqual({ status: 200, body: '[{"online":true}]' })
+  expect(gate.availabilityRequests).toBe(3)
+  expect(received).toHaveLength(2)
+  gate.check()
+})
+
 it('produces a real read failure before headers and during an already started body', async () => {
   for (const bodyStarted of [false, true]) {
     const { gate, call } = await fixture()

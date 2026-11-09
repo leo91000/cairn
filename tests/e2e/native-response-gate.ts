@@ -37,6 +37,8 @@ export async function nativeResponseGate(origin: string) {
   const failures: unknown[] = []
   let closing = false
   let closeResult: Promise<void> | undefined
+  let availabilityRequests = 0
+  let availabilityFailure: { rejectedRequests: number } | undefined
 
   function control(kind: ResponseKind, unavailable = false, headersFirst = false) {
     const released = Promise.withResolvers<void>()
@@ -115,6 +117,15 @@ export async function nativeResponseGate(origin: string) {
       : request.method === 'GET' && /^\/installations\/[\w-]+\/agents$/.test(target.pathname)
         ? 'agents'
         : request.method === 'GET' && target.pathname === '/health' ? 'health' : undefined
+    if (kind === 'availability') {
+      availabilityRequests++
+      if (availabilityFailure) {
+        availabilityFailure.rejectedRequests++
+        response.destroy()
+        return
+      }
+    }
+
     const held = kind ? next.get(kind) : undefined
     if (kind && held) {
       held.response.received = true
@@ -261,6 +272,21 @@ export async function nativeResponseGate(origin: string) {
 
   return {
     server: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+    get availabilityRequests() { return availabilityRequests },
+    failAvailabilityReads() {
+      if (closing || availabilityFailure)
+        throw new Error('Only one owned availability outage may be active')
+
+      const failure = { rejectedRequests: 0 }
+      availabilityFailure = failure
+      return {
+        get rejectedRequests() { return failure.rejectedRequests },
+        restore() {
+          if (availabilityFailure === failure)
+            availabilityFailure = undefined
+        },
+      }
+    },
     hold: (kind: ResponseKind) => hold(kind),
     holdBody: () => hold('availability', false, true),
     unavailable: () => {
@@ -272,6 +298,7 @@ export async function nativeResponseGate(origin: string) {
     close() {
       closeResult ??= (async () => {
         closing = true
+        availabilityFailure = undefined
         for (const held of controls)
           held.response.release()
         const stopped = new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
