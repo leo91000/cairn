@@ -1,8 +1,8 @@
 # Focused availability product qualification
 
-Product 0fcd910c6872ab4f4baf787e64fe7f09e71d7d23 tree 8f8d5edaef9d7b09e7de684a6ace94e81c5eb56a, base actual main e88bd38c5a162483aafa38172d04f5fb2a75c420.
+Product 127434eb7fc3eaa9242601df2f115f9dffac975b tree a92366a62e251487389eb6954a7975e54033528a, base actual main dc24903967c7443d5c3e61587440240d05fa3c76.
 Existing observer only, NEVER merge observer. Pinned product checkout; only hash-checked
-SDK helper copied into ignored test-results. No localheavy/SDKinstall/newenv/ref/pilot.
+SDK helper and immutable collection/checksum/formatter evidence copied into TASK-SCOPED RUNNER_TEMP, outsideALLPlaywright output/reportdirs. C40_EVIDENCE_DIR is exported throughGITHUB_ENV afterinitialcreation. InlineSDKimportsfromfileURL withactualrootSDKpassedbyparameter; no SDKcopy/environmentduplication. Both prebuildcollection andfinalalwaysartifact includeonlythatdedicatedfolder, notallRunnerTemp. Primarydefaulttest-results cleanupcannotdeleteproof/finalchecksum inputs. No localheavy/SDKinstall/newenv/ref/pilot.
 One sequential25minjob/allsteps5min/owned7s bounds. No retry/flaky/skip/error masking.
 
 Native evidence acquired separately, NEVER rerun for globalgreen:
@@ -48,12 +48,13 @@ https://raw.githubusercontent.com/microsoft/playwright/v1.64.1/packages/playwrig
 https://raw.githubusercontent.com/microsoft/playwright/v1.64.1/packages/playwright-core/src/coreBundle.ts
 
 Qualification exact-head map:
-- Real1.64.1CLI --list EXACT6 newMCP +EXACT2physicalBFCache, ordinaryconfig, BEFOREcompile.
+- Real1.64.1CLI --list EXACT8 newMCP +EXACT2physicalBFCache, ordinaryconfig, BEFOREcompile (four MCPcases perbrowser includingthepermanentactualapplicationoutage).
   Prior oldanchoredgrep0/exit1 evidence425281 preserved, not rerun to getgreen.
 - pnpm lint:fix + unchangedsourceguard, fullpnpmcheck; preserveformatter.patch/error.
   Process-scoped Gittrust +established disposablezip/deps/Rust setup retained.
 - Primary EXACTUNCHANGED:
   pnpm test:e2e deliverables.spec.ts skill-bundles.spec.ts beacon-sharing.spec.ts beacon-installations.spec.ts mcps.spec.ts --workers=2 --retries=0 --fail-on-flaky-tests --trace=on
+- PrimaryMCP includesactualapplication readonlyoutage: originalGET held, persistenttransportfault acrossHTTPattempts, originalTypeError/nonaborted/Offline preserved, healthyhealthroutewhilefaultactive, counts +restorationBEFORElaterPagegoto, finalfreshAgentsOnline/journal andallpageerrorsstrict. No JSretry/mutation/sleep/newdeadline.
 - DirectRelay/savedreaders: existing beacon-relay/direct-capacity/chat-switch projects.
 - PhysicalBFCache ordinaryMCPprojects, workers1 budget unchanged, actual trusted
   persisted SAMEdoc/exactfreshbody; synthetic lifecycle doesNOTreplacephysical.

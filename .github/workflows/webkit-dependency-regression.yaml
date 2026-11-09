@@ -12,7 +12,7 @@ jobs:
       matrix:
         include:
           - label: focused-repair
-            sha: 0fcd910c6872ab4f4baf787e64fe7f09e71d7d23
+            sha: 127434eb7fc3eaa9242601df2f115f9dffac975b
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -53,9 +53,11 @@ jobs:
           git -c safe.directory="$GITHUB_WORKSPACE" log -1 --format='commit=%H tree=%T'
           test -z "$(git -c safe.directory="$GITHUB_WORKSPACE" status --porcelain)"
           git -c safe.directory="$GITHUB_WORKSPACE" fetch --depth=1 --no-tags origin "$OBSERVER_SHA"
-          mkdir -p test-results/collection
-          git -c safe.directory="$GITHUB_WORKSPACE" show "$OBSERVER_SHA:.github/diagnostics/closed-target-error.mjs" > test-results/collection/closed-target-error.mjs
-          sha256sum test-results/collection/closed-target-error.mjs > test-results/collection/closed-target-helper.sha256
+          export C40_EVIDENCE_DIR="$RUNNER_TEMP/cairn-availability-qualification"
+          mkdir -p "$C40_EVIDENCE_DIR/collection" "$C40_EVIDENCE_DIR/sdk"
+          echo "C40_EVIDENCE_DIR=$C40_EVIDENCE_DIR" >> "$GITHUB_ENV"
+          git -c safe.directory="$GITHUB_WORKSPACE" show "$OBSERVER_SHA:.github/diagnostics/closed-target-error.mjs" > "$C40_EVIDENCE_DIR/sdk/closed-target-error.mjs"
+          sha256sum "$C40_EVIDENCE_DIR/sdk/closed-target-error.mjs" > "$C40_EVIDENCE_DIR/sdk/closed-target-helper.sha256"
       - uses: ./.github/actions/setup-pnpm
         timeout-minutes: 5
         with:
@@ -75,12 +77,13 @@ jobs:
         run: |
           test ! -e target/debug/cairn
           test ! -e target/debug/examples/browser_fixture
-          mkdir -p test-results/collection
-          PLAYWRIGHT_JSON_OUTPUT_FILE=test-results/collection/cases.json pnpm test:e2e mcps.spec.ts --project=journeys-mcps --project=layout-webkit-mcps --grep 'availability (keeps direct readers stable|resumes real reads after same-document persisted lifecycle)' --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --list --reporter=json
+          mkdir -p "$C40_EVIDENCE_DIR/collection"
+          PLAYWRIGHT_JSON_OUTPUT_FILE="$C40_EVIDENCE_DIR/collection/cases.json" pnpm test:e2e mcps.spec.ts --project=journeys-mcps --project=layout-webkit-mcps --grep 'availability (keeps direct readers stable|resumes real reads after same-document persisted lifecycle|preserves a scoped readonly outage before native navigation)' --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --list --reporter=json
           node --input-type=module <<'JS'
           import { readFileSync, writeFileSync } from 'node:fs'
+          import { join } from 'node:path'
           import assert from 'node:assert/strict'
-          const report = JSON.parse(readFileSync('test-results/collection/cases.json', 'utf8'))
+          const report = JSON.parse(readFileSync(join(process.env.C40_EVIDENCE_DIR, 'collection', 'cases.json'), 'utf8'))
           const cases = []
           function collect(suite) {
             for (const spec of suite.specs || []) {
@@ -95,19 +98,21 @@ jobs:
           assert.deepEqual(report.errors, [])
           const titles = ['committed', 'cancelled'].map(destination => `availability keeps direct readers stable until native navigation is ${destination}`)
           titles.push('availability resumes real reads after same-document persisted lifecycle')
+          titles.push('availability preserves a scoped readonly outage before native navigation')
           const expected = ['journeys-mcps', 'layout-webkit-mcps'].flatMap(project => titles.map(title => [project, title]))
           assert.deepEqual(cases.sort(), expected.sort())
-          writeFileSync('test-results/collection/receipt.json', JSON.stringify({ collectionOnly: true, cases }))
-          console.log('Exact native regression collection: six cases, three per browser project; no runtime fixture execution.')
+          writeFileSync(join(process.env.C40_EVIDENCE_DIR, 'collection', 'receipt.json'), JSON.stringify({ collectionOnly: true, cases }))
+          console.log('Exact native regression collection: eight cases, four per browser project; no runtime fixture execution.')
           JS
       - name: Collect both physical BFCache cases before compilation
         timeout-minutes: 5
         run: |
-          PLAYWRIGHT_JSON_OUTPUT_FILE=test-results/collection/bfcache.json pnpm test:e2e availability-bfcache.spec.ts --project=journeys-mcps --project=layout-webkit-mcps --workers=1 --retries=0 --fail-on-flaky-tests --trace=on --list --reporter=json
+          PLAYWRIGHT_JSON_OUTPUT_FILE="$C40_EVIDENCE_DIR/collection/bfcache.json" pnpm test:e2e availability-bfcache.spec.ts --project=journeys-mcps --project=layout-webkit-mcps --workers=1 --retries=0 --fail-on-flaky-tests --trace=on --list --reporter=json
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict'
           import { readFileSync, writeFileSync } from 'node:fs'
-          const report = JSON.parse(readFileSync('test-results/collection/bfcache.json', 'utf8'))
+          import { join } from 'node:path'
+          const report = JSON.parse(readFileSync(join(process.env.C40_EVIDENCE_DIR, 'collection', 'bfcache.json'), 'utf8'))
           const cases = []
           function collect(suite) {
             for (const spec of suite.specs || []) {
@@ -123,7 +128,7 @@ jobs:
           const title = 'availability restores the same native document from BFCache with an exact fresh body'
           const expected = ['journeys-mcps', 'layout-webkit-mcps'].map(project => [project, title])
           assert.deepEqual(cases.sort(), expected.sort())
-          writeFileSync('test-results/collection/bfcache-receipt.json', JSON.stringify({ collectionOnly: true, cases }))
+          writeFileSync(join(process.env.C40_EVIDENCE_DIR, 'collection', 'bfcache-receipt.json'), JSON.stringify({ collectionOnly: true, cases }))
           console.log('Exact physical BFCache collection: two cases, no runtime fixture execution.')
           JS
       - name: Verify the actual pinned SDK closed-target error prototype before compilation
@@ -131,19 +136,21 @@ jobs:
         run: |
           node --input-type=module <<'JS'
           import { writeFileSync } from 'node:fs'
+          import { join } from 'node:path'
           import { webkit, errors } from '@playwright/test'
-          import { qualifyClosedTargetSdk } from './test-results/collection/closed-target-error.mjs'
+          import { pathToFileURL } from 'node:url'
+          const { qualifyClosedTargetSdk } = await import(pathToFileURL(join(process.env.C40_EVIDENCE_DIR, 'sdk', 'closed-target-error.mjs')).href)
           const receipt = await qualifyClosedTargetSdk(webkit, errors)
-          writeFileSync('test-results/collection/closed-target-sdk.json', JSON.stringify(receipt))
+          writeFileSync(join(process.env.C40_EVIDENCE_DIR, 'collection', 'closed-target-sdk.json'), JSON.stringify(receipt))
           console.log('Actual pinned SDK closed-target prototype verified; classifier-only, product not qualified.')
           JS
-          sha256sum --check test-results/collection/closed-target-helper.sha256
+          sha256sum --check "$C40_EVIDENCE_DIR/sdk/closed-target-helper.sha256"
       - uses: actions/upload-artifact@v7.0.1
         timeout-minutes: 5
         if: always()
         with:
           name: availability-repair-collection
-          path: test-results/collection/
+          path: ${{ env.C40_EVIDENCE_DIR }}
           retention-days: 14
       - name: Install pinned Rust tools and browser build dependencies
         timeout-minutes: 5
@@ -172,10 +179,10 @@ jobs:
         run: |
           format_result=0
           pnpm lint:fix || format_result=$?
-          git -c safe.directory="$GITHUB_WORKSPACE" diff --binary > test-results/formatter.patch
+          git -c safe.directory="$GITHUB_WORKSPACE" diff --binary > "$C40_EVIDENCE_DIR/formatter.patch"
           source_result=0
           git -c safe.directory="$GITHUB_WORKSPACE" diff --exit-code || source_result=$?
-          printf '{"formatterExit":%s,"sourceDiffExit":%s}\n' "$format_result" "$source_result" > test-results/formatter-result.json
+          printf '{"formatterExit":%s,"sourceDiffExit":%s}\n' "$format_result" "$source_result" > "$C40_EVIDENCE_DIR/formatter-result.json"
           test "$format_result" -eq 0
           test "$source_result" -eq 0
       - name: Qualify all web quality checks
@@ -224,7 +231,7 @@ jobs:
         run: |
           test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = "$EXPECTED_SHA"
           test -z "$(git -c safe.directory="$GITHUB_WORKSPACE" status --porcelain)"
-          sha256sum --check test-results/collection/closed-target-helper.sha256
+          sha256sum --check "$C40_EVIDENCE_DIR/sdk/closed-target-helper.sha256"
       - uses: actions/upload-artifact@v7.0.1
         timeout-minutes: 5
         if: always()
@@ -233,4 +240,5 @@ jobs:
           path: |
             playwright-report/
             test-results/
+            ${{ env.C40_EVIDENCE_DIR }}
           retention-days: 14
