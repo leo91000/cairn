@@ -13,7 +13,7 @@ use crate::{
     validation::text,
 };
 use cairn_contracts::PluginContributionKind as Kind;
-use cairn_plugin_api::{Output, parse_arguments, usage};
+use cairn_plugin_api::{Output, parse_arguments};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -124,15 +124,101 @@ fn words(input: &Value) -> Result<Vec<String>> {
         .ok_or_else(|| Error::bad("Command arguments must be text."))
 }
 
+/// A live, authorized command catalog. No instance settings, secrets or script calls.
+async fn help(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
+    let run = super::help::authorize_metadata(s, bearer).await?;
+    let (agent_id, _) = agent(&run);
+    let plugin = text(input, "plugin");
+    let selected = text(input, "helpCommand");
+    let packages = granted(s, &agent_id, (!plugin.is_empty()).then_some(plugin), None).await?;
+    let mut output = String::new();
+    for (package, instances) in packages {
+        let snapshot =
+            super::grant_authorization::Snapshot::capture(s, &agent_id, Some(bearer), &package)
+                .await?;
+        let manifest = package.manifest.clone();
+        let commands = s
+            .store
+            .read(move |db| {
+                snapshot.authorize(db)?;
+                let mut commands = Vec::new();
+                for command in &manifest.commands {
+                    for instance in &instances {
+                        let current = super::connections::authorize(db, instance)?;
+                        if db
+                            .plugin_contribution(
+                                &snapshot.agent,
+                                &current.id,
+                                Kind::Command,
+                                &command.name,
+                            )?
+                            .is_some()
+                        {
+                            commands.push(command.clone());
+                            break;
+                        }
+                    }
+                }
+                Ok(commands)
+            })
+            .await?;
+        if commands.is_empty() {
+            continue;
+        }
+        if plugin.is_empty() {
+            output.push_str(&format!(
+                "  {:20} {}\n",
+                package.manifest.id, package.manifest.name
+            ));
+        } else if selected.is_empty() {
+            output = super::help::package(
+                plugin,
+                &package.manifest.name,
+                &package.manifest.description,
+                &commands,
+            );
+        } else if let Some(command) = commands.iter().find(|command| command.name == selected) {
+            output = super::help::command(plugin, command);
+        }
+    }
+    if plugin.is_empty() {
+        output = if output.is_empty() {
+            "No enabled plugin commands are granted to this agent.\n".to_owned()
+        } else {
+            format!(
+                "Plugin packages with commands granted to this agent:\n\n{output}\nRun 'cairn plugin <package> --help' to discover its commands.\n"
+            )
+        };
+    } else if output.is_empty() {
+        return Err(Error::forbidden(
+            "Plugin help unavailable: no enabled instance grants this command or package. Run 'cairn plugin --list' to check current command grants.",
+        ));
+    }
+    Ok(json!({ "output": "text", "value": output }))
+}
+
 /// Runs `cairn plugin <plugin> <command> …` for the run holding `bearer`.
 pub async fn command(s: &Service, bearer: &str, input: &Value) -> Result<Value> {
-    let run = authorize(s, bearer).await?;
-    let (agent_id, agent) = agent(&run);
+    if input["help"] == true || ["--help", "-h"].contains(&text(input, "command")) {
+        return help(s, bearer, input).await;
+    }
+    super::help::authorize_metadata(s, bearer).await?;
     let plugin = text(input, "plugin");
     let unavailable = || Error::not_found("Plugin command not available.");
     let package = registry::active(s, plugin)
         .await
         .map_err(|_| unavailable())?;
+    let name = text(input, "command");
+    if !input["file"].is_object()
+        && let Some(command) = package.manifest.command(name)
+        && super::help::requested(command, &words(input)?)
+    {
+        return help(s, bearer, &json!({ "plugin": plugin, "helpCommand": name })).await;
+    }
+    // Metadata discovery above cannot resolve provider resources. Every real
+    // command and file transfer retains the full asynchronous authority checks.
+    let run = authorize(s, bearer).await?;
+    let (agent_id, agent) = agent(&run);
     if let Some(file) = input.get("file").filter(|value| value.is_object()) {
         let instances = granted(s, &agent_id, Some(plugin), None)
             .await?
@@ -184,20 +270,9 @@ pub async fn command(s: &Service, bearer: &str, input: &Value) -> Result<Value> 
         })??;
         return Ok(json!({ "output": "json", "value": result }));
     }
-    let name = text(input, "command");
     let Some(command) = package.manifest.command(name) else {
-        let available = package
-            .manifest
-            .commands
-            .iter()
-            .map(usage)
-            .collect::<Vec<_>>();
-        if available.is_empty() {
-            return Err(unavailable());
-        }
         return Err(Error::bad(format!(
-            "Unknown command. Use cairn plugin {plugin} {}",
-            available.join(" | ")
+            "Unknown command. Run 'cairn plugin {plugin} --help' for commands granted to this agent."
         )));
     };
     let values = parse_arguments(command, &words(input)?).map_err(Error::bad)?;

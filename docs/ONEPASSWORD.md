@@ -1,5 +1,9 @@
 # 1Password service accounts
 
+Discover commands with `cairn plugin onepassword --help`; use
+`cairn plugin onepassword read --help` for secret-read arguments without reading a
+secret. See [CLI help](CLI.md) for discovery and access requirements.
+
 1Password is an ordinary plugin package (see [plugins](PLUGINS.md#1password)). In
 **Atelier → Plugins → 1Password** on web or Android, add a service account with a
 name and an `ops_…` token, then save and test it. Grant it to agents from each

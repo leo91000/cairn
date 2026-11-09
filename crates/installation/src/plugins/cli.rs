@@ -14,6 +14,9 @@ const USAGE: &str = "Use cairn plugin <plugin> <command> [arguments], for exampl
 pub(crate) const ORIGIN_ENV: &str = "CAIRN_MCP_ORIGIN";
 
 pub fn arguments(args: &[String]) -> Result<Value> {
+    if args == ["--list"] {
+        return Ok(json!({ "help": true }));
+    }
     let plugin = args.first().filter(|plugin| {
         !plugin.is_empty()
             && plugin.len() <= 80
@@ -21,13 +24,13 @@ pub fn arguments(args: &[String]) -> Result<Value> {
                 .bytes()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
     });
-    let (Some(plugin), Some(command)) = (plugin, args.get(1)) else {
+    let Some(plugin) = plugin else {
         return Err(Error::bad(USAGE));
     };
     Ok(json!({
         "plugin": plugin,
-        "command": command,
-        "args": &args[2..],
+        "command": args.get(1).map_or("--help", String::as_str),
+        "args": args.get(2..).unwrap_or_default(),
     }))
 }
 
@@ -234,14 +237,17 @@ mod tests {
             .unwrap(),
             json!({ "plugin": "onepassword", "command": "read", "args": ["--account", "a1", "op://v/i/f"] })
         );
-        for invalid in [
-            vec![],
-            vec!["onepassword"],
-            vec!["../x", "read"],
-            vec!["One", "read"],
-        ] {
+        for invalid in [vec![], vec!["../x", "read"], vec!["One", "read"]] {
             assert!(arguments(&words(&invalid)).is_err(), "{invalid:?}");
         }
+        assert_eq!(
+            arguments(&words(&["--list"])).unwrap(),
+            json!({ "help": true })
+        );
+        assert_eq!(
+            arguments(&words(&["onepassword"])).unwrap(),
+            json!({ "plugin": "onepassword", "command": "--help", "args": [] })
+        );
     }
 
     #[test]
