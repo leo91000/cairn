@@ -797,20 +797,7 @@ const allPageErrorsStrict = rows.every(row => row.pageErrors.length === 0)
 const baselineExpectedCells = ['chromium', 'webkit'].flatMap(engine => ['fetch', 'xhr'].flatMap(reader => scenarios.map(scenario => engine + ':' + reader + ':' + scenario))).sort()
 const baselineObservedCells = rows.filter(row => row.reader !== 'intent-fetch').map(row => row.engine + ':' + row.reader + ':' + row.scenario).sort()
 const baselineAllCellsObserved = JSON.stringify(baselineExpectedCells) === JSON.stringify(baselineObservedCells)
-const baselineControlsComplete = baselineAllCellsObserved && rows.filter(row => row.reader === 'fetch').every((row) => {
-  if (!['committed', 'download'].includes(row.scenario))
-    return row.usable
-  if (!row.firstFailure)
-    return true
-  const original = row.events.filter(event => event.read === 1)
-  const pendingOriginal = original.filter(event => event.kind === 'start').length === 1 && !original.some(terminal)
-  return row.scenario === 'download'
-    && row.identityRetained
-    && row.firstFailure.phase === 'exact read terminal and replacement'
-    && pendingOriginal
-    && row.http?.ready
-    && row.http.status === 200
-})
+const baselineControlsComplete = baselineAllCellsObserved && rows.filter(row => row.reader !== 'intent-fetch').every(row => row.usable)
 const expectedCells = ['chromium', 'webkit'].flatMap(engine => ['fetch', 'xhr', 'intent-fetch'].flatMap(reader => (reader === 'intent-fetch' ? intentScenarios : scenarios).map(scenario => engine + ':' + reader + ':' + scenario))).sort()
 const observedCells = rows.map(row => row.engine + ':' + row.reader + ':' + row.scenario).sort()
 const allCellsObserved = JSON.stringify(observedCells) === JSON.stringify(expectedCells)
@@ -822,6 +809,14 @@ const xhrControlsPassed = rows.filter(row => row.reader !== 'intent-fetch').leng
   && cleanupFailures.length === 0
 const intentControlsPassed = allCellsObserved && rows.filter(row => row.reader === 'intent-fetch').every(row => row.usable)
   && allPageErrorsStrict && baselineControlsComplete && cleanupFailures.length === 0
+const readerSummary = Object.fromEntries(['fetch', 'xhr', 'intent-fetch'].map((reader) => {
+  const selected = rows.filter(row => row.reader === reader)
+  return [reader, {
+    observed: selected.length,
+    usable: selected.filter(row => row.usable).length,
+    expected: 2 * (reader === 'intent-fetch' ? intentScenarios.length : scenarios.length),
+  }]
+}))
 await writeEvidence('result.json', {
   diagnosticOnly: true,
   productQualified: false,
@@ -832,6 +827,7 @@ await writeEvidence('result.json', {
   baselineAllCellsObserved,
   allCellsObserved,
   rows: rows.length,
+  readerSummary,
   cleanupFailures,
 })
 console.log(JSON.stringify({
@@ -844,6 +840,7 @@ console.log(JSON.stringify({
   baselineAllCellsObserved,
   allCellsObserved,
   rows: rows.length,
+  readerSummary,
   cleanupFailures: cleanupFailures.length,
 }))
 // Prior genuine XHR failures remain failures, even if the new candidate works.
