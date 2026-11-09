@@ -19,6 +19,9 @@ function client(reader, scenario) {
   const documentId = crypto.randomUUID()
   const pending = new Map()
   let hidden = false
+  let resumeTimer
+  let intentSequence = 0
+  let failureCount = 0
   const record = (kind, read, detail = {}) => {
     const journal = JSON.parse(sessionStorage.getItem(key) || '[]')
     journal.push({
@@ -26,25 +29,57 @@ function client(reader, scenario) {
       read,
       kind,
       hidden,
+      sequence: journal.length + 1,
+      time: performance.now(),
       ...detail,
     })
     sessionStorage.setItem(key, JSON.stringify(journal))
   }
 
-  sessionStorage.setItem(key, '[]')
+  if (!sessionStorage.getItem(key))
+    sessionStorage.setItem(key, '[]')
   window.readerDocument = documentId
   window.addEventListener('pagehide', () => {
     hidden = true
     record('pagehide', 0)
+    clearTimeout(resumeTimer)
     for (const controller of [...pending.values()])
       controller.abort()
   })
   window.abortReader = () => pending.get(1)?.abort()
+  if (reader === 'intent-fetch') {
+    const navigation = window.navigation
+    record('navigation-api', 0, { available: Boolean(navigation?.addEventListener) })
+    navigation?.addEventListener('navigate', (event) => {
+      const id = ++intentSequence
+      const recognized = typeof event.destination?.sameDocument === 'boolean'
+      const verified = event.isTrusted && event.target === navigation && recognized && !event.destination.sameDocument
+      record('navigation-intent', 0, {
+        id,
+        trusted: event.isTrusted,
+        exactTarget: event.target === navigation,
+        recognized,
+        sameDocument: event.destination?.sameDocument,
+        navigationType: event.navigationType,
+        verified,
+      })
+      if (!verified)
+        return
+      for (const [read, controller] of pending) {
+        record('owner-withdrawal', read, { id })
+        controller.abort({ kind: 'navigation-intent', id })
+      }
+    })
+  }
   window.beginReader = (read = 1) => {
     const controller = new AbortController()
     pending.set(read, controller)
     record('start', read)
-    controller.signal.addEventListener('abort', () => record('signal-abort', read, { signalAborted: true }), { once: true })
+    controller.signal.addEventListener('abort', () => record('signal-abort', read, {
+      signalAborted: true,
+      reason: controller.signal.reason?.kind,
+      intentId: controller.signal.reason?.id,
+    }), { once: true })
     let settled = false
     const finish = (kind, detail = {}) => {
       if (settled)
@@ -59,6 +94,84 @@ function client(reader, scenario) {
             window.beginReader(2)
         }, 3000)
       }
+    }
+
+    if (reader === 'intent-fetch') {
+      let abortListener
+      const withdrawal = new Promise((_, reject) => {
+        abortListener = () => reject(controller.signal.reason)
+        controller.signal.addEventListener('abort', abortListener, { once: true })
+      })
+      const raw = fetch('/api/installations', {
+        credentials: 'same-origin',
+        keepalive: true,
+        signal: controller.signal,
+        headers: { 'x-cairn-diagnostic-read': String(read) },
+      })
+      // Observe the real native promise independently of the ownership race.
+      // Register before race so a rejection already queued before intent stays
+      // a genuine failure, even if its observer initiates a later navigation.
+      void raw.then(() => record('native-fetch-fulfilled', read), (error) => {
+        record('native-fetch-rejected', read, { sameAbortReason: controller.signal.aborted && error === controller.signal.reason })
+        if (scenario === 'failure-before-intent' && read === 1 && window.navigation) {
+          const result = window.navigation.navigate('/installations/fixture/agents')
+          void result.finished.catch(() => {})
+        }
+      })
+      void (async () => {
+        try {
+          const response = await Promise.race([raw, withdrawal])
+          record('headers', read, { status: response.status })
+          if (!response.ok) {
+            failureCount++
+            finish('http-error', { status: response.status })
+            return
+          }
+          const body = response.json()
+          void body.then(() => record('native-body-fulfilled', read), (error) => record('native-body-rejected', read, {
+            sameAbortReason: controller.signal.aborted && error === controller.signal.reason,
+          }))
+          try {
+            const value = await Promise.race([body, withdrawal])
+            failureCount = 0
+            finish('body', {
+              status: response.status,
+              online: value[0]?.online,
+              exactBody: Array.isArray(value) && value.length === 1 && Object.keys(value[0] || {}).length === 1 && value[0]?.online === true,
+            })
+          }
+          catch (error) {
+            if (controller.signal.aborted && error === controller.signal.reason)
+              finish('owner-cancelled', { reason: error?.kind, intentId: error?.id })
+            else {
+              failureCount++
+              finish('body-error')
+            }
+          }
+        }
+        catch (error) {
+          if (controller.signal.aborted && error === controller.signal.reason)
+            finish('owner-cancelled', { reason: error?.kind, intentId: error?.id })
+          else {
+            failureCount++
+            finish('fetch-error')
+          }
+        }
+        finally {
+          controller.signal.removeEventListener('abort', abortListener)
+          // Same existing clean-poll cadence and failure backoff; no rearm from
+          // the intent handler, and never resume while pagehide owns suspension.
+          if (read === 1 && !hidden && ['committed', 'download', 'reload', 'delayed-commit', 'failure-before-intent'].includes(scenario)) {
+            const delay = Math.min(3000 * 2 ** Math.min(failureCount, 4), 30000)
+            record('resume-scheduled', read, { delay, failureCount })
+            resumeTimer = setTimeout(() => {
+              if (!hidden)
+                window.beginReader(2)
+            }, delay)
+          }
+        }
+      })()
+      return
     }
 
     if (reader === 'fetch') {
@@ -169,6 +282,7 @@ function client(reader, scenario) {
 const terminalKinds = ['body', 'fetch-error', 'http-error', 'body-error', 'error', 'timeout', 'native-abort', 'owner-cancelled', 'sync-error']
 const terminal = event => terminalKinds.includes(event.kind)
 const scenarios = ['success', 'committed', 'download', 'owner-abort', 'network-error', 'truncated', 'http503', 'malformed', 'access-check']
+const intentScenarios = [...scenarios, 'same-document', 'synthetic-intent', 'reload', 'delayed-commit', 'failure-before-intent', 'http401']
 const rows = []
 const cleanupFailures = []
 
@@ -203,6 +317,9 @@ async function observe(browser, engine, reader, scenario) {
   let page
   let held
   let destination
+  let secondHeld
+  let documentId
+  let apiRequests = 0
   let navigation
   let navigationKind = 'not-started'
   let identityRetained = false
@@ -211,7 +328,8 @@ async function observe(browser, engine, reader, scenario) {
   let httpClosedDuringObservation = false
   const backend = createServer((request, response) => {
     if (request.url === '/api/installations') {
-      if (scenario === 'network-error') {
+      apiRequests++
+      if (scenario === 'network-error' || (scenario === 'failure-before-intent' && request.headers['x-cairn-diagnostic-read'] === '1')) {
         request.socket.destroy()
         return
       }
@@ -226,12 +344,13 @@ async function observe(browser, engine, reader, scenario) {
         return
       }
 
-      response.writeHead(scenario === 'http503' ? 503 : 200, { 'content-type': 'application/json' })
+      const status = scenario === 'http503' ? 503 : scenario === 'http401' ? 401 : 200
+      response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
       response.end(scenario === 'malformed' ? '{invalid' : '[{"online":true}]')
       return
     }
 
-    if (request.url === '/live') {
+    if (request.url === '/live' || (scenario === 'reload' && request.url === '/installations/fixture/agents')) {
       if (scenario === 'access-check')
         response.setHeader('content-security-policy', "connect-src 'none'")
       const program = '(' + client.toString() + ')(' + JSON.stringify(reader) + ',' + JSON.stringify(scenario) + ')'
@@ -240,6 +359,8 @@ async function observe(browser, engine, reader, scenario) {
       return
     }
 
+    if (scenario === 'failure-before-intent')
+      response.setHeader('content-disposition', 'attachment; filename=availability-navigation.html')
     response.writeHead(200, { 'content-type': 'text/html' }).end('<!doctype html><h1>Destination</h1>')
   })
 
@@ -249,7 +370,7 @@ async function observe(browser, engine, reader, scenario) {
     backend.listen(0, '127.0.0.1')
     await once(backend, 'listening')
     const origin = 'http://127.0.0.1:' + backend.address().port
-    const controlled = ['success', 'committed', 'download', 'owner-abort'].includes(scenario)
+    const controlled = ['success', 'committed', 'download', 'owner-abort', 'same-document', 'synthetic-intent', 'reload', 'delayed-commit'].includes(scenario)
     if (controlled)
       gate = await nativeResponseGate(origin)
     context = await browser.newContext({
@@ -261,8 +382,8 @@ async function observe(browser, engine, reader, scenario) {
     page.on('download', download => downloads.push(download))
     page.on('pageerror', error => pageErrors.push(errorRecord(error)))
     phase = 'initial document'
-    await page.goto(origin + '/live')
-    const documentId = await page.evaluate(() => window.readerDocument)
+    await page.goto(origin + (scenario === 'reload' ? '/installations/fixture/agents' : '/live'))
+    documentId = await page.evaluate(() => window.readerDocument)
     if (controlled)
       held = gate.hold('availability')
     await page.evaluate(() => window.beginReader())
@@ -276,9 +397,24 @@ async function observe(browser, engine, reader, scenario) {
       if (scenario === 'owner-abort') {
         await page.evaluate(() => window.abortReader())
       }
+      else if (scenario === 'same-document' || scenario === 'synthetic-intent') {
+        await page.evaluate((kind) => {
+          if (kind === 'same-document')
+            history.pushState({ probe: true }, '', '#same-document')
+          else {
+            const event = new Event('navigate')
+            Object.defineProperty(event, 'destination', { value: { sameDocument: false } })
+            window.navigation?.dispatchEvent(event)
+          }
+        }, scenario)
+        identityRetained = await page.evaluate(() => window.readerDocument) === documentId
+        assert.equal(identityRetained, true)
+        if (scenario === 'same-document')
+          assert.equal(await page.evaluate(() => history.state?.probe === true && location.hash === '#same-document'), true)
+      }
       else if (scenario !== 'success') {
         destination = gate.hold('agents')
-        navigation = page.goto(origin + '/installations/fixture/agents')
+        navigation = scenario === 'reload' ? page.reload() : page.goto(origin + '/installations/fixture/agents')
         const arrival = navigation.then(() => 'committed', () => 'rejected')
         phase = 'navigation response ready'
         await expect.poll(() => {
@@ -286,6 +422,23 @@ async function observe(browser, engine, reader, scenario) {
           return destination.ready
         }, { timeout: 7000 }).toBe(true)
         assert.equal(destination.status, 200)
+        if (reader === 'intent-fetch') {
+          phase = 'owned intent and actual native rejection before destination release'
+          await expect.poll(async () => {
+            const journal = await readJournal()
+            return journal.some(event => event.document === documentId && event.read === 1 && event.kind === 'native-fetch-rejected' && event.sameAbortReason)
+          }, { timeout: 7000 }).toBe(true)
+        }
+        if (scenario === 'delayed-commit') {
+          secondHeld = gate.hold('availability')
+          held.release()
+          phase = 'ordinary cadence starts read two while destination pending'
+          await expect.poll(() => {
+            gate.check()
+            return secondHeld.ready
+          }, { timeout: 7000 }).toBe(true)
+          assert.equal(secondHeld.status, 200)
+        }
         if (scenario === 'download')
           destination.downloadNavigation()
         else
@@ -301,27 +454,39 @@ async function observe(browser, engine, reader, scenario) {
         }
         else {
           assert.equal(navigationKind, 'committed')
-          await expect(page.getByRole('heading', { name: 'Destination', exact: true })).toBeVisible()
+          await expect(page.getByRole('heading', { name: scenario === 'reload' ? 'Live' : 'Destination', exact: true })).toBeVisible()
+          assert.notEqual(await page.evaluate(() => window.readerDocument), documentId)
         }
       }
       held.release()
+      secondHeld?.release()
     }
 
     phase = 'exact read terminal and replacement'
     await expect.poll(async () => {
       const journal = await readJournal()
-      const first = journal.filter(event => event.read === 1 && terminal(event))
+      const first = journal.filter(event => event.document === documentId && event.read === 1 && terminal(event))
+      if (reader === 'intent-fetch' && ['download', 'failure-before-intent'].includes(scenario))
+        return journal.some(event => event.document === documentId && event.read === 2 && event.kind === 'body')
       if (scenario === 'committed' && journal.some(event => event.read === 1 && event.kind === 'signal-abort' && event.hidden))
         return true
       if (scenario === 'download' && first.some(event => event.kind === 'native-abort'))
         return journal.some(event => event.read === 2 && terminal(event))
       return first.length > 0
     }, { timeout: 7000 }).toBe(true)
+    if (scenario === 'failure-before-intent') {
+      phase = 'failure remains genuine across later native download intent'
+      await expect.poll(() => downloads.length, { timeout: 7000 }).toBe(1)
+      assert.equal(downloads[0].suggestedFilename(), 'availability-navigation.html')
+      identityRetained = await page.evaluate(() => window.readerDocument) === documentId
+      assert.equal(identityRetained, true)
+      await expect(page.getByRole('heading', { name: 'Live', exact: true })).toBeVisible()
+    }
     if (held) {
       phase = 'positive HTTP close'
       await expect.poll(() => {
         gate.check()
-        return held.closed && ['finished', 'cancelled'].includes(held.terminal)
+        return [held, ...(secondHeld ? [secondHeld] : [])].every(control => control.closed && ['finished', 'cancelled'].includes(control.terminal))
       }, { timeout: 7000 }).toBe(true)
       httpClosedDuringObservation = true
     }
@@ -331,6 +496,7 @@ async function observe(browser, engine, reader, scenario) {
   }
   finally {
     held?.release()
+    secondHeld?.release()
     destination?.release()
     if (page && !page.isClosed()) {
       try {
@@ -394,10 +560,11 @@ async function observe(browser, engine, reader, scenario) {
     await navigation?.catch(() => {})
   }
 
-  const first = events.filter(event => event.read === 1 && terminal(event))
+  const originalEvents = events.filter(event => event.document === documentId)
+  const first = originalEvents.filter(event => event.read === 1 && terminal(event))
   const trustedNativeCancel = first.some(event => event.kind === 'native-abort' && event.trusted && event.exactTarget && !event.explicitAbort && !event.signalAborted)
-  const freshBody = events.filter(event => event.read === 2 && event.kind === 'body' && event.status === 200 && event.online === true).length === 1
-  const originalBody = first.filter(event => event.kind === 'body' && event.status === 200 && event.online === true).length === 1
+  const freshBody = originalEvents.filter(event => event.read === 2 && event.kind === 'body' && event.status === 200 && event.online === true && (reader !== 'intent-fetch' || event.exactBody)).length === 1
+  const originalBody = first.filter(event => event.kind === 'body' && event.status === 200 && event.online === true && (reader !== 'intent-fetch' || event.exactBody)).length === 1
   const ownedWithdrawal = events.some(event => event.read === 1 && event.kind === 'signal-abort' && event.hidden && event.signalAborted)
   const unexpectedNativeError = ['success', 'committed', 'download', 'owner-abort'].includes(scenario)
     && events.some(event => ['platform-error', 'platform-timeout'].includes(event.kind) && !event.explicitAbort && !event.signalAborted)
@@ -416,6 +583,44 @@ async function observe(browser, engine, reader, scenario) {
     usable = first.some(event => event.kind === 'body-error')
   else
     usable = first.some(event => ['error', 'fetch-error', 'body-error', 'sync-error'].includes(event.kind)) && !trustedNativeCancel && !originalBody
+  if (reader === 'intent-fetch') {
+    const verifiedIntents = originalEvents.filter(event => event.kind === 'navigation-intent' && event.verified && event.trusted && event.exactTarget && event.recognized && event.sameDocument === false)
+    const cancellation = first.find(event => event.kind === 'owner-cancelled' && event.reason === 'navigation-intent')
+    const withdrawal = originalEvents.find(event => event.kind === 'owner-withdrawal' && event.read === 1 && event.id === cancellation?.intentId)
+    const intent = verifiedIntents.find(event => event.id === cancellation?.intentId)
+    const signal = originalEvents.find(event => event.read === 1 && event.kind === 'signal-abort' && event.reason === 'navigation-intent' && event.intentId === cancellation?.intentId)
+    const nativeRejection = originalEvents.find(event => event.read === 1 && event.kind === 'native-fetch-rejected' && event.sameAbortReason)
+    const explicitNativeCancellation = Boolean(intent && withdrawal && signal && nativeRejection && cancellation
+      && intent.sequence < withdrawal.sequence && withdrawal.sequence < signal.sequence && signal.sequence < nativeRejection.sequence)
+    const resumed = originalEvents.find(event => event.read === 1 && event.kind === 'resume-scheduled')
+    const unexpectedFailure = originalEvents.some(event => ['fetch-error', 'body-error', 'http-error', 'error', 'timeout'].includes(event.kind)
+      || (['native-fetch-rejected', 'native-body-rejected'].includes(event.kind) && !event.sameAbortReason))
+    if (['committed', 'reload', 'delayed-commit'].includes(scenario)) {
+      usable = explicitNativeCancellation && !unexpectedFailure && !originalBody
+      if (scenario === 'delayed-commit') {
+        const secondStart = originalEvents.find(event => event.read === 2 && event.kind === 'start')
+        const pagehide = originalEvents.find(event => event.kind === 'pagehide')
+        usable &&= resumed?.delay === 3000 && secondStart && pagehide && secondStart.sequence < pagehide.sequence
+          && originalEvents.some(event => event.read === 2 && event.kind === 'signal-abort' && event.hidden && !event.reason)
+      }
+    }
+    else if (scenario === 'download') {
+      usable = identityRetained && explicitNativeCancellation && !originalBody && freshBody && !unexpectedFailure && resumed?.delay === 3000
+    }
+    else if (scenario === 'same-document' || scenario === 'synthetic-intent') {
+      usable = identityRetained && originalBody && first.length === 1 && !unexpectedFailure
+        && !originalEvents.some(event => event.kind === 'signal-abort' || event.kind === 'owner-withdrawal')
+    }
+    else if (scenario === 'failure-before-intent') {
+      usable = identityRetained && verifiedIntents.length === 1 && first.length === 1 && first[0].kind === 'fetch-error'
+        && !originalBody && freshBody && resumed?.delay === 6000 && resumed.failureCount === 1
+        && originalEvents.some(event => event.read === 1 && event.kind === 'native-fetch-rejected' && !event.sameAbortReason && event.sequence < verifiedIntents[0].sequence)
+    }
+    else if (scenario === 'owner-abort')
+      usable = first.length === 1 && first[0].kind === 'owner-cancelled' && first[0].signalAborted && !verifiedIntents.length
+    else if (scenario === 'http401')
+      usable = first.length === 1 && first[0].kind === 'http-error' && first[0].status === 401
+  }
   const row = {
     engine,
     reader,
@@ -424,6 +629,8 @@ async function observe(browser, engine, reader, scenario) {
     pageErrors,
     navigationKind,
     identityRetained,
+    initialDocument: documentId,
+    apiRequests,
     usable: usable && !firstFailure && !pageErrors.length && !unexpectedNativeError && (!held || httpClosedDuringObservation),
     httpClosedDuringObservation,
     http: held && {
@@ -432,6 +639,7 @@ async function observe(browser, engine, reader, scenario) {
       closed: held.closed,
       terminal: held.terminal,
     },
+    secondHttp: secondHeld && { ready: secondHeld.ready, status: secondHeld.status, closed: secondHeld.closed, terminal: secondHeld.terminal },
     events,
   }
   rows.push(row)
@@ -462,8 +670,8 @@ for (const [engine, type] of [['chromium', chromium], ['webkit', webkit]]) {
   let browser
   try {
     browser = await type.launch()
-    for (const reader of ['fetch', 'xhr']) {
-      for (const scenario of scenarios)
+    for (const reader of ['fetch', 'xhr', 'intent-fetch']) {
+      for (const scenario of reader === 'intent-fetch' ? intentScenarios : scenarios)
         await observe(browser, engine, reader, scenario)
     }
   }
@@ -494,19 +702,22 @@ const baselineControlsComplete = rows.filter(row => row.reader === 'fetch').ever
     && row.http?.ready
     && row.http.status === 200
 })
-const expectedCells = ['chromium', 'webkit'].flatMap(engine => ['fetch', 'xhr'].flatMap(reader => scenarios.map(scenario => engine + ':' + reader + ':' + scenario))).sort()
+const expectedCells = ['chromium', 'webkit'].flatMap(engine => ['fetch', 'xhr', 'intent-fetch'].flatMap(reader => (reader === 'intent-fetch' ? intentScenarios : scenarios).map(scenario => engine + ':' + reader + ':' + scenario))).sort()
 const observedCells = rows.map(row => row.engine + ':' + row.reader + ':' + row.scenario).sort()
 const allCellsObserved = JSON.stringify(observedCells) === JSON.stringify(expectedCells)
-const xhrControlsPassed = rows.length === 36
+const xhrControlsPassed = rows.filter(row => row.reader !== 'intent-fetch').length === 36
   && allCellsObserved
   && rows.filter(row => row.reader === 'xhr').every(row => row.usable)
   && allPageErrorsStrict
   && baselineControlsComplete
   && cleanupFailures.length === 0
+const intentControlsPassed = allCellsObserved && rows.filter(row => row.reader === 'intent-fetch').every(row => row.usable)
+  && allPageErrorsStrict && baselineControlsComplete && cleanupFailures.length === 0
 await writeEvidence('result.json', {
   diagnosticOnly: true,
   productQualified: false,
   xhrControlsPassed,
+  intentControlsPassed,
   allPageErrorsStrict,
   baselineControlsComplete,
   allCellsObserved,
@@ -517,11 +728,13 @@ console.log(JSON.stringify({
   diagnosticOnly: true,
   productQualified: false,
   xhrControlsPassed,
+  intentControlsPassed,
   allPageErrorsStrict,
   baselineControlsComplete,
   allCellsObserved,
   rows: rows.length,
   cleanupFailures: cleanupFailures.length,
 }))
-if (!xhrControlsPassed)
+// Prior genuine XHR failures remain failures, even if the new candidate works.
+if (!xhrControlsPassed || !intentControlsPassed)
   process.exitCode = 1
