@@ -559,7 +559,18 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       const currentDocument = await page.evaluate(() => window.cairnAvailabilityDocument)
       await expect.poll(() => pendingReads(currentDocument)).toEqual([])
       responseGate.check()
+      stage = 'retire application and acknowledge its final journal'
+      // The existing JSON health document has no application poll producers.
+      // Keep same-origin storage accessible until departure receipts are read.
+      const retirement = await page.goto(new URL('/health', workspace.url).href)
+      expect(retirement?.status()).toBe(200)
+      expect(retirement?.headers()['content-type']).toContain('application/json')
+      const retiredDocument = await page.evaluate(() => window.cairnAvailabilityDocument)
+      expect(retiredDocument).toBeTruthy()
+      expect(retiredDocument).not.toBe(currentDocument)
+      await expect(page.locator('[data-transport-route]')).toHaveCount(0)
       await harvestReads()
+      expect(reads.filter(event => event.document === retiredDocument && event.kind === 'start')).toEqual([])
       stage = 'completed'
     }
     catch (error) {
