@@ -1,11 +1,11 @@
-name: Availability early departure scope diagnostic only
+name: Availability native XHR ownership diagnostic only
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   reader:
-    name: Native beforeunload scope (NOT product qualification)
+    name: Native XHR ownership (NOT product qualification)
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -37,7 +37,7 @@ jobs:
           mkdir -p test-results/reader-native
           git -c safe.directory="$GITHUB_WORKSPACE" show "$OBSERVER_SHA:.github/diagnostics/availability-reader-native.mjs" > test-results/reader-native/run.mjs
           sha256sum test-results/reader-native/run.mjs tests/e2e/native-response-gate.ts > test-results/reader-native/sources.sha256
-          printf 'observer=%s\nproduct=071010f8682ec2f089f09454959c1391458c50ed\nmode=beforeunload-native-scope-only\n' "$OBSERVER_SHA" > test-results/reader-native/source.txt
+          printf 'observer=%s\nproduct=071010f8682ec2f089f09454959c1391458c50ed\nmode=beforeunload-xhr-owned-terminal-only\n' "$OBSERVER_SHA" > test-results/reader-native/source.txt
       - uses: ./.github/actions/setup-pnpm
         timeout-minutes: 5
         with:
@@ -53,7 +53,7 @@ jobs:
           assert.equal(installed, '1.64.1')
           assert.equal(image, installed)
           JS
-      - name: Observe native beforeunload scope and exact owner rejection once per engine
+      - name: Observe scoped XHR ownership and native attribution negatives once
         timeout-minutes: 5
         run: node test-results/reader-native/run.mjs
       - name: Require unchanged product and diagnostic bytes
