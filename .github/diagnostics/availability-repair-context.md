@@ -1,6 +1,6 @@
 # Focused availability product qualification
 
-Product 40ecae42abac9ffa9cc3d7e670c38845f141671f tree 5f49098e70d1e9faf85c718b38f3f65dc0e4f7f6, base actual main da00f92aee9afb2c125f7aa8bb903999548a35be.
+Product a78ad5c47e60e841db295dc235ebb99345a20d3c tree 9d553de895adf55065273a9dff385f4613778b6d, base actual main da00f92aee9afb2c125f7aa8bb903999548a35be.
 Existing observer only, NEVER merge observer. Pinned product checkout; only hash-checked
 SDK helper copied into ignored test-results. No localheavy/SDKinstall/newenv/ref/pilot.
 One sequential25minjob/allsteps5min/owned7s bounds. No retry/flaky/skip/error masking.
@@ -56,7 +56,8 @@ Qualification exact-head map:
 - PhysicalBFCache ordinaryMCPprojects, workers1 budget unchanged, actual trusted
   persisted SAMEdoc/exactfreshbody; synthetic lifecycle doesNOTreplacephysical.
   Full browser/all matrix selectsit; imposed shortPRfivefilenames excludesit/NOcredit.
-- FullBeaconaccount inclactual401polling/revocation/OAuth/signout.
+- FullBeaconaccount ANDbeacon-oauth specs inaccountproject, inclactual401polling/revocation/OAuth/signout. Both filenames explicitlyselected, no projectmatch-onlycoverage claim.
+- Restored-body assertions require requestSTART andexactBODY afterthetrustedpersistedpageshow sequence. Canceled-navigation recovery usesa freshsameDocsourcecheckpoint beforethequalifyingnewread; predeparture/oldpendingbodies neverqualify. Both sequenceboundaries are retained inprivateevidence, notinferredfromhostcallbackarrival.
 - Real manager/Beacon/networkfixtures/assets +disposablePostgres inCI, final product/
   helper identities unchanged. No Rust/Android/networkprotocol or typed API capability
   source changes in this internal account-shell readonlyGET repair; their unaffected

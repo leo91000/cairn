@@ -12,7 +12,7 @@ jobs:
       matrix:
         include:
           - label: focused-repair
-            sha: 40ecae42abac9ffa9cc3d7e670c38845f141671f
+            sha: a78ad5c47e60e841db295dc235ebb99345a20d3c
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -216,7 +216,7 @@ jobs:
         timeout-minutes: 5
         env:
           PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/account
-        run: pnpm test:e2e beacon-account.spec.ts --project=journeys-beacon-account --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results/account
+        run: pnpm test:e2e beacon-account.spec.ts beacon-oauth.spec.ts --project=journeys-beacon-account --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results/account
       - name: Require final source identity
         timeout-minutes: 5
         env:
