@@ -821,9 +821,11 @@ availabilityTest('availability preserves a scoped readonly outage before native 
   let stage = 'initial application'
   let original: string | undefined
   let target: number | undefined
+  let retryRead: number | undefined
   let poll: ReturnType<typeof responseGate.hold> | undefined
   let outage: ReturnType<typeof responseGate.failAvailabilityReads> | undefined
   let expectedFailure: AvailabilityReadEvent | undefined
+  const failureReceipts: AvailabilityReadEvent[] = []
   let faultWireReceipt: { closed: boolean, terminal: string, bodyReleased: boolean } | undefined
   let primaryFailure: unknown
   let journalAcknowledged = false
@@ -871,7 +873,24 @@ availabilityTest('availability preserves a scoped readonly outage before native 
     expect(expectedFailure.errorName).toBe('TypeError')
     expect(expectedFailure.aborted).toBe(false)
     expect(expectedFailure.afterPagehide).toBe(false)
+    failureReceipts.push(expectedFailure)
     expect(reads.filter(event => event.document === original && event.read === target && event.kind === 'abort')).toEqual([])
+    await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Offline')
+    stage = 'normal polling backoff remains inside the active readonly outage'
+    // Advance only the application's existing six-second polling backoff.
+    await page.clock.runFor(6100)
+    await harvest()
+    const retried = reads.filter(event => event.document === original && event.kind === 'start')
+    expect(retried.length).toBe(earlier + 2)
+    retryRead = retried.at(-1)!.read
+    expect(retryRead).toBeGreaterThan(target)
+    await expect.poll(() => reads.filter(event => event.document === original && event.read === retryRead && event.kind === 'rejected').length).toBe(1)
+    const retryFailure = reads.find(event => event.document === original && event.read === retryRead && event.kind === 'rejected')!
+    expect(retryFailure.errorName).toBe('TypeError')
+    expect(retryFailure.aborted).toBe(false)
+    expect(retryFailure.afterPagehide).toBe(false)
+    expect(reads.filter(event => event.document === original && event.read === retryRead && event.kind === 'abort')).toEqual([])
+    failureReceipts.push(retryFailure)
     await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Offline')
     evidence.healthyRouteStatus = await page.evaluate(async () => {
       const response = await fetch('/health', { credentials: 'same-origin' })
@@ -880,6 +899,7 @@ availabilityTest('availability preserves a scoped readonly outage before native 
     })
     expect(evidence.healthyRouteStatus).toBe(200)
     const rejectedRequests = outage.rejectedRequests
+    expect(rejectedRequests).toBeGreaterThan(0)
     const attemptsAfterTerminal = responseGate.availabilityRequests
     evidence.rejectedRequests = rejectedRequests
     evidence.attemptsAfterTerminal = attemptsAfterTerminal
@@ -929,7 +949,7 @@ availabilityTest('availability preserves a scoped readonly outage before native 
     () => expect(incompleteAvailabilityReads(reads)).toEqual([]),
     () => responseGate.check(),
     () => expect(reads.filter(event => ['rejected', 'body-rejected'].includes(event.kind) && !event.aborted
-      && !(expectedFailure && event.document === expectedFailure.document && event.sequence === expectedFailure.sequence))).toEqual([]),
+      && !failureReceipts.some(expected => event.document === expected.document && event.sequence === expected.sequence))).toEqual([]),
     () => expect(reads.filter(event => event.kind === 'headers' && event.status !== 200)).toEqual([]),
     () => expect(errors).toEqual([]),
   ]
@@ -946,7 +966,9 @@ availabilityTest('availability preserves a scoped readonly outage before native 
       stage,
       original: original ?? null,
       target: target ?? null,
+      retryRead: retryRead ?? null,
       expectedFailure: expectedFailure ?? null,
+      failureReceipts,
       faultWireReceipt: faultWireReceipt ?? null,
       finalAvailabilityRequests: responseGate.availabilityRequests,
       finalRejectedRequests: outage?.rejectedRequests ?? null,

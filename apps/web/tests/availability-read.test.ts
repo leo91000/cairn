@@ -505,6 +505,18 @@ it('accounts for native fetch, optional body and unread HTTP disposal as distinc
     [...complete, { ...enter, sequence: 6 }, { ...abort, sequence: 7, trusted: false }, { ...returned, sequence: 8 }],
     [...complete, { ...enter, sequence: 6 }, { ...abort, sequence: 7, insideAbortCall: false }, { ...returned, sequence: 8 }],
     [...complete, { ...enter, sequence: 6 }, { ...returned, sequence: 7 }, { ...abort, sequence: 8 }],
+    [start, {
+      ...terminal,
+      kind: 'rejected',
+      sequence: 2,
+      aborted: true,
+    }, { ...enter, sequence: 3 }, { ...abort, sequence: 4 }, { ...returned, sequence: 5 }],
+    [start, response, headers, body, {
+      ...terminal,
+      kind: 'body-rejected',
+      sequence: 5,
+      aborted: true,
+    }, { ...enter, sequence: 6 }, { ...abort, sequence: 7 }, { ...returned, sequence: 8 }],
   ]) {
     assert.notEqual(incompleteAvailabilityReads(partial).length, 0)
   }

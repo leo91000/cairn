@@ -228,7 +228,7 @@ export function incompleteAvailabilityReads(reads: readonly AvailabilityReadEven
       }
     }
 
-    if ([...rejected, ...outcomes].some(event => event.aborted && !nativeAbort))
+    if ([...rejected, ...outcomes].some(event => event.aborted && (!nativeAbort || event.sequence <= returns[0]!.sequence)))
       return true
     if (rejected.length)
       return headers.length !== 0 || bodies.length !== 0 || outcomes.length !== 0
