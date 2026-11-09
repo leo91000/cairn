@@ -336,7 +336,7 @@ const availabilityTest = test.extend<{ responseGate: Awaited<ReturnType<typeof n
 })
 
 for (const destination of ['committed', 'cancelled'] as const) {
-  availabilityTest('availability keeps direct readers stable until native navigation is ' + destination, async ({ page, workspace, responseGate }, testInfo) => {
+  availabilityTest(`availability keeps direct readers stable until native navigation is ${destination}`, async ({ page, workspace, responseGate }, testInfo) => {
     const errors: string[] = []
     const reads: AvailabilityReadEvent[] = []
     let stage = 'fixture reset'
@@ -372,6 +372,7 @@ for (const destination of ['committed', 'cancelled'] as const) {
             afterPagehide: pageHidden,
           })
         }
+
         // Report completion after the application's await/catch/finally cycle,
         // without replacing or waiting on its native fetch/body promises.
         const settled = (kind: AvailabilityReadEvent['kind']) => queueMicrotask(() => record(kind))
@@ -470,6 +471,7 @@ for (const destination of ['committed', 'cancelled'] as const) {
         stage = 'production backoff and direct recovery'
         await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
       }
+
       stage = 'current direct readers and settled finite work'
       await expect(transport).toHaveAttribute('data-transport-route', 'direct')
       const currentDocument = await page.evaluate(() => window.cairnAvailabilityDocument)
@@ -494,6 +496,7 @@ for (const destination of ['committed', 'cancelled'] as const) {
       catch (error) {
         cleanupFailures.push(error)
       }
+
       saveAvailabilityObservation(testInfo.outputPath('availability-native-observation.json'), JSON.stringify({
         stage,
         reads,
@@ -502,8 +505,9 @@ for (const destination of ['committed', 'cancelled'] as const) {
         navigation: navigationResponse && { ready: navigationResponse.ready, status: navigationResponse.status, terminal: navigationResponse.terminal },
       }))
     }
+
     if (primaryFailure || cleanupFailures.length)
-      throw new AggregateError([...(primaryFailure ? [primaryFailure] : []), ...cleanupFailures], 'Availability navigation failed at ' + stage)
+      throw new AggregateError([...(primaryFailure ? [primaryFailure] : []), ...cleanupFailures], `Availability navigation failed at ${stage}`)
     expect(errors).toEqual([])
   })
 }

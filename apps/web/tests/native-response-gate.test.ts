@@ -17,7 +17,12 @@ afterEach(async () => {
 })
 
 async function fixture() {
-  const received: Array<{ method?: string, cookie?: string, origin?: string, body: string }> = []
+  const received: Array<{
+    method?: string
+    cookie?: string
+    origin?: string
+    body: string
+  }> = []
   const backend = createServer(async (incoming, response) => {
     const chunks: Buffer[] = []
     for await (const chunk of incoming)
@@ -37,7 +42,7 @@ async function fixture() {
     backend.closeAllConnections()
     await closed
   })
-  const origin = 'http://127.0.0.1:' + (backend.address() as { port: number }).port
+  const origin = `http://127.0.0.1:${(backend.address() as { port: number }).port}`
   const gate = await nativeResponseGate(origin)
   let gateClosed = false
   cleanup.push(async () => {
@@ -92,7 +97,12 @@ it('holds real HTTP headers until release and observes complete delivery', async
 })
 
 it('preserves account context and forwards a mutation exactly once', async () => {
-  const { gate, origin, received, call } = await fixture()
+  const {
+    gate,
+    origin,
+    received,
+    call,
+  } = await fixture()
   expect((await call('/api/fixture', 'POST', 'preserved').result).status).toBe(200)
   expect(received).toEqual([{
     method: 'POST',
@@ -150,7 +160,12 @@ it('closes owned pending responses and is safe to close twice', async () => {
 })
 
 it('refuses another origin before forwarding any account credentials', async () => {
-  const { gate, received, call, closeExpectedFailure } = await fixture()
+  const {
+    gate,
+    received,
+    call,
+    closeExpectedFailure,
+  } = await fixture()
   expect((await call('/api/installations', 'GET', '', 'http://unrelated.invalid').result).status).toBe(502)
   expect(received).toEqual([])
   expect(() => gate.check()).toThrow('The native response gate failed')

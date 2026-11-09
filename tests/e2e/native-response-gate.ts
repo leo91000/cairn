@@ -151,6 +151,7 @@ export async function nativeResponseGate(origin: string) {
         if (held)
           held.response.terminal = 'failed'
       }
+
       response.destroy()
     })
     request.pipe(upstream)
@@ -188,7 +189,7 @@ export async function nativeResponseGate(origin: string) {
   }
 
   return {
-    server: 'http://127.0.0.1:' + (server.address() as { port: number }).port,
+    server: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
     hold: (kind: ResponseKind) => hold(kind),
     unavailable: () => {
       const held = hold('availability', true)
