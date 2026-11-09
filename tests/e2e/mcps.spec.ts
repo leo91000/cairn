@@ -607,23 +607,24 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       }
     }
 
-    // Every owned producer is closed before evaluating the complete journal.
-    // Keep the original failure first while retaining late HTTP/native failures.
-    try {
-      expect(reads.filter(event => ['rejected', 'body-rejected'].includes(event.kind) && !event.aborted)).toEqual([])
-      expect(reads.filter(event => event.kind === 'headers' && event.status !== 200
-        && !(expectedFailure && event.document === expectedFailure.document && event.read === expectedFailure.read && event.status === 503))).toEqual([])
-      expect(errors).toEqual([])
-    }
-    catch (error) {
-      cleanupFailures.push(error)
+    // Audit independent failure categories after every owned producer closes.
+    // One late rejection must not discard an HTTP failure or a pageerror.
+    const audits = [
+      () => expect(reads.filter(event => ['rejected', 'body-rejected'].includes(event.kind) && !event.aborted)).toEqual([]),
+      () => expect(reads.filter(event => event.kind === 'headers' && event.status !== 200
+        && !(expectedFailure && event.document === expectedFailure.document && event.read === expectedFailure.read && event.status === 503))).toEqual([]),
+      () => expect(errors).toEqual([]),
+    ]
+    for (const audit of audits) {
+      try { audit() }
+      catch (error) { cleanupFailures.push(error) }
     }
 
     try {
       saveAvailabilityObservation(testInfo.outputPath('availability-native-observation.json'), JSON.stringify({
         stage,
         reads,
-        pageErrors: errors.length,
+        pageErrors: errors,
         poll: poll && {
           ready: poll.ready,
           status: poll.status,

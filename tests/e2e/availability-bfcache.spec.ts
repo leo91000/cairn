@@ -1,3 +1,4 @@
+import { writeFileSync as saveAvailabilityObservation } from 'node:fs'
 import type { AvailabilityReadEvent } from './availability-probe'
 import { installAvailabilityProbe } from './availability-probe'
 import { expect, signIn, test, workspacePath } from './fixtures'
@@ -12,7 +13,7 @@ const cacheTest = test.extend<{ responseGate: Awaited<ReturnType<typeof nativeRe
   proxy: async ({ responseGate }, use) => use({ server: responseGate.server }),
 })
 
-cacheTest('availability restores the same native document from BFCache with an exact fresh body', async ({ page, workspace, responseGate }) => {
+cacheTest('availability restores the same native document from BFCache with an exact fresh body', async ({ page, workspace, responseGate }, testInfo) => {
   const reads: AvailabilityReadEvent[] = []
   const errors: string[] = []
   const record = (entry: AvailabilityReadEvent) => {
@@ -28,6 +29,7 @@ cacheTest('availability restores the same native document from BFCache with an e
   await workspace.restart()
   await installAvailabilityProbe(page, record)
   let poll: ReturnType<typeof responseGate.hold> | undefined
+  let journalAcknowledged = false
   let primaryFailure: unknown
   const failures: unknown[] = []
   try {
@@ -69,6 +71,7 @@ cacheTest('availability restores the same native document from BFCache with an e
     // Retire every producer before the final synchronous journal acknowledgement.
     await page.goto(new URL('/health', workspace.url).href)
     await harvest()
+    journalAcknowledged = true
   }
   catch (cause) {
     primaryFailure = cause
@@ -88,11 +91,24 @@ cacheTest('availability restores the same native document from BFCache with an e
         failures.push(closure.reason)
     }
   }
+  // Audit independently so simultaneous native/HTTP/page errors all survive.
+  const audits = [
+    () => responseGate.check(),
+    () => expect(reads.filter(event => ['rejected', 'body-rejected'].includes(event.kind) && !event.aborted)).toEqual([]),
+    () => expect(reads.filter(event => event.kind === 'headers' && event.status !== 200)).toEqual([]),
+    () => expect(errors).toEqual([]),
+  ]
+  for (const audit of audits) {
+    try { audit() }
+    catch (cause) { failures.push(cause) }
+  }
   try {
-    responseGate.check()
-    expect(reads.filter(event => ['rejected', 'body-rejected'].includes(event.kind) && !event.aborted)).toEqual([])
-    expect(reads.filter(event => event.kind === 'headers' && event.status !== 200)).toEqual([])
-    expect(errors).toEqual([])
+    saveAvailabilityObservation(testInfo.outputPath('availability-bfcache-observation.json'), JSON.stringify({
+      journalAcknowledged,
+      reads,
+      pageErrors: errors,
+      poll: poll && { ready: poll.ready, status: poll.status, terminal: poll.terminal, closed: poll.closed },
+    }))
   }
   catch (cause) {
     failures.push(cause)
