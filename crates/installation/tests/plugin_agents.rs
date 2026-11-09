@@ -1072,6 +1072,100 @@ async fn run(f: &Fixture, input: Value) -> Result<Value, u16> {
 }
 
 #[tokio::test]
+async fn cli_help_discovers_live_commands_without_running_plugins_or_reading_secrets() {
+    let f = fixture().await;
+    let saved = save(
+        &f.s,
+        json!({
+            "name": "Private account name", "enabled": true,
+            "secrets": { "token": "ops_fixture" }, "agentIds": [MAIN_AGENT_ID],
+        }),
+        None,
+    )
+    .await;
+    // A help request must not start either the script worker or the secret program.
+    f.s.plugins
+        .use_worker(f.root.path().join("worker-must-not-start"));
+    f.s.plugins.use_program(
+        "onepassword",
+        "op",
+        f.root.path().join("program-must-not-start"),
+    );
+    let app = cairn_installation::http::router(f.s.clone()).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    for (args, expected) in [
+        (vec!["plugin", "--list"], "onepassword"),
+        (
+            vec!["plugin", "onepassword"],
+            "Commands granted to this agent",
+        ),
+        (vec!["plugin", "onepassword", "--help"], "read-fields"),
+        (
+            vec!["plugin", "onepassword", "read", "--help"],
+            "Output: secret bytes",
+        ),
+        (
+            vec![
+                "plugin",
+                "onepassword",
+                "read",
+                "--account",
+                "ignored",
+                "-h",
+            ],
+            "required",
+        ),
+        (
+            vec!["help", "plugin", "onepassword", "read"],
+            "op://vault/item/field",
+        ),
+    ] {
+        let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_cairn"))
+            .args(&args)
+            .env_clear()
+            .env("CAIRN_MCP_ORIGIN", &origin)
+            .env("CAIRN_MCP_RUN_TOKEN", &f.bearer)
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains(expected), "{args:?}: {text}");
+        for private in [
+            "Private account name",
+            "ops_fixture",
+            "hidden-secret",
+            "secret-with-no-newline",
+        ] {
+            assert!(!text.contains(private), "{args:?}: {text}");
+        }
+    }
+    assert!(!f.program.with_extension("daemons.jsonl").exists());
+    assert!(
+        f.s.plugins
+            .command(&f.s, "invalid-token", &json!({"help":true}))
+            .await
+            .is_err()
+    );
+    save(
+        &f.s,
+        json!({
+            "name":"Private account name", "enabled":false,
+        }),
+        Some(text(&saved, "id")),
+    )
+    .await;
+    let catalog = run(&f, json!({"help":true})).await.unwrap();
+    assert!(!catalog["value"].as_str().unwrap().contains("onepassword"));
+    assert!(run(&f, command("--help", &[])).await.is_err());
+    assert!(run(&f, command("read", &["--help"])).await.is_err());
+    server.abort();
+}
+
+#[tokio::test]
 async fn service_accounts_are_instances_with_encrypted_tokens_and_live_grants() {
     let f = fixture().await;
     let s = &f.s;

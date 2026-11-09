@@ -20,6 +20,95 @@ mod fixture;
 use fixture::{Fixture, contribution, running_conversation, support};
 
 #[tokio::test]
+async fn delegated_cli_help_never_calls_resource_resolvers_and_keeps_the_parent_ceiling() {
+    let f = Fixture::new().await;
+    f.set(json!([contribution("command", "post", support())]))
+        .await;
+    let child =
+        f.s.agent_fixture(
+            json!({"name":"Help reader","access":{"installation":true}}),
+            None,
+        )
+        .await
+        .unwrap();
+    let child_id = text(&child, "id");
+    f.set_for(
+        child_id,
+        json!([contribution("command", "post", support())]),
+    )
+    .await;
+    let (_, bearer) = f.delegated(MAIN_AGENT_ID, child_id).await;
+    f.marker("resolver-effects").await;
+    // Fail on every attempt to start a worker, even for a resource resolver.
+    f.s.plugins.use_worker(std::path::PathBuf::from(
+        "/missing/help-must-not-start-worker",
+    ));
+    let before = f.posts.load(Ordering::SeqCst);
+    for input in [
+        json!({"help":true}),
+        json!({"plugin":"grant-probe","command":"--help"}),
+        json!({"plugin":"grant-probe","command":"post","args":["--help"]}),
+    ] {
+        let output = f.s.plugins.command(&f.s, &bearer, &input).await.unwrap();
+        assert!(!text(&output, "value").is_empty());
+    }
+    assert_eq!(f.posts.load(Ordering::SeqCst), before);
+    // The real invocation still needs asynchronous resource authorization.
+    assert!(
+        f.s.plugins
+            .command(
+                &f.s,
+                &bearer,
+                &json!({"plugin":"grant-probe","command":"post","args":["support"]})
+            )
+            .await
+            .is_err()
+    );
+    f.set(json!([contribution("instructions", "", json!([]))]))
+        .await;
+    assert!(
+        f.s.plugins
+            .command(&f.s, &bearer, &json!({"help":true}))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn cli_help_lists_only_live_command_grants_without_host_effects() {
+    let f = Fixture::new().await;
+    f.set(json!([contribution("tool", "grant_probe_post", support())]))
+        .await;
+    let list = agents::command(&f.s, &f.bearer, &json!({"help":true}))
+        .await
+        .unwrap();
+    assert!(!text(&list, "value").contains("grant-probe"));
+    let package = json!({"plugin":"grant-probe","command":"--help"});
+    assert!(agents::command(&f.s, &f.bearer, &package).await.is_err());
+    f.set(json!([contribution("command", "post", support())]))
+        .await;
+    let list = agents::command(&f.s, &f.bearer, &json!({"help":true}))
+        .await
+        .unwrap();
+    assert!(text(&list, "value").contains("grant-probe"));
+    let detail = agents::command(&f.s, &f.bearer, &package).await.unwrap();
+    assert!(text(&detail, "value").contains("post [<channel>]"));
+    assert!(!text(&detail, "value").contains("grant_probe_other"));
+    let detail = agents::command(
+        &f.s,
+        &f.bearer,
+        &json!({"plugin":"grant-probe","command":"post","args":["--help"]}),
+    )
+    .await
+    .unwrap();
+    assert!(text(&detail, "value").contains("optional"));
+    assert_eq!(f.posts.load(Ordering::SeqCst), 0);
+    f.set(json!([contribution("instructions", "", json!([]))]))
+        .await;
+    assert!(agents::command(&f.s, &f.bearer, &package).await.is_err());
+}
+
+#[tokio::test]
 async fn tools_commands_and_hooks_resolve_every_designation_and_reject_contradictions() {
     let f = Fixture::new().await;
     f.set(json!([
