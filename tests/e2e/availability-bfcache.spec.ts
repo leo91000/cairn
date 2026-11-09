@@ -118,7 +118,7 @@ cacheTest('availability restores the same native document from BFCache with an e
       heldRead: heldRead ?? null,
       reads,
       pageErrors: errors,
-      poll: poll && { ready: poll.ready, status: poll.status, terminal: poll.terminal, closed: poll.closed },
+      poll: poll ? { ready: poll.ready, status: poll.status ?? null, terminal: poll.terminal, closed: poll.closed } : null,
     }))
   }
   catch (cause) {

@@ -369,6 +369,17 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
     let navigationResponse: ReturnType<typeof responseGate.hold> | undefined
     let navigation: Promise<unknown> | undefined
     let navigationValidated = false
+    const gates: Array<{
+      label: string
+      document: string | null
+      read: number | null
+      response: ReturnType<typeof responseGate.hold>
+    }> = []
+    const observeGate = (label: string, response: ReturnType<typeof responseGate.hold>) => {
+      const gate = { label, document: departingDocumentId ?? null, read: null as number | null, response }
+      gates.push(gate)
+      return gate
+    }
     page.on('pageerror', error => errors.push(error.message))
     // Accepted grants belong to this worker's earlier pages until expiry. Use
     // the existing tunnel reset to establish real capacity before this case.
@@ -407,8 +418,11 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       await expect.poll(() => pendingReads(departingDocument)).toEqual([])
       const earlierReads = reads.filter(event => event.document === departingDocument && event.kind === 'start').length
       poll = responseGate.hold('availability')
-      if (destination !== 'restored')
+      const initialResponse = observeGate('initial-availability', poll)
+      if (destination !== 'restored') {
         navigationResponse = responseGate.hold('agents')
+        observeGate('first-navigation', navigationResponse)
+      }
       stage = 'server holds the real availability response'
       await page.clock.runFor(3100)
       await expect.poll(() => {
@@ -419,6 +433,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       await expect.poll(() => reads.filter(event => event.document === departingDocument && event.kind === 'start').length).toBe(earlierReads + 1)
       const targetRead = reads.filter(event => event.document === departingDocument && event.kind === 'start').at(-1)!.read
       firstRead = targetRead
+      initialResponse.read = targetRead
       expect(events(departingDocument, targetRead).some(event => event.kind === 'abort')).toBe(false)
       await expect(transport).toHaveAttribute('data-transport-route', 'direct')
       // Restore ordinary production timers before a navigation can stall clock
@@ -469,6 +484,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         else {
           stage = 'delayed commit admits the next real periodic read'
           secondPoll = responseGate.hold('availability')
+          const delayedResponse = observeGate('delayed-availability', secondPoll)
           await expect.poll(() => {
             responseGate.check()
             return secondPoll!.ready
@@ -476,6 +492,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
           expect(secondPoll.status).toBe(200)
           await expect.poll(() => reads.filter(event => event.document === departingDocument && event.kind === 'start' && event.read > targetRead).length).toBe(1)
           secondRead = reads.filter(event => event.document === departingDocument && event.kind === 'start').at(-1)!.read
+          delayedResponse.read = secondRead
           navigationResponse!.release()
           expect(await arrival).toBeUndefined()
         }
@@ -518,10 +535,12 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         await expect.poll(() => reads.filter(event => event.document === departingDocument && event.read > targetRead && event.kind === 'body' && event.exactBody).length).toBeGreaterThan(0)
         stage = 'genuine active HTTP failure'
         const unavailable = responseGate.unavailable()
+        const failedResponse = observeGate('503-availability', unavailable)
         await expect.poll(() => unavailable.ready).toBe(true)
         expect(unavailable.status).toBe(200)
         await expect.poll(() => reads.filter(event => event.document === departingDocument && event.kind === 'headers' && event.status === 503).length).toBe(1)
         expectedFailure = reads.find(event => event.document === departingDocument && event.kind === 'headers' && event.status === 503)!
+        failedResponse.read = expectedFailure.read
         await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Offline')
         await expect(transport).toHaveAttribute('data-transport-route', 'relay')
         stage = 'production backoff and direct recovery'
@@ -531,6 +550,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         await expect.poll(() => pendingReads(departingDocument)).toEqual([])
         const recoveredRead = reads.filter(event => event.document === departingDocument && event.kind === 'start').at(-1)!.read
         secondPoll = responseGate.hold('availability')
+        const rearmedResponse = observeGate('rearmed-availability', secondPoll)
         await expect.poll(() => {
           responseGate.check()
           return secondPoll!.ready
@@ -538,9 +558,11 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         expect(secondPoll.status).toBe(200)
         await harvestReads()
         secondRead = reads.filter(event => event.document === departingDocument && event.kind === 'start').at(-1)!.read
+        rearmedResponse.read = secondRead
         expect(secondRead).toBeGreaterThan(recoveredRead)
         expect(secondRead).toBeGreaterThan(targetRead)
         navigationResponse = responseGate.hold('agents')
+        observeGate('second-navigation', navigationResponse)
         navigationValidated = false
         navigation = page.goto(workspacePath('/agents'))
         const secondArrival = navigation.then(() => undefined, error => error)
@@ -583,9 +605,8 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       primaryFailure = error
     }
     finally {
-      poll?.release()
-      secondPoll?.release()
-      navigationResponse?.release()
+      for (const gate of gates)
+        gate.response.release()
       const closeOwned = async (operation: () => Promise<unknown>, actor: string) => {
         let deadline: ReturnType<typeof setTimeout> | undefined
         try {
@@ -653,6 +674,16 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         secondRead: secondRead ?? null,
         expectedFailure: expectedFailure ?? null,
         navigationValidated,
+        gates: gates.map(({ label, document, read, response }) => ({
+          label,
+          document,
+          read,
+          ready: response.ready,
+          status: response.status ?? null,
+          forcedStatus: label === '503-availability' ? 503 : null,
+          terminal: response.terminal,
+          closed: response.closed,
+        })),
         reads,
         pageErrors: errors,
         poll: poll ? {
