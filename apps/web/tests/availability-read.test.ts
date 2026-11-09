@@ -481,7 +481,8 @@ it('accounts for native fetch, optional body and unread HTTP disposal as distinc
     insideAbortCall: false,
   }
   assert.deepEqual(incompleteAvailabilityReads(complete), [])
-  for (const partial of [
+
+  const partials: AvailabilityReadEvent[][] = [
     [start],
     [terminal],
     [start, terminal],
@@ -517,7 +518,8 @@ it('accounts for native fetch, optional body and unread HTTP disposal as distinc
       sequence: 5,
       aborted: true,
     }, { ...enter, sequence: 6 }, { ...abort, sequence: 7 }, { ...returned, sequence: 8 }],
-  ]) {
+  ]
+  for (const partial of partials) {
     assert.notEqual(incompleteAvailabilityReads(partial).length, 0)
   }
 
