@@ -72,24 +72,30 @@ function nativeDiagnostics(mode) {
   const abort = AbortController.prototype.abort
   const json = Response.prototype.json
   const responses = new WeakMap()
-  const snapshots = new Set()
+  const snapshots = []
+  let channel
   const snapshot = (trigger, selectedRead) => {
-    const channel = new MessageChannel()
-    snapshots.add(channel)
+    snapshots.push({ trigger, read: selectedRead })
+    if (channel)
+      return
+    channel = new MessageChannel()
     channel.port1.onmessage = () => {
-      channel.port1.close(); channel.port2.close(); snapshots.delete(channel)
-      void window.nativeStateReceipt({
-        document: window.cairnAvailabilityDocument, read: selectedRead, trigger, pendingSnapshots: snapshots.size,
+      const batch = snapshots.splice(0)
+      channel.port1.close(); channel.port2.close(); channel = undefined
+      const receipt = {
+        document: window.cairnAvailabilityDocument, pendingSnapshots: snapshots.length,
         state: window.diagnosticState?.() ?? null,
         journal: JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]'),
         native: JSON.parse(sessionStorage.getItem('cairn-native-fetch-journal') || '[]'),
-      })
+      }
+      for (const selected of batch)
+        void window.nativeStateReceipt({ ...receipt, ...selected })
     }
     channel.port2.postMessage(null)
   }
   window.addEventListener('pagehide', () => {
-    for (const channel of snapshots) { channel.port1.close(); channel.port2.close() }
-    snapshots.clear()
+    if (channel) { channel.port1.close(); channel.port2.close(); channel = undefined }
+    snapshots.length = 0
   })
   const record = (kind, extra = {}) => {
     const journal = JSON.parse(sessionStorage.getItem('cairn-native-fetch-journal') || '[]')
