@@ -180,8 +180,17 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
 export function incompleteAvailabilityReads(reads: readonly AvailabilityReadEvent[]) {
   const starts = reads.filter(event => event.kind === 'start')
   const terminals = reads.filter(event => ['body', 'body-rejected', 'rejected'].includes(event.kind))
-  return starts.filter((start) => {
-    const sameRead = (event: AvailabilityReadEvent) => event.document === start.document && event.read === start.read
+  const identities = new Map<string, AvailabilityReadEvent>()
+  for (const event of reads) {
+    if (event.kind === 'pagehide' || event.kind === 'pageshow')
+      continue
+    const identity = `${event.document}:${event.read}`
+    if (!identities.has(identity))
+      identities.set(identity, event)
+  }
+
+  return [...identities.values()].filter((read) => {
+    const sameRead = (event: AvailabilityReadEvent) => event.document === read.document && event.read === read.read
     return starts.filter(sameRead).length !== 1 || terminals.filter(sameRead).length !== 1
   })
 }

@@ -322,11 +322,20 @@ it('requires exactly one terminal for each current or retired journal read', () 
   const terminal: AvailabilityReadEvent = { ...start, sequence: 3, kind: 'rejected', aborted: true }
   assert.deepEqual(incompleteAvailabilityReads([start]), [start])
   assert.deepEqual(incompleteAvailabilityReads([start, headers]), [start])
-  assert.deepEqual(incompleteAvailabilityReads([start, { ...terminal, document: 'current-document' }]), [start])
-  assert.deepEqual(incompleteAvailabilityReads([start, { ...terminal, read: 2 }]), [start])
+  assert.deepEqual(incompleteAvailabilityReads([start, { ...terminal, document: 'current-document' }]), [start, { ...terminal, document: 'current-document' }])
+  assert.deepEqual(incompleteAvailabilityReads([start, { ...terminal, read: 2 }]), [start, { ...terminal, read: 2 }])
   assert.deepEqual(incompleteAvailabilityReads([start, headers, terminal]), [])
   assert.deepEqual(incompleteAvailabilityReads([start, { ...terminal, kind: 'body', exactBody: true }]), [])
   assert.deepEqual(incompleteAvailabilityReads([start, { ...terminal, kind: 'body-rejected' }]), [])
   assert.deepEqual(incompleteAvailabilityReads([start, terminal, { ...terminal, sequence: 4 }]), [start])
-  assert.deepEqual(incompleteAvailabilityReads([start, { ...start, sequence: 2 }, terminal]), [start, { ...start, sequence: 2 }])
+  assert.deepEqual(incompleteAvailabilityReads([start, { ...start, sequence: 2 }, terminal]), [start])
+  const body: AvailabilityReadEvent = { ...terminal, kind: 'body', exactBody: true }
+  assert.deepEqual(incompleteAvailabilityReads([body]), [body])
+  assert.deepEqual(incompleteAvailabilityReads([body, { ...body, sequence: 4 }]), [body])
+  assert.deepEqual(incompleteAvailabilityReads([terminal]), [terminal])
+  assert.deepEqual(incompleteAvailabilityReads([headers]), [headers])
+  assert.deepEqual(incompleteAvailabilityReads([
+    { ...start, kind: 'pagehide', read: 0 },
+    { ...start, kind: 'pageshow', read: 0, document: 'current-document' },
+  ]), [])
 })
