@@ -66,7 +66,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
     const open = XMLHttpRequest.prototype.open
     const send = XMLHttpRequest.prototype.send
     const abort = XMLHttpRequest.prototype.abort
-    XMLHttpRequest.prototype.open = function (this: XMLHttpRequest, method: string, url: string | URL, async = true, username?: string | null, password?: string | null) {
+    XMLHttpRequest.prototype.open = function (this: XMLHttpRequest, method: string, url: string | URL, async: boolean = true, username?: string | null, password?: string | null) {
       if (method === 'GET' && String(url) === '/api/installations') {
         const meta = {
           read: ++sequence,

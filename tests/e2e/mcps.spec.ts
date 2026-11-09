@@ -98,7 +98,7 @@ for (const pending of ['authorization', 'offer'] as const) {
       const availability = new WeakSet<XMLHttpRequest>()
       const open = XMLHttpRequest.prototype.open
       const send = XMLHttpRequest.prototype.send
-      XMLHttpRequest.prototype.open = function (this: XMLHttpRequest, method: string, url: string | URL, async = true, username?: string | null, password?: string | null) {
+      XMLHttpRequest.prototype.open = function (this: XMLHttpRequest, method: string, url: string | URL, async: boolean = true, username?: string | null, password?: string | null) {
         availability.delete(this)
         if (method === 'GET' && String(url) === '/api/installations')
           availability.add(this)
