@@ -29,6 +29,7 @@ import {
   Puzzle,
   Search,
   Settings,
+  Trash2,
   X,
 } from '../icons'
 import { refreshMissionRuns, useMissionRuns } from '../mission-runs'
@@ -41,7 +42,12 @@ import AgentAvatar from './AgentAvatar.vue'
 import Icon from './Icon.vue'
 
 // Universal search with direct actions: conversations, missions, agents, projects and skills.
-const emit = defineEmits<{ close: [], shortcuts: [] }>()
+const emit = defineEmits<{
+  close: []
+  shortcuts: []
+  create: [text?: string]
+  trash: []
+}>()
 const router = useRouter()
 const runs = useMissionRuns()
 const dialog = ref<HTMLDialogElement>()
@@ -83,7 +89,15 @@ const commands = computed<Command[]>(() => {
       label: 'New conversation',
       icon: Plus,
       keys: ['C'],
-      run: go('/chats'),
+      run: () => emit('create'),
+    },
+    {
+      id: 'trash',
+      group: 'Navigation',
+      label: 'Conversation trash',
+      icon: Trash2,
+      keywords: 'deleted conversations restore recovery',
+      run: () => emit('trash'),
     },
     {
       id: 'fil',
@@ -284,7 +298,7 @@ const results = computed(() => {
     label: `Start a conversation: “${query.value.trim()}”`,
     icon: Plus,
     hint: 'With the main agent',
-    run: () => router.push({ path: '/chats', query: { draft: query.value.trim() } }),
+    run: () => emit('create', query.value.trim()),
   }
   return [...ranked, ask]
 })

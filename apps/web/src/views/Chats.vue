@@ -294,6 +294,7 @@ const provider = ref<'' | Provider>('')
 // The next messages are plan turns until the user turns it off or implements a plan.
 const planning = ref(false)
 const history = ref(false)
+const historyView = ref<'active' | 'trash'>('active')
 const deletingConversation = ref<ChatDetail>()
 const deletionOpener = ref<HTMLElement>()
 const renaming = ref(false)
@@ -734,7 +735,7 @@ let submission: {
   }
 } | undefined
 
-function newConversation() {
+function newConversation(text = '') {
   if (chatId.value)
     saveDraft()
   else
@@ -758,8 +759,19 @@ function newConversation() {
   submission = undefined
   editing.value = null
   error.value = ''
-  void router.push('/chats').finally(() => loadDraft())
+  void router.push('/chats').finally(() => {
+    loadDraft()
+    if (text)
+      draft.value = text
+  })
 }
+
+function openConversations(view: 'active' | 'trash' = 'active') {
+  historyView.value = view
+  history.value = true
+}
+
+defineExpose({ newConversation, openTrash: () => openConversations('trash') })
 
 async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId: string, revision: string }) {
   const originalDraft = draft.value
@@ -1420,6 +1432,7 @@ function key(event: KeyboardEvent) {
     <div class="chat-page flex h-full min-h-0 min-w-0 flex-1 flex-col gap-3 px-6 pb-4 pt-3 phone:gap-0 phone:px-3 phone:pb-2 phone:pt-[env(safe-area-inset-top)]">
       <ChatSwitcher
         v-if="history"
+        v-model:view="historyView"
         :chats="chats"
         :selected="selectedChatId"
         :anchor="switcherAnchor"
@@ -1444,7 +1457,7 @@ function key(event: KeyboardEvent) {
           :aria-description="phoneDescription || undefined"
           aria-haspopup="dialog"
           :aria-expanded="history"
-          @click="history = true"
+          @click="openConversations()"
         >
           <span class="flex min-w-0 items-center gap-2.5">
             <AgentAvatar

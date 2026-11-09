@@ -31,7 +31,7 @@ const props = defineProps<{ chats: ChatView[], selected?: string, anchor?: () =>
 const emit = defineEmits<{ close: [], create: [], deleted: [id: string] }>()
 const dialog = ref<HTMLDialogElement>()
 const query = ref('')
-const view = ref<'active' | 'trash'>('active')
+const view = defineModel<'active' | 'trash'>('view', { default: 'active' })
 const views = [
   { value: 'active', label: 'Active conversations' },
   { value: 'trash', label: 'Trash' },
@@ -67,7 +67,7 @@ async function load() {
   }
 }
 
-watch([view, () => props.chats], load)
+watch([view, () => props.chats], load, { immediate: true })
 
 const titleId = useId()
 const previous = document.activeElement as HTMLElement | null
