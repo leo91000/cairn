@@ -588,6 +588,9 @@ async function observe(browser, cell, closedPrototype) {
       await expect(page.getByRole('heading', { name: 'Destination', exact: true })).toBeVisible()
       await poll(() => destination.closed && destination.terminal === 'finished')
       if (cell.mode === 'pre-pagehide-original-body') {
+        // Commit is confirmed. Recover synchronous old-document receipts even
+        // if its exposed binding was dropped when the execution context died.
+        await harvest()
         assert.equal(originalPromiseBoundary?.beforeFirstListenerBody, true)
         assert.equal(originalPromiseBoundary.promiseState, 'rejected')
         assert.equal(originalPromiseBoundary.resultSubtype, 'error')

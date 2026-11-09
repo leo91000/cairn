@@ -55,3 +55,4 @@ permanent intention latch or guessed timeout, no replaymutation/auth/cache/histo
 change. Fresh COMPLETE FULL required on any source/harness correction before dispatch.
 Actual exact affected qualification/PR/RUC/requiredchecks/pinnedordinarymerge/postCI remain
 required. No UImerge534679/capturewaiver/Slack/release/tag/deploy/livegrant.
+Post-commit receipt recovery: after actual arrival/destinationfinish, harvest the synchronous sessionStorage journal BEFORE requiring the old-document terminal binding. PinnedPlaywright may drop bindings after executioncontext destruction. This changes only observation ordering; no hostPage.evaluate while navigationheld, no originalterminal invented/waived and no deadline change. Missing journal terminal still RED.
