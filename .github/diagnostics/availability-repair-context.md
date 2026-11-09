@@ -1,6 +1,6 @@
 # Focused WebKit gate-retirement diagnostic
 
-Product `b9f1e7010345e5e0d1172c79a540344f7a1b0772` tree `1046270fa120e8a3156f44cfcb63532dd8fe6c7c`, base main `7028fbfdd6d13e27b8f4e7db767899828d631b42`.
+Product `b9f1e7010345e5e0d1172c79a540344f7a1b0772` tree `4bd409a19890fe30a4ef4d6e8ec5b99eaea6bca4`, base main `7028fbfdd6d13e27b8f4e7db767899828d631b42`.
 Diagnostic only: no Cargo, Cairn runtime, fixtures or product qualification.
 Pinned Playwright 1.64.1; real loopback HTTP proxy; actual product availability
 transport, BeaconApp polling block and e2e observer. Minimal session/state adapters
