@@ -29,6 +29,8 @@ cacheTest('availability restores the same native document from BFCache with an e
   await workspace.restart()
   await installAvailabilityProbe(page, record)
   let poll: ReturnType<typeof responseGate.hold> | undefined
+  let originalDocument: string | undefined
+  let heldRead: number | undefined
   let journalAcknowledged = false
   let primaryFailure: unknown
   const failures: unknown[] = []
@@ -45,11 +47,18 @@ cacheTest('availability restores the same native document from BFCache with an e
       window.cairnExpectedAvailability = await reference.json()
     })
     const original = await page.evaluate(() => window.cairnAvailabilityDocument)
+    originalDocument = original
     await expect.poll(() => reads.some(event => event.document === original && event.kind === 'body')).toBe(true)
+    await harvest()
+    const earlierReads = reads.filter(event => event.document === original && event.kind === 'start').length
     poll = responseGate.hold('availability')
     await expect.poll(() => { responseGate.check(); return poll!.ready }).toBe(true)
-    await expect.poll(() => reads.filter(event => event.document === original && event.kind === 'start').length).toBeGreaterThan(1)
+    // A binding may lag the server's ready receipt. Read the synchronous journal
+    // before assigning the held request's identity; never select an older read.
+    await harvest()
+    expect(reads.filter(event => event.document === original && event.kind === 'start').length).toBeGreaterThan(earlierReads)
     const target = reads.filter(event => event.document === original && event.kind === 'start').at(-1)!.read
+    heldRead = target
     expect(poll.status).toBe(200)
     const departed = await page.goto(new URL('/health', workspace.url).href)
     expect(departed?.status()).toBe(200)
@@ -105,6 +114,8 @@ cacheTest('availability restores the same native document from BFCache with an e
   try {
     saveAvailabilityObservation(testInfo.outputPath('availability-bfcache-observation.json'), JSON.stringify({
       journalAcknowledged,
+      originalDocument: originalDocument ?? null,
+      heldRead: heldRead ?? null,
       reads,
       pageErrors: errors,
       poll: poll && { ready: poll.ready, status: poll.status, terminal: poll.terminal, closed: poll.closed },

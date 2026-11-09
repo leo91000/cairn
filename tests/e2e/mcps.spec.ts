@@ -349,6 +349,9 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
     let poll: ReturnType<typeof responseGate.hold> | undefined
     let secondPoll: ReturnType<typeof responseGate.hold> | undefined
     let secondRead: number | undefined
+    let firstRead: number | undefined
+    let departingDocumentId: string | undefined
+    let journalAcknowledged = false
     let navigationResponse: ReturnType<typeof responseGate.hold> | undefined
     let navigation: Promise<unknown> | undefined
     let navigationValidated = false
@@ -383,6 +386,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         window.cairnExpectedAvailability = await reference.json()
       })
       const departingDocument = await page.evaluate(() => window.cairnAvailabilityDocument)
+      departingDocumentId = departingDocument
       await expect.poll(() => reads.some(event => event.document === departingDocument && event.kind === 'body')).toBe(true)
       await expect.poll(() => pendingReads(departingDocument)).toEqual([])
       await page.clock.pauseAt(new Date(Date.now() + 1000))
@@ -400,6 +404,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       expect(poll.status).toBe(200)
       await expect.poll(() => reads.filter(event => event.document === departingDocument && event.kind === 'start').length).toBe(earlierReads + 1)
       const targetRead = reads.filter(event => event.document === departingDocument && event.kind === 'start').at(-1)!.read
+      firstRead = targetRead
       expect(events(departingDocument, targetRead).some(event => event.kind === 'abort')).toBe(false)
       await expect(transport).toHaveAttribute('data-transport-route', 'direct')
       // Restore ordinary production timers before a navigation can stall clock
@@ -553,6 +558,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       await expect(page.locator('[data-transport-route]')).toHaveCount(0)
       await harvestReads()
       expect(reads.filter(event => event.document === retiredDocument && event.kind === 'start')).toEqual([])
+      journalAcknowledged = true
       stage = 'completed'
     }
     catch (error) {
@@ -623,20 +629,32 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
     try {
       saveAvailabilityObservation(testInfo.outputPath('availability-native-observation.json'), JSON.stringify({
         stage,
+        journalAcknowledged,
+        departingDocument: departingDocumentId ?? null,
+        firstRead: firstRead ?? null,
+        secondRead: secondRead ?? null,
+        expectedFailure: expectedFailure ?? null,
+        navigationValidated,
         reads,
         pageErrors: errors,
-        poll: poll && {
+        poll: poll ? {
           ready: poll.ready,
-          status: poll.status,
+          status: poll.status ?? null,
           terminal: poll.terminal,
           closed: poll.closed,
-        },
-        navigation: navigationResponse && {
+        } : null,
+        secondPoll: secondPoll ? {
+          ready: secondPoll.ready,
+          status: secondPoll.status ?? null,
+          terminal: secondPoll.terminal,
+          closed: secondPoll.closed,
+        } : null,
+        navigation: navigationResponse ? {
           ready: navigationResponse.ready,
-          status: navigationResponse.status,
+          status: navigationResponse.status ?? null,
           terminal: navigationResponse.terminal,
           closed: navigationResponse.closed,
-        },
+        } : null,
       }))
     }
     catch (error) {
