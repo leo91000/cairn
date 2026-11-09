@@ -103,7 +103,6 @@ async function main() {
         sandbox: 'yolo',
         cwd: `${runRoot}/workspace`,
         command: ['/usr/local/bin/node', `${runRoot}/workspace/probe.mjs`, mode, ackId, process.env.ANDROID_TEST_API || '34', process.env.ANDROID_TEST_SYSTEM || 'google-apis'],
-        chat: { output: `${runRoot}/output/result.md` },
         imports: ['workspace', 'home', 'output'].map(dir => ({ source: `${runRoot}/${dir}`, target: dir === 'home' ? '/home/node' : `${runRoot}/${dir}`, readOnly: false })),
       }
       await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))
