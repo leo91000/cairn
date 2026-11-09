@@ -768,6 +768,9 @@ async function observe(browser, engine, reader, scenario) {
 }
 
 engineLoop: for (const [engine, type] of [['chromium', chromium], ['webkit', webkit]]) {
+  // The previous engine's browser close runs after its per-case stop check.
+  if (cleanupFailures.some(failure => failure.actor !== 'journal-read'))
+    break
   let browser
   try {
     browser = await type.launch()
