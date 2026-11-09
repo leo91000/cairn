@@ -814,10 +814,12 @@ availabilityTest('availability preserves a scoped readonly outage before native 
     if (!reads.some(previous => previous.document === event.document && previous.sequence === event.sequence))
       reads.push(event)
   }
+
   const harvest = async () => {
     for (const event of await page.evaluate(() => JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]') as AvailabilityReadEvent[]))
       record(event)
   }
+
   let stage = 'initial application'
   let original: string | undefined
   let target: number | undefined
@@ -939,12 +941,14 @@ availabilityTest('availability preserves a scoped readonly outage before native 
         clearTimeout(timer)
       }
     }
+
     const closed = await Promise.allSettled([bounded(() => page.close()), bounded(() => responseGate.close())])
     for (const result of closed) {
       if (result.status === 'rejected')
         failures.push(result.reason)
     }
   }
+
   const audits = [
     () => expect(incompleteAvailabilityReads(reads)).toEqual([]),
     () => responseGate.check(),
@@ -961,6 +965,7 @@ availabilityTest('availability preserves a scoped readonly outage before native 
       failures.push(cause)
     }
   }
+
   try {
     saveAvailabilityObservation(testInfo.outputPath('availability-outage-observation.json'), JSON.stringify({
       stage,
@@ -992,6 +997,7 @@ availabilityTest('availability preserves a scoped readonly outage before native 
   catch (cause) {
     failures.push(cause)
   }
+
   if (primaryFailure || failures.length)
     throw new AggregateError([...(primaryFailure ? [primaryFailure] : []), ...failures], 'Application availability outage qualification failed')
 })
