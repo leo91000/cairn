@@ -55,17 +55,17 @@ async function observed(operation, label) {
 }
 
 function auditReadJournal(reads, selectedDocument, selectedRead, selectedOutcome) {
-  const starts = new Map()
+  const identities = new Map()
   for (const event of reads) {
-    if (event.kind === 'start') {
-      const key = event.document + ':' + event.read
-      starts.set(key, [...(starts.get(key) ?? []), event])
-    }
+    if (event.kind === 'pagehide' || event.kind === 'pageshow')
+      continue
+    const key = event.document + ':' + event.read
+    identities.set(key, [...(identities.get(key) ?? []), event])
   }
   const unknownReads = []
   const runtimeFailures = []
-  for (const [key, begun] of starts) {
-    const events = reads.filter(event => event.document === begun[0].document && event.read === begun[0].read)
+  for (const [key, events] of identities) {
+    const begun = events.filter(event => event.kind === 'start')
     const terminals = events.filter(event => ['body', 'body-rejected', 'rejected'].includes(event.kind))
     if (begun.length !== 1 || terminals.length !== 1) {
       unknownReads.push({ key, starts: begun.length, terminals: terminals.length })
@@ -83,7 +83,7 @@ function auditReadJournal(reads, selectedDocument, selectedRead, selectedOutcome
       runtimeFailures.push({ key, kind: terminal.kind, status: failedStatus?.status ?? null, selectedFailure })
     }
   }
-  return { startedReads: starts.size, unknownReads, runtimeFailures, unexpectedFailures: runtimeFailures.filter(failure => !failure.selectedFailure) }
+  return { observedReads: identities.size, startedReads: [...identities.values()].filter(events => events.some(event => event.kind === 'start')).length, unknownReads, runtimeFailures, unexpectedFailures: runtimeFailures.filter(failure => !failure.selectedFailure) }
 }
 
 // Adds metadata only. The actual transport, poll and probe remain source-bound.
