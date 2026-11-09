@@ -8,7 +8,7 @@ import { devices, expect, webkit } from '@playwright/test'
 
 const output = 'test-results/reader-native'
 await mkdir(output, { recursive: true })
-const control = 'webkit-next-read-after-initial-gate-retirement'
+const control = 'webkit-next-read-with-initial-gate-retired-only'
 const paths = {
   gate: 'tests/e2e/native-response-gate.ts',
   probe: 'tests/e2e/availability-probe.ts',
@@ -40,7 +40,7 @@ const bootstrap = `window.startDiagnosticPoll = () => {
 };`
 const rows = []
 const cleanupFailures = []
-const planned = ['initial-held', 'initial-retired']
+const planned = ['initial-retired']
 const errorRecord = error => ({ name: error?.name ?? 'Error', message: String(error?.message ?? error), stack: error?.stack })
 const write = (name, value) => writeFile(output + '/' + name, JSON.stringify(value, null, 2))
 async function observed(operation, label) {
@@ -340,8 +340,6 @@ try {
     const row = rows.at(-1)
     if (!row.observationComplete || cleanupFailures.length)
       break
-    if (arm === 'initial-held' && row.nextOutcome !== 'unowned-rejection-without-http')
-      break // Baseline did not reproduce: do not claim a gate-retirement cause.
   }
 }
 catch (error) { engineFailures.push(errorRecord(error)) }
@@ -352,21 +350,22 @@ finally {
   }
 }
 const allCellsObserved = rows.length === planned.length && rows.every(row => row.observationComplete)
-const baselineMatched = rows[0]?.observationComplete && rows[0]?.nextOutcome === 'unowned-rejection-without-http'
-const contrastObserved = allCellsObserved && baselineMatched && rows[1].initialRetiredBeforeNextStart
+const initialRetiredArmObserved = allCellsObserved && rows[0].initialRetiredBeforeNextStart
 const result = {
   control, diagnosticOnly: true, productQualified: false, bfCacheQualified: false,
   retainedPollingQualified: false, genuineFailureHandlingQualified: false,
-  sourceHashes, planned, allCellsObserved, baselineMatched: Boolean(baselineMatched),
-  contrastObserved: Boolean(contrastObserved),
-  earlyRetirementAdmitsExactBody: contrastObserved ? rows[1].nextOutcome === 'exact-200-body' : null,
+  sourceHashes, observeFunctionSha256: createHash('sha256').update(observe.toString()).digest('hex'), planned, allCellsObserved,
+  baselineMatched: false, contrastObserved: false,
+  priorBaselineReference: { runId: 42593972210, artifactId: 13662287543, sha256: '869c4eed43fc93f4cb333a3b1b8e9170493389ecab89e4137337cb4665d20f17' },
+  initialRetiredArmObserved: Boolean(initialRetiredArmObserved),
+  earlyRetirementAdmitsExactBody: initialRetiredArmObserved ? rows[0].nextOutcome === 'exact-200-body' : null,
   allPageErrorsStrict: rows.every(row => row.allPageErrorsStrict),
   rows, cleanupFailures, engineFailures,
 }
 await write('result.json', result)
 console.log(JSON.stringify({ ...result, rows: rows.length, cleanupFailures: cleanupFailures.length, engineFailures: engineFailures.length }))
-// A reproduced genuine rejection or any pageerror remains red. This diagnostic
-// never launders a failing baseline into a green product qualification.
-if (!allCellsObserved || !contrastObserved || rows.some(row => row.nextOutcome !== 'exact-200-body' || !row.allPageErrorsStrict)
+// The prior failed baseline is not rerun or turned green by this one-cell result.
+// Every native rejection or pageerror in this cell still remains red.
+if (!allCellsObserved || rows.some(row => row.nextOutcome !== 'exact-200-body' || !row.allPageErrorsStrict)
   || cleanupFailures.length || engineFailures.length)
   process.exitCode = 1

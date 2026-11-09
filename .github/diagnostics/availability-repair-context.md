@@ -8,17 +8,23 @@ are not Vue/application integration coverage. The ordinary MCP WebKit device
 settings, Page.goto stimulus and original clock install/pause/runFor/resume
 sequence are used in both arms.
 
-Exactly two serial WebKit arms. First retains the initial response gate. Second
-releases it and requires its HTTP closure before the next periodic read begins.
-Both hold the destination and observe the actual next read's precise body or
-unowned native rejection. Only this one gate-retirement variable differs. The
-first arm must reproduce the current unowned replacement failure without a
-received HTTP request; otherwise the contrast is inconclusive and stops. A
-known failed baseline may proceed to the contrast only after complete observation
-and all owners close. Unknown, timeout, missing journal or cleanup failure stops
-remaining cells. Every native rejection and all pageerrors remain globally red,
-including an expected diagnostic baseline failure. There is no green product
-inference from a positive contrast.
+Exactly ONE WebKit cell: initial-retired. The previously acquired initial-held
+cell is NOT rerun. Run42593972210/artifact13662287543 SHA256
+869c4eed43fc93f4cb333a3b1b8e9170493389ecab89e4137337cb4665d20f17
+retains its native read3 error, zero proxy ingress after owned closure, exact
+initial read2 abort, complete read journal, one native access-control pageerror
+and strict red exit. That pageerror stopped the second cell. No baseline is
+turned green or represented as a new complete two-cell contrast.
+
+The SAME observe() implementation now acquires only the missing cell: release
+initial bytes, acknowledge HTTP closure and a synchronous browser journal
+boundary BEFORE the next ordinary poll; keep destination held. Actual source,
+engine, device, clock, Page.goto, deadlines, error guards and cleanup are
+unchanged. A native rejection or any pageerror stays red. Pending, unknown,
+missing terminal, unexpected error or cleanup failure stays non-green. The
+result has baselineMatched=false and contrastObserved=false; any comparison
+with the prior baseline must cite both original receipts and its limitations.
+Retained polling, BFCache and product integration are NOT qualified.
 
 The original 7-second observation/closure budgets, 5-minute steps and 25-minute job
 remain. Source and diagnostic hashes must agree before/after. All first failures
