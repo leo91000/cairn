@@ -13,12 +13,13 @@ import {
 import { nativeResponseGate } from './native-response-gate'
 
 interface AvailabilityReadEvent {
-  kind: 'start' | 'headers' | 'body' | 'rejected' | 'body-rejected' | 'abort'
+  kind: 'start' | 'headers' | 'body' | 'rejected' | 'body-rejected' | 'abort' | 'pagehide' | 'pageshow'
   document: string
   read: number
   status?: number
   aborted: boolean
   afterPagehide: boolean
+  persisted?: boolean
 }
 
 type OAuthDepartureProbe = { kind: 'background' } | { kind: 'offer', closed: boolean }
@@ -335,8 +336,11 @@ const availabilityTest = test.extend<{ responseGate: Awaited<ReturnType<typeof n
   },
 })
 
-for (const destination of ['committed', 'cancelled'] as const) {
-  availabilityTest(`availability keeps direct readers stable until native navigation is ${destination}`, async ({ page, workspace, responseGate }, testInfo) => {
+for (const destination of ['committed', 'cancelled', 'restored'] as const) {
+  const title = destination === 'restored'
+    ? 'availability resumes real reads after same-document persisted lifecycle'
+    : `availability keeps direct readers stable until native navigation is ${destination}`
+  availabilityTest(title, async ({ page, workspace, responseGate }, testInfo) => {
     const errors: string[] = []
     const reads: AvailabilityReadEvent[] = []
     let stage = 'fixture reset'
@@ -355,7 +359,12 @@ for (const destination of ['committed', 'cancelled'] as const) {
       window.cairnAvailabilityDocument = documentId
       let pageHidden = false
       let sequence = 0
-      window.addEventListener('pagehide', () => pageHidden = true)
+      for (const kind of ['pagehide', 'pageshow'] as const) {
+        window.addEventListener(kind, (event) => {
+          pageHidden = kind === 'pagehide'
+          void window.cairnAvailabilityRecord({ kind, document: documentId, read: 0, aborted: false, afterPagehide: pageHidden, persisted: event.persisted })
+        })
+      }
       const request = window.fetch
       window.fetch = (...args) => {
         if (args[0] !== '/api/installations')
@@ -411,7 +420,8 @@ for (const destination of ['committed', 'cancelled'] as const) {
       await expect.poll(() => pendingReads(departingDocument)).toEqual([])
       const earlierReads = reads.filter(event => event.document === departingDocument && event.kind === 'start').length
       poll = responseGate.hold('availability')
-      navigationResponse = responseGate.hold('agents')
+      if (destination !== 'restored')
+        navigationResponse = responseGate.hold('agents')
       stage = 'server holds the real availability response'
       await page.clock.runFor(3100)
       await expect.poll(() => {
@@ -426,22 +436,40 @@ for (const destination of ['committed', 'cancelled'] as const) {
       // Restore ordinary production timers before a navigation can stall clock
       // evaluations. Subsequent polling/recovery must progress on its real cadence.
       await page.clock.resume()
-      stage = 'native destination response'
-      navigation = page.goto(workspacePath('/agents'))
-      const arrival = navigation.then(() => 'committed', () => 'cancelled')
-      await expect.poll(() => {
-        responseGate.check()
-        return navigationResponse!.ready
-      }).toBe(true)
-      expect(navigationResponse.status).toBe(200)
-      expect(errors).toEqual([])
-      if (destination === 'cancelled')
-        navigationResponse.cancelNavigation()
-      else
-        navigationResponse.release()
-      expect(await arrival).toBe(destination)
-      // Always release owned HTTP bytes before waiting for their terminal receipt.
-      poll.release()
+      if (destination === 'restored') {
+        // Exercise the actual same-document lifecycle handlers. Synthetic persisted
+        // events do not claim that the engine physically cached this document.
+        stage = 'same-document persisted pagehide'
+        await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true })))
+        await expect.poll(() => events(departingDocument, targetRead).filter(event => event.kind === 'abort').map(event => event.afterPagehide)).toEqual([true])
+        await expect.poll(() => poll!.terminal).toBe('cancelled')
+        expect(events(departingDocument, targetRead).filter(event => event.kind === 'body')).toEqual([])
+        poll.release()
+        stage = 'same-document persisted pageshow resumes real polling'
+        await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })))
+        expect(await page.evaluate(() => window.cairnAvailabilityDocument)).toBe(departingDocument)
+        await expect.poll(() => reads.filter(event => event.document === departingDocument && event.read > targetRead && event.kind === 'body').length).toBeGreaterThan(0)
+        expect(reads.filter(event => event.document === departingDocument && event.persisted).map(event => event.kind)).toEqual(['pagehide', 'pageshow'])
+        await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
+      }
+      else {
+        stage = 'native destination response'
+        navigation = page.goto(workspacePath('/agents'))
+        const arrival = navigation.then(() => 'committed', () => 'cancelled')
+        await expect.poll(() => {
+          responseGate.check()
+          return navigationResponse!.ready
+        }).toBe(true)
+        expect(navigationResponse!.status).toBe(200)
+        expect(errors).toEqual([])
+        if (destination === 'cancelled')
+          navigationResponse!.cancelNavigation()
+        else
+          navigationResponse!.release()
+        expect(await arrival).toBe(destination)
+        // Always release owned HTTP bytes before waiting for their terminal receipt.
+        poll.release()
+      }
       if (destination === 'committed') {
         stage = 'caller and native request withdrawal after pagehide'
         await expect.poll(() => events(departingDocument, targetRead).filter(event => event.kind === 'abort').map(event => event.afterPagehide)).toEqual([true])
@@ -450,7 +478,7 @@ for (const destination of ['committed', 'cancelled'] as const) {
         await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
         expect(await page.evaluate(() => window.cairnAvailabilityDocument)).not.toBe(departingDocument)
       }
-      else {
+      else if (destination === 'cancelled') {
         stage = 'retained document consumes its actual fetch body'
         await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
         expect(await page.evaluate(() => window.cairnAvailabilityDocument)).toBe(departingDocument)
@@ -477,9 +505,6 @@ for (const destination of ['committed', 'cancelled'] as const) {
       const currentDocument = await page.evaluate(() => window.cairnAvailabilityDocument)
       await expect.poll(() => pendingReads(currentDocument)).toEqual([])
       responseGate.check()
-      expect(reads.filter(event => ['rejected', 'body-rejected'].includes(event.kind) && !event.aborted)).toEqual([])
-      expect(reads.filter(event => event.kind === 'headers' && event.status !== 200
-        && !(expectedFailure && event.document === expectedFailure.document && event.read === expectedFailure.read && event.status === 503))).toEqual([])
       stage = 'completed'
     }
     catch (error) {
@@ -497,17 +522,34 @@ for (const destination of ['committed', 'cancelled'] as const) {
         cleanupFailures.push(error)
       }
 
-      saveAvailabilityObservation(testInfo.outputPath('availability-native-observation.json'), JSON.stringify({
-        stage,
-        reads,
-        pageErrors: errors.length,
-        poll: poll && { ready: poll.ready, status: poll.status, terminal: poll.terminal },
-        navigation: navigationResponse && { ready: navigationResponse.ready, status: navigationResponse.status, terminal: navigationResponse.terminal },
-      }))
+      try {
+        await responseGate.close()
+      }
+      catch (error) {
+        cleanupFailures.push(error)
+      }
     }
 
+    // Every owned producer is closed before evaluating the complete journal.
+    // Keep the original failure first while retaining late HTTP/native failures.
+    try {
+      expect(reads.filter(event => ['rejected', 'body-rejected'].includes(event.kind) && !event.aborted)).toEqual([])
+      expect(reads.filter(event => event.kind === 'headers' && event.status !== 200
+        && !(expectedFailure && event.document === expectedFailure.document && event.read === expectedFailure.read && event.status === 503))).toEqual([])
+      expect(errors).toEqual([])
+    }
+    catch (error) {
+      cleanupFailures.push(error)
+    }
+
+    saveAvailabilityObservation(testInfo.outputPath('availability-native-observation.json'), JSON.stringify({
+      stage,
+      reads,
+      pageErrors: errors.length,
+      poll: poll && { ready: poll.ready, status: poll.status, terminal: poll.terminal },
+      navigation: navigationResponse && { ready: navigationResponse.ready, status: navigationResponse.status, terminal: navigationResponse.terminal },
+    }))
     if (primaryFailure || cleanupFailures.length)
       throw new AggregateError([...(primaryFailure ? [primaryFailure] : []), ...cleanupFailures], `Availability navigation failed at ${stage}`)
-    expect(errors).toEqual([])
   })
 }
