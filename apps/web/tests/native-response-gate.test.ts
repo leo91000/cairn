@@ -151,6 +151,26 @@ it('delivers genuine headers while holding the native response body', async () =
   gate.check()
 })
 
+it('advances only genuine headers while retaining the body until caller cancellation', async () => {
+  const { gate, call } = await fixture()
+  const held = gate.hold('availability')
+  const read = call('/api/installations')
+  const rejected = expect(read.result).rejects.toThrow()
+  await vi.waitFor(() => expect(held.ready).toBe(true))
+  expect(read.responseSeen()).toBe(false)
+  held.releaseHeaders()
+  await vi.waitFor(() => expect(read.responseSeen()).toBe(true))
+  expect(held.status).toBe(200)
+  expect(held.headersDelivered).toBe(true)
+  expect(held.bodyReleased).toBe(false)
+  read.client.destroy(new Error('Caller withdrawn after headers'))
+  await rejected
+  await vi.waitFor(() => expect(held.closed).toBe(true))
+  expect(held.terminal).toBe('cancelled')
+  expect(held.bodyReleased).toBe(false)
+  gate.check()
+})
+
 it('produces a real read failure before headers and during an already started body', async () => {
   for (const bodyStarted of [false, true]) {
     const { gate, call } = await fixture()

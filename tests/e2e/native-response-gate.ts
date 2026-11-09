@@ -10,7 +10,10 @@ export interface HeldResponse {
   status?: number
   terminal: 'pending' | 'finished' | 'cancelled' | 'failed'
   closed: boolean
+  headersDelivered: boolean
+  bodyReleased: boolean
   release: () => void
+  releaseHeaders: () => void
   disconnect: () => void
   downloadNavigation: () => void
 }
@@ -37,14 +40,28 @@ export async function nativeResponseGate(origin: string) {
 
   function control(kind: ResponseKind, unavailable = false, headersFirst = false) {
     const released = Promise.withResolvers<void>()
+    const headersReleased = Promise.withResolvers<void>()
     let download = false
     let disconnected = false
+    let wantsHeaders = false
     const response: HeldResponse = {
       received: false,
       ready: false,
       terminal: 'pending',
       closed: false,
-      release: () => released.resolve(),
+      headersDelivered: false,
+      bodyReleased: false,
+      release: () => {
+        response.bodyReleased = true
+        released.resolve()
+      },
+      releaseHeaders: () => {
+        if (kind !== 'availability' || unavailable)
+          throw new Error('Only an unchanged availability response may advance its headers')
+
+        wantsHeaders = true
+        headersReleased.resolve()
+      },
       disconnect: () => {
         if (kind !== 'availability')
           throw new Error('Only an availability read may receive a controlled transport failure')
@@ -57,12 +74,15 @@ export async function nativeResponseGate(origin: string) {
           throw new Error('Only the destination navigation may become a download')
 
         download = true
+        response.bodyReleased = true
         released.resolve()
       },
     }
     return {
       response,
       released: released.promise,
+      headersReleased: headersReleased.promise,
+      wantsHeaders: () => wantsHeaders,
       downloads: () => download,
       disconnected: () => disconnected,
       unavailable,
@@ -116,10 +136,20 @@ export async function nativeResponseGate(origin: string) {
         if (held.headersFirst) {
           response.writeHead(source.statusCode || 502, source.headers)
           response.flushHeaders()
+          held.response.headersDelivered = true
         }
       }
 
       const delivery = (async () => {
+        if (held && !held.headersFirst) {
+          await Promise.race([held.released, held.headersReleased])
+          if (held.wantsHeaders() && !closing && !response.destroyed && !held.disconnected()) {
+            response.writeHead(source.statusCode || 502, source.headers)
+            response.flushHeaders()
+            held.response.headersDelivered = true
+          }
+        }
+
         if (held)
           await held.released
 
@@ -138,7 +168,7 @@ export async function nativeResponseGate(origin: string) {
         const headers = held?.downloads()
           ? { ...source.headers, 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="availability-navigation.html"' }
           : source.headers
-        if (!held?.headersFirst)
+        if (!response.headersSent)
           response.writeHead(source.statusCode || 502, headers)
         source.pipe(response)
       })()
