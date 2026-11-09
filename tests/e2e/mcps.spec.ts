@@ -578,6 +578,12 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       for (const download of downloads) {
         try {
           await download.cancel()
+        }
+        catch (error) {
+          cleanupFailures.push(error)
+        }
+
+        try {
           await download.delete()
         }
         catch (error) {
