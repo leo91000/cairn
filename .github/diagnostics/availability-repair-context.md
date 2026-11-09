@@ -10,6 +10,8 @@ Run42563010910/db35 ended FAILURE with21/66observed and45unknown. NavigationAPIa
 
 All previous errors, raw private artifacts, immutable observer commits and OPEN product/archive P2s below remain preserved. Narrowing this new first-stage inventory does not qualify or erase any unexecuted historical cell. Fresh COMPLETE FULL is required before one new dispatch.
 
+Engine launch/escaping observation errors are retained before the final inventory. An active receipt is written before launch; failure stops further engines, still attempts browser closure, and reaches result.json with explicit missing cells, original engine errors and any later closure error. Nested AggregateError metadata retains original and secondary observations/write failures. Final JSON carries the existing row metadata as a fallback; stdout projects only counts, not raw error/receipt objects.
+
 ## Retained history and future qualification requirements (not current profile)
 
 # Native reader mechanism diagnostic — HOLD

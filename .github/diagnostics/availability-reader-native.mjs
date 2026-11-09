@@ -18,6 +18,7 @@ const control = 'beforeunload-native-scope-only'
 const expectedCells = ['chromium:beforeunload-scope', 'webkit:beforeunload-scope']
 const rows = []
 const cleanupFailures = []
+const engineFailures = []
 
 function client() {
   const key = 'cairn-reader-mechanism'
@@ -157,9 +158,17 @@ function nativeScopeProof(events, documentId) {
 }
 
 function errorRecord(error) {
-  return error instanceof Error
-    ? { name: error.name, message: error.message, stack: error.stack }
-    : { name: 'ThrownValue', message: String(error) }
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack,
+      ...(error instanceof AggregateError ? { errors: error.errors.map(errorRecord) } : {}),
+    }
+  }
+  if (error && typeof error === 'object' && 'error' in error && ('phase' in error || 'actor' in error))
+    return error
+  return { name: 'ThrownValue', message: String(error) }
 }
 
 async function writeEvidence(name, value, firstFailure, observationFailures = []) {
@@ -462,13 +471,23 @@ engineLoop: for (const [engine, type] of [['chromium', chromium], ['webkit', web
   if (cleanupFailures.length)
     break
   let browser
+  let enginePhase = 'browser launch'
   try {
+    await writeEvidence('active.json', {
+      control, diagnosticOnly: true, productQualified: false, complete: false,
+      engine, phase: enginePhase, completedCells: rows.length, expectedCells: expectedCells.length,
+    })
     browser = await type.launch()
+    enginePhase = 'scope observation'
     await observe(browser, engine)
     // This first-stage experiment ends on a failed prerequisite; it does not
     // repeat the acquired baseline matrix or silently qualify an unrun engine.
     if (!rows.at(-1).usable || cleanupFailures.length)
       break engineLoop
+  }
+  catch (error) {
+    engineFailures.push({ engine, phase: enginePhase, error: errorRecord(error) })
+    break engineLoop
   }
   finally {
     if (browser) {
@@ -486,7 +505,7 @@ const observedCells = rows.map(row => row.engine + ':beforeunload-scope').sort()
 const allCellsObserved = JSON.stringify(observedCells) === JSON.stringify(expectedCells)
 const allPageErrorsStrict = rows.every(row => row.pageErrors.length === 0)
 const nativeScopeEvidenceComplete = allCellsObserved && rows.every(row => row.usable)
-  && allPageErrorsStrict && cleanupFailures.length === 0
+  && allPageErrorsStrict && cleanupFailures.length === 0 && engineFailures.length === 0
 const result = {
   control,
   diagnosticOnly: true,
@@ -501,9 +520,11 @@ const result = {
   observedCells,
   unobservedCells: expectedCells.filter(cell => !observedCells.includes(cell)),
   rows: rows.length,
+  observations: rows,
+  engineFailures,
   cleanupFailures,
 }
-await writeEvidence('result.json', result)
-console.log(JSON.stringify({ ...result, cleanupFailures: cleanupFailures.length }))
+await writeEvidence('result.json', result, engineFailures[0], engineFailures)
+console.log(JSON.stringify({ ...result, observations: undefined, engineFailures: engineFailures.length, cleanupFailures: cleanupFailures.length }))
 if (!nativeScopeEvidenceComplete)
   process.exitCode = 1
