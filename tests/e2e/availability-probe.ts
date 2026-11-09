@@ -95,7 +95,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
             meta.headers = true
             recordRead('headers', { status: this.status })
           }
-        })
+        }, { capture: true })
         this.addEventListener('abort', (event) => {
           const native = nativeEvent(event, 'abort')
           meta.aborted = native && meta.insideAbortCall

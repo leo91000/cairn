@@ -1,3 +1,4 @@
+import type { Page } from '@playwright/test'
 import assert from 'node:assert/strict'
 import {
   afterEach,
@@ -5,6 +6,7 @@ import {
   it,
   vi,
 } from 'vitest'
+import { installAvailabilityProbe } from '../../../tests/e2e/availability-probe'
 import { AvailabilityDeparture, readAvailability } from '../src/availability-read'
 
 class NativeProgress {
@@ -37,6 +39,7 @@ class Request {
   method = ''
   url = ''
   abortListenerCounts: number[] = []
+  events = new Map<string, Array<{ callback: (event: NativeProgress) => void, capture: boolean }>>()
   constructor() { Request.instances.push(this) }
   open(method: string, url: string) {
     this.method = method
@@ -46,10 +49,22 @@ class Request {
   }
 
   send() {}
+  addEventListener(type: string, callback: (event: NativeProgress) => void, options?: { capture?: boolean }) {
+    this.events.set(type, [...(this.events.get(type) || []), { callback, capture: options?.capture === true }])
+  }
+
+  nativeAbort() {
+    const event = new NativeProgress('abort', this)
+    this.status = 0
+    this.onabort?.(event)
+    for (const listener of this.events.get('abort') || [])
+      listener.callback(event)
+  }
+
   abort() {
     this.abortListenerCounts.push(listeners.size)
     if (this.abortMode === 'sync')
-      this.onabort?.(new NativeProgress('abort', this))
+      this.nativeAbort()
     else if (this.abortMode === 'error')
       this.onerror?.(new NativeProgress('error', this))
     else if (this.abortMode === 'deferred')
@@ -60,6 +75,24 @@ class Request {
     this.status = status
     this.readyState = 2
     this.onreadystatechange?.()
+  }
+
+  async observedHeaders(status: number, checkpoint: () => Promise<unknown>) {
+    this.status = status
+    this.readyState = 2
+    const event = new NativeProgress('readystatechange', this)
+    for (const listener of this.events.get('readystatechange') || []) {
+      if (listener.capture)
+        listener.callback(event)
+    }
+    this.onreadystatechange?.()
+    // DOM callbacks drain application microtasks before invoking the next
+    // ordinary listener. The caller can dispose and reset the XHR's status.
+    await checkpoint()
+    for (const listener of this.events.get('readystatechange') || []) {
+      if (!listener.capture)
+        listener.callback(event)
+    }
   }
 
   load(text: string, status = 200) {
@@ -82,8 +115,14 @@ beforeEach(() => {
     BeforeUnloadEvent: NativeBeforeUnload,
     ProgressEvent: NativeProgress,
     XMLHttpRequest: Request,
-    addEventListener(_type: string, listener: (event: NativeBeforeUnload) => void) { listeners.add(listener) },
-    removeEventListener(_type: string, listener: (event: NativeBeforeUnload) => void) { listeners.delete(listener) },
+    addEventListener(type: string, listener: (event: NativeBeforeUnload) => void) {
+      if (type === 'beforeunload')
+        listeners.add(listener)
+    },
+    removeEventListener(type: string, listener: (event: NativeBeforeUnload) => void) {
+      if (type === 'beforeunload')
+        listeners.delete(listener)
+    },
   }
   ownerDocument = { defaultView: ownerWindow }
   ownerWindow.document = ownerDocument
@@ -240,4 +279,31 @@ it('does not start an already withdrawn caller', async () => {
   await assert.rejects(readAvailability(controller.signal).response, DOMException)
   assert.equal(Request.instances[0]!.method, '')
   assert.equal(listeners.size, 0)
+})
+
+it('observes genuine HTTP headers before application disposal resets the native status', async () => {
+  const storage = new Map<string, string>()
+  vi.stubGlobal('ProgressEvent', NativeProgress)
+  vi.stubGlobal('sessionStorage', {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => storage.set(key, value),
+  })
+  const page = {
+    async exposeFunction(name: string, callback: (event: unknown) => void) {
+      ownerWindow[name] = async (event: unknown) => callback(event)
+    },
+    async addInitScript(callback: () => void) { callback() },
+  }
+  await installAvailabilityProbe(page as unknown as Page, () => {})
+  const read = readAvailability(new AbortController().signal)
+  let rejectedHttp = false
+  const application = read.response.then((response) => {
+    assert.equal(response.status, 503)
+    rejectedHttp = !response.ok
+  }).finally(() => read.dispose())
+  await Request.instances[0]!.observedHeaders(503, () => application)
+  assert.equal(rejectedHttp, true)
+  assert.equal(Request.instances[0]!.status, 0)
+  const journal = JSON.parse(storage.get('cairn-e2e-availability-journal') || '[]') as Array<{ kind: string, status?: number }>
+  assert.equal(journal.filter(event => event.kind === 'headers' && event.status === 503).length, 1)
 })
