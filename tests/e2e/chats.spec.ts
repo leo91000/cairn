@@ -1,6 +1,7 @@
 import type { Page, Route } from '@playwright/test'
 import type { Workspace } from './fixtures'
 import type { ResumeDiagnosticRecord } from './resume-diagnostic'
+import { Buffer } from 'node:buffer'
 import { randomUUID } from 'node:crypto'
 import {
   signIn as authenticateWorkspace,
@@ -166,6 +167,139 @@ test('a lost message acknowledgement retries the same submission without duplica
   expect(detail.messages[0].id).toBe(attempts[0].id)
 })
 
+for (const stage of ['creation', 'upload', 'message', 'message error'] as const) {
+  test(`fresh conversation ignores a late ${stage} response`, async ({ page, workspace }) => {
+    await useRelayForHttpMocks(page)
+    const pattern = stage === 'creation' ? /\/chats$/ : stage === 'upload' ? /\/chats\/[^/]+\/attachments\// : /\/chats\/[^/]+\/messages$/
+    let release = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let enter = () => {}
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve
+    })
+    let held = false
+    let oldChatId = ''
+    const submitted: string[] = []
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && /\/chats\/[^/]+\/messages$/.test(request.url()))
+        submitted.push(new URL(request.url()).pathname.split('/').at(-2)!)
+    })
+    await page.route(pattern, async (route) => {
+      if (held || !['POST', 'PUT'].includes(route.request().method()))
+        return route.continue()
+      held = true
+      const response = await route.fetch()
+      expect(response.ok()).toBe(true)
+      oldChatId = stage === 'creation' ? (await response.json()).id : new URL(route.request().url()).pathname.split('/chats/').at(-1)!.split('/')[0]!
+      enter()
+      await gate
+      if (stage === 'message error')
+        return route.fulfill({ status: 503, json: { error: 'Late request failed' } })
+      return route.fulfill({ response })
+    })
+    const completed = page.waitForResponse(response => pattern.test(response.url()) && ['POST', 'PUT'].includes(response.request().method()))
+    try {
+      await page.goto(workspacePath('/chats'))
+      await authenticateWorkspace(page)
+      const composer = page.getByRole('textbox', { name: 'Message', exact: true })
+      await composer.fill('The first request is still in flight')
+      if (stage === 'upload')
+        await page.getByLabel('Attach files', { exact: true }).setInputFiles({ name: 'old-note.txt', mimeType: 'text/plain', buffer: Buffer.from('old note') })
+      await page.getByRole('button', { name: 'Send', exact: true }).click()
+      await entered
+      await page.getByRole('link', { name: 'New conversation', exact: true }).click()
+      await expect(composer).toHaveValue('')
+      await composer.fill('Keep the replacement draft')
+      if (stage === 'upload')
+        await page.getByLabel('Attach files', { exact: true }).setInputFiles({ name: 'new-note.txt', mimeType: 'text/plain', buffer: Buffer.from('new note') })
+      release()
+      await (await completed).finished()
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+      await expect(page).toHaveURL(workspacePath('/chats'))
+      await expect(composer).toHaveValue('Keep the replacement draft')
+      await expect(page.getByText('Late request failed', { exact: true })).toHaveCount(0)
+      if (stage === 'upload')
+        await expect(page.getByText('new-note.txt', { exact: true })).toBeVisible()
+      if (stage === 'creation' || stage === 'upload')
+        expect(submitted).not.toContain(oldChatId)
+      else
+        expect(workspace.service.chats.detail(oldChatId).messages).toHaveLength(1)
+    }
+    finally {
+      release()
+    }
+  })
+}
+
+test('a previous send cannot release a newer conversation submission', async ({ page, workspace }) => {
+  await useRelayForHttpMocks(page)
+  let releaseOld = () => {}
+  const oldGate = new Promise<void>((resolve) => {
+    releaseOld = resolve
+  })
+  let releaseNew = () => {}
+  const newGate = new Promise<void>((resolve) => {
+    releaseNew = resolve
+  })
+  let oldEntered = () => {}
+  const oldReady = new Promise<void>((resolve) => {
+    oldEntered = resolve
+  })
+  let newEntered = () => {}
+  const newReady = new Promise<void>((resolve) => {
+    newEntered = resolve
+  })
+  const targets: string[] = []
+  await page.route(/\/chats\/[^/]+\/messages$/, async (route) => {
+    if (route.request().method() !== 'POST')
+      return route.continue()
+    const index = targets.length
+    targets.push(new URL(route.request().url()).pathname.split('/').at(-2)!)
+    const response = await route.fetch()
+    expect(response.ok()).toBe(true)
+    if (index === 0) {
+      oldEntered()
+      await oldGate
+    }
+    else {
+      newEntered()
+      await newGate
+    }
+
+    return route.fulfill({ response })
+  })
+  try {
+    await page.goto(workspacePath('/chats'))
+    await authenticateWorkspace(page)
+    const composer = page.getByRole('textbox', { name: 'Message', exact: true })
+    await composer.fill('The previous request is still pending')
+    await page.getByRole('button', { name: 'Send', exact: true }).click()
+    await oldReady
+    await page.getByRole('link', { name: 'New conversation', exact: true }).click()
+    await composer.fill('The new request owns this conversation')
+    await page.getByRole('button', { name: 'Send', exact: true }).click()
+    await newReady
+    expect(targets).toHaveLength(2)
+    expect(targets[1]).not.toBe(targets[0])
+    const oldResponse = page.waitForResponse(response => response.request().method() === 'POST' && response.url().endsWith(`/chats/${targets[0]}/messages`))
+    releaseOld()
+    await (await oldResponse).finished()
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+    await expect(page).toHaveURL(workspacePath('/chats'))
+    await expect(page.getByRole('button', { name: 'Sending…', exact: true })).toBeDisabled()
+    releaseNew()
+    const destination = workspace.service.chats.detail(targets[1]!)
+    await expect(page).toHaveURL(workspacePath(`/chats/${destination.slug}`))
+    await expect(page.locator('.activity-message').getByText('The new request owns this conversation', { exact: true })).toBeVisible()
+  }
+  finally {
+    releaseOld()
+    releaseNew()
+  }
+})
+
 for (const entry of ['command', 'workspace link', 'search draft'] as const) {
   test(`new conversation through ${entry} clears an uncertain submission with identical content`, async ({ page, workspace }) => {
     await useRelayForHttpMocks(page)
@@ -203,7 +337,7 @@ for (const entry of ['command', 'workspace link', 'search draft'] as const) {
         await palette.getByRole('option', { name: /^Start a conversation:/ }).click()
       }
       else {
-        await palette.getByRole('option', { name: /^New conversation\b/ }).click()
+        await palette.getByRole('option', { name: 'New conversation C', exact: true }).click()
       }
     }
 

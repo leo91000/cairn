@@ -719,7 +719,11 @@ watch(live.error, (value, previous) => {
   else if (error.value === previous)
     error.value = ''
 })
-onBeforeUnmount(clearAttachments)
+let compositionGeneration = 0
+onBeforeUnmount(() => {
+  compositionGeneration++
+  clearAttachments()
+})
 let submission: {
   key: string
   message: {
@@ -736,6 +740,12 @@ let submission: {
 } | undefined
 
 function newConversation(text = '') {
+  const generation = ++compositionGeneration
+  if (submitting.value) {
+    busy.value = false
+    submitting.value = false
+  }
+
   if (chatId.value)
     saveDraft()
   else
@@ -760,6 +770,8 @@ function newConversation(text = '') {
   editing.value = null
   error.value = ''
   void router.push('/chats').finally(() => {
+    if (generation !== compositionGeneration)
+      return
     loadDraft()
     if (text)
       draft.value = text
@@ -792,12 +804,14 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
   const targetProject = projectId.value || null
   submitting.value = true
   const origin = chatId.value
+  const generation = compositionGeneration
+  const currentComposition = () => generation === compositionGeneration && chatId.value === origin
   const direct = !editing.value && ((mode === 'steer' && !detail.value?.paused) || (!responding.value && !detail.value?.paused && !pending.value.length))
   busy.value = true
   error.value = ''
   try {
     const chat = target ?? await createChat(api, { agentId: targetAgent, projectId: targetProject })
-    if (chatId.value !== origin)
+    if (!currentComposition())
       return
     createdChat = chat
     // Items without a local file (reused or already sent records) are never uploaded again.
@@ -809,18 +823,22 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
         const saved = await apiUpload<ChatAttachment>(`/chats/${chat.id}/attachments/${attachment.id}?name=${encodeURIComponent(attachment.name)}`, files.get(attachment.id)!, {
           headers: { 'Content-Type': 'application/octet-stream' },
           onProgress: (progress) => {
+            if (!currentComposition())
+              return
             const current = attachmentStates.value[attachment.id]
             if (current?.status === 'uploading')
               current.progress = progress
           },
         })
+        if (!currentComposition())
+          return
         Object.assign(attachment, saved)
         uploaded.add(attachment.id)
         delete attachmentStates.value[attachment.id]
       }
       catch (e) {
         // The item stays in the draft; the next send retries it.
-        if (attachments.value.some(item => item.id === attachment.id))
+        if (currentComposition() && attachments.value.some(item => item.id === attachment.id))
           attachmentStates.value[attachment.id] = { status: 'failed', error: (e as Error).message || 'Upload failed.' }
         throw e
       }
@@ -829,7 +847,7 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
     if (results.some(result => result.status === 'rejected'))
       return
 
-    if (chatId.value !== origin)
+    if (!currentComposition())
       return
     const attachmentIds = selectedAttachments.map(attachment => attachment.id)
     const content = {
@@ -868,10 +886,8 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
     else
       await sendChatMessage(api, { chatId: chat.id, message: submission.message })
     // Another conversation was opened meanwhile; its composer is not this message's.
-    if (chatId.value !== origin) {
-      submission = undefined
+    if (!currentComposition())
       return
-    }
 
     if (draft.value === originalDraft)
       draft.value = ''
@@ -883,9 +899,12 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
       await router.push(chatPath(chat))
     }
 
-    textarea.value?.focus()
+    if (generation === compositionGeneration)
+      textarea.value?.focus()
   }
   catch (e) {
+    if (!currentComposition())
+      return
     outgoing.value = null
     error.value = (e as Error).message
     if (planApproval) {
@@ -898,8 +917,11 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
     }
   }
   finally {
-    busy.value = false
-    submitting.value = false
+    // The composition that started the request owns its busy state.
+    if (generation === compositionGeneration) {
+      busy.value = false
+      submitting.value = false
+    }
   }
 }
 
