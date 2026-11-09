@@ -12,7 +12,7 @@ jobs:
       matrix:
         include:
           - label: focused-repair
-            sha: f5ce244467caae2062e24f54e975cef8bba224f9
+            sha: 1d3d432299348451d58bb9d7040a4d957422e6e2
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
