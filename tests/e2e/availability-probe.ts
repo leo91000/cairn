@@ -214,9 +214,18 @@ export function incompleteAvailabilityReads(reads: readonly AvailabilityReadEven
     const nativeAbort = enters.length === 1 && aborts.length === 1 && returns.length === 1
       && enters[0]!.sequence < aborts[0]!.sequence && aborts[0]!.sequence < returns[0]!.sequence
       && aborts[0]!.trusted && aborts[0]!.exactTarget && aborts[0]!.insideAbortCall
-    if (enters.length !== returns.length || enters.length > 1 || aborts.length > 1
+    if (enters.length !== returns.length || enters.length !== aborts.length || enters.length > 1
       || (enters.length === 1 && enters[0]!.sequence >= returns[0]!.sequence)) {
       return true
+    }
+
+    if (aborts.length === 1) {
+      const signal = aborts[0]!
+      const inside = enters[0]!.sequence < signal.sequence && signal.sequence < returns[0]!.sequence
+      if (!signal.trusted || !signal.exactTarget || signal.insideAbortCall !== inside
+        || enters[0]!.insideAbortCall !== true || returns[0]!.insideAbortCall !== false) {
+        return true
+      }
     }
 
     if ([...rejected, ...outcomes].some(event => event.aborted && !nativeAbort))

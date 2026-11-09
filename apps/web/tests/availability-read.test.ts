@@ -494,6 +494,17 @@ it('accounts for native fetch, optional body and unread HTTP disposal as distinc
     [start, response, { ...headers, status: 503 }, body, terminal],
     [start, { ...response, status: 503, ok: false }, { ...headers, status: 503 }],
     [start, { ...response, status: 503, ok: false }, { ...headers, status: 503 }, enter, { ...abort, trusted: false }, returned],
+    [...complete, {
+      ...abort,
+      sequence: 6,
+      trusted: false,
+      exactTarget: false,
+      insideAbortCall: false,
+    }],
+    [...complete, { ...enter, sequence: 6 }, { ...returned, sequence: 7 }],
+    [...complete, { ...enter, sequence: 6 }, { ...abort, sequence: 7, trusted: false }, { ...returned, sequence: 8 }],
+    [...complete, { ...enter, sequence: 6 }, { ...abort, sequence: 7, insideAbortCall: false }, { ...returned, sequence: 8 }],
+    [...complete, { ...enter, sequence: 6 }, { ...returned, sequence: 7 }, { ...abort, sequence: 8 }],
   ]) {
     assert.notEqual(incompleteAvailabilityReads(partial).length, 0)
   }
@@ -506,5 +517,18 @@ it('accounts for native fetch, optional body and unread HTTP disposal as distinc
     kind: 'rejected',
     aborted: true,
   }]), [])
+  assert.deepEqual(incompleteAvailabilityReads([
+    start,
+    { ...enter, sequence: 2 },
+    { ...returned, sequence: 3 },
+    { ...abort, sequence: 4, insideAbortCall: false },
+    {
+      ...terminal,
+      kind: 'rejected',
+      sequence: 5,
+      aborted: false,
+      errorName: 'AbortError',
+    },
+  ]), [])
   assert.deepEqual(incompleteAvailabilityReads([{ ...start, kind: 'pagehide', read: 0 }, { ...start, kind: 'pageshow', read: 0 }]), [])
 })
