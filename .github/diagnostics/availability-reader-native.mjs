@@ -113,6 +113,7 @@ async function observe(browser, arm) {
   let navigationValidated = false
   let journalAcknowledged = false
   let initialRetiredBeforeNextStart = false
+  let retirementBoundary
   let nextOutcome = 'unknown'
   let initial, destination, next
   const ownedFailure = (actor, error) => cleanupFailures.push({ arm, actor, error: errorRecord(error) })
@@ -193,7 +194,15 @@ async function observe(browser, arm) {
       await stage('only changed variable: release and acknowledge initial HTTP closure')
       initial.release()
       await poll(() => initial.closed && ['cancelled', 'finished'].includes(initial.terminal))
-      initialRetiredBeforeNextStart = !received.some(event => event.document === documentId && event.kind === 'start' && event.read > firstRead)
+      // Exposed-function messages can lag the synchronous browser journal. Only
+      // a browser checkpoint acquired AFTER HTTP closure can prove the ordering.
+      const checkpoint = await evaluate(() => ({
+        document: window.cairnAvailabilityDocument,
+        reads: JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]'),
+      }))
+      assert.equal(checkpoint.document, documentId)
+      initialRetiredBeforeNextStart = !checkpoint.reads.some(event => event.document === documentId && event.kind === 'start' && event.read > firstRead)
+      retirementBoundary = { document: checkpoint.document, lastSequence: checkpoint.reads.at(-1)?.sequence ?? null, beforeNextStart: initialRetiredBeforeNextStart }
       assert.equal(initialRetiredBeforeNextStart, true)
     }
     await stage('next ordinary periodic read while destination still held')
@@ -210,7 +219,7 @@ async function observe(browser, arm) {
     assert.equal(terminal.length, 1)
     assert.equal(terminal[0].afterPagehide, false)
     nextOutcome = terminal[0].kind === 'body' && terminal[0].exactBody && next.ready
-      ? 'exact-200-body' : terminal[0].kind === 'rejected' && !terminal[0].aborted && !next.ready
+      ? 'exact-200-body' : terminal[0].kind === 'rejected' && !terminal[0].aborted && !next.received
         ? 'unowned-rejection-without-http' : 'other-failure'
     // Preserve the failure as a red product result even when it calibrates the
     // diagnostic baseline. Only owned complete closure permits the second arm.
@@ -266,15 +275,21 @@ async function observe(browser, arm) {
     try { await observed(() => Promise.all([...receiptWrites]), 'receipt drain after context closure') }
     catch (error) { ownedFailure('receipt-drain', error) }
   }
+  // Absence is meaningful only after the page/context/proxy owners have closed:
+  // a request can arrive after a binding receipt but before network teardown.
+  if (nextOutcome === 'unowned-rejection-without-http' && next.received) {
+    nextOutcome = 'unowned-rejection-after-http'
+    remember('final HTTP ingress audit', new Error('Replacement HTTP request arrived before owned closure'))
+  }
   const ownFailures = cleanupFailures.filter(entry => entry.arm === arm)
   const observationComplete = !failures.length && !ownFailures.length && navigationValidated && journalAcknowledged && nextOutcome !== 'unknown'
   const row = {
     arm, control, diagnosticOnly: true, productQualified: false,
     observationComplete, nextOutcome, firstRead, nextRead, documentId,
-    initialRetiredBeforeNextStart, navigationValidated, journalAcknowledged,
+    initialRetiredBeforeNextStart, retirementBoundary, navigationValidated, journalAcknowledged,
     allPageErrorsStrict: pageErrors.length === 0, pageErrors, failures,
     reads: received, nativeEvents,
-    gates: gates.map(({ label, response }) => ({ label, ready: response.ready, status: response.status ?? null, terminal: response.terminal, closed: response.closed })),
+    gates: gates.map(({ label, response }) => ({ label, received: response.received, ready: response.ready, status: response.status ?? null, terminal: response.terminal, closed: response.closed })),
     cleanupFailures: ownFailures,
   }
   rows.push(row)
