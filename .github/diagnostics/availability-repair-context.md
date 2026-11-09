@@ -1,6 +1,6 @@
 # Scoped original-fetch terminal evidence, not product qualification
 
-Frozen product `4e9b4a6fef7e27e5bf140d27e13e73dbb0b168f0` tree `721d2027eef668dc53506eea80bf16417d01bd77`, main base `da00f92aee9afb2c125f7aa8bb903999548a35be`.
+Frozen product `721b3028d0b5464ec2ba019a87697bfb460d67df` tree `dd61b64ee3fe9511f22ea75c901c1bd72d3cd0cc`, main base `da00f92aee9afb2c125f7aa8bb903999548a35be`.
 Existing observer only; no new framework, environment, ref or Cairn pilot.
 Playwright1.64.1 image unchanged. No Cargo, Cairn runtime/fixtures or local browser.
 Original actual product readAvailability factory and BeaconApp polling source are

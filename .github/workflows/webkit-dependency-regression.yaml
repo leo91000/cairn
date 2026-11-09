@@ -11,7 +11,7 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - sha: 4e9b4a6fef7e27e5bf140d27e13e73dbb0b168f0
+          - sha: 721b3028d0b5464ec2ba019a87697bfb460d67df
     runs-on: ubuntu-latest
     timeout-minutes: 25
     container:
@@ -30,14 +30,14 @@ jobs:
         env:
           OBSERVER_SHA: ${{ github.sha }}
         run: |
-          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = 4e9b4a6fef7e27e5bf140d27e13e73dbb0b168f0
+          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = 721b3028d0b5464ec2ba019a87697bfb460d67df
           test -z "$(git -c safe.directory="$GITHUB_WORKSPACE" status --porcelain)"
           git -c safe.directory="$GITHUB_WORKSPACE" log -1 --format='source=%H tree=%T'
           git -c safe.directory="$GITHUB_WORKSPACE" fetch --depth=1 --no-tags origin "$OBSERVER_SHA"
           mkdir -p test-results/reader-native
           git -c safe.directory="$GITHUB_WORKSPACE" show "$OBSERVER_SHA:.github/diagnostics/availability-reader-native.mjs" > test-results/reader-native/run.mjs
           sha256sum test-results/reader-native/run.mjs tests/e2e/native-response-gate.ts tests/e2e/availability-probe.ts apps/web/src/availability-read.ts apps/web/src/BeaconApp.vue > test-results/reader-native/sources.sha256
-          printf 'observer=%s\nproduct=4e9b4a6fef7e27e5bf140d27e13e73dbb0b168f0\nmode=owned-keepalive-fetch-original-terminals\n' "$OBSERVER_SHA" > test-results/reader-native/source.txt
+          printf 'observer=%s\nproduct=721b3028d0b5464ec2ba019a87697bfb460d67df\nmode=owned-keepalive-fetch-original-terminals\n' "$OBSERVER_SHA" > test-results/reader-native/source.txt
       - uses: ./.github/actions/setup-pnpm
         timeout-minutes: 5
         with:
@@ -60,7 +60,7 @@ jobs:
         timeout-minutes: 5
         if: always()
         run: |
-          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = 4e9b4a6fef7e27e5bf140d27e13e73dbb0b168f0
+          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = 721b3028d0b5464ec2ba019a87697bfb460d67df
           test -z "$(git -c safe.directory="$GITHUB_WORKSPACE" status --porcelain)"
           sha256sum --check test-results/reader-native/sources.sha256
       - uses: actions/upload-artifact@v7.0.1
