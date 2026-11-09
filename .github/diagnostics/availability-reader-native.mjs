@@ -409,6 +409,7 @@ async function observe(browser, cell) {
         assert.equal(nativeNavigationCheckpoint.document, documentId)
         assert.equal(nativeNavigationCheckpoint.liveVisible, true)
         assert.equal(nativeNavigationCheckpoint.livePath, true)
+        assert.equal(received.some(event => event.document === documentId && event.kind === 'pagehide'), false)
         assert.equal(nativeNavigationCheckpoint.journal.some(event => event.document === documentId && event.kind === 'pagehide'), false)
         assert.equal(destination.received, false)
         assert.equal(destination.ready, false)
@@ -509,6 +510,10 @@ async function observe(browser, cell) {
 
     }
     await harvest()
+    if (cell.mode === 'proof-without-terminal') {
+      assert.equal(checkpoint.document, documentId)
+      assert.equal(checkpoint.journal.some(event => event.document === documentId && event.kind === 'pagehide'), false)
+    }
     journalAcknowledged = true
   }
   catch (error) { remember(phase, error) }
