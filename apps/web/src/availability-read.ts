@@ -86,6 +86,7 @@ export function readAvailability(signal: AbortSignal) {
       && (cause === proof.reason || nativeAbortError)) {
       return new AvailabilityDeparture()
     }
+
     return cause
   }
 
@@ -128,6 +129,7 @@ export function readAvailability(signal: AbortSignal) {
           finish()
           bodyResult = Promise.reject(cause)
         }
+
         // A retiring caller may never request JSON. Observe this owned result
         // without replacing it: json() still returns the same success/failure.
         void bodyResult.catch(() => {})

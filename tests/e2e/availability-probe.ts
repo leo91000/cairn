@@ -46,7 +46,15 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
     for (const kind of ['pagehide', 'pageshow'] as const) {
       window.addEventListener(kind, (event) => {
         pageHidden = kind === 'pagehide'
-        record({ kind, document: documentId, read: 0, aborted: false, afterPagehide: pageHidden, persisted: event.persisted, trusted: event.isTrusted })
+        record({
+          kind,
+          document: documentId,
+          read: 0,
+          aborted: false,
+          afterPagehide: pageHidden,
+          persisted: event.persisted,
+          trusted: event.isTrusted,
+        })
       })
     }
 
@@ -56,6 +64,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
       insideAbortCall: boolean
       nativeSignal: boolean
     }
+
     const signals = new WeakMap<AbortSignal, Metadata>()
     const responses = new WeakMap<Response, Metadata>()
     const fetch = window.fetch
@@ -84,7 +93,12 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
       const tracked = String(input) === '/api/installations' && (!init?.method || init.method === 'GET')
       if (!tracked)
         return fetch.call(this, input, init)
-      const meta: Metadata = { read: ++sequence, signal: init?.signal, insideAbortCall: false, nativeSignal: false }
+      const meta: Metadata = {
+        read: ++sequence,
+        signal: init?.signal,
+        insideAbortCall: false,
+        nativeSignal: false,
+      }
       if (meta.signal) {
         signals.set(meta.signal, meta)
         meta.signal.addEventListener('abort', (event) => {
@@ -94,6 +108,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
           recordRead(meta, 'abort', { trusted: event.isTrusted, exactTarget: native, insideAbortCall: meta.insideAbortCall })
         }, { once: true })
       }
+
       recordRead(meta, 'start')
       let original: ReturnType<typeof fetch>
       try {
@@ -103,6 +118,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
         rejected(meta, 'rejected', cause)
         throw cause
       }
+
       // Observe without replacing the original promise or cloning its Response.
       void original.then((response) => {
         responses.set(response, meta)
@@ -125,6 +141,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
         rejected(meta, 'body-rejected', cause)
         throw cause
       }
+
       void original.then((value: unknown) => {
         recordRead(meta, 'body', {
           status: this.status,
@@ -186,8 +203,10 @@ export function incompleteAvailabilityReads(reads: readonly AvailabilityReadEven
       && enters[0]!.sequence < aborts[0]!.sequence && aborts[0]!.sequence < returns[0]!.sequence
       && aborts[0]!.trusted && aborts[0]!.exactTarget && aborts[0]!.insideAbortCall
     if (enters.length !== returns.length || enters.length > 1 || aborts.length > 1
-      || (enters.length === 1 && enters[0]!.sequence >= returns[0]!.sequence))
+      || (enters.length === 1 && enters[0]!.sequence >= returns[0]!.sequence)) {
       return true
+    }
+
     if ([...rejected, ...outcomes].some(event => event.aborted && !nativeAbort))
       return true
     if (rejected.length)
@@ -198,6 +217,7 @@ export function incompleteAvailabilityReads(reads: readonly AvailabilityReadEven
       || response.ok !== (response.status >= 200 && response.status < 300)) {
       return true
     }
+
     if (!bodies.length)
       return response.ok || outcomes.length !== 0 || !nativeAbort
     return outcomes.length !== 1 || bodies[0]!.sequence <= headers[0]!.sequence || outcomes[0]!.sequence <= bodies[0]!.sequence

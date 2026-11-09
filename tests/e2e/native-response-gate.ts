@@ -186,6 +186,7 @@ export async function nativeResponseGate(origin: string) {
           response.writeHead(source.statusCode || 502, headers)
           response.flushHeaders()
         }
+
         if (held)
           held.response.headersDelivered = true
 

@@ -45,7 +45,12 @@ cacheTest('availability restores the same native document from BFCache with an e
   let poll: ReturnType<typeof responseGate.hold> | undefined
   let destination: ReturnType<typeof responseGate.hold> | undefined
   let navigation: Promise<unknown> | undefined
-  let withdrawalReceipt: { headersDelivered: boolean, bodyReleased: boolean, closed: boolean, terminal: string } | undefined
+  let withdrawalReceipt: {
+    headersDelivered: boolean
+    bodyReleased: boolean
+    closed: boolean
+    terminal: string
+  } | undefined
   let originalDocument: string | undefined
   let heldRead: number | undefined
   let journalAcknowledged = false
@@ -94,7 +99,12 @@ cacheTest('availability restores the same native document from BFCache with an e
       responseGate.check()
       return poll!.closed && poll!.terminal === 'cancelled' && !poll!.bodyReleased
     }).toBe(true)
-    withdrawalReceipt = { headersDelivered: poll.headersDelivered, bodyReleased: poll.bodyReleased, closed: poll.closed, terminal: poll.terminal }
+    withdrawalReceipt = {
+      headersDelivered: poll.headersDelivered,
+      bodyReleased: poll.bodyReleased,
+      closed: poll.closed,
+      terminal: poll.terminal,
+    }
     poll.release()
     destination.release()
     const departed = await arrival
@@ -138,9 +148,14 @@ cacheTest('availability restores the same native document from BFCache with an e
       if (closure.status === 'rejected')
         failures.push(closure.reason)
     }
+
     if (navigation) {
-      try { await bounded(() => navigation!) }
-      catch (cause) { failures.push(cause) }
+      try {
+        await bounded(() => navigation!)
+      }
+      catch (cause) {
+        failures.push(cause)
+      }
     }
   }
 
@@ -167,7 +182,15 @@ cacheTest('availability restores the same native document from BFCache with an e
       originalDocument: originalDocument ?? null,
       heldRead: heldRead ?? null,
       withdrawalReceipt: withdrawalReceipt ?? null,
-      destination: destination ? { received: destination.received, ready: destination.ready, status: destination.status ?? null, terminal: destination.terminal, closed: destination.closed } : null,
+      destination: destination
+        ? {
+            received: destination.received,
+            ready: destination.ready,
+            status: destination.status ?? null,
+            terminal: destination.terminal,
+            closed: destination.closed,
+          }
+        : null,
       reads,
       pageErrors: errors,
       poll: poll

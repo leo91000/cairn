@@ -352,7 +352,15 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
     const errors: string[] = []
     const reads: AvailabilityReadEvent[] = []
     const downloads: Download[] = []
-    const withdrawalReceipts: Array<{ label: string, document: string, read: number, headersDelivered: boolean, bodyReleased: boolean, terminal: string, closed: boolean }> = []
+    const withdrawalReceipts: Array<{
+      label: string
+      document: string
+      read: number
+      headersDelivered: boolean
+      bodyReleased: boolean
+      terminal: string
+      closed: boolean
+    }> = []
     const recordRead = (event: AvailabilityReadEvent) => {
       if (!reads.some(record => record.document === event.document && record.sequence === event.sequence))
         reads.push(event)
@@ -408,7 +416,15 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         responseGate.check()
         return response.closed && response.terminal === 'cancelled' && !response.bodyReleased
       }).toBe(true)
-      withdrawalReceipts.push({ label, document, read, headersDelivered: response.headersDelivered, bodyReleased: response.bodyReleased, terminal: response.terminal, closed: response.closed })
+      withdrawalReceipts.push({
+        label,
+        document,
+        read,
+        headersDelivered: response.headersDelivered,
+        bodyReleased: response.bodyReleased,
+        terminal: response.terminal,
+        closed: response.closed,
+      })
       response.release()
     }
 

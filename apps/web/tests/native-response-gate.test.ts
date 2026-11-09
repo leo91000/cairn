@@ -200,6 +200,7 @@ it('keeps a controlled readonly outage active across HTTP attempts and restores 
     await expect(read.result).rejects.toThrow()
     expect(read.responseSeen()).toBe(false)
   }
+
   expect(outage.rejectedRequests).toBe(2)
   expect(await call('/health').result).toEqual({ status: 200, body: '[{"online":true}]' })
   outage.restore()

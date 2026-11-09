@@ -1,7 +1,12 @@
 import type { Page } from '@playwright/test'
 import type { AvailabilityReadEvent } from '../../../tests/e2e/availability-probe'
 import assert from 'node:assert/strict'
-import { afterEach, beforeEach, it, vi } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  it,
+  vi,
+} from 'vitest'
 import { incompleteAvailabilityReads, installAvailabilityProbe } from '../../../tests/e2e/availability-probe'
 import { AvailabilityDeparture, readAvailability } from '../src/availability-read'
 
@@ -42,6 +47,7 @@ class NativeController extends HostController {
       queueMicrotask(() => hostAbort.call(this, reason))
       return
     }
+
     hostAbort.call(this, reason)
   }
 }
@@ -62,27 +68,33 @@ class NativeResponse {
 
 const originalJson = NativeResponse.prototype.json
 const originalAbort = NativeController.prototype.abort
-const headers = (status = 200, call = calls.at(-1)!) => {
+
+function headers(status = 200, call = calls.at(-1)!) {
   call.headerStatus = status
   call.response.resolve(new NativeResponse(call, status))
 }
-const value = (data: unknown, call = calls.at(-1)!) => {
+
+function value(data: unknown, call = calls.at(-1)!) {
   call.outcome = { value: data }
   call.body?.resolve(data)
 }
-const failure = (cause: unknown, call = calls.at(-1)!) => {
-  if (call.headerStatus === undefined)
+
+function failure(cause: unknown, call = calls.at(-1)!) {
+  if (call.headerStatus === undefined) {
     call.response.reject(cause)
+  }
   else {
     call.outcome = { error: cause }
     call.body?.reject(cause)
   }
 }
-const flush = async () => {
+
+async function flush() {
   for (let index = 0; index < 10; index++)
     await Promise.resolve()
 }
-const departure = (event = new Intent(ownerDocument, ownerWindow)) => {
+
+function departure(event = new Intent(ownerDocument, ownerWindow)) {
   for (const listener of [...listeners])
     listener(event)
 }
@@ -96,7 +108,13 @@ beforeEach(() => {
   NativeResponse.prototype.json = originalJson
   NativeController.prototype.abort = originalAbort
   const fetch = (input: unknown, init: RequestInit) => {
-    const call: Call = { input, init, response: Promise.withResolvers<NativeResponse>(), jsonCalls: 0, aborts: 0 }
+    const call: Call = {
+      input,
+      init,
+      response: Promise.withResolvers<NativeResponse>(),
+      jsonCalls: 0,
+      aborts: 0,
+    }
     calls.push(call)
     init.signal?.addEventListener('abort', () => {
       if (!init.signal?.aborted)
@@ -106,6 +124,7 @@ beforeEach(() => {
     }, { once: true })
     return call.response.promise
   }
+
   ownerWindow = {
     fetch,
     Response: NativeResponse,
@@ -198,7 +217,12 @@ it('does not disarm the listener for synthetic, foreign or wrong-interface inten
   departure(untrusted)
   departure(new Intent({}, ownerWindow))
   departure(new Intent(ownerDocument, {}))
-  departure({ type: 'beforeunload', isTrusted: true, target: ownerDocument, currentTarget: ownerWindow } as Intent)
+  departure({
+    type: 'beforeunload',
+    isTrusted: true,
+    target: ownerDocument,
+    currentTarget: ownerWindow,
+  } as Intent)
   assert.equal(listeners.size, 1)
   assert.equal(calls[0]!.aborts, 0)
   const rejected = assert.rejects(read.response, AvailabilityDeparture)
@@ -227,6 +251,7 @@ it('keeps a prior fetch or body failure even when intent arrives before its prom
       headers()
       original = (await read.response).json()
     }
+
     const cause = new TypeError('genuine native network failure')
     const rejected = assert.rejects(original, error => error === cause)
     failure(cause)
@@ -365,18 +390,61 @@ it('observes the original fetch and JSON promises without clones, replacement pr
 })
 
 it('accounts for native fetch, optional body and unread HTTP disposal as distinct phases', () => {
-  const start: AvailabilityReadEvent = { sequence: 1, kind: 'start', document: 'retired', read: 1, aborted: false, afterPagehide: false }
-  const response: AvailabilityReadEvent = { ...start, sequence: 2, kind: 'fetch-fulfilled', status: 200, ok: true }
-  const headers: AvailabilityReadEvent = { ...start, sequence: 3, kind: 'headers', status: 200 }
+  const start: AvailabilityReadEvent = {
+    sequence: 1,
+    kind: 'start',
+    document: 'retired',
+    read: 1,
+    aborted: false,
+    afterPagehide: false,
+  }
+  const response: AvailabilityReadEvent = {
+    ...start,
+    sequence: 2,
+    kind: 'fetch-fulfilled',
+    status: 200,
+    ok: true,
+  }
+  const headers: AvailabilityReadEvent = {
+    ...start,
+    sequence: 3,
+    kind: 'headers',
+    status: 200,
+  }
   const body: AvailabilityReadEvent = { ...start, sequence: 4, kind: 'body-start' }
-  const terminal: AvailabilityReadEvent = { ...start, sequence: 5, kind: 'body', exactBody: true }
+  const terminal: AvailabilityReadEvent = {
+    ...start,
+    sequence: 5,
+    kind: 'body',
+    exactBody: true,
+  }
   const complete = [start, response, headers, body, terminal]
-  const enter: AvailabilityReadEvent = { ...start, sequence: 4, kind: 'abort-call-enter', insideAbortCall: true }
-  const abort: AvailabilityReadEvent = { ...start, sequence: 5, kind: 'abort', trusted: true, exactTarget: true, insideAbortCall: true }
-  const returned: AvailabilityReadEvent = { ...start, sequence: 6, kind: 'abort-call-return', insideAbortCall: false }
+  const enter: AvailabilityReadEvent = {
+    ...start,
+    sequence: 4,
+    kind: 'abort-call-enter',
+    insideAbortCall: true,
+  }
+  const abort: AvailabilityReadEvent = {
+    ...start,
+    sequence: 5,
+    kind: 'abort',
+    trusted: true,
+    exactTarget: true,
+    insideAbortCall: true,
+  }
+  const returned: AvailabilityReadEvent = {
+    ...start,
+    sequence: 6,
+    kind: 'abort-call-return',
+    insideAbortCall: false,
+  }
   assert.deepEqual(incompleteAvailabilityReads(complete), [])
   for (const partial of [
-    [start], [terminal], [start, terminal], [start, response, headers],
+    [start],
+    [terminal],
+    [start, terminal],
+    [start, response, headers],
     [...complete, { ...terminal, sequence: 6 }],
     [start, response, { ...response, sequence: 6 }, headers, body, terminal],
     [start, response, headers, { ...headers, sequence: 6 }, body, terminal],
@@ -388,8 +456,14 @@ it('accounts for native fetch, optional body and unread HTTP disposal as distinc
   ]) {
     assert.notEqual(incompleteAvailabilityReads(partial).length, 0)
   }
+
   const unreadFailure = [start, { ...response, status: 503, ok: false }, { ...headers, status: 503 }, enter, abort, returned]
   assert.deepEqual(incompleteAvailabilityReads(unreadFailure), [])
-  assert.deepEqual(incompleteAvailabilityReads([start, enter, abort, returned, { ...terminal, sequence: 7, kind: 'rejected', aborted: true }]), [])
+  assert.deepEqual(incompleteAvailabilityReads([start, enter, abort, returned, {
+    ...terminal,
+    sequence: 7,
+    kind: 'rejected',
+    aborted: true,
+  }]), [])
   assert.deepEqual(incompleteAvailabilityReads([{ ...start, kind: 'pagehide', read: 0 }, { ...start, kind: 'pageshow', read: 0 }]), [])
 })
