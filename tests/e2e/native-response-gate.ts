@@ -11,6 +11,7 @@ export interface HeldResponse {
   terminal: 'pending' | 'finished' | 'cancelled' | 'failed'
   closed: boolean
   release: () => void
+  disconnect: () => void
   downloadNavigation: () => void
 }
 
@@ -37,12 +38,20 @@ export async function nativeResponseGate(origin: string) {
   function control(kind: ResponseKind, unavailable = false, headersFirst = false) {
     const released = Promise.withResolvers<void>()
     let download = false
+    let disconnected = false
     const response: HeldResponse = {
       received: false,
       ready: false,
       terminal: 'pending',
       closed: false,
       release: () => released.resolve(),
+      disconnect: () => {
+        if (kind !== 'availability')
+          throw new Error('Only an availability read may receive a controlled transport failure')
+
+        disconnected = true
+        released.resolve()
+      },
       downloadNavigation: () => {
         if (kind !== 'agents')
           throw new Error('Only the destination navigation may become a download')
@@ -55,6 +64,7 @@ export async function nativeResponseGate(origin: string) {
       response,
       released: released.promise,
       downloads: () => download,
+      disconnected: () => disconnected,
       unavailable,
       headersFirst,
     }
@@ -113,7 +123,7 @@ export async function nativeResponseGate(origin: string) {
         if (held)
           await held.released
 
-        if (closing || response.destroyed) {
+        if (closing || response.destroyed || held?.disconnected()) {
           source.destroy()
           response.destroy()
           return

@@ -151,6 +151,23 @@ it('delivers genuine headers while holding the native response body', async () =
   gate.check()
 })
 
+it('produces a real read failure before headers and during an already started body', async () => {
+  for (const bodyStarted of [false, true]) {
+    const { gate, call } = await fixture()
+    const held = bodyStarted ? gate.holdBody() : gate.hold('availability')
+    const pending = call('/api/installations')
+    const rejected = expect(pending.result).rejects.toThrow()
+    await vi.waitFor(() => expect(held.ready).toBe(true))
+    if (bodyStarted)
+      await vi.waitFor(() => expect(pending.responseSeen()).toBe(true))
+    held.disconnect()
+    await rejected
+    await vi.waitFor(() => expect(held.closed).toBe(true))
+    expect(held.terminal).toBe('cancelled')
+    gate.check()
+  }
+})
+
 it('records HTTP ingress before upstream headers even when the caller cancels', async () => {
   const headers = Promise.withResolvers<void>()
   const { gate, call } = await fixture(headers.promise)

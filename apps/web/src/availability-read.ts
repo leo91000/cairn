@@ -108,31 +108,45 @@ export function readAvailability(signal: AbortSignal) {
       keepalive: true,
       signal: controller.signal,
     })
-    response = original.then(value => ({
-      status: value.status,
-      ok: value.ok,
-      json() {
-        if (consumed)
-          return Promise.reject(new TypeError('Availability body already consumed'))
-        consumed = true
-        let body: Promise<unknown>
+    response = original.then((value) => {
+      let bodyResult: Promise<unknown> | undefined
+      const consume = () => {
+        if (bodyResult)
+          return bodyResult
         try {
-          body = nativeJson.call(value)
+          const originalBody = nativeJson.call(value)
+          bodyResult = originalBody.then((data) => {
+            finish()
+            return data
+          }, (cause: unknown) => {
+            const result = departureCause(cause, !value.ok)
+            finish()
+            throw result
+          })
         }
         catch (cause) {
           finish()
-          return Promise.reject(cause)
+          bodyResult = Promise.reject(cause)
         }
-        return body.then((data) => {
-          finish()
-          return data
-        }, (cause: unknown) => {
-          const result = departureCause(cause, !value.ok)
-          finish()
-          throw result
-        })
-      },
-    }), (cause: unknown) => {
+        // A retiring caller may never request JSON. Observe this owned result
+        // without replacing it: json() still returns the same success/failure.
+        void bodyResult.catch(() => {})
+        return bodyResult
+      }
+
+      if (value.ok)
+        consume()
+      return {
+        status: value.status,
+        ok: value.ok,
+        json() {
+          if (consumed)
+            return Promise.reject(new TypeError('Availability body already consumed'))
+          consumed = true
+          return consume()
+        },
+      }
+    }, (cause: unknown) => {
       const result = departureCause(cause)
       finish()
       throw result

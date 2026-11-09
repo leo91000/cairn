@@ -250,6 +250,18 @@ it('preserves already fulfilled HTTP failure headers and never hides their body 
   }
 })
 
+it('starts successful native JSON before exposing headers even when the parent has already retired', async () => {
+  const parent = new HostController()
+  const read = readAvailability(parent.signal)
+  headers()
+  parent.abort()
+  const response = await read.response
+  assert.equal(response.status, 200)
+  assert.equal(calls[0]!.jsonCalls, 1)
+  await assert.rejects(response.json(), cause => cause instanceof DOMException && !(cause instanceof AvailabilityDeparture))
+  assert.equal(listeners.size, 0)
+})
+
 it('does not manufacture a terminal when an abort produces no original rejection', async () => {
   omitAbort = true
   const read = readAvailability(new HostController().signal)
@@ -337,20 +349,47 @@ it('observes the original fetch and JSON promises without clones, replacement pr
   headers(503)
   const bad = await read.response
   assert.equal(bad.status, 503)
+  const beforeDisposal = JSON.parse(storage.get('cairn-e2e-availability-journal') || '[]') as AvailabilityReadEvent[]
+  assert.deepEqual(incompleteAvailabilityReads(beforeDisposal.filter(event => event.read === 1)), [])
+  assert.equal(incompleteAvailabilityReads(beforeDisposal).length, 1)
   read.dispose()
   await flush()
   const journal = JSON.parse(storage.get('cairn-e2e-availability-journal') || '[]') as AvailabilityReadEvent[]
   assert.equal(journal.filter(event => event.kind === 'headers' && event.status === 503).length, 1)
   assert.equal(journal.filter(event => event.kind === 'body').length, 1)
+  assert.equal(calls[1]!.jsonCalls, 0)
+  // Node's later AbortSignal listeners can receive currentTarget=null. Positive
+  // native disposal provenance is checked in the pinned browser controls.
+  assert.equal(journal.filter(event => event.kind === 'abort-call-enter').length, 1)
+  assert.equal(journal.filter(event => event.kind === 'abort-call-return').length, 1)
 })
 
-it('requires exactly one start and terminal for every final journal identity', () => {
+it('accounts for native fetch, optional body and unread HTTP disposal as distinct phases', () => {
   const start: AvailabilityReadEvent = { sequence: 1, kind: 'start', document: 'retired', read: 1, aborted: false, afterPagehide: false }
-  const terminal: AvailabilityReadEvent = { ...start, sequence: 2, kind: 'body', exactBody: true }
-  assert.deepEqual(incompleteAvailabilityReads([start]), [start])
-  assert.deepEqual(incompleteAvailabilityReads([terminal]), [terminal])
-  assert.deepEqual(incompleteAvailabilityReads([start, terminal]), [])
-  assert.deepEqual(incompleteAvailabilityReads([start, terminal, { ...terminal, sequence: 3 }]), [start])
-  assert.deepEqual(incompleteAvailabilityReads([{ ...terminal, kind: 'headers', status: 200 }]), [{ ...terminal, kind: 'headers', status: 200 }])
+  const response: AvailabilityReadEvent = { ...start, sequence: 2, kind: 'fetch-fulfilled', status: 200, ok: true }
+  const headers: AvailabilityReadEvent = { ...start, sequence: 3, kind: 'headers', status: 200 }
+  const body: AvailabilityReadEvent = { ...start, sequence: 4, kind: 'body-start' }
+  const terminal: AvailabilityReadEvent = { ...start, sequence: 5, kind: 'body', exactBody: true }
+  const complete = [start, response, headers, body, terminal]
+  const enter: AvailabilityReadEvent = { ...start, sequence: 4, kind: 'abort-call-enter', insideAbortCall: true }
+  const abort: AvailabilityReadEvent = { ...start, sequence: 5, kind: 'abort', trusted: true, exactTarget: true, insideAbortCall: true }
+  const returned: AvailabilityReadEvent = { ...start, sequence: 6, kind: 'abort-call-return', insideAbortCall: false }
+  assert.deepEqual(incompleteAvailabilityReads(complete), [])
+  for (const partial of [
+    [start], [terminal], [start, terminal], [start, response, headers],
+    [...complete, { ...terminal, sequence: 6 }],
+    [start, response, { ...response, sequence: 6 }, headers, body, terminal],
+    [start, response, headers, { ...headers, sequence: 6 }, body, terminal],
+    [start, response, headers, terminal],
+    [start, response, headers, { ...body, sequence: 7 }, terminal],
+    [start, response, { ...headers, status: 503 }, body, terminal],
+    [start, { ...response, status: 503, ok: false }, { ...headers, status: 503 }],
+    [start, { ...response, status: 503, ok: false }, { ...headers, status: 503 }, enter, { ...abort, trusted: false }, returned],
+  ]) {
+    assert.notEqual(incompleteAvailabilityReads(partial).length, 0)
+  }
+  const unreadFailure = [start, { ...response, status: 503, ok: false }, { ...headers, status: 503 }, enter, abort, returned]
+  assert.deepEqual(incompleteAvailabilityReads(unreadFailure), [])
+  assert.deepEqual(incompleteAvailabilityReads([start, enter, abort, returned, { ...terminal, sequence: 7, kind: 'rejected', aborted: true }]), [])
   assert.deepEqual(incompleteAvailabilityReads([{ ...start, kind: 'pagehide', read: 0 }, { ...start, kind: 'pageshow', read: 0 }]), [])
 })
