@@ -162,7 +162,7 @@ function client(reader, scenario) {
           // Same existing clean-poll cadence and failure backoff; no rearm from
           // the intent handler, and never resume while pagehide owns suspension.
           if (read === 1 && !hidden && ['committed', 'download', 'reload', 'delayed-commit', 'failure-before-intent'].includes(scenario)) {
-            const delay = Math.min(3000 * 2 ** Math.min(failureCount, 4), 30000)
+            const delay = Math.min(15000, 3000 * 2 ** Math.min(failureCount, 3))
             record('resume-scheduled', read, { delay, failureCount })
             resumeTimer = setTimeout(() => {
               if (!hidden)
@@ -466,6 +466,10 @@ async function observe(browser, engine, reader, scenario) {
     await expect.poll(async () => {
       const journal = await readJournal()
       const first = journal.filter(event => event.document === documentId && event.read === 1 && terminal(event))
+      if (reader === 'intent-fetch' && scenario === 'delayed-commit')
+        return journal.some(event => event.document === documentId && event.read === 2 && event.kind === 'native-fetch-rejected' && event.sameAbortReason)
+      if (reader === 'intent-fetch' && scenario === 'owner-abort')
+        return journal.some(event => event.document === documentId && event.read === 1 && event.kind === 'native-fetch-rejected' && event.sameAbortReason)
       if (reader === 'intent-fetch' && ['download', 'failure-before-intent'].includes(scenario))
         return journal.some(event => event.document === documentId && event.read === 2 && event.kind === 'body')
       if (scenario === 'committed' && journal.some(event => event.read === 1 && event.kind === 'signal-abort' && event.hidden))
@@ -504,6 +508,7 @@ async function observe(browser, engine, reader, scenario) {
       }
       catch (error) {
         firstFailure ??= { phase: 'journal read', error: errorRecord(error) }
+        ownedFailure('journal-read', error)
       }
       try {
         await page.close()
@@ -596,16 +601,21 @@ async function observe(browser, engine, reader, scenario) {
     const unexpectedFailure = originalEvents.some(event => ['fetch-error', 'body-error', 'http-error', 'error', 'timeout'].includes(event.kind)
       || (['native-fetch-rejected', 'native-body-rejected'].includes(event.kind) && !event.sameAbortReason))
     if (['committed', 'reload', 'delayed-commit'].includes(scenario)) {
-      usable = explicitNativeCancellation && !unexpectedFailure && !originalBody
+      usable = explicitNativeCancellation && first.length === 1 && !unexpectedFailure && !first.some(event => event.kind === 'body')
       if (scenario === 'delayed-commit') {
         const secondStart = originalEvents.find(event => event.read === 2 && event.kind === 'start')
         const pagehide = originalEvents.find(event => event.kind === 'pagehide')
-        usable &&= resumed?.delay === 3000 && secondStart && pagehide && secondStart.sequence < pagehide.sequence
-          && originalEvents.some(event => event.read === 2 && event.kind === 'signal-abort' && event.hidden && !event.reason)
+        const secondSignal = originalEvents.find(event => event.read === 2 && event.kind === 'signal-abort' && event.hidden && !event.reason && !event.intentId)
+        const secondRejection = originalEvents.find(event => event.read === 2 && event.kind === 'native-fetch-rejected' && event.sameAbortReason)
+        const secondTerminal = originalEvents.filter(event => event.read === 2 && terminal(event))
+        usable &&= resumed?.delay === 3000 && secondStart && pagehide && secondSignal && secondRejection
+          && secondStart.sequence < pagehide.sequence && pagehide.sequence < secondSignal.sequence && secondSignal.sequence < secondRejection.sequence
+          && secondTerminal.length === 1 && secondTerminal[0].kind === 'owner-cancelled' && secondTerminal[0].hidden
+          && !secondTerminal[0].reason && !secondTerminal[0].intentId
       }
     }
     else if (scenario === 'download') {
-      usable = identityRetained && explicitNativeCancellation && !originalBody && freshBody && !unexpectedFailure && resumed?.delay === 3000
+      usable = identityRetained && explicitNativeCancellation && first.length === 1 && !first.some(event => event.kind === 'body') && freshBody && !unexpectedFailure && resumed?.delay === 3000
     }
     else if (scenario === 'same-document' || scenario === 'synthetic-intent') {
       usable = identityRetained && originalBody && first.length === 1 && !unexpectedFailure
@@ -618,6 +628,8 @@ async function observe(browser, engine, reader, scenario) {
     }
     else if (scenario === 'owner-abort')
       usable = first.length === 1 && first[0].kind === 'owner-cancelled' && first[0].signalAborted && !verifiedIntents.length
+        && originalEvents.some(event => event.read === 1 && event.kind === 'native-fetch-rejected' && event.sameAbortReason
+          && originalEvents.some(signal => signal.read === 1 && signal.kind === 'signal-abort' && signal.sequence < event.sequence))
     else if (scenario === 'http401')
       usable = first.length === 1 && first[0].kind === 'http-error' && first[0].status === 401
   }
