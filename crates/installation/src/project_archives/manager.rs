@@ -205,6 +205,7 @@ pub(crate) async fn run_archives(
     s: &Service,
     run: &Value,
     root: &Path,
+    plan: &Value,
 ) -> Result<Option<Vec<Archive>>> {
     let projects = crate::service::run_projects(run);
     let mut archives = Vec::new();
@@ -218,14 +219,13 @@ pub(crate) async fn run_archives(
         let Some(revision) = entry["revision"].as_str() else {
             return Ok(None);
         };
-        match build(
-            &s.config,
-            project,
-            &root.join("workspace").join(text(project, "id")),
-            revision,
-        )
-        .await
-        {
+        let archive = async {
+            let source =
+                crate::execution::project_seed_source(root, plan, text(project, "id")).await?;
+            build(&s.config, project, &source, revision).await
+        }
+        .await;
+        match archive {
             Ok((archive, _file)) => archives.push(archive),
             Err(error) => {
                 tracing::warn!(
@@ -338,6 +338,7 @@ pub(crate) async fn serve_run(
     s: &Service,
     run: &Value,
     root: &Path,
+    plan: &Value,
     body: &Value,
 ) -> Result<Response> {
     let projects = crate::service::run_projects(run);
@@ -354,13 +355,8 @@ pub(crate) async fn serve_run(
         .ok_or_else(|| Error::forbidden("Project archive outside run scope."))?;
     // Open the requested archive under the builder's eviction lock. A concurrent
     // cache refresh cannot invalidate this response, even after unlinking it.
-    let (descriptor, file) = build(
-        &s.config,
-        project,
-        &root.join("workspace").join(text(project, "id")),
-        revision,
-    )
-    .await?;
+    let source = crate::execution::project_seed_source(root, plan, text(project, "id")).await?;
+    let (descriptor, file) = build(&s.config, project, &source, revision).await?;
     if descriptor.hash != body["hash"] {
         return Err(Error::conflict("Project archive identity changed."));
     }
@@ -565,14 +561,21 @@ mod tests {
             )
             .unwrap();
             workspaces.push(json!({ "projectId": project["id"], "revision": descriptor.revision }));
+            std::fs::create_dir_all(root.path().join("workspace").join(text(&project, "id")))
+                .unwrap();
             projects.push(project);
         }
         let run = json!({ "snapshot": { "projects": projects }, "workspaces": workspaces });
         assert!(
-            run_archives(&service, &run, root.path())
-                .await
-                .unwrap()
-                .is_none()
+            run_archives(
+                &service,
+                &run,
+                root.path(),
+                &json!({ "projectRoot": root.path().join("workspace") })
+            )
+            .await
+            .unwrap()
+            .is_none()
         );
     }
 }

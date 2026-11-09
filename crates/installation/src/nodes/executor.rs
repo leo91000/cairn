@@ -187,24 +187,23 @@ impl Executor {
             let value: Value = serde_json::from_slice(body)?;
             let run = text(&value, "runId");
             crate::validation::uuid(run)?;
-            let target = self
-                .data
-                .join("runs")
-                .join(run)
-                .join("workspace")
-                .join(project);
-            let expected = if self.native {
-                let plan: Value = serde_json::from_slice(
-                    &tokio::fs::read(plan_path(&self.data, attempt)).await?,
-                )?;
+            let plan: Value =
+                serde_json::from_slice(&tokio::fs::read(plan_path(&self.data, attempt)).await?)?;
+            if plan["runId"] != run {
+                return Err(Error::bad("Invalid project run."));
+            }
+            let manager = if self.native {
                 PathBuf::from(text(&plan, "guestDataRoot"))
-                    .join("runs")
-                    .join(run)
-                    .join("workspace")
-                    .join(project)
             } else {
-                target.clone()
+                self.data.clone()
             };
+            let expected = crate::execution::project_seed_path(
+                &manager.join("runs").join(run),
+                &plan,
+                project,
+            )?;
+            let relative = expected.strip_prefix(&manager).map_err(Error::internal)?;
+            let target = self.data.join(relative);
             if value["source"] != expected.to_string_lossy().as_ref() {
                 return Err(Error::bad("Invalid project destination."));
             }

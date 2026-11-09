@@ -146,6 +146,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_workspace("workspace").await
+    }
+
+    async fn with_workspace(workspace: &str) -> Self {
         assert!(
             !crate::native::enabled(),
             "use the isolated backend test launcher"
@@ -161,13 +165,9 @@ impl Fixture {
             .path()
             .join("master/runs")
             .join(&run)
-            .join("workspace")
+            .join(workspace)
             .join(&project);
-        let target = data
-            .join("runs")
-            .join(&run)
-            .join("workspace")
-            .join(&project);
+        let target = data.join("runs").join(&run).join(workspace).join(&project);
         tokio::fs::create_dir_all(&source).await.unwrap();
         tokio::fs::write(source.join("file"), b"project seed")
             .await
@@ -181,7 +181,12 @@ impl Fixture {
             .unwrap();
         tokio::fs::write(
             data.join("runner-plans").join(format!("{attempt}.json")),
-            serde_json::to_vec(&json!({ "guestDataRoot": root.path().join("master") })).unwrap(),
+            serde_json::to_vec(&json!({
+                "runId": run,
+                "guestDataRoot": root.path().join("master"),
+                "projectRoot": source.parent().unwrap(),
+            }))
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -312,6 +317,19 @@ async fn advance_before(started: tokio::time::Instant, elapsed: Duration) {
         .checked_duration_since(tokio::time::Instant::now())
         .expect("fixture readiness exceeded the controlled deadline");
     advance(remaining).await;
+}
+
+#[tokio::test]
+async fn native_import_relay_stages_the_current_workspace_generation() {
+    let mut fixture = Fixture::with_workspace("workspace-fdeab5b6").await;
+    let (operation, _) = fixture.import().await;
+    fixture.receiving_seed().await;
+    fixture.state.seed.release.notify_one();
+    ready(fixture.state.controller.entered.notified()).await;
+    fixture.state.controller.release.notify_one();
+    ready(operation).await.unwrap().unwrap();
+    assert_eq!(fixture.state.controller_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(ready(fixture.replies.recv()).await.unwrap()["status"], 200);
 }
 
 #[tokio::test]

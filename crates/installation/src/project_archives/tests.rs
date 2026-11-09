@@ -202,6 +202,37 @@ async fn checksum_verification_covers_zip_permissions_outside_the_payload_crc() 
 #[tokio::test]
 #[ignore = "reproducible local archive versus file-frame benchmark"]
 async fn measure_project_archive_transfer() {
+    use std::os::fd::AsRawFd;
+
+    fn reads(file: &tempfile::NamedTempFile) -> Value {
+        file.as_file().sync_all().unwrap();
+        // Evict only this synthetic file, never the host's global page cache.
+        assert_eq!(
+            unsafe {
+                libc::posix_fadvise(file.as_file().as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED)
+            },
+            0
+        );
+        let cpu = cpu_seconds();
+        let before = Instant::now();
+        let cold = std::fs::read(file.path()).unwrap();
+        let cold_ms = before.elapsed().as_secs_f64() * 1000.0;
+        let cold_cpu = cpu_seconds() - cpu;
+        let cpu = cpu_seconds();
+        let before = Instant::now();
+        let warm = std::fs::read(file.path()).unwrap();
+        let warm_ms = before.elapsed().as_secs_f64() * 1000.0;
+        let warm_cpu = cpu_seconds() - cpu;
+        assert_eq!(cold, warm);
+        json!({
+            "coldReadMs": cold_ms,
+            "warmReadMs": warm_ms,
+            "coldReadCpuSeconds": cold_cpu,
+            "warmReadCpuSeconds": warm_cpu,
+            "coldPolicy": "per-file POSIX_FADV_DONTNEED advisory after sync; no global eviction",
+        })
+    }
+
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
     std::fs::create_dir(&source).unwrap();
@@ -250,15 +281,11 @@ async fn measure_project_archive_transfer() {
             json!({"sample": sample, "legacyWriteMs": old.as_secs_f64()*1000.0, "archiveWriteMs": new.as_secs_f64()*1000.0, "legacyCpuSeconds": old_cpu, "archiveCpuSeconds": new_cpu})
         );
     }
-    let before = Instant::now();
-    let first_read = std::fs::read(file.path()).unwrap();
-    let first_read_ms = before.elapsed().as_secs_f64() * 1000.0;
-    let before = Instant::now();
-    let warm_read = std::fs::read(file.path()).unwrap();
-    let warm_read_ms = before.elapsed().as_secs_f64() * 1000.0;
-    assert_eq!(first_read, warm_read);
+    let legacy = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(legacy.path(), &frames).unwrap();
     println!(
-        "archive read first/warm ms: {first_read_ms:.3}/{warm_read_ms:.3}; both page-cache eligible"
+        "{}",
+        json!({ "legacyReads": reads(&legacy), "archiveReads": reads(&file) })
     );
     println!(
         "{}",
