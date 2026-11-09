@@ -1,6 +1,6 @@
 # Focused availability product qualification
 
-Product 7df2ac2bb0f34fa917e64cc2fa928dcf5d1f5224 tree d734d9eb5af1428c140a8ba0e530098f44290dae, base actual main da00f92aee9afb2c125f7aa8bb903999548a35be.
+Product 40ecae42abac9ffa9cc3d7e670c38845f141671f tree 5f49098e70d1e9faf85c718b38f3f65dc0e4f7f6, base actual main da00f92aee9afb2c125f7aa8bb903999548a35be.
 Existing observer only, NEVER merge observer. Pinned product checkout; only hash-checked
 SDK helper copied into ignored test-results. No localheavy/SDKinstall/newenv/ref/pilot.
 One sequential25minjob/allsteps5min/owned7s bounds. No retry/flaky/skip/error masking.
@@ -23,6 +23,8 @@ Native evidence acquired separately, NEVER rerun for globalgreen:
 All eight factual scopes precede cleanup, but no whole-run/global product green
 is inferred. FullEightCellRunComplete and prior globalflags remainFALSE. The source
 hash pins and bounded gate comparison remain in archived native script/context history.
+
+Formatting qualification42633640027 on7df remainsFAILURE: realCLI6+2 andactualSDKidentity PASS, formatterExit1/sourceDiff1, patch17416B SHA25666c6cff476c7be72d040172e069435c5e3ae915866349b5f0b719e8eacbc7423. Exactformatterpatch applied to7files + manual expansion of remaining single-line BFcleanuptry; new product head above is NOT qualified by those prior results. Factory comparison to7df adds ONLY2 blank lines, BeaconApp BYTEIDENTICAL; probe/tests formatting changed and need fresh review/actualexactCI. Archived native script intentionally retains its7df sourcehash pins and is NOT executed by this product qualification; historicalnativefacts are not a newhead/globalqualification.
 
 Closed-target classifier fix: acquire process-local exact client prototype from
 an isolated owned about:blank page using SAME installed SDK. Strict pageerror/crash,
