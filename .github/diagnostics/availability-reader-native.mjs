@@ -397,7 +397,8 @@ async function observe(browser, engine, reader, scenario) {
     response.writeHead(200, { 'content-type': 'text/html' }).end('<!doctype html><h1>Destination</h1>')
   })
 
-  const readJournal = async () => JSON.parse(await observed(() => page.evaluate(() => sessionStorage.getItem('cairn-reader-mechanism') || '[]'), 'journal read'))
+  const evaluate = (callback, argument) => observed(() => page.evaluate(callback, argument), 'document evaluation: ' + phase)
+  const readJournal = async () => JSON.parse(await evaluate(() => sessionStorage.getItem('cairn-reader-mechanism') || '[]'))
 
   try {
     await stage('backend setup')
@@ -439,10 +440,10 @@ async function observe(browser, engine, reader, scenario) {
     page.on('pageerror', error => pageErrors.push(errorRecord(error)))
     await stage('initial document')
     await page.goto(origin + (scenario === 'reload' ? '/installations/fixture/agents' : '/live'))
-    documentId = await page.evaluate(() => window.readerDocument)
+    documentId = await evaluate(() => window.readerDocument)
     if (controlled)
       held = gate.hold('availability')
-    await page.evaluate(() => window.beginReader())
+    await evaluate(() => window.beginReader())
     if (controlled) {
       await stage('held response ready')
       await expect.poll(() => {
@@ -451,10 +452,10 @@ async function observe(browser, engine, reader, scenario) {
       }, { timeout: 7000 }).toBe(true)
       assert.equal(held.status, 200)
       if (scenario === 'owner-abort') {
-        await page.evaluate(() => window.abortReader())
+        await evaluate(() => window.abortReader())
       }
       else if (scenario === 'same-document' || scenario === 'synthetic-intent') {
-        await page.evaluate((kind) => {
+        await evaluate((kind) => {
           if (kind === 'same-document')
             history.pushState({ probe: true }, '', '#same-document')
           else {
@@ -463,10 +464,10 @@ async function observe(browser, engine, reader, scenario) {
             window.navigation?.dispatchEvent(event)
           }
         }, scenario)
-        identityRetained = await page.evaluate(() => window.readerDocument) === documentId
+        identityRetained = await evaluate(() => window.readerDocument) === documentId
         assert.equal(identityRetained, true)
         if (scenario === 'same-document')
-          assert.equal(await page.evaluate(() => history.state?.probe === true && location.hash === '#same-document'), true)
+          assert.equal(await evaluate(() => history.state?.probe === true && location.hash === '#same-document'), true)
       }
       else if (scenario !== 'success') {
         destination = gate.hold('agents')
@@ -503,14 +504,14 @@ async function observe(browser, engine, reader, scenario) {
         if (scenario === 'download') {
           await expect.poll(() => downloads.length, { timeout: 7000 }).toBe(1)
           assert.equal(downloads[0].suggestedFilename(), 'availability-navigation.html')
-          identityRetained = await page.evaluate(() => window.readerDocument) === documentId
+          identityRetained = await evaluate(() => window.readerDocument) === documentId
           assert.equal(identityRetained, true)
           await expect(page.getByRole('heading', { name: 'Live', exact: true })).toBeVisible()
         }
         else {
           assert.equal(navigationKind, 'committed')
           await expect(page.getByRole('heading', { name: scenario === 'reload' ? 'Live' : 'Destination', exact: true })).toBeVisible()
-          assert.notEqual(await page.evaluate(() => window.readerDocument), documentId)
+          assert.notEqual(await evaluate(() => window.readerDocument), documentId)
         }
         navigationValidated = true
       }
@@ -538,7 +539,7 @@ async function observe(browser, engine, reader, scenario) {
       await stage('failure remains genuine across later native download intent')
       await expect.poll(() => downloads.length, { timeout: 7000 }).toBe(1)
       assert.equal(downloads[0].suggestedFilename(), 'availability-navigation.html')
-      identityRetained = await page.evaluate(() => window.readerDocument) === documentId
+      identityRetained = await evaluate(() => window.readerDocument) === documentId
       assert.equal(identityRetained, true)
       await expect(page.getByRole('heading', { name: 'Live', exact: true })).toBeVisible()
     }
@@ -775,7 +776,7 @@ engineLoop: for (const [engine, type] of [['chromium', chromium], ['webkit', web
         await observe(browser, engine, reader, scenario)
         // Unknown closure is a red partial run, never overlap another case with
         // an owned resource that may still be active.
-        if (cleanupFailures.length)
+        if (cleanupFailures.some(failure => failure.actor !== 'journal-read'))
           break engineLoop
       }
     }
