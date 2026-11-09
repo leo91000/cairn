@@ -54,7 +54,7 @@ Qualification exact-head map:
   Process-scoped Gittrust +established disposablezip/deps/Rust setup retained.
 - Primary EXACTUNCHANGED:
   pnpm test:e2e deliverables.spec.ts skill-bundles.spec.ts beacon-sharing.spec.ts beacon-installations.spec.ts mcps.spec.ts --workers=2 --retries=0 --fail-on-flaky-tests --trace=on
-- PrimaryMCP includesactualapplication readonlyoutage: originalGET held, persistenttransportfault acrossHTTPattempts, originalTypeError/nonaborted/Offline preserved, healthyhealthroutewhilefaultactive, counts +restorationBEFORElaterPagegoto, finalfreshAgentsOnline/journal andallpageerrorsstrict. No JSretry/mutation/sleep/newdeadline.
+- PrimaryMCP includesactualapplication readonlyoutage: originalGET held, persistenttransportfault acrossHTTPattempts, originalTypeError/nonaborted/Offline preserved, healthyhealthroutewhilefaultactive, counts +restorationBEFORElaterPagegoto, finalfreshAgentsOnline/journal andallpageerrorsstrict. No JSretry/mutation/sleep/newdeadline. Every recordedabort requires completecall/signal/return counts, native trusted/exactsignal and an insideflag consistentwithintrinsicsequence. Explicitoutside-call negative keepsabortedFALSE and isnotownedattribution; orphan/untrusted/incompletepairsfail EVENiforiginalreadsuccess.
 - DirectRelay/savedreaders: existing beacon-relay/direct-capacity/chat-switch projects.
 - PhysicalBFCache ordinaryMCPprojects, workers1 budget unchanged, actual trusted
   persisted SAMEdoc/exactfreshbody; synthetic lifecycle doesNOTreplacephysical.
