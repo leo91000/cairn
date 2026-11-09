@@ -4,7 +4,9 @@ import { once } from 'node:events'
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { stripTypeScriptTypes } from 'node:module'
-import { chromium, devices, expect, webkit } from '@playwright/test'
+import { chromium, devices, errors, expect, webkit } from '@playwright/test'
+
+import { acquireClosedTargetReference, isClosedTargetError } from './closed-target-error.mjs'
 
 const output = 'test-results/reader-native'
 await mkdir(output, { recursive: true })
@@ -198,7 +200,7 @@ function nativeDiagnostics(mode) {
   }
 }
 
-async function observe(browser, cell) {
+async function observe(browser, cell, closedPrototype) {
   const arm = cell.engine + '-' + cell.mode
   const received = []
   const stateReceipts = []
@@ -212,7 +214,7 @@ async function observe(browser, cell) {
   let context, page, gate, navigation, documentId, initial, destination, next, outage
   let outageEvidence
   let checkpoint, nativeEvents = [], initialClosureBeforeRelease = false, journalAcknowledged = false, navigationValidated = false
-  let initialHeaderAdvance, initialClosureBoundary, nativeNavigationCheckpoint, navigationOutcome, navigationRetirement
+  let initialHeaderAdvance, initialClosureBoundary, nativeNavigationCheckpoint, navigationOutcome, rawNavigationError, navigationRetirement
   let activatedViaClick = false, retainedAfterDialog = false, pageCloseAttempted = false, pageCloseCompleted = false, waiterPendingAtCleanup = false
   let pendingProof, state, finalAudit = { unknown: [], unexpected: [] }
   const remember = (stage, error) => failures.push({ stage, error: errorRecord(error) })
@@ -381,6 +383,7 @@ async function observe(browser, cell) {
         navigationOutcome = { kind: 'committed' }
         return navigationOutcome
       }, error => {
+        rawNavigationError = error
         navigationOutcome = { kind: 'rejected', error: errorRecord(error), observedAfterPageCloseStarted: pageCloseAttempted }
         return navigationOutcome
       })
@@ -544,14 +547,14 @@ async function observe(browser, cell) {
     if (navigation) {
       try {
         const outcome = await observed(() => navigation, 'automation navigation waiter retirement')
-        navigationRetirement = { waiterPendingAtCleanup, pageCloseCompleted, ...outcome, cancellationEvidence: false }
+        navigationRetirement = { waiterPendingAtCleanup, pageCloseCompleted, ...outcome, matchesOwnedSdkPrototype: isClosedTargetError(rawNavigationError, closedPrototype), cancellationEvidence: false }
         if (cell.mode === 'proof-without-terminal') {
           assert.equal(outcome.kind, 'rejected')
           assert.notEqual(outcome.error?.name, 'TimeoutError')
           if (waiterPendingAtCleanup) {
             assert.equal(pageCloseCompleted, true)
             assert.equal(outcome.observedAfterPageCloseStarted, true)
-            assert.equal(outcome.error?.type, 'TargetClosedError')
+            assert.equal(isClosedTargetError(rawNavigationError, closedPrototype), true)
           }
         }
       }
@@ -595,8 +598,10 @@ for (const engine of new Set(planned.map(cell => cell.engine))) {
   let browser
   try {
     browser = await observed(() => ({ chromium, webkit })[engine].launch(), engine + ' launch')
+    const closedReference = await acquireClosedTargetReference(browser, errors, observed)
+    await write(engine + '-closed-target-sdk.json', closedReference.receipt)
     for (const cell of planned.filter(item => item.engine === engine)) {
-      await observe(browser, cell)
+      await observe(browser, cell, closedReference.prototype)
       if (!rows.at(-1).observationComplete || cleanupFailures.length)
         break
     }
