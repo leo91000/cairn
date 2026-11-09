@@ -2,7 +2,7 @@ import type { Download } from '@playwright/test'
 import type { AvailabilityReadEvent } from './availability-probe'
 import { writeFileSync as saveAvailabilityObservation } from 'node:fs'
 import { mcpProvider } from '../fixtures/mcp-provider'
-import { incompleteAvailabilityReads, installAvailabilityProbe } from './availability-probe'
+import { availabilityBodiesAfter, incompleteAvailabilityReads, installAvailabilityProbe } from './availability-probe'
 import {
   signIn as authenticateWorkspace,
   createAgent,
@@ -373,6 +373,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
     let poll: ReturnType<typeof responseGate.hold> | undefined
     let secondPoll: ReturnType<typeof responseGate.hold> | undefined
     let secondRead: number | undefined
+    let retainedSequence: number | undefined
     let firstRead: number | undefined
     let departingDocumentId: string | undefined
     let journalAcknowledged = false
@@ -490,7 +491,10 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         stage = 'same-document persisted pageshow resumes real polling'
         await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })))
         expect(await page.evaluate(() => window.cairnAvailabilityDocument)).toBe(departingDocument)
-        await expect.poll(() => reads.filter(event => event.document === departingDocument && event.read > targetRead && event.kind === 'body' && event.exactBody).length).toBeGreaterThan(0)
+        await harvestReads()
+        const restored = reads.filter(event => event.document === departingDocument && event.kind === 'pageshow' && event.persisted)
+        expect(restored.map(event => event.trusted)).toEqual([false])
+        await expect.poll(() => availabilityBodiesAfter(reads, departingDocument, restored[0]!.sequence).length).toBeGreaterThan(0)
         expect(reads.filter(event => event.document === departingDocument && event.persisted).map(event => event.kind)).toEqual(['pagehide', 'pageshow'])
         await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
       }
@@ -575,7 +579,17 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         await expect.poll(() => ({ closed: poll!.closed, terminal: poll!.terminal })).toEqual({ closed: true, terminal: 'cancelled' })
         await expect(transport).toHaveAttribute('data-transport-route', 'direct')
         stage = 'real periodic polling continues'
-        await expect.poll(() => reads.filter(event => event.document === departingDocument && event.read > targetRead && event.kind === 'body' && event.exactBody).length).toBeGreaterThan(0)
+        const retained = await page.evaluate((selected) => {
+          const journal = JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]') as AvailabilityReadEvent[]
+          return {
+            document: window.cairnAvailabilityDocument,
+            sequence: Math.max(0, ...journal.filter(event => event.document === selected).map(event => event.sequence)),
+          }
+        }, departingDocument)
+        expect(retained.document).toBe(departingDocument)
+        expect(retained.sequence).toBeGreaterThan(0)
+        retainedSequence = retained.sequence
+        await expect.poll(() => availabilityBodiesAfter(reads, departingDocument, retainedSequence!).length).toBeGreaterThan(0)
         stage = 'genuine active HTTP failure'
         const unavailable = responseGate.unavailable()
         const failedResponse = observeGate('503-availability', unavailable)
@@ -730,6 +744,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         departingDocument: departingDocumentId ?? null,
         firstRead: firstRead ?? null,
         secondRead: secondRead ?? null,
+        retainedSequence: retainedSequence ?? null,
         expectedFailure: expectedFailure ?? null,
         navigationValidated,
         withdrawalReceipts,

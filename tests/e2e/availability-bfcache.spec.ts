@@ -1,6 +1,6 @@
 import type { AvailabilityReadEvent } from './availability-probe'
 import { writeFileSync as saveAvailabilityObservation } from 'node:fs'
-import { incompleteAvailabilityReads, installAvailabilityProbe } from './availability-probe'
+import { availabilityBodiesAfter, incompleteAvailabilityReads, installAvailabilityProbe } from './availability-probe'
 import {
   expect,
   signIn,
@@ -53,6 +53,8 @@ cacheTest('availability restores the same native document from BFCache with an e
   } | undefined
   let originalDocument: string | undefined
   let heldRead: number | undefined
+  let restorationSequence: number | undefined
+  let restoredRead: number | undefined
   let journalAcknowledged = false
   let primaryFailure: unknown
   const failures: unknown[] = []
@@ -118,8 +120,11 @@ cacheTest('availability restores the same native document from BFCache with an e
     await page.goBack()
     expect(await page.evaluate(() => window.cairnAvailabilityDocument)).toBe(original)
     await harvest()
-    expect(reads.filter(event => event.document === original && event.kind === 'pageshow' && event.persisted).map(event => event.trusted)).toEqual([true])
-    await expect.poll(() => reads.filter(event => event.document === original && event.read > target && event.kind === 'body' && event.exactBody).length).toBeGreaterThan(0)
+    const restored = reads.filter(event => event.document === original && event.kind === 'pageshow' && event.persisted)
+    expect(restored.map(event => event.trusted)).toEqual([true])
+    restorationSequence = restored[0]!.sequence
+    await expect.poll(() => availabilityBodiesAfter(reads, original, restorationSequence!).length).toBeGreaterThan(0)
+    restoredRead = availabilityBodiesAfter(reads, original, restorationSequence)[0]!.read
     await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
     await expect(route).toHaveAttribute('data-transport-route', 'direct')
     // Retire every producer before the final synchronous journal acknowledgement.
@@ -181,6 +186,8 @@ cacheTest('availability restores the same native document from BFCache with an e
       journalAcknowledged,
       originalDocument: originalDocument ?? null,
       heldRead: heldRead ?? null,
+      restorationSequence: restorationSequence ?? null,
+      restoredRead: restoredRead ?? null,
       withdrawalReceipt: withdrawalReceipt ?? null,
       destination: destination
         ? {

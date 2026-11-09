@@ -7,7 +7,7 @@ import {
   it,
   vi,
 } from 'vitest'
-import { incompleteAvailabilityReads, installAvailabilityProbe } from '../../../tests/e2e/availability-probe'
+import { availabilityBodiesAfter, incompleteAvailabilityReads, installAvailabilityProbe } from '../../../tests/e2e/availability-probe'
 import { AvailabilityDeparture, readAvailability } from '../src/availability-read'
 
 const HostController = AbortController
@@ -387,6 +387,47 @@ it('observes the original fetch and JSON promises without clones, replacement pr
   // native disposal provenance is checked in the pinned browser controls.
   assert.equal(journal.filter(event => event.kind === 'abort-call-enter').length, 1)
   assert.equal(journal.filter(event => event.kind === 'abort-call-return').length, 1)
+})
+
+it('requires a new read and exact body after the restoration or retained-document boundary', () => {
+  const start: AvailabilityReadEvent = {
+    sequence: 1,
+    kind: 'start',
+    document: 'retained',
+    read: 2,
+    aborted: false,
+    afterPagehide: false,
+  }
+  const oldBody: AvailabilityReadEvent = {
+    ...start,
+    sequence: 2,
+    kind: 'body',
+    exactBody: true,
+  }
+  const restored: AvailabilityReadEvent = {
+    ...start,
+    sequence: 4,
+    read: 0,
+    kind: 'pageshow',
+    trusted: true,
+    persisted: true,
+  }
+  const previous = [start, oldBody, { ...restored, sequence: 3, kind: 'pagehide' as const }, restored]
+  assert.equal(previous.some(event => event.read > 1 && event.kind === 'body' && event.exactBody), true)
+  assert.deepEqual(availabilityBodiesAfter(previous, 'retained', restored.sequence), [])
+  const freshStart: AvailabilityReadEvent = { ...start, read: 3, sequence: 5 }
+  const freshBody: AvailabilityReadEvent = { ...oldBody, read: 3, sequence: 6 }
+  assert.deepEqual(availabilityBodiesAfter([...previous, freshStart, freshBody], 'retained', restored.sequence), [freshBody])
+  for (const invalid of [
+    [...previous, { ...oldBody, sequence: 6 }],
+    [...previous, freshBody],
+    [...previous, freshStart, { ...freshBody, exactBody: false }],
+    [...previous, freshStart, { ...freshBody, afterPagehide: true }],
+    [...previous, freshStart, { ...freshBody, document: 'replacement' }],
+    [...previous, freshStart, { ...freshStart, sequence: 7 }, freshBody],
+  ]) {
+    assert.deepEqual(availabilityBodiesAfter(invalid, 'retained', restored.sequence), [])
+  }
 })
 
 it('accounts for native fetch, optional body and unread HTTP disposal as distinct phases', () => {

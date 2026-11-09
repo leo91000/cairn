@@ -169,6 +169,18 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
   })
 }
 
+// Both the request and its exact body must follow this document's boundary.
+// A body completed before departure, or from an older pending read, is stale.
+export function availabilityBodiesAfter(reads: readonly AvailabilityReadEvent[], document: string, sequence: number) {
+  return reads.filter((event) => {
+    if (event.document !== document || event.kind !== 'body' || !event.exactBody || event.aborted || event.afterPagehide)
+      return false
+
+    const starts = reads.filter(start => start.document === document && start.read === event.read && start.kind === 'start')
+    return starts.length === 1 && starts[0]!.sequence > sequence && event.sequence > starts[0]!.sequence
+  })
+}
+
 // Validate native fetch and optional JSON phases separately. A deliberately
 // unread HTTP failure still requires owned disposal; its wire closure must be
 // proved independently by the response gate, never inferred from this journal.
