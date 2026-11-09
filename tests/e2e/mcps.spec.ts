@@ -11,26 +11,16 @@ import {
   useRelayForHttpMocks,
   workspacePath,
 } from './fixtures'
+import type { AvailabilityReadEvent } from './availability-probe'
+import { installAvailabilityProbe } from './availability-probe'
 import { nativeResponseGate } from './native-response-gate'
 
-interface AvailabilityReadEvent {
-  sequence: number
-  kind: 'start' | 'headers' | 'body' | 'rejected' | 'body-rejected' | 'abort' | 'pagehide' | 'pageshow'
-  document: string
-  read: number
-  status?: number
-  aborted: boolean
-  afterPagehide: boolean
-  persisted?: boolean
-}
 
 type OAuthDepartureProbe = { kind: 'background' } | { kind: 'offer', closed: boolean }
 
 declare global {
   interface Window {
     cairnOAuthProbe: (probe: OAuthDepartureProbe) => Promise<void>
-    cairnAvailabilityDocument: string
-    cairnAvailabilityRecord: (event: AvailabilityReadEvent) => Promise<void>
   }
 }
 
@@ -357,6 +347,8 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
     let primaryFailure: unknown
     const cleanupFailures: unknown[] = []
     let poll: ReturnType<typeof responseGate.hold> | undefined
+    let secondPoll: ReturnType<typeof responseGate.hold> | undefined
+    let secondRead: number | undefined
     let navigationResponse: ReturnType<typeof responseGate.hold> | undefined
     let navigation: Promise<unknown> | undefined
     let navigationValidated = false
@@ -364,72 +356,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
     // Accepted grants belong to this worker's earlier pages until expiry. Use
     // the existing tunnel reset to establish real capacity before this case.
     await workspace.restart()
-    await page.exposeFunction('cairnAvailabilityRecord', recordRead)
-    await page.addInitScript(() => {
-      const documentId = crypto.randomUUID()
-      window.cairnAvailabilityDocument = documentId
-      let pageHidden = false
-      let sequence = 0
-      let eventSequence = 0
-      const record = (event: Omit<AvailabilityReadEvent, 'sequence'>) => {
-        const entry = { ...event, sequence: ++eventSequence }
-        // Persist metadata synchronously before the departing context can retire.
-        // The live binding alone may lose its last messages during replacement.
-        const journal = JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]') as AvailabilityReadEvent[]
-        journal.push(entry)
-        sessionStorage.setItem('cairn-e2e-availability-journal', JSON.stringify(journal))
-        void window.cairnAvailabilityRecord(entry)
-      }
-
-      for (const kind of ['pagehide', 'pageshow'] as const) {
-        window.addEventListener(kind, (event) => {
-          pageHidden = kind === 'pagehide'
-          record({
-            kind,
-            document: documentId,
-            read: 0,
-            aborted: false,
-            afterPagehide: pageHidden,
-            persisted: event.persisted,
-          })
-        })
-      }
-
-      const request = window.fetch
-      window.fetch = (...args) => {
-        if (args[0] !== '/api/installations')
-          return request(...args)
-        const read = ++sequence
-        const signal = args[1]?.signal
-        const recordRead = (kind: AvailabilityReadEvent['kind'], status?: number) => {
-          record({
-            kind,
-            document: documentId,
-            read,
-            status,
-            aborted: !!signal?.aborted,
-            afterPagehide: pageHidden,
-          })
-        }
-
-        // Report completion after the application's await/catch/finally cycle,
-        // without replacing or waiting on its native fetch/body promises.
-        const settled = (kind: AvailabilityReadEvent['kind']) => queueMicrotask(() => recordRead(kind))
-        signal?.addEventListener('abort', () => recordRead('abort'), { once: true })
-        recordRead('start')
-        const pending = request(...args)
-        void pending.then((response) => {
-          recordRead('headers', response.status)
-          const json = response.json.bind(response)
-          response.json = () => {
-            const body = json()
-            void body.then(() => settled('body'), () => settled('body-rejected'))
-            return body
-          }
-        }, () => settled('rejected'))
-        return pending
-      }
-    })
+    await installAvailabilityProbe(page, recordRead)
     const harvestReads = async () => {
       const journal = await page.evaluate(() => JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]') as AvailabilityReadEvent[])
       for (const event of journal)
@@ -438,7 +365,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
 
     const events = (document: string, read: number) => reads.filter(event => event.document === document && event.read === read)
     const pendingReads = (document: string) => reads.filter(event => event.document === document && event.kind === 'start'
-      && !events(document, event.read).some(outcome => ['body', 'rejected', 'body-rejected', 'abort'].includes(outcome.kind)
+      && !events(document, event.read).some(outcome => ['body', 'rejected', 'body-rejected'].includes(outcome.kind)
         || (outcome.kind === 'headers' && outcome.status !== 200)))
     let expectedFailure: AvailabilityReadEvent | undefined
     try {
@@ -449,6 +376,12 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
       const transport = page.locator('[data-transport-route]').first()
       await expect(transport).toHaveAttribute('data-transport-route', 'direct')
+      await page.evaluate(async () => {
+        const reference = await fetch('/api/installations', { credentials: 'same-origin' })
+        if (!reference.ok)
+          throw new Error('The availability reference must be an authenticated success')
+        window.cairnExpectedAvailability = await reference.json()
+      })
       const departingDocument = await page.evaluate(() => window.cairnAvailabilityDocument)
       await expect.poll(() => reads.some(event => event.document === departingDocument && event.kind === 'body')).toBe(true)
       await expect.poll(() => pendingReads(departingDocument)).toEqual([])
@@ -488,7 +421,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         stage = 'same-document persisted pageshow resumes real polling'
         await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })))
         expect(await page.evaluate(() => window.cairnAvailabilityDocument)).toBe(departingDocument)
-        await expect.poll(() => reads.filter(event => event.document === departingDocument && event.read > targetRead && event.kind === 'body').length).toBeGreaterThan(0)
+        await expect.poll(() => reads.filter(event => event.document === departingDocument && event.read > targetRead && event.kind === 'body' && event.exactBody).length).toBeGreaterThan(0)
         expect(reads.filter(event => event.document === departingDocument && event.persisted).map(event => event.kind)).toEqual(['pagehide', 'pageshow'])
         await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
       }
@@ -502,6 +435,10 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         }).toBe(true)
         expect(navigationResponse!.status).toBe(200)
         expect(errors).toEqual([])
+        await expect.poll(() => events(departingDocument, targetRead).filter(event => event.kind === 'abort').map(event => ({
+          trusted: event.trusted, exactTarget: event.exactTarget, insideAbortCall: event.insideAbortCall, afterPagehide: event.afterPagehide,
+        }))).toEqual([{ trusted: true, exactTarget: true, insideAbortCall: true, afterPagehide: false }])
+        await expect.poll(() => events(departingDocument, targetRead).filter(event => event.kind === 'rejected').map(event => event.aborted)).toEqual([true])
         if (destination === 'cancelled') {
           navigationResponse!.downloadNavigation()
           const failure = await arrival
@@ -511,6 +448,15 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
           expect(downloads[0].suggestedFilename()).toBe('availability-navigation.html')
         }
         else {
+          stage = 'delayed commit admits the next real periodic read'
+          secondPoll = responseGate.hold('availability')
+          await expect.poll(() => {
+            responseGate.check()
+            return secondPoll!.ready
+          }).toBe(true)
+          expect(secondPoll.status).toBe(200)
+          await expect.poll(() => reads.filter(event => event.document === departingDocument && event.kind === 'start' && event.read > targetRead).length).toBe(1)
+          secondRead = reads.filter(event => event.document === departingDocument && event.kind === 'start').at(-1)!.read
           navigationResponse!.release()
           expect(await arrival).toBeUndefined()
         }
@@ -519,29 +465,38 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         await harvestReads()
         // Always release owned HTTP bytes before waiting for their terminal receipt.
         poll.release()
+        secondPoll?.release()
       }
 
       if (destination === 'committed') {
-        stage = 'caller and native request withdrawal after pagehide'
-        await expect.poll(() => events(departingDocument, targetRead).filter(event => event.kind === 'abort').map(event => event.afterPagehide)).toEqual([true])
+        stage = 'native owned request withdrawal before pagehide'
+        await expect.poll(() => events(departingDocument, targetRead).filter(event => event.kind === 'abort').map(event => event.afterPagehide)).toEqual([false])
         await expect.poll(() => {
           responseGate.check()
           return poll!.closed && ['finished', 'cancelled'].includes(poll!.terminal)
         }).toBe(true)
         expect(events(departingDocument, targetRead).filter(event => event.kind === 'body')).toEqual([])
+        expect(secondRead).toBeDefined()
+        await expect.poll(() => events(departingDocument, secondRead!).filter(event => event.kind === 'abort').map(event => ({ trusted: event.trusted, exactTarget: event.exactTarget, insideAbortCall: event.insideAbortCall })))
+          .toEqual([{ trusted: true, exactTarget: true, insideAbortCall: true }])
+        await expect.poll(() => events(departingDocument, secondRead!).filter(event => event.kind === 'rejected').map(event => event.aborted)).toEqual([true])
+        expect(events(departingDocument, secondRead!).filter(event => event.kind === 'body')).toEqual([])
+        await expect.poll(() => {
+          responseGate.check()
+          return secondPoll!.closed && ['finished', 'cancelled'].includes(secondPoll!.terminal)
+        }).toBe(true)
         await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
         expect(await page.evaluate(() => window.cairnAvailabilityDocument)).not.toBe(departingDocument)
       }
       else if (destination === 'cancelled') {
-        stage = 'retained document consumes its actual fetch body'
+        stage = 'retained document resumes an exact replacement after proven native abort'
         await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
         expect(await page.evaluate(() => window.cairnAvailabilityDocument)).toBe(departingDocument)
-        await expect.poll(() => events(departingDocument, targetRead).filter(event => event.kind === 'body').length).toBe(1)
-        expect(events(departingDocument, targetRead).some(event => event.kind === 'abort' || event.kind === 'rejected' || event.kind === 'body-rejected')).toBe(false)
-        await expect.poll(() => ({ closed: poll!.closed, terminal: poll!.terminal })).toEqual({ closed: true, terminal: 'finished' })
+        expect(events(departingDocument, targetRead).filter(event => event.kind === 'body')).toEqual([])
+        await expect.poll(() => ({ closed: poll!.closed, terminal: poll!.terminal })).toEqual({ closed: true, terminal: 'cancelled' })
         await expect(transport).toHaveAttribute('data-transport-route', 'direct')
         stage = 'real periodic polling continues'
-        await expect.poll(() => reads.filter(event => event.document === departingDocument && event.read > targetRead && event.kind === 'body').length).toBeGreaterThan(0)
+        await expect.poll(() => reads.filter(event => event.document === departingDocument && event.read > targetRead && event.kind === 'body' && event.exactBody).length).toBeGreaterThan(0)
         stage = 'genuine active HTTP failure'
         const unavailable = responseGate.unavailable()
         await expect.poll(() => unavailable.ready).toBe(true)
@@ -552,6 +507,33 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         await expect(transport).toHaveAttribute('data-transport-route', 'relay')
         stage = 'production backoff and direct recovery'
         await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
+        stage = 'second real departure rearms the same document listener'
+        await expect.poll(() => pendingReads(departingDocument)).toEqual([])
+        secondPoll = responseGate.hold('availability')
+        await expect.poll(() => {
+          responseGate.check()
+          return secondPoll!.ready
+        }).toBe(true)
+        expect(secondPoll.status).toBe(200)
+        secondRead = reads.filter(event => event.document === departingDocument && event.kind === 'start').at(-1)!.read
+        expect(secondRead).toBeGreaterThan(targetRead)
+        navigationResponse = responseGate.hold('agents')
+        navigationValidated = false
+        navigation = page.goto(workspacePath('/agents'))
+        const secondArrival = navigation.then(() => undefined, error => error)
+        await expect.poll(() => navigationResponse!.ready).toBe(true)
+        await expect.poll(() => events(departingDocument, secondRead!).filter(event => event.kind === 'abort').map(event => ({
+          trusted: event.trusted, exactTarget: event.exactTarget, insideAbortCall: event.insideAbortCall, afterPagehide: event.afterPagehide,
+        }))).toEqual([{ trusted: true, exactTarget: true, insideAbortCall: true, afterPagehide: false }])
+        await expect.poll(() => events(departingDocument, secondRead!).filter(event => event.kind === 'rejected').map(event => event.aborted)).toEqual([true])
+        expect(events(departingDocument, secondRead!).filter(event => event.kind === 'body')).toEqual([])
+        secondPoll.release()
+        navigationResponse.release()
+        expect(await secondArrival).toBeUndefined()
+        navigationValidated = true
+        await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
+        await expect.poll(() => secondPoll!.closed && ['finished', 'cancelled'].includes(secondPoll!.terminal)).toBe(true)
+        await harvestReads()
       }
 
       stage = 'current direct readers and settled finite work'
@@ -578,42 +560,46 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
     }
     finally {
       poll?.release()
+      secondPoll?.release()
       navigationResponse?.release()
-      try {
-        if (!page.isClosed())
-          await page.close()
+      const closeOwned = async (operation: () => Promise<unknown>, actor: string) => {
+        let deadline: ReturnType<typeof setTimeout> | undefined
+        try {
+          await Promise.race([
+            Promise.resolve().then(operation),
+            new Promise((_, reject) => deadline = setTimeout(() => reject(new Error(`Availability cleanup deadline: ${actor}`)), 7000)),
+          ])
+        }
+        finally {
+          clearTimeout(deadline)
+        }
       }
-      catch (error) {
-        cleanupFailures.push(error)
-      }
-
+      // Start independent owners before awaiting any of them: a blocked page
+      // close must not prevent download cancellation or HTTP gate closure.
+      const closures = [closeOwned(() => responseGate.close(), 'HTTP gate')]
+      if (!page.isClosed())
+        closures.push(closeOwned(() => page.close(), 'page'))
       for (const download of downloads) {
-        try {
-          await download.cancel()
-        }
-        catch (error) {
-          cleanupFailures.push(error)
-        }
-
-        try {
-          await download.delete()
-        }
-        catch (error) {
-          cleanupFailures.push(error)
-        }
+        closures.push((async () => {
+          for (const operation of ['cancel', 'delete'] as const) {
+            try {
+              await closeOwned(() => download[operation](), `download ${operation}`)
+            }
+            catch (error) {
+              cleanupFailures.push(error)
+            }
+          }
+        })())
       }
-
-      try {
-        await responseGate.close()
-      }
-      catch (error) {
-        cleanupFailures.push(error)
+      for (const closure of await Promise.allSettled(closures)) {
+        if (closure.status === 'rejected')
+          cleanupFailures.push(closure.reason)
       }
 
       // Page and HTTP closure can terminate a still-pending navigation. Never
       // gate those cleanup attempts on the navigation they need to terminate.
       try {
-        await navigation
+        await closeOwned(() => navigation || Promise.resolve(), 'navigation')
       }
       catch (error) {
         if (!navigationValidated)

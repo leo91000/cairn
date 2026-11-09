@@ -17,6 +17,7 @@ import {
   state,
 } from './api'
 import App from './App.vue'
+import { AvailabilityDeparture, readAvailability } from './availability-read'
 import {
   accountSettingsUrl,
   beaconOrigin,
@@ -628,10 +629,9 @@ async function refreshAvailability() {
   const controller = new AbortController()
   availabilityRequest = controller
   const current = session.value
+  const read = readAvailability(controller.signal)
   try {
-    // Keep the read alive until pagehide can explicitly withdraw its caller.
-    // Native navigation may cancel ordinary fetches before pagehide runs.
-    const response = await fetch('/api/installations', { credentials: 'same-origin', signal: controller.signal, keepalive: true })
+    const response = await read.response
     if (controller.signal.aborted)
       return
     if (response.status === 401 && session.value === current && !availabilityStopped) {
@@ -657,8 +657,8 @@ async function refreshAvailability() {
 
     availabilityFailures = 0
   }
-  catch {
-    if (controller.signal.aborted)
+  catch (cause) {
+    if (controller.signal.aborted || cause instanceof AvailabilityDeparture)
       return
     if (session.value === current) {
       for (const item of current.installations)
@@ -669,9 +669,11 @@ async function refreshAvailability() {
     availabilityFailures++
   }
   finally {
+    read.dispose()
+    const ownsTimer = availabilityRequest === controller
     if (availabilityRequest === controller)
       availabilityRequest = undefined
-    if (!availabilityStopped && !availabilitySuspended && !controller.signal.aborted && !state.signingOut && !state.redirecting && session.value?.authenticated)
+    if (ownsTimer && !availabilityStopped && !availabilitySuspended && !controller.signal.aborted && !state.signingOut && !state.redirecting && session.value?.authenticated)
       availabilityTimer = setTimeout(refreshAvailability, Math.min(15000, 3000 * 2 ** Math.min(availabilityFailures, 3)))
   }
 }
