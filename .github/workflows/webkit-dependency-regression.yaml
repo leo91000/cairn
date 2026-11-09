@@ -1,36 +1,19 @@
-name: Availability navigation repair qualification
+name: Availability reader mechanism diagnostic only
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  browser:
-    name: Availability repair (${{ matrix.label }})
+  reader:
+    name: Native reader event controls (NOT product qualification)
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
         include:
-          - label: focused-repair
-            sha: 071010f8682ec2f089f09454959c1391458c50ed
+          - sha: 071010f8682ec2f089f09454959c1391458c50ed
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    env:
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_INCREMENTAL: '0'
-      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@postgres:5432/cairn_beacon_test
-    permissions:
-      contents: read
-    services:
-      postgres:
-        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
-        env:
-          POSTGRES_USER: cairn
-          POSTGRES_PASSWORD: test-only
-          POSTGRES_DB: cairn_beacon_test
-        options: >-
-          --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
-          --health-interval 5s --health-timeout 5s --health-retries 10
     container:
       image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f
       options: --init --ipc=host
@@ -42,146 +25,48 @@ jobs:
         timeout-minutes: 5
         with:
           ref: ${{ matrix.sha }}
-      - name: Record immutable diagnostic source
+      - name: Record frozen product source and acquire only this observer's script
         timeout-minutes: 5
         env:
-          EXPECTED_SHA: ${{ matrix.sha }}
+          OBSERVER_SHA: ${{ github.sha }}
         run: |
-          actual="$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)"
-          test "$actual" = "$EXPECTED_SHA"
-          git -c safe.directory="$GITHUB_WORKSPACE" log -1 --format='commit=%H tree=%T'
+          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = 071010f8682ec2f089f09454959c1391458c50ed
           test -z "$(git -c safe.directory="$GITHUB_WORKSPACE" status --porcelain)"
+          git -c safe.directory="$GITHUB_WORKSPACE" log -1 --format='source=%H tree=%T'
+          git -c safe.directory="$GITHUB_WORKSPACE" fetch --depth=1 --no-tags origin "$OBSERVER_SHA"
+          mkdir -p test-results/reader-native
+          git -c safe.directory="$GITHUB_WORKSPACE" show "$OBSERVER_SHA:.github/diagnostics/availability-reader-native.mjs" > test-results/reader-native/run.mjs
+          sha256sum test-results/reader-native/run.mjs tests/e2e/native-response-gate.ts > test-results/reader-native/sources.sha256
+          printf 'observer=%s\nproduct=071010f8682ec2f089f09454959c1391458c50ed\nmode=diagnostic-only\n' "$OBSERVER_SHA" > test-results/reader-native/source.txt
       - uses: ./.github/actions/setup-pnpm
         timeout-minutes: 5
         with:
           cache: true
-      - name: Check browser image version
+      - name: Require the exact preinstalled browser version
         timeout-minutes: 5
         run: |
           node --input-type=module <<'JS'
+          import assert from 'node:assert/strict'
           import { readFileSync } from 'node:fs'
           const installed = JSON.parse(readFileSync('node_modules/@playwright/test/package.json', 'utf8')).version
-          const preinstalled = JSON.parse(readFileSync('/ms-playwright/.docker-info', 'utf8')).driverVersion
-          if (installed !== preinstalled)
-            throw new Error(`Update the pinned browser image: Playwright package ${installed}, image ${preinstalled}`)
+          const image = JSON.parse(readFileSync('/ms-playwright/.docker-info', 'utf8')).driverVersion
+          assert.equal(installed, '1.64.1')
+          assert.equal(image, installed)
           JS
-      - name: Collect the real native regression cases before compilation
+      - name: Observe each native reader and genuine-failure control exactly once
         timeout-minutes: 5
-        run: |
-          test ! -e target/debug/cairn
-          test ! -e target/debug/examples/browser_fixture
-          mkdir -p test-results/collection
-          PLAYWRIGHT_JSON_OUTPUT_FILE=test-results/collection/cases.json pnpm test:e2e mcps.spec.ts --project=journeys-mcps --project=layout-webkit-mcps --grep 'availability (keeps direct readers stable|resumes real reads after same-document persisted lifecycle)' --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --list --reporter=json
-          node --input-type=module <<'JS'
-          import { readFileSync, writeFileSync } from 'node:fs'
-          import assert from 'node:assert/strict'
-          const report = JSON.parse(readFileSync('test-results/collection/cases.json', 'utf8'))
-          const cases = []
-          function collect(suite) {
-            for (const spec of suite.specs || []) {
-              for (const test of spec.tests) {
-                assert.equal(test.results.length, 0)
-                cases.push([test.projectName, spec.title])
-              }
-            }
-            for (const child of suite.suites || []) collect(child)
-          }
-          for (const suite of report.suites) collect(suite)
-          assert.deepEqual(report.errors, [])
-          const titles = ['committed', 'cancelled'].map(destination => `availability keeps direct readers stable until native navigation is ${destination}`)
-          titles.push('availability resumes real reads after same-document persisted lifecycle')
-          const expected = ['journeys-mcps', 'layout-webkit-mcps'].flatMap(project => titles.map(title => [project, title]))
-          assert.deepEqual(cases.sort(), expected.sort())
-          writeFileSync('test-results/collection/receipt.json', JSON.stringify({ collectionOnly: true, cases }))
-          console.log('Exact native regression collection: six cases, three per browser project; no runtime fixture execution.')
-          JS
-      - uses: actions/upload-artifact@v7.0.1
+        run: node test-results/reader-native/run.mjs
+      - name: Require unchanged product and diagnostic bytes
         timeout-minutes: 5
         if: always()
-        with:
-          name: availability-repair-collection
-          path: test-results/collection/
-          retention-days: 14
-      - name: Install pinned Rust tools and browser build dependencies
-        timeout-minutes: 5
         run: |
-          node scripts/prepare-browser-build-dependencies.mjs
-          timeout --signal=TERM --kill-after=5s 60s apt-get -o Acquire::Retries=0 -o Acquire::https::Timeout=20 install -y --no-install-recommends zip
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
-          "$HOME/.cargo/bin/rustup" component add rustfmt
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          for tool in git node pnpm python3 tar bash curl timeout cc pkg-config; do
-            command -v "$tool" > /dev/null
-          done
-          test -x /usr/bin/zip
-          test -x /usr/bin/python3
-          test -x /usr/bin/strip
-          test -x node_modules/.bin/vue-tsc
-          test -x node_modules/.bin/vite
-          "$HOME/.cargo/bin/cargo" --version
-          "$HOME/.cargo/bin/rustfmt" --version
-      - name: Format and require unchanged product source
-        timeout-minutes: 5
-        env:
-          GIT_CONFIG_COUNT: '1'
-          GIT_CONFIG_KEY_0: safe.directory
-          GIT_CONFIG_VALUE_0: ${{ github.workspace }}
-        run: |
-          format_result=0
-          pnpm lint:fix || format_result=$?
-          git -c safe.directory="$GITHUB_WORKSPACE" diff --binary > test-results/formatter.patch
-          source_result=0
-          git -c safe.directory="$GITHUB_WORKSPACE" diff --exit-code || source_result=$?
-          printf '{"formatterExit":%s,"sourceDiffExit":%s}\n' "$format_result" "$source_result" > test-results/formatter-result.json
-          test "$format_result" -eq 0
-          test "$source_result" -eq 0
-      - name: Qualify all web quality checks
-        timeout-minutes: 5
-        env:
-          GIT_CONFIG_COUNT: '1'
-          GIT_CONFIG_KEY_0: safe.directory
-          GIT_CONFIG_VALUE_0: ${{ github.workspace }}
-        run: pnpm check
-      - name: Build the manager fixtures
-        timeout-minutes: 5
-        run: cargo build --locked --bin cairn --example worker_fixture --example browser_fixture --example network_direct_client --example network_qualification --example native_storage_qualifier
-      - name: Build the Beacon fixtures
-        timeout-minutes: 5
-        run: cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server --example beacon_sql_fixture
-      - name: Build ordinary browser assets
-        timeout-minutes: 5
-        run: pnpm exec vite build --config apps/web/vite.config.ts
-      - name: Qualify the isolated Postgres fixture
-        timeout-minutes: 5
-        run: pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts
-      - name: Qualify the exact PR browser command on the product head
-        timeout-minutes: 5
-        env:
-          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/primary
-        run: pnpm test:e2e deliverables.spec.ts skill-bundles.spec.ts beacon-sharing.spec.ts beacon-installations.spec.ts mcps.spec.ts --workers=2 --retries=0 --fail-on-flaky-tests --trace=on
-      - name: Qualify direct relay and saved-reader dependants
-        timeout-minutes: 5
-        env:
-          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/specialists
-        run: pnpm test:e2e beacon-relay.spec.ts direct-capacity.spec.ts chat-switch.spec.ts --project=journeys-beacon-relay --project=journeys-chat-switch --project=layout-webkit-chat-switch --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results/specialists
-      - name: Qualify account authentication and expired availability polling
-        timeout-minutes: 5
-        env:
-          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/account
-        run: pnpm test:e2e beacon-account.spec.ts --project=journeys-beacon-account --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results/account
-      - name: Require final source identity
-        timeout-minutes: 5
-        env:
-          EXPECTED_SHA: ${{ matrix.sha }}
-        run: |
-          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = 071010f8682ec2f089f09454959c1391458c50ed
           test -z "$(git -c safe.directory="$GITHUB_WORKSPACE" status --porcelain)"
+          sha256sum --check test-results/reader-native/sources.sha256
       - uses: actions/upload-artifact@v7.0.1
         timeout-minutes: 5
         if: always()
         with:
-          name: availability-repair-browser-evidence
-          path: |
-            playwright-report/
-            test-results/
+          name: native-reader-mechanism-private
+          path: test-results/reader-native/
           retention-days: 14
