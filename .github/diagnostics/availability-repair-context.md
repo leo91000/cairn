@@ -1,6 +1,6 @@
 # Focused availability product qualification
 
-Product 127434eb7fc3eaa9242601df2f115f9dffac975b tree a92366a62e251487389eb6954a7975e54033528a, base actual main dc24903967c7443d5c3e61587440240d05fa3c76.
+Product 0b46948adb5953141176e9c67b9f29abff05a866 tree 78da60a4d80b800b6eac2554c2e73675cbdfc1bd, base actual main dc24903967c7443d5c3e61587440240d05fa3c76.
 Existing observer only, NEVER merge observer. Pinned product checkout; only hash-checked
 SDK helper and immutable collection/checksum/formatter evidence copied into TASK-SCOPED RUNNER_TEMP, outsideALLPlaywright output/reportdirs. C40_EVIDENCE_DIR is exported throughGITHUB_ENV afterinitialcreation. InlineSDKimportsfromfileURL withactualrootSDKpassedbyparameter; no SDKcopy/environmentduplication. Both prebuildcollection andfinalalwaysartifact includeonlythatdedicatedfolder, notallRunnerTemp. Primarydefaulttest-results cleanupcannotdeleteproof/finalchecksum inputs. No localheavy/SDKinstall/newenv/ref/pilot.
 One sequential25minjob/allsteps5min/owned7s bounds. No retry/flaky/skip/error masking.
