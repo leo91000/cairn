@@ -1,6 +1,6 @@
 # Focused availability repair qualification
 
-Diagnostic-only observer branch, never merge. Root ceded the sole heavy slot for this B534 prerequisite repair. Current workflow selects only product source 2b6bead9f8b8c7ad4413d921b3bae41f946cf16d, tree 10131137d8fdbe7d37d5be557a904e1d6b06c898, based on main7028fbfdd6d13e27b8f4e7db767899828d631b42. No observer TypeScript is overlaid into this product checkout.
+Diagnostic-only observer branch, never merge. Root ceded the sole heavy slot for this B534 prerequisite repair. Current workflow selects only product source b0665567ded99e10c7ddc9bff52f7153d5555f4e, tree f198993dd80d3c2afa248e8d96e571848dea670f, based on main7028fbfdd6d13e27b8f4e7db767899828d631b42. No observer TypeScript is overlaid into this product checkout.
 
 Run42528187935 at observer56320 completed its immutable7028/B5d comparison once. Both native-cancel controls failed with chat-stream and chat-list native pageerrors; both actual-caller abort-before-goto controls passed strict errors[]. In both native controls, cancellation left the poll signal active, availability catch published offline, direct transport fell back and admitted old-document readers before pagehide. The original full B42518166046/job128847095867 first failure remains preserved; its retry pass is not credited. The earlier731 skill-bundle failure is separately preserved and is not declared fixed by this diagnostic.
 
@@ -71,3 +71,6 @@ The HTML navigation standard defines attachment responses as retaining the activ
 
 
 Product2b6 additionally attempts download cancellation and deletion independently, preserving either failure. A lightweight fixture executing the actual final callback reproduces deletion being skipped when cancellation rejects on2df and verifies deletion attempted on2b6, with original/cleanup/observation-write errors still retained. No runtime/newCI executed since425439; current exact-body WebKit settlement remains unknown and required. Fresh full source and observer reviews apply to the whole cumulative changes, not only this correction.
+
+
+Productb066 retires the owned page, downloads and HTTP gate before awaiting a pending navigation; a navigation is marked validated only after the case has checked its actual success or precise download error/event. Unvalidated navigation failure joins the existing aggregate instead of disappearing. A lightweight actual-callback fixture holds navigation pending until page closure: old2b6 gates pageclose on pendingnavigation, newb066 starts closure independently and retains original plus navigation errors. No new timeout or execution occurred. Every native proof requirement above remains strict; fresh complete source/observer reviews are required for this pin.
