@@ -340,6 +340,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
   const title = destination === 'restored'
     ? 'availability resumes real reads after same-document persisted lifecycle'
     : `availability keeps direct readers stable until native navigation is ${destination}`
+
   availabilityTest(title, async ({ page, workspace, responseGate }, testInfo) => {
     const errors: string[] = []
     const reads: AvailabilityReadEvent[] = []
@@ -362,9 +363,17 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       for (const kind of ['pagehide', 'pageshow'] as const) {
         window.addEventListener(kind, (event) => {
           pageHidden = kind === 'pagehide'
-          void window.cairnAvailabilityRecord({ kind, document: documentId, read: 0, aborted: false, afterPagehide: pageHidden, persisted: event.persisted })
+          void window.cairnAvailabilityRecord({
+            kind,
+            document: documentId,
+            read: 0,
+            aborted: false,
+            afterPagehide: pageHidden,
+            persisted: event.persisted,
+          })
         })
       }
+
       const request = window.fetch
       window.fetch = (...args) => {
         if (args[0] !== '/api/installations')
@@ -470,6 +479,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         // Always release owned HTTP bytes before waiting for their terminal receipt.
         poll.release()
       }
+
       if (destination === 'committed') {
         stage = 'caller and native request withdrawal after pagehide'
         await expect.poll(() => events(departingDocument, targetRead).filter(event => event.kind === 'abort').map(event => event.afterPagehide)).toEqual([true])
@@ -542,13 +552,19 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       cleanupFailures.push(error)
     }
 
-    saveAvailabilityObservation(testInfo.outputPath('availability-native-observation.json'), JSON.stringify({
-      stage,
-      reads,
-      pageErrors: errors.length,
-      poll: poll && { ready: poll.ready, status: poll.status, terminal: poll.terminal },
-      navigation: navigationResponse && { ready: navigationResponse.ready, status: navigationResponse.status, terminal: navigationResponse.terminal },
-    }))
+    try {
+      saveAvailabilityObservation(testInfo.outputPath('availability-native-observation.json'), JSON.stringify({
+        stage,
+        reads,
+        pageErrors: errors.length,
+        poll: poll && { ready: poll.ready, status: poll.status, terminal: poll.terminal },
+        navigation: navigationResponse && { ready: navigationResponse.ready, status: navigationResponse.status, terminal: navigationResponse.terminal },
+      }))
+    }
+    catch (error) {
+      cleanupFailures.push(error)
+    }
+
     if (primaryFailure || cleanupFailures.length)
       throw new AggregateError([...(primaryFailure ? [primaryFailure] : []), ...cleanupFailures], `Availability navigation failed at ${stage}`)
   })

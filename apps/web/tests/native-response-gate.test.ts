@@ -11,9 +11,34 @@ import { nativeResponseGate } from '../../../tests/e2e/native-response-gate'
 
 const cleanup: Array<() => Promise<void>> = []
 
-afterEach(async () => {
-  for (const close of cleanup.splice(0).reverse())
-    await close()
+async function closeOwnedServers() {
+  const failures: unknown[] = []
+  for (const close of cleanup.splice(0).reverse()) {
+    try {
+      await close()
+    }
+    catch (error) {
+      failures.push(error)
+    }
+  }
+
+  if (failures.length)
+    throw new AggregateError(failures, 'Unable to close all owned HTTP servers')
+}
+
+afterEach(closeOwnedServers)
+
+it('attempts every owned closure even when an earlier closure fails', async () => {
+  const closed: string[] = []
+  const failure = new Error('fixture close failure')
+  cleanup.push(async () => { closed.push('backend') })
+  cleanup.push(async () => {
+    closed.push('gate')
+    throw failure
+  })
+  await expect(closeOwnedServers()).rejects.toMatchObject({ errors: [failure] })
+  expect(closed).toEqual(['gate', 'backend'])
+  expect(cleanup).toEqual([])
 })
 
 async function fixture() {
