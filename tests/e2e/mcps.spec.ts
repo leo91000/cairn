@@ -1,3 +1,4 @@
+import type { Download } from '@playwright/test'
 import { writeFileSync as saveAvailabilityObservation } from 'node:fs'
 import { mcpProvider } from '../fixtures/mcp-provider'
 import {
@@ -13,6 +14,7 @@ import {
 import { nativeResponseGate } from './native-response-gate'
 
 interface AvailabilityReadEvent {
+  sequence: number
   kind: 'start' | 'headers' | 'body' | 'rejected' | 'body-rejected' | 'abort' | 'pagehide' | 'pageshow'
   document: string
   read: number
@@ -344,6 +346,13 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
   availabilityTest(title, async ({ page, workspace, responseGate }, testInfo) => {
     const errors: string[] = []
     const reads: AvailabilityReadEvent[] = []
+    const downloads: Download[] = []
+    const recordRead = (event: AvailabilityReadEvent) => {
+      if (!reads.some(record => record.document === event.document && record.sequence === event.sequence))
+        reads.push(event)
+    }
+
+    page.on('download', download => downloads.push(download))
     let stage = 'fixture reset'
     let primaryFailure: unknown
     const cleanupFailures: unknown[] = []
@@ -354,16 +363,27 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
     // Accepted grants belong to this worker's earlier pages until expiry. Use
     // the existing tunnel reset to establish real capacity before this case.
     await workspace.restart()
-    await page.exposeFunction('cairnAvailabilityRecord', (event: AvailabilityReadEvent) => reads.push(event))
+    await page.exposeFunction('cairnAvailabilityRecord', recordRead)
     await page.addInitScript(() => {
       const documentId = crypto.randomUUID()
       window.cairnAvailabilityDocument = documentId
       let pageHidden = false
       let sequence = 0
+      let eventSequence = 0
+      const record = (event: Omit<AvailabilityReadEvent, 'sequence'>) => {
+        const entry = { ...event, sequence: ++eventSequence }
+        // Persist metadata synchronously before the departing context can retire.
+        // The live binding alone may lose its last messages during replacement.
+        const journal = JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]') as AvailabilityReadEvent[]
+        journal.push(entry)
+        sessionStorage.setItem('cairn-e2e-availability-journal', JSON.stringify(journal))
+        void window.cairnAvailabilityRecord(entry)
+      }
+
       for (const kind of ['pagehide', 'pageshow'] as const) {
         window.addEventListener(kind, (event) => {
           pageHidden = kind === 'pagehide'
-          void window.cairnAvailabilityRecord({
+          record({
             kind,
             document: documentId,
             read: 0,
@@ -380,8 +400,8 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
           return request(...args)
         const read = ++sequence
         const signal = args[1]?.signal
-        const record = (kind: AvailabilityReadEvent['kind'], status?: number) => {
-          void window.cairnAvailabilityRecord({
+        const recordRead = (kind: AvailabilityReadEvent['kind'], status?: number) => {
+          record({
             kind,
             document: documentId,
             read,
@@ -393,12 +413,12 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
 
         // Report completion after the application's await/catch/finally cycle,
         // without replacing or waiting on its native fetch/body promises.
-        const settled = (kind: AvailabilityReadEvent['kind']) => queueMicrotask(() => record(kind))
-        signal?.addEventListener('abort', () => record('abort'), { once: true })
-        record('start')
+        const settled = (kind: AvailabilityReadEvent['kind']) => queueMicrotask(() => recordRead(kind))
+        signal?.addEventListener('abort', () => recordRead('abort'), { once: true })
+        recordRead('start')
         const pending = request(...args)
         void pending.then((response) => {
-          record('headers', response.status)
+          recordRead('headers', response.status)
           const json = response.json.bind(response)
           response.json = () => {
             const body = json()
@@ -409,6 +429,12 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         return pending
       }
     })
+    const harvestReads = async () => {
+      const journal = await page.evaluate(() => JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]') as AvailabilityReadEvent[])
+      for (const event of journal)
+        recordRead(event)
+    }
+
     const events = (document: string, read: number) => reads.filter(event => event.document === document && event.read === read)
     const pendingReads = (document: string) => reads.filter(event => event.document === document && event.kind === 'start'
       && !events(document, event.read).some(outcome => ['body', 'rejected', 'body-rejected', 'abort'].includes(outcome.kind)
@@ -451,9 +477,13 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         stage = 'same-document persisted pagehide'
         await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true })))
         await expect.poll(() => events(departingDocument, targetRead).filter(event => event.kind === 'abort').map(event => event.afterPagehide)).toEqual([true])
-        await expect.poll(() => poll!.terminal).toBe('cancelled')
+        await expect.poll(() => events(departingDocument, targetRead).filter(event => event.kind === 'rejected').map(event => event.aborted)).toEqual([true])
         expect(events(departingDocument, targetRead).filter(event => event.kind === 'body')).toEqual([])
         poll.release()
+        await expect.poll(() => {
+          responseGate.check()
+          return poll!.closed && ['finished', 'cancelled'].includes(poll!.terminal)
+        }).toBe(true)
         stage = 'same-document persisted pageshow resumes real polling'
         await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true })))
         expect(await page.evaluate(() => window.cairnAvailabilityDocument)).toBe(departingDocument)
@@ -464,18 +494,27 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       else {
         stage = 'native destination response'
         navigation = page.goto(workspacePath('/agents'))
-        const arrival = navigation.then(() => 'committed', () => 'cancelled')
+        const arrival = navigation.then(() => undefined, error => error)
         await expect.poll(() => {
           responseGate.check()
           return navigationResponse!.ready
         }).toBe(true)
         expect(navigationResponse!.status).toBe(200)
         expect(errors).toEqual([])
-        if (destination === 'cancelled')
-          navigationResponse!.cancelNavigation()
-        else
+        if (destination === 'cancelled') {
+          navigationResponse!.downloadNavigation()
+          const failure = await arrival
+          expect(failure).toBeInstanceOf(Error)
+          expect(failure.message).toContain('Download is starting')
+          await expect.poll(() => downloads.length).toBe(1)
+          expect(downloads[0].suggestedFilename()).toBe('availability-navigation.html')
+        }
+        else {
           navigationResponse!.release()
-        expect(await arrival).toBe(destination)
+          expect(await arrival).toBeUndefined()
+        }
+
+        await harvestReads()
         // Always release owned HTTP bytes before waiting for their terminal receipt.
         poll.release()
       }
@@ -483,7 +522,10 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       if (destination === 'committed') {
         stage = 'caller and native request withdrawal after pagehide'
         await expect.poll(() => events(departingDocument, targetRead).filter(event => event.kind === 'abort').map(event => event.afterPagehide)).toEqual([true])
-        await expect.poll(() => poll!.terminal).toBe('cancelled')
+        await expect.poll(() => {
+          responseGate.check()
+          return poll!.closed && ['finished', 'cancelled'].includes(poll!.terminal)
+        }).toBe(true)
         expect(events(departingDocument, targetRead).filter(event => event.kind === 'body')).toEqual([])
         await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
         expect(await page.evaluate(() => window.cairnAvailabilityDocument)).not.toBe(departingDocument)
@@ -494,7 +536,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         expect(await page.evaluate(() => window.cairnAvailabilityDocument)).toBe(departingDocument)
         await expect.poll(() => events(departingDocument, targetRead).filter(event => event.kind === 'body').length).toBe(1)
         expect(events(departingDocument, targetRead).some(event => event.kind === 'abort' || event.kind === 'rejected' || event.kind === 'body-rejected')).toBe(false)
-        await expect.poll(() => poll!.terminal).toBe('finished')
+        await expect.poll(() => ({ closed: poll!.closed, terminal: poll!.terminal })).toEqual({ closed: true, terminal: 'finished' })
         await expect(transport).toHaveAttribute('data-transport-route', 'direct')
         stage = 'real periodic polling continues'
         await expect.poll(() => reads.filter(event => event.document === departingDocument && event.read > targetRead && event.kind === 'body').length).toBeGreaterThan(0)
@@ -515,6 +557,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       const currentDocument = await page.evaluate(() => window.cairnAvailabilityDocument)
       await expect.poll(() => pendingReads(currentDocument)).toEqual([])
       responseGate.check()
+      await harvestReads()
       stage = 'completed'
     }
     catch (error) {
@@ -530,6 +573,16 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       }
       catch (error) {
         cleanupFailures.push(error)
+      }
+
+      for (const download of downloads) {
+        try {
+          await download.cancel()
+          await download.delete()
+        }
+        catch (error) {
+          cleanupFailures.push(error)
+        }
       }
 
       try {
@@ -557,8 +610,18 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         stage,
         reads,
         pageErrors: errors.length,
-        poll: poll && { ready: poll.ready, status: poll.status, terminal: poll.terminal },
-        navigation: navigationResponse && { ready: navigationResponse.ready, status: navigationResponse.status, terminal: navigationResponse.terminal },
+        poll: poll && {
+          ready: poll.ready,
+          status: poll.status,
+          terminal: poll.terminal,
+          closed: poll.closed,
+        },
+        navigation: navigationResponse && {
+          ready: navigationResponse.ready,
+          status: navigationResponse.status,
+          terminal: navigationResponse.terminal,
+          closed: navigationResponse.closed,
+        },
       }))
     }
     catch (error) {

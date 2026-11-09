@@ -80,12 +80,14 @@ async function fixture() {
   function call(path: string, method = 'GET', body = '', target = origin) {
     const result = Promise.withResolvers<{ status?: number, body: string }>()
     let responseSeen = false
+    let disposition: string | undefined
     const client = request(gate.server, {
       method,
       path: target + path,
       headers: { host: new URL(target).host, cookie: 'fixture-only', origin },
     }, (response) => {
       responseSeen = true
+      disposition = response.headers['content-disposition']
       void (async () => {
         const chunks: Buffer[] = []
         for await (const chunk of response)
@@ -95,7 +97,12 @@ async function fixture() {
     })
     client.on('error', result.reject)
     client.end(body)
-    return { client, result: result.promise, responseSeen: () => responseSeen }
+    return {
+      client,
+      result: result.promise,
+      responseSeen: () => responseSeen,
+      disposition: () => disposition,
+    }
   }
 
   return {
@@ -162,15 +169,16 @@ it('sends a genuine controlled HTTP503 after a successful upstream read', async 
   gate.check()
 })
 
-it('cancels the destination HTTP navigation without cancelling the availability control', async () => {
+it('turns the destination response into a download without destroying its HTTP connection', async () => {
   const { gate, call } = await fixture()
   const destination = gate.hold('agents')
   const navigation = call('/installations/fixture/agents')
-  const rejected = expect(navigation.result).rejects.toThrow()
   await vi.waitFor(() => expect(destination.ready).toBe(true))
-  destination.cancelNavigation()
-  await rejected
-  await vi.waitFor(() => expect(destination.terminal).toBe('cancelled'))
+  destination.downloadNavigation()
+  expect(await navigation.result).toEqual({ status: 200, body: '[{"online":true}]' })
+  expect(navigation.disposition()).toBe('attachment; filename="availability-navigation.html"')
+  await vi.waitFor(() => expect(destination.closed).toBe(true))
+  expect(destination.terminal).toBe('finished')
   gate.check()
 })
 
@@ -183,6 +191,7 @@ it('closes owned pending responses and is safe to close twice', async () => {
   await gate.close()
   await rejected
   expect(held.terminal).toBe('cancelled')
+  expect(held.closed).toBe(true)
   await gate.close()
 })
 

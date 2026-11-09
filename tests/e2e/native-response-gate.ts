@@ -8,8 +8,9 @@ export interface HeldResponse {
   ready: boolean
   status?: number
   terminal: 'pending' | 'finished' | 'cancelled' | 'failed'
+  closed: boolean
   release: () => void
-  cancelNavigation: () => void
+  downloadNavigation: () => void
 }
 
 // A real HTTP proxy for only one disposable fixture origin. Holding bytes here
@@ -34,23 +35,24 @@ export async function nativeResponseGate(origin: string) {
 
   function control(kind: ResponseKind, unavailable = false) {
     const released = Promise.withResolvers<void>()
-    let cancel = false
+    let download = false
     const response: HeldResponse = {
       ready: false,
       terminal: 'pending',
+      closed: false,
       release: () => released.resolve(),
-      cancelNavigation: () => {
+      downloadNavigation: () => {
         if (kind !== 'agents')
-          throw new Error('Only the destination navigation may be deliberately cancelled')
+          throw new Error('Only the destination navigation may become a download')
 
-        cancel = true
+        download = true
         released.resolve()
       },
     }
     return {
       response,
       released: released.promise,
-      cancelled: () => cancel,
+      downloads: () => download,
       unavailable,
     }
   }
@@ -102,7 +104,7 @@ export async function nativeResponseGate(origin: string) {
         if (held)
           await held.released
 
-        if (closing || response.destroyed || held?.cancelled()) {
+        if (closing || response.destroyed) {
           source.destroy()
           response.destroy()
           return
@@ -114,7 +116,10 @@ export async function nativeResponseGate(origin: string) {
           return
         }
 
-        response.writeHead(source.statusCode || 502, source.headers)
+        const headers = held?.downloads()
+          ? { ...source.headers, 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="availability-navigation.html"' }
+          : source.headers
+        response.writeHead(source.statusCode || 502, headers)
         source.pipe(response)
       })()
       deliveries.add(delivery)
@@ -144,8 +149,12 @@ export async function nativeResponseGate(origin: string) {
         held.response.terminal = 'finished'
     })
     response.on('close', () => {
-      if (held && !response.writableFinished)
-        held.response.terminal = 'cancelled'
+      if (held) {
+        held.response.closed = true
+        if (!response.writableFinished && held.response.terminal !== 'failed')
+          held.response.terminal = 'cancelled'
+      }
+
       upstream.destroy()
     })
     request.on('aborted', () => upstream.destroy())
