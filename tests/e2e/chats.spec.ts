@@ -191,6 +191,7 @@ test('new conversation on the same route clears an uncertain submission with ide
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   await expect(page.getByText('Connection unavailable. Please try again.', { exact: true })).toBeVisible()
   await expect(page).toHaveURL(workspacePath('/chats'))
+  await page.setViewportSize({ width: 390, height: 844 })
   await page.getByRole('button', { name: 'Conversations', exact: true }).click()
   await page.getByRole('button', { name: 'New conversation', exact: true }).click()
   await expect(composer).toHaveValue('')
@@ -219,6 +220,7 @@ test('new conversation on the same route clears the abandoned attempt’s error'
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   const failure = page.getByText('Simulated send failure', { exact: true })
   await expect(failure).toBeVisible()
+  await page.setViewportSize({ width: 390, height: 844 })
   await page.getByRole('button', { name: 'Conversations', exact: true }).click()
   await page.getByRole('button', { name: 'New conversation', exact: true }).click()
   await expect(page).toHaveURL(workspacePath('/chats'))
@@ -961,7 +963,7 @@ test('queued Claude conversation explains the missing account and continues afte
   await expect(page.locator('.activity-message').getByText('Keep this request while connecting', { exact: true })).toHaveCount(1)
 })
 
-test('conversation switcher preserves drafts and supports search, keyboard and mobile sheets', async ({ page, workspace }) => {
+test('conversation navigation uses desktop search and the phone switcher without losing drafts', async ({ page, workspace }) => {
   test.setTimeout(60000)
   await workspace.restart()
   const first = await workspace.api('/api/chats', 'POST', {})
@@ -977,8 +979,29 @@ test('conversation switcher preserves drafts and supports search, keyboard and m
   const dialog = page.getByRole('dialog', { name: /Conversations/ })
   for (const colorScheme of ['dark', 'light'] as const) {
     await page.emulateMedia({ colorScheme })
-    // Every width opens conversations from the title's chevron; phones from the title itself.
-    for (const width of [1440, 800, 390, 320]) {
+    for (const width of [1440, 800]) {
+      await page.setViewportSize({ width, height: 900 })
+      await expect(trigger).toBeHidden()
+      await expect(page.getByRole('heading', { name: 'Simplify the chat navigation', exact: true })).toBeVisible()
+      const shortcut = width === 1440 ? 'Control+k' : 'Meta+k'
+      const palette = page.getByRole('dialog', { name: 'Search and commands', exact: true })
+      await page.keyboard.press(shortcut)
+      const search = palette.getByRole('combobox', { name: 'Search', exact: true })
+      await expect(search).toBeFocused()
+      await search.fill('Review the release notes')
+      await expect(palette.getByRole('option', { name: /Review the release notes/ })).toBeVisible()
+      await search.press('Enter')
+      await expect(page).toHaveURL(workspacePath(`/chats/${second.slug}`))
+      await expect(message).toHaveValue('')
+      await page.keyboard.press(shortcut)
+      await search.fill('Simplify the chat navigation')
+      await expect(palette.getByRole('option', { name: /Simplify the chat navigation/ })).toBeVisible()
+      await search.press('Enter')
+      await expect(page).toHaveURL(workspacePath(`/chats/${first.slug}`))
+      await expect(message).toHaveValue('Keep this unsent draft')
+    }
+
+    for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: width === 320 ? 600 : 900 })
       await trigger.click()
       await expect(dialog).toBeVisible()
@@ -1001,14 +1024,14 @@ test('conversation switcher preserves drafts and supports search, keyboard and m
     }
   }
 
-  // Crossing into phone widths while open swaps the trigger: focus returns to the visible one.
-  await page.setViewportSize({ width: 800, height: 900 })
+  // Resizing an open phone list restores focus to a visible desktop control.
+  await page.setViewportSize({ width: 390, height: 844 })
   await trigger.click()
   await expect(dialog).toBeVisible()
-  await page.setViewportSize({ width: 390, height: 844 })
+  await page.setViewportSize({ width: 800, height: 900 })
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
-  await expect(trigger).toBeFocused()
+  await expect(page.getByRole('button', { name: 'Chat details', exact: true })).toBeFocused()
 
   await page.setViewportSize({ width: 320, height: 600 })
   await trigger.click()
@@ -2350,7 +2373,7 @@ test('conversation deletion is visible, confirmed and permanent on desktop and m
   await expect(confirmation).toBeVisible()
   await confirmation.getByRole('button', { name: 'Keep conversation' }).click()
   await expect(page.getByRole('button', { name: 'Chat details', exact: true })).toBeFocused()
-  for (const [width, colorScheme] of [[1280, 'light'], [390, 'dark']] as const) {
+  for (const [width, colorScheme] of [[390, 'light'], [320, 'dark']] as const) {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 900 })
     await page.emulateMedia({ colorScheme })
     await openConversations()

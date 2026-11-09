@@ -370,11 +370,12 @@ async function detailAction(action: () => void) {
 }
 
 const historyButton = ref<HTMLButtonElement>()
-const tabletHistoryButton = ref<HTMLButtonElement>()
 
-// The title's chevron opens the conversation list on every width; phones use the title itself.
+// Phones open the conversation list from the title; desktop uses workspace search.
 function switcherAnchor() {
-  return [historyButton.value, tabletHistoryButton.value, detailsButton.value].find(button => button?.getClientRects().length)
+  if (historyButton.value?.getClientRects().length)
+    return historyButton.value
+  return visibleMenuTrigger()
 }
 
 const error = ref('')
@@ -1480,17 +1481,6 @@ function key(event: KeyboardEvent) {
             <h1 class="min-w-0 truncate text-base! font-semibold! leading-snug! tracking-tight! text-ink" :title="heading?.title || undefined">
               {{ heading?.title || 'New conversation' }}
             </h1>
-            <button
-              ref="tabletHistoryButton"
-              :class="iconButton"
-              class="-my-2 -ml-2 size-8! shrink-0 pointer-coarse:size-10!"
-              aria-label="Conversations"
-              aria-haspopup="dialog"
-              :aria-expanded="history"
-              @click="history = true"
-            >
-              <Icon :name="ChevronDown" :size="16" />
-            </button>
             <span v-if="headerProject" class="flex min-w-0 items-center gap-1.5"><Icon :name="FolderGit2" :size="13" class="shrink-0" /><span class="truncate max-w-48">{{ headerProject }}</span></span>
             <RouterLink
               v-if="heading?.requester"
