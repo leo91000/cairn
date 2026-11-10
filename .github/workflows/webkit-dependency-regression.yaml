@@ -45,7 +45,7 @@ jobs:
           export C40_EVIDENCE_DIR="$RUNNER_TEMP/cairn-direct-owner-first-receipt"
           echo "C40_EVIDENCE_DIR=$C40_EVIDENCE_DIR" >> "$GITHUB_ENV"
           mkdir -p "$C40_EVIDENCE_DIR" test-results/direct-owner-receipt
-          for file in archive-transparency.node.mjs skill-availability-probe.ts b534-navigation-probe.ts direct-owner-probe.mjs direct-owner-probe.d.mts direct-owner-probe.node.mjs direct-owner-overlay-control.mjs closed-target-error.mjs mcps.direct-owner.overlay.ts direct-transport.seam.overlay.ts overlay-manifest.json; do
+          for file in archive-transparency.node.mjs availability-reader-native.mjs skill-availability-probe.ts b534-navigation-probe.ts direct-owner-probe.mjs direct-owner-probe.d.mts direct-owner-probe.node.mjs direct-owner-overlay-control.mjs closed-target-error.mjs mcps.direct-owner.overlay.ts direct-transport.seam.overlay.ts overlay-manifest.json; do
             git -c safe.directory="$GITHUB_WORKSPACE" show "$OBSERVER_SHA:.github/diagnostics/$file" > "test-results/direct-owner-receipt/$file"
           done
           sha256sum test-results/direct-owner-receipt/* > "$C40_EVIDENCE_DIR/observer-source.sha256"

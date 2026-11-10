@@ -320,30 +320,38 @@ import process from 'node:process'
         })
         const NativeEventSource = window.EventSource
         const observedChatSources = new WeakSet<EventSource>()
-        window.EventSource = class extends NativeEventSource {
-          constructor(url: string | URL, options?: EventSourceInit) {
-            super(url, options)
-            const chat = new URL(String(url), location.href).pathname.endsWith('/api/chats/stream')
-            if (!chat)
-              return
-            observedChatSources.add(this)
-            if (observation.armed)
-              observation.armedSources.push(this)
-            void probe('native-chat-source-created')
-            this.addEventListener('open', () => { void probe('native-chat-source-open') })
-            this.addEventListener('error', () => { void probe('native-chat-source-error') })
-            const close = this.close
-            this.close = function (this: EventSource, ...args: Parameters<typeof close>) {
-              const original = Reflect.apply(close, this, args)
-              try {
-                if (observedChatSources.has(this))
-                  safeProbe(this.readyState === NativeEventSource.CLOSED ? 'native-chat-source-closed' : 'native-chat-source-close-unknown')
-              }
-              catch { observerFailed() }
-              return original
-            }
+        const nativeSourceClose = NativeEventSource.prototype.close
+        NativeEventSource.prototype.close = function (this: EventSource, ...args: Parameters<typeof nativeSourceClose>) {
+          const original = Reflect.apply(nativeSourceClose, this, args)
+          try {
+            if (observedChatSources.has(this))
+              safeProbe(this.readyState === NativeEventSource.CLOSED ? 'native-chat-source-closed' : 'native-chat-source-close-unknown')
           }
+          catch { observerFailed() }
+          return original
         }
+        window.EventSource = new Proxy(NativeEventSource, {
+          construct(target, args, newTarget) {
+            const original = Reflect.construct(target, args, newTarget) as EventSource
+            try {
+              if (typeof args[0] !== 'string') {
+                observerFailed()
+                return original
+              }
+              const chat = new URL(args[0], location.href).pathname.endsWith('/api/chats/stream')
+              if (!chat)
+                return original
+              observedChatSources.add(original)
+              if (observation.armed)
+                observation.armedSources.push(original)
+              safeProbe('native-chat-source-created')
+              original.addEventListener('open', () => { safeProbe('native-chat-source-open') })
+              original.addEventListener('error', () => { safeProbe('native-chat-source-error') })
+            }
+            catch { observerFailed() }
+            return original
+          },
+        })
         const fetch = window.fetch
         const promiseThen = Promise.prototype.then
         const responses = new WeakMap<Response, { poll: number, settled: (kind: string) => void }>()

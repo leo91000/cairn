@@ -91,3 +91,23 @@ ROOT sourcevalidation f76d is separately archived with SHA9a506a9b...; it is not
 a review verdict and does not qualify currentcode after correction. FIVE module
 source payloadf48 remains byte-identical to ROOT72PASS/lint0 proof. No repeat for
 receipt, no native receipt/production causal fix. Product2344 always untouched.
+
+H77 COMPLETE FULL on71a7, twoP2 confirmed. Archived ordinary native-reader fetch
+now forwards actual arguments without extra input coercion/accessor value reads;
+only its explicit negative wire substitution remains deliberately distinct. Its
+bootstrap is read/extracted by Node only, never imported/executed as native/CDP.
+B534 source constructor uses actual native Proxy construction/result/prototype,
+unknown metadata cannot change constructor success; native close forwards exactly.
+Four actual archive bootstrap regressions RED71a7/GREENcorrected. Existing archives
+remain unqualified and historical evidence never changes source attachment.
+H77 also identifies product tests/e2e/availability-probe.ts native argument/coercion
+transparency. Three actual frozen2344 bootstrap regressions RED by assertion, not
+setup errors. Product is explicitly FROZEN by ROOT, so this finding remains OPEN;
+no correction/overlay of that helper, no old clean/QA transfer and no native gate.
+Decision required: authorize focused PRODUCT TEST helper source correction on same
+existing product branch (not app runtime), followed by new QA, repin and fresh FULLs;
+or independently resolve the contract with evidence. Current observer-only edit
+authority cannot claim whole pin clean while that source finding remains open.
+Do not dispatch this observer under an old permission. Native owner receipt still
+missing; no production bug or original47/1 causal fix inferred from these source
+observer counterexamples. SlotROOT/HEAVYHOLD, P1OPEN, all forensic preserved.

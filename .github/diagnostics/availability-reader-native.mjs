@@ -164,35 +164,71 @@ function nativeDiagnostics(mode) {
     }
     return abort.call(this, reason)
   }
-  window.fetch = function (input, init) {
-    if (String(input) !== '/api/installations')
-      return fetch.call(this, input, init)
-    const current = ++read
-    const signal = init?.signal
-    if (signal) {
-      signals.set(signal, current)
-      signal.addEventListener('abort', event => {
-        record('private-native-signal', {
-          read: current, trusted: event.isTrusted,
-          exactTarget: event.target === signal && event.currentTarget === signal && event instanceof Event,
-          aborted: signal.aborted,
-        })
-        snapshot('signal', current)
-      })
+  const observationFailed = () => {
+    try { record('observer-failed') } catch {}
+  }
+  window.fetch = function (...args) {
+    // Only the declared proof-without-terminal negative changes a wire signal.
+    // Ordinary observation forwards the exact original argument list.
+    if (typeof args[0] !== 'string') {
+      const original = Reflect.apply(fetch, this, args)
+      observationFailed()
+      return original
     }
-    let request = init
-    if (mode === 'proof-without-terminal' && current === 2) {
+    if (args[0] !== '/api/installations')
+      return Reflect.apply(fetch, this, args)
+    const current = ++read
+    let signal
+    let metadataKnown = true
+    try {
+      if (args[1] != null) {
+        const descriptor = Object.getOwnPropertyDescriptor(args[1], 'signal')
+        if ((descriptor && !('value' in descriptor)) || ![null, Object.prototype].includes(Object.getPrototypeOf(args[1])))
+          metadataKnown = false
+        else
+          signal = descriptor?.value
+      }
+    }
+    catch { metadataKnown = false }
+    let request = args
+    if (mode === 'proof-without-terminal' && current === 2 && metadataKnown) {
       const wire = new AbortController()
       record('negative-wire-substitution', { read: current, distinctSignal: wire.signal !== signal })
-      request = { ...init, signal: wire.signal }
+      request = [...args]
+      request[1] = { ...args[1], signal: wire.signal }
     }
-    const original = fetch.call(this, input, request)
-    void original.then(response => {
-      responses.set(response, current)
-      snapshot('fetch-fulfilled', current)
-    }, () => snapshot('fetch-rejected', current))
+    const original = Reflect.apply(fetch, this, request)
+    if (!metadataKnown) {
+      observationFailed()
+      return original
+    }
+    try {
+      if (signal) {
+        signals.set(signal, current)
+        signal.addEventListener('abort', event => {
+          try {
+            record('private-native-signal', {
+              read: current, trusted: event.isTrusted,
+              exactTarget: event.target === signal && event.currentTarget === signal && event instanceof Event,
+              aborted: signal.aborted,
+            })
+            snapshot('signal', current)
+          }
+          catch { observationFailed() }
+        })
+      }
+      void original.then(response => {
+        try { responses.set(response, current); snapshot('fetch-fulfilled', current) }
+        catch { observationFailed() }
+      }, () => {
+        try { snapshot('fetch-rejected', current) }
+        catch { observationFailed() }
+      })
+    }
+    catch { observationFailed() }
     return original
   }
+
   Response.prototype.json = function () {
     const original = json.call(this)
     const current = responses.get(this)
@@ -886,7 +922,7 @@ async function observe(browser, cell, closedPrototype) {
       finalAudit.unexpected.push(event)
   }
   const ownCleanup = cleanupFailures.filter(event => event.arm === arm)
-  const observationComplete = journalAcknowledged && navigationValidated && !failures.length && !pageErrors.length
+  const observationComplete = !nativeEvents.some(event => event.kind === 'observer-failed') && journalAcknowledged && navigationValidated && !failures.length && !pageErrors.length
     && !ownCleanup.length && !finalAudit.unknown.length && !finalAudit.unexpected.length
   const row = { arm, control, diagnosticOnly: true, productQualified: false, observationComplete, phase,
     pauseReceipts, postCommitReceipt, cleanupStartedAt, cdpAdmission, cdpCloseObserved, cdpTaskRecords, cdpCommandsDrained: cdpTasks.size === 0, originalPromiseBoundary, documentId, state, pendingProof, stateReceipts, dialogs, nativeNavigationCheckpoint, navigationRetirement, activatedViaClick, retainedAfterDialog, destinationAdmission: cell.mode === 'proof-without-terminal' && navigationValidated && !destination?.received ? 'cancelled-before-request' : null, outageEvidence, initialHeaderAdvance, initialClosureBoundary, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
