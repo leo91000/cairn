@@ -1,114 +1,84 @@
-# Focused availability repair qualification — source only, dispatch HOLD
+# Chromium native first-history reasons — diagnostic only
 
-Existing observer qualification/skill-availability-20261108 is NEVER merged.
-Immutable selected product **b1863f5601e483000d96eaab121ce3ec0ae44c7b** /
-tree **221d33c85475a88aecfccacf73227df3ae8ec048**. Integrated base
-b431f53a5d26138699b97c26c6121f11f6ef7963 (main740), current at freeze.
+Immutable product b1863f5601e483000d96eaab121ce3ec0ae44c7b,
+tree221d33c85475a88aecfccacf73227df3ae8ec048. Never merge this observer.
+Existing branch qualification/skill-availability-20261108, same workflow file.
+ROOT grants source preparation and ONE conditional native acquisition after a
+NEW complete independent clean FULL. No admission from f717 is reused.
 
-ROOT actually qualified clean selectedb186 source: pnpm checkEXIT0,
-141files/1873tests, ESLint/Rustfmtcheck/vue-tsc/productionbuild, clean before/after.
-That is exact SOURCE QA, not runtime qualification or a substitute for reading
-code. Original TypeError preserved; same-source conditional ownership regressions
-use the actual read/caller/lifetime, not a new native app-generation probe.
-Every source/base change requires new affected QA/review/pin and explicit report.
+## Exact purpose and preserved conditions
 
-## Selected mode and collection: original framework only
+Acquire only Chromium's native PerformanceNavigationTiming.notRestoredReasons
+on the FIRST history return of the identified original MCP document. Same real
+fixture/app code, official config/journeys-mcps profile, launchOptions filtering
+--disable-back-forward-cache, proxy/auth/Direct/held-body scenario, cache policy,
+SDK1.64.1/container digest, PR VITE resume flag,7s assertions/5msteps/25mjob.
+No WebKit, baseline series, old PromiseState, primary/specialist/network/Android/
+backend global suite, image publication or product qualification.
 
-Use existing focused-repair, NOT nativePromiseState or any old probe/matrix.
-Pinned Playwright1.64.1 image, maxparallel1,25mjob/5msteps/7sexpect/30stest unchanged.
-The true CLI must run in future admitted CI BEFORE Cargo on the same productpin:
-official playwright.config.ts, journeys-mcps/layout-webkit-mcps,
-tests/e2e/mcps.spec.ts with --grep availability, and availability-bfcache.spec.ts
-withoutgrep. list,json reporters retain list output and strict JSON receipts.
-Assert exactly8MCP (committed/cancelled/same-document persisted/scopedreadonlyoutage
-per engine) plus2physicalBF, no report errors and zero executed results. Zero,
-foreign,missing or actually-executed collection is RED. ROOT earlier realBB8+2
-selection is historical selection-only, not selectedpin/runtime evidence.
+A versioned/hash-specific overlay changes ONLY the original BF test. The native
+pagehide checkpoint still expects persistedTRUE/trustedTRUE. Any observedFALSE
+keeps the exact failed assertion and the test/job RED. The continuation is
+DIAGNOSTIC ONLY: first goBack, ordinary main-world evaluate, then existing real
+settling/retirement, independent bounded closure and original error/HTTP audits.
+The diagnostic title explicitly disclaims product/restoration qualification.
+The original test bytes and every other tracked production byte are checked
+before overlay, before acquisition and after restoration. Unknown diff or
+restoration fails the guard, never becomes product evidence. No app/header/auth/
+transport change, generic permissive overlay or new SDK environment is involved.
 
-Existing companions are separately recollected:4saved-resume cases journeys-chats,
-and2main740wait variants on journeys-chats/layout-webkit-chats (4). These counts
-are required real CLI receipts, not source-derived qualification. No new scenario.
+## Native provenance, private identity and closed projection
 
-Keep actual pinned SDK closed-target prototype/owned-resource preflight, RunnerTemp
-immutable evidence, bounded Git trust, zip and normal build dependencies,
-format/sourceunchanged guard, whole pnpm quality BEFORE fixtureCargobuilds,
-manager+Beacon fixtures/webassets, isolatedPostgres. Build assets with the existing
-PR flag VITE_CAIRN_TEST_RESUME_DIAGNOSTICS=true required by savedresume assertions;
-no app source or Beacon instrumentation is added. The exact PRprimary command is
-unchanged, same PR build configuration. Primary/source SHA and this flag must not
-be misreported as qualification of other variants.
+An observation before the held-read baseline records hashed original location,
+origin, native history-entry key and existing document nonce in a dedicated
+sessionStorage marker. No history/cookie mutation, no identifier returned. The
+original probe already uses same-origin sessionStorage. The marker is consumed
+once, and matching is checked inside evaluate, with main-frame/default-world
+DOM entry brand/prototype accessor. No new Runtime/Debugger/CDP session.
 
-Complete selected runtime suites after future explicit admission: unchanged
-PRprimaryworkers2/retries0/failonflaky/trace; DirectRelay+direct-capacity+SavedReaders;
-existing four savedquota-resume cases with workers1/retries0; main740wait variants;
-physicalBF; Account AND OAuth401; finalsourceidentity/helper hashes. Only actual
-complete successful jobs grant their respective evidence. Fixture builds are NOT
-backend qualification. Errors/timeout/unknownclosure/flaky/skipped/unrun remain RED.
-No budget/retry/assertion/filter relaxation.
+Cache misses reload a new Document: originalDocumentSameFALSE is expected, while
+native history ENTRY and location must match the privately armed original. A
+foreign entry/location/realm or changing context is inconclusive. No raw
+notRestoredReasons object crosses evaluate. Only navigationtype, presence/boolean
+flags, counts and anonymized {reasonCodes,children} tree are constructed. URL/id/
+name/src/frameidentifiers/cookie names/values/auth headers/queries never copied.
+Browser version comes from the already-owned Browser object. Source identities
+and file hashes are separate mandatory provenance metadata.
 
-## Accepted contract and evidence limits
+Null/undefined/empty/masked/unknownAPI/wrong navigation/context/timeout/malformed/
+truncated tree/closure unknown => inconclusive RED. Cause wording is not an
+allowlist: new native reason codes are retained; format validation protects
+privacy, and the defined masked marker refuses incomplete native information.
+No native statement is inferred from controlled Node fixtures.
 
-Original MCP need: obsolete availability reads must not publish Offline/fallback/
-retry; genuine active/retained-download failures must still publish/recover.
-Preserve original native fetch/JSON terminal and prior identical TypeError.
-Captured read/session/document generation owns headers401/success effects and
-failure publication/counter/retry. Beforeunload alone cannot suppress retained
-work indefinitely. Publication before retirement while active must act.
+29 light Node tests exercise the SAME serialized projection, controller,
+closedTargetBound helper, exact patch/restore and actual preserved cleanup code.
+They cover closed output, wrong identity, unknown/null/masked, nonfixed codes,
+first checkpoint failure retention, one history call, timeout and closure red.
+They are SOURCE tests, not native/browser measurements. Initial VM-fixture setup
+failure was fixed as a fixture issue, not credited as native RED. The immutable
+product and original first BF failures are preserved.
 
-ROOT accepted OptionA bounded split: browser=originalterminal/lifecycleoldDoc/
-closure/freshdoc+recovery; Node realfunctions=CONDITIONAL generation ownership/
-publication. **NO native appgeneration/publication correlation in THISPage.goto.**
-**NO guaranteed BASEbrowserRED.** Pagehideprobe is not appgeneration evidence;
-no NoStalePub native or intrinsic PromiseState claim is made from journal events.
-Permanent companion retires actualgeneration BEFORE SAME originalTypeError while
-parent alive; base9da emits Offline1/counter1/retry6000 vs candidatezeroeffects.
-This conditional source witness is not a native ordering/baseline guarantee.
+## Artifact and first-result meaning
 
-First owned trusted/exact/in-call withdrawal remains strict. Only later committed
-read and its audit use original exact-counted terminal without fabricated abort.
-Raw TypeError remains in journal; all other unexpected rejections/pageerrors/
-unhandled/HTTP/incomplete/orphan/duplicate stay RED. Retaineddownload exact body,
-activeHTTP/JSON/fetch/401/backoff/cadence/recovery/rearming/physicalBF/DirectRelay/
-cache/history/cursors and no uncertain mutation replay remain strict.
-Read docs/agents/availability-navigation-repair.md at selectedpin for full mapping.
+native-bfcache-reasons.json reports diagnosticOnlyTRUE/productQualifiedFALSE.
+observationComplete requires usable native data AND actual original journal ACK,
+page/HTTP closure and zero cleanup/audit failures. Original checkpoint failure
+still makes the workload RED even with acquired reasons. All original native
+terminals, pageerrors and HTTP audits remain strict and privately preserved.
+Only closed projections may be shared; raw traces remain private originals.
 
-## Incoming main740 and held network groups
+f717/run42841980306 remains completedFAILURE: CURRENT primary48PASS, dependants27,
+savedresume4,waits7404; BF2nonadmissions beforegoBack, AccountOAuth/finalidentity
+SKIPPED nonqualified. SourceQA1873 does not qualify runtime. OptionA limits stay:
+no native appgen/publication correlation in that Page.goto and no guaranteed
+BASEbrowserRED. Archived probes remain unselected/runtime-unqualified; historical
+failures and source corrections are not erased or transferred.
 
-Incoming7main740 blobs are preserved exactly. Webactivity waits with late
-turn.started remain after final replies in streaming/reloaded timelines; mirrored
-Android and parity/device tests unchanged. Whole newhead QA includes chat-wait;
-selected browser companions cover actual changedwaits and savedresume/readers.
-No borrowed old global or Android PASS. New confirmed parity interaction requires
-its affected qualification/admission.
-
-Network is a SEPARATE held proposal, not in this workflow. Indirect callerchain:
-BeaconApp -> api.watch -> InstallationTransport.availabilityChanged -> fallback /
-networkChanged -> live/API readers. Existing groups qualification and recovery
-(network-change,packet-loss) are proposed for ROOT assessment separately; no
-ALLNETWORK/ALLBACKEND dispatch, queue, or implicit execution. Their harness uses
-shipped api/liveConnection in another document, not the Beacon account shell.
-BrowserDirectRelay/SavedReaders and network topologies are distinct evidence.
-
-## Archives and preserved first failures
-
-Old skill/b534/nativePromiseState scripts remain UNSELECTED; this workflow imports
-only closed-target-error.mjs from observer. Historical negative probes/results
-remain preserved, never converted into selected product PASS. Original native
-primary47PASS1FAIL and P1 remain OPEN until required real qualifications. Latest
-428008 original JS TypeError terminal was acquired; intrinsic PromiseState before
-first listener was not acquired; no old result transfers here.
-
-Two historical skillprobeP2 scenarios/severity/first failures are preserved in
-archive checkpoint: old-document closure before reload/bodyrelease and finiteHTTP
-audit before asyncdrain. Current source addresses their actual controller seams:
-commitSkillReload requires exact olddocument/read terminal and JSclosure BEFORE
-releasing reload; closeAndAuditSkillProbe drains, closes owners independently,
-waits final finite termination THEN audits. Actual old control blocks reproduce
-2RED contracts; permanent Node controller tests pass15, including missing/wrong/
-duplicate/unknown and late503 negatives. This establishes source orchestration
-only. Native archived probe remains UNEXECUTED/UNQUALIFIED, not a PASS or a
-transferred selectedmode result. Fresh ALLobserver review remains required.
-
-No CI/heavy admitted; STOP until ROOT explicit new admission after complete fresh
-product/observer reviews. No PR creation/UI534679merge without Leo captures,
-release/deploy/livegrants/Slack. Heavy slot ROOT; C40/B/D/storage HOLD.
+Before ONE effect: fresh full ALL observer+ALL pinned product/overlay/contracts/
+profile/commands clean; publish newSHA/tree/checkpoint, reverify source clean,
+realmain noted (do NOT update immutableproduct), globalin_progress+queued empty,
+no run of newhead even closed. Existing/uncertain run => no redispatch. After the
+first result: report acquired/missing and return slot ROOT; no retry/correction/
+other lot admitted. Networkqualification+recovery remain separate, not admitted.
+P1globalOPEN, B/D/storageHOLD, UI534679 capturesLeo gates/Slackprodgrants intact.

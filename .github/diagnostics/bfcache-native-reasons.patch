@@ -1,0 +1,148 @@
+--- a/tests/e2e/availability-bfcache.spec.ts
++++ b/tests/e2e/availability-bfcache.spec.ts
+@@ -8,6 +8,7 @@
+   workspacePath,
+ } from './fixtures'
+ import { nativeResponseGate } from './native-response-gate'
++import { acquireNativeReasonDiagnostic, armNativeHistoryIdentity, readNativeHistoryReasons, finalizeNativeReasonDiagnostic } from '../../test-results/native-bfcache-reasons/bfcache-native-reasons.mjs'
+ 
+ const cacheTest = test.extend<{ responseGate: Awaited<ReturnType<typeof nativeResponseGate>> }>({
+   responseGate: async ({ workspace }, use) => {
+@@ -25,7 +26,7 @@
+ // Only Chromium has this default disabling switch; filtering it is inert for WebKit.
+ cacheTest.use({ launchOptions: { ignoreDefaultArgs: ['--disable-back-forward-cache'] } })
+ 
+-cacheTest('availability restores the same native document from BFCache with an exact fresh body', async ({ page, workspace, responseGate }, testInfo) => {
++cacheTest('availability native not-restored reasons diagnostic only', async ({ page, workspace, responseGate, browser }, testInfo) => {
+   const reads: AvailabilityReadEvent[] = []
+   const errors: string[] = []
+   const record = (entry: AvailabilityReadEvent) => {
+@@ -57,6 +58,11 @@
+   let restoredRead: number | undefined
+   let journalAcknowledged = false
+   let primaryFailure: unknown
++  let nativeReasonReceipt: any
++  let nativeArmReceipt: any
++  const diagnosticFailures: unknown[] = []
++  let cleanupFailureCount = 0
++  let httpClosed = false
+   const failures: unknown[] = []
+   try {
+     await page.goto(workspacePath('/mcps'))
+@@ -72,6 +78,10 @@
+     })
+     const original = await page.evaluate(() => window.cairnAvailabilityDocument)
+     originalDocument = original
++    const identity = await page.evaluate(armNativeHistoryIdentity)
++    nativeArmReceipt = identity
++    if (!identity.armed)
++      throw new Error('Native history identity admission is inconclusive')
+     await expect.poll(() => reads.some(event => event.document === original && event.kind === 'body')).toBe(true)
+     await harvest()
+     const earlierReads = reads.filter(event => event.document === original && event.kind === 'start').length
+@@ -114,23 +124,35 @@
+       throw departed.error
+     expect(departed.response?.status()).toBe(200)
+     await harvest()
+-    expect(reads.filter(event => event.document === original && event.kind === 'pagehide').map(event => ({ persisted: event.persisted, trusted: event.trusted })))
+-      .toEqual([{ persisted: true, trusted: true }])
++    const outcome = await acquireNativeReasonDiagnostic({
++      checkpoint: async () => {
++        expect(reads.filter(event => event.document === original && event.kind === 'pagehide').map(event => ({ persisted: event.persisted, trusted: event.trusted })))
++          .toEqual([{ persisted: true, trusted: true }])
++      },
++      checkpointFlags: () => reads.filter(event => event.document === original && event.kind === 'pagehide').map(event => ({ persisted: event.persisted, trusted: event.trusted })),
++      browserVersion: () => browser.version(),
++      history: () => {
++        const firstHistory = page.goBack()
++        navigation = firstHistory
++        return firstHistory
++      },
++      harvest,
++      observe: () => page.evaluate(readNativeHistoryReasons),
++    })
++    nativeReasonReceipt = outcome.receipt
++    diagnosticFailures.push(...outcome.failures)
+     expect(poll.terminal).toBe('cancelled')
+-    await page.goBack()
+-    expect(await page.evaluate(() => window.cairnAvailabilityDocument)).toBe(original)
+-    await harvest()
+-    const restored = reads.filter(event => event.document === original && event.kind === 'pageshow' && event.persisted)
+-    expect(restored.map(event => event.trusted)).toEqual([true])
+-    restorationSequence = restored[0]!.sequence
+-    await expect.poll(() => availabilityBodiesAfter(reads, original, restorationSequence!).length).toBeGreaterThan(0)
+-    restoredRead = availabilityBodiesAfter(reads, original, restorationSequence)[0]!.read
+-    await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
+-    await expect(route).toHaveAttribute('data-transport-route', 'direct')
+-    // Retire every producer before the final synchronous journal acknowledgement.
+-    await page.goto(new URL('/health', workspace.url).href)
+-    await harvest()
+-    journalAcknowledged = true
++    // Preserve every checkpoint failure before any later settling can fail.
++    if (outcome.receipt.historyCompleted) {
++      // These existing waits settle the current document; they never qualify
++      // restoration of the original document after a cache miss.
++      await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
++      await expect(route).toHaveAttribute('data-transport-route', 'direct')
++      // Existing retirement and synchronous journal acknowledgement are retained.
++      await page.goto(new URL('/health', workspace.url).href)
++      await harvest()
++      journalAcknowledged = true
++    }
+   }
+   catch (cause) {
+     primaryFailure = cause
+@@ -148,7 +170,10 @@
+       }
+     }
+ 
+-    const closures = await Promise.allSettled([bounded(() => page.close()), bounded(() => responseGate.close())])
++    const closures = await Promise.allSettled([bounded(() => page.close()), bounded(async () => {
++      await responseGate.close()
++      httpClosed = true
++    })])
+     for (const closure of closures) {
+       if (closure.status === 'rejected')
+         failures.push(closure.reason)
+@@ -163,6 +188,8 @@
+       }
+     }
+   }
++
++  cleanupFailureCount = failures.length
+ 
+   // Audit independently so simultaneous native/HTTP/page errors all survive.
+   const audits = [
+@@ -179,6 +206,23 @@
+     catch (cause) {
+       failures.push(cause)
+     }
++  }
++
++  try {
++    const nativeFinal = finalizeNativeReasonDiagnostic(nativeReasonReceipt, {
++      arm: nativeArmReceipt,
++      cleanupFailureCount,
++      auditFailureCount: failures.length - cleanupFailureCount,
++      pageClosed: page.isClosed(),
++      httpClosed,
++      journalAcknowledged,
++    })
++    saveAvailabilityObservation(testInfo.outputPath('native-bfcache-reasons.json'), JSON.stringify(nativeFinal))
++    if (!nativeFinal.observationComplete)
++      failures.push(new Error('Native BF reason observation or closure is inconclusive'))
++  }
++  catch (cause) {
++    failures.push(cause)
+   }
+ 
+   try {
+@@ -215,6 +259,6 @@
+     failures.push(cause)
+   }
+ 
+-  if (primaryFailure || failures.length)
+-    throw new AggregateError([...(primaryFailure ? [primaryFailure] : []), ...failures], 'Physical BFCache availability qualification failed')
++  if (primaryFailure || diagnosticFailures.length || failures.length)
++    throw new AggregateError([...diagnosticFailures, ...(primaryFailure ? [primaryFailure] : []), ...failures], 'Physical BFCache availability qualification failed')
+ })
