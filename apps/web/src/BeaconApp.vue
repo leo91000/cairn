@@ -661,7 +661,7 @@ function finishAvailability(owner: AvailabilityOwner) {
 }
 
 function publishAvailabilityFailure(owner: AvailabilityOwner) {
-  let timer: ReturnType<typeof setTimeout> | undefined
+  const channel = new MessageChannel()
   const publication = {
     cancel() {
       if (release())
@@ -673,7 +673,9 @@ function publishAvailabilityFailure(owner: AvailabilityOwner) {
     if (availabilityPublication !== publication)
       return false
     availabilityPublication = undefined
-    clearTimeout(timer)
+    channel.port1.onmessage = null
+    channel.port1.close()
+    channel.port2.close()
     owner.controller.signal.removeEventListener('abort', publication.cancel)
     owner.generation.signal.removeEventListener('abort', publication.cancel)
     return true
@@ -684,7 +686,7 @@ function publishAvailabilityFailure(owner: AvailabilityOwner) {
   owner.generation.signal.addEventListener('abort', publication.cancel, { once: true })
   // Keep the original read rejection intact. Only its state publication waits
   // for another task, where its captured document/session/read must still own it.
-  timer = setTimeout(() => {
+  channel.port1.onmessage = () => {
     if (!release())
       return
     if (availabilityRequest === owner.controller && currentAvailabilityScope(owner)) {
@@ -695,7 +697,9 @@ function publishAvailabilityFailure(owner: AvailabilityOwner) {
     }
 
     finishAvailability(owner)
-  }, 0)
+  }
+
+  channel.port2.postMessage(undefined)
 }
 
 function cancelAvailability() {
@@ -757,8 +761,7 @@ async function refreshAvailability() {
 }
 
 watch(() => [session.value, session.value?.authenticated, state.signingOut, state.redirecting], () => {
-  if (state.signingOut || state.redirecting || !session.value?.authenticated)
-    cancelAvailability()
+  cancelAvailability()
   void refreshAvailability()
 }, { flush: 'sync' })
 

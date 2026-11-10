@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { stripTypeScriptTypes } from 'node:module'
+import { clearTimeout as clearNativeTimeout, setTimeout as setNativeTimeout } from 'node:timers'
 import { setImmediate } from 'node:timers/promises'
 import { runInNewContext } from 'node:vm'
+import { MessageChannel as HostMessageChannel } from 'node:worker_threads'
 import {
   afterEach,
   beforeEach,
@@ -65,13 +67,15 @@ function account() {
   return { authenticated: true, installations: online.map(item => ({ ...item })) }
 }
 
-function fixture() {
+function fixture(nativePublication = false) {
   const timers = new Map<number, Timer>()
   const requests: Request[] = []
   const bodies: Promise<unknown>[] = []
   const watchers: Array<() => void> = []
   const disposals: Array<() => void> = []
   const redirects: string[] = []
+  const published = Promise.withResolvers<void>()
+  const documentListeners = new Map<string, Set<() => void>>()
   const listeners = new Map<string, Set<(event: BeforeUnload) => void>>()
   let nextTimer = 0
   let offlineWrites = 0
@@ -84,8 +88,10 @@ function fixture() {
     redirecting: false,
   }, {
     set(target, name, value) {
-      if (name === 'installationOnline' && value === false)
+      if (name === 'installationOnline' && value === false) {
         offlineWrites++
+        published.resolve()
+      }
       Reflect.set(target, name, value)
       return true
     },
@@ -93,8 +99,14 @@ function fixture() {
   const document = {
     hidden: false,
     defaultView: undefined as unknown,
-    addEventListener() {},
-    removeEventListener() {},
+    addEventListener(name: string, callback: () => void) {
+      if (!documentListeners.has(name))
+        documentListeners.set(name, new Set())
+      documentListeners.get(name)!.add(callback)
+    },
+    removeEventListener(name: string, callback: () => void) {
+      documentListeners.get(name)?.delete(callback)
+    },
   }
   const window = {
     document,
@@ -124,6 +136,37 @@ function fixture() {
       return request.headers.promise
     },
   }
+  // Controlled message delivery shares this fixture's task queue, but is not
+  // a production timer. The liveness case below uses actual Node message ports.
+  class ControlledMessageChannel {
+    port1: { onmessage: (() => void) | null, close: () => void }
+    port2: { postMessage: (value: unknown) => void, close: () => void }
+
+    constructor() {
+      let closed = false
+      let delivery: number | undefined
+      const close = () => {
+        closed = true
+        if (delivery !== undefined)
+          timers.delete(delivery)
+      }
+      this.port1 = { onmessage: null, close }
+      this.port2 = {
+        postMessage: () => {
+          delivery = ++nextTimer
+          timers.set(delivery, {
+            delay: 0,
+            callback: () => {
+              if (!closed)
+                this.port1.onmessage?.()
+            },
+          })
+        },
+        close,
+      }
+    }
+  }
+
   window.top = window
   document.defaultView = window
   vi.stubGlobal('window', window)
@@ -132,6 +175,7 @@ function fixture() {
     window,
     document,
     AbortController: HostController,
+    MessageChannel: nativePublication ? HostMessageChannel : ControlledMessageChannel,
     session,
     state,
     AvailabilityDeparture,
@@ -214,6 +258,8 @@ function fixture() {
 
   return {
     control: sandbox.control,
+    document,
+    published: published.promise,
     session,
     state,
     timers,
@@ -228,6 +274,10 @@ function fixture() {
     reply,
     failBody,
     event,
+    visibility() {
+      for (const callback of documentListeners.get('visibilitychange') || [])
+        callback()
+    },
     notify() {
       for (const callback of watchers)
         callback()
@@ -488,4 +538,54 @@ it('disposes a pending original JSON read with no publication or abandoned task'
   assert.equal(f.timers.size, 0)
   assert.equal(f.offlineWrites(), 0)
   assert.equal(f.control.snapshot().failures, 0)
+})
+
+it('publishes active failure independently of a paused timer clock', async () => {
+  current.dispose()
+  current = fixture(true)
+  const f = current
+  const cycle = f.control.refreshAvailability()
+  const cause = new TypeError('real failure while only timers are paused')
+  await f.failBody(0, cause)
+  await cycle
+  let deadline: ReturnType<typeof setNativeTimeout> | undefined
+  try {
+    await Promise.race([
+      f.published,
+      new Promise<never>((_, reject) => {
+        deadline = setNativeTimeout(() => reject(new Error('Publication did not progress while timer clock is paused')), 1000)
+      }),
+    ])
+  }
+  finally {
+    clearNativeTimeout(deadline)
+  }
+  assert.equal(f.offlineWrites(), 1)
+  assert.equal(f.control.snapshot().failures, 1)
+  assert.deepEqual(f.delays(), [6000])
+  await assert.rejects(f.bodies[0], error => error === cause)
+})
+
+it('cancels authenticated session ownership immediately while hidden and resumes when visible', async () => {
+  const f = current
+  const cycle = f.control.refreshAvailability()
+  await f.failBody(0, new TypeError('old hidden-session failure'))
+  await cycle
+  const owner = f.control.snapshot().request
+  assert.ok(owner)
+  f.document.hidden = true
+  f.session.value = account()
+  f.notify()
+  assert.equal(owner.signal.aborted, true)
+  assert.equal(f.control.snapshot().request, undefined)
+  assert.equal(f.timers.size, 0)
+  assert.equal(f.requests.length, 1)
+  assert.equal(f.offlineWrites(), 0)
+  f.document.hidden = false
+  f.visibility()
+  assert.equal(f.requests.length, 2)
+  f.reply(1)
+  await f.flush()
+  assert.equal(f.state.installationOnline, true)
+  assert.deepEqual(f.delays(), [3000])
 })
