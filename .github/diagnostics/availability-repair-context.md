@@ -101,3 +101,9 @@ cover original errors with cleanup-entry/completion EIO and a stalled attachment
 all owners/audits attempted and all causes retained. Source-only results: skill8,
 B53410 scenarios; previous frozen callback loses the new contracts. No archived
 browser replay or Native result is implied. Whole fresh source review required.
+
+The archived B534 current page is now independently retired within existing7s,
+then finite HTTP and native-stream terminal receipts are drained before final
+audits. Actual callback source scenarios12 pass, including HTTP503/pageerror
+admitted during page retirement; immutable414 loses both new contracts. This
+is controlled source regression evidence only, not native execution.

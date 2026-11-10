@@ -569,6 +569,7 @@ import process from 'node:process'
       finally {
         record(cleanupCompleted ? 'cleanup-completed' : 'cleanup-failed')
         const owners = await Promise.allSettled([
+          observedCleanup(() => page.close(), 'page retirement'),
           observedCleanup(() => testInfo.attach('b534-navigation', { path: journalPath, contentType: 'application/json' }), 'attachment'),
           observedCleanup(async () => {
             await provider?.close()
@@ -580,6 +581,20 @@ import process from 'node:process'
             outcomeFailures.push(owner.reason)
         }
       }
+    }
+    try {
+      await observedCleanup(async () => {
+        expect(page.isClosed()).toBe(true)
+        await expect.poll(() => [...requests.values()].every(state => state !== 'pending'), {
+          message: 'All finite HTTP requests terminate after page retirement',
+        }).toBe(true)
+        await expect.poll(() => [...nativeStreams.values()].every(state => state !== 'pending'), {
+          message: 'All native stream requests terminate after page retirement',
+        }).toBe(true)
+      }, 'post-retirement terminal receipts')
+    }
+    catch (cause) {
+      outcomeFailures.push(cause)
     }
     record('outcome-validation-entered')
     try {

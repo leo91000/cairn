@@ -6,7 +6,7 @@ import { resolve } from 'node:path'
 import { setImmediate as nextTurn } from 'node:timers/promises'
 import { runInNewContext } from 'node:vm'
 const path = '.github/diagnostics/b534-navigation-probe.ts'
-const raw = process.argv.includes('--baseline') ? execFileSync('git', ['-c', `safe.directory=${process.cwd()}`, 'show', `c5e4786c9f39eea5e3c51df2b32af1cda2b15006:${path}`], { encoding: 'utf8' }) : readFileSync(new URL('./b534-navigation-probe.ts', import.meta.url), 'utf8')
+const raw = process.argv.includes('--baseline') ? execFileSync('git', ['-c', `safe.directory=${process.cwd()}`, 'show', `414c7465a86fe8ed5a38a73dc1168e73efdb9e0c:${path}`], { encoding: 'utf8' }) : readFileSync(new URL('./b534-navigation-probe.ts', import.meta.url), 'utf8')
 const source = stripTypeScriptTypes(raw).replace(/^import .*\n/gm, '')
 const tests = []
 const expect = value => ({
@@ -36,7 +36,7 @@ runInNewContext(source, {
   mcpProvider: async () => ({ origin: 'http://fixture.test', exchanges: 1, close: async () => closeProvider() }),
 })
 let gaps = 0
-for (const scenario of ['healthy-boundary', 'late-http403-after-drain', 'late-pending-after-drain', 'startup-http500', 'startup-fetch-rejection', 'workload-cleanup-error', 'workload-attach-provider-error', 'workload-error-cleanup-ok', 'journal-entry-error', 'journal-completion-error']) {
+for (const scenario of ['healthy-boundary', 'late-http403-after-drain', 'late-pending-after-drain', 'startup-http500', 'startup-fetch-rejection', 'workload-cleanup-error', 'workload-attach-provider-error', 'workload-error-cleanup-ok', 'journal-entry-error', 'journal-completion-error', 'late-http-at-page-retirement', 'late-pageerror-at-page-retirement']) {
   activeScenario = scenario
   journalFailure = new Error('controlled journal failure')
   const workloadError = new Error('controlled first workload error')
@@ -47,6 +47,8 @@ for (const scenario of ['healthy-boundary', 'late-http403-after-drain', 'late-pe
   const frame = {}
   const locator = { or() { return this }, first() { return this }, filter() { return this }, getByRole() { return this }, getByText() { return this }, click: async () => {} }
   let document = 'old', pending = 0, record, target
+  let pageClosed = false
+  let pageCloseCalls = 0
   const request = (path, navigation = false) => ({ url: () => 'http://fixture.test' + path, method: () => 'GET', resourceType: () => navigation ? 'document' : 'fetch', isNavigationRequest: () => navigation, failure: () => ({ errorText: 'Load request cancelled' }) })
   const invoke = (pattern, navigation = false) => {
     const req = request(navigation ? '/agents' : '/api/installations', navigation)
@@ -96,6 +98,19 @@ for (const scenario of ['healthy-boundary', 'late-http403-after-drain', 'late-pe
       if (text.includes('return observation.documentId') || text.includes('b534Observation.documentId')) return document
       if (text.includes('directChatAccepted') || text.includes('chatAccepted') || text.includes('armedSources')) return true
     },
+    close: async () => {
+      pageClosed = true
+      pageCloseCalls++
+      if (scenario === 'late-http-at-page-retirement') {
+        const req = request('/api/projects')
+        listeners.get('request')(req)
+        listeners.get('response')({ request: () => req, status: () => 503 })
+        listeners.get('requestfinished')(req)
+      }
+      if (scenario === 'late-pageerror-at-page-retirement')
+        listeners.get('pageerror')(new Error('controlled late page error'))
+    },
+    isClosed: () => pageClosed,
     unrouteAll: async () => { if (scenario === 'workload-cleanup-error') throw cleanupError; await Promise.all(active) },
   }
   closeProvider = () => {
@@ -114,10 +129,12 @@ for (const scenario of ['healthy-boundary', 'late-http403-after-drain', 'late-pe
   let failure
   try { await tests[0]({ page, workspace: { api: async () => {} } }, info) }
   catch (error) { failure = error }
+  if (!pageClosed) await page.close()
   const shouldFail = scenario !== 'healthy-boundary'
   if (!!failure !== shouldFail) { gaps++; console.log(scenario + ': final-boundary gap') }
   else console.log(scenario + ': PASS')
   if (failure && !shouldFail) console.log(String(failure))
+  assert.equal(pageCloseCalls, 1)
   if ((scenario.startsWith('workload-') || scenario.startsWith('journal-'))) {
     const flatten = error => [error, ...(Array.isArray(error?.errors) ? error.errors.flatMap(flatten) : [])]
     const errors = flatten(failure)
