@@ -8,6 +8,52 @@ import org.junit.Test
 private const val IMMEDIATE_WAIT_RESULT = "Wait condition already completed"
 
 class ChatWaitTest {
+    @Test
+    fun `a late engine turn start keeps waits after final replies and before the next turn`() {
+        for (type in listOf("chat.wait", "chat.sleep", "run.wait")) {
+            val scheduled = wakeup()
+            fun message(text: String) =
+                event(
+                    "item.completed",
+                    buildJsonObject {
+                        putJsonObject("item") {
+                            put("id", "message-$id")
+                            put("type", "agent_message")
+                            put("text", text)
+                        }
+                    },
+                )
+            val turn =
+                listOf(
+                    event(type, scheduled.json()),
+                    event("turn.started", buildJsonObject {}),
+                    message("Je reprends après le résultat."),
+                )
+            fun shape(events: List<RunEvent>) =
+                fixtureEntries(events, chat = true, pendingWakeup = scheduled).map {
+                    if (it.wait != null) "wait" else if (it.message) "message" else "activity"
+                }
+            assertEquals(type, listOf("message", "wait"), shape(turn))
+            val completed = turn + event("turn.completed", buildJsonObject {})
+            assertEquals(type, listOf("message", "wait"), shape(completed))
+            assertEquals(
+                type,
+                listOf("message", "wait", "message"),
+                shape(
+                    completed +
+                        listOf(
+                            event(
+                                if (type == "run.wait") "run.wakeup" else "chat.wakeup",
+                                scheduled.json(),
+                            ),
+                            event("turn.started", buildJsonObject {}),
+                            message("Le résultat est arrivé."),
+                        )
+                ),
+            )
+        }
+    }
+
     // A plugin's condition: only the plugin knows what its fields mean.
     private val checks = buildJsonObject {
         put("type", "github_pr_checks")

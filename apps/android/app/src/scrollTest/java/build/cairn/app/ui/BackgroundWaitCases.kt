@@ -856,8 +856,11 @@ abstract class BackgroundWaitCases {
             compose.onNodeWithContentDescription("Arrêter").assertExists()
         }
 
-    @Test
-    fun scheduledWaitFollowsTheTurnAndClampsItsReason() {
+    @Test fun scheduledWaitFollowsTheTurnAndClampsItsReason() = scheduledWaitFollowsTheTurn(false)
+
+    @Test fun scheduledWaitFollowsALateTurnStart() = scheduledWaitFollowsTheTurn(true)
+
+    private fun scheduledWaitFollowsTheTurn(lateStart: Boolean) {
         val reason =
             List(12) {
                     "Vérifier Quality et Android sur la PR, corriger les échecs puis poursuivre."
@@ -905,9 +908,16 @@ abstract class BackgroundWaitCases {
                                 wireJson.encodeToJsonElement(wakeup!!).jsonObject
                             ),
                     ),
-                    message(4, "CI en cours, reprise programmée pour la vérifier."),
                     RunEvent(
-                        id = 5,
+                        id = 4,
+                        createdAt = now - 10_000,
+                        type = if (lateStart) "turn.started" else "diagnostic",
+                        text = "",
+                        payload = kotlinx.serialization.json.JsonObject(emptyMap()),
+                    ),
+                    message(5, "CI en cours, reprise programmée pour la vérifier."),
+                    RunEvent(
+                        id = 6,
                         createdAt = now - 5_000,
                         type = "turn.completed",
                         text = "",

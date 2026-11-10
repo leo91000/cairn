@@ -685,3 +685,12 @@ off; it is never silently sent as an ordinary request. Accepted queued requests,
 active turns and their questionnaire answers retain their Plan boundary. The public
 MCP and `cairn_installation` expose the same revision-guarded setting with read/manage
 authorization. Web uses an English switch button; Android uses a native French switch.
+
+### Scheduled wait placement with delayed engine events
+
+Web and Android keep a scheduled wait after the final replies of its turn even
+when the engine reports `turn.started` after wait registration. Streaming and
+reloaded history use the same order; resolved waits remain before resumed replies.
+The wait commands, cancellation and public MCP/agent tool contracts are unchanged.
+`chat-wait.test.ts`, `ChatWaitTest`, the scheduled-wait browser journeys and
+`BackgroundWaitCases` cover this ordering on both platforms.

@@ -133,7 +133,8 @@ export interface ActivityWait {
 }
 
 // Where a scheduled wait's card is placed: its turn ended, or a message or another wait event came.
-const waitBoundaries = new Set(['turn.started', 'turn.completed', 'turn.failed', 'chat.user', 'chat.sleep', 'chat.wait', 'chat.wait_ready', 'chat.wakeup', 'run.wait', 'run.wait_ready', 'run.wakeup'])
+// The engine's turn.started can arrive after wait registration, before the final replies.
+const waitBoundaries = new Set(['turn.completed', 'turn.failed', 'chat.user', 'chat.sleep', 'chat.wait', 'chat.wait_ready', 'chat.wakeup', 'run.wait', 'run.wait_ready', 'run.wakeup'])
 const terminalStatuses = new Set(['succeeded', 'failed', 'cancelled', 'interrupted'])
 
 // Codex names the workspace server; Claude and OpenCode prefix the tool with it.
