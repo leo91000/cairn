@@ -1,19 +1,34 @@
-name: Synthetic real-caller physical lifecycle ONLY
+name: Availability navigation repair qualification (focused-repair)
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  lifecycle:
-    name: Additional synthetic physical lifecycle (NOT app Direct qualification)
+  browser:
+    name: Availability repair (focused-repair)
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      PRODUCT_SHA: ba65b52ab8cca3a37aca61e5d19a7cee3fb010cc
+      RUNTIME_SHA: b1863f5601e483000d96eaab121ce3ec0ae44c7b
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@postgres:5432/cairn_beacon_test
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_USER: cairn
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: cairn_beacon_test
+        options: >-
+          --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
     container:
       image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f
       options: --init --ipc=host
-    env:
-      PRODUCT_SHA: 0bb132942c2a65c0e5d9e071811c1ecde9087058
-      RUNTIME_SHA: b1863f5601e483000d96eaab121ce3ec0ae44c7b
     defaults:
       run:
         shell: bash
@@ -21,102 +36,284 @@ jobs:
       - uses: actions/checkout@v7.0.1
         timeout-minutes: 5
         with:
-          ref: 0bb132942c2a65c0e5d9e071811c1ecde9087058
-      - name: Bind source and require frozen runtime before any workload
+          ref: ba65b52ab8cca3a37aca61e5d19a7cee3fb010cc
+      - name: Record immutable focused-repair source
         timeout-minutes: 5
         env:
+          EXPECTED_SHA: ba65b52ab8cca3a37aca61e5d19a7cee3fb010cc
           OBSERVER_SHA: ${{ github.sha }}
         run: |
-          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = "$PRODUCT_SHA"
+          actual="$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)"
+          test "$actual" = "$EXPECTED_SHA"
+          git -c safe.directory="$GITHUB_WORKSPACE" log -1 --format='commit=%H tree=%T'
           test -z "$(git -c safe.directory="$GITHUB_WORKSPACE" status --porcelain)"
-          git -c safe.directory="$GITHUB_WORKSPACE" fetch --depth=1 --no-tags origin "$RUNTIME_SHA"
-          export C40_EVIDENCE_DIR="$RUNNER_TEMP/cairn-synthetic-physical-lifecycle"
+          git -c safe.directory="$GITHUB_WORKSPACE" fetch --depth=1 --no-tags origin "$OBSERVER_SHA"
+          export C40_EVIDENCE_DIR="$RUNNER_TEMP/cairn-availability-qualification"
+          mkdir -p "$C40_EVIDENCE_DIR/collection" "$C40_EVIDENCE_DIR/source"
           echo "C40_EVIDENCE_DIR=$C40_EVIDENCE_DIR" >> "$GITHUB_ENV"
-          mkdir -p "$C40_EVIDENCE_DIR"
-          python3 - <<'PYCODE'
-          import os, subprocess, pathlib, json
-          root=pathlib.Path.cwd(); evidence=pathlib.Path(os.environ['C40_EVIDENCE_DIR'])
-          def git(*args): return subprocess.check_output(['git','-c','safe.directory='+str(root),*args]).decode().strip()
-          expected={
-              'playwright.config.ts',
-              'tests/e2e/availability-lifecycle-fixture.ts',
-              'tests/e2e/availability-lifecycle-fixture.node.mjs',
-              'tests/e2e/availability-lifecycle.spec.ts',
-              'docs/agents/availability-lifecycle-fixture.md',
-          }
-          changed=set(git('diff','--name-only',os.environ['RUNTIME_SHA'],os.environ['PRODUCT_SHA']).splitlines())
-          assert changed==expected
-          assert not git('diff',os.environ['RUNTIME_SHA'],os.environ['PRODUCT_SHA'],'--','apps/web/src','tests/e2e/availability-bfcache.spec.ts')
-          (evidence/'source-binding.json').write_text(json.dumps({
-              'product':os.environ['PRODUCT_SHA'],'tree':git('rev-parse','HEAD^{tree}'),
-              'runtime':os.environ['RUNTIME_SHA'],'observer':os.environ['OBSERVER_SHA'],
-              'runtimeBlobsUnchanged':True,'originalAppTestUnchanged':True,
-              'appDirectQualified':False,'nativeGenerationPublicationCorrelation':False,
-          }))
-          PYCODE
+          git -c safe.directory="$GITHUB_WORKSPACE" show "$OBSERVER_SHA:.github/workflows/webkit-dependency-regression.yaml" > "$C40_EVIDENCE_DIR/source/selected-workflow.yaml"
+          sha256sum "$C40_EVIDENCE_DIR/source/selected-workflow.yaml" > "$C40_EVIDENCE_DIR/source/selected-workflow.sha256"
+          git -c safe.directory="$GITHUB_WORKSPACE" fetch --depth=1 --no-tags origin "$RUNTIME_SHA"
+          git -c safe.directory="$GITHUB_WORKSPACE" diff --exit-code "$RUNTIME_SHA" HEAD -- apps/web/src apps/web/public apps/web/index.html apps/web/beacon.html apps/web/vite.config.ts
+          printf '{"product":"%s","observer":"%s","runtime":"%s","mode":"focused-repair","physicalBFCacheQualified":false}\n' "$EXPECTED_SHA" "$OBSERVER_SHA" "$RUNTIME_SHA" > "$C40_EVIDENCE_DIR/source/binding.json"
       - uses: ./.github/actions/setup-pnpm
         timeout-minutes: 5
         with:
           cache: true
-      - name: Require exact preinstalled SDK and image
+      - name: Check browser image version
         timeout-minutes: 5
         run: |
           node --input-type=module <<'JS'
-          import assert from 'node:assert/strict'
           import { readFileSync } from 'node:fs'
-          assert.equal(JSON.parse(readFileSync('node_modules/@playwright/test/package.json','utf8')).version,'1.64.1')
-          assert.equal(JSON.parse(readFileSync('/ms-playwright/.docker-info','utf8')).driverVersion,'1.64.1')
+          const installed = JSON.parse(readFileSync('node_modules/@playwright/test/package.json', 'utf8')).version
+          const preinstalled = JSON.parse(readFileSync('/ms-playwright/.docker-info', 'utf8')).driverVersion
+          if (installed !== '1.64.1' || installed !== preinstalled)
+            throw new Error(`Update the pinned browser image: Playwright package ${installed}, image ${preinstalled}`)
           JS
-      - name: Real HTTP and closure controller light checks (NOT native)
-        timeout-minutes: 5
-        run: node --test tests/e2e/availability-lifecycle-fixture.node.mjs
-      - name: Recollect exactly the two existing engine projects before build
+      - name: Collect eight availability regression cases before compilation
         timeout-minutes: 5
         run: |
-          PLAYWRIGHT_JSON_OUTPUT_FILE="$C40_EVIDENCE_DIR/collection.json" ./node_modules/.bin/playwright test --config=playwright.config.ts --project=journeys-mcps --project=layout-webkit-mcps tests/e2e/availability-lifecycle.spec.ts --list --reporter=list,json
+          test ! -e target/debug/cairn
+          test ! -e target/debug/examples/browser_fixture
+          mkdir -p "$C40_EVIDENCE_DIR/collection"
+          PLAYWRIGHT_JSON_OUTPUT_FILE="$C40_EVIDENCE_DIR/collection/cases.json" ./node_modules/.bin/playwright test --config=playwright.config.ts --project=journeys-mcps --project=layout-webkit-mcps tests/e2e/mcps.spec.ts --grep availability --list --reporter=list,json
+          node --input-type=module <<'JS'
+          import { readFileSync, writeFileSync } from 'node:fs'
+          import { join } from 'node:path'
+          import assert from 'node:assert/strict'
+          const report = JSON.parse(readFileSync(join(process.env.C40_EVIDENCE_DIR, 'collection', 'cases.json'), 'utf8'))
+          const cases = []
+          function collect(suite) {
+            for (const spec of suite.specs || []) {
+              for (const test of spec.tests) {
+                assert.equal(test.results.length, 0)
+                cases.push([test.projectName, spec.title])
+              }
+            }
+            for (const child of suite.suites || []) collect(child)
+          }
+          for (const suite of report.suites) collect(suite)
+          assert.deepEqual(report.errors, [])
+          const titles = ['committed', 'cancelled'].map(destination => `availability keeps direct readers stable until native navigation is ${destination}`)
+          titles.push('availability resumes real reads after same-document persisted lifecycle')
+          titles.push('availability preserves a scoped readonly outage before native navigation')
+          const expected = ['journeys-mcps', 'layout-webkit-mcps'].flatMap(project => titles.map(title => [project, title]))
+          assert.deepEqual(cases.sort(), expected.sort())
+          writeFileSync(join(process.env.C40_EVIDENCE_DIR, 'collection', 'receipt.json'), JSON.stringify({ collectionOnly: true, cases }))
+          console.log('Exact availability collection: eight cases, including explicitly simulated lifecycle; no runtime execution.')
+          JS
+      - name: Collect authenticated history and reload recovery before compilation
+        timeout-minutes: 5
+        run: |
+          PLAYWRIGHT_JSON_OUTPUT_FILE="$C40_EVIDENCE_DIR/collection/history-reload.json" ./node_modules/.bin/playwright test --config=playwright.config.ts --project=journeys-mcps --project=layout-webkit-mcps tests/e2e/availability-history-reload.spec.ts --list --reporter=list,json
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict'
           import { readFileSync, writeFileSync } from 'node:fs'
-          const report=JSON.parse(readFileSync(process.env.C40_EVIDENCE_DIR+'/collection.json','utf8'))
-          const cases=[]
+          import { join } from 'node:path'
+          const report = JSON.parse(readFileSync(join(process.env.C40_EVIDENCE_DIR, 'collection', 'history-reload.json'), 'utf8'))
+          const cases = []
           function collect(suite) {
-            for (const spec of suite.specs||[]) {
+            for (const spec of suite.specs || []) {
               for (const test of spec.tests) {
-                assert.equal(test.results.length,0)
-                cases.push([test.projectName,spec.title])
+                assert.equal(test.results.length, 0)
+                cases.push([test.projectName, spec.title])
               }
             }
-            for (const child of suite.suites||[]) collect(child)
+            for (const child of suite.suites || []) collect(child)
           }
           for (const suite of report.suites) collect(suite)
-          const title='restores the real availability caller in an eligible synthetic lifecycle fixture'
-          assert.deepEqual(report.errors,[])
-          assert.deepEqual(cases,[['journeys-mcps',title],['layout-webkit-mcps',title]])
-          writeFileSync(process.env.C40_EVIDENCE_DIR+'/collection-receipt.json',JSON.stringify({collectionOnly:true,cases,appDirectQualified:false}))
+          assert.deepEqual(report.errors, [])
+          const title = 'availability recovers exact fresh documents through authenticated history and reload'
+          const expected = ['journeys-mcps', 'layout-webkit-mcps'].map(project => [project, title])
+          assert.deepEqual(cases.sort(), expected.sort())
+          writeFileSync(join(process.env.C40_EVIDENCE_DIR, 'collection', 'history-reload-receipt.json'), JSON.stringify({ collectionOnly: true, cases }))
+          console.log('Exact authenticated history/reload collection: two cases, no runtime execution or BFCache claim.')
           JS
-      - name: Build unchanged runtime entry for the isolated fixture only
+      - name: Collect existing main740 waits and saved-resume companions before compilation
         timeout-minutes: 5
-        run: VITE_CAIRN_TEST_RESUME_DIAGNOSTICS=true pnpm exec vite build --config apps/web/vite.config.ts
-      - name: Physical lifecycle in the synthetic fixture only
-        timeout-minutes: 5
-        env:
-          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/synthetic-physical-lifecycle
-        run: pnpm test:e2e --config=playwright.config.ts --project=journeys-mcps --project=layout-webkit-mcps tests/e2e/availability-lifecycle.spec.ts --workers=1 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results/synthetic-physical-lifecycle
-      - name: Always require exact final source identity
-        timeout-minutes: 5
-        if: always()
         run: |
-          mkdir -p "$RUNNER_TEMP/cairn-synthetic-physical-lifecycle"
-          git -c safe.directory="$GITHUB_WORKSPACE" log -1 --format='product=%H tree=%T' > "$RUNNER_TEMP/cairn-synthetic-physical-lifecycle/final-identity.txt"
-          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = "$PRODUCT_SHA"
-          test -z "$(git -c safe.directory="$GITHUB_WORKSPACE" status --porcelain)"
+          PLAYWRIGHT_JSON_OUTPUT_FILE="$C40_EVIDENCE_DIR/collection/main740.json" ./node_modules/.bin/playwright test --config=playwright.config.ts --project=journeys-chats --project=layout-webkit-chats tests/e2e/chats.spec.ts --grep 'a scheduled wait card follows its turn and clamps a long reason' --list --reporter=list,json
+          PLAYWRIGHT_JSON_OUTPUT_FILE="$C40_EVIDENCE_DIR/collection/resume.json" ./node_modules/.bin/playwright test --config=playwright.config.ts --project=journeys-chats tests/e2e/chats.spec.ts --grep 'same-provider quota resume' --list --reporter=list,json
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict'
+          import { readFileSync, writeFileSync } from 'node:fs'
+          import { join } from 'node:path'
+          const directory = join(process.env.C40_EVIDENCE_DIR, 'collection')
+          const selections = [
+            ['main740', ['journeys-chats', 'layout-webkit-chats'].flatMap(project => [false, true].map(late => [project, `a scheduled wait card follows its turn and clamps a long reason (late start: ${late})`]))],
+            ['resume', [
+              'same-provider quota resume submits the saved turn with the picker-applied speed',
+              'same-provider quota resume retries a prelaunch turn without selection',
+              'same-provider quota resume preserves an inherited blank model',
+              'same-provider quota resume submits the changed model default and unchanged saved effort',
+            ].map(title => ['journeys-chats', title])],
+          ]
+          for (const [name, expected] of selections) {
+            const report = JSON.parse(readFileSync(join(directory, `${name}.json`), 'utf8'))
+            const cases = []
+            function collect(suite) {
+              for (const spec of suite.specs || []) {
+                for (const test of spec.tests) {
+                  assert.equal(test.results.length, 0)
+                  cases.push([test.projectName, spec.title])
+                }
+              }
+              for (const child of suite.suites || []) collect(child)
+            }
+            for (const suite of report.suites) collect(suite)
+            assert.deepEqual(report.errors, [])
+            assert.deepEqual(cases.sort(), expected.sort())
+            writeFileSync(join(directory, `${name}-receipt.json`), JSON.stringify({ collectionOnly: true, cases }))
+          }
+          console.log('Exact existing companions collected: four main740 wait cases and four saved-resume cases; no runtime qualification.')
+          JS
+      - name: Collect primary dependants and both account authentication files before compilation
+        timeout-minutes: 5
+        run: |
+          PLAYWRIGHT_JSON_OUTPUT_FILE="$C40_EVIDENCE_DIR/collection/primary.json" ./node_modules/.bin/playwright test --config=playwright.config.ts deliverables.spec.ts skill-bundles.spec.ts beacon-sharing.spec.ts beacon-installations.spec.ts mcps.spec.ts --list --reporter=list,json
+          PLAYWRIGHT_JSON_OUTPUT_FILE="$C40_EVIDENCE_DIR/collection/dependants.json" ./node_modules/.bin/playwright test --config=playwright.config.ts beacon-relay.spec.ts direct-capacity.spec.ts chat-switch.spec.ts --project=journeys-beacon-relay --project=journeys-chat-switch --project=layout-webkit-chat-switch --list --reporter=list,json
+          PLAYWRIGHT_JSON_OUTPUT_FILE="$C40_EVIDENCE_DIR/collection/account.json" ./node_modules/.bin/playwright test --config=playwright.config.ts beacon-account.spec.ts beacon-oauth.spec.ts --project=journeys-beacon-account --list --reporter=list,json
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict'
+          import { readFileSync, writeFileSync } from 'node:fs'
+          import { join, basename } from 'node:path'
+          const selections = [
+            ['primary', 48, ['deliverables.spec.ts','skill-bundles.spec.ts','beacon-sharing.spec.ts','beacon-installations.spec.ts','mcps.spec.ts']],
+            ['dependants', 27, ['beacon-relay.spec.ts','direct-capacity.spec.ts','chat-switch.spec.ts']],
+            ['account', 5, ['beacon-account.spec.ts','beacon-oauth.spec.ts']],
+          ]
+          for (const [name, expectedCount, files] of selections) {
+            const report = JSON.parse(readFileSync(join(process.env.C40_EVIDENCE_DIR,'collection',name+'.json'),'utf8'))
+            const cases = []
+            function collect(suite) {
+              for (const spec of suite.specs || []) {
+                for (const test of spec.tests) {
+                  assert.equal(test.results.length,0)
+                  cases.push({project:test.projectName,title:spec.title,file:basename(spec.file)})
+                }
+              }
+              for (const child of suite.suites || []) collect(child)
+            }
+            for (const suite of report.suites) collect(suite)
+            assert.deepEqual(report.errors,[])
+            assert.equal(cases.length,expectedCount)
+            assert.deepEqual([...new Set(cases.map(test=>test.file))].sort(),files.sort())
+            if (name === 'account') {
+              assert(cases.every(test=>test.project==='journeys-beacon-account'))
+              assert(cases.some(test=>test.file==='beacon-oauth.spec.ts' && test.title==='Google and GitHub reuse an account, manage sign-in methods and preserve claim navigation'))
+              assert(cases.some(test=>test.file==='beacon-account.spec.ts' && test.title==='email sign-in works after a third party exhausts their challenge, persists and signs out'))
+            }
+            writeFileSync(join(process.env.C40_EVIDENCE_DIR,'collection',name+'-receipt.json'),JSON.stringify({collectionOnly:true,cases}))
+          }
+          JS
       - uses: actions/upload-artifact@v7.0.1
         timeout-minutes: 5
         if: always()
         with:
-          name: private-additional-synthetic-physical-lifecycle
+          name: availability-repair-collection
+          path: ${{ env.C40_EVIDENCE_DIR }}
+          retention-days: 14
+      - name: Install pinned Rust tools and browser build dependencies
+        timeout-minutes: 5
+        run: |
+          node scripts/prepare-browser-build-dependencies.mjs
+          timeout --signal=TERM --kill-after=5s 60s apt-get -o Acquire::Retries=0 -o Acquire::https::Timeout=20 install -y --no-install-recommends zip
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
+          "$HOME/.cargo/bin/rustup" component add rustfmt
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          for tool in git node pnpm python3 tar bash curl timeout cc pkg-config; do
+            command -v "$tool" > /dev/null
+          done
+          test -x /usr/bin/zip
+          test -x /usr/bin/python3
+          test -x /usr/bin/strip
+          test -x node_modules/.bin/vue-tsc
+          test -x node_modules/.bin/vite
+          "$HOME/.cargo/bin/cargo" --version
+          "$HOME/.cargo/bin/rustfmt" --version
+      - name: Format and require unchanged product source
+        timeout-minutes: 5
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: safe.directory
+          GIT_CONFIG_VALUE_0: ${{ github.workspace }}
+        run: |
+          format_result=0
+          pnpm lint:fix || format_result=$?
+          git -c safe.directory="$GITHUB_WORKSPACE" diff --binary > "$C40_EVIDENCE_DIR/formatter.patch"
+          source_result=0
+          git -c safe.directory="$GITHUB_WORKSPACE" diff --exit-code || source_result=$?
+          printf '{"formatterExit":%s,"sourceDiffExit":%s}\n' "$format_result" "$source_result" > "$C40_EVIDENCE_DIR/formatter-result.json"
+          test "$format_result" -eq 0
+          test "$source_result" -eq 0
+      - name: Qualify all web quality checks
+        timeout-minutes: 5
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: safe.directory
+          GIT_CONFIG_VALUE_0: ${{ github.workspace }}
+        run: pnpm check
+      - name: Build the manager fixtures
+        timeout-minutes: 5
+        run: cargo build --locked --bin cairn --example worker_fixture --example browser_fixture
+      - name: Build the Beacon fixtures
+        timeout-minutes: 5
+        run: cargo build --locked -p cairn-beacon --bin cairn-beacon --example beacon_sql_fixture
+      - name: Build PR browser assets with the existing saved-resume diagnostics
+        timeout-minutes: 5
+        run: VITE_CAIRN_TEST_RESUME_DIAGNOSTICS=true pnpm exec vite build --config apps/web/vite.config.ts
+      - name: Qualify the isolated Postgres fixture
+        timeout-minutes: 5
+        run: pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts
+      - name: Qualify the exact PR browser command on the product head
+        timeout-minutes: 5
+        env:
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/primary
+        run: pnpm test:e2e deliverables.spec.ts skill-bundles.spec.ts beacon-sharing.spec.ts beacon-installations.spec.ts mcps.spec.ts --workers=2 --retries=0 --fail-on-flaky-tests --trace=on
+      - name: Qualify direct relay and saved-reader dependants
+        timeout-minutes: 5
+        env:
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/specialists
+        run: pnpm test:e2e beacon-relay.spec.ts direct-capacity.spec.ts chat-switch.spec.ts --project=journeys-beacon-relay --project=journeys-chat-switch --project=layout-webkit-chat-switch --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results/specialists
+      - name: Qualify the existing saved-chat quota resume companions
+        timeout-minutes: 5
+        env:
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/saved-resume
+        run: pnpm test:e2e --project=journeys-chats tests/e2e/chats.spec.ts --grep 'same-provider quota resume' --workers=1 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results/saved-resume
+      - name: Preserve incoming main740 scheduled wait variants
+        timeout-minutes: 5
+        env:
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/main740
+        run: pnpm test:e2e chats.spec.ts --project=journeys-chats --project=layout-webkit-chats --grep 'a scheduled wait card follows its turn and clamps a long reason' --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results/main740
+      - name: Qualify authenticated fresh-document history and reload recovery
+        timeout-minutes: 5
+        env:
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/history-reload
+        run: pnpm test:e2e availability-history-reload.spec.ts --project=journeys-mcps --project=layout-webkit-mcps --workers=1 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results/history-reload
+      - name: Qualify account authentication and expired availability polling
+        timeout-minutes: 5
+        env:
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/account
+        run: pnpm test:e2e beacon-account.spec.ts beacon-oauth.spec.ts --project=journeys-beacon-account --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results/account
+      - name: Require final source identity
+        timeout-minutes: 5
+        if: always()
+        env:
+          EXPECTED_SHA: ba65b52ab8cca3a37aca61e5d19a7cee3fb010cc
+        run: |
+          export C40_EVIDENCE_DIR="${C40_EVIDENCE_DIR:-$RUNNER_TEMP/cairn-availability-qualification}"
+          mkdir -p "$C40_EVIDENCE_DIR/source"
+          git -c safe.directory="$GITHUB_WORKSPACE" log -1 --format='product=%H tree=%T' > "$C40_EVIDENCE_DIR/source/final-identity.txt"
+          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git -c safe.directory="$GITHUB_WORKSPACE" status --porcelain)"
+          sha256sum --check "$C40_EVIDENCE_DIR/source/selected-workflow.sha256"
+      - uses: actions/upload-artifact@v7.0.1
+        timeout-minutes: 5
+        if: always()
+        with:
+          name: availability-repair-browser-evidence
           path: |
-            ${{ runner.temp }}/cairn-synthetic-physical-lifecycle/
-            test-results/synthetic-physical-lifecycle/
-            playwright-report/synthetic-physical-lifecycle/
+            playwright-report/
+            test-results/
+            ${{ env.C40_EVIDENCE_DIR }}
           retention-days: 14

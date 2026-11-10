@@ -1,47 +1,44 @@
-# Additional physical availability lifecycle — source preparation only
+# Focused availability repair — SOURCE-ONLY provisional snapshot
 
-Selected workflow mode now covers ONLY the separate synthetic HTTP fixture,
-true beacon.html→beacon.ts→BeaconApp.vue caller on /claim with no installation
-selected, and the two existing Chromium/WebKit profiles sequentially. Runtime
-blobs are frozen at b1863f5601e483000d96eaab121ce3ec0ae44c7b. Full product/tests
-source pin 0bb132942c2a65c0e5d9e071811c1ecde9087058. Never merge this observer.
+Product ba65b52ab8cca3a37aca61e5d19a7cee3fb010cc/tree6786f4388dc5a467b1a82eb05095ffb2d68dcd8a, existing repair/availability-navigation;
+runtimeBLOBS b1863f5601e483000d96eaab121ce3ec0ae44c7b UNCHANGED. Do not merge observer.
+ROOT explicitly revised only the added BF physical admission criterion: product
+contract is conditional correct departure/return, not universal cache admission.
+No delivery/qualification inferred. All historical commits/runs428419/428753/428867,
+originalBFassertions and forensic evidence preserved in history/private artifacts.
 
-User accepted the scope in docs/agents/availability-lifecycle-fixture.md, not
-eligibility inferred from design. Preserve original appDirect BF test and both
-native non-admission failures; no waived persistedfalse/skip/retry, no production
-cache/auth/transport change. Synthetic fixture policy no-cache ONLY for fixed
-non-sensitive test data; production build/runtime bytes unchanged. Real modules,
-Vue/router, caller/timers/native gate/probe, no polling extraction/mocks/newseam.
+Delivered diff removes syntheticfixture and unconditionalBFadmission assertions.
+New accurately named availability-history-reload.spec.ts authenticates the real
+app, preserves nativefirstwithdrawal/originalJSONterminal/HTTPcancelprebody, uses
+normal SDKprofiles WITHOUT BFreactivation, realhistory return and reload requiring
+network200/newDocument/freshrequest exactJSON/OnlineDirect, secondcycle, no duplicate
+heldpoll, bounded independentclosure and strict HTTP/pageerror/terminalaudits.
+A cachehit is NOT fresh-document success; no persistedfalse=>BFrestorePASS/skip.
+No productionheader/auth/cache/grant/transport/runtime change. Existing actual
+module/caller source regressions remain, including conditional SAMETypeError
+retired-generation red/green; simulated browserlifecycle remains explicitlylabelled.
+NO nativeappgenpublicationcorrelation/guaranteedBASEbrowserRED/BFphysicalqualification.
 
-Native controls prepared: inert same server/profile, actual caller same Document
-with trusted persistedTRUE pagehide/pageshow, original abort/terminal/HTTP close
-before body, exact fresh HTTP200/DOM, second cycle rearming. Inert-only success,
-reload/unknown closure/errors are red. Existing7s/5m/25m/SDKimage1.64.1 preserved.
-All source before/after unchanged, no overlay is used in this selected mode.
+Selected workflow existingfocused-repair mode only, onejob25m/steps5m, existing
+SDK/image1.64.1digest/profiles/assert7s; actualSDK and CLI inventory BEFORE compiler:
+8MCP including readonlyoutage, historyreload2, primary/dependants, savedresume4,
+main740wait4, ACCOUNT+OAuth5cases. All counts are EXPECTEDGATES not runresults.
+Primary command unchanged, DirectRelayCapacitySavedReader, savedresume/main740,
+historyreload and realACCOUNT+OAuth401 then finalidentityALWAYS. No old diagnostic
+probe/classifier/matrix selected. Rust builds are fixture binaries only, no global
+backend/Android/network qualification; networking remains separate/nonadmitted.
 
-Crossed evidence remains bounded: real Node source conditional retired-generation
-same-TypeError red/green, no guaranteeBASEbrowserRED and no native application
-generation/publication correlation in original Page.goto. AuthACCOUNT/OAuth401,
-network and original appDirect eligibility plus global final qualification remain
-due. Current primary48PASS belongs to b186 only, not this new source.
+OAuth source journey now verifies real OAuth browser session expiration through
+availability401/redirect/stop via sibling; source prepared, NOT nativequalified.
+HTTPgate adds ONLY MCPdocument hold, permanent realHTTP unit regression. Light
+actualgate samecheck: candidatePASS, baseline0bbFAIL targetnotheld; no browser.
+Initial private Python orchestration typo stopped beforeexecution, preserved as
+setup-only not productRED. No factory/typeerror changes, errorfilters/retries/budget
+inflation/securityorUIfeature. All actualoldresults remain attached to exactoldhead.
 
-Current phase SOURCE-ONLY. No dispatch/native/build/Cargo/Gradle/browser local or
-newSDK/environment/ref/pilot/framework. Canonical pnpm/PW tools currently absent
-on C40; ROOT canonical snapshot checks and actual CLI selection are due. A fresh
-COMPLETE independent FULL ALLproduct+observer/callers/contracts is required; no
-old verdict transfers. ROOT QA and DISTINCT future admission before native work.
-P1OPEN/slotROOT/B-D-storageHOLD/UIcapturesLéo/Slackprod/grants intact.
-
-Archived NRR/PromiseState/skill/B534 sources remain unselected and their complete
-history/errors preserved. Run42875372366 acquired explicit partial native Chromium
-no-store/fetch/RTC exclusions AND masked, first identified back_forward/newDocument,
-persistedfalse; cleanup/audits/pageerrors0, source restorationPASS. Masked does not
-cancel the explicit exclusions, but prevents exhaustive cause and WebKit inference.
-No further quest for masked reasons or PromiseState is selected. Archived sources
-are still included in complete source review; controlled Node tests never qualify
-native results. Separate app BF reload recovery is a proposal only, not executed.
-
-Synthetic context establishes existing performance-upload preference false via
-storageState before load. Real monitor/uploader unchanged; unexpected POST stays
-red. Actual preference/uploader light comparison: default sends once at10s,
-persisted false sends zero, no abandoned tasks. Twelve source checks pass; not native.
+SEQUENCE: publish this PROVISIONALCLEAN snapshot for ROOTcanonicalformat/QA using
+existingtools; no localpnpm/PWdeps/install. Then soleC40applyexactpatch, finalclean
+commit, freshCOMPLETE independentSolHigh/forknone ALLproduct+ALLobserver/pinnedproduct,
+fixconfirmedfindings/freshFULLuntilclean. Do not transfer R75/H73/QA0bb. Source
+figé during review. NO CI/native/PR/autoci/merge before DISTINCT ROOTadmission.
+P1OPEN/slotROOT/B5dD3estorageHOLD/UIcapturesLéo/Slackprod/grants intact.
