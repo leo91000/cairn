@@ -45,6 +45,7 @@ import UiAlert from './components/UiAlert.vue'
 import UiButton from './components/UiButton.vue'
 import VirtualSelect from './components/VirtualSelect.vue'
 import WebUpdateNotice from './components/WebUpdateNotice.vue'
+import { documentLifetime } from './document-lifetime'
 import { restoreInstallationDrafts, transferInstallationDrafts } from './draft-transfer'
 import { Settings } from './icons'
 import { installationKey } from './installation-context'
@@ -621,15 +622,99 @@ let availabilityFailures = 0
 let availabilityStopped = false
 let availabilitySuspended = false
 
-async function refreshAvailability() {
+interface AvailabilityOwner {
+  controller: AbortController
+  session: AccountSession
+  generation: AbortController
+}
+
+let availabilityPublication: { cancel: () => void } | undefined
+
+function clearAvailabilityTimer() {
   clearTimeout(availabilityTimer)
-  if (availabilityStopped || availabilitySuspended || !session.value?.authenticated || document.hidden || state.redirecting || state.signingOut)
+  availabilityTimer = undefined
+}
+
+function currentAvailabilityScope(owner: AvailabilityOwner) {
+  return !owner.controller.signal.aborted && !owner.generation.signal.aborted
+    && documentLifetime.value === owner.generation && session.value === owner.session
+    && owner.session.authenticated && !availabilityStopped && !availabilitySuspended
+    && !state.signingOut && !state.redirecting
+}
+
+function finishAvailability(owner: AvailabilityOwner) {
+  if (availabilityRequest !== owner.controller)
     return
+  const schedule = currentAvailabilityScope(owner)
+  availabilityRequest = undefined
+  if (!schedule)
+    return
+  const timer = setTimeout(() => {
+    if (availabilityTimer !== timer)
+      return
+    availabilityTimer = undefined
+    if (currentAvailabilityScope(owner))
+      void refreshAvailability()
+  }, Math.min(15000, 3000 * 2 ** Math.min(availabilityFailures, 3)))
+
+  availabilityTimer = timer
+}
+
+function publishAvailabilityFailure(owner: AvailabilityOwner) {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const release = () => {
+    if (availabilityPublication !== publication)
+      return false
+    availabilityPublication = undefined
+    clearTimeout(timer)
+    owner.controller.signal.removeEventListener('abort', publication.cancel)
+    owner.generation.signal.removeEventListener('abort', publication.cancel)
+    return true
+  }
+
+  const publication = {
+    cancel() {
+      if (release())
+        finishAvailability(owner)
+    },
+  }
+
+  availabilityPublication = publication
+  owner.controller.signal.addEventListener('abort', publication.cancel, { once: true })
+  owner.generation.signal.addEventListener('abort', publication.cancel, { once: true })
+  // Keep the original read rejection intact. Only its state publication waits
+  // for another task, where its captured document/session/read must still own it.
+  timer = setTimeout(() => {
+    if (!release())
+      return
+    if (availabilityRequest === owner.controller && currentAvailabilityScope(owner)) {
+      for (const item of owner.session.installations)
+        item.online = false
+      state.installationOnline = false
+      availabilityFailures++
+    }
+
+    finishAvailability(owner)
+  }, 0)
+}
+
+function cancelAvailability() {
   availabilityRequest?.abort()
+  availabilityPublication?.cancel()
+  clearAvailabilityTimer()
+}
+
+async function refreshAvailability() {
+  clearAvailabilityTimer()
+  if (availabilityStopped || availabilitySuspended || documentLifetime.value.signal.aborted || !session.value?.authenticated || document.hidden || state.redirecting || state.signingOut)
+    return
+  cancelAvailability()
   const controller = new AbortController()
   availabilityRequest = controller
   const current = session.value
+  const owner: AvailabilityOwner = { controller, session: current, generation: documentLifetime.value }
   const read = readAvailability(controller.signal)
+  let failed = false
   try {
     const response = await read.response
     if (controller.signal.aborted)
@@ -660,27 +745,20 @@ async function refreshAvailability() {
   catch (cause) {
     if (controller.signal.aborted || cause instanceof AvailabilityDeparture)
       return
-    if (session.value === current) {
-      for (const item of current.installations)
-        item.online = false
-      state.installationOnline = false
-    }
-
-    availabilityFailures++
+    failed = true
   }
   finally {
     read.dispose()
-    const ownsTimer = availabilityRequest === controller
-    if (availabilityRequest === controller)
-      availabilityRequest = undefined
-    if (ownsTimer && !availabilityStopped && !availabilitySuspended && !controller.signal.aborted && !state.signingOut && !state.redirecting && session.value?.authenticated)
-      availabilityTimer = setTimeout(refreshAvailability, Math.min(15000, 3000 * 2 ** Math.min(availabilityFailures, 3)))
+    if (failed && availabilityRequest === controller && currentAvailabilityScope(owner))
+      publishAvailabilityFailure(owner)
+    else
+      finishAvailability(owner)
   }
 }
 
-watch(() => [session.value?.authenticated, state.signingOut, state.redirecting], () => {
+watch(() => [session.value, session.value?.authenticated, state.signingOut, state.redirecting], () => {
   if (state.signingOut || state.redirecting || !session.value?.authenticated)
-    availabilityRequest?.abort()
+    cancelAvailability()
   void refreshAvailability()
 }, { flush: 'sync' })
 
@@ -691,8 +769,7 @@ function visibleAvailability() {
 
 function suspendAvailability() {
   availabilitySuspended = true
-  availabilityRequest?.abort()
-  clearTimeout(availabilityTimer)
+  cancelAvailability()
 }
 
 function resumeAvailability() {
@@ -705,8 +782,7 @@ window.addEventListener('pagehide', suspendAvailability)
 window.addEventListener('pageshow', resumeAvailability)
 onScopeDispose(() => {
   availabilityStopped = true
-  availabilityRequest?.abort()
-  clearTimeout(availabilityTimer)
+  cancelAvailability()
   document.removeEventListener('visibilitychange', visibleAvailability)
   window.removeEventListener('pagehide', suspendAvailability)
   window.removeEventListener('pageshow', resumeAvailability)
