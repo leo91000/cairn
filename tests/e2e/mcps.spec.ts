@@ -433,6 +433,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       && !events(document, event.read).some(outcome => ['body', 'rejected', 'body-rejected'].includes(outcome.kind)
         || (outcome.kind === 'headers' && outcome.status !== 200)))
     let expectedFailure: AvailabilityReadEvent | undefined
+    let committedTerminal: AvailabilityReadEvent | undefined
     try {
       stage = 'initial direct reads'
       await page.clock.install()
@@ -441,12 +442,19 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
       await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
       const transport = page.locator('[data-transport-route]').first()
       await expect(transport).toHaveAttribute('data-transport-route', 'direct')
-      await page.evaluate(async () => {
+      const expectedAvailability = await page.evaluate(async () => {
         const reference = await fetch('/api/installations', { credentials: 'same-origin' })
         if (!reference.ok)
           throw new Error('The availability reference must be an authenticated success')
         window.cairnExpectedAvailability = await reference.json()
+        return window.cairnExpectedAvailability
       })
+      if (destination === 'committed') {
+        await page.addInitScript((reference) => {
+          window.cairnExpectedAvailability = reference
+        }, expectedAvailability)
+      }
+
       const departingDocument = await page.evaluate(() => window.cairnAvailabilityDocument)
       departingDocumentId = departingDocument
       await expect.poll(() => reads.some(event => event.document === departingDocument && event.kind === 'body')).toBe(true)
@@ -551,7 +559,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
 
         navigationValidated = true
         await harvestReads()
-        // Every availability body stays held until its cancellation receipt.
+        // Bodies stay held until their original terminal and wire closure are checked.
       }
 
       if (destination === 'committed') {
@@ -563,13 +571,35 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         }).toBe(true)
         expect(events(departingDocument, targetRead).filter(event => event.kind === 'body')).toEqual([])
         expect(secondRead).toBeDefined()
-        await expect.poll(() => events(departingDocument, secondRead!).filter(event => event.kind === 'abort').map(event => ({ trusted: event.trusted, exactTarget: event.exactTarget, insideAbortCall: event.insideAbortCall })))
-          .toEqual([{ trusted: true, exactTarget: true, insideAbortCall: true }])
-        await expect.poll(() => events(departingDocument, secondRead!).filter(event => event.kind === 'body-rejected').map(event => event.aborted)).toEqual([true])
+        stage = 'committed later read preserves its original terminal and document lifecycle'
+        await expect.poll(() => events(departingDocument, secondRead!).filter(event => event.kind === 'body-rejected').length).toBe(1)
+        const terminal = events(departingDocument, secondRead!).find(event => event.kind === 'body-rejected')!
+        if (terminal.aborted) {
+          expect(terminal.reasonMatches || terminal.errorName === 'AbortError').toBe(true)
+          expect(events(departingDocument, secondRead!).filter(event => event.kind === 'abort').map(event => ({ trusted: event.trusted, exactTarget: event.exactTarget, insideAbortCall: event.insideAbortCall })))
+            .toEqual([{ trusted: true, exactTarget: true, insideAbortCall: true }])
+        }
+        else {
+          // This declared committed outcome retains the raw native failure.
+          // It does not claim private abort ownership or app-generation evidence.
+          expect(terminal).toMatchObject({ kind: 'body-rejected', errorName: 'TypeError', aborted: false, reasonMatches: false })
+        }
+
         expect(events(departingDocument, secondRead!).filter(event => event.kind === 'body')).toEqual([])
+        // This is an HTTP closure receipt, not evidence of a private JS abort.
         await finishWithdrawal('delayed-availability', secondPoll!, departingDocument, secondRead!)
+        const departure = reads.filter(event => event.document === departingDocument && event.kind === 'pagehide')
+        expect(departure).toHaveLength(1)
+        expect(departure[0]).toMatchObject({ trusted: true, afterPagehide: true })
+        expect(departure[0]!.sequence).toBeGreaterThan(events(departingDocument, secondRead!).find(event => event.kind === 'body-start')!.sequence)
         await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
-        expect(await page.evaluate(() => window.cairnAvailabilityDocument)).not.toBe(departingDocument)
+        const freshDocument = await page.evaluate(() => window.cairnAvailabilityDocument)
+        expect(freshDocument).not.toBe(departingDocument)
+        await expect.poll(() => availabilityBodiesAfter(reads, freshDocument, 0).length).toBeGreaterThan(0)
+        await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
+        // The complete journal remains in the receipt. Only this validated
+        // committed-read terminal is accounted for separately in the audit.
+        committedTerminal = terminal
       }
       else if (destination === 'cancelled') {
         stage = 'retained document resumes an exact replacement after proven native abort'
@@ -723,7 +753,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
     // One late rejection must not discard an HTTP failure or a pageerror.
     const audits = [
       () => expect(incompleteAvailabilityReads(reads)).toEqual([]),
-      () => expect(reads.filter(event => ['rejected', 'body-rejected'].includes(event.kind) && !event.aborted)).toEqual([]),
+      () => expect(reads.filter(event => ['rejected', 'body-rejected'].includes(event.kind) && !event.aborted && event !== committedTerminal)).toEqual([]),
       () => expect(reads.filter(event => event.kind === 'headers' && event.status !== 200
         && !(expectedFailure && event.document === expectedFailure.document && event.read === expectedFailure.read && event.status === 503))).toEqual([]),
       () => expect(errors).toEqual([]),
@@ -746,6 +776,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         secondRead: secondRead ?? null,
         retainedSequence: retainedSequence ?? null,
         expectedFailure: expectedFailure ?? null,
+        committedTerminal: committedTerminal ?? null,
         navigationValidated,
         withdrawalReceipts,
         gates: gates.map(({

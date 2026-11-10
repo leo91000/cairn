@@ -306,6 +306,32 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
+it('preserves the same original terminal without publishing after generation retirement while its caller remains alive', async () => {
+  const f = current
+  const cycle = f.control.refreshAvailability()
+  f.headers(0)
+  await f.flush()
+  const owner = f.control.snapshot()
+  assert.ok(owner.request)
+  assert.equal(owner.request.signal.aborted, false)
+  f.control.departDocument()
+  assert.equal(owner.generation.signal.aborted, true)
+  assert.equal(owner.request.signal.aborted, false)
+  const cause = new TypeError('original JSON transport failure after retirement')
+  f.requests[0].body!.error(cause)
+  await cycle
+  await f.flush()
+  await assert.rejects(f.bodies[0], error => error === cause)
+  assert.equal(owner.request.signal.aborted, false)
+  assert.deepEqual({
+    offlineWrites: f.offlineWrites(),
+    online: f.state.installationOnline,
+    failures: f.control.snapshot().failures,
+    tasks: f.delays(),
+  }, { offlineWrites: 0, online: true, failures: 0, tasks: [] })
+  assert.equal(f.control.snapshot().request, undefined)
+})
+
 it('keeps an identical original TypeError but cancels publication when pagehide precedes its task', async () => {
   const f = current
   const cycle = f.control.refreshAvailability()
