@@ -92,6 +92,7 @@ function fixture(nativePublication = false) {
         offlineWrites++
         published.resolve()
       }
+
       Reflect.set(target, name, value)
       return true
     },
@@ -136,6 +137,7 @@ function fixture(nativePublication = false) {
       return request.headers.promise
     },
   }
+
   // Controlled message delivery shares this fixture's task queue, but is not
   // a production timer. The liveness case below uses actual Node message ports.
   class ControlledMessageChannel {
@@ -150,6 +152,7 @@ function fixture(nativePublication = false) {
         if (delivery !== undefined)
           timers.delete(delivery)
       }
+
       this.port1 = { onmessage: null, close }
       this.port2 = {
         postMessage: () => {
@@ -211,6 +214,7 @@ function fixture(nativePublication = false) {
   const flush = async () => {
     await setImmediate()
   }
+
   const takeTask = (delay: number) => {
     const entry = [...timers].find(([, timer]) => timer.delay === delay)
     assert.ok(entry, `Expected one owned task with delay ${delay}`)
@@ -560,6 +564,7 @@ it('publishes active failure independently of a paused timer clock', async () =>
   finally {
     clearNativeTimeout(deadline)
   }
+
   assert.equal(f.offlineWrites(), 1)
   assert.equal(f.control.snapshot().failures, 1)
   assert.deepEqual(f.delays(), [6000])
