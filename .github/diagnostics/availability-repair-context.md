@@ -53,7 +53,7 @@ allowlist: new native reason codes are retained; format validation protects
 privacy, and the defined masked marker refuses incomplete native information.
 No native statement is inferred from controlled Node fixtures.
 
-29 light Node tests exercise the SAME serialized projection, controller,
+30 light Node tests exercise the SAME serialized projection, controller,
 closedTargetBound helper, exact patch/restore and actual preserved cleanup code.
 They cover closed output, wrong identity, unknown/null/masked, nonfixed codes,
 first checkpoint failure retention, one history call, timeout and closure red.

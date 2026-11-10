@@ -269,3 +269,12 @@ test('actual patched cleanup starts HTTP closure despite stalled page and drains
   const acquisitionResult = await acquisition()
   assert.equal(finalizeNativeReasonDiagnostic(acquisitionResult.receipt, { ...closure, cleanupFailureCount: result.failures.length, pageClosed: false }).observationComplete, false)
 })
+
+
+test('publication cannot trust a usable flag inconsistent with native identity or presence', async () => {
+  const result = await acquisition()
+  for (const key of ['apiPresent', 'historyEntryMatched', 'reasonsPresent']) {
+    const changed = { ...result.receipt, native: { ...result.receipt.native, [key]: false } }
+    assert.equal(finalizeNativeReasonDiagnostic(changed, closure).observationComplete, false)
+  }
+})

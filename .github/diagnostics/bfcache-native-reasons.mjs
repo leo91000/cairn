@@ -154,9 +154,16 @@ export function validateClosedProjection(value) {
   }
   if (value.tree === null)
     return value.nodeCount === 0 && value.reasonCount === 0 && value.projectionComplete === false
-  if (value.projectionComplete && (value.reasonCount === 0 || value.masked || value.truncated || value.malformed || value.evaluationFailed))
+  if (value.projectionComplete && (!value.reasonsPresent || value.reasonCount === 0 || value.masked || value.truncated || value.malformed || value.evaluationFailed))
     return false
   return visit(value.tree, 0) && nodes === value.nodeCount && reasons === value.reasonCount
+}
+
+export function nativeProjectionUsable(projected) {
+  return Boolean(validateClosedProjection(projected) && projected.apiPresent && projected.nativeEntry && projected.mainFrame && projected.identityPresent
+    && projected.historyEntryMatched && projected.locationMatched && projected.stableContext && projected.reasonsPresent
+    && projected.navigationType === 'back_forward' && !projected.originalDocumentSame && projected.projectionComplete
+    && !projected.masked && !projected.truncated && !projected.malformed && !projected.evaluationFailed)
 }
 
 export async function acquireNativeReasonDiagnostic(control) {
@@ -194,10 +201,7 @@ export async function acquireNativeReasonDiagnostic(control) {
       throw new Error('Native reason projection is not closed')
     receipt.projectionReceived = true
     receipt.native = projected
-    receipt.nativeReadUsable = projected.apiPresent && projected.nativeEntry && projected.mainFrame && projected.identityPresent
-      && projected.historyEntryMatched && projected.locationMatched && projected.stableContext
-      && projected.navigationType === 'back_forward' && !projected.originalDocumentSame && projected.projectionComplete
-      && !projected.masked && !projected.truncated && !projected.malformed && !projected.evaluationFailed
+    receipt.nativeReadUsable = nativeProjectionUsable(projected)
     if (!receipt.nativeReadUsable)
       throw new Error('Native reason acquisition is inconclusive')
   }
@@ -214,7 +218,9 @@ export function finalizeNativeReasonDiagnostic(receipt, closure) {
     && Object.keys(receipt).every(key => allowed.has(key)) && booleans.every(key => typeof receipt[key] === 'boolean')
     && Number.isInteger(receipt.historyAttempts) && receipt.historyAttempts >= 0 && receipt.historyAttempts <= 1
     && (receipt.browserVersion === null || (typeof receipt.browserVersion === 'string' && /^[A-Za-z0-9.+_() -]{1,96}$/.test(receipt.browserVersion)))
-    && (receipt.native === null || validateClosedProjection(receipt.native)))
+    && (receipt.native === null || validateClosedProjection(receipt.native))
+    && receipt.nativeReadUsable === nativeProjectionUsable(receipt.native)
+    && (!receipt.nativeReadUsable || (receipt.historyAttempts === 1 && receipt.historyCompleted && receipt.projectionReceived && receipt.checkpointObserved && receipt.checkpointConsistent && receipt.browserVersion !== null)))
   const countsKnown = [closure.cleanupFailureCount, closure.auditFailureCount].every(n => Number.isInteger(n) && n >= 0)
   const out = Object.fromEntries(booleans.map(key => [key, closed && receipt[key] === true]))
   return {
