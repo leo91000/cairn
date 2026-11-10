@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import {
+  mkdir,
+  mkdtemp,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises'
 import { request } from 'node:http'
 import path from 'node:path'
 import { test } from 'node:test'
@@ -37,8 +43,10 @@ async function fixture(run) {
     catch (cause) {
       failure ??= cause
     }
+
     await rm(directory, { recursive: true, force: true })
   }
+
   if (failure)
     throw failure
 }
@@ -198,7 +206,12 @@ test('existing persisted user choice prevents unrelated real uploader traffic be
         return true
       },
     })
-    uploader.update({ accountId: 'synthetic', csrf: 'synthetic', foreground: true, enabled: preference.refresh() })
+    uploader.update({
+      accountId: 'synthetic',
+      csrf: 'synthetic',
+      foreground: true,
+      enabled: preference.refresh(),
+    })
     now = 10000
     for (const [callback, at] of tasks) {
       if (at <= now) {
@@ -206,6 +219,7 @@ test('existing persisted user choice prevents unrelated real uploader traffic be
         await callback()
       }
     }
+
     uploader.stop()
     assert.equal(tasks.size, 0)
     return sends

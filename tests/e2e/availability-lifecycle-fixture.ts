@@ -69,24 +69,29 @@ export async function availabilityLifecycleFixture(directory = path.resolve('dis
         })
         return
       }
+
       if (pathname === '/api/account/options') {
         json({ google: false, github: false, passkeys: false })
         return
       }
+
       if (pathname === '/api/account/invitations') {
         json([])
         return
       }
+
       if (pathname === '/api/installations') {
         availabilityRequests++
         json(lifecycleAvailability(online))
         return
       }
+
       if (pathname === '/inert' || pathname === '/health') {
         response.writeHead(200, { 'Content-Type': 'text/html' })
         response.end(`<!doctype html><title>Lifecycle control</title><h1>${pathname === '/inert' ? 'Inert control' : 'Away'}</h1>`)
         return
       }
+
       // Exact built entry, unchanged scripts and assets. No path fallback to a
       // successful page: unexpected APIs, traversals and missing assets are red.
       const relative = pathname === '/claim' ? 'beacon.html' : pathname.slice(1)
@@ -95,6 +100,7 @@ export async function availabilityLifecycleFixture(directory = path.resolve('dis
         || /^\/(?:icons|brand)\/[\w.-]+$/.test(pathname))) {
         throw new Error('Unexpected lifecycle fixture path')
       }
+
       const file = path.join(root, relative)
       const resolved = await realpath(file)
       if (!resolved.startsWith(`${root}${path.sep}`) || !(await lstat(file)).isFile())

@@ -126,7 +126,7 @@ test('restores the real availability caller in an eligible synthetic lifecycle f
       expect(await page.evaluate(() => window.cairnAvailabilityDocument)).toBe(original)
       await harvest()
       const restored = lifecycleEvents(original, 'pageshow').filter(event => event.persisted)
-      expect(restored.map(event => event.trusted)).toEqual(Array.from({ length: completedCycles + 1 }, () => true))
+      expect(restored.map(event => event.trusted)).toEqual(Array.from({ length: completedCycles + 1 }).fill(true))
       const restoredSequence = restored.at(-1)!.sequence
       await expect.poll(() => reads.filter(event => event.document === original && event.kind === 'body' && event.sequence > restoredSequence).map(event => ({ status: event.status, exactBody: event.exactBody })))
         .toEqual([{ status: 200, exactBody: true }])
@@ -137,6 +137,7 @@ test('restores the real availability caller in an eligible synthetic lifecycle f
       await expect(page.getByRole('button', { name: `Lifecycle installation · ${online ? 'Online' : 'Offline'}`, exact: true })).toBeVisible()
       completedCycles++
     }
+
     navigation = page.goto(`${lifecycle.url}/health`)
     await navigation
     await harvest()
@@ -171,6 +172,7 @@ test('restores the real availability caller in an eligible synthetic lifecycle f
       }
     }
   }
+
   const audits = [
     () => expect(incompleteAvailabilityReads(reads)).toEqual([]),
     () => expect(reads.filter(event => ['rejected', 'body-rejected'].includes(event.kind) && !event.aborted)).toEqual([]),
@@ -188,6 +190,7 @@ test('restores the real availability caller in an eligible synthetic lifecycle f
       failures.push(cause)
     }
   }
+
   try {
     writeFileSync(testInfo.outputPath('availability-lifecycle.json'), JSON.stringify({
       scope: 'synthetic-claim-no-selected-installation',
@@ -205,6 +208,7 @@ test('restores the real availability caller in an eligible synthetic lifecycle f
   catch (cause) {
     failures.push(cause)
   }
+
   if (primaryFailures.length || failures.length)
     throw new AggregateError([...primaryFailures, ...failures], 'Synthetic lifecycle restoration failed')
 })
