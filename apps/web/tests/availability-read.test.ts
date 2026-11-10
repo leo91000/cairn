@@ -611,7 +611,6 @@ it('accounts for native fetch, optional body and unread HTTP disposal as distinc
   assert.deepEqual(incompleteAvailabilityReads([{ ...start, kind: 'pagehide', read: 0 }, { ...start, kind: 'pageshow', read: 0 }]), [])
 })
 
-
 it('forwards the exact fetch arguments and receiver, including an empty argument list', async () => {
   const original = Promise.resolve(new NativeResponse({} as Call, 200))
   const received: { receiver: unknown, args: unknown[] }[] = []
@@ -619,6 +618,7 @@ it('forwards the exact fetch arguments and receiver, including an empty argument
     received.push({ receiver: this, args })
     return original
   }
+
   await installSourceProbe()
   const fetch = ownerWindow.fetch as typeof globalThis.fetch
   const receiver = {}
@@ -627,6 +627,7 @@ it('forwards the exact fetch arguments and receiver, including an empty argument
     assert.equal(received.at(-1)!.receiver, receiver)
     assert.deepEqual(received.at(-1)!.args, args)
   }
+
   await original
 })
 
@@ -634,17 +635,24 @@ it('leaves fetch input coercion and the identical original rejection to the orig
   const cause = new TypeError('original fetch input refusal')
   const original = Promise.reject(cause)
   void original.catch(() => {})
-  const input = { toString() { throw cause } }
+  const input = {
+    toString() {
+      throw cause
+    },
+  }
   let invoked = 0
   ownerWindow.fetch = function (...args: unknown[]) {
     invoked++
     assert.equal(args[0], input)
     return original
   }
+
   const storage = await installSourceProbe()
   const fetch = ownerWindow.fetch as typeof globalThis.fetch
   let returned: Promise<Response> | undefined
-  assert.doesNotThrow(() => { returned = Reflect.apply(fetch, ownerWindow, [input]) })
+  assert.doesNotThrow(() => {
+    returned = Reflect.apply(fetch, ownerWindow, [input])
+  })
   assert.equal(returned, original)
   await assert.rejects(returned!, value => value === cause)
   assert.equal(invoked, 1)
@@ -673,6 +681,7 @@ it('never consumes method or signal accessors a second time for metadata', async
     assert.equal(options.signal, signal)
     return original
   }
+
   const storage = await installSourceProbe()
   const returned = Reflect.apply(ownerWindow.fetch as typeof fetch, ownerWindow, ['/api/installations', init])
   assert.equal(returned, original)
@@ -691,8 +700,13 @@ it('preserves an original synchronous fetch exception without a metadata excepti
     invoked++
     throw cause
   }
+
   await installSourceProbe()
-  const input = { toString() { throw new Error('metadata must not run first') } }
+  const input = {
+    toString() {
+      throw new Error('metadata must not run first')
+    },
+  }
   assert.throws(() => Reflect.apply(ownerWindow.fetch as typeof fetch, ownerWindow, [input]), error => error === cause)
   assert.equal(invoked, 1)
 })
@@ -723,33 +737,37 @@ it('keeps original active fetch and JSON failures while recording distinct read 
 it('forwards JSON arguments and actual receiver while keeping the original promise', async () => {
   const response = new NativeResponse({} as Call, 200)
   const originalBody = Promise.resolve({ original: true })
-  let receiver: unknown
-  let args: unknown[] | undefined
+  const received: { receiver: unknown, args: unknown[] }[] = []
   NativeResponse.prototype.json = function (...input: unknown[]) {
-    receiver = this
-    args = input
+    received.push({ receiver: this, args: input })
     return originalBody
   }
+
   ownerWindow.fetch = () => Promise.resolve(response)
   await installSourceProbe()
   const returned = await Reflect.apply(ownerWindow.fetch as typeof fetch, ownerWindow, ['/api/installations'])
   const original = Reflect.apply(returned.json, returned, ['extra', undefined])
   assert.equal(original, originalBody)
   assert.deepEqual(await original, { original: true })
-  assert.equal(receiver, response)
-  assert.deepEqual(args, ['extra', undefined])
+  assert.equal(received[0]!.receiver, response)
+  assert.deepEqual(received[0]!.args, ['extra', undefined])
 })
 
 it('forwards abort arguments and actual signal ownership without reading an instance accessor', async () => {
   const controller = new NativeController()
   const signal = controller.signal
-  Object.defineProperty(controller, 'signal', { get() { throw new Error('instance accessor must not be inspected') } })
+  Object.defineProperty(controller, 'signal', {
+    get() {
+      throw new Error('instance accessor must not be inspected')
+    },
+  })
   const original = Promise.resolve(new NativeResponse({} as Call, 200))
   const received: { receiver: unknown, args: unknown[] }[] = []
   NativeController.prototype.abort = function (...args: unknown[]) {
     received.push({ receiver: this, args })
     Reflect.apply(hostAbort, this, args)
   }
+
   ownerWindow.fetch = () => original
   await installSourceProbe()
   assert.equal(Reflect.apply(ownerWindow.fetch as typeof fetch, ownerWindow, ['/api/installations', { signal }]), original)
@@ -768,8 +786,15 @@ it('keeps native promises unchanged when observation storage or delivery fails, 
   ownerWindow.fetch = () => original
   await installSourceProbe()
   const failures: AvailabilityReadEvent[] = []
-  vi.stubGlobal('sessionStorage', { getItem() { throw new Error('original unavailable observer storage') } })
-  ownerWindow.cairnAvailabilityRecord = async (event: AvailabilityReadEvent) => { failures.push(event) }
+  vi.stubGlobal('sessionStorage', {
+    getItem() {
+      throw new Error('original unavailable observer storage')
+    },
+  })
+  ownerWindow.cairnAvailabilityRecord = async (event: AvailabilityReadEvent) => {
+    failures.push(event)
+  }
+
   assert.equal(Reflect.apply(ownerWindow.fetch as typeof fetch, ownerWindow, ['/api/installations']), original)
   await original
   await flush()

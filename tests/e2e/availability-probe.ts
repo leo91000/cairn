@@ -43,47 +43,74 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
       journal.push(entry)
       sessionStorage.setItem('cairn-e2e-availability-journal', JSON.stringify(journal))
     }
+
     const observationFailed = () => {
       window.cairnAvailabilityProbeFailures++
       const entry: AvailabilityReadEvent = {
-        kind: 'observer-failed', sequence: ++eventSequence,
-        document: documentId, read: 0, aborted: false, afterPagehide: pageHidden,
+        kind: 'observer-failed',
+        sequence: ++eventSequence,
+        document: documentId,
+        read: 0,
+        aborted: false,
+        afterPagehide: pageHidden,
       }
       // An unavailable sink must not replace an application's native result.
       // Persist/forward the failure independently, without recursive delivery.
-      try { store(entry) }
+      try {
+        store(entry)
+      }
       catch {}
+
       try {
         const delivery = window.cairnAvailabilityRecord(entry)
         void Reflect.apply(then, delivery, [undefined, () => {}])
       }
       catch {}
     }
+
     const record = (event: Omit<AvailabilityReadEvent, 'sequence'>) => {
       const entry = { ...event, sequence: ++eventSequence }
-      try { store(entry) }
-      catch { observationFailed() }
+      try {
+        store(entry)
+      }
+      catch {
+        observationFailed()
+      }
+
       try {
         const delivery = window.cairnAvailabilityRecord(entry)
         void Reflect.apply(then, delivery, [undefined, observationFailed])
       }
-      catch { observationFailed() }
+      catch {
+        observationFailed()
+      }
     }
+
     const observe = <T>(original: Promise<T>, fulfilled: (value: T) => void, rejected: (cause: unknown) => void) => {
       try {
         const observation = Reflect.apply(then, original, [
           (value: T) => {
-            try { fulfilled(value) }
-            catch { observationFailed() }
+            try {
+              fulfilled(value)
+            }
+            catch {
+              observationFailed()
+            }
           },
           (cause: unknown) => {
-            try { rejected(cause) }
-            catch { observationFailed() }
+            try {
+              rejected(cause)
+            }
+            catch {
+              observationFailed()
+            }
           },
         ])
         void Reflect.apply(then, observation, [undefined, observationFailed])
       }
-      catch { observationFailed() }
+      catch {
+        observationFailed()
+      }
     }
 
     for (const kind of ['pagehide', 'pageshow'] as const) {
@@ -119,6 +146,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
       controllerSignal = Object.getOwnPropertyDescriptor(controllerPrototype, 'signal')?.get
       controllerPrototype = Object.getPrototypeOf(controllerPrototype)
     }
+
     const recordRead = (meta: Metadata, kind: AvailabilityReadEvent['kind'], detail: Partial<AvailabilityReadEvent> = {}) => record({
       kind,
       document: documentId,
@@ -148,6 +176,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
           observationFailed()
           return original
         }
+
         if (args[0] !== '/api/installations')
           return original
         if (args[1] != null) {
@@ -158,11 +187,13 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
             observationFailed()
             return original
           }
+
           const method: unknown = descriptors.method?.value
           if (method !== undefined && typeof method !== 'string') {
             observationFailed()
             return original
           }
+
           if (typeof method === 'string' && method.toUpperCase() !== 'GET')
             return original
           signal = descriptors.signal?.value
@@ -176,6 +207,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
         observationFailed()
         return original
       }
+
       const meta: Metadata = {
         read: ++sequence,
         signal,
@@ -192,9 +224,12 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
               meta.nativeSignal = native && meta.insideAbortCall
               recordRead(meta, 'abort', { trusted: event.isTrusted, exactTarget: native, insideAbortCall: meta.insideAbortCall })
             }
-            catch { observationFailed() }
+            catch {
+              observationFailed()
+            }
           }, { once: true })
         }
+
         recordRead(meta, 'start')
         // Observe without replacing the original promise or cloning its Response.
         observe(original, (response) => {
@@ -203,7 +238,10 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
           recordRead(meta, 'headers', { status: response.status })
         }, cause => rejected(meta, 'rejected', cause))
       }
-      catch { observationFailed() }
+      catch {
+        observationFailed()
+      }
+
       return original
     }
 
@@ -217,8 +255,13 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
         original = Reflect.apply(json, this, args)
       }
       catch (cause) {
-        try { rejected(meta, 'body-rejected', cause) }
-        catch { observationFailed() }
+        try {
+          rejected(meta, 'body-rejected', cause)
+        }
+        catch {
+          observationFailed()
+        }
+
         throw cause
       }
 
@@ -240,7 +283,10 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
         else
           observationFailed()
       }
-      catch { observationFailed() }
+      catch {
+        observationFailed()
+      }
+
       if (!meta)
         return Reflect.apply(abort, this, args)
       meta.insideAbortCall = true
