@@ -133,70 +133,115 @@ import process from 'node:process'
     }
 
     function validateObservedOutcomes() {
-      expect(errors).toEqual([])
-      expect(bodyFailures).toEqual([])
-      for (const [request, terminal] of requests) {
-        if (terminal === 'pending')
-          throw new Error('A finite HTTP request has no terminal receipt at the final boundary')
-        if (request === targetPoll)
-          record(`target-network-${terminal}`)
-        const status = statuses.get(request)
-        const successfulResponse = status !== undefined && status >= 200 && status < 300
-        if ((status !== undefined && !successfulResponse) || (terminal === 'finished' && status === undefined))
-          throw new Error(`An observed finite HTTP response has unexpected status ${status ?? 'unknown'}`)
-        if (terminal === 'failed')
-          throw new Error('An observed finite HTTP request failed unexpectedly')
-        const requestEpoch = epochs.get(request)
-        const retired = requestEpoch !== undefined && requestEpoch < epoch
-        const read = ['GET', 'HEAD'].includes(request.method())
-        const path = new URL(request.url()).pathname
-        const directControl = request.method() === 'POST' && /^\/api\/installations\/[^/]+\/direct\/(?:authorize|[^/]+\/(?:signal|renew))$/.test(path)
-        const abortedControl = directControl && [...fetchCalls.values()].some(call => call.path === path && call.method === 'POST'
-          && call.aborted && documentEpochs.get(call.document) === requestEpoch
-          && journal.some(event => event.document === call.document && event.kind.startsWith('pagehide-')))
-        const withdrawn = retired && (read || abortedControl)
-        if (terminal === 'cancelled' && request !== targetPoll && !withdrawn)
-          throw new Error('An HTTP cancellation lacks old-document read provenance')
+      const auditFailures: unknown[] = []
+      const audit = (run: () => void) => {
+        try {
+          run()
+        }
+        catch (cause) {
+          auditFailures.push(cause)
+        }
       }
-      for (const status of streamStatuses.values()) {
-        if (status !== 200)
-          throw new Error(`An observed native chat stream has unexpected HTTP status ${status}`)
-      }
-      for (const [request, terminal] of nativeStreams) {
-        const status = streamStatuses.get(request)
-        if (terminal === 'pending' && epochs.get(request) !== epoch)
-          throw new Error('A retired native stream has no terminal receipt at the final boundary')
-        if (terminal === 'failed')
-          throw new Error('A native chat request failed without an attributable cancellation')
-        if ((terminal === 'finished' || terminal === 'pending') && status !== 200)
-          throw new Error('A native chat request has no successful opening proof')
-        if (terminal === 'cancelled') {
+      audit(() => {
+        expect(errors).toEqual([])
+      })
+      audit(() => {
+        expect(bodyFailures).toEqual([])
+      })
+      audit(() => {
+        for (const [request, terminal] of requests) {
+          if (terminal === 'pending')
+            throw new Error('A finite HTTP request has no terminal receipt at the final boundary')
+          if (request === targetPoll)
+            record(`target-network-${terminal}`)
+          const status = statuses.get(request)
+          const successfulResponse = status !== undefined && status >= 200 && status < 300
+          if ((status !== undefined && !successfulResponse) || (terminal === 'finished' && status === undefined))
+            throw new Error(`An observed finite HTTP response has unexpected status ${status ?? 'unknown'}`)
+          if (terminal === 'failed')
+            throw new Error('An observed finite HTTP request failed unexpectedly')
           const requestEpoch = epochs.get(request)
           const retired = requestEpoch !== undefined && requestEpoch < epoch
-          const handoff = requestEpoch === epoch && status === 200 && currentStreamHandoff
-          if (!retired && !handoff)
-            throw new Error('A native chat cancellation lacks document retirement or successful direct handoff')
+          const read = ['GET', 'HEAD'].includes(request.method())
+          const path = new URL(request.url()).pathname
+          const directControl = request.method() === 'POST' && /^\/api\/installations\/[^/]+\/direct\/(?:authorize|[^/]+\/(?:signal|renew))$/.test(path)
+          const abortedControl = directControl && [...fetchCalls.values()].some(call => call.path === path && call.method === 'POST'
+            && call.aborted && documentEpochs.get(call.document) === requestEpoch
+            && journal.some(event => event.document === call.document && event.kind.startsWith('pagehide-')))
+          const withdrawn = retired && (read || abortedControl)
+          if (terminal === 'cancelled' && request !== targetPoll && !withdrawn)
+            throw new Error('An HTTP cancellation lacks old-document read provenance')
         }
-      }
-      expect(nativeSourceErrors).toEqual([])
-      if (deliveryFailure && (!targetPoll || requests.get(targetPoll) !== 'cancelled'))
-        throw deliveryFailure
-      for (const failure of fetchFailures) {
-        const target = failure.document === departingDocument && failure.poll === targetJavaScriptPoll
-        if (target) {
-          if (!targetPoll || requests.get(targetPoll) !== 'cancelled')
-            throw new Error('The target JavaScript rejection has no matching native cancellation')
-          if (failure.kind !== expectedTargetRejection)
-            throw new Error('The target rejection does not match its control-specific caller signal state')
-          continue
+      })
+      audit(() => {
+        for (const status of streamStatuses.values()) {
+          if (status !== 200)
+            throw new Error(`An observed native chat stream has unexpected HTTP status ${status}`)
         }
-        const withdrawnCaller = failure.document !== currentDocument && failure.kind.endsWith('-signal-aborted')
-          && journal.some(event => event.document === failure.document && event.kind.startsWith('pagehide-'))
-        if (!withdrawnCaller)
-          throw new Error('A JavaScript fetch rejection lacks target or retired-caller cancellation provenance')
+      })
+      audit(() => {
+        for (const [request, terminal] of nativeStreams) {
+          const status = streamStatuses.get(request)
+          if (terminal === 'pending' && epochs.get(request) !== epoch)
+            throw new Error('A retired native stream has no terminal receipt at the final boundary')
+          if (terminal === 'failed')
+            throw new Error('A native chat request failed without an attributable cancellation')
+          if ((terminal === 'finished' || terminal === 'pending') && status !== 200)
+            throw new Error('A native chat request has no successful opening proof')
+          if (terminal === 'cancelled') {
+            const requestEpoch = epochs.get(request)
+            const retired = requestEpoch !== undefined && requestEpoch < epoch
+            const handoff = requestEpoch === epoch && status === 200 && currentStreamHandoff
+            if (!retired && !handoff)
+              throw new Error('A native chat cancellation lacks document retirement or successful direct handoff')
+          }
+        }
+      })
+      audit(() => {
+        expect(nativeSourceErrors).toEqual([])
+      })
+      audit(() => {
+        if (deliveryFailure && (!targetPoll || requests.get(targetPoll) !== 'cancelled'))
+          throw deliveryFailure
+      })
+      audit(() => {
+        for (const failure of fetchFailures) {
+          const target = failure.document === departingDocument && failure.poll === targetJavaScriptPoll
+          if (target) {
+            if (!targetPoll || requests.get(targetPoll) !== 'cancelled')
+              throw new Error('The target JavaScript rejection has no matching native cancellation')
+            if (failure.kind !== expectedTargetRejection)
+              throw new Error('The target rejection does not match its control-specific caller signal state')
+            continue
+          }
+          const withdrawnCaller = failure.document !== currentDocument && failure.kind.endsWith('-signal-aborted')
+            && journal.some(event => event.document === failure.document && event.kind.startsWith('pagehide-'))
+          if (!withdrawnCaller)
+            throw new Error('A JavaScript fetch rejection lacks target or retired-caller cancellation provenance')
+        }
+      })
+      audit(() => {
+        if (routeFailure)
+          throw routeFailure
+      })
+      if (auditFailures.length)
+        throw new AggregateError(auditFailures, 'B534 independent outcome audits failed')
+    }
+
+    const outcomeFailures: unknown[] = []
+    const observedCleanup = async (operation: () => Promise<unknown>, label: string) => {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        return await Promise.race([
+          Promise.resolve().then(operation),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`B534 cleanup deadline: ${label}`)), 7000)
+          }),
+        ])
       }
-      if (routeFailure)
-        throw routeFailure
+      finally {
+        clearTimeout(timer)
+      }
     }
 
     record('setup-entered')
@@ -481,37 +526,50 @@ import process from 'node:process'
       }).toBe(true)
 
     }
+    catch (cause) {
+      outcomeFailures.push(cause)
+      record('workload-failed')
+    }
     finally {
       releasePoll.resolve()
       releaseNavigation.resolve()
       record('cleanup-entered')
       let cleanupCompleted = false
       try {
-        await navigation?.catch(() => {})
-        await page.unrouteAll({ behavior: 'wait' })
-        await expect.poll(() => [...requests.values()].every(state => state !== 'pending'), {
-          message: 'Every observed finite application HTTP request has terminated',
-        }).toBe(true)
-        await expect.poll(() => [...nativeStreams].every(([request, terminal]) => epochs.get(request) === epoch || terminal !== 'pending'), {
-          message: 'Every retired-document native chat request has terminated',
-        }).toBe(true)
-        currentStreamHandoff = await page.evaluate(() => {
-          const observation = (window as any).b534Observation
-          return observation.directChatAccepted
-            && document.querySelector('[data-transport-route]')?.getAttribute('data-transport-route') === 'direct'
-        })
-        await browserSettled()
-        currentDocument = await page.evaluate(() => (window as any).b534Observation.documentId as string)
+        await observedCleanup(async () => {
+          await navigation?.catch(() => {})
+          await page.unrouteAll({ behavior: 'wait' })
+          await expect.poll(() => [...requests.values()].every(state => state !== 'pending'), {
+            message: 'Every observed finite application HTTP request has terminated',
+          }).toBe(true)
+          await expect.poll(() => [...nativeStreams].every(([request, terminal]) => epochs.get(request) === epoch || terminal !== 'pending'), {
+            message: 'Every retired-document native chat request has terminated',
+          }).toBe(true)
+          currentStreamHandoff = await page.evaluate(() => {
+            const observation = (window as any).b534Observation
+            return observation.directChatAccepted
+              && document.querySelector('[data-transport-route]')?.getAttribute('data-transport-route') === 'direct'
+          })
+          await browserSettled()
+          currentDocument = await page.evaluate(() => (window as any).b534Observation.documentId as string)
+        }, 'document observations')
         cleanupCompleted = true
+      }
+      catch (cause) {
+        outcomeFailures.push(cause)
       }
       finally {
         record(cleanupCompleted ? 'cleanup-completed' : 'cleanup-failed')
-        try {
-          await testInfo.attach('b534-navigation', { path: journalPath, contentType: 'application/json' })
-        }
-        finally {
-          await provider?.close()
-          record('provider-closed')
+        const owners = await Promise.allSettled([
+          observedCleanup(() => testInfo.attach('b534-navigation', { path: journalPath, contentType: 'application/json' }), 'attachment'),
+          observedCleanup(async () => {
+            await provider?.close()
+            record('provider-closed')
+          }, 'provider'),
+        ])
+        for (const owner of owners) {
+          if (owner.status === 'rejected')
+            outcomeFailures.push(owner.reason)
         }
       }
     }
@@ -522,7 +580,9 @@ import process from 'node:process'
     }
     catch (cause) {
       record('outcome-validation-failed')
-      throw cause
+      outcomeFailures.push(cause)
     }
+    if (outcomeFailures.length)
+      throw new AggregateError(outcomeFailures, 'B534 workload, cleanup or outcome validation failed')
   })
 }

@@ -84,3 +84,12 @@ no run of newhead even closed. Existing/uncertain run => no redispatch. After th
 first result: report acquired/missing and return slot ROOT; no retry/correction/
 other lot admitted. Networkqualification+recovery remain separate, not admitted.
 P1globalOPEN, B/D/storageHOLD, UI534679 capturesLeo gates/Slackprodgrants intact.
+
+An archived B534 source error path is also corrected without selecting its runtime:
+workload, cleanup observations, attachment/provider closure and independent final
+outcome audits retain separate failures, including the original first cause.
+Cleanup observations and independent provider/attachment work remain bounded7s;
+final audits run after rejection/timeout too. Eight actual-callback source fixture
+scenarios pass; three new contracts fail on the immutable previous source. These
+are controlled adapters only, not native data or a B534 browser replay. Fresh ALL
+observer review must include that archive and its permanent Node runner.
