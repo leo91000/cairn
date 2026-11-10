@@ -74,6 +74,21 @@ DOCKER_TOOLS = (
      '47737f4236e6d3ccea7291995203f8f018058783b4c3a9469119811a0b5db8c0', {'': 'plugins/docker-compose'}),
 )
 
+
+# These public API routes identify the same release assets as the canonical URLs
+# above. Keep the canonical URL for archive format/provenance and the exact digest
+# for byte identity; no API credential or metadata lookup is required.
+DOCKER_GITHUB_ASSETS = {
+    'https://github.com/rootless-containers/rootlesskit/releases/download/v3.3.0/rootlesskit-x86_64.tar.gz':
+        'https://api.github.com/repos/rootless-containers/rootlesskit/releases/assets/638878224',
+    'https://github.com/rootless-containers/slirp4netns/releases/download/v1.3.6/slirp4netns-x86_64':
+        'https://api.github.com/repos/rootless-containers/slirp4netns/releases/assets/606623788',
+    'https://github.com/docker/buildx/releases/download/v0.38.1/buildx-v0.38.1.linux-amd64':
+        'https://api.github.com/repos/docker/buildx/releases/assets/660618355',
+    'https://github.com/docker/compose/releases/download/v5.6.1/docker-compose-linux-x86_64':
+        'https://api.github.com/repos/docker/compose/releases/assets/661714739',
+}
+
 DOCKER_WRAPPER = '''#!/bin/sh
 set -eu
 if test "${1:-}" = cairn-reset; then
@@ -177,6 +192,39 @@ def require_docker_host():
         raise PrerequisiteError('kernel')
 
 
+def open_docker_tool(url):
+    # Retry only public, idempotent acquisition failures, before any bytes are
+    # accepted. Attempts share the existing 60-second acquisition timeout;
+    # transfer, size, digest and extraction failures remain terminal.
+    asset = DOCKER_GITHUB_ASSETS.get(url)
+    request = (urllib.request.Request(asset, headers={
+        'Accept': 'application/octet-stream',
+        'X-GitHub-Api-Version': '2022-11-28',
+    }) if asset else url)
+    deadline = time.monotonic() + 60
+    for attempt in range(3):
+        if attempt and STOP:
+            raise InterruptedError('Native Docker tool acquisition interrupted.')
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('Native Docker tool acquisition deadline exhausted.')
+        try:
+            response = urllib.request.urlopen(request, timeout=min(60, remaining))
+            if time.monotonic() >= deadline:
+                response.close()
+                raise TimeoutError('Native Docker tool acquisition deadline exhausted.')
+            return response
+        except urllib.error.HTTPError as error:
+            error.close()
+            backoff = 2 ** attempt
+            remaining = deadline - time.monotonic()
+            if error.code not in (502, 503, 504) or attempt == 2 or remaining <= backoff or STOP:
+                raise
+            # Fixed fields only: never emit response bodies or request details.
+            print(f'Native Docker tool acquisition retry: status={error.code} attempt={attempt + 1}', file=sys.stderr)
+            time.sleep(backoff)
+
+
 def prepare_docker_tools():
     # Bump this package generation when wrapper or generated metadata changes.
     target = INSTALL / 'docker-tools/v2'
@@ -196,7 +244,7 @@ def prepare_docker_tools():
         for url, digest, names in DOCKER_TOOLS:
             archive = stage / 'download'
             # These public downloads carry no enrollment/node credential.
-            with urllib.request.urlopen(url, timeout=60) as response, archive.open('wb') as output:
+            with open_docker_tool(url) as response, archive.open('wb') as output:
                 total = 0
                 while chunk := response.read(65536):
                     total += len(chunk)
