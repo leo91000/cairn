@@ -21,6 +21,12 @@ each status refresh. These responses contain only fixed synthetic data, with no
 real account authentication or secret. No Beacon/manager header, authorization,
 production cache policy, transport code or runtime source changes are involved.
 Unexpected APIs, methods, queries, missing assets and path escapes fail the fixture.
+The context stores the existing user's performance-upload preference as false
+before loading the application. The real monitor/uploader remain unchanged;
+this explicit synthetic-user choice prevents legitimate background telemetry
+from becoming an unrelated unexpected POST during a slow cycle. The light test
+uses the actual preference/uploader: default sends once after ten seconds, this
+persisted choice sends none, and neither leaves a task after retirement.
 
 The test uses the existing native response gate and availability probe. It does
 not use Playwright routing, dispatch synthetic lifecycle events, accelerate the

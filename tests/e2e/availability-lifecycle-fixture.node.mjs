@@ -5,9 +5,12 @@ import { request } from 'node:http'
 import path from 'node:path'
 import { test } from 'node:test'
 import { setImmediate } from 'node:timers/promises'
+import { performancePreference } from '../../apps/web/src/client-performance-preference.ts'
+import { performanceUploader } from '../../apps/web/src/client-performance-upload.ts'
 import {
   availabilityLifecycleFixture,
   lifecycleAvailability,
+  lifecycleStorageState,
   retireLifecycleOwners,
 } from './availability-lifecycle-fixture.ts'
 import { nativeResponseGate } from './native-response-gate.ts'
@@ -167,4 +170,49 @@ test('HTTP retirement is idempotent and refuses subsequent data changes', async 
     assert.throws(() => server.setAvailability(false), /retired/)
     await assert.rejects(fetch(`${server.url}/api/installations`))
   })
+})
+
+test('existing persisted user choice prevents unrelated real uploader traffic beyond 10s', async () => {
+  async function uploads(storage) {
+    const values = storage?.origins[0].localStorage ?? []
+    const preference = performancePreference({
+      read: () => {
+        const value = values.find(item => item.name === 'cairn_performance_upload')?.value
+        return value === undefined ? undefined : value === 'true'
+      },
+      write() {},
+    })
+    let now = 0
+    let sends = 0
+    const tasks = new Map()
+    const uploader = performanceUploader({
+      now: () => now,
+      schedule: (callback, milliseconds) => {
+        tasks.set(callback, now + milliseconds)
+        return () => tasks.delete(callback)
+      },
+      report: () => ({ measurements: { windowId: 'controlled', sequence: 1 } }),
+      enabled: () => preference.refresh(),
+      send: async () => {
+        sends++
+        return true
+      },
+    })
+    uploader.update({ accountId: 'synthetic', csrf: 'synthetic', foreground: true, enabled: preference.refresh() })
+    now = 10000
+    for (const [callback, at] of tasks) {
+      if (at <= now) {
+        tasks.delete(callback)
+        await callback()
+      }
+    }
+    uploader.stop()
+    assert.equal(tasks.size, 0)
+    return sends
+  }
+
+  // Controlled old fixture precondition: the real default generates a POST.
+  assert.equal(await uploads(undefined), 1)
+  // Same real preference/uploader and task cadence, persisted user choice only.
+  assert.equal(await uploads(lifecycleStorageState('http://localhost:4322')), 0)
 })

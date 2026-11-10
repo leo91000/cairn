@@ -5,6 +5,7 @@ import {
   availabilityLifecycleFixture,
   lifecycleAvailability,
   lifecycleBound,
+  lifecycleStorageState,
   retireLifecycleOwners,
 } from './availability-lifecycle-fixture'
 import { incompleteAvailabilityReads, installAvailabilityProbe } from './availability-probe'
@@ -34,6 +35,7 @@ const test = base.extend<{
     }
   },
   proxy: async ({ responseGate }, use) => use({ server: responseGate.server }),
+  storageState: async ({ lifecycle }, use) => use(lifecycleStorageState(lifecycle.url)),
 })
 
 test.use({ launchOptions: { ignoreDefaultArgs: ['--disable-back-forward-cache'] } })

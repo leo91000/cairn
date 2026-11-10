@@ -8,6 +8,15 @@ export function lifecycleAvailability(online: boolean) {
   return [{ id: 'lifecycle-installation', online, updateRequired: false }]
 }
 
+// Existing user preference, not a disabled monitor or a replaced uploader. Keep
+// unrelated telemetry out of this fixed-data fixture even on a slow native run.
+export function lifecycleStorageState(origin: string) {
+  return {
+    cookies: [],
+    origins: [{ origin, localStorage: [{ name: 'cairn_performance_upload', value: 'false' }] }],
+  }
+}
+
 // Synthetic, non-sensitive data only. This cache policy is NOT a Beacon override.
 // The shipped Beacon entry loads /claim without selecting an installation, so the
 // real InstallationTransport.start() guard refuses RTC without replacing it.
