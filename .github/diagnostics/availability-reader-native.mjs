@@ -133,10 +133,12 @@ function nativeDiagnostics(mode) {
     }
     channel.port2.postMessage(null)
   }
-  window.addEventListener('pagehide', () => {
+  const pagehideEntry = function diagnosticPagehideEntry() {
     if (channel) { channel.port1.close(); channel.port2.close(); channel = undefined }
     snapshots.length = 0
-  })
+  }
+  window.cairnNativePagehideEntry = pagehideEntry
+  window.addEventListener('pagehide', pagehideEntry)
   const record = (kind, extra = {}) => {
     const journal = JSON.parse(sessionStorage.getItem('cairn-native-fetch-journal') || '[]')
     journal.push({ kind, sequence: journal.length + 1, ...extra })
@@ -222,6 +224,38 @@ function ownPageCdp(context, page, pageOwner, trackCdp, onClosed) {
   })
 }
 
+// Derive pause provenance from the paused frame and reported live context.
+// Expected scope is a comparison target, never a substitute for missing data.
+function identifyPause(event, expected, scripts, contexts) {
+  const frame = event.callFrames?.[0]
+  const scriptId = frame?.location?.scriptId
+  const script = scripts.get(scriptId)
+  const context = script && contexts.get(script.executionContextId)
+  const actual = {
+    callFrameId: frame?.callFrameId ?? null,
+    scriptId: scriptId ?? null,
+    functionLocation: frame?.functionLocation ?? null,
+    executionContextId: script?.executionContextId ?? null,
+    uniqueId: context?.uniqueId ?? null,
+    frameId: context?.auxData?.frameId ?? null,
+    defaultContext: context?.auxData?.isDefault ?? null,
+    origin: context?.origin ?? null,
+  }
+  const result = { status: 'unknown', actual, entryMatched: false }
+  if (!actual.callFrameId || !script || !context || !actual.functionLocation || !script.uniqueId)
+    return result
+  const locationMatches = actual.functionLocation.scriptId === expected.entry.scriptId
+    && actual.functionLocation.lineNumber === expected.entry.lineNumber
+    && actual.functionLocation.columnNumber === expected.entry.columnNumber
+  const contextMatches = actual.executionContextId === expected.context.id
+    && actual.uniqueId === expected.context.uniqueId && script.uniqueId === actual.uniqueId
+    && actual.frameId === expected.frameId && actual.defaultContext === true
+    && actual.origin === expected.origin
+  result.entryMatched = locationMatches && actual.scriptId === expected.entry.scriptId
+  result.status = contextMatches && result.entryMatched ? 'matching-frame-context' : 'wrong'
+  return result
+}
+
 async function observe(browser, cell, closedPrototype) {
   const arm = cell.engine + '-' + cell.mode
   const received = []
@@ -236,6 +270,8 @@ async function observe(browser, cell, closedPrototype) {
   let context, page, gate, navigation, documentId, initial, destination, next, outage, contextOwner, pageOwner, gateOwner
   let cdp, cdpOwner, cdpAdmission, originalPromiseBoundary, debuggerAction
   let cdpCloseObserved = false
+  let cleanupStartedAt, postCommitReceipt
+  const pauseReceipts = []
   const cdpTasks = new Set()
   const cdpTaskRecords = []
   const trackCdp = (method, operation) => {
@@ -271,6 +307,12 @@ async function observe(browser, cell, closedPrototype) {
     const pending = appendFile(output + '/' + arm + '.reads.jsonl', JSON.stringify(event) + '\n')
     writes.add(pending)
     void pending.catch(error => cleanupFailure('receipt-write', error)).finally(() => writes.delete(pending))
+  }
+  const persistEvidence = (name, value) => {
+    const pending = write(name, value)
+    writes.add(pending)
+    void pending.then(() => writes.delete(pending), () => writes.delete(pending))
+    return observed(() => pending, 'persist ' + name)
   }
   const evaluate = (fn, value) => observed(() => page.evaluate(fn, value), 'evaluate: ' + phase)
   const events = read => received.filter(event => event.document === documentId && event.read === read)
@@ -378,13 +420,20 @@ async function observe(browser, cell, closedPrototype) {
       cdpOwner = ownPageCdp(context, page, pageOwner, trackCdp, () => { cdpCloseObserved = true })
       const cdpResource = await observed(() => cdpOwner.result, 'CDP acquisition')
       cdp = cdpResource.session
-      const executionContexts = []
-      cdp.on('Runtime.executionContextCreated', event => executionContexts.push(event.context))
+      const executionContexts = new Map()
+      const scriptScopes = new Map()
+      cdp.on('Runtime.executionContextCreated', event => executionContexts.set(event.context.id, event.context))
+      cdp.on('Runtime.executionContextDestroyed', event => executionContexts.delete(event.executionContextId))
+      cdp.on('Runtime.executionContextsCleared', () => executionContexts.clear())
+      cdp.on('Debugger.scriptParsed', event => {
+        const context = executionContexts.get(event.executionContextId)
+        scriptScopes.set(event.scriptId, { executionContextId: event.executionContextId, uniqueId: context?.uniqueId ?? null })
+      })
       await observed(() => sendCdp('Runtime.enable'), 'runtime contexts')
       cdpAdmission.runtimeAck = true
       await write(arm + '.cdp-admission.json', cdpAdmission)
       const frame = await observed(() => sendCdp('Page.getFrameTree'), 'owned main frame identity')
-      const currentContexts = executionContexts.filter(context => context.auxData?.isDefault === true
+      const currentContexts = [...executionContexts.values()].filter(context => context.auxData?.isDefault === true
         && context.auxData.frameId === frame.frameTree.frame.id && context.origin === origin)
       assert.equal(currentContexts.length, 1)
       const currentContext = currentContexts[0]
@@ -395,22 +444,71 @@ async function observe(browser, cell, closedPrototype) {
       await observed(() => sendCdp('Debugger.enable'), 'debugger enable')
       cdpAdmission.debuggerAck = true
       await write(arm + '.cdp-admission.json', cdpAdmission)
+      // Bind the first registered fixture listener to its actual function location.
+      // This does not read or replace the native JSON promise.
+      const entry = await observed(() => sendCdp('Runtime.evaluate', {
+        uniqueContextId: currentContext.uniqueId,
+        expression: 'globalThis.cairnNativePagehideEntry',
+        returnByValue: false, silent: true, throwOnSideEffect: true,
+      }), 'registered pagehide entry reference')
+      assert.equal(entry.exceptionDetails, undefined)
+      assert.equal(entry.result.type, 'function')
+      assert.ok(entry.result.objectId)
+      const entryProperties = await observed(() => sendCdp('Runtime.getProperties', {
+        objectId: entry.result.objectId, ownProperties: true,
+      }), 'registered pagehide entry location')
+      assert.equal(entryProperties.exceptionDetails, undefined)
+      const entryLocation = entryProperties.internalProperties?.find(item => item.name === '[[FunctionLocation]]')?.value?.value
+      assert.equal(typeof entryLocation?.scriptId, 'string')
+      assert.equal(Number.isInteger(entryLocation?.lineNumber), true)
+      assert.equal(Number.isInteger(entryLocation?.columnNumber), true)
+      const entryScope = scriptScopes.get(entryLocation.scriptId)
+      assert.equal(entryScope?.executionContextId, currentContext.id)
+      assert.equal(entryScope?.uniqueId, currentContext.uniqueId)
+      cdpAdmission.entry = entryLocation
+      await write(arm + '.cdp-admission.json', cdpAdmission)
+      const expectedPause = { context: currentContext, frameId: frame.frameTree.frame.id, origin, entry: entryLocation }
+
       const paused = Promise.withResolvers()
       debuggerAction = paused.promise
       cdp.once('Debugger.paused', event => {
+        const ingress = {
+          ingressAtMs: performance.now(), phase, reason: event.reason ?? null,
+          eventName: event.data?.eventName ?? null, expectedDocument: documentId,
+          observedDocument: null, bodyHeldAtIngress: Boolean(next && !next.bodyReleased),
+          cleanupStartedAtIngress: cleanupStartedAt ?? null,
+          provenance: identifyPause(event, expectedPause, scriptScopes, executionContexts),
+          status: 'unverified',
+        }
+        pauseReceipts.push(ingress)
         void (async () => {
           let observationError
           try {
-            assert.equal(event.reason, 'EventListener')
-            assert.equal(event.data?.eventName, 'listener:pagehide')
-            assert.ok(next)
+            await persistEvidence(arm + '.pause-ingress.json', ingress)
+            assert.equal(ingress.reason, 'EventListener')
+            assert.equal(ingress.eventName, 'listener:pagehide')
+            assert.equal(ingress.provenance.status, 'matching-frame-context')
+            assert.equal(cleanupStartedAt, undefined)
+            assert.equal(ingress.bodyHeldAtIngress, true)
+            assert.equal(next.bodyReleased, false)
+            const pausedDocument = await observed(() => sendCdp('Debugger.evaluateOnCallFrame', {
+              callFrameId: ingress.provenance.actual.callFrameId,
+              expression: 'globalThis.cairnAvailabilityDocument',
+              returnByValue: true, silent: true, throwOnSideEffect: true,
+            }), 'paused frame document identity')
+            assert.equal(pausedDocument.exceptionDetails, undefined)
+            ingress.observedDocument = pausedDocument.result.value ?? null
+            ingress.status = ingress.observedDocument === documentId ? 'verified-document' : 'wrong-document'
+            await persistEvidence(arm + '.pause-ingress.json', ingress)
+            assert.equal(ingress.status, 'verified-document')
+            assert.equal(cleanupStartedAt, undefined)
             assert.equal(next.bodyReleased, false)
             await observed(() => sendCdp('DOMDebugger.removeEventListenerBreakpoint', { eventName: 'pagehide' }), 'remove pagehide breakpoint')
-            const target = await observed(() => sendCdp('Runtime.evaluate', {
-              uniqueContextId: currentContext.uniqueId,
+            const target = await observed(() => sendCdp('Debugger.evaluateOnCallFrame', {
+              callFrameId: ingress.provenance.actual.callFrameId,
               expression: 'globalThis.cairnNativeOriginalJSON',
               returnByValue: false, silent: true, throwOnSideEffect: true,
-            }), 'reference original native JSON promise')
+            }), 'same paused frame original native JSON promise')
             assert.equal(target.exceptionDetails, undefined)
             assert.equal(target.result.subtype, 'promise')
             assert.ok(target.result.objectId)
@@ -418,19 +516,25 @@ async function observe(browser, cell, closedPrototype) {
               objectId: target.result.objectId, ownProperties: true,
             }), 'original native promise internal state')
             assert.equal(properties.exceptionDetails, undefined)
+            assert.equal(cleanupStartedAt, undefined)
+            assert.equal(next.bodyReleased, false)
+            const stillCurrent = identifyPause(event, expectedPause, scriptScopes, executionContexts)
+            assert.equal(stillCurrent.status, 'matching-frame-context')
             const internal = properties.internalProperties || []
             const state = internal.find(item => item.name === '[[PromiseState]]')?.value
             const result = internal.find(item => item.name === '[[PromiseResult]]')?.value
             originalPromiseBoundary = {
-              beforeFirstListenerBody: true, reason: event.reason, eventName: event.data.eventName,
-              exactOwnedContext: true, document: documentId, read: 3, promiseState: state?.value ?? null,
+              beforeFirstListenerBody: ingress.provenance.entryMatched && ingress.reason === 'EventListener',
+              reason: ingress.reason, eventName: ingress.eventName,
+              exactOwnedContext: stillCurrent.status === 'matching-frame-context' && ingress.status === 'verified-document',
+              document: ingress.observedDocument, read: 3, promiseState: state?.value ?? null,
               resultSubtype: result?.subtype ?? null, resultClassName: result?.className ?? null,
-              originalBodyHeld: !next.bodyReleased,
+              originalBodyHeld: !next.bodyReleased, pauseIngressAtMs: ingress.ingressAtMs,
               cancellationEvidence: false, productQualified: false,
             }
-            await write(arm + '.original-promise-boundary.json', originalPromiseBoundary)
+            await persistEvidence(arm + '.original-promise-boundary.json', originalPromiseBoundary)
           }
-          catch (error) { observationError = error }
+          catch (error) { ingress.status = ingress.status === 'unverified' ? 'refused' : ingress.status; observationError = error }
           finally {
             try { await observed(() => sendCdp('Debugger.resume'), 'resume first pagehide callback') }
             catch (error) { observationError ||= error }
@@ -636,17 +740,38 @@ async function observe(browser, cell, closedPrototype) {
         : cell.mode === 'owned-body' || cell.mode === 'body-failure-first' ? 'body-rejected' : 'fetch-rejected'
       checkpoint = await stateReceipt(lastRead, lastTrigger)
       destination.release()
-      if (cell.mode === 'pre-pagehide-original-body')
-        await observed(() => debuggerAction, 'first pagehide original promise observation')
-      const arrival = await observed(() => navigation, 'destination commit')
-      assert.equal(arrival.kind, 'committed')
-      navigationValidated = true
-      await expect(page.getByRole('heading', { name: 'Destination', exact: true })).toBeVisible()
-      await poll(() => destination.closed && destination.terminal === 'finished')
       if (cell.mode === 'pre-pagehide-original-body') {
-        // Commit is confirmed. Recover synchronous old-document receipts even
-        // if its exposed binding was dropped when the execution context died.
-        await harvest()
+        const commitAndJournal = observed(async () => {
+          const arrival = await navigation
+          assert.equal(arrival.kind, 'committed')
+          navigationValidated = true
+          await harvest()
+          assert.equal(cleanupStartedAt, undefined)
+          assert.equal(next.bodyReleased, false)
+          const receipt = { departingDocument: documentId, currentDocument: checkpoint.document,
+            capturedAtMs: performance.now(), beforeCleanup: cleanupStartedAt === undefined,
+            bodyHeld: !next.bodyReleased, journal: checkpoint.journal, native: checkpoint.native }
+          await persistEvidence(arm + '.post-commit-journal.json', receipt)
+          assert.equal(cleanupStartedAt, undefined)
+          assert.equal(next.bodyReleased, false)
+          postCommitReceipt = { departingDocument: documentId, currentDocument: checkpoint.document,
+            capturedAtMs: receipt.capturedAtMs, persistedAtMs: performance.now(), beforeCleanup: cleanupStartedAt === undefined,
+            departingEvents: checkpoint.journal.filter(item => item.document === documentId).length }
+          journalAcknowledged = true
+        }, 'destination commit and persisted journal').catch(error => {
+          remember('destination commit and persisted journal', error)
+          throw error
+        })
+        const pauseObservation = observed(() => debuggerAction, 'first pagehide original promise observation').catch(error => {
+          remember('first pagehide original promise observation', error)
+          throw error
+        })
+        const outcomes = await Promise.allSettled([commitAndJournal, pauseObservation])
+        const errors = outcomes.filter(item => item.status === 'rejected').map(item => item.reason)
+        if (errors.length)
+          throw errors[0]
+        await expect(page.getByRole('heading', { name: 'Destination', exact: true })).toBeVisible()
+        await poll(() => destination.closed && destination.terminal === 'finished')
         assert.equal(originalPromiseBoundary?.beforeFirstListenerBody, true)
         assert.equal(originalPromiseBoundary.promiseState, 'rejected')
         assert.equal(originalPromiseBoundary.resultSubtype, 'error')
@@ -657,6 +782,13 @@ async function observe(browser, cell, closedPrototype) {
         assert.equal(terminal(3)[0].errorName, 'TypeError')
         assert.equal(terminal(3)[0].aborted, false)
         assert.equal(events(3).some(event => event.kind === 'abort'), false)
+      }
+      else {
+        const arrival = await observed(() => navigation, 'destination commit')
+        assert.equal(arrival.kind, 'committed')
+        navigationValidated = true
+        await expect(page.getByRole('heading', { name: 'Destination', exact: true })).toBeVisible()
+        await poll(() => destination.closed && destination.terminal === 'finished')
       }
       }
 
@@ -670,6 +802,7 @@ async function observe(browser, cell, closedPrototype) {
   }
   catch (error) { remember(phase, error) }
   finally {
+    cleanupStartedAt = performance.now()
     // All failed observations remain red; closing one owner never gates another.
     waiterPendingAtCleanup = Boolean(navigation && !navigationOutcome)
     outage?.restore()
@@ -756,7 +889,7 @@ async function observe(browser, cell, closedPrototype) {
   const observationComplete = journalAcknowledged && navigationValidated && !failures.length && !pageErrors.length
     && !ownCleanup.length && !finalAudit.unknown.length && !finalAudit.unexpected.length
   const row = { arm, control, diagnosticOnly: true, productQualified: false, observationComplete, phase,
-    cdpAdmission, cdpCloseObserved, cdpTaskRecords, cdpCommandsDrained: cdpTasks.size === 0, originalPromiseBoundary, documentId, state, pendingProof, stateReceipts, dialogs, nativeNavigationCheckpoint, navigationRetirement, activatedViaClick, retainedAfterDialog, destinationAdmission: cell.mode === 'proof-without-terminal' && navigationValidated && !destination?.received ? 'cancelled-before-request' : null, outageEvidence, initialHeaderAdvance, initialClosureBoundary, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
+    pauseReceipts, postCommitReceipt, cleanupStartedAt, cdpAdmission, cdpCloseObserved, cdpTaskRecords, cdpCommandsDrained: cdpTasks.size === 0, originalPromiseBoundary, documentId, state, pendingProof, stateReceipts, dialogs, nativeNavigationCheckpoint, navigationRetirement, activatedViaClick, retainedAfterDialog, destinationAdmission: cell.mode === 'proof-without-terminal' && navigationValidated && !destination?.received ? 'cancelled-before-request' : null, outageEvidence, initialHeaderAdvance, initialClosureBoundary, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
     allPageErrorsStrict: pageErrors.length === 0, pageErrors, failures, reads: received, nativeEvents, finalAudit,
     gates: gates.map(({ label, response }) => ({ label, received: response.received, ready: response.ready, status: response.status ?? null, terminal: response.terminal, closed: response.closed, headersDelivered: response.headersDelivered, bodyReleased: response.bodyReleased })), cleanupFailures: ownCleanup }
   rows.push(row)
