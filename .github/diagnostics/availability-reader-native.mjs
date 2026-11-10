@@ -217,7 +217,24 @@ async function observe(browser, cell, closedPrototype) {
   const gates = []
   let phase = 'setup'
   let context, page, gate, navigation, documentId, initial, destination, next, outage, contextOwner, pageOwner, gateOwner
-  let cdp, cdpOwner, originalPromiseBoundary, debuggerAction
+  let cdp, cdpOwner, cdpAdmission, originalPromiseBoundary, debuggerAction
+  const cdpTasks = new Set()
+  const cdpTaskRecords = []
+  const trackCdp = (method, operation) => {
+    const record = { method, state: 'pending' }
+    cdpTaskRecords.push(record)
+    const pending = Promise.resolve().then(operation)
+    cdpTasks.add(pending)
+    void pending.then(() => {
+      record.state = 'fulfilled'
+      cdpTasks.delete(pending)
+    }, () => {
+      record.state = 'rejected'
+      cdpTasks.delete(pending)
+    })
+    return pending
+  }
+  const sendCdp = (method, params) => trackCdp(method, () => cdp.send(method, params))
   let outageEvidence
   let checkpoint, nativeEvents = [], initialClosureBeforeRelease = false, journalAcknowledged = false, navigationValidated = false
   let initialHeaderAdvance, initialClosureBoundary, nativeNavigationCheckpoint, navigationOutcome, rawNavigationError, navigationRetirement
@@ -334,6 +351,83 @@ async function observe(browser, cell, closedPrototype) {
     await evaluate(() => window.startDiagnosticPoll())
     await poll(() => events(1).some(event => event.kind === 'body' && event.exactBody))
     await page.clock.pauseAt(new Date(Date.now() + 1000))
+    if (cell.mode === 'pre-pagehide-original-body') {
+      await stage('pre-admit CDP before retained navigation while clock is paused')
+      // Admit instrumentation while the existing product clock is paused,
+      // BEFORE any retained navigation. The original native producer is untouched.
+      cdpAdmission = { document: documentId, runtimeAck: false, frameAck: false, debuggerAck: false, breakpointAck: false, readyBeforeRetainedNavigation: false }
+      await write(arm + '.cdp-admission.json', cdpAdmission)
+      cdpOwner = ownSdkResource(() => trackCdp('newCDPSession', () => context.newCDPSession(page)), value => trackCdp('detach', () => value.detach()))
+      cdp = await observed(() => cdpOwner.result, 'CDP acquisition')
+      const executionContexts = []
+      cdp.on('Runtime.executionContextCreated', event => executionContexts.push(event.context))
+      await observed(() => sendCdp('Runtime.enable'), 'runtime contexts')
+      cdpAdmission.runtimeAck = true
+      await write(arm + '.cdp-admission.json', cdpAdmission)
+      const frame = await observed(() => sendCdp('Page.getFrameTree'), 'owned main frame identity')
+      const currentContexts = executionContexts.filter(context => context.auxData?.isDefault === true
+        && context.auxData.frameId === frame.frameTree.frame.id && context.origin === origin)
+      assert.equal(currentContexts.length, 1)
+      const currentContext = currentContexts[0]
+      assert.ok(currentContext.uniqueId)
+      cdpAdmission.frameAck = true
+      cdpAdmission.context = { uniqueId: currentContext.uniqueId, frameId: frame.frameTree.frame.id, defaultContext: true, exactOrigin: true }
+      await write(arm + '.cdp-admission.json', cdpAdmission)
+      await observed(() => sendCdp('Debugger.enable'), 'debugger enable')
+      cdpAdmission.debuggerAck = true
+      await write(arm + '.cdp-admission.json', cdpAdmission)
+      const paused = Promise.withResolvers()
+      debuggerAction = paused.promise
+      cdp.once('Debugger.paused', event => {
+        void (async () => {
+          let observationError
+          try {
+            assert.equal(event.reason, 'EventListener')
+            assert.equal(event.data?.eventName, 'listener:pagehide')
+            assert.ok(next)
+            assert.equal(next.bodyReleased, false)
+            await observed(() => sendCdp('DOMDebugger.removeEventListenerBreakpoint', { eventName: 'pagehide' }), 'remove pagehide breakpoint')
+            const target = await observed(() => sendCdp('Runtime.evaluate', {
+              uniqueContextId: currentContext.uniqueId,
+              expression: 'globalThis.cairnNativeOriginalJSON',
+              returnByValue: false, silent: true, throwOnSideEffect: true,
+            }), 'reference original native JSON promise')
+            assert.equal(target.exceptionDetails, undefined)
+            assert.equal(target.result.subtype, 'promise')
+            assert.ok(target.result.objectId)
+            const properties = await observed(() => sendCdp('Runtime.getProperties', {
+              objectId: target.result.objectId, ownProperties: true,
+            }), 'original native promise internal state')
+            assert.equal(properties.exceptionDetails, undefined)
+            const internal = properties.internalProperties || []
+            const state = internal.find(item => item.name === '[[PromiseState]]')?.value
+            const result = internal.find(item => item.name === '[[PromiseResult]]')?.value
+            originalPromiseBoundary = {
+              beforeFirstListenerBody: true, reason: event.reason, eventName: event.data.eventName,
+              exactOwnedContext: true, document: documentId, read: 3, promiseState: state?.value ?? null,
+              resultSubtype: result?.subtype ?? null, resultClassName: result?.className ?? null,
+              originalBodyHeld: !next.bodyReleased,
+              cancellationEvidence: false, productQualified: false,
+            }
+            await write(arm + '.original-promise-boundary.json', originalPromiseBoundary)
+          }
+          catch (error) { observationError = error }
+          finally {
+            try { await observed(() => sendCdp('Debugger.resume'), 'resume first pagehide callback') }
+            catch (error) { observationError ||= error }
+          }
+          if (observationError) paused.reject(observationError)
+          else paused.resolve()
+        })()
+      })
+      // Avoid an unhandled observer rejection while the host awaits commit.
+      void debuggerAction.catch(() => {})
+      await observed(() => sendCdp('DOMDebugger.setEventListenerBreakpoint', { eventName: 'pagehide' }), 'arm first pagehide breakpoint')
+      cdpAdmission.breakpointAck = true
+      cdpAdmission.readyBeforeRetainedNavigation = true
+      await write(arm + '.cdp-admission.json', cdpAdmission)
+      await stage('same actual poll and clock seed')
+    }
     initial = addGate('initial', ['owned-body', 'body-failure-first', 'unread-503'].includes(cell.mode) ? gate.holdBody() : gate.hold('availability'))
     await page.clock.runFor(3100)
     await poll(() => initial.ready)
@@ -387,6 +481,8 @@ async function observe(browser, cell, closedPrototype) {
         await observed(() => page.getByRole('heading', { name: 'Live', exact: true }).click(), 'trusted activation click')
         activatedViaClick = true
       }
+      if (cell.mode === 'pre-pagehide-original-body')
+        assert.equal(cdpAdmission?.readyBeforeRetainedNavigation, true)
       await stage('original Page.goto with destination response held')
       navigation = page.goto(origin + '/installations/fixture/agents').then(() => {
         navigationOutcome = { kind: 'committed' }
@@ -500,65 +596,6 @@ async function observe(browser, cell, closedPrototype) {
           await poll(() => events(3).some(event => event.kind === 'body-start'))
           assert.equal(next.bodyReleased, false)
           assert.equal(terminal(3).length, 0)
-          // Observe the first native pagehide callback before ANY listener body
-          // runs. Never replace/settle the producer, abort it, or read its body.
-          cdpOwner = ownSdkResource(() => context.newCDPSession(page), value => value.detach())
-          cdp = await observed(() => cdpOwner.result, 'CDP acquisition')
-          const executionContexts = []
-          cdp.on('Runtime.executionContextCreated', event => executionContexts.push(event.context))
-          await observed(() => cdp.send('Runtime.enable'), 'runtime contexts')
-          const frame = await observed(() => cdp.send('Page.getFrameTree'), 'owned main frame identity')
-          const currentContexts = executionContexts.filter(context => context.auxData?.isDefault === true
-            && context.auxData.frameId === frame.frameTree.frame.id && context.origin === origin)
-          assert.equal(currentContexts.length, 1)
-          const currentContext = currentContexts[0]
-          assert.ok(currentContext.uniqueId)
-          await observed(() => cdp.send('Debugger.enable'), 'debugger enable')
-          const paused = Promise.withResolvers()
-          debuggerAction = paused.promise
-          cdp.once('Debugger.paused', event => {
-            void (async () => {
-              let observationError
-              try {
-                assert.equal(event.reason, 'EventListener')
-                assert.equal(event.data?.eventName, 'listener:pagehide')
-                await observed(() => cdp.send('DOMDebugger.removeEventListenerBreakpoint', { eventName: 'pagehide' }), 'remove pagehide breakpoint')
-                const target = await observed(() => cdp.send('Runtime.evaluate', {
-                  uniqueContextId: currentContext.uniqueId,
-                  expression: 'globalThis.cairnNativeOriginalJSON',
-                  returnByValue: false, silent: true, throwOnSideEffect: true,
-                }), 'reference original native JSON promise')
-                assert.equal(target.exceptionDetails, undefined)
-                assert.equal(target.result.subtype, 'promise')
-                assert.ok(target.result.objectId)
-                const properties = await observed(() => cdp.send('Runtime.getProperties', {
-                  objectId: target.result.objectId, ownProperties: true,
-                }), 'original native promise internal state')
-                assert.equal(properties.exceptionDetails, undefined)
-                const internal = properties.internalProperties || []
-                const state = internal.find(item => item.name === '[[PromiseState]]')?.value
-                const result = internal.find(item => item.name === '[[PromiseResult]]')?.value
-                originalPromiseBoundary = {
-                  beforeFirstListenerBody: true, reason: event.reason, eventName: event.data.eventName,
-                  exactOwnedContext: true, document: documentId, read: 3, promiseState: state?.value ?? null,
-                  resultSubtype: result?.subtype ?? null, resultClassName: result?.className ?? null,
-                  originalBodyHeld: !next.bodyReleased,
-                  cancellationEvidence: false, productQualified: false,
-                }
-                await write(arm + '.original-promise-boundary.json', originalPromiseBoundary)
-              }
-              catch (error) { observationError = error }
-              finally {
-                try { await observed(() => cdp.send('Debugger.resume'), 'resume first pagehide callback') }
-                catch (error) { observationError ||= error }
-              }
-              if (observationError) paused.reject(observationError)
-              else paused.resolve()
-            })()
-          })
-          // Avoid an unhandled observer rejection while the host awaits commit.
-          void debuggerAction.catch(() => {})
-          await observed(() => cdp.send('DOMDebugger.setEventListenerBreakpoint', { eventName: 'pagehide' }), 'arm first pagehide breakpoint')
         }
         else {
           next.release()
@@ -617,21 +654,12 @@ async function observe(browser, cell, closedPrototype) {
     // All failed observations remain red; closing one owner never gates another.
     waiterPendingAtCleanup = Boolean(navigation && !navigationOutcome)
     outage?.restore()
-    // Retire debugger ownership independently; disable also releases a paused VM.
-    if (cdp) {
-      try { await observed(() => cdp.send('Debugger.disable'), 'debugger disable') }
-      catch (error) { cleanupFailure('debugger-disable', error) }
-    }
-    if (cdpOwner) {
-      try { await observed(() => cdpOwner.release(), 'CDP detach') }
-      catch (error) { cleanupFailure('CDP-detach', error) }
-    }
-    if (debuggerAction) {
-      try { await observed(() => debuggerAction, 'debugger observer drain') }
-      catch (error) { remember('debugger observer drain', error) }
-    }
+    // Start every owner's retirement without depending on a CDP reply.
+    // The observation bound records failures; it never cancels an SDK command.
     for (const item of gates) item.response.release()
     const closures = [
+      ...(cdp ? [['debugger-disable', () => sendCdp('Debugger.disable')]] : []),
+      ...(cdpOwner ? [['CDP-detach', () => cdpOwner.release()]] : []),
       ...(pageOwner ? [['page', () => pageOwner.release()]] : []),
       ...(gateOwner ? [['gate', () => gateOwner.release()]] : []),
       ['backend', () => {
@@ -652,6 +680,16 @@ async function observe(browser, cell, closedPrototype) {
       try { await observed(() => contextOwner.release(), 'context close') }
       catch (error) { cleanupFailure('context', error) }
     }
+    if (debuggerAction) {
+      try { await observed(() => debuggerAction, 'debugger observer drain') }
+      catch (error) { remember('debugger observer drain', error) }
+    }
+    try {
+      await observed(() => Promise.allSettled([...cdpTasks]), 'CDP command drain')
+      if (cdpTasks.size)
+        throw new Error('CDP command closure remains unknown')
+    }
+    catch (error) { cleanupFailure('CDP-command-drain', error) }
     if (navigation) {
       try {
         const outcome = await observed(() => navigation, 'automation navigation waiter retirement')
@@ -700,7 +738,7 @@ async function observe(browser, cell, closedPrototype) {
   const observationComplete = journalAcknowledged && navigationValidated && !failures.length && !pageErrors.length
     && !ownCleanup.length && !finalAudit.unknown.length && !finalAudit.unexpected.length
   const row = { arm, control, diagnosticOnly: true, productQualified: false, observationComplete, phase,
-    originalPromiseBoundary, documentId, state, pendingProof, stateReceipts, dialogs, nativeNavigationCheckpoint, navigationRetirement, activatedViaClick, retainedAfterDialog, destinationAdmission: cell.mode === 'proof-without-terminal' && navigationValidated && !destination?.received ? 'cancelled-before-request' : null, outageEvidence, initialHeaderAdvance, initialClosureBoundary, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
+    cdpAdmission, cdpTaskRecords, cdpCommandsDrained: cdpTasks.size === 0, originalPromiseBoundary, documentId, state, pendingProof, stateReceipts, dialogs, nativeNavigationCheckpoint, navigationRetirement, activatedViaClick, retainedAfterDialog, destinationAdmission: cell.mode === 'proof-without-terminal' && navigationValidated && !destination?.received ? 'cancelled-before-request' : null, outageEvidence, initialHeaderAdvance, initialClosureBoundary, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
     allPageErrorsStrict: pageErrors.length === 0, pageErrors, failures, reads: received, nativeEvents, finalAudit,
     gates: gates.map(({ label, response }) => ({ label, received: response.received, ready: response.ready, status: response.status ?? null, terminal: response.terminal, closed: response.closed, headersDelivered: response.headersDelivered, bodyReleased: response.bodyReleased })), cleanupFailures: ownCleanup }
   rows.push(row)

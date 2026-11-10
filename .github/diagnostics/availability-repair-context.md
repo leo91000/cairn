@@ -56,3 +56,50 @@ change. Fresh COMPLETE FULL required on any source/harness correction before dis
 Actual exact affected qualification/PR/RUC/requiredchecks/pinnedordinarymerge/postCI remain
 required. No UImerge534679/capturewaiver/Slack/release/tag/deploy/livegrant.
 Post-commit receipt recovery: after actual arrival/destinationfinish, harvest the synchronous sessionStorage journal BEFORE requiring the old-document terminal binding. PinnedPlaywright may drop bindings after executioncontext destruction. This changes only observation ordering; no hostPage.evaluate while navigationheld, no originalterminal invented/waived and no deadline change. Missing journal terminal still RED.
+
+## Corrected admission / independent retirement — immutable product unchanged
+
+ROOT explicitly admits this targeted observer correction after first execution42787383461
+(artifact13749514330 SHA857f03b272739fc29c2bb585e5275f1b27a16ce6e7db7b85bf84caf66cc61887).
+Runtime.enable after held navigation timedout; debugger-disable/detach/pageclose timedout.
+Cause of those nonresponses remains UNKNOWN. Original PromiseState was NOT acquired;
+therefore no earlier engine failure may be reclassified or qualified from that result.
+
+The SAME CDP/session/Runtime+frame+default/origin/uniqueId/Debugger/BP guards move BEFORE
+retained Page.goto, while the EXISTING clock pause is active AFTER read1 exact200.
+First gated read remains2, later nativeJSON remains3, same3100ms advancement/resume,
+3s production timer, original producer/navigation/body holds and strict terminals.
+Partial/final cdp-admission.json records each bounded ACK and the exact owned context;
+entry into retained Page.goto requires readyBeforeRetainedNavigation=true. Missing ACK,
+wrong/ambiguous context or failed BP admission stays RED before navigation acquisition.
+The first native pagehide callback still inspects SAME original JSON promise in this
+owned context with throwOnSideEffect, intrinsic PromiseState/Result, bodyheld and original
+terminal; no native promise/result or error classification is replaced.
+
+Cleanup first releases HTTP gates then starts CDP disable/detach, page/gate/backend close
+without awaiting another actor's CDP response. Context/trace retirement follows bounded
+owned operations, and paused-handler plus actual CDP tasks are drained within existing7s
+bounds. trackCdp retains actual SDK operation until settlement; timeout remains failure,
+never cancellation. Command records are fixed method/state only, no protocol payload.
+Unknown commands/closures remain RED after bounded drain; no new error whitelist.
+All original native/type errors, real outage, pageshow/BFCache/auth/DirectRelay/product
+contracts remain untouched. ProductP1 and two unselected archivalP2s remain OPEN.
+
+Light regression executes EXTRACTED ACTUAL old/new controller cleanup and actual observed
+7000ms deadline with a virtual owned clock, plus existing real ownership helper. CDP
+retirement blocked until HTTP/page closure reproduces old coupled RED; new independent
+closure succeeds without relaxing bounds. Indefinite CDP operations and unknown page
+closure STILL RED. Actual early admission block requires Runtime/context/Debugger/BP ACKs
+before retained navigation; missing ACK/error/foreign-origin/wrong-mainframe/duplicate
+contexts refuse entry. Existing original-promise/pending-red and lost-binding journal
+regressions remain strict. These light models are NOT browser evidence.
+
+Current real main88fe9de4b457ed50c988952c183a3b3b12e3a931 differs from pinned product baseDC.
+This diagnostic intentionally preserves historical product9da/tree6332. Reconcile realmain
+and rerun affected FULL/qualifications BEFORE any future PRODUCT qualification/PR/merge.
+Before ONE corrected native dispatch: fresh COMPLETE independent FULL of ALL observer
+and ALL pinned product changes, exact refs/trees/clean/main/global in_progress ANDqueued
+empty/no duplicate. If mismatch or other job, HOLD without preemption. First result ends
+this heavy admission; return slot/evidence/limits toROOT, no subsequent lot/retry.
+No local browser/Cargo/SDK environment or new ref/framework/pilot. Workflow/image/pins,
+job25m/allsteps5m/observation7s/assertions/primary requirements remain UNCHANGED.
