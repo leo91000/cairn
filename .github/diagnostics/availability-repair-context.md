@@ -4,7 +4,7 @@ Selected workflow mode now covers ONLY the separate synthetic HTTP fixture,
 true beacon.html→beacon.ts→BeaconApp.vue caller on /claim with no installation
 selected, and the two existing Chromium/WebKit profiles sequentially. Runtime
 blobs are frozen at b1863f5601e483000d96eaab121ce3ec0ae44c7b. Full product/tests
-source pin 523fdd9f76b0d82f4fae59ec12a4154954a85b72. Never merge this observer.
+source pin 0bb132942c2a65c0e5d9e071811c1ecde9087058. Never merge this observer.
 
 User accepted the scope in docs/agents/availability-lifecycle-fixture.md, not
 eligibility inferred from design. Preserve original appDirect BF test and both
