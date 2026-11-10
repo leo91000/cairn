@@ -1,6 +1,87 @@
 
 import { writeFileSync as saveAvailabilityJournal } from 'node:fs'
 
+// These functions are the real probe orchestration seams. Light controller tests
+// exercise them without launching a browser; no synthetic terminal is produced.
+export async function skillProbeBound(operation: () => Promise<unknown>, label: string) {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      Promise.resolve().then(operation),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Skill probe deadline: ${label}`)), 7000)
+      }),
+    ])
+  }
+  finally {
+    clearTimeout(timer)
+  }
+}
+
+export async function commitSkillReload(control: {
+  document: string
+  read: number
+  held: () => boolean
+  snapshot: () => Promise<{ document?: string, pending?: number }>
+  terminals: () => Promise<Array<{ kind: string, document?: string, poll?: number }>>
+  drain: () => Promise<void>
+  advance: () => Promise<void>
+}) {
+  if (!control.held())
+    throw new Error('The original skill poll body is no longer held')
+  const before = await skillProbeBound(control.snapshot, 'old document identity') as { document?: string }
+  if (!control.document || before.document !== control.document)
+    throw new Error('Wrong or unknown old skill document')
+  const terminals = await skillProbeBound(control.terminals, 'original old poll terminal') as Array<{ kind: string, document?: string, poll?: number }>
+  const terminal = terminals[0]
+  if (terminals.length !== 1 || !terminal || terminal.document !== control.document || terminal.poll !== control.read
+    || !['poll-rejected', 'poll-threw'].includes(terminal.kind)) {
+    throw new Error('Missing, duplicate or wrong original old skill poll terminal')
+  }
+  await skillProbeBound(control.drain, 'old document JavaScript drain')
+  const after = await skillProbeBound(control.snapshot, 'old document closure') as { document?: string, pending?: number }
+  const final = await skillProbeBound(control.terminals, 'final original poll receipt') as typeof terminals
+  if (after.document !== control.document || after.pending !== 0 || final.length !== 1 || final[0] !== terminal || !control.held())
+    throw new Error('Old skill document or original poll closure is incomplete')
+  await skillProbeBound(control.advance, 'owned reload commit')
+}
+
+export async function closeAndAuditSkillProbe(control: {
+  drain: () => Promise<void>
+  close: Array<() => Promise<unknown>>
+  finished: () => Promise<void>
+  audit: () => void
+}) {
+  const failures: unknown[] = []
+  try {
+    await skillProbeBound(control.drain, 'final JavaScript drain')
+  }
+  catch (cause) {
+    failures.push(cause)
+  }
+  // Start every owner independently; a stalled navigation must not gate page close.
+  const closures = await Promise.allSettled(control.close.map((close, index) => skillProbeBound(close, `owner ${index}`)))
+  for (const result of closures) {
+    if (result.status === 'rejected')
+      failures.push(result.reason)
+  }
+  try {
+    await skillProbeBound(control.finished, 'final finite HTTP closure')
+  }
+  catch (cause) {
+    failures.push(cause)
+  }
+  // Audits follow the drain AND producer closure, even when either is unknown.
+  try {
+    control.audit()
+  }
+  catch (cause) {
+    failures.push(cause)
+  }
+  if (failures.length)
+    throw new AggregateError(failures, 'Skill probe closure or audit failed')
+}
+
 for (const boundary of ['pending-poll', 'departing-timer'] as const) {
   test(`availability native reload probe (${boundary})`, async ({ page }, testInfo) => {
     const journal: Array<{ kind: string, hostAt: number, browserAt?: number, document?: string, poll?: number }> = []
@@ -54,6 +135,15 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
     let routeFailure: unknown
     let reloadFailure: unknown
     let reload: Promise<unknown> | undefined
+    let departingDocument: string | undefined
+    let earlierPolls = 0
+    let pollReleased = false
+    const primaryFailures: unknown[] = []
+    const cleanupFailures: unknown[] = []
+    const releaseHeldPoll = () => {
+      pollReleased = true
+      releasePoll.resolve()
+    }
     const reached = async (kind: 'poll' | 'reload') => {
       await expect.poll(() => {
         if (routeFailure)
@@ -84,6 +174,7 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
         const pending = new Set<number>()
         const consuming = new Set<number>()
         ;(window as any).shellPending = pending
+        ;(window as any).shellObservation = { document: documentId, pending }
         const completions = new MessageChannel()
         completions.port1.onmessage = async (event) => {
           const { kind, poll } = event.data as { kind: string, poll: number }
@@ -155,6 +246,8 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
       await expect(page.getByRole('heading', { name: 'Skills library', exact: true })).toBeVisible()
       await page.clock.pauseAt(new Date(Date.now() + 1000))
       await browserSettled()
+      departingDocument = await page.evaluate(() => (window as any).shellObservation.document)
+      earlierPolls = journal.filter(event => event.document === departingDocument && event.kind === 'poll-start').length
       await page.route('**/api/installations', async (route) => {
         // Hold exactly the old document's targeted request; the new document stays real.
         if (pollIntercepted)
@@ -217,48 +310,117 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
         await page.clock.runFor(3100)
         await reached('poll')
       }
-      // Both stimuli must reach the old document before the reload can commit.
+      // Keep both bodies held until the exact old read and old document settle.
       expect(pollHeld).toBe(true)
-      releaseReload.resolve()
-      await reload
-      releasePoll.resolve()
+      await expect.poll(() => journal.filter(event => event.document === departingDocument && event.kind === 'poll-start').length).toBe(earlierPolls + 1)
+      const target = journal.filter(event => event.document === departingDocument && event.kind === 'poll-start').at(-1)!.poll
+      if (!departingDocument || typeof target !== 'number')
+        throw new Error('Missing old skill document/read identity')
+      const terminals = () => journal.filter(event => event.document === departingDocument && event.poll === target
+        && ['poll-rejected', 'poll-threw', 'poll-body-rejected', 'poll-body-resolved'].includes(event.kind))
+      await commitSkillReload({
+        document: departingDocument,
+        read: target,
+        held: () => pollHeld && !pollReleased,
+        snapshot: () => page.evaluate(() => ({ document: (window as any).shellObservation.document, pending: (window as any).shellPending.size })),
+        terminals: async () => {
+          await expect.poll(() => terminals().length).toBe(1)
+          return terminals()
+        },
+        drain: browserSettled,
+        advance: async () => {
+          record('old-document-original-read-and-javascript-closed')
+          releaseReload.resolve()
+          await reload
+          releaseHeldPoll()
+        },
+      })
       await expect(page.getByRole('heading', { name: 'Skills library', exact: true })).toBeVisible()
     }
+    catch (cause) {
+      primaryFailures.push(cause)
+      record('primary-failed')
+    }
     finally {
-      releasePoll.resolve()
+      releaseHeldPoll()
       releaseReload.resolve()
       record('cleanup-entered')
       let cleanupCompleted = false
       try {
-        await reload?.catch(() => {})
-        await page.unrouteAll({ behavior: 'wait' })
-        await expect.poll(() => [...requests.values()].every(state => state !== 'pending'), {
-          message: 'Every observed finite application HTTP request has terminated',
-        }).toBe(true)
-        for (const [request, terminal] of requests) {
-          if (request === targetPoll)
-            record(`target-network-${terminal}`)
-          const status = statuses.get(request)
-          const successfulResponse = status !== undefined && status >= 200 && status < 300
-          if (terminal === 'finished' && !successfulResponse)
-            throw new Error(`An observed finite HTTP response has unexpected status ${status ?? 'unknown'}`)
-          if (terminal === 'failed')
-            throw new Error('An observed finite HTTP request failed unexpectedly')
-          if (terminal === 'cancelled' && request !== targetPoll)
-            throw new Error('A finite HTTP request outside the old-document target was cancelled')
-        }
-        if (deliveryFailure && (!targetPoll || requests.get(targetPoll) !== 'cancelled'))
-          throw deliveryFailure
-        await browserSettled()
+        await closeAndAuditSkillProbe({
+          drain: browserSettled,
+          close: [
+            () => page.close(),
+            () => page.unrouteAll({ behavior: 'wait' }),
+            () => reload?.catch(() => {}) ?? Promise.resolve(),
+          ],
+          finished: async () => {
+            await expect.poll(() => [...requests.values()].every(state => state !== 'pending'), {
+              message: 'Every observed finite application HTTP request has terminated after producer closure',
+            }).toBe(true)
+          },
+          audit: () => {
+            const failures: unknown[] = []
+            const audits = [
+              () => {
+                for (const [request, terminal] of requests) {
+                  if (request === targetPoll)
+                    record(`target-network-${terminal}`)
+                  const status = statuses.get(request)
+                  const successfulResponse = status !== undefined && status >= 200 && status < 300
+                  if (terminal === 'pending')
+                    throw new Error('Finite HTTP closure remains unknown')
+                  if (terminal === 'finished' && !successfulResponse)
+                    throw new Error(`An observed finite HTTP response has unexpected status ${status ?? 'unknown'}`)
+                  if (terminal === 'failed')
+                    throw new Error('An observed finite HTTP request failed unexpectedly')
+                  if (terminal === 'cancelled' && request !== targetPoll)
+                    throw new Error('A finite HTTP request outside the old-document target was cancelled')
+                }
+              },
+              () => {
+                if (deliveryFailure && (!targetPoll || requests.get(targetPoll) !== 'cancelled'))
+                  throw deliveryFailure
+              },
+              () => {
+                if (routeFailure)
+                  throw routeFailure
+              },
+              () => {
+                if (reloadFailure)
+                  throw reloadFailure
+              },
+              () => expect(bodyFailures).toEqual([]),
+              () => expect(errors).toEqual([]),
+            ]
+            for (const audit of audits) {
+              try {
+                audit()
+              }
+              catch (cause) {
+                failures.push(cause)
+              }
+            }
+            if (failures.length)
+              throw new AggregateError(failures, 'Skill probe final audits failed')
+          },
+        })
         cleanupCompleted = true
+      }
+      catch (cause) {
+        cleanupFailures.push(cause)
       }
       finally {
         record(cleanupCompleted ? 'cleanup-completed' : 'cleanup-failed')
-        await testInfo.attach('availability-boundaries', { path: journalPath, contentType: 'application/json' })
+        try {
+          await testInfo.attach('availability-boundaries', { path: journalPath, contentType: 'application/json' })
+        }
+        catch (cause) {
+          cleanupFailures.push(cause)
+        }
       }
     }
-    if (routeFailure)
-      throw routeFailure
-    expect(errors).toEqual([])
+    if (primaryFailures.length || cleanupFailures.length)
+      throw new AggregateError([...primaryFailures, ...cleanupFailures], 'Skill probe failed')
   })
 }

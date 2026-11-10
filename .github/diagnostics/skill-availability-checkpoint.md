@@ -59,3 +59,36 @@ The preserved source is available unchanged at [bc1b48316f033460e5c5ab40e1285832
 - **P2, open:** legacy probe lines238–253 validate HTTP before a later asynchronous drain. A late new-document HTTP503 admitted during that drain can escape the HTTP verdict if this prototype is executed.
 
 Keep these scenarios, source and severity in the archive. Reuse requires separate root admission, correction, fresh full review and actual qualification. Do not dispatch or deploy this legacy prototype as part of B534, and do not count it as passed or fixed.
+
+## Source corrections 2026-11-10 — archived runtime still unqualified
+
+The P2 severity/scenarios and first failures above remain historical evidence.
+A fresh scope adjudication confirmed both defects remain actionable for an
+ALL-observer source review despite being unreachable from focused-repair. No
+scope waiver or selected-product clean verdict was used to close them.
+
+- Old-document closure: the real probe now calls commitSkillReload before release.
+  It requires exact original document/read rejection receipt, successful old-doc
+  JavaScript drain and matching identity/pending0 afterward, unchanged exact
+  terminal, and body still held. Missing/wrong/duplicate/unknown evidence is RED;
+  the held success is not released early merely to manufacture settlement.
+- Final HTTP audit: real closeAndAuditSkillProbe drains continuations, starts all
+  bounded owner closures independently, waits final finite request termination,
+  then audits HTTP/body/pageerror categories. HTTP503 admitted during drain or
+  closure cannot escape the final verdict; unknown closure remains RED. Primary
+  errors and cleanup failures are preserved together, including falsy throws.
+
+Permanent LIGHT regression command (existing Node runner, no browser):
+`node --test .github/diagnostics/skill-availability-controller.node.mjs`.
+It extracts the actual functions called by the real probe; fifteen cases PASS.
+Controlled `node .github/diagnostics/skill-availability-controller.node.mjs --baseline`
+executes the immutable original controller blocks from bc1b483 and produces the
+TWO expected contract failures (release without receipt; late503 escapes audit).
+These are source/controller proofs, not native/platform/runtime qualification.
+
+Current status: both P2s addressed IN SOURCE, pending fresh complete observer
+review; legacy native scenarios remain UNEXECUTED/UNQUALIFIED. No archived run was
+replayed, skipped, declared green or erased. The historical open bullets describe
+the immutable source linked above; actual execution/reuse still needs separate
+ROOT admission and exact qualifications. Focused product qualification does not
+select this legacy probe and inherits none of its historical results.

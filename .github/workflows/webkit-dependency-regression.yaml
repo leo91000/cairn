@@ -12,7 +12,7 @@ jobs:
       matrix:
         include:
           - label: focused-repair
-            sha: bb8957197d4308fe786ae60bc470b4c193ae501a
+            sha: b1863f5601e483000d96eaab121ce3ec0ae44c7b
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -78,7 +78,7 @@ jobs:
           test ! -e target/debug/cairn
           test ! -e target/debug/examples/browser_fixture
           mkdir -p "$C40_EVIDENCE_DIR/collection"
-          PLAYWRIGHT_JSON_OUTPUT_FILE="$C40_EVIDENCE_DIR/collection/cases.json" pnpm test:e2e mcps.spec.ts --project=journeys-mcps --project=layout-webkit-mcps --grep 'availability (keeps direct readers stable|resumes real reads after same-document persisted lifecycle|preserves a scoped readonly outage before native navigation)' --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --list --reporter=json
+          PLAYWRIGHT_JSON_OUTPUT_FILE="$C40_EVIDENCE_DIR/collection/cases.json" ./node_modules/.bin/playwright test --config=playwright.config.ts --project=journeys-mcps --project=layout-webkit-mcps tests/e2e/mcps.spec.ts --grep availability --list --reporter=list,json
           node --input-type=module <<'JS'
           import { readFileSync, writeFileSync } from 'node:fs'
           import { join } from 'node:path'
@@ -107,7 +107,7 @@ jobs:
       - name: Collect both physical BFCache cases before compilation
         timeout-minutes: 5
         run: |
-          PLAYWRIGHT_JSON_OUTPUT_FILE="$C40_EVIDENCE_DIR/collection/bfcache.json" pnpm test:e2e availability-bfcache.spec.ts --project=journeys-mcps --project=layout-webkit-mcps --workers=1 --retries=0 --fail-on-flaky-tests --trace=on --list --reporter=json
+          PLAYWRIGHT_JSON_OUTPUT_FILE="$C40_EVIDENCE_DIR/collection/bfcache.json" ./node_modules/.bin/playwright test --config=playwright.config.ts --project=journeys-mcps --project=layout-webkit-mcps tests/e2e/availability-bfcache.spec.ts --list --reporter=list,json
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict'
           import { readFileSync, writeFileSync } from 'node:fs'
@@ -130,6 +130,44 @@ jobs:
           assert.deepEqual(cases.sort(), expected.sort())
           writeFileSync(join(process.env.C40_EVIDENCE_DIR, 'collection', 'bfcache-receipt.json'), JSON.stringify({ collectionOnly: true, cases }))
           console.log('Exact physical BFCache collection: two cases, no runtime fixture execution.')
+          JS
+      - name: Collect existing main740 waits and saved-resume companions before compilation
+        timeout-minutes: 5
+        run: |
+          PLAYWRIGHT_JSON_OUTPUT_FILE="$C40_EVIDENCE_DIR/collection/main740.json" ./node_modules/.bin/playwright test --config=playwright.config.ts --project=journeys-chats --project=layout-webkit-chats tests/e2e/chats.spec.ts --grep 'a scheduled wait card follows its turn and clamps a long reason' --list --reporter=list,json
+          PLAYWRIGHT_JSON_OUTPUT_FILE="$C40_EVIDENCE_DIR/collection/resume.json" ./node_modules/.bin/playwright test --config=playwright.config.ts --project=journeys-chats tests/e2e/chats.spec.ts --grep 'same-provider quota resume' --list --reporter=list,json
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict'
+          import { readFileSync, writeFileSync } from 'node:fs'
+          import { join } from 'node:path'
+          const directory = join(process.env.C40_EVIDENCE_DIR, 'collection')
+          const selections = [
+            ['main740', ['journeys-chats', 'layout-webkit-chats'].flatMap(project => [false, true].map(late => [project, `a scheduled wait card follows its turn and clamps a long reason (late start: ${late})`]))],
+            ['resume', [
+              'same-provider quota resume submits the saved turn with the picker-applied speed',
+              'same-provider quota resume retries a prelaunch turn without selection',
+              'same-provider quota resume preserves an inherited blank model',
+              'same-provider quota resume submits the changed model default and unchanged saved effort',
+            ].map(title => ['journeys-chats', title])],
+          ]
+          for (const [name, expected] of selections) {
+            const report = JSON.parse(readFileSync(join(directory, `${name}.json`), 'utf8'))
+            const cases = []
+            function collect(suite) {
+              for (const spec of suite.specs || []) {
+                for (const test of spec.tests) {
+                  assert.equal(test.results.length, 0)
+                  cases.push([test.projectName, spec.title])
+                }
+              }
+              for (const child of suite.suites || []) collect(child)
+            }
+            for (const suite of report.suites) collect(suite)
+            assert.deepEqual(report.errors, [])
+            assert.deepEqual(cases.sort(), expected.sort())
+            writeFileSync(join(directory, `${name}-receipt.json`), JSON.stringify({ collectionOnly: true, cases }))
+          }
+          console.log('Exact existing companions collected: four main740 wait cases and four saved-resume cases; no runtime qualification.')
           JS
       - name: Verify the actual pinned SDK closed-target error prototype before compilation
         timeout-minutes: 5
@@ -198,9 +236,9 @@ jobs:
       - name: Build the Beacon fixtures
         timeout-minutes: 5
         run: cargo build --locked -p cairn-beacon --bin cairn-beacon --example network_stun_server --example beacon_sql_fixture
-      - name: Build ordinary browser assets
+      - name: Build PR browser assets with the existing saved-resume diagnostics
         timeout-minutes: 5
-        run: pnpm exec vite build --config apps/web/vite.config.ts
+        run: VITE_CAIRN_TEST_RESUME_DIAGNOSTICS=true pnpm exec vite build --config apps/web/vite.config.ts
       - name: Qualify the isolated Postgres fixture
         timeout-minutes: 5
         run: pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts
@@ -214,6 +252,11 @@ jobs:
         env:
           PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/specialists
         run: pnpm test:e2e beacon-relay.spec.ts direct-capacity.spec.ts chat-switch.spec.ts --project=journeys-beacon-relay --project=journeys-chat-switch --project=layout-webkit-chat-switch --workers=2 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results/specialists
+      - name: Qualify the existing saved-chat quota resume companions
+        timeout-minutes: 5
+        env:
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/saved-resume
+        run: pnpm test:e2e --project=journeys-chats tests/e2e/chats.spec.ts --grep 'same-provider quota resume' --workers=1 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results/saved-resume
       - name: Preserve incoming main740 scheduled wait variants
         timeout-minutes: 5
         env:
