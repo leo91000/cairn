@@ -8,9 +8,10 @@ import { MessageChannel as NativeMessageChannel } from 'node:worker_threads'
 import { setImmediate } from 'node:timers/promises'
 
 const reference = process.argv.includes('--reference')
+const referenceHead = process.env.C40_ARCHIVE_REFERENCE || '589e704e90bc451a181bd7fdcf667993e518522e'
 function fixture(t, name) {
   const raw = reference
-    ? execFileSync('git', ['-c', `safe.directory=${process.cwd()}`, 'show', `589e704e90bc451a181bd7fdcf667993e518522e:.github/diagnostics/${name}`], { encoding: 'utf8' })
+    ? execFileSync('git', ['-c', `safe.directory=${process.cwd()}`, 'show', `${referenceHead}:.github/diagnostics/${name}`], { encoding: 'utf8' })
     : readFileSync(new URL('./' + name, import.meta.url), 'utf8')
   const source = stripTypeScriptTypes(raw, { mode: 'transform' })
   const start = source.indexOf('await page.addInitScript(') + 'await page.addInitScript('.length
@@ -49,7 +50,7 @@ function fixture(t, name) {
     close() { this.readyState = 2; this.closes++; return closeResult }
   }
   const context = createContext({
-    URL, Request, Response, AbortController, EventSource: NativeSource, crypto,
+    URL, Request, Response, AbortController, AbortSignal, Object, EventSource: NativeSource, crypto,
     Event, MessageEvent, Promise, performance,
     MessageChannel: class {
       constructor() {
@@ -62,7 +63,7 @@ function fixture(t, name) {
       calls.push({ receiver: this, args })
       const next = queue.shift()
       assert(next)
-      return next
+      return typeof next === 'function' ? Reflect.apply(next, this, args) : next
     },
     availabilityProbe: (...args) => { events.push(args); return Promise.resolve() },
     b534Record: (...args) => { events.push(args); return Promise.resolve() },
@@ -124,3 +125,45 @@ test('B534 actual bootstrap source.close preserves actual receiver and original 
   assert.equal(second.closes, 1)
   await setImmediate()
 })
+
+
+for (const name of ['skill-availability-probe.ts', 'b534-navigation-probe.ts']) {
+  test(`H76 ${name}: malformed URL preserves the ORIGINAL rejected promise and cause`, async (t) => {
+    const f = fixture(t, name)
+    const cause = new TypeError('same native malformed URL rejection')
+    const original = Promise.reject(cause)
+    // Attach immediately so a synchronous observer throw cannot create an
+    // unrelated unhandled-rejection error in the reference counterexample.
+    void original.catch(() => {})
+    f.queue.push(original)
+    const result = f.fetch('http://[')
+    assert.equal(result, original)
+    await assert.rejects(result, value => value === cause)
+    assert.equal(f.calls.length, 1)
+  })
+  test(`H76 ${name}: coercible inputs are consumed ONLY by original fetch`, async (t) => {
+    const f = fixture(t, name)
+    let reads = 0
+    const input = { get url() { reads++; return '/api/installations' } }
+    const original = Promise.resolve(Response.json({ value: 'original' }))
+    f.queue.push((value) => { void value.url; return original })
+    const result = f.fetch(input)
+    assert.equal(result, original)
+    await result
+    assert.equal(reads, 1)
+  })
+  test(`H76 ${name}: accessor options are read ONLY by original fetch`, async (t) => {
+    const f = fixture(t, name)
+    let methodReads = 0
+    let signalReads = 0
+    const controller = new AbortController()
+    const options = { get method() { methodReads++; return 'GET' }, get signal() { signalReads++; return controller.signal } }
+    const original = Promise.resolve(Response.json({ value: 'original' }))
+    f.queue.push((_, init) => { void init.method; void init.signal; return original })
+    const result = f.fetch('/api/installations', options)
+    assert.equal(result, original)
+    await result
+    assert.equal(methodReads, 1)
+    assert.equal(signalReads, 1)
+  })
+}

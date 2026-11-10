@@ -155,7 +155,8 @@ test('real native parent/composite signals preserve exact rejection reason and s
   assert.equal(projected.ownerReactionStateKnown, true)
   assert.equal(projected.browserLocalOwnerOrdering.controlAbortBeforeOriginalRejectionReaction, true)
   assert.equal(projected.nativeOrderingAgainstBothPageErrors, 'UNKNOWN')
-  assert.equal(projected.receiptStatus, 'PARTIAL')
+  assert.equal(projected.lifecycleObserved, false)
+  assert.equal(projected.receiptStatus, 'UNKNOWN')
   assert.equal(projected.productQualified, false)
   const output = JSON.stringify(projected)
   for (const secret of ['PRIVATE_CONNECTION_CANARY', 'PRIVATE_DOCUMENT_CANARY', 'NEVER_PUBLISH', 'localhost', 'cookie', 'Authorization'])
@@ -496,4 +497,82 @@ test('close provenance does not turn an original thrown close into a known retur
   const out = projectDirectOwners(journal, privateErrors, 0, { pageClosed: true, gateClosed: true, cleanupFailureCount: 0 })
   assert.equal(out.sourceCloseProvenanceKnown, false)
   assert.equal(out.receiptStatus, 'UNKNOWN')
+})
+
+
+async function completeSourceReceipt(t) {
+  const f = fixture(t)
+  const source = await f.authorize()
+  const native = Promise.withResolvers()
+  f.queue.push(native)
+  const original = f.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', { signal: f.signal() })
+  const cause = new TypeError('same original controlled source terminal')
+  native.reject(cause)
+  await assert.rejects(original, value => value === cause)
+  await setImmediate()
+  source.close()
+  // Controlled SOURCE events exercise the actual serialized listener, not a
+  // claim that Node acquired native browser lifecycle receipts.
+  for (const kind of ['beforeunload', 'pagehide']) {
+    f.context.lifecycleCallback = f.callbacks.get(kind)
+    runInContext(`{
+      const event = new ${kind === 'beforeunload' ? 'BeforeUnloadEvent' : 'PageTransitionEvent'}('${kind}');
+      Object.defineProperties(event, {isTrusted:{value:true},target:{value:document},currentTarget:{value:window}});
+      lifecycleCallback(event);
+    }`, f.context)
+  }
+  return f.snapshot().journal
+}
+const completeClosure = { pageClosed: true, gateClosed: true, cleanupFailureCount: 0 }
+
+test('H76 missing or ambiguous native lifecycle receipts must stay UNKNOWN', async (t) => {
+  const complete = await completeSourceReceipt(t)
+  assert.equal(projectDirectOwners(complete, privateErrors, 0, completeClosure).receiptStatus, 'PARTIAL')
+  for (const kind of ['beforeunload', 'pagehide']) {
+    const missing = complete.filter(event => event.kind !== kind)
+    assert.equal(projectDirectOwners(missing, privateErrors, 0, completeClosure).receiptStatus, 'UNKNOWN')
+    const duplicate = complete.map(event => event.kind === kind ? { ...event, sequence: 1000 } : event)
+    duplicate.push(complete.find(event => event.kind === kind))
+    assert.equal(projectDirectOwners(duplicate, privateErrors, 0, completeClosure).receiptStatus, 'UNKNOWN')
+  }
+})
+
+test('H76 actual binding and snapshot retain conflicting receipts and refuse provenance', async (t) => {
+  const complete = await completeSourceReceipt(t)
+  const page = new EventEmitter()
+  let binding
+  page.exposeFunction = async (_, callback) => { binding = callback }
+  page.addInitScript = async () => {}
+  const controller = createDirectOwnerObserver(page)
+  await controller.install()
+  t.after(() => controller.dispose())
+  for (const error of privateErrors)
+    page.emit('pageerror', error)
+  for (const event of complete)
+    binding(event)
+  controller.accept({ journal: complete.map(event => ({ ...event })), observerFailures: 0 })
+  assert.equal(controller.finish(completeClosure).projection.receiptStatus, 'PARTIAL')
+  const target = complete.find(event => event.kind === 'source-close-return')
+  const conflict = { ...target, readyState: 0 }
+  controller.accept({ journal: [conflict], observerFailures: 0 })
+  binding({ ...target, readyState: 1 })
+  const result = controller.finish(completeClosure)
+  assert.equal(result.projection.receiptStatus, 'UNKNOWN')
+  assert.equal(result.projection.observerFailureCount, 2)
+  assert.equal(result.privateEvidence.conflicts.length, 2)
+  assert.equal(result.privateEvidence.journal.find(event => event.sequence === target.sequence).readyState, 2)
+  assert.deepEqual(result.privateEvidence.conflicts.map(value => value.event.readyState), [0, 1])
+})
+
+
+test('H76 lifecycle receipt refuses gaps, wrong context, untrusted or reversed lifecycle', async (t) => {
+  const complete = await completeSourceReceipt(t)
+  const variants = [
+    complete.filter(event => event.kind !== 'control-headers'),
+    complete.map(event => event.kind === 'pagehide' ? { ...event, ownContext: false } : event),
+    complete.map(event => event.kind === 'pagehide' ? { ...event, nativeTrusted: false } : event),
+    complete.map(event => event.kind === 'pagehide' ? { ...event, sequence: complete.find(value => value.kind === 'beforeunload').sequence } : event),
+  ]
+  for (const journal of variants)
+    assert.equal(projectDirectOwners(journal, privateErrors, 0, completeClosure).receiptStatus, 'UNKNOWN')
 })

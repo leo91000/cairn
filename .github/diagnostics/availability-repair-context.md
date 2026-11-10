@@ -74,3 +74,20 @@ findings fixed withEXACT2098B/a75ff126 patch once, payloadf48ada4b8312643434f4f5
 manifestupdated/oldsourcepreserved. ROOTformatted72PASS+lint0receipt da64ab20... is
 separateSourceproof, no Native acquisition and no productionfix. FreshFULL on new
 source mandatory; no oldH75 verdicttransfer. Product2344/PR731 untouched.
+
+H76 onf76d COMPLETE NONclean3P2, archived separately. Observer corrections only:
+- Lifecycle-complete partial receipt requires one trusted beforeunload and pagehide
+  for the exact selected document, ordered and continuous journal; missing, duplicate,
+  untrusted/wrong context/gap remains UNKNOWN. These are observation requirements,
+  not an assertion that a product transition always emits these receipts.
+- Binding and snapshot reconciliation retain first evidence; identical replay is
+  idempotent, conflicting payload preserved privately and failure forces UNKNOWN.
+- Archived wrappers invoke native fetch FIRST and once, preserve original promise
+  and cause, and never coerce non-string inputs or read accessor option values.
+  Unsupported metadata becomes diagnostic failure, not altered native terminal.
+Three actualcontroller negatives RED frozenf76d; six actualarchive argument
+transparency negatives RED frozenf76d. These are sourceobserver defects only.
+ROOT sourcevalidation f76d is separately archived with SHA9a506a9b...; it is not
+a review verdict and does not qualify currentcode after correction. FIVE module
+source payloadf48 remains byte-identical to ROOT72PASS/lint0 proof. No repeat for
+receipt, no native receipt/production causal fix. Product2344 always untouched.

@@ -392,40 +392,79 @@ import process from 'node:process'
         window.fetch = function (this: Window, ...args: Parameters<typeof fetch>) {
           if (this != null && this !== window)
             return Reflect.apply(fetch, this, args)
-          const input = args[0]
-          const url = typeof input === 'string' || input instanceof URL ? String(input) : input.url
-          const path = new URL(url, location.href).pathname
-          if (!path.startsWith('/api/') && path !== '/web-build.json')
-            return Reflect.apply(fetch, this, args)
-          const category = path === '/api/installations' ? 'poll' : path.endsWith('/api/chats') ? 'chat-read' : 'http'
-          const poll = ++pollId
-          if (category === 'poll' && observation.armed && !observation.targetController) {
-            const signal = args[1]?.signal
-            observation.targetController = signal ? controllers.get(signal) : undefined
-            observation.targetPollId = poll
-            safeProbe(observation.targetController ? 'poll-controller-identified' : 'poll-controller-unknown', poll)
-          }
-          pending.add(poll)
-          safeProbe(`${category}-start`, poll, { method: (args[1]?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase(), path })
-          args[1]?.signal?.addEventListener('abort', () => safeProbe(`${category}-abort`, poll), { once: true })
-          const settled = (kind: string) => {
-            // Separate observation returns the ORIGINAL promise. MessagePort
-            // completion still follows the application's native microtasks.
-            safeProbe(`${category}-${kind}`, poll)
-            completions.port2.postMessage({ kind: `${category}-${kind}`, poll })
-          }
+          // Invoke FIRST, once, preserving its receiver, original promise and
+          // synchronous cause. Metadata never consumes a Request/URL/coercible
+          // input or accessor-backed options a second time.
           let original: ReturnType<typeof fetch>
           try {
             original = Reflect.apply(fetch, this, args)
           }
           catch (cause) {
-            settled(`threw-${args[1]?.signal?.aborted ? 'signal-aborted' : 'signal-active'}`)
+            observerFailed()
             throw cause
           }
-          observe(original, (response) => {
-            responses.set(response, { poll, settled })
-            settled('headers')
-          }, () => settled(`rejected-${args[1]?.signal?.aborted ? 'signal-aborted' : 'signal-active'}`))
+          let path: string
+          let signal: AbortSignal | undefined
+          let method = 'GET'
+          try {
+            if (typeof args[0] !== 'string') {
+              observerFailed()
+              return original
+            }
+            path = new URL(args[0], location.href).pathname
+            if (!path.startsWith('/api/') && path !== '/web-build.json')
+              return original
+            if (args[1] != null) {
+              const descriptors = Object.getOwnPropertyDescriptors(args[1])
+              if (['method', 'signal'].some(key => descriptors[key] && !('value' in descriptors[key]))) {
+                observerFailed()
+                return original
+              }
+              const prototype = Object.getPrototypeOf(args[1])
+              if (prototype !== null && prototype !== Object.prototype) {
+                observerFailed()
+                return original
+              }
+              const value = descriptors.method?.value
+              if (value !== undefined && typeof value !== 'string') {
+                observerFailed()
+                return original
+              }
+              method = (value ?? 'GET').toUpperCase()
+              signal = descriptors.signal?.value
+              if (signal !== undefined && !(signal instanceof AbortSignal)) {
+                observerFailed()
+                return original
+              }
+            }
+          }
+          catch {
+            observerFailed()
+            return original
+          }
+          try {
+            const category = path === '/api/installations' ? 'poll' : path.endsWith('/api/chats') ? 'chat-read' : 'http'
+            const poll = ++pollId
+            if (category === 'poll' && observation.armed && !observation.targetController) {
+              observation.targetController = signal ? controllers.get(signal) : undefined
+              observation.targetPollId = poll
+              safeProbe(observation.targetController ? 'poll-controller-identified' : 'poll-controller-unknown', poll)
+            }
+            pending.add(poll)
+            safeProbe(`${category}-start`, poll, { method, path })
+            signal?.addEventListener('abort', () => safeProbe(`${category}-abort`, poll), { once: true })
+            const settled = (kind: string) => {
+              // Separate observation returns the ORIGINAL promise. MessagePort
+              // completion still follows the application's native microtasks.
+              safeProbe(`${category}-${kind}`, poll)
+              completions.port2.postMessage({ kind: `${category}-${kind}`, poll })
+            }
+            observe(original, (response) => {
+              responses.set(response, { poll, settled })
+              settled('headers')
+            }, () => settled(`rejected-${signal?.aborted ? 'signal-aborted' : 'signal-active'}`))
+          }
+          catch { observerFailed() }
           return original
         }
       })

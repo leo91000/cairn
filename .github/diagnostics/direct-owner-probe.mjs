@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks'
+import { isDeepStrictEqual } from 'node:util'
 import { closedTargetBound } from './closed-target-error.mjs'
 
 // Serialized into the real page. All identities below stay private; publication
@@ -343,6 +344,15 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
     ? allCloses.filter(event => event.source === source && closeEntries[0].source === source && event.owner === owner && closeEntries[0].owner === owner && event.grantMatched === true && closeEntries[0].grantMatched === true && event.ownContext === true && event.readyState === 2 && closeEntries[0].sequence < event.sequence)
     : []
   const structural = related.every(event => allowedKinds.includes(event.kind) && Number.isInteger(event.sequence) && event.sequence > 0 && event.ownContext === true) && new Set(related.map(event => event.sequence)).size === related.length
+  const documentJournal = journal.filter(event => document !== null && event.document === document)
+  const orderedSequences = documentJournal.map(event => event.sequence).sort((a, b) => a - b)
+  const documentJournalContinuous = orderedSequences.length > 0 && orderedSequences.every((value, index) => Number.isSafeInteger(value) && value > 0 && (index === 0 || value === orderedSequences[index - 1] + 1))
+  const unloads = related.filter(event => event.kind === 'beforeunload')
+  const hides = related.filter(event => event.kind === 'pagehide')
+  const lifecycleObserved = unloads.length === 1 && hides.length === 1
+    && unloads[0].nativeTrusted === true && hides[0].nativeTrusted === true
+    && unloads[0].ownContext === true && hides[0].ownContext === true
+    && unloads[0].sequence < hides[0].sequence
   const nativeErrors = events.filter(event => event.kind === 'window-error-same-original-cause' && event.nativeTrusted)
   const closureKnown = typeof closure?.pageClosed === 'boolean' && typeof closure?.gateClosed === 'boolean' && Number.isSafeInteger(closure?.cleanupFailureCount) && closure.cleanupFailureCount >= 0
   const firstErrorPairReproduced = identities.length === 2 && connections.length === 1 && identities.every(Boolean) && new Set(identities.map(value => value.category)).size === 2
@@ -380,7 +390,8 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
     sourceCloseProvenanceKnown: ownedCloses.length === 1,
     relatedJournalStructurallyKnown: structural,
     ownerReactionStateKnown: rejectionIdentityKnown && rejected.length === 1 && rejected[0].requestSignalKnown === true && rejected[0].controlSignalKnown === true && rejected[0].generationSignalKnown === true,
-    lifecycleObserved: events.some(event => event.kind === 'beforeunload' && event.nativeTrusted) && events.some(event => event.kind === 'pagehide' && event.nativeTrusted),
+    documentJournalContinuous,
+    lifecycleObserved,
     ambiguousOriginalCauseErrorCount: journal.filter(event => event.kind === 'window-error-ambiguous-original-cause' && event.document === document).length,
     nativeErrorObjectCorrespondence: nativeErrors.length > 0 ? 'SAME_ORIGINAL_CAUSE_EVENT_OBSERVED' : 'UNKNOWN',
     browserLocalOwnerOrdering: {
@@ -389,7 +400,7 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
     },
     nativeOrderingAgainstBothPageErrors: 'UNKNOWN',
     orderingLimit: 'Browser-local sequence is real observation order. Host pageerror delivery is not native error creation; no cross-clock ordering is inferred.',
-    receiptStatus: inputKnown && observerFailures === 0 && firstErrorPairReproduced && closureKnown && closure.pageClosed && closure.gateClosed && closure.cleanupFailureCount === 0 && structural && document !== null && owner !== null && generationOwner !== null && rejectionIdentityKnown && rejected.length === 1 && rejected[0].requestSignalKnown === true && rejected[0].controlSignalKnown === true && rejected[0].generationSignalKnown === true && ownedCloses.length === 1 ? 'PARTIAL' : 'UNKNOWN',
+    receiptStatus: inputKnown && observerFailures === 0 && firstErrorPairReproduced && closureKnown && closure.pageClosed && closure.gateClosed && closure.cleanupFailureCount === 0 && structural && documentJournalContinuous && lifecycleObserved && document !== null && owner !== null && generationOwner !== null && rejectionIdentityKnown && rejected.length === 1 && rejected[0].requestSignalKnown === true && rejected[0].controlSignalKnown === true && rejected[0].generationSignalKnown === true && ownedCloses.length === 1 ? 'PARTIAL' : 'UNKNOWN',
     events,
   }
 }
@@ -397,7 +408,28 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
 export function createDirectOwnerObserver(page) {
   const journal = new Map()
   const pageErrors = []
+  const conflicts = []
   let failures = 0
+  const acceptEvent = (event, ingress) => {
+    try {
+      if (!event || typeof event.document !== 'string' || !Number.isSafeInteger(event.sequence) || event.sequence <= 0) {
+        failures++
+        return
+      }
+      const received = structuredClone(event)
+      const key = JSON.stringify([received.document, received.sequence])
+      const prior = journal.get(key)
+      if (!prior) {
+        journal.set(key, { event: received, hostIngress: ingress })
+      }
+      else if (!isDeepStrictEqual(prior.event, received)) {
+        conflicts.push({ event: received, hostIngress: ingress })
+        failures++
+      }
+      // Identical retransmission is idempotent; never overwrite first evidence.
+    }
+    catch { failures++ }
+  }
   const onError = (error) => {
     try { pageErrors.push({ message: error.message, hostTime: performance.now() }) }
     catch { failures++ }
@@ -410,11 +442,7 @@ export function createDirectOwnerObserver(page) {
       page.on('pageerror', onError)
       listenerAttached = true
       await closedTargetBound(() => page.exposeFunction('__c40RecordDirectOwner', (event) => {
-        if (!event || typeof event.document !== 'string' || !Number.isInteger(event.sequence)) {
-          failures++
-          return
-        }
-        journal.set(`${event.document}:${event.sequence}`, { ...event, hostIngress: performance.now() })
+        acceptEvent(event, performance.now())
       }), 'direct owner binding')
       await closedTargetBound(() => page.addInitScript(observeDirectOwners), 'direct owner bootstrap')
     },
@@ -424,19 +452,13 @@ export function createDirectOwnerObserver(page) {
         return
       }
       failures += snapshot.observerFailures
-      for (const event of snapshot.journal) {
-        if (!event || typeof event.document !== 'string' || !Number.isInteger(event.sequence)) {
-          failures++
-          continue
-        }
-        const key = `${event.document}:${event.sequence}`
-        journal.set(key, { ...event, hostIngress: journal.get(key)?.hostIngress ?? null })
-      }
+      for (const event of snapshot.journal)
+        acceptEvent(event, null)
     },
     finish(closure) {
       return {
-        privateEvidence: { journal: [...journal.values()], pageErrors, observerFailures: failures },
-        projection: projectDirectOwners([...journal.values()], pageErrors, failures, closure),
+        privateEvidence: { journal: [...journal.values()].map(value => ({ ...value.event, hostIngress: value.hostIngress })), conflicts, pageErrors, observerFailures: failures },
+        projection: projectDirectOwners([...journal.values()].map(value => value.event), pageErrors, failures, closure),
       }
     },
     dispose() {
