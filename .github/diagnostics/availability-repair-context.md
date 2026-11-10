@@ -2,8 +2,8 @@
 
 ## Current selection after explicit ROOT H77 source-helper decision
 
-Product **4969f8ed41956b569399e0aaac87384ca5da1d37**, tree **aabc36da765e0900c3b9c3d908e74a0cafb9c613**,
-parent2344; canonicalQA ROOT DUE on this clean exact commit. Only
+Product **937e8f6da1b2bb8d05e0fe1b3142ca87e5592b10**, tree **9f52901ebbffbfeb9021690cf22aaccf5954b7b8**,
+parent4969; canonicalQA ROOT DUE on this clean exact commit. Only
 `tests/e2e/availability-probe.ts` and its real existing source regression suite
 `apps/web/tests/availability-read.test.ts` changed. Runtimeb186/apps/factory/TypeError,
 MCPS/browser assertions, budgets/profiles/auth/grants remain immutable.
@@ -155,3 +155,16 @@ accessors. SAME final tests/real71a7 bootstrap: four ASSERTION failures (no setu
 error), corrected archive17PASS; frozenproduct2344 three ASSERTION failures/14PASS.
 No native execution and no change to fixed product helper. Full review remains
 NONclean/open product-test-helper issue, source correction requires ROOT scope.
+
+ROOT canonical helper patch applied exactly once after4969: artifact61392cb1,
+12219B/SHA2568f639c13f89e1c551926dcf766e8a585768d89d18bbcdeeb828308827358f3ed.
+Two post-image blobs verified against patch index, only the same two test files.
+First ROOT lint12nonautofix errors preserved, later ROOT lint:fix EXIT0 only on
+detached DIRTY copy; globalcheck still unclaimed, none transferred. Final clean
+product is 937e8f6da1b2bb8d05e0fe1b3142ca87e5592b10/tree9f52901ebbffbfeb9021690cf22aaccf5954b7b8.
+Selected workflow/env/checkout/overlay-control/manifest all repinned together;
+unchanged overlay originals/hashes verified at this commit. Counterexample2344
+remains historicalRED, not selected. Prior4969Node20PASS remains source proof
+on4969 only, no native proof/currentQA. ROOT exact clean-commit QA then fresh
+COMPLETE ALLproduct+ALLobserver/archives/callers FULLs required, not launched early.
+No additional functional edits or runtime mutation, no CI/PR/native effects.
