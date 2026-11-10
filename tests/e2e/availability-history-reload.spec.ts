@@ -1,7 +1,12 @@
 import type { AvailabilityReadEvent } from './availability-probe'
 import { writeFileSync } from 'node:fs'
 import { availabilityBodiesAfter, incompleteAvailabilityReads, installAvailabilityProbe } from './availability-probe'
-import { expect, signIn, test, workspacePath } from './fixtures'
+import {
+  expect,
+  signIn,
+  test,
+  workspacePath,
+} from './fixtures'
 import { nativeResponseGate } from './native-response-gate'
 
 const recoveryTest = test.extend<{ responseGate: Awaited<ReturnType<typeof nativeResponseGate>> }>({
@@ -31,7 +36,12 @@ recoveryTest('availability recovers exact fresh documents through authenticated 
     heldRead: number
     freshRead: number
     responseStatus: number
-    withdrawal: { closed: boolean, terminal: string, headersDelivered: boolean, bodyReleased: boolean }
+    withdrawal: {
+      closed: boolean
+      terminal: string
+      headersDelivered: boolean
+      bodyReleased: boolean
+    }
   }> = []
   let poll: ReturnType<typeof responseGate.holdBody> | undefined
   let destination: ReturnType<typeof responseGate.hold> | undefined
@@ -118,6 +128,7 @@ recoveryTest('availability recovers exact fresh documents through authenticated 
         navigation = returned
         response = await returned
       }
+
       expect(response?.status()).toBe(200)
       expect(response?.request().isNavigationRequest()).toBe(true)
       expect(page.url()).toBe(applicationUrl)
@@ -135,8 +146,17 @@ recoveryTest('availability recovers exact fresh documents through authenticated 
       await expect(route).toHaveAttribute('data-transport-route', 'direct')
       await harvest()
       await expect.poll(() => incompleteAvailabilityReads(reads)).toEqual([])
-      recoveries.push({ mode, departedDocument, freshDocument, heldRead, freshRead: freshBody.read, responseStatus: response!.status(), withdrawal })
+      recoveries.push({
+        mode,
+        departedDocument,
+        freshDocument,
+        heldRead,
+        freshRead: freshBody.read,
+        responseStatus: response!.status(),
+        withdrawal,
+      })
     }
+
     navigation = page.goto(new URL('/health', workspace.url).href)
     await navigation
     await harvest()
@@ -166,6 +186,7 @@ recoveryTest('availability recovers exact fresh documents through authenticated 
       if (closure.status === 'rejected')
         failures.push(closure.reason)
     }
+
     if (navigation) {
       try {
         await bounded(() => navigation!)
@@ -175,6 +196,7 @@ recoveryTest('availability recovers exact fresh documents through authenticated 
       }
     }
   }
+
   for (const audit of [
     () => expect(incompleteAvailabilityReads(reads)).toEqual([]),
     () => responseGate.check(),
@@ -191,6 +213,7 @@ recoveryTest('availability recovers exact fresh documents through authenticated 
       failures.push(cause)
     }
   }
+
   try {
     writeFileSync(testInfo.outputPath('availability-history-reload.json'), JSON.stringify({
       evidence: 'authenticated-fresh-document-history-reload',
@@ -209,6 +232,7 @@ recoveryTest('availability recovers exact fresh documents through authenticated 
   catch (cause) {
     failures.push(cause)
   }
+
   if (primaryFailures.length || failures.length)
     throw new AggregateError([...primaryFailures, ...failures], 'Authenticated fresh-document history/reload recovery failed')
 })
