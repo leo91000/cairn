@@ -60,7 +60,7 @@ test('restores the real availability caller in an eligible synthetic lifecycle f
   let original: string | undefined
   let inertRestored = false
   let completedCycles = 0
-  let primaryFailure: unknown
+  const primaryFailures: unknown[] = []
   let journalAcknowledged = false
   page.on('pageerror', error => errors.push(error.message))
   await installAvailabilityProbe(page, record)
@@ -141,7 +141,7 @@ test('restores the real availability caller in an eligible synthetic lifecycle f
     journalAcknowledged = true
   }
   catch (cause) {
-    primaryFailure = cause
+    primaryFailures.push(cause)
   }
   finally {
     poll?.release()
@@ -197,12 +197,12 @@ test('restores the real availability caller in an eligible synthetic lifecycle f
       withdrawals,
       reads,
       pageErrors: errors,
-      failureCount: failures.length + (primaryFailure ? 1 : 0),
+      failureCount: failures.length + primaryFailures.length,
     }))
   }
   catch (cause) {
     failures.push(cause)
   }
-  if (primaryFailure || failures.length)
-    throw new AggregateError([...(primaryFailure ? [primaryFailure] : []), ...failures], 'Synthetic lifecycle restoration failed')
+  if (primaryFailures.length || failures.length)
+    throw new AggregateError([...primaryFailures, ...failures], 'Synthetic lifecycle restoration failed')
 })
