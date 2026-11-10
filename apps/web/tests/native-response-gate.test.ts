@@ -192,6 +192,20 @@ it('holds the real inert health destination until the old document has retired i
   gate.check()
 })
 
+it('holds the real MCP document reload until its previous availability read is retired', async () => {
+  const { gate, call } = await fixture()
+  const held = gate.hold('mcps')
+  const read = call('/installations/fixture/mcps')
+  await vi.waitFor(() => expect(held.ready).toBe(true))
+  expect(held.status).toBe(200)
+  expect(read.responseSeen()).toBe(false)
+  held.release()
+  expect(await read.result).toEqual({ status: 200, body: '[{"online":true}]' })
+  await vi.waitFor(() => expect(held.closed).toBe(true))
+  expect(held.terminal).toBe('finished')
+  gate.check()
+})
+
 it('keeps a controlled readonly outage active across HTTP attempts and restores the origin', async () => {
   const { gate, call, received } = await fixture()
   const outage = gate.failAvailabilityReads()

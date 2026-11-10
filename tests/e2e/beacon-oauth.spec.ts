@@ -337,6 +337,34 @@ test('Google and GitHub reuse an account, manage sign-in methods and preserve cl
     finally {
       await resumed.dispose()
     }
+
+    // This browser session came from the real GitHub OAuth flow. Revoking it
+    // must stop availability polling, just as for email/passkey account sessions.
+    await page.goto(`${url}/claim`)
+    await expect(page.getByRole('button', { name: 'Sign out', exact: true })).toBeVisible()
+    const sibling = await page.context().newPage()
+    try {
+      await sibling.clock.install()
+      let expiredChecks = 0
+      sibling.on('response', (response) => {
+        if (new URL(response.url()).pathname === '/api/installations' && response.status() === 401)
+          expiredChecks++
+      })
+      await sibling.goto(`${url}/claim`)
+      await expect(sibling.getByRole('button', { name: 'Sign out', exact: true })).toBeVisible()
+      await page.bringToFront()
+      await page.getByRole('button', { name: 'Sign out', exact: true }).click()
+      await expect(page.getByLabel('Email address')).toBeVisible()
+      await sibling.bringToFront()
+      await expect(sibling.getByLabel('Email address')).toBeVisible()
+      const checksAfterRedirect = expiredChecks
+      expect(checksAfterRedirect).toBeGreaterThan(0)
+      await sibling.clock.runFor(7000)
+      expect(expiredChecks).toBe(checksAfterRedirect)
+    }
+    finally {
+      await sibling.close()
+    }
   }
   finally {
     child.kill('SIGTERM')

@@ -2,7 +2,7 @@ import type { ClientRequest } from 'node:http'
 import { once } from 'node:events'
 import { Agent, createServer, request as httpRequest } from 'node:http'
 
-export type ResponseKind = 'availability' | 'agents' | 'health'
+export type ResponseKind = 'availability' | 'agents' | 'mcps' | 'health'
 
 export interface HeldResponse {
   received: boolean
@@ -116,7 +116,9 @@ export async function nativeResponseGate(origin: string) {
       ? 'availability'
       : request.method === 'GET' && /^\/installations\/[\w-]+\/agents$/.test(target.pathname)
         ? 'agents'
-        : request.method === 'GET' && target.pathname === '/health' ? 'health' : undefined
+        : request.method === 'GET' && /^\/installations\/[\w-]+\/mcps$/.test(target.pathname)
+          ? 'mcps'
+          : request.method === 'GET' && target.pathname === '/health' ? 'health' : undefined
     if (kind === 'availability') {
       availabilityRequests++
       if (availabilityFailure) {

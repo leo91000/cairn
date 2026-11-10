@@ -50,7 +50,7 @@ production timers. It is used by the existing exact-body probe.
 
 Cancelled/download and same-document lifecycle cases, active HTTP/JSON/fetch
 failures, backoff/recovery, second departure rearming, account/OAuth 401,
-physical BFCache, saved readers and Direct/Relay qualification remain strict.
+conditional document-return behavior, saved readers and Direct/Relay qualification remain strict.
 The original MCP management case keeps its empty pageerror assertion. No new
 filter, global allowance, skip, retry or timeout increase is introduced.
 
@@ -85,7 +85,7 @@ qualification.
 | Native response gate and journal | Existing gate/probe tests and canonical lint/type checks; no new instrumentation framework |
 | MCP and skill lifecycle regression | Exact primary command below with zero retries; original MCP assertions preserved |
 | API/transport indirect dependants | Direct/Relay, saved readers and network qualifications selected by docs/agents/pr-validation.md |
-| BFCache and authentication | Physical BFCache case; account and OAuth polling 401 cases |
+| Document return and authentication | Authenticated history/reload fresh-document recovery; conditional lifecycle tests; ACCOUNT and OAuth polling 401 cases |
 | Source integrity | Canonical pnpm lint:fix without a diff, pnpm check, exact CLI collection, final commit/tree identity |
 
 The primary command remains:
@@ -94,12 +94,49 @@ The primary command remains:
 pnpm test:e2e deliverables.spec.ts skill-bundles.spec.ts beacon-sharing.spec.ts beacon-installations.spec.ts mcps.spec.ts --workers=2 --retries=0 --fail-on-flaky-tests --trace=on
 ```
 
-No browser, native runtime, CI or global qualification has been executed for this
-provisional snapshot. The first primary 47 PASS / 1 FAIL and every first diagnostic
-failure remain preserved; no partial result closes P1. No source PASS transfers
-across the main merge or this browser/test patch. Final canonical checks precede
-a fresh complete independent review; affected exact-head qualifications still
-require ROOT admission.
+The current history/reload correction is source-only and unqualified at runtime.
+Earlier exact-source evidence remains scoped to its own head: the primary command
+passed 48/48 on b186, while the first primary 47/1 and all historical failures
+remain preserved. No result transfers to this corrected source automatically.
+
+## Corrected physical admission criterion
+
+ROOT explicitly retained the original conditional product contract: retire old
+work at departure and resume fresh work when the document returns. It does not
+promise universal browser BFCache admission. The added physical assertions used
+a surface that [Playwright v1.64.1 does not support](https://raw.githubusercontent.com/microsoft/playwright/v1.64.1/docs/src/navigations.md#L140-L146).
+Neither removing Chromium's default flag nor changing a navigation wait provides
+supported BFCache qualification.
+
+The authenticated physical case and later synthetic fixture have been removed
+from the delivered diff by forward commits. Their source history, reports and
+runs 42841980306, 42875372366 and 42886703157 remain preserved and RED. There is
+no skip, retrospective PASS, cache-miss-as-restoration claim or cache/header/
+authorization/runtime change. Physical BFCache remains NON QUALIFIED.
+
+The replacement `availability-history-reload.spec.ts` uses the existing normal
+Chromium/WebKit profiles without BFCache reactivation. It requires a real history
+return with a network document response and a distinct new Document, then a real
+reload and another distinct Document. Both phases require the original owned
+withdrawal/JSON terminal and HTTP cancellation before held body release, a new
+real availability request/exact 200 body, Online/Direct recovery and complete
+closure. An unexpected retained document, missing network response, duplicate
+poll, unknown terminal or unexpected error fails this accurately named recovery
+case; it does not satisfy a BFCache claim. No synthetic lifecycle event is used
+by this recovery test.
+
+The same-document MCP case still labels its events SYNTHETIC and the real-module
+Node suites remain conditional source evidence. They preserve generation/read/
+session ownership, the SAME earlier TypeError, genuine active errors, retained
+navigation/download, retry cadence and rearming. They do not become native
+app-generation/publication correlation or physical BFCache evidence.
+
+ACCOUNT and OAuth availability-401 qualification is still due on the final head.
+The OAuth journey now explicitly revokes its OAuth browser session while a sibling
+is polling, observes the real availability401/login redirect, and requires polling
+to remain stopped. This is prepared source, not an executed authentication result.
+Final source identity and separately selected networking remain due. No document
+or correction of the criterion closes P1 or delivers the product.
 
 This is web document-lifecycle error handling, not a new UI capability. Android,
 public MCP and the built-in installation tool retain their existing contracts;
