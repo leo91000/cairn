@@ -328,7 +328,12 @@ it('preserves the same original terminal without publishing after generation ret
     online: f.state.installationOnline,
     failures: f.control.snapshot().failures,
     tasks: f.delays(),
-  }, { offlineWrites: 0, online: true, failures: 0, tasks: [] })
+  }, {
+    offlineWrites: 0,
+    online: true,
+    failures: 0,
+    tasks: [],
+  })
   assert.equal(f.control.snapshot().request, undefined)
 })
 

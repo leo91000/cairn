@@ -582,7 +582,12 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
         else {
           // This declared committed outcome retains the raw native failure.
           // It does not claim private abort ownership or app-generation evidence.
-          expect(terminal).toMatchObject({ kind: 'body-rejected', errorName: 'TypeError', aborted: false, reasonMatches: false })
+          expect(terminal).toMatchObject({
+            kind: 'body-rejected',
+            errorName: 'TypeError',
+            aborted: false,
+            reasonMatches: false,
+          })
         }
 
         expect(events(departingDocument, secondRead!).filter(event => event.kind === 'body')).toEqual([])
