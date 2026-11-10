@@ -1,0 +1,18 @@
+{
+  "product": "2344e38c11909ff4bdfb5d3f8c862b8e7f48885c",
+  "files": {
+    "tests/e2e/mcps.spec.ts": {
+      "originalSHA256": "43a9659c3bb8e176438025cc7812c6d72a5aec9308b9bc038f6745d5764fb43d",
+      "overlaySHA256": "d4ecaf692482c2e3a95a4d2183aae84ee52c9ef67e3c7bda5320d53e5ddce15a",
+      "overlayFile": "mcps.direct-owner.overlay.ts"
+    },
+    "apps/web/tests/direct-transport.test.ts": {
+      "originalSHA256": "e89819370ed1753319e005b725dc2196421eec043de236d0e4f2a3c9a7b6ee18",
+      "overlaySHA256": "95c14de2273586036ff6f79e460512aaaa7e48403906afe80b1c4abb5ede6eaa",
+      "overlayFile": "direct-transport.seam.overlay.ts"
+    }
+  },
+  "testOnly": true,
+  "productQualified": false,
+  "runtimeChanged": false
+}
