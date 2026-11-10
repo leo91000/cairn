@@ -1,6 +1,6 @@
 # Focused availability repair — SOURCE-ONLY provisional snapshot
 
-Product ba65b52ab8cca3a37aca61e5d19a7cee3fb010cc/tree6786f4388dc5a467b1a82eb05095ffb2d68dcd8a, existing repair/availability-navigation;
+Product 2344e38c11909ff4bdfb5d3f8c862b8e7f48885c/tree56dd76916edf7550a097d0a689f36b116893ec46, existing repair/availability-navigation;
 runtimeBLOBS b1863f5601e483000d96eaab121ce3ec0ae44c7b UNCHANGED. Do not merge observer.
 ROOT explicitly revised only the added BF physical admission criterion: product
 contract is conditional correct departure/return, not universal cache admission.
