@@ -662,7 +662,14 @@ function finishAvailability(owner: AvailabilityOwner) {
 
 function publishAvailabilityFailure(owner: AvailabilityOwner) {
   let timer: ReturnType<typeof setTimeout> | undefined
-  const release = () => {
+  const publication = {
+    cancel() {
+      if (release())
+        finishAvailability(owner)
+    },
+  }
+
+  function release() {
     if (availabilityPublication !== publication)
       return false
     availabilityPublication = undefined
@@ -670,13 +677,6 @@ function publishAvailabilityFailure(owner: AvailabilityOwner) {
     owner.controller.signal.removeEventListener('abort', publication.cancel)
     owner.generation.signal.removeEventListener('abort', publication.cancel)
     return true
-  }
-
-  const publication = {
-    cancel() {
-      if (release())
-        finishAvailability(owner)
-    },
   }
 
   availabilityPublication = publication

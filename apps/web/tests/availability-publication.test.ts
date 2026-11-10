@@ -3,7 +3,12 @@ import { readFileSync } from 'node:fs'
 import { stripTypeScriptTypes } from 'node:module'
 import { setImmediate } from 'node:timers/promises'
 import { runInNewContext } from 'node:vm'
-import { afterEach, beforeEach, it, vi } from 'vitest'
+import {
+  afterEach,
+  beforeEach,
+  it,
+  vi,
+} from 'vitest'
 import { AvailabilityDeparture, readAvailability } from '../src/availability-read'
 
 const HostController = AbortController
@@ -13,7 +18,8 @@ const HostException = DOMException
 const pollingSource = readFileSync(new URL('../src/BeaconApp.vue', import.meta.url), 'utf8')
 const polling = stripTypeScriptTypes(pollingSource.slice(pollingSource.indexOf('let availabilityTimer:'), pollingSource.indexOf('\nfunction installationStatus(')))
 const lifetime = stripTypeScriptTypes(readFileSync(new URL('../src/document-lifetime.ts', import.meta.url), 'utf8'))
-  .replace(/^import[^\n]+\n/, '').replace(/^export /gm, '')
+  .replace(/^import[^\n]+\n/, '')
+  .replace(/^export /gm, '')
 const online = [{ id: 'installation', online: true, updateRequired: false }]
 
 class BeforeUnload {
@@ -157,42 +163,55 @@ function fixture() {
     clearTimeout(id: number) { timers.delete(id) },
     control: undefined as unknown as Control,
   }
-  runInNewContext(lifetime + '\n' + polling + '\ncontrol = { refreshAvailability, departDocument, snapshot: () => ({ failures: availabilityFailures, request: availabilityRequest, generation: documentLifetime.value }) }', sandbox)
-  const flush = async () => { await setImmediate() }
+  runInNewContext(`${lifetime}\n${polling}\ncontrol = { refreshAvailability, departDocument, snapshot: () => ({ failures: availabilityFailures, request: availabilityRequest, generation: documentLifetime.value }) }`, sandbox)
+  const flush = async () => {
+    await setImmediate()
+  }
   const takeTask = (delay: number) => {
     const entry = [...timers].find(([, timer]) => timer.delay === delay)
-    assert.ok(entry, 'Expected one owned task with delay ' + delay)
+    assert.ok(entry, `Expected one owned task with delay ${delay}`)
     timers.delete(entry[0])
     return entry[1].callback
   }
+
   const runTask = async (delay: number) => {
     takeTask(delay)()
     await flush()
   }
+
   const headers = (index: number, status = 200) => {
     const request = requests[index]
-    const stream = new ReadableStream<Uint8Array>({ start(controller) { request.body = controller } })
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        request.body = controller
+      },
+    })
     request.headers.resolve(new HostResponse(stream, { status, headers: { 'Content-Type': 'application/json' } }))
   }
+
   const body = (index: number, text = JSON.stringify(online)) => {
     requests[index].body!.enqueue(new TextEncoder().encode(text))
     requests[index].body!.close()
   }
+
   const reply = (index: number) => {
     headers(index)
     body(index)
   }
+
   const failBody = async (index: number, cause: unknown) => {
     headers(index)
     await flush()
     requests[index].body!.error(cause)
     await flush()
   }
+
   const event = (name: 'beforeunload' | 'pagehide' | 'pageshow') => {
     const value = name === 'beforeunload' ? new BeforeUnload(document, window) : new PageTransition(document, window, name)
     for (const callback of [...listeners.get(name) || []])
       callback(value)
   }
+
   return {
     control: sandbox.control,
     session,
@@ -224,7 +243,9 @@ function fixture() {
 
 let current: ReturnType<typeof fixture>
 
-beforeEach(() => { current = fixture() })
+beforeEach(() => {
+  current = fixture()
+})
 afterEach(async () => {
   current.dispose()
   await current.flush()
@@ -251,14 +272,16 @@ it('keeps an identical original TypeError but cancels publication when pagehide 
 })
 
 for (const kind of ['network', 'http', 'json', 'body'] as const) {
-  it('publishes an active or retained-document ' + kind + ' failure once, then recovers and rearms', async () => {
+  it(`publishes an active or retained-document ${kind} failure once, then recovers and rearms`, async () => {
     const f = current
     const cycle = f.control.refreshAvailability()
     const cause = new TypeError('original active failure')
-    if (kind === 'network')
+    if (kind === 'network') {
       f.requests[0].headers.reject(cause)
-    else if (kind === 'http')
+    }
+    else if (kind === 'http') {
       f.headers(0, 503)
+    }
     else if (kind === 'json') {
       f.headers(0)
       f.body(0, '{invalid JSON')
@@ -266,6 +289,7 @@ for (const kind of ['network', 'http', 'json', 'body'] as const) {
     else {
       await f.failBody(0, cause)
     }
+
     await f.flush()
     await cycle
     assert.equal(f.state.installationOnline, true)
@@ -340,14 +364,15 @@ it('refuses an old publication after hide then show and keeps the fresh generati
 })
 
 for (const cancellation of ['caller', 'session', 'signout', 'redirect', 'replacement', 'dispose', 'generation'] as const) {
-  it('settles pending publication ownership on ' + cancellation + ' without stale writes or duplicate timers', async () => {
+  it(`settles pending publication ownership on ${cancellation} without stale writes or duplicate timers`, async () => {
     const f = current
     const cycle = f.control.refreshAvailability()
     await f.failBody(0, new TypeError('cancelled owner failure'))
     await cycle
     const queued = f.takeTask(0)
-    if (cancellation === 'caller')
+    if (cancellation === 'caller') {
       f.control.snapshot().request!.abort()
+    }
     else if (cancellation === 'session') {
       f.session.value = account()
       f.notify()
@@ -365,11 +390,13 @@ for (const cancellation of ['caller', 'session', 'signout', 'redirect', 'replace
     else {
       f.control.departDocument()
     }
+
     if (cancellation === 'session' || cancellation === 'replacement') {
       assert.equal(f.requests.length, 2)
       f.reply(1)
       await f.flush()
     }
+
     queued()
     await f.flush()
     assert.equal(f.state.installationOnline, true)
@@ -441,6 +468,7 @@ it('keeps consecutive active failures and fresh recovery on the existing backoff
     assert.deepEqual(f.delays(), [delay])
     await f.runTask(delay)
   }
+
   f.reply(3)
   await f.flush()
   assert.equal(f.control.snapshot().failures, 0)
