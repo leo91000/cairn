@@ -337,6 +337,67 @@ it('preserves the same original terminal without publishing after generation ret
   assert.equal(f.control.snapshot().request, undefined)
 })
 
+it('does not apply an original successful body or reset backoff after its generation retires', async () => {
+  const f = current
+  const cycle = f.control.refreshAvailability()
+  f.requests[0].headers.reject(new TypeError('active failure before retry'))
+  await cycle
+  await f.flush()
+  await f.runTask(0)
+  assert.equal(f.offlineWrites(), 1)
+  assert.equal(f.control.snapshot().failures, 1)
+  await f.runTask(6000)
+  f.headers(1)
+  await f.flush()
+  const owner = f.control.snapshot()
+  assert.ok(owner.request)
+  assert.equal(owner.request.signal.aborted, false)
+  f.control.departDocument()
+  assert.equal(owner.generation.signal.aborted, true)
+  assert.equal(owner.request.signal.aborted, false)
+  const statuses = [{ ...online[0], online: false }]
+  f.body(1, JSON.stringify(statuses))
+  assert.deepEqual(await f.bodies[0], statuses)
+  await f.flush()
+  assert.equal(owner.request.signal.aborted, false)
+  assert.deepEqual({
+    offlineWrites: f.offlineWrites(),
+    failures: f.control.snapshot().failures,
+    tasks: f.delays(),
+  }, {
+    offlineWrites: 1,
+    failures: 1,
+    tasks: [],
+  })
+  assert.equal(f.control.snapshot().request, undefined)
+})
+
+it('preserves an original stale 401 without redirecting and permits the next document generation', async () => {
+  const f = current
+  const cycle = f.control.refreshAvailability()
+  const owner = f.control.snapshot()
+  assert.ok(owner.request)
+  f.control.departDocument()
+  assert.equal(owner.generation.signal.aborted, true)
+  assert.equal(owner.request.signal.aborted, false)
+  f.headers(0, 401)
+  assert.equal((await f.requests[0].headers.promise).status, 401)
+  await cycle
+  await f.flush()
+  assert.deepEqual(f.redirects, [])
+  assert.equal(f.offlineWrites(), 0)
+  assert.equal(f.control.snapshot().failures, 0)
+  assert.equal(f.control.snapshot().request, undefined)
+  assert.deepEqual(f.delays(), [])
+  f.event('pageshow')
+  assert.notEqual(f.control.snapshot().generation, owner.generation)
+  assert.equal(f.requests.length, 2)
+  f.reply(1)
+  await f.flush()
+  assert.equal(f.state.installationOnline, true)
+  assert.deepEqual(f.delays(), [3000])
+})
+
 it('keeps an identical original TypeError but cancels publication when pagehide precedes its task', async () => {
   const f = current
   const cycle = f.control.refreshAvailability()

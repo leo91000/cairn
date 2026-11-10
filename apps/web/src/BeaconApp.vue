@@ -721,7 +721,7 @@ async function refreshAvailability() {
   let failed = false
   try {
     const response = await read.response
-    if (controller.signal.aborted)
+    if (availabilityRequest !== controller || !currentAvailabilityScope(owner))
       return
     if (response.status === 401 && session.value === current && !availabilityStopped) {
       availabilityStopped = true
@@ -732,7 +732,7 @@ async function refreshAvailability() {
     if (!response.ok)
       throw new Error('Installation status unavailable')
     const statuses = await response.json() as AccountSession['installations']
-    if (controller.signal.aborted || session.value !== current || availabilityStopped)
+    if (availabilityRequest !== controller || !currentAvailabilityScope(owner))
       return
     for (const item of current.installations) {
       const status = statuses.find(status => status.id === item.id)
