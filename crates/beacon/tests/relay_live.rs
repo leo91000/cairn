@@ -132,7 +132,7 @@ async fn relay_disconnect_replays_activity_and_does_not_stop_the_run() {
         })
         .await
         .unwrap();
-    let path = format!("/runs/{run_id}/stream");
+    let path = format!("/runs/{run_id}/stream?timeline=1");
     let mut stream = Stream {
         response: relay.get(&path).send().await.unwrap(),
         pending: String::new(),
@@ -185,7 +185,7 @@ async fn relay_disconnect_replays_activity_and_does_not_stop_the_run() {
     .await
     .unwrap();
     let response = relay
-        .get(&format!("{path}?history={history}"))
+        .get(&format!("{path}&history={history}"))
         .header("last-event-id", cursor.to_string())
         .send()
         .await

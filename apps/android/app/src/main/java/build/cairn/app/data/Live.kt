@@ -165,7 +165,7 @@ private fun CairnApi.frames(
             builder(
                     "$path?after=$cursor" +
                         (history?.let { "&history=${segment(it)}" } ?: "") +
-                        (if (windowed) "&window=1" else "") +
+                        (if (windowed) "&window=1&timeline=1" else "") +
                         if (windowed && recent) "&recent=1" else ""
                 )
                 .header("Accept", "text/event-stream")
@@ -203,8 +203,22 @@ private fun CairnApi.frames(
                                     val next =
                                         id.toLongOrNull()?.takeIf { n -> n >= 0 }
                                             ?: error("Curseur invalide")
+                                    val representation =
+                                        wireJson.parseToJsonElement(data.toString()).jsonObject
+                                    if (windowed) {
+                                        val history =
+                                            (representation["history"] as? JsonPrimitive)
+                                                ?.contentOrNull
+                                        if (
+                                            history == null ||
+                                                !Regex("^v2:[^:]*:[0-9]+$").matches(history) ||
+                                                representation["entries"] !is JsonArray
+                                        ) {
+                                            throw ProtocolMismatch()
+                                        }
+                                    }
                                     val batch =
-                                        wireJson.decodeFromString<LiveBatch>(data.toString())
+                                        wireJson.decodeFromJsonElement<LiveBatch>(representation)
                                     if (trySendBlocking(StreamFrame(next, batch)).isFailure) return
                                 }
                                 event = ""
@@ -485,7 +499,9 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
             } catch (e: Exception) {
                 if (generation != streamGeneration.get()) break
                 if (e is DirectStreamLost) relayRecovery = true
-                val terminal = e is ApiException && e.status in setOf(401, 403, 404)
+                val updateRequired = e is ApiException && e.status == 426
+                val terminal =
+                    updateRequired || (e is ApiException && e.status in setOf(401, 403, 404))
                 if (e !is IOException) {
                     accumulator.clear()
                     cursor = 0
@@ -494,11 +510,17 @@ fun CairnApi.live(path: String, session: LiveSession = LiveSession()): Flow<Live
                 snapshot =
                     snapshot.copy(
                         httpStatus = (e as? ApiException)?.status,
-                        status = if (terminal) "Déconnecté" else "Reconnexion…",
-                        error = if (terminal) e.message else null,
+                        status =
+                            if (updateRequired) "Mise à jour requise"
+                            else if (terminal) "Déconnecté" else "Reconnexion…",
+                        error =
+                            if (updateRequired) ProtocolMismatch().message
+                            else if (terminal) e.message else null,
+                        synced = if (updateRequired) false else snapshot.synced,
                     )
                 session.cursor = cursor
                 session.snapshot = snapshot
+                if (updateRequired) transport.rejectProtocol()
                 emit(snapshot)
                 if (terminal) break
             }
