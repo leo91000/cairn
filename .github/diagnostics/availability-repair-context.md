@@ -93,3 +93,11 @@ final audits run after rejection/timeout too. Eight actual-callback source fixtu
 scenarios pass; three new contracts fail on the immutable previous source. These
 are controlled adapters only, not native data or a B534 browser replay. Fresh ALL
 observer review must include that archive and its permanent Node runner.
+
+Journal persistence failures in the two archived callbacks are now collected
+separately instead of escaping record() and bypassing retirement/audits. The
+skill attachment uses existing skillProbeBound7s. Actual callback regressions
+cover original errors with cleanup-entry/completion EIO and a stalled attachment,
+all owners/audits attempted and all causes retained. Source-only results: skill8,
+B53410 scenarios; previous frozen callback loses the new contracts. No archived
+browser replay or Native result is implied. Whole fresh source review required.

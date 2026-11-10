@@ -6,7 +6,7 @@ import { resolve } from 'node:path'
 import { setImmediate as nextTurn } from 'node:timers/promises'
 import { runInNewContext } from 'node:vm'
 const path = '.github/diagnostics/b534-navigation-probe.ts'
-const raw = process.argv.includes('--baseline') ? execFileSync('git', ['-c', `safe.directory=${process.cwd()}`, 'show', `87590feb14088429c2869b24a8138c29e6b7d3b3:${path}`], { encoding: 'utf8' }) : readFileSync(new URL('./b534-navigation-probe.ts', import.meta.url), 'utf8')
+const raw = process.argv.includes('--baseline') ? execFileSync('git', ['-c', `safe.directory=${process.cwd()}`, 'show', `c5e4786c9f39eea5e3c51df2b32af1cda2b15006:${path}`], { encoding: 'utf8' }) : readFileSync(new URL('./b534-navigation-probe.ts', import.meta.url), 'utf8')
 const source = stripTypeScriptTypes(raw).replace(/^import .*\n/gm, '')
 const tests = []
 const expect = value => ({
@@ -20,15 +20,25 @@ expect.poll = callback => ({ async toBe(expected) {
   assert.equal(result, expected)
 } })
 let closeProvider
+let journalFailure
+let activeScenario
 runInNewContext(source, {
   test: (name, body) => tests.push(body), expect, Date, Promise, URL, Error, AggregateError, setTimeout, clearTimeout,
   process: { env: { CAIRN_B534_CONTROL: 'native-cancel' } },
-  saveB534Journal: writeFileSync, workspacePath: path => path,
+  saveB534Journal: (path, content) => {
+    const value = JSON.parse(content)
+    const kind = value.journal.at(-1)?.kind
+    if (activeScenario === 'journal-entry-error' && kind === 'cleanup-entered') throw journalFailure
+    if (activeScenario === 'journal-completion-error' && /^cleanup-(completed|failed)$/.test(kind)) throw journalFailure
+    writeFileSync(path, content)
+  }, workspacePath: path => path,
   authenticateWorkspace: async () => {},
   mcpProvider: async () => ({ origin: 'http://fixture.test', exchanges: 1, close: async () => closeProvider() }),
 })
 let gaps = 0
-for (const scenario of ['healthy-boundary', 'late-http403-after-drain', 'late-pending-after-drain', 'startup-http500', 'startup-fetch-rejection', 'workload-cleanup-error', 'workload-attach-provider-error', 'workload-error-cleanup-ok']) {
+for (const scenario of ['healthy-boundary', 'late-http403-after-drain', 'late-pending-after-drain', 'startup-http500', 'startup-fetch-rejection', 'workload-cleanup-error', 'workload-attach-provider-error', 'workload-error-cleanup-ok', 'journal-entry-error', 'journal-completion-error']) {
+  activeScenario = scenario
+  journalFailure = new Error('controlled journal failure')
   const workloadError = new Error('controlled first workload error')
   const cleanupError = new Error('controlled cleanup error')
   const attachError = new Error('controlled attach error')
@@ -60,7 +70,7 @@ for (const scenario of ['healthy-boundary', 'late-http403-after-drain', 'late-pe
     route: async (pattern, callback) => routes.set(pattern, callback),
     clock: { install: async () => {}, pauseAt: async () => {}, runFor: async () => { void invoke('**/api/installations'); await nextTurn() } },
     goto: async path => {
-      if (path === '/agents' && scenario.startsWith('workload-')) {
+      if (path === '/agents' && (scenario.startsWith('workload-') || scenario.startsWith('journal-'))) {
         listeners.get('requestfailed')(target)
         record('poll-rejected-signal-active', 1, 'old', 4)
         pending = 0
@@ -108,11 +118,12 @@ for (const scenario of ['healthy-boundary', 'late-http403-after-drain', 'late-pe
   if (!!failure !== shouldFail) { gaps++; console.log(scenario + ': final-boundary gap') }
   else console.log(scenario + ': PASS')
   if (failure && !shouldFail) console.log(String(failure))
-  if (scenario.startsWith('workload-')) {
+  if ((scenario.startsWith('workload-') || scenario.startsWith('journal-'))) {
     const flatten = error => [error, ...(Array.isArray(error?.errors) ? error.errors.flatMap(flatten) : [])]
     const errors = flatten(failure)
     const observation = JSON.parse(readFileSync(resolve(dir, 'b534-navigation.json'), 'utf8'))
     const retained = errors.includes(workloadError)
+      && (!scenario.startsWith('journal-') || errors.includes(journalFailure))
       && (scenario !== 'workload-cleanup-error' || errors.includes(cleanupError))
       && (scenario !== 'workload-attach-provider-error' || (errors.includes(attachError) && errors.includes(providerError)))
     const audited = observation.journal.some(event => event.kind === 'outcome-validation-entered')

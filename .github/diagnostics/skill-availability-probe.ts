@@ -87,13 +87,19 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
     const journal: Array<{ kind: string, hostAt: number, browserAt?: number, document?: string, poll?: number }> = []
     const errors: string[] = []
     const bodyFailures: Array<{ kind: string, document?: string, poll?: number }> = []
+    const journalFailures: unknown[] = []
     const journalPath = testInfo.outputPath('availability-boundaries.json')
     const saveJournal = () => saveAvailabilityJournal(journalPath, JSON.stringify({ boundary, journal, errors, bodyFailures }))
     const record = (kind: string, browserAt?: number, document?: string, poll?: number) => {
       if (kind.endsWith('-body-rejected'))
         bodyFailures.push({ kind, document, poll })
       journal.push({ kind, hostAt: Date.now(), browserAt, document, poll })
-      saveJournal()
+      try {
+        saveJournal()
+      }
+      catch (cause) {
+        journalFailures.push(cause)
+      }
     }
     const requests = new Map<import('@playwright/test').Request, 'pending' | 'finished' | 'cancelled' | 'failed'>()
     const statuses = new Map<import('@playwright/test').Request, number>()
@@ -167,6 +173,8 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
       record('page-error')
     })
     try {
+      if (journalFailures.length)
+        throw journalFailures[0]
       await page.exposeFunction('availabilityProbe', record)
       await page.addInitScript(() => {
         const documentId = crypto.randomUUID()
@@ -413,14 +421,14 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
       finally {
         record(cleanupCompleted ? 'cleanup-completed' : 'cleanup-failed')
         try {
-          await testInfo.attach('availability-boundaries', { path: journalPath, contentType: 'application/json' })
+          await skillProbeBound(() => testInfo.attach('availability-boundaries', { path: journalPath, contentType: 'application/json' }), 'artifact attachment')
         }
         catch (cause) {
           cleanupFailures.push(cause)
         }
       }
     }
-    if (primaryFailures.length || cleanupFailures.length)
-      throw new AggregateError([...primaryFailures, ...cleanupFailures], 'Skill probe failed')
+    if (primaryFailures.length || cleanupFailures.length || journalFailures.length)
+      throw new AggregateError([...primaryFailures, ...cleanupFailures, ...journalFailures], 'Skill probe failed')
   })
 }

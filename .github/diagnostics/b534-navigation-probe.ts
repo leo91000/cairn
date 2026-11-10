@@ -15,6 +15,7 @@ import process from 'node:process'
     const fetchFailures: Array<{ kind: string, document?: string, poll?: number }> = []
     const nativeSourceErrors: Array<{ document?: string, source?: number }> = []
     const bodyFailures: Array<{ kind: string, document?: string, poll?: number }> = []
+    const journalFailures: unknown[] = []
     const journalPath = testInfo.outputPath('b534-navigation.json')
     const saveJournal = () => saveB534Journal(journalPath, JSON.stringify({ control, journal, errors, bodyFailures, nativeSourceErrors, fetchFailures }))
     const record = (kind: string, browserAt?: number, document?: string, poll?: number, request?: { method: string, path: string }) => {
@@ -35,7 +36,12 @@ import process from 'node:process'
       if (kind.endsWith('-body-rejected'))
         bodyFailures.push({ kind, document, poll })
       journal.push({ kind, hostAt: Date.now(), browserAt, document, poll })
-      saveJournal()
+      try {
+        saveJournal()
+      }
+      catch (cause) {
+        journalFailures.push(cause)
+      }
     }
     let departingEpoch: number | undefined
     let departingDocument: string | undefined
@@ -250,6 +256,8 @@ import process from 'node:process'
       record('page-error')
     })
     try {
+      if (journalFailures.length)
+        throw journalFailures[0]
       await page.exposeFunction('b534Record', record)
       await page.addInitScript(() => {
         const documentId = crypto.randomUUID()
@@ -582,7 +590,7 @@ import process from 'node:process'
       record('outcome-validation-failed')
       outcomeFailures.push(cause)
     }
-    if (outcomeFailures.length)
-      throw new AggregateError(outcomeFailures, 'B534 workload, cleanup or outcome validation failed')
+    if (outcomeFailures.length || journalFailures.length)
+      throw new AggregateError([...outcomeFailures, ...journalFailures], 'B534 workload, cleanup, journal or outcome validation failed')
   })
 }
