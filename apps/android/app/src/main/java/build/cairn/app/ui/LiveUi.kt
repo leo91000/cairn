@@ -1217,7 +1217,7 @@ internal fun timelineEntries(
 // Where a scheduled wait's card is placed: its turn ended, or a message or another wait event came.
 private val WAIT_BOUNDARIES =
     setOf(
-        "turn.started",
+        // The engine's turn.started can arrive after wait registration, before final replies.
         "turn.completed",
         "turn.failed",
         "chat.user",
