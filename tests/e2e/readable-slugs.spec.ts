@@ -30,6 +30,7 @@ test('readable URLs preserve legacy deep links, UUID drafts and conversation ide
   await page.goto(workspacePath(`/chats/${chat.slug}`))
   await expect(message).toHaveValue('A draft saved from the old UUID link')
 
+  await page.setViewportSize({ width: 390, height: 844 })
   const switcher = page.getByRole('button', { name: 'Conversations', exact: true })
   const conversations = page.getByRole('dialog', { name: /Conversations/ })
 
@@ -41,6 +42,7 @@ test('readable URLs preserve legacy deep links, UUID drafts and conversation ide
   await conversations.locator(`a[href="${workspacePath(`/chats/${chat.slug}`)}"]`).click()
   await expect(page).toHaveURL(`${workspace.url}${workspacePath(`/chats/${chat.slug}`)}`)
   await expect(message).toHaveValue('A draft saved from the old UUID link')
+  await page.setViewportSize({ width: 1280, height: 900 })
   await page.reload()
   await expect(message).toHaveValue('A draft saved from the old UUID link')
 

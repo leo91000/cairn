@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import type { IconName } from './icons'
+import type Chats from './views/Chats.vue'
 import {
   computed,
+  nextTick,
   onBeforeUnmount,
   onMounted,
   provide,
@@ -44,9 +46,33 @@ const router = useRouter()
 const route = useRoute()
 const paletteOpen = ref(false)
 const shortcutsOpen = ref(false)
+const conversationView = ref<InstanceType<typeof Chats>>()
 provide(workspaceActionsKey, {
   search: () => { paletteOpen.value = true },
 })
+
+function newConversation(text?: string) {
+  if (route.path.startsWith('/chats') && conversationView.value?.newConversation) {
+    conversationView.value.newConversation(text)
+    return
+  }
+
+  void router.push({ path: '/chats', query: text ? { draft: text } : undefined })
+}
+
+function followNewConversation(event: MouseEvent) {
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)
+    return
+  event.preventDefault()
+  newConversation()
+}
+
+async function openTrash() {
+  if (!route.path.startsWith('/chats'))
+    await router.push('/chats')
+  await nextTick()
+  conversationView.value?.openTrash?.()
+}
 
 // The three places of « Signal »: the Fil (home and conversations), Missions and the Atelier.
 const atelierPaths = ['/atelier', '/agents', '/projects', '/skills', '/mcps', '/connections', '/plugins', '/nodes', '/settings', '/runs']
@@ -177,7 +203,7 @@ function key(event: KeyboardEvent) {
   }
   else if (letter === 'c') {
     event.preventDefault()
-    void router.push('/chats')
+    newConversation()
   }
   else if (letter === 'r') {
     const composer = document.querySelector<HTMLTextAreaElement>('.chat-composer textarea')
@@ -251,15 +277,18 @@ function openShortcuts() {
           </span>
         </RouterLink>
       </div>
-      <RouterLink
-        to="/chats"
-        class="press mt-4 grid size-12 place-items-center rounded-full bg-accent text-surface shadow-[0_10px_24px_-10px_var(--color-accent)]"
-        aria-label="New conversation"
-        data-tip="New conversation"
-        data-kbd="C"
-        data-side="right"
-      >
-        <Icon :name="Plus" :size="22" />
+      <RouterLink v-slot="{ href }" to="/chats" custom>
+        <a
+          :href="href"
+          class="press mt-4 grid size-12 place-items-center rounded-full bg-accent text-surface shadow-[0_10px_24px_-10px_var(--color-accent)]"
+          aria-label="New conversation"
+          data-tip="New conversation"
+          data-kbd="C"
+          data-side="right"
+          @click="followNewConversation"
+        >
+          <Icon :name="Plus" :size="22" />
+        </a>
       </RouterLink>
       <div class="mt-auto flex flex-col items-center gap-1">
         <button
@@ -347,7 +376,7 @@ function openShortcuts() {
       </nav>
       <!-- Chats and the Fil stay mounted between what they open so switching swaps content in place. -->
       <RouterView v-if="state.installationRole === 'owner' || !ownerPage(route.path)" v-slot="{ Component }">
-        <component :is="Component" :key="route.path.startsWith('/chats/') ? '/chats' : filPage ? '/' : route.path">
+        <component :is="Component" ref="conversationView" :key="route.path.startsWith('/chats/') ? '/chats' : filPage ? '/' : route.path">
           <template #account>
             <slot name="settings-account" />
           </template>
@@ -386,8 +415,15 @@ function openShortcuts() {
           <span v-if="index === 1 && missionRunning" class="live-dot absolute -right-2 -top-1" aria-hidden="true" />
         </span>
       </RouterLink>
-      <RouterLink to="/chats" class="press ml-1 grid size-13 place-items-center rounded-full bg-accent text-surface shadow-[0_8px_20px_-8px_var(--color-accent)]" aria-label="New conversation">
-        <Icon :name="Plus" :size="22" />
+      <RouterLink v-slot="{ href }" to="/chats" custom>
+        <a
+          :href="href"
+          class="press ml-1 grid size-13 place-items-center rounded-full bg-accent text-surface shadow-[0_8px_20px_-8px_var(--color-accent)]"
+          aria-label="New conversation"
+          @click="followNewConversation"
+        >
+          <Icon :name="Plus" :size="22" />
+        </a>
       </RouterLink>
     </nav>
     <Transition name="signal-pop">
@@ -401,7 +437,13 @@ function openShortcuts() {
       <Icon :name="Check" :size="17" />{{ state.toast }}
     </div>
   </Transition>
-  <CommandPalette v-if="paletteOpen" @close="paletteOpen = false" @shortcuts="openShortcuts" />
+  <CommandPalette
+    v-if="paletteOpen"
+    @close="paletteOpen = false"
+    @shortcuts="openShortcuts"
+    @create="newConversation"
+    @trash="openTrash"
+  />
   <ShortcutSheet v-if="shortcutsOpen" @close="shortcutsOpen = false" />
 </template>
 

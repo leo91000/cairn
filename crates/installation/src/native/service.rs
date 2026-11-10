@@ -2660,6 +2660,12 @@ pub async fn serve(stop: CancellationToken) -> Result<()> {
 pub(crate) mod tests {
     use super::*;
 
+    pub(crate) async fn validate_staged_plan(data: &Path, id: &str) -> Result<Value> {
+        let (_root, mut controller) = fixture().await;
+        controller.data = data.to_owned();
+        controller.plan(id).await
+    }
+
     /// Real output guard, completion-error branch and authenticated wait/client.
     /// Sparse bytes model an exhausted journal without storing child payloads.
     pub(crate) async fn output_limit_completion(attempt: &str) -> crate::runner::ControllerResult {

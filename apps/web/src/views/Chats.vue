@@ -294,6 +294,7 @@ const provider = ref<'' | Provider>('')
 // The next messages are plan turns until the user turns it off or implements a plan.
 const planning = ref(false)
 const history = ref(false)
+const historyView = ref<'active' | 'trash'>('active')
 const deletingConversation = ref<ChatDetail>()
 const deletionOpener = ref<HTMLElement>()
 const renaming = ref(false)
@@ -370,11 +371,12 @@ async function detailAction(action: () => void) {
 }
 
 const historyButton = ref<HTMLButtonElement>()
-const tabletHistoryButton = ref<HTMLButtonElement>()
 
-// The title's chevron opens the conversation list on every width; phones use the title itself.
+// Phones open the conversation list from the title; desktop uses workspace search.
 function switcherAnchor() {
-  return [historyButton.value, tabletHistoryButton.value, detailsButton.value].find(button => button?.getClientRects().length)
+  if (historyButton.value?.getClientRects().length)
+    return historyButton.value
+  return visibleMenuTrigger()
 }
 
 const error = ref('')
@@ -717,7 +719,11 @@ watch(live.error, (value, previous) => {
   else if (error.value === previous)
     error.value = ''
 })
-onBeforeUnmount(clearAttachments)
+let compositionGeneration = 0
+onBeforeUnmount(() => {
+  compositionGeneration++
+  clearAttachments()
+})
 let submission: {
   key: string
   message: {
@@ -733,7 +739,13 @@ let submission: {
   }
 } | undefined
 
-function newConversation() {
+function newConversation(text = '') {
+  const generation = ++compositionGeneration
+  if (submitting.value) {
+    busy.value = false
+    submitting.value = false
+  }
+
   if (chatId.value)
     saveDraft()
   else
@@ -757,8 +769,21 @@ function newConversation() {
   submission = undefined
   editing.value = null
   error.value = ''
-  void router.push('/chats').finally(() => loadDraft())
+  void router.push('/chats').finally(() => {
+    if (generation !== compositionGeneration)
+      return
+    loadDraft()
+    if (text)
+      draft.value = text
+  })
 }
+
+function openConversations(view: 'active' | 'trash' = 'active') {
+  historyView.value = view
+  history.value = true
+}
+
+defineExpose({ newConversation, openTrash: () => openConversations('trash') })
 
 async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId: string, revision: string }) {
   const originalDraft = draft.value
@@ -779,12 +804,14 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
   const targetProject = projectId.value || null
   submitting.value = true
   const origin = chatId.value
+  const generation = compositionGeneration
+  const currentComposition = () => generation === compositionGeneration && chatId.value === origin
   const direct = !editing.value && ((mode === 'steer' && !detail.value?.paused) || (!responding.value && !detail.value?.paused && !pending.value.length))
   busy.value = true
   error.value = ''
   try {
     const chat = target ?? await createChat(api, { agentId: targetAgent, projectId: targetProject })
-    if (chatId.value !== origin)
+    if (!currentComposition())
       return
     createdChat = chat
     // Items without a local file (reused or already sent records) are never uploaded again.
@@ -796,18 +823,22 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
         const saved = await apiUpload<ChatAttachment>(`/chats/${chat.id}/attachments/${attachment.id}?name=${encodeURIComponent(attachment.name)}`, files.get(attachment.id)!, {
           headers: { 'Content-Type': 'application/octet-stream' },
           onProgress: (progress) => {
+            if (!currentComposition())
+              return
             const current = attachmentStates.value[attachment.id]
             if (current?.status === 'uploading')
               current.progress = progress
           },
         })
+        if (!currentComposition())
+          return
         Object.assign(attachment, saved)
         uploaded.add(attachment.id)
         delete attachmentStates.value[attachment.id]
       }
       catch (e) {
         // The item stays in the draft; the next send retries it.
-        if (attachments.value.some(item => item.id === attachment.id))
+        if (currentComposition() && attachments.value.some(item => item.id === attachment.id))
           attachmentStates.value[attachment.id] = { status: 'failed', error: (e as Error).message || 'Upload failed.' }
         throw e
       }
@@ -816,7 +847,7 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
     if (results.some(result => result.status === 'rejected'))
       return
 
-    if (chatId.value !== origin)
+    if (!currentComposition())
       return
     const attachmentIds = selectedAttachments.map(attachment => attachment.id)
     const content = {
@@ -855,10 +886,8 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
     else
       await sendChatMessage(api, { chatId: chat.id, message: submission.message })
     // Another conversation was opened meanwhile; its composer is not this message's.
-    if (chatId.value !== origin) {
-      submission = undefined
+    if (!currentComposition())
       return
-    }
 
     if (draft.value === originalDraft)
       draft.value = ''
@@ -870,9 +899,12 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
       await router.push(chatPath(chat))
     }
 
-    textarea.value?.focus()
+    if (generation === compositionGeneration)
+      textarea.value?.focus()
   }
   catch (e) {
+    if (!currentComposition())
+      return
     outgoing.value = null
     error.value = (e as Error).message
     if (planApproval) {
@@ -885,8 +917,11 @@ async function send(mode: 'queue' | 'steer' = 'queue', planApproval?: { sourceId
     }
   }
   finally {
-    busy.value = false
-    submitting.value = false
+    // The composition that started the request owns its busy state.
+    if (generation === compositionGeneration) {
+      busy.value = false
+      submitting.value = false
+    }
   }
 }
 
@@ -1419,6 +1454,7 @@ function key(event: KeyboardEvent) {
     <div class="chat-page flex h-full min-h-0 min-w-0 flex-1 flex-col gap-3 px-6 pb-4 pt-3 phone:gap-0 phone:px-3 phone:pb-2 phone:pt-[env(safe-area-inset-top)]">
       <ChatSwitcher
         v-if="history"
+        v-model:view="historyView"
         :chats="chats"
         :selected="selectedChatId"
         :anchor="switcherAnchor"
@@ -1443,7 +1479,7 @@ function key(event: KeyboardEvent) {
           :aria-description="phoneDescription || undefined"
           aria-haspopup="dialog"
           :aria-expanded="history"
-          @click="history = true"
+          @click="openConversations()"
         >
           <span class="flex min-w-0 items-center gap-2.5">
             <AgentAvatar
@@ -1480,17 +1516,6 @@ function key(event: KeyboardEvent) {
             <h1 class="min-w-0 truncate text-base! font-semibold! leading-snug! tracking-tight! text-ink" :title="heading?.title || undefined">
               {{ heading?.title || 'New conversation' }}
             </h1>
-            <button
-              ref="tabletHistoryButton"
-              :class="iconButton"
-              class="-my-2 -ml-2 size-8! shrink-0 pointer-coarse:size-10!"
-              aria-label="Conversations"
-              aria-haspopup="dialog"
-              :aria-expanded="history"
-              @click="history = true"
-            >
-              <Icon :name="ChevronDown" :size="16" />
-            </button>
             <span v-if="headerProject" class="flex min-w-0 items-center gap-1.5"><Icon :name="FolderGit2" :size="13" class="shrink-0" /><span class="truncate max-w-48">{{ headerProject }}</span></span>
             <RouterLink
               v-if="heading?.requester"

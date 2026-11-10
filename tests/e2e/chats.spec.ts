@@ -1,6 +1,7 @@
 import type { Page, Route } from '@playwright/test'
 import type { Workspace } from './fixtures'
 import type { ResumeDiagnosticRecord } from './resume-diagnostic'
+import { Buffer } from 'node:buffer'
 import { randomUUID } from 'node:crypto'
 import {
   signIn as authenticateWorkspace,
@@ -166,46 +167,194 @@ test('a lost message acknowledgement retries the same submission without duplica
   expect(detail.messages[0].id).toBe(attempts[0].id)
 })
 
-test('new conversation on the same route clears an uncertain submission with identical content', async ({ page, workspace }) => {
+for (const stage of ['creation', 'upload', 'message', 'message error'] as const) {
+  test(`fresh conversation ignores a late ${stage} response`, async ({ page, workspace }) => {
+    await useRelayForHttpMocks(page)
+    const pattern = stage === 'creation' ? /\/chats$/ : stage === 'upload' ? /\/chats\/[^/]+\/attachments\// : /\/chats\/[^/]+\/messages$/
+    let release = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let enter = () => {}
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve
+    })
+    let held = false
+    let oldChatId = ''
+    const submitted: string[] = []
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && /\/chats\/[^/]+\/messages$/.test(request.url()))
+        submitted.push(new URL(request.url()).pathname.split('/').at(-2)!)
+    })
+    await page.route(pattern, async (route) => {
+      if (held || !['POST', 'PUT'].includes(route.request().method()))
+        return route.continue()
+      held = true
+      const response = await route.fetch()
+      expect(response.ok()).toBe(true)
+      oldChatId = stage === 'creation' ? (await response.json()).id : new URL(route.request().url()).pathname.split('/chats/').at(-1)!.split('/')[0]!
+      enter()
+      await gate
+      if (stage === 'message error')
+        return route.fulfill({ status: 503, json: { error: 'Late request failed' } })
+      return route.fulfill({ response })
+    })
+    const completed = page.waitForResponse(response => pattern.test(response.url()) && ['POST', 'PUT'].includes(response.request().method()))
+    try {
+      await page.goto(workspacePath('/chats'))
+      await authenticateWorkspace(page)
+      const composer = page.getByRole('textbox', { name: 'Message', exact: true })
+      await composer.fill('The first request is still in flight')
+      if (stage === 'upload')
+        await page.getByLabel('Attach files', { exact: true }).setInputFiles({ name: 'old-note.txt', mimeType: 'text/plain', buffer: Buffer.from('old note') })
+      await page.getByRole('button', { name: 'Send', exact: true }).click()
+      await entered
+      await page.getByRole('link', { name: 'New conversation', exact: true }).click()
+      await expect(composer).toHaveValue('')
+      await composer.fill('Keep the replacement draft')
+      if (stage === 'upload')
+        await page.getByLabel('Attach files', { exact: true }).setInputFiles({ name: 'new-note.txt', mimeType: 'text/plain', buffer: Buffer.from('new note') })
+      release()
+      await (await completed).finished()
+      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+      await expect(page).toHaveURL(workspacePath('/chats'))
+      await expect(composer).toHaveValue('Keep the replacement draft')
+      await expect(page.getByText('Late request failed', { exact: true })).toHaveCount(0)
+      if (stage === 'upload')
+        await expect(page.getByText('new-note.txt', { exact: true })).toBeVisible()
+      if (stage === 'creation' || stage === 'upload')
+        expect(submitted).not.toContain(oldChatId)
+      else
+        expect(workspace.service.chats.detail(oldChatId).messages).toHaveLength(1)
+    }
+    finally {
+      release()
+    }
+  })
+}
+
+test('a previous send cannot release a newer conversation submission', async ({ page, workspace }) => {
   await useRelayForHttpMocks(page)
-  const attempts: { id: string, chatId: string }[] = []
-  await page.route(/\/chats\/([^/]+)\/messages$/, async (route) => {
+  let releaseOld = () => {}
+  const oldGate = new Promise<void>((resolve) => {
+    releaseOld = resolve
+  })
+  let releaseNew = () => {}
+  const newGate = new Promise<void>((resolve) => {
+    releaseNew = resolve
+  })
+  let oldEntered = () => {}
+  const oldReady = new Promise<void>((resolve) => {
+    oldEntered = resolve
+  })
+  let newEntered = () => {}
+  const newReady = new Promise<void>((resolve) => {
+    newEntered = resolve
+  })
+  const targets: string[] = []
+  await page.route(/\/chats\/[^/]+\/messages$/, async (route) => {
     if (route.request().method() !== 'POST')
       return route.continue()
-    attempts.push({
-      id: route.request().postDataJSON().id,
-      chatId: new URL(route.request().url()).pathname.split('/').at(-2)!,
-    })
+    const index = targets.length
+    targets.push(new URL(route.request().url()).pathname.split('/').at(-2)!)
     const response = await route.fetch()
-    if (attempts.length === 1) {
-      expect(response.ok()).toBe(true)
-      return route.abort('failed')
+    expect(response.ok()).toBe(true)
+    if (index === 0) {
+      oldEntered()
+      await oldGate
+    }
+    else {
+      newEntered()
+      await newGate
     }
 
     return route.fulfill({ response })
   })
-  await page.goto(workspacePath('/chats'))
-  await authenticateWorkspace(page)
-  const composer = page.getByRole('textbox', { name: 'Message', exact: true })
-  await composer.fill('Same content, separate conversation')
-  await page.getByRole('button', { name: 'Send', exact: true }).click()
-  await expect(page.getByText('Connection unavailable. Please try again.', { exact: true })).toBeVisible()
-  await expect(page).toHaveURL(workspacePath('/chats'))
-  await page.getByRole('button', { name: 'Conversations', exact: true }).click()
-  await page.getByRole('button', { name: 'New conversation', exact: true }).click()
-  await expect(composer).toHaveValue('')
-  await composer.fill('Same content, separate conversation')
-  await page.getByRole('button', { name: 'Send', exact: true }).click()
-  await expect(page).toHaveURL(/\/chats\/[a-z]+-[a-z]+-[a-f0-9]{8}$/)
-  expect(attempts).toHaveLength(2)
-  expect(attempts[1].chatId).not.toBe(attempts[0].chatId)
-  expect(attempts[1].id).not.toBe(attempts[0].id)
-  for (const attempt of attempts) {
-    const detail = workspace.service.chats.detail(attempt.chatId)
-    expect(detail.messages).toHaveLength(1)
-    expect(detail.messages[0].id).toBe(attempt.id)
+  try {
+    await page.goto(workspacePath('/chats'))
+    await authenticateWorkspace(page)
+    const composer = page.getByRole('textbox', { name: 'Message', exact: true })
+    await composer.fill('The previous request is still pending')
+    await page.getByRole('button', { name: 'Send', exact: true }).click()
+    await oldReady
+    await page.getByRole('link', { name: 'New conversation', exact: true }).click()
+    await composer.fill('The new request owns this conversation')
+    await page.getByRole('button', { name: 'Send', exact: true }).click()
+    await newReady
+    expect(targets).toHaveLength(2)
+    expect(targets[1]).not.toBe(targets[0])
+    const oldResponse = page.waitForResponse(response => response.request().method() === 'POST' && response.url().endsWith(`/chats/${targets[0]}/messages`))
+    releaseOld()
+    await (await oldResponse).finished()
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
+    await expect(page).toHaveURL(workspacePath('/chats'))
+    await expect(page.getByRole('button', { name: 'Sending…', exact: true })).toBeDisabled()
+    releaseNew()
+    const destination = workspace.service.chats.detail(targets[1]!)
+    await expect(page).toHaveURL(workspacePath(`/chats/${destination.slug}`))
+    await expect(page.locator('.activity-message').getByText('The new request owns this conversation', { exact: true })).toBeVisible()
+  }
+  finally {
+    releaseOld()
+    releaseNew()
   }
 })
+
+for (const entry of ['command', 'workspace link', 'search draft'] as const) {
+  test(`new conversation through ${entry} clears an uncertain submission with identical content`, async ({ page, workspace }) => {
+    await useRelayForHttpMocks(page)
+    const attempts: { id: string, chatId: string }[] = []
+    await page.route(/\/chats\/([^/]+)\/messages$/, async (route) => {
+      if (route.request().method() !== 'POST')
+        return route.continue()
+      attempts.push({
+        id: route.request().postDataJSON().id,
+        chatId: new URL(route.request().url()).pathname.split('/').at(-2)!,
+      })
+      const response = await route.fetch()
+      if (attempts.length === 1) {
+        expect(response.ok()).toBe(true)
+        return route.abort('failed')
+      }
+
+      return route.fulfill({ response })
+    })
+    await page.goto(workspacePath('/chats'))
+    await authenticateWorkspace(page)
+    const composer = page.getByRole('textbox', { name: 'Message', exact: true })
+    await composer.fill('Same content, separate conversation')
+    await page.getByRole('button', { name: 'Send', exact: true }).click()
+    await expect(page.getByText('Connection unavailable. Please try again.', { exact: true })).toBeVisible()
+    await expect(page).toHaveURL(workspacePath('/chats'))
+    if (entry === 'workspace link') {
+      await page.getByRole('link', { name: 'New conversation', exact: true }).click()
+    }
+    else {
+      await page.keyboard.press('Control+k')
+      const palette = page.getByRole('dialog', { name: 'Search and commands', exact: true })
+      if (entry === 'search draft') {
+        await palette.getByRole('combobox', { name: 'Search', exact: true }).fill('Same content, separate conversation')
+        await palette.getByRole('option', { name: /^Start a conversation:/ }).click()
+      }
+      else {
+        await palette.getByRole('option', { name: 'New conversation C', exact: true }).click()
+      }
+    }
+
+    await expect(composer).toHaveValue(entry === 'search draft' ? 'Same content, separate conversation' : '')
+    await composer.fill('Same content, separate conversation')
+    await page.getByRole('button', { name: 'Send', exact: true }).click()
+    await expect(page).toHaveURL(/\/chats\/[a-z]+-[a-z]+-[a-f0-9]{8}$/)
+    expect(attempts).toHaveLength(2)
+    expect(attempts[1].chatId).not.toBe(attempts[0].chatId)
+    expect(attempts[1].id).not.toBe(attempts[0].id)
+    for (const attempt of attempts) {
+      const detail = workspace.service.chats.detail(attempt.chatId)
+      expect(detail.messages).toHaveLength(1)
+      expect(detail.messages[0].id).toBe(attempt.id)
+    }
+  })
+}
 
 test('new conversation on the same route clears the abandoned attempt’s error', async ({ page }) => {
   await useRelayForHttpMocks(page)
@@ -219,8 +368,7 @@ test('new conversation on the same route clears the abandoned attempt’s error'
   await page.getByRole('button', { name: 'Send', exact: true }).click()
   const failure = page.getByText('Simulated send failure', { exact: true })
   await expect(failure).toBeVisible()
-  await page.getByRole('button', { name: 'Conversations', exact: true }).click()
-  await page.getByRole('button', { name: 'New conversation', exact: true }).click()
+  await page.getByRole('link', { name: 'New conversation', exact: true }).click()
   await expect(page).toHaveURL(workspacePath('/chats'))
   await expect(composer).toHaveValue('')
   await expect(failure).toBeHidden()
@@ -961,7 +1109,7 @@ test('queued Claude conversation explains the missing account and continues afte
   await expect(page.locator('.activity-message').getByText('Keep this request while connecting', { exact: true })).toHaveCount(1)
 })
 
-test('conversation switcher preserves drafts and supports search, keyboard and mobile sheets', async ({ page, workspace }) => {
+test('conversation navigation uses desktop search and the phone switcher without losing drafts', async ({ page, workspace }) => {
   test.setTimeout(60000)
   await workspace.restart()
   const first = await workspace.api('/api/chats', 'POST', {})
@@ -977,8 +1125,29 @@ test('conversation switcher preserves drafts and supports search, keyboard and m
   const dialog = page.getByRole('dialog', { name: /Conversations/ })
   for (const colorScheme of ['dark', 'light'] as const) {
     await page.emulateMedia({ colorScheme })
-    // Every width opens conversations from the title's chevron; phones from the title itself.
-    for (const width of [1440, 800, 390, 320]) {
+    for (const width of [1440, 800]) {
+      await page.setViewportSize({ width, height: 900 })
+      await expect(trigger).toBeHidden()
+      await expect(page.getByRole('heading', { name: 'Simplify the chat navigation', exact: true })).toBeVisible()
+      const shortcut = width === 1440 ? 'Control+k' : 'Meta+k'
+      const palette = page.getByRole('dialog', { name: 'Search and commands', exact: true })
+      await page.keyboard.press(shortcut)
+      const search = palette.getByRole('combobox', { name: 'Search', exact: true })
+      await expect(search).toBeFocused()
+      await search.fill('Review the release notes')
+      await expect(palette.getByRole('option', { name: /^Review the release notes/ })).toBeVisible()
+      await search.press('Enter')
+      await expect(page).toHaveURL(workspacePath(`/chats/${second.slug}`))
+      await expect(message).toHaveValue('')
+      await page.keyboard.press(shortcut)
+      await search.fill('Simplify the chat navigation')
+      await expect(palette.getByRole('option', { name: /^Simplify the chat navigation/ })).toBeVisible()
+      await search.press('Enter')
+      await expect(page).toHaveURL(workspacePath(`/chats/${first.slug}`))
+      await expect(message).toHaveValue('Keep this unsent draft')
+    }
+
+    for (const width of [390, 320]) {
       await page.setViewportSize({ width, height: width === 320 ? 600 : 900 })
       await trigger.click()
       await expect(dialog).toBeVisible()
@@ -1001,14 +1170,14 @@ test('conversation switcher preserves drafts and supports search, keyboard and m
     }
   }
 
-  // Crossing into phone widths while open swaps the trigger: focus returns to the visible one.
-  await page.setViewportSize({ width: 800, height: 900 })
+  // Resizing an open phone list restores focus to a visible desktop control.
+  await page.setViewportSize({ width: 390, height: 844 })
   await trigger.click()
   await expect(dialog).toBeVisible()
-  await page.setViewportSize({ width: 390, height: 844 })
+  await page.setViewportSize({ width: 800, height: 900 })
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
-  await expect(trigger).toBeFocused()
+  await expect(page.getByRole('button', { name: 'Chat details', exact: true })).toBeFocused()
 
   await page.setViewportSize({ width: 320, height: 600 })
   await trigger.click()
@@ -1030,6 +1199,52 @@ test('conversation switcher preserves drafts and supports search, keyboard and m
   await expect(dialog).toHaveCount(0)
   await expect(message).toHaveValue('')
   await workspace.restart()
+})
+
+test('workspace search opens legacy trash and restores a conversation without losing another draft', async ({ page, workspace }) => {
+  const active = await workspace.api('/api/chats', 'POST', {})
+  const trashed = await workspace.api('/api/chats', 'POST', {})
+  workspace.service.store.put('chats', { ...active, title: 'Keep the current work draft' })
+  workspace.service.store.put('chats', {
+    ...trashed,
+    title: 'Legacy recoverable conversation',
+    lifecycle: 'trash',
+    trashedAt: Date.now() - 86400000,
+    purgeAt: Date.now() + 86400000,
+  })
+  await page.goto(workspacePath(`/chats/${active.id}`))
+  await authenticateWorkspace(page)
+  const message = page.getByRole('textbox', { name: 'Message', exact: true })
+  await message.fill('Keep this draft while visiting the trash')
+  const trash = page.getByRole('dialog', { name: /Conversations/ })
+  for (const fromFil of [false, true]) {
+    if (fromFil) {
+      await page.getByRole('navigation', { name: 'Workspace navigation', exact: true }).getByRole('link', { name: 'Fil', exact: true }).click()
+      await expect(page).toHaveURL(workspacePath('/'))
+    }
+
+    await page.keyboard.press('Control+k')
+    const palette = page.getByRole('dialog', { name: 'Search and commands', exact: true })
+    await palette.getByRole('combobox', { name: 'Search', exact: true }).fill('Conversation trash')
+    await palette.getByRole('option', { name: 'Conversation trash', exact: true }).click()
+    await expect(trash.getByRole('link', { name: /^Legacy recoverable conversation/ })).toBeVisible()
+    await expect(trash.getByRole('link', { name: /^Keep the current work draft/ })).toHaveCount(0)
+    if (!fromFil) {
+      await trash.getByRole('button', { name: 'Close conversations', exact: true }).click()
+      await expect(message).toHaveValue('Keep this draft while visiting the trash')
+    }
+  }
+
+  await trash.getByRole('link', { name: /^Legacy recoverable conversation/ }).click()
+  await page.getByRole('button', { name: 'Restore conversation', exact: true }).click()
+  await expect(message).toBeVisible()
+  expect((await workspace.api(`/api/chats/${trashed.id}`)).lifecycle).toBe('active')
+  await page.keyboard.press('Control+k')
+  const palette = page.getByRole('dialog', { name: 'Search and commands', exact: true })
+  const search = palette.getByRole('combobox', { name: 'Search', exact: true })
+  await search.fill('Keep the current work draft')
+  await palette.getByRole('option', { name: /^Keep the current work draft/ }).click()
+  await expect(message).toHaveValue('Keep this draft while visiting the trash')
 })
 
 test('compact mobile toolbar keeps details and workspace controls accessible', async ({ page, workspace }) => {
@@ -2350,7 +2565,7 @@ test('conversation deletion is visible, confirmed and permanent on desktop and m
   await expect(confirmation).toBeVisible()
   await confirmation.getByRole('button', { name: 'Keep conversation' }).click()
   await expect(page.getByRole('button', { name: 'Chat details', exact: true })).toBeFocused()
-  for (const [width, colorScheme] of [[1280, 'light'], [390, 'dark']] as const) {
+  for (const [width, colorScheme] of [[390, 'light'], [320, 'dark']] as const) {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 900 })
     await page.emulateMedia({ colorScheme })
     await openConversations()
