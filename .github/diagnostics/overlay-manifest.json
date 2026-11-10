@@ -3,12 +3,12 @@
   "files": {
     "tests/e2e/mcps.spec.ts": {
       "originalSHA256": "43a9659c3bb8e176438025cc7812c6d72a5aec9308b9bc038f6745d5764fb43d",
-      "overlaySHA256": "d4ecaf692482c2e3a95a4d2183aae84ee52c9ef67e3c7bda5320d53e5ddce15a",
+      "overlaySHA256": "48f4a80c78adbabbcb2a034b5abd7a0d79faf013f5c31d53b40597bc8b6d9006",
       "overlayFile": "mcps.direct-owner.overlay.ts"
     },
     "apps/web/tests/direct-transport.test.ts": {
       "originalSHA256": "e89819370ed1753319e005b725dc2196421eec043de236d0e4f2a3c9a7b6ee18",
-      "overlaySHA256": "95c14de2273586036ff6f79e460512aaaa7e48403906afe80b1c4abb5ede6eaa",
+      "overlaySHA256": "f48ada4b8312643434f4f5469fd9387923fbd5aa002c94e2c26d07d63696b609",
       "overlayFile": "direct-transport.seam.overlay.ts"
     }
   },

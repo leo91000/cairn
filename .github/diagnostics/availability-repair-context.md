@@ -58,3 +58,19 @@ is DUE on frozen newsource, no oldR76/H74 transfer. ROOT may run5cases using exi
 tools in detached copy, no install/newSDK/env/toolapproval needed. Any sourcechange
 invalidates affected sourcechecks/reviews. P1OPEN/slotROOT/B-DstorageHOLD/UIcaptures
 Léo/Slackprod/grantsforensics intact. No fixes applied to sharedmodules.
+
+H75 on589e COMPLETE NONclean2P2 preserved: provenance filtered out unmatched sources,
+and archived skill/B534 wrappers returned derivedpromises/fixedreceivers. Corrected
+observer-only: count ALL sources before attribution; exactgrant/owner/request-start
+identity for selected originalrejection; ambiguity/orphan staysUNKNOWN. Current3new
+source negatives RED on589e, affectedchecksGREENafterfix, not a productionbugfix.
+Archived wrappers now separatelyobserve andreturnORIGINAL fetch/bodypromises, actual
+receivers/args, no response-own bodymethods; B534close forwardsreceiver/return too.
+Actualbootstrap sourcechecks RED old589e/GREENcorrected; archives remain unqualified.
+Observermetadatafailures markdiagnosticfailure instead of changingappterminals.
+ROOTfiveSOURCEcases passed onREFERENCE2344:5PASS/67skipsNONcredited and72wholePASS;
+no causal nativebeforepagehide defect established. Sourceunitoverlaycanonical7lint
+findings fixed withEXACT2098B/a75ff126 patch once, payloadf48ada4b8312643434f4f5469fd9387923fbd5aa002c94e2c26d07d63696b609,
+manifestupdated/oldsourcepreserved. ROOTformatted72PASS+lint0receipt da64ab20... is
+separateSourceproof, no Native acquisition and no productionfix. FreshFULL on new
+source mandatory; no oldH75 verdicttransfer. Product2344/PR731 untouched.

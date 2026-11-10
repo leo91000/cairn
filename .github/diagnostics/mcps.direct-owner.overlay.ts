@@ -1059,7 +1059,7 @@ availabilityTest('availability preserves a scoped readonly outage before native 
     saveAvailabilityObservation(testInfo.outputPath('direct-owner-private.json'), JSON.stringify(receipt.privateEvidence))
     saveAvailabilityObservation(testInfo.outputPath('direct-owner-projection.json'), JSON.stringify(receipt.projection))
     // A non-reproduced/unknown observation never becomes diagnostic success.
-    if (!observerRetired || !receipt.projection.ownerReactionStateKnown || !receipt.projection.sourceCloseProvenanceKnown || !receipt.projection.firstErrorPairReproduced || !receipt.projection.closureKnown || !receipt.projection.pageClosed || !receipt.projection.gateClosed || receipt.projection.cleanupFailureCount !== 0)
+    if (receipt.projection.receiptStatus !== 'PARTIAL' || !observerRetired || !receipt.projection.ownerReactionStateKnown || !receipt.projection.sourceCloseProvenanceKnown || !receipt.projection.firstErrorPairReproduced || !receipt.projection.closureKnown || !receipt.projection.pageClosed || !receipt.projection.gateClosed || receipt.projection.cleanupFailureCount !== 0)
       failures.push(new Error('Direct owner receipt remains UNKNOWN'))
   }
   catch (cause) {

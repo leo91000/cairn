@@ -93,6 +93,7 @@ for (const scenario of ['healthy-boundary', 'late-http403-after-drain', 'late-pe
     },
     evaluate: async callback => {
       const text = callback.toString()
+      if (text.includes('shellObserverFailed')) return false
       if (text.includes('shellPending.size')) return pending
       if (text.includes('targetController')) return { active: true, poll: 4, document }
       if (text.includes('return observation.documentId') || text.includes('b534Observation.documentId')) return document

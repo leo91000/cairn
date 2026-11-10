@@ -10,7 +10,7 @@ import { createContext, runInContext, runInNewContext } from 'node:vm'
 import { applyTestOverlays, restoreTestOverlays, product } from './direct-owner-overlay-control.mjs'
 import { observeDirectOwners, projectDirectOwners, createDirectOwnerObserver } from './direct-owner-probe.mjs'
 
-function fixture(t) {
+function fixture(t, options = {}) {
   const originalAny = AbortSignal.any
   const originalAbort = AbortController.prototype.abort
   const originalJson = Response.prototype.json
@@ -38,7 +38,7 @@ function fixture(t) {
     readyState = 0
     closes = 0
     constructor(url) { super(); this.url = url }
-    close() { this.readyState = 2; this.closes++; return closeResult }
+    close() { this.readyState = 2; this.closes++; if (options.closeFailure) throw options.closeFailure; return closeResult }
   }
   const nativeFetch = function (...args) {
     requests.push({ receiver: this, args })
@@ -60,18 +60,20 @@ function fixture(t) {
   })
   runInContext("window=globalThis; top=window; document={defaultView:window}; location={href:'http://localhost:4422/installations/private/agents',origin:'http://localhost:4422',pathname:'/installations/private/agents'}; cairnAvailabilityDocument='PRIVATE_DOCUMENT_CANARY'", context)
   runInContext(`(${observeDirectOwners.toString()})()`, context)
+  const ownWindow = runInContext('window', context)
+  const invokeFetch = (...args) => Reflect.apply(context.fetch, ownWindow, args)
   const generation = new AbortController()
   const control = new AbortController()
   const signal = () => context.AbortSignal.any([generation.signal, control.signal])
   return {
-    context, Source, generation, control, signal, queue, requests, storage, ingresses,
+    context, fetch: invokeFetch, Source, generation, control, signal, queue, requests, storage, ingresses,
     closeResult, originalJsonPromises, callbacks,
     snapshot: () => context.__c40DirectOwnerReceipt.snapshot(),
     async authorize() {
       const native = Promise.withResolvers()
       queue.push(native)
       const options = { method: 'POST', signal: signal() }
-      const returned = context.fetch('/api/installations/private/direct/authorize', options)
+      const returned = invokeFetch('/api/installations/private/direct/authorize', options)
       assert.equal(returned, native.promise)
       native.resolve(Response.json({ available: true, grant: { claims: { connection_id: 'PRIVATE_CONNECTION_CANARY', token: 'NEVER_PUBLISH' } } }))
       const response = await returned
@@ -113,7 +115,7 @@ test('original active rejection stays identical and records live owner at reacti
   const source = await f.authorize()
   const native = Promise.withResolvers()
   f.queue.push(native)
-  const original = f.context.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', { signal: f.signal(), method: 'POST' })
+  const original = f.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', { signal: f.signal(), method: 'POST' })
   const cause = new TypeError('ORIGINAL_CAUSE')
   native.reject(cause)
   await assert.rejects(original, value => value === cause)
@@ -131,7 +133,7 @@ test('real native parent/composite signals preserve exact rejection reason and s
   const native = Promise.withResolvers()
   f.queue.push(native)
   const signal = f.signal()
-  const original = f.context.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', { signal, method: 'POST' })
+  const original = f.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', { signal, method: 'POST' })
   const cause = new DOMException('owned native source test withdrawal', 'AbortError')
   f.control.abort(cause)
   source.close()
@@ -166,7 +168,7 @@ test('generation reason is distinct from a later control abort reason, without i
   const native = Promise.withResolvers()
   f.queue.push(native)
   const signal = f.signal()
-  const original = f.context.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', { signal })
+  const original = f.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', { signal })
   const cause = new DOMException('generation reason', 'AbortError')
   f.generation.abort(cause)
   f.control.abort(new DOMException('different control reason', 'AbortError'))
@@ -241,7 +243,7 @@ test('actual serialized wrappers preserve synchronous original exceptions', (t) 
   const f = fixture(t)
   const cause = new TypeError('same original synchronous fetch refusal')
   f.queue.push({ throw: cause })
-  assert.throws(() => f.context.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', { signal: f.signal() }), error => error === cause)
+  assert.throws(() => f.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', { signal: f.signal() }), error => error === cause)
 })
 
 test('missing closure or duplicate private receipt never acquires a known result', async (t) => {
@@ -249,7 +251,7 @@ test('missing closure or duplicate private receipt never acquires a known result
   const source = await f.authorize()
   const native = Promise.withResolvers()
   f.queue.push(native)
-  const original = f.context.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', { signal: f.signal() })
+  const original = f.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', { signal: f.signal() })
   const cause = new TypeError('active original')
   native.reject(cause)
   await assert.rejects(original, error => error === cause)
@@ -427,4 +429,71 @@ test('serialized lifecycle provenance checks the actual captured document, not a
   event = f.snapshot().journal.at(-1)
   assert.equal(event.ownContext, false)
   assert.equal(event.nativeTrusted, false)
+})
+
+test('H75 all sources on the errored connection, including an unmatched source, prevent known provenance', async (t) => {
+  const f = fixture(t)
+  const unmatched = new f.context.EventSource('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/events')
+  const matched = await f.authorize()
+  const native = Promise.withResolvers()
+  f.queue.push(native)
+  const original = f.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', { signal: f.signal() })
+  const cause = new TypeError('same original')
+  native.reject(cause)
+  await assert.rejects(original, value => value === cause)
+  await setImmediate()
+  unmatched.close()
+  matched.close()
+  const out = projectDirectOwners(f.snapshot().journal, privateErrors, 0, { pageClosed: true, gateClosed: true, cleanupFailureCount: 0 })
+  assert.equal(out.actualSourceUnique, false)
+  assert.equal(out.sourceCloseProvenanceKnown, false)
+  assert.equal(out.receiptStatus, 'UNKNOWN')
+})
+
+test('H75 a rejection from another actual parent owner cannot stand for the selected grant owner', async (t) => {
+  const f = fixture(t)
+  const source = await f.authorize()
+  const other = new AbortController()
+  const native = Promise.withResolvers()
+  f.queue.push(native)
+  const original = f.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', { signal: f.context.AbortSignal.any([f.generation.signal, other.signal]) })
+  const cause = new TypeError('different actual owner')
+  native.reject(cause)
+  await assert.rejects(original, value => value === cause)
+  await setImmediate()
+  source.close()
+  const out = projectDirectOwners(f.snapshot().journal, privateErrors, 0, { pageClosed: true, gateClosed: true, cleanupFailureCount: 0 })
+  assert.equal(out.ownerReactionStateKnown, false)
+  assert.equal(out.receiptStatus, 'UNKNOWN')
+})
+
+test('H75 an orphan rejection request identity remains unknown even with a matched source', async (t) => {
+  const f = fixture(t)
+  const source = await f.authorize()
+  const native = Promise.withResolvers()
+  f.queue.push(native)
+  const original = f.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', { signal: f.signal() })
+  const cause = new TypeError('original orphan metadata control')
+  native.reject(cause)
+  await assert.rejects(original, value => value === cause)
+  await setImmediate()
+  source.close()
+  const journal = Array.from(f.snapshot().journal, event => event.kind === 'control-rejected-reaction' ? { ...event, request: event.request + 100 } : event)
+  const out = projectDirectOwners(journal, privateErrors, 0, { pageClosed: true, gateClosed: true, cleanupFailureCount: 0 })
+  assert.equal(out.ownerReactionStateKnown, false)
+  assert.equal(out.receiptStatus, 'UNKNOWN')
+})
+
+
+test('close provenance does not turn an original thrown close into a known return', async (t) => {
+  const cause = new Error('same original close failure')
+  const f = fixture(t, { closeFailure: cause })
+  const source = await f.authorize()
+  assert.throws(() => source.close(), value => value === cause)
+  const journal = f.snapshot().journal
+  assert.equal(journal.some(event => event.kind === 'source-close-threw'), true)
+  assert.equal(journal.some(event => event.kind === 'source-close-return'), false)
+  const out = projectDirectOwners(journal, privateErrors, 0, { pageClosed: true, gateClosed: true, cleanupFailureCount: 0 })
+  assert.equal(out.sourceCloseProvenanceKnown, false)
+  assert.equal(out.receiptStatus, 'UNKNOWN')
 })

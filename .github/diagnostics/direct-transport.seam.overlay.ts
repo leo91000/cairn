@@ -1358,10 +1358,18 @@ for (const departure of ['pagehide', 'redirect'] as const) {
         if (url.endsWith('/direct/authorize')) {
           return Promise.resolve(Response.json({
             available: true,
-            grant: { claims: { connection_id: `connection-${Peer.all.length}`, account_id: 'account', role: 'owner', expires_at: Date.now() / 1000 + 180 } },
+            grant: {
+              claims: {
+                connection_id: `connection-${Peer.all.length}`,
+                account_id: 'account',
+                role: 'owner',
+                expires_at: Date.now() / 1000 + 180,
+              },
+            },
             iceServers: [],
           }))
         }
+
         if (url.endsWith('/signal') && signals++ === 0)
           return pending.promise
         return Promise.resolve(new Response(null, { status: 204 }))
@@ -1388,6 +1396,7 @@ for (const departure of ['pagehide', 'redirect'] as const) {
       else {
         window.dispatchEvent(new Event('pagehide'))
       }
+
       expect(generation.signal.aborted).toBe(true)
       expect(signal.aborted).toBe(true)
       expect(source.closed).toBe(true)
@@ -1400,6 +1409,7 @@ for (const departure of ['pagehide', 'redirect'] as const) {
       else {
         pending.resolve(Response.json({ error: 'old session refused' }, { status: 401 }))
       }
+
       source.dispatchEvent(new MessageEvent('signal', { data: JSON.stringify({ kind: 'answer', sdp: 'late' }) }))
       source.onerror?.()
       window.dispatchEvent(new Event('online'))
@@ -1428,7 +1438,14 @@ it('keeps an original active signal TypeError meaningful while the generation is
   const fetch = vi.fn((url: string, _options?: RequestInit) => url.endsWith('/direct/authorize')
     ? Promise.resolve(Response.json({
         available: true,
-        grant: { claims: { connection_id: 'active-connection', account_id: 'account', role: 'owner', expires_at: Date.now() / 1000 + 180 } },
+        grant: {
+          claims: {
+            connection_id: 'active-connection',
+            account_id: 'account',
+            role: 'owner',
+            expires_at: Date.now() / 1000 + 180,
+          },
+        },
         iceServers: [],
       }))
     : pending.promise)

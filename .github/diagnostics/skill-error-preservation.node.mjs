@@ -69,6 +69,7 @@ for (const boundary of ['pending-poll', 'departing-timer']) {
       },
       evaluate: async fn => {
         const text = fn.toString()
+        if (text.includes('shellObserverFailed')) return false
         if (text.includes('({ document:')) return { document, pending }
         if (text.includes('shellObservation.document')) return document
         if (text.includes('shellPending.size')) return pending

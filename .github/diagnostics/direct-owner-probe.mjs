@@ -4,6 +4,7 @@ import { closedTargetBound } from './closed-target-error.mjs'
 // Serialized into the real page. All identities below stay private; publication
 // is exclusively through projectDirectOwners. No original promise is replaced.
 export function observeDirectOwners() {
+  'use strict'
   const key = '__c40_direct_owner_journal_v1'
   const api = '__c40DirectOwnerReceipt'
   if (Object.hasOwn(window, api))
@@ -154,6 +155,8 @@ export function observeDirectOwners() {
     }
   }
   window.fetch = function (...args) {
+    if (this != null && this !== ownerWindow)
+      return Reflect.apply(fetch, this, args)
     let meta
     try {
       const path = inspect(args[0])
@@ -242,10 +245,13 @@ export function observeDirectOwners() {
       return Reflect.apply(close, this, args)
     sourceRecord('source-close-enter', meta, this)
     try {
-      return Reflect.apply(close, this, args)
-    }
-    finally {
+      const original = Reflect.apply(close, this, args)
       sourceRecord('source-close-return', meta, this)
+      return original
+    }
+    catch (cause) {
+      sourceRecord('source-close-threw', meta, this)
+      throw cause
     }
   }
   for (const kind of ['beforeunload', 'pagehide']) {
@@ -302,7 +308,7 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
   const generations = [...new Set(grants.map(event => event.generationOwner).filter(Number.isInteger))]
   const generationOwner = generations.length === 1 ? generations[0] : null
   const related = journal.filter(event => document && event.document === document && (event.connection === connection || event.owner === owner || (generationOwner !== null && event.owner === generationOwner) || ['beforeunload', 'pagehide'].includes(event.kind)))
-  const allowedKinds = ['grant-observed','control-start','control-headers','control-threw','control-rejected-reaction','request-abort-event','parent-abort-event','parent-abort-call-enter','parent-abort-call-return','source-created','source-open-event','source-error-event','source-close-enter','source-close-return','beforeunload','pagehide','window-error-same-original-cause']
+  const allowedKinds = ['grant-observed','control-start','control-headers','control-threw','control-rejected-reaction','request-abort-event','parent-abort-event','parent-abort-call-enter','parent-abort-call-return','source-created','source-open-event','source-error-event','source-close-enter','source-close-return','source-close-threw','beforeunload','pagehide','window-error-same-original-cause']
   const booleans = ['agentsDocument','ownContext','parentIdentityKnown','requestSignalKnown','requestAborted','controlSignalKnown','controlAborted','generationSignalKnown','generationAborted','requestReasonMatches','controlReasonMatches','generationReasonMatches','nativeTrusted','insideOwnAbortCall','grantMatched','alreadyAborted','aborted']
   const events = related.map((event) => {
     const out = {
@@ -321,11 +327,21 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
     return out
   })
   const rejected = events.filter(event => event.kind === 'control-rejected-reaction' && event.category === 'signal')
+  const privateRejections = related.filter(event => event.kind === 'control-rejected-reaction' && event.category === 'signal' && event.connection === connection)
+  const selectedRejection = privateRejections.length === 1 ? privateRejections[0] : null
+  const rejectionStarts = selectedRejection ? related.filter(event => event.kind === 'control-start' && event.category === 'signal' && event.connection === connection && event.owner === owner && event.request === selectedRejection.request && event.sequence < selectedRejection.sequence && event.parentIdentityKnown === true) : []
+  const rejectionIdentityKnown = grants.length === 1 && selectedRejection !== null && selectedRejection.owner === owner && Number.isSafeInteger(selectedRejection.request) && rejectionStarts.length === 1
   const closed = events.filter(event => event.kind === 'source-close-return')
-  const sourceCreators = related.filter(event => event.kind === 'source-created' && event.grantMatched === true && event.owner === owner && event.ownContext === true && Number.isInteger(event.source))
-  const sourceIdentities = [...new Set(sourceCreators.map(event => event.source))]
-  const source = sourceIdentities.length === 1 ? sourceIdentities[0] : null
-  const ownedCloses = related.filter(event => source !== null && event.kind === 'source-close-return' && event.source === source && event.owner === owner && event.grantMatched === true && event.ownContext === true && event.readyState === 2)
+  // First count EVERY source on this document/connection. Filtering by an
+  // already-matched owner would conceal the very ambiguity this receipt tests.
+  const sourceCreators = related.filter(event => event.kind === 'source-created' && event.connection === connection)
+  const source = sourceCreators.length === 1 && Number.isSafeInteger(sourceCreators[0].source) ? sourceCreators[0].source : null
+  const creatorKnown = source !== null && sourceCreators[0].grantMatched === true && sourceCreators[0].owner === owner && sourceCreators[0].ownContext === true
+  const closeEntries = related.filter(event => event.kind === 'source-close-enter' && event.connection === connection)
+  const allCloses = related.filter(event => event.kind === 'source-close-return' && event.connection === connection)
+  const ownedCloses = creatorKnown && closeEntries.length === 1 && allCloses.length === 1
+    ? allCloses.filter(event => event.source === source && closeEntries[0].source === source && event.owner === owner && closeEntries[0].owner === owner && event.grantMatched === true && closeEntries[0].grantMatched === true && event.ownContext === true && event.readyState === 2 && closeEntries[0].sequence < event.sequence)
+    : []
   const structural = related.every(event => allowedKinds.includes(event.kind) && Number.isInteger(event.sequence) && event.sequence > 0 && event.ownContext === true) && new Set(related.map(event => event.sequence)).size === related.length
   const nativeErrors = events.filter(event => event.kind === 'window-error-same-original-cause' && event.nativeTrusted)
   const closureKnown = typeof closure?.pageClosed === 'boolean' && typeof closure?.gateClosed === 'boolean' && Number.isSafeInteger(closure?.cleanupFailureCount) && closure.cleanupFailureCount >= 0
@@ -358,11 +374,12 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
     gateClosed: closureKnown ? closure.gateClosed : null,
     cleanupFailureCount: closureKnown ? closure.cleanupFailureCount : null,
     originalControlRejectionObserved: rejected.length === 1,
+    rejectionIdentityKnown,
     sourceCloseObserved: closed.length === 1,
     actualSourceUnique: source !== null,
     sourceCloseProvenanceKnown: ownedCloses.length === 1,
     relatedJournalStructurallyKnown: structural,
-    ownerReactionStateKnown: rejected.length === 1 && rejected[0].controlSignalKnown === true && rejected[0].generationSignalKnown === true,
+    ownerReactionStateKnown: rejectionIdentityKnown && rejected.length === 1 && rejected[0].requestSignalKnown === true && rejected[0].controlSignalKnown === true && rejected[0].generationSignalKnown === true,
     lifecycleObserved: events.some(event => event.kind === 'beforeunload' && event.nativeTrusted) && events.some(event => event.kind === 'pagehide' && event.nativeTrusted),
     ambiguousOriginalCauseErrorCount: journal.filter(event => event.kind === 'window-error-ambiguous-original-cause' && event.document === document).length,
     nativeErrorObjectCorrespondence: nativeErrors.length > 0 ? 'SAME_ORIGINAL_CAUSE_EVENT_OBSERVED' : 'UNKNOWN',
@@ -372,7 +389,7 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
     },
     nativeOrderingAgainstBothPageErrors: 'UNKNOWN',
     orderingLimit: 'Browser-local sequence is real observation order. Host pageerror delivery is not native error creation; no cross-clock ordering is inferred.',
-    receiptStatus: inputKnown && observerFailures === 0 && firstErrorPairReproduced && closureKnown && closure.pageClosed && closure.gateClosed && closure.cleanupFailureCount === 0 && structural && document !== null && owner !== null && generationOwner !== null && rejected.length === 1 && rejected[0].controlSignalKnown === true && rejected[0].generationSignalKnown === true && ownedCloses.length === 1 ? 'PARTIAL' : 'UNKNOWN',
+    receiptStatus: inputKnown && observerFailures === 0 && firstErrorPairReproduced && closureKnown && closure.pageClosed && closure.gateClosed && closure.cleanupFailureCount === 0 && structural && document !== null && owner !== null && generationOwner !== null && rejectionIdentityKnown && rejected.length === 1 && rejected[0].requestSignalKnown === true && rejected[0].controlSignalKnown === true && rejected[0].generationSignalKnown === true && ownedCloses.length === 1 ? 'PARTIAL' : 'UNKNOWN',
     events,
   }
 }

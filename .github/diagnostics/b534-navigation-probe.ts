@@ -33,8 +33,10 @@ import process from 'node:process'
         fetchFailures.push({ kind, document, poll })
       if (kind === 'native-chat-source-error')
         nativeSourceErrors.push({ document, source: poll })
-      if (kind.endsWith('-body-rejected'))
+      if (kind.endsWith('-body-rejected') || kind.endsWith('-body-threw'))
         bodyFailures.push({ kind, document, poll })
+      if (kind === 'observer-failed')
+        errors.push('Archived HTTP observer failed')
       journal.push({ kind, hostAt: Date.now(), browserAt, document, poll })
       try {
         saveJournal()
@@ -134,7 +136,7 @@ import process from 'node:process'
         message: 'Current document finite HTTP work and body continuations have settled',
       }).toBe(0)
       // This round trip follows the completed fetch microtasks and their native diagnostics.
-      await page.evaluate(() => {})
+      expect(await page.evaluate(() => (window as any).shellObserverFailed)).toBe(false)
       expect(bodyFailures).toEqual([])
     }
 
@@ -260,6 +262,7 @@ import process from 'node:process'
         throw journalFailures[0]
       await page.exposeFunction('b534Record', record)
       await page.addInitScript(() => {
+        'use strict'
         const documentId = crypto.randomUUID()
         let pollId = 0
         const controllers = new WeakMap<AbortSignal, AbortController>()
@@ -316,75 +319,114 @@ import process from 'node:process'
           void probe(route === 'direct' ? 'chat-batch-direct-accepted' : 'chat-batch-relay-accepted')
         })
         const NativeEventSource = window.EventSource
+        const observedChatSources = new WeakSet<EventSource>()
         window.EventSource = class extends NativeEventSource {
           constructor(url: string | URL, options?: EventSourceInit) {
             super(url, options)
             const chat = new URL(String(url), location.href).pathname.endsWith('/api/chats/stream')
             if (!chat)
               return
+            observedChatSources.add(this)
             if (observation.armed)
               observation.armedSources.push(this)
             void probe('native-chat-source-created')
             this.addEventListener('open', () => { void probe('native-chat-source-open') })
             this.addEventListener('error', () => { void probe('native-chat-source-error') })
-            const close = this.close.bind(this)
-            this.close = () => {
-              close()
-              void probe(this.readyState === NativeEventSource.CLOSED ? 'native-chat-source-closed' : 'native-chat-source-close-unknown')
+            const close = this.close
+            this.close = function (this: EventSource, ...args: Parameters<typeof close>) {
+              const original = Reflect.apply(close, this, args)
+              try {
+                if (observedChatSources.has(this))
+                  safeProbe(this.readyState === NativeEventSource.CLOSED ? 'native-chat-source-closed' : 'native-chat-source-close-unknown')
+              }
+              catch { observerFailed() }
+              return original
             }
           }
         }
-        const fetch = window.fetch.bind(window)
-        window.fetch = (...args) => {
+        const fetch = window.fetch
+        const promiseThen = Promise.prototype.then
+        const responses = new WeakMap<Response, { poll: number, settled: (kind: string) => void }>()
+        ;(window as any).shellObserverFailed = false
+        const observerFailed = () => {
+          if ((window as any).shellObserverFailed)
+            return
+          ;(window as any).shellObserverFailed = true
+          try { void probe('observer-failed').catch(() => {}) } catch {}
+        }
+        const safeProbe = (...args: Parameters<typeof probe>) => {
+          try { void probe(...args).catch(observerFailed) } catch { observerFailed() }
+        }
+        const observe = <T>(original: Promise<T>, fulfilled: (value: T) => void, rejected: () => void) => {
+          try {
+            const observation = Reflect.apply(promiseThen, original, [
+              (value: T) => { try { fulfilled(value) } catch { observerFailed() } },
+              () => { try { rejected() } catch { observerFailed() } },
+            ])
+            void Reflect.apply(promiseThen, observation, [undefined, observerFailed])
+          }
+          catch { observerFailed() }
+        }
+        for (const method of ['json', 'text', 'arrayBuffer', 'blob', 'formData'] as const) {
+          const consume = Response.prototype[method]
+          if (typeof consume !== 'function')
+            continue
+          ;(Response.prototype as any)[method] = function (this: Response, ...options: unknown[]) {
+            const metadata = responses.get(this)
+            if (!metadata)
+              return Reflect.apply(consume, this, options)
+            consuming.add(metadata.poll)
+            pending.add(metadata.poll)
+            let original
+            try {
+              original = Reflect.apply(consume, this, options)
+            }
+            catch (cause) {
+              metadata.settled('body-threw')
+              throw cause
+            }
+            observe(original, () => metadata.settled('body-resolved'), () => metadata.settled('body-rejected'))
+            return original
+          }
+        }
+        window.fetch = function (this: Window, ...args: Parameters<typeof fetch>) {
+          if (this != null && this !== window)
+            return Reflect.apply(fetch, this, args)
           const input = args[0]
           const url = typeof input === 'string' || input instanceof URL ? String(input) : input.url
           const path = new URL(url, location.href).pathname
           if (!path.startsWith('/api/') && path !== '/web-build.json')
-            return fetch(...args)
+            return Reflect.apply(fetch, this, args)
           const category = path === '/api/installations' ? 'poll' : path.endsWith('/api/chats') ? 'chat-read' : 'http'
           const poll = ++pollId
           if (category === 'poll' && observation.armed && !observation.targetController) {
             const signal = args[1]?.signal
             observation.targetController = signal ? controllers.get(signal) : undefined
             observation.targetPollId = poll
-            void probe(observation.targetController ? 'poll-controller-identified' : 'poll-controller-unknown', poll)
+            safeProbe(observation.targetController ? 'poll-controller-identified' : 'poll-controller-unknown', poll)
           }
           pending.add(poll)
-          probe(`${category}-start`, poll, { method: (args[1]?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase(), path })
-          args[1]?.signal?.addEventListener('abort', () => probe(`${category}-abort`, poll), { once: true })
+          safeProbe(`${category}-start`, poll, { method: (args[1]?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase(), path })
+          args[1]?.signal?.addEventListener('abort', () => safeProbe(`${category}-abort`, poll), { once: true })
           const settled = (kind: string) => {
-            // A posted task follows the application's await/catch/finally microtasks.
-            // Body consumers keep this cycle pending through their continuation.
-            void probe(`${category}-${kind}`, poll)
+            // Separate observation returns the ORIGINAL promise. MessagePort
+            // completion still follows the application's native microtasks.
+            safeProbe(`${category}-${kind}`, poll)
             completions.port2.postMessage({ kind: `${category}-${kind}`, poll })
           }
+          let original: ReturnType<typeof fetch>
           try {
-            return fetch(...args).then((response) => {
-              for (const method of ['json', 'text', 'arrayBuffer', 'blob', 'formData'] as const) {
-                const consume = response[method].bind(response)
-                ;(response as any)[method] = (...options: unknown[]) => {
-                  consuming.add(poll)
-                  pending.add(poll)
-                  return Reflect.apply(consume, response, options).then((body: unknown) => {
-                    settled('body-resolved')
-                    return body
-                  }, (cause: unknown) => {
-                    settled('body-rejected')
-                    throw cause
-                  })
-                }
-              }
-              settled('headers')
-              return response
-            }, (cause) => {
-              settled(`rejected-${args[1]?.signal?.aborted ? 'signal-aborted' : 'signal-active'}`)
-              throw cause
-            })
+            original = Reflect.apply(fetch, this, args)
           }
           catch (cause) {
             settled(`threw-${args[1]?.signal?.aborted ? 'signal-aborted' : 'signal-active'}`)
             throw cause
           }
+          observe(original, (response) => {
+            responses.set(response, { poll, settled })
+            settled('headers')
+          }, () => settled(`rejected-${args[1]?.signal?.aborted ? 'signal-aborted' : 'signal-active'}`))
+          return original
         }
       })
       await page.setViewportSize({ width: 390, height: 844 })
