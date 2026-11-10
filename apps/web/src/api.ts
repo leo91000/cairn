@@ -220,15 +220,23 @@ export function redirect(url: string) {
     state.redirecting = false
   }
 
+  const restore = (event: PageTransitionEvent) => {
+    if (!event.persisted)
+      return
+    window.removeEventListener('pageshow', restore)
+    resume()
+  }
+
   departDocument()
   state.redirecting = true
   // Restore polling if Back returns this document from the browser's page cache.
-  window.addEventListener('pageshow', resume, { once: true })
+  // Initial pageshow can still arrive after a redirect during document startup.
+  window.addEventListener('pageshow', restore)
   try {
     window.location.assign(url)
   }
   catch (error) {
-    window.removeEventListener('pageshow', resume)
+    window.removeEventListener('pageshow', restore)
     resume()
     throw error
   }

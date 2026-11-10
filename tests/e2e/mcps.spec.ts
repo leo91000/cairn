@@ -12,8 +12,21 @@ import {
 
 type OAuthDepartureProbe = { kind: 'background' } | { kind: 'offer', closed: boolean }
 
+interface CallbackBootstrapProbe {
+  kind: 'account-held' | 'load' | 'retired' | 'pageshow' | 'authorize'
+  documentId: string
+  retired: boolean
+  trusted?: boolean
+  persisted?: boolean
+  account?: 'session' | 'options'
+  heldResponses?: number
+}
+
 declare global {
-  interface Window { cairnOAuthProbe: (probe: OAuthDepartureProbe) => Promise<void> }
+  interface Window {
+    cairnOAuthProbe: (probe: OAuthDepartureProbe) => Promise<void>
+    cairnCallbackBootstrapProbe: (probe: CallbackBootstrapProbe) => Promise<void>
+  }
 }
 
 test('failed saves keep feedback visible above a scrolled MCP form', async ({ page }) => {
@@ -221,6 +234,117 @@ for (const pending of ['authorization', 'offer'] as const) {
     }
   })
 }
+
+test('initial pageshow cannot restart direct authorization during OAuth callback canonicalization', async ({ page, workspace, browserName }) => {
+  test.skip(browserName !== 'webkit', 'Exercises the observed native WebKit load/pageshow ordering')
+  // An HTTP redirect chain bypasses page.route on its callback target. Use the
+  // provider's document navigation so the callback's native-load barrier applies.
+  const provider = await mcpProvider({ authorizationNavigation: 'document' })
+  const probes: CallbackBootstrapProbe[] = []
+  const errors: string[] = []
+  const accountHeld = Promise.withResolvers<void>()
+  const heldResponses = new Set<'session' | 'options'>()
+  const callbackPath = `/installations/${workspace.installationId}/mcps/callback`
+  page.on('pageerror', error => errors.push(error.message))
+  await page.exposeFunction('cairnCallbackBootstrapProbe', (probe: CallbackBootstrapProbe) => {
+    probes.push(probe)
+    if (probe.kind === 'account-held' && probe.account) {
+      heldResponses.add(probe.account)
+      if (heldResponses.size === 2)
+        accountHeld.resolve()
+    }
+  })
+  await page.addInitScript((legacyCallbackPath) => {
+    if (location.pathname !== legacyCallbackPath)
+      return
+    const documentId = crypto.randomUUID()
+    let retired = false
+    const releaseAccount: (() => void)[] = []
+    const report = (probe: Omit<CallbackBootstrapProbe, 'documentId' | 'retired'>) => {
+      void window.cairnCallbackBootstrapProbe({ documentId, retired, ...probe })
+    }
+
+    // Observe the real departing peer; keep its native offer and close behavior.
+    const close = RTCPeerConnection.prototype.close
+    RTCPeerConnection.prototype.close = function () {
+      Reflect.apply(close, this, [])
+      retired = true
+      report({ kind: 'retired' })
+    }
+
+    // Both account bodies must be ready: the production bootstrap awaits them
+    // together. Deliver them at native load, before initial native pageshow.
+    window.addEventListener('load', (event) => {
+      report({ kind: 'load', trusted: event.isTrusted, heldResponses: releaseAccount.length })
+      for (const release of releaseAccount)
+        release()
+    }, { once: true })
+    window.addEventListener('pageshow', event => report({ kind: 'pageshow', trusted: event.isTrusted, persisted: event.persisted }))
+    const fetch = window.fetch
+    window.fetch = (...args) => {
+      const resource = args[0]
+      const address = typeof resource === 'string' || resource instanceof URL ? resource : resource.url
+      const pathname = new URL(address, location.href).pathname
+      if (pathname.endsWith('/direct/authorize'))
+        report({ kind: 'authorize' })
+
+      const pending = fetch(...args)
+      const account = pathname === '/api/account/session' ? 'session' : pathname === '/api/account/options' ? 'options' : undefined
+      if (!account)
+        return pending
+
+      return pending.then(async (response) => {
+        const text = await response.text()
+        return new Promise<Response>((resolve) => {
+          releaseAccount.push(() => resolve(new Response(text, { status: response.status, headers: response.headers })))
+          report({ kind: 'account-held', account })
+        })
+      })
+    }
+  }, callbackPath)
+  await page.route(url => url.pathname === callbackPath, async (route) => {
+    const response = await route.fetch()
+    const body = (await response.text()).replace('</body>', '<img alt="" src="/__cairn-callback-load.svg"></body>')
+    await route.fulfill({ response, body })
+  })
+  await page.route('**/__cairn-callback-load.svg', async (route) => {
+    await accountHeld.promise
+    await route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>' })
+  })
+  try {
+    const name = 'Callback lifecycle'
+    await workspace.api('/api/mcps', 'POST', {
+      name,
+      transport: 'http',
+      url: `${provider.origin}/mcp`,
+      auth: 'oauth',
+      allowPrivateNetwork: true,
+    })
+    await page.goto(workspacePath('/mcps'))
+    await authenticateWorkspace(page)
+    const card = page.locator('.mcp-card').filter({ hasText: name })
+    await card.getByRole('button', { name: 'Connect', exact: true }).click()
+    await expect(card.getByText('Connected', { exact: true })).toBeVisible()
+    expect(provider.exchanges).toBe(1)
+    expect(probes.filter(probe => probe.kind === 'load')).toEqual([
+      expect.objectContaining({ trusted: true, heldResponses: 2 }),
+    ])
+    expect(probes.filter(probe => probe.kind === 'pageshow')).toEqual([
+      expect.objectContaining({ trusted: true, persisted: false, retired: true }),
+    ])
+    expect(probes.filter(probe => probe.kind === 'authorize' && probe.retired)).toEqual([])
+    expect(errors).toEqual([])
+  }
+  finally {
+    accountHeld.resolve()
+    try {
+      await page.unrouteAll({ behavior: 'wait' })
+    }
+    finally {
+      await provider.close()
+    }
+  }
+})
 
 test('manages MCP connections, OAuth consent, tools and agent access on desktop and mobile', async ({ page, workspace }, testInfo) => {
   const provider = await mcpProvider()

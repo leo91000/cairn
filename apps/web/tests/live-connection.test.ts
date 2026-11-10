@@ -202,7 +202,7 @@ it('suspends live streams during navigation and resumes even when direct remains
 
   window.dispatchEvent(new Event('cairn-transport-change'))
   window.dispatchEvent(new Event('online'))
-  window.dispatchEvent(new Event('pageshow'))
+  window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }))
   vi.advanceTimersByTime(60000)
   expect(Source.instances).toHaveLength(1)
 

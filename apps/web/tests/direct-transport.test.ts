@@ -210,7 +210,7 @@ it('cancels pending direct authorization before redirecting and ignores its late
   expect(fetch).toHaveBeenCalledTimes(1)
 
   // Back restores the document from its page cache and negotiates a fresh grant.
-  window.dispatchEvent(new Event('pageshow'))
+  window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }))
   await vi.waitFor(() => expect(Source.all).toHaveLength(1))
   expect(fetch.mock.calls.filter(([url]) => url.endsWith('/direct/authorize'))).toHaveLength(2)
 })
@@ -269,7 +269,7 @@ it('closes established direct streams without opening relay streams during navig
     expect(Source.all).toHaveLength(1)
 
     window.dispatchEvent(new Event('online'))
-    window.dispatchEvent(new Event('pageshow'))
+    window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }))
     await vi.waitFor(() => expect(Source.all.length).toBeGreaterThan(1))
   }
   finally {
@@ -1235,7 +1235,7 @@ it('restores fresh document work without reviving an old pending read or stream 
   await vi.waitFor(() => expect(channel.packets).toHaveLength(2))
   try {
     window.dispatchEvent(new Event('pagehide'))
-    window.dispatchEvent(new Event('pageshow'))
+    window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }))
     await vi.waitFor(() => expect(Source.all.filter(source => !source.closed).length).toBeGreaterThan(0))
     expect(await oldRead).toMatchObject({ name: 'AbortError' })
     expect(state.connectionLost).toBe(false)
@@ -1258,7 +1258,7 @@ it('does not signal a late offer from a departed generation after pageshow', asy
   await vi.waitFor(() => expect(Peer.all).toHaveLength(1))
   const old = Peer.all[0]
   window.dispatchEvent(new Event('pagehide'))
-  window.dispatchEvent(new Event('pageshow'))
+  window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }))
   await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce())
   offered.resolve(old.localDescription)
   await vi.advanceTimersByTimeAsync(0)
@@ -1277,7 +1277,7 @@ it('rejects a late relay result from an old document generation after restoratio
   const signal = fetch.mock.calls[0][1].signal
   window.dispatchEvent(new Event('pagehide'))
   expect(signal.aborted).toBe(true)
-  window.dispatchEvent(new Event('pageshow'))
+  window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }))
   pending.resolve(Response.json({ marker: 'stale' }))
   expect(await old).toMatchObject({ name: 'AbortError' })
   expect(await api('/settings')).toEqual({ marker: 'fresh' })
@@ -1305,7 +1305,7 @@ it('ignores an old signaling refusal after a fresh document generation resumes',
   state.ready = true
   await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce())
   window.dispatchEvent(new Event('pagehide'))
-  window.dispatchEvent(new Event('pageshow'))
+  window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }))
   await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
   pending.resolve(Response.json({ error: 'Old session refused' }, { status: 401 }))
   await vi.advanceTimersByTimeAsync(0)
@@ -1322,7 +1322,7 @@ it('ignores an old API refusal decoded after a fresh document generation resumes
   const pending = api('/settings').catch(error => error)
   await vi.waitFor(() => expect(decode).toHaveBeenCalledOnce())
   window.dispatchEvent(new Event('pagehide'))
-  window.dispatchEvent(new Event('pageshow'))
+  window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }))
   text.resolve('{"error":"Old session refused"}')
   expect(await pending).toMatchObject({ name: 'AbortError' })
   expect(state.authenticated).toBe(true)
@@ -1339,7 +1339,7 @@ it('retires a departed recovery loop and permits fresh reads after restoration',
   await vi.waitFor(() => expect(state.connectionLost).toBe(true))
   window.dispatchEvent(new Event('pagehide'))
   expect(state.connectionLost).toBe(false)
-  window.dispatchEvent(new Event('pageshow'))
+  window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }))
   expect(await old).toMatchObject({ name: 'AbortError' })
   await vi.advanceTimersByTimeAsync(10000)
   expect(fetch).toHaveBeenCalledOnce()

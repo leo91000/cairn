@@ -561,6 +561,13 @@ PKCE, refresh and private-network/metadata protection remain in the existing
 protocol implementations. The shared corpus qualifies Rust/TS/Kotlin; browser MCP
 journeys and `McpJourneyCases` (JVM/device) cover the clients.
 
+Web document departure (2026-11-08): an initial `pageshow` arriving after an OAuth
+or canonical-link redirect keeps the departing document's work stopped. Only a
+persisted page-cache restoration resumes its signaling and polling. Android uses
+its native lifecycle and Custom Tabs, without browser `pageshow` events. This
+repairs browser lifecycle handling; UI capabilities and both tool contracts stay
+the same.
+
 
 A15 account contracts: Connections on web and Android use generated Rust account,
 usage, sign-in and command models. Renaming, pause and parallel limits send complete
