@@ -26,7 +26,7 @@ and wirecancel before bodyrelease are required, then a NEW real3s read3 gets gen
 
 Fixture wrapper stores a reference to that SAME original native JSON promise and
 returns it unchanged, adding its existing observer only. Chromium CDP Debugger event
-listener breakpoint pagehide is armed after body-start, then destination is released.
+listener breakpoint pagehide is admitted while the existing clock is paused, BEFORE retained Page.goto. After the SAME read3 body-start, destination is released.
 Before the FIRST listener body, evaluate ONLY the plain fixture global promise reference
 in the exact owned default execution context (CDP uniqueId/mainFrame/origin checked), only while paused; Runtime.getProperties reads internal PromiseState/Result. throwOnSideEffect refuses side-effecting evaluation. Native callback stacks need not contain a JS callFrame. No producer,
 body getter, clone, abort, mutation or fabricated terminal. Required result is original
@@ -38,8 +38,7 @@ all pageerrors and other nativeerrors/orphan/missing outcomes remain strict. No 
 assertion/filter is changed. If firstlistener state is pending this negative proof fails,
 requiring further attribution rather than pretending it proves impossibility.
 
-Debugger resumes in owned finally; disable/detach/drain and page/context/gate/backend
-close are independently bounded and recorded. SDK late acquisitions use existing
+Debugger resumes in owned finally. Its page-scoped CDP session retires through the owned page and its actual session-close event, without racing disable/detach commands. Page/context/gate/backend close and command drain are bounded and recorded. SDK late acquisitions use existing
 owned resource helper, actual canonical SDK prototype observed. Job25m/step5m/7s waits
 unchanged. Source/script/helper hashes before/after mandatory. Historical native matrices
 and their immutable sourcehashes remain as historical metadata ONLY, are NOT rerun or
@@ -76,10 +75,13 @@ The first native pagehide callback still inspects SAME original JSON promise in 
 owned context with throwOnSideEffect, intrinsic PromiseState/Result, bodyheld and original
 terminal; no native promise/result or error classification is replaced.
 
-Cleanup first releases HTTP gates then starts CDP disable/detach, page/gate/backend close
-without awaiting another actor's CDP response. Context/trace retirement follows bounded
-owned operations, and paused-handler plus actual CDP tasks are drained within existing7s
-bounds. trackCdp retains actual SDK operation until settlement; timeout remains failure,
+Cleanup first releases HTTP gates and starts page/gate/backend closure independently
+of pending CDP commands. The SAME owned page also owns the CDP session lifetime:
+listener registration precedes exposure of that session handle; CDP retirement waits
+for the memoized page close AND the actual SDK session-close event. No disable/detach
+commands race target destruction, and no rejection is whitelisted. Missing page/session
+closure remains RED. Context/trace retirement follows bounded owned operations, and
+paused-handler plus actual CDP tasks are drained within existing7s bounds. trackCdp retains actual SDK operation until settlement; timeout remains failure,
 never cancellation. Command records are fixed method/state only, no protocol payload.
 Unknown commands/closures remain RED after bounded drain; no new error whitelist.
 All original native/type errors, real outage, pageshow/BFCache/auth/DirectRelay/product
@@ -88,8 +90,11 @@ contracts remain untouched. ProductP1 and two unselected archivalP2s remain OPEN
 Light regression executes EXTRACTED ACTUAL old/new controller cleanup and actual observed
 7000ms deadline with a virtual owned clock, plus existing real ownership helper. CDP
 retirement blocked until HTTP/page closure reproduces old coupled RED; new independent
-closure succeeds without relaxing bounds. Indefinite CDP operations and unknown page
-closure STILL RED. Actual early admission block requires Runtime/context/Debugger/BP ACKs
+closure succeeds without relaxing bounds. A second actual-controller regression
+reproduces healthy target closure rejecting concurrent CDP cleanup commands (old parallel
+controller RED); page-owned session-close receipt removes the destructive race, without
+ignoring any error. Indefinite existing CDP commands, unknown page AND missing session-close
+receipt STILL RED. Actual early admission block requires Runtime/context/Debugger/BP ACKs
 before retained navigation; missing ACK/error/foreign-origin/wrong-mainframe/duplicate
 contexts refuse entry. Existing original-promise/pending-red and lost-binding journal
 regressions remain strict. These light models are NOT browser evidence.

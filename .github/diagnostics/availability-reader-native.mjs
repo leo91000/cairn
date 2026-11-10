@@ -205,6 +205,23 @@ function nativeDiagnostics(mode) {
   }
 }
 
+// A page-scoped CDP session is retired by its owned page, not by commands
+// that race that page's destruction. The actual session-close event is required.
+function ownPageCdp(context, page, pageOwner, trackCdp, onClosed) {
+  return ownSdkResource(async () => {
+    const session = await trackCdp('newCDPSession', () => context.newCDPSession(page))
+    const closed = Promise.withResolvers()
+    session.once('close', () => {
+      onClosed()
+      closed.resolve()
+    })
+    return { session, closed: closed.promise }
+  }, async (resource) => {
+    await pageOwner.release()
+    await resource.closed
+  })
+}
+
 async function observe(browser, cell, closedPrototype) {
   const arm = cell.engine + '-' + cell.mode
   const received = []
@@ -218,6 +235,7 @@ async function observe(browser, cell, closedPrototype) {
   let phase = 'setup'
   let context, page, gate, navigation, documentId, initial, destination, next, outage, contextOwner, pageOwner, gateOwner
   let cdp, cdpOwner, cdpAdmission, originalPromiseBoundary, debuggerAction
+  let cdpCloseObserved = false
   const cdpTasks = new Set()
   const cdpTaskRecords = []
   const trackCdp = (method, operation) => {
@@ -357,8 +375,9 @@ async function observe(browser, cell, closedPrototype) {
       // BEFORE any retained navigation. The original native producer is untouched.
       cdpAdmission = { document: documentId, runtimeAck: false, frameAck: false, debuggerAck: false, breakpointAck: false, readyBeforeRetainedNavigation: false }
       await write(arm + '.cdp-admission.json', cdpAdmission)
-      cdpOwner = ownSdkResource(() => trackCdp('newCDPSession', () => context.newCDPSession(page)), value => trackCdp('detach', () => value.detach()))
-      cdp = await observed(() => cdpOwner.result, 'CDP acquisition')
+      cdpOwner = ownPageCdp(context, page, pageOwner, trackCdp, () => { cdpCloseObserved = true })
+      const cdpResource = await observed(() => cdpOwner.result, 'CDP acquisition')
+      cdp = cdpResource.session
       const executionContexts = []
       cdp.on('Runtime.executionContextCreated', event => executionContexts.push(event.context))
       await observed(() => sendCdp('Runtime.enable'), 'runtime contexts')
@@ -658,8 +677,7 @@ async function observe(browser, cell, closedPrototype) {
     // The observation bound records failures; it never cancels an SDK command.
     for (const item of gates) item.response.release()
     const closures = [
-      ...(cdp ? [['debugger-disable', () => sendCdp('Debugger.disable')]] : []),
-      ...(cdpOwner ? [['CDP-detach', () => cdpOwner.release()]] : []),
+      ...(cdpOwner ? [['CDP-close', () => cdpOwner.release()]] : []),
       ...(pageOwner ? [['page', () => pageOwner.release()]] : []),
       ...(gateOwner ? [['gate', () => gateOwner.release()]] : []),
       ['backend', () => {
@@ -738,7 +756,7 @@ async function observe(browser, cell, closedPrototype) {
   const observationComplete = journalAcknowledged && navigationValidated && !failures.length && !pageErrors.length
     && !ownCleanup.length && !finalAudit.unknown.length && !finalAudit.unexpected.length
   const row = { arm, control, diagnosticOnly: true, productQualified: false, observationComplete, phase,
-    cdpAdmission, cdpTaskRecords, cdpCommandsDrained: cdpTasks.size === 0, originalPromiseBoundary, documentId, state, pendingProof, stateReceipts, dialogs, nativeNavigationCheckpoint, navigationRetirement, activatedViaClick, retainedAfterDialog, destinationAdmission: cell.mode === 'proof-without-terminal' && navigationValidated && !destination?.received ? 'cancelled-before-request' : null, outageEvidence, initialHeaderAdvance, initialClosureBoundary, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
+    cdpAdmission, cdpCloseObserved, cdpTaskRecords, cdpCommandsDrained: cdpTasks.size === 0, originalPromiseBoundary, documentId, state, pendingProof, stateReceipts, dialogs, nativeNavigationCheckpoint, navigationRetirement, activatedViaClick, retainedAfterDialog, destinationAdmission: cell.mode === 'proof-without-terminal' && navigationValidated && !destination?.received ? 'cancelled-before-request' : null, outageEvidence, initialHeaderAdvance, initialClosureBoundary, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
     allPageErrorsStrict: pageErrors.length === 0, pageErrors, failures, reads: received, nativeEvents, finalAudit,
     gates: gates.map(({ label, response }) => ({ label, received: response.received, ready: response.ready, status: response.status ?? null, terminal: response.terminal, closed: response.closed, headersDelivered: response.headersDelivered, bodyReleased: response.bodyReleased })), cleanupFailures: ownCleanup }
   rows.push(row)
