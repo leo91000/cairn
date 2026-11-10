@@ -15,7 +15,6 @@ jobs:
       PRODUCT_SHA: b1863f5601e483000d96eaab121ce3ec0ae44c7b
       ORIGINAL_TEST_SHA256: ebd565007a49baee2d585efbb6270fd285815fabc1c8b3b454c066b92a21f15c
       DIAGNOSTIC_TEST_SHA256: 1fc644bb0298a3faa5c06686b444e431b21556e4aee7a10994271fb2b2ab6e85
-      PATCH_SHA256: 829ccdb96e7bcd3e8c2e24c94c1d585c1ac0f4a2a9102f302b0b057d79069a56
     services:
       postgres:
         image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
@@ -49,7 +48,7 @@ jobs:
           export C40_EVIDENCE_DIR="$RUNNER_TEMP/cairn-native-bfcache-reasons"
           echo "C40_EVIDENCE_DIR=$C40_EVIDENCE_DIR" >> "$GITHUB_ENV"
           mkdir -p "$C40_EVIDENCE_DIR" test-results/native-bfcache-reasons
-          for file in bfcache-native-reasons.mjs bfcache-native-reasons.node.mjs bfcache-native-reasons.patch closed-target-error.mjs; do
+          for file in bfcache-native-reasons.mjs bfcache-native-reasons.node.mjs bfcache-native-reasons.overlay.ts closed-target-error.mjs; do
             git -c safe.directory="$GITHUB_WORKSPACE" show "$OBSERVER_SHA:.github/diagnostics/$file" > "test-results/native-bfcache-reasons/$file"
           done
           sha256sum test-results/native-bfcache-reasons/* > "$C40_EVIDENCE_DIR/observer-files.sha256"
@@ -89,12 +88,13 @@ jobs:
       - name: Apply only the explicit hashed diagnostic test overlay
         timeout-minutes: 5
         run: |
-          printf '%s  %s\n' "$PATCH_SHA256" test-results/native-bfcache-reasons/bfcache-native-reasons.patch | sha256sum --check
-          git -c safe.directory="$GITHUB_WORKSPACE" apply --check test-results/native-bfcache-reasons/bfcache-native-reasons.patch
-          git -c safe.directory="$GITHUB_WORKSPACE" apply test-results/native-bfcache-reasons/bfcache-native-reasons.patch
+          printf '%s  %s\n' "$ORIGINAL_TEST_SHA256" tests/e2e/availability-bfcache.spec.ts | sha256sum --check
+          printf '%s  %s\n' "$DIAGNOSTIC_TEST_SHA256" test-results/native-bfcache-reasons/bfcache-native-reasons.overlay.ts | sha256sum --check
+          cp test-results/native-bfcache-reasons/bfcache-native-reasons.overlay.ts tests/e2e/availability-bfcache.spec.ts
           printf '%s  %s\n' "$DIAGNOSTIC_TEST_SHA256" tests/e2e/availability-bfcache.spec.ts | sha256sum --check
           test "$(git -c safe.directory="$GITHUB_WORKSPACE" diff --name-only)" = tests/e2e/availability-bfcache.spec.ts
           git -c safe.directory="$GITHUB_WORKSPACE" diff --binary > "$C40_EVIDENCE_DIR/applied-diagnostic.patch"
+          sha256sum "$C40_EVIDENCE_DIR/applied-diagnostic.patch" > "$C40_EVIDENCE_DIR/applied-diagnostic.patch.sha256"
           printf 'diagnostic-overlay=true\nproduct-qualified=false\n' > "$C40_EVIDENCE_DIR/mode.txt"
       - name: Collect exactly one Chromium diagnostic before Cargo
         timeout-minutes: 5

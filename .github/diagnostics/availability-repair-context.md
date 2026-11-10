@@ -16,7 +16,9 @@ SDK1.64.1/container digest, PR VITE resume flag,7s assertions/5msteps/25mjob.
 No WebKit, baseline series, old PromiseState, primary/specialist/network/Android/
 backend global suite, image publication or product qualification.
 
-A versioned/hash-specific overlay changes ONLY the original BF test. The native
+A complete readable, versioned/hash-specific overlay changes ONLY the original BF test.
+It is copied only after original and overlay hashes match; the exact Git diff and
+its hash are saved separately. No generic patch engine or permission bypass. The native
 pagehide checkpoint still expects persistedTRUE/trustedTRUE. Any observedFALSE
 keeps the exact failed assertion and the test/job RED. The continuation is
 DIAGNOSTIC ONLY: first goBack, ordinary main-world evaluate, then existing real

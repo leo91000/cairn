@@ -3,7 +3,6 @@ import { webcrypto } from 'node:crypto'
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
 import { stripTypeScriptTypes } from 'node:module'
 import { setImmediate } from 'node:timers/promises'
@@ -221,9 +220,8 @@ function patchedSource() {
   mkdirSync(join(directory, 'tests/e2e'), { recursive: true })
   writeFileSync(target, source)
   try {
-    const patch = fileURLToPath(new URL('./bfcache-native-reasons.patch', import.meta.url))
-    execFileSync('git', ['apply', '--check', patch], { cwd: directory })
-    execFileSync('git', ['apply', patch], { cwd: directory })
+    const overlay = readFileSync(new URL('./bfcache-native-reasons.overlay.ts', import.meta.url))
+    writeFileSync(target, overlay)
     const diagnostic = readFileSync(target, 'utf8')
     assert.ok(diagnostic.includes('.toEqual([{ persisted: true, trusted: true }])'))
     assert.ok(diagnostic.includes('diagnosticFailures.push(...outcome.failures)'))
