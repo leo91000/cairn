@@ -2,7 +2,7 @@ import type { Page } from '@playwright/test'
 
 export interface AvailabilityReadEvent {
   sequence: number
-  kind: 'start' | 'fetch-fulfilled' | 'headers' | 'body' | 'body-start' | 'rejected' | 'body-rejected' | 'abort' | 'abort-call-enter' | 'abort-call-return' | 'pagehide' | 'pageshow'
+  kind: 'start' | 'fetch-fulfilled' | 'headers' | 'body' | 'body-start' | 'rejected' | 'body-rejected' | 'abort' | 'abort-call-enter' | 'abort-call-return' | 'pagehide' | 'pageshow' | 'observer-failed'
   document: string
   read: number
   status?: number
@@ -23,6 +23,7 @@ declare global {
   interface Window {
     cairnAvailabilityDocument: string
     cairnExpectedAvailability?: unknown
+    cairnAvailabilityProbeFailures: number
     cairnAvailabilityRecord: (event: AvailabilityReadEvent) => Promise<void>
   }
 }
@@ -35,12 +36,54 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
     let pageHidden = false
     let sequence = 0
     let eventSequence = 0
-    const record = (event: Omit<AvailabilityReadEvent, 'sequence'>) => {
-      const entry = { ...event, sequence: ++eventSequence }
+    const then = Promise.prototype.then
+    window.cairnAvailabilityProbeFailures = 0
+    const store = (entry: AvailabilityReadEvent) => {
       const journal = JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]') as AvailabilityReadEvent[]
       journal.push(entry)
       sessionStorage.setItem('cairn-e2e-availability-journal', JSON.stringify(journal))
-      void window.cairnAvailabilityRecord(entry)
+    }
+    const observationFailed = () => {
+      window.cairnAvailabilityProbeFailures++
+      const entry: AvailabilityReadEvent = {
+        kind: 'observer-failed', sequence: ++eventSequence,
+        document: documentId, read: 0, aborted: false, afterPagehide: pageHidden,
+      }
+      // An unavailable sink must not replace an application's native result.
+      // Persist/forward the failure independently, without recursive delivery.
+      try { store(entry) }
+      catch {}
+      try {
+        const delivery = window.cairnAvailabilityRecord(entry)
+        void Reflect.apply(then, delivery, [undefined, () => {}])
+      }
+      catch {}
+    }
+    const record = (event: Omit<AvailabilityReadEvent, 'sequence'>) => {
+      const entry = { ...event, sequence: ++eventSequence }
+      try { store(entry) }
+      catch { observationFailed() }
+      try {
+        const delivery = window.cairnAvailabilityRecord(entry)
+        void Reflect.apply(then, delivery, [undefined, observationFailed])
+      }
+      catch { observationFailed() }
+    }
+    const observe = <T>(original: Promise<T>, fulfilled: (value: T) => void, rejected: (cause: unknown) => void) => {
+      try {
+        const observation = Reflect.apply(then, original, [
+          (value: T) => {
+            try { fulfilled(value) }
+            catch { observationFailed() }
+          },
+          (cause: unknown) => {
+            try { rejected(cause) }
+            catch { observationFailed() }
+          },
+        ])
+        void Reflect.apply(then, observation, [undefined, observationFailed])
+      }
+      catch { observationFailed() }
     }
 
     for (const kind of ['pagehide', 'pageshow'] as const) {
@@ -70,6 +113,12 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
     const fetch = window.fetch
     const json = Response.prototype.json
     const abort = AbortController.prototype.abort
+    let controllerPrototype: object | null = AbortController.prototype
+    let controllerSignal: (() => AbortSignal) | undefined
+    while (controllerPrototype && !controllerSignal) {
+      controllerSignal = Object.getOwnPropertyDescriptor(controllerPrototype, 'signal')?.get
+      controllerPrototype = Object.getPrototypeOf(controllerPrototype)
+    }
     const recordRead = (meta: Metadata, kind: AvailabilityReadEvent['kind'], detail: Partial<AvailabilityReadEvent> = {}) => record({
       kind,
       document: documentId,
@@ -89,60 +138,91 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
       })
     }
 
-    window.fetch = function (this: Window, input: RequestInfo | URL, init?: RequestInit) {
-      const tracked = String(input) === '/api/installations' && (!init?.method || init.method === 'GET')
-      if (!tracked)
-        return fetch.call(this, input, init)
+    window.fetch = function (this: Window, ...args: Parameters<typeof fetch>) {
+      // Invoke the original once, with the exact argument list and receiver.
+      // Metadata inspection cannot become the application's fetch terminal.
+      const original = Reflect.apply(fetch, this, args) as ReturnType<typeof fetch>
+      let signal: AbortSignal | null | undefined
+      try {
+        if (typeof args[0] !== 'string') {
+          observationFailed()
+          return original
+        }
+        if (args[0] !== '/api/installations')
+          return original
+        if (args[1] != null) {
+          const prototype = Object.getPrototypeOf(args[1])
+          const descriptors = Object.getOwnPropertyDescriptors(args[1])
+          if ((prototype !== null && prototype !== Object.prototype)
+            || (['method', 'signal'] as const).some(key => descriptors[key] && !('value' in descriptors[key]))) {
+            observationFailed()
+            return original
+          }
+          const method: unknown = descriptors.method?.value
+          if (method !== undefined && typeof method !== 'string') {
+            observationFailed()
+            return original
+          }
+          if (typeof method === 'string' && method.toUpperCase() !== 'GET')
+            return original
+          signal = descriptors.signal?.value
+          if (signal != null && !(signal instanceof AbortSignal)) {
+            observationFailed()
+            return original
+          }
+        }
+      }
+      catch {
+        observationFailed()
+        return original
+      }
       const meta: Metadata = {
         read: ++sequence,
-        signal: init?.signal,
+        signal,
         insideAbortCall: false,
         nativeSignal: false,
       }
-      if (meta.signal) {
-        signals.set(meta.signal, meta)
-        meta.signal.addEventListener('abort', (event) => {
-          const native = event.type === 'abort' && event.isTrusted && event instanceof Event
-            && event.target === meta.signal && event.currentTarget === meta.signal && meta.signal!.aborted
-          meta.nativeSignal = native && meta.insideAbortCall
-          recordRead(meta, 'abort', { trusted: event.isTrusted, exactTarget: native, insideAbortCall: meta.insideAbortCall })
-        }, { once: true })
-      }
-
-      recordRead(meta, 'start')
-      let original: ReturnType<typeof fetch>
       try {
-        original = fetch.call(this, input, init)
+        if (meta.signal) {
+          signals.set(meta.signal, meta)
+          meta.signal.addEventListener('abort', (event) => {
+            try {
+              const native = event.type === 'abort' && event.isTrusted && event instanceof Event
+                && event.target === meta.signal && event.currentTarget === meta.signal && meta.signal!.aborted
+              meta.nativeSignal = native && meta.insideAbortCall
+              recordRead(meta, 'abort', { trusted: event.isTrusted, exactTarget: native, insideAbortCall: meta.insideAbortCall })
+            }
+            catch { observationFailed() }
+          }, { once: true })
+        }
+        recordRead(meta, 'start')
+        // Observe without replacing the original promise or cloning its Response.
+        observe(original, (response) => {
+          responses.set(response, meta)
+          recordRead(meta, 'fetch-fulfilled', { status: response.status, ok: response.ok })
+          recordRead(meta, 'headers', { status: response.status })
+        }, cause => rejected(meta, 'rejected', cause))
       }
-      catch (cause) {
-        rejected(meta, 'rejected', cause)
-        throw cause
-      }
-
-      // Observe without replacing the original promise or cloning its Response.
-      void original.then((response) => {
-        responses.set(response, meta)
-        recordRead(meta, 'fetch-fulfilled', { status: response.status, ok: response.ok })
-        recordRead(meta, 'headers', { status: response.status })
-      }, cause => rejected(meta, 'rejected', cause))
+      catch { observationFailed() }
       return original
     }
 
-    Response.prototype.json = function (this: Response) {
+    Response.prototype.json = function (this: Response, ...args: Parameters<typeof json>) {
       const meta = responses.get(this)
       if (!meta)
-        return json.call(this)
+        return Reflect.apply(json, this, args)
       recordRead(meta, 'body-start')
       let original: ReturnType<typeof json>
       try {
-        original = json.call(this)
+        original = Reflect.apply(json, this, args)
       }
       catch (cause) {
-        rejected(meta, 'body-rejected', cause)
+        try { rejected(meta, 'body-rejected', cause) }
+        catch { observationFailed() }
         throw cause
       }
 
-      void original.then((value: unknown) => {
+      observe(original, (value: unknown) => {
         recordRead(meta, 'body', {
           status: this.status,
           exactBody: window.cairnExpectedAvailability !== undefined
@@ -152,14 +232,21 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
       return original
     }
 
-    AbortController.prototype.abort = function (this: AbortController, reason?: unknown) {
-      const meta = signals.get(this.signal)
+    AbortController.prototype.abort = function (this: AbortController, ...args: Parameters<typeof abort>) {
+      let meta: Metadata | undefined
+      try {
+        if (controllerSignal)
+          meta = signals.get(Reflect.apply(controllerSignal, this, []))
+        else
+          observationFailed()
+      }
+      catch { observationFailed() }
       if (!meta)
-        return abort.call(this, reason)
+        return Reflect.apply(abort, this, args)
       meta.insideAbortCall = true
       recordRead(meta, 'abort-call-enter', { insideAbortCall: true })
       try {
-        return abort.call(this, reason)
+        return Reflect.apply(abort, this, args)
       }
       finally {
         meta.insideAbortCall = false
