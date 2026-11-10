@@ -4,7 +4,7 @@ Selected workflow mode now covers ONLY the separate synthetic HTTP fixture,
 true beacon.html→beacon.ts→BeaconApp.vue caller on /claim with no installation
 selected, and the two existing Chromium/WebKit profiles sequentially. Runtime
 blobs are frozen at b1863f5601e483000d96eaab121ce3ec0ae44c7b. Full product/tests
-source pin 2c11b656e799e36bc41cbc1c69fa61c63e148365. Never merge this observer.
+source pin 523fdd9f76b0d82f4fae59ec12a4154954a85b72. Never merge this observer.
 
 User accepted the scope in docs/agents/availability-lifecycle-fixture.md, not
 eligibility inferred from design. Preserve original appDirect BF test and both
@@ -40,3 +40,8 @@ cancel the explicit exclusions, but prevents exhaustive cause and WebKit inferen
 No further quest for masked reasons or PromiseState is selected. Archived sources
 are still included in complete source review; controlled Node tests never qualify
 native results. Separate app BF reload recovery is a proposal only, not executed.
+
+Synthetic context establishes existing performance-upload preference false via
+storageState before load. Real monitor/uploader unchanged; unexpected POST stays
+red. Actual preference/uploader light comparison: default sends once at10s,
+persisted false sends zero, no abandoned tasks. Twelve source checks pass; not native.

@@ -12,7 +12,7 @@ jobs:
       image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f
       options: --init --ipc=host
     env:
-      PRODUCT_SHA: 2c11b656e799e36bc41cbc1c69fa61c63e148365
+      PRODUCT_SHA: 523fdd9f76b0d82f4fae59ec12a4154954a85b72
       RUNTIME_SHA: b1863f5601e483000d96eaab121ce3ec0ae44c7b
     defaults:
       run:
@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         timeout-minutes: 5
         with:
-          ref: 2c11b656e799e36bc41cbc1c69fa61c63e148365
+          ref: 523fdd9f76b0d82f4fae59ec12a4154954a85b72
       - name: Bind source and require frozen runtime before any workload
         timeout-minutes: 5
         env:
