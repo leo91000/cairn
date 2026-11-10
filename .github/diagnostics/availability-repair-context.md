@@ -1,31 +1,83 @@
-# Scoped native JSON observer — SOURCE-ONLY correction, no CI admission
+# Focused availability product qualification — source preparation, NO dispatch
 
-Product PIN9da5f39aa9170444789708a0c5e6b2183934c303/tree6332536596ea2be7c60653bb7e4b42c448182847 remains immutable. Historical pinned baseDC249039; realmain lastseen88fe9de4b457ed50c988952c183a3b3b12e3a931 must be reconciled before future PRODUCT qualification. Existing observer/ref/pilot only. ROOT grants source-only observer correction, light regressions and fresh COMPLETE FULL; STOP BEFORE ANY CI. C40 HEAVY HOLD / slot ROOT. No new SDK environment, framework, app prototype, Cargo or localbrowser.
+Existing observer branch qualification/skill-availability-20261108 is NEVER merged.
+Selected mode focused-repair. Immutable selected product:
+**bb8957197d4308fe786ae60bc470b4c193ae501a**, tree
+**a18526ad7f3b265b198da685b4b32aac6d50f63f**; integrated main
+b431f53a5d26138699b97c26c6121f11f6ef7963, ordinary merge parents8832+b431.
 
-## Contract and preserved first failures
+ROOT exact cleanBB canonical pnpm check EXIT0:141files/1871tests, ESLint,
+Rustfmtcheck,vue-tsc,productionbuild; clean before/after. No QA8832/dirty transfer.
+This is SOURCE QA ONLY. Full fresh complete product and observer+selected-product
+reviews are still required. No runtime/global qualification or P1 closure follows.
+ROOT has NOT admitted any CI/heavy/native/browser/network/PR/merge execution.
 
-Whole-product42665955888 remains FAILURE47PASS1FAIL (later nativeJSON TypeError/noownedabort atcommit). Native42787383461 failedRuntime.enable admission/cleanup; corrected42793093288 passed pre-navigationadmission and closure but did NOT acquire originalPromiseState. Its pause sample arrived/refusedafterbodyrelease; old-document identity was not proven and journal was lost behind awaitedcallback. All failures remain unchanged/private. ProductP1 and two archived skill-probeP2s OPEN/unselected. No qualification transfer, retry-for-green, new filter/whitelist or deadline increase.
+## Selected existing mode and exact commands
 
-Pending JSON through commit and exact abort metadata are regression acceptance requirements; no waiver is inferred. Preserve original native GET+Response.json promises, producer/caller semantics, original terminal, readonly poll3s/backoff, DirectRelay/auth/BFCache/cache/history/cursors and no uncertain mutation replay. This diagnostic does NOT qualify the Vue application or these shared contracts.
+Restore existing focused-repair workflow, not PromiseState diagnostics/matrices.
+Same Playwright1.64.1 image, maxparallel1,25mjob/5mstep,7s expectations/30s tests.
+Real CLI --list BEFORE Cargo must select exactly8MCP and2physicalBF, with zero,
+missing,foreign,error or actually-executed collection results refused. MCP titles
+per engine: committed, cancelled, same-document persisted lifecycle, scoped
+readonly outage. Actual list output is required; source counts are not receipts.
 
-## Selected observer, fixed boundaries
+Keep real SDK closed-target prototype/ownership preflight, RUNNER_TEMP receipts,
+bounded per-command Git trust, zip/build prerequisites, format/sourceunchanged,
+wholequality, manager+Beacon+web fixtures/assets, isolated Postgres qualification,
+UNCHANGED exactprimary worker2/retries0/failonflaky/trace, DirectRelay/direct-capacity/
+SavedReader complete selections, physicalBF, Account+OAuth401, finalsourceidentity
+and helper hashes. Unknown closure/timeouts/errors remain red. No local build/SDK.
 
-ONE same Chromium cell remains in the existing manual workflow, pinnedPlaywright1.64.1. Actual product factory/BeaconApp poll block, unmodified product probe and HTTP gate are embedded with minimal existing state/session adapters. No Cargo/Cairn fixtures. Sameclockinstall/pause/runFor3100/resume, firstgatedread2 and laterJSONread3, same heldresponses/navigation. Job25m/allsteps5m/observed7s unchanged. Source/script/helper hashes before/after required. Workflow and SDK helper unchanged.
+Incoming main740 keeps delayed turn.started waits after final replies in web and
+Android; all7incoming blobs are preserved. Whole source QA includes new chat-wait
+cases. This focused browser plan also selects both changed scheduled-wait variants
+in journeys-chats/layout-webkit-chats, plus shared saved-reader coverage. No old
+main/Android/global green is borrowed as C40 qualification. Any new source/base
+change invalidates affected checks/reviews and needs exact final pin updates.
 
-Runtime/frame/defaultcontext/exactorigin/uniqueContext/Debugger/BP admission still completes while the existingclock is paused BEFORE retainedPage.goto. Runtime context-created/destroyed/cleared and Debugger.scriptParsed mappings retain actual scope metadata. The first registered fixture pagehide listener is the SAME nativeDiagnostics snapshot-retirement callback; it is given a reference, not a new producer or lifecycle action. Before navigation the actual function reference's intrinsic FunctionLocation must map to the admitted live default context. Missing/ambiguous function or script/context metadata refuses admission.
+## Accepted Option A and original requirement
 
-Pause ingress records host timestamp/phase/bodyheld/cleanup boundary and actual firstcallFrame/script/functionLocation/live executioncontext metadata. Expected document/scope is explicitly separate from observed provenance. No URLs, query/header/token payloads are projected. Unknown/mismatching frame, script, function location, context, origin or default/mainframe is REFUSED before native-promise inspection. After structural matching, Debugger.evaluateOnCallFrame reads the actual paused frame's document identity with throwOnSideEffect; a different/unknown document is refused. Only that SAME validated callFrame can return the original JSON promise reference. Runtime.getProperties then reads its intrinsic state. Live scope/bodyheld/beforecleanup are rechecked before accepting metadata. Boundary document comes from the actual paused-frame read; first-listener/exact-context claims are derived from matched identity, never filled from the desired old realm. Earlier TypeError/HTTP/JSON errors are never reclassified.
+Prevent obsolete availability Offline/fallback/retry effects while preserving
+original native fetch/JSON terminals and genuine active/download failures.
+Browser=originalterminal/lifecycleoldDoc/closure/freshdoc+recovery.
+Node real functions=CONDITIONAL generation ownership/publication.
+**NO native appgeneration/publication correlation in THIS Page.goto.**
+**NO guaranteed BASEbrowserRED.** No appgeneration inferred from pagehideprobe,
+no NoStalePub native claim. A genuine publication while still active must act.
 
-The originalPromiseState must be REJECTED/TypeError whilebodyheld and before the first registered entry body; the SAME original read3 terminal must follow. Pending/unknown/wrong/errors stay RED. An intrinsic function/promise API shape missing in the real browser remains missing/red: source models do not prove native availability or state.
+Permanent companion uses actual generation retirement BEFORE SAME original
+TypeError with parent caller alive; base9da publishes Offline1/counter1/retry6000,
+candidate zeroeffects and identical cause. Original factory/type/error unchanged.
+Later committed read retains the raw exact-counted terminal, never fabricated
+aborted metadata. First owned trusted/exact/in-call withdrawal remains strict.
+All other unexpected rejects/pageerrors/unhandled/HTTP/incomplete/orphan/duplicate
+reads remain red. Active HTTP/JSON/fetch errors, retained-download exact body,
+ordinary cadence/backoff/recovery/rearming,401,physicalBF,DirectRelay and
+cache/history/cursors/no uncertain mutation replay remain strict.
+Product mapping: docs/agents/availability-navigation-repair.md at selectedBB.
 
-Destinationcommit and postcommitjournal capture/persistence run in a bounded path INDEPENDENT of the callback observation. After actual goto returnscommitted, harvest retains the ENTIRE synchronous sessionStorage journal/native records and persists them beforeHTTPbodyrelease/pageclose, even if callback is missing/wrong/rejected. Both observations are awaited with independent existing7s bounds; any callback timeout/error remains recorded and RED. A journal failure/timeout doesnotacknowledge acquisition. Owned persistence is tracked/drained; late work cannot claim beforecleanup acknowledgment. This explains/fixes journal loss, NOT the cause of the missing old-document pause. Any actual native error recovered by the journal remains audited.
+## Network is a separate held proposal, not browser qualification
 
-HTTP release/page/gate/backend close remain independent of pending CDP commands. The page owns the CDP session lifetime and its actual session-close event is required; no racing disable/detach commands and no error whitelist. Existingcommand/handler/receipt drains remain bounded, unknownclosure remains RED. No native promise is settled by an observer or by cleanup. Every qualification flag (product/retainedPolling/BFCache/genuineFailureHandling/fullEight) stays FALSE; allCellsObserved covers only the selected cell.
+Indirect caller chain: Beacon availability -> api.watch -> InstallationTransport.
+availabilityChanged -> fallback / networkChanged -> direct/live consumers.
+The separate existing network-qualification harness imports shipped api/transport/
+liveConnection but is NOT the Beacon account-shell document/generation.
+Proposed existing network groups for separate ROOT assessment: qualification
+(bounded loss/starvation, cursors, no uncertain mutation replay, auth/revocation)
+and recovery (network-change,packet-loss). No ALLNETWORK/ALLBACKEND workflow,
+queue, automatic execution or native app-publication correlation claim. Browser
+DirectRelay/SavedReader jobs do not substitute for these topologies, and fixture
+builds are not backend qualification. ROOT must explicitly admit any group.
 
-## Light verification / limits / stop
+## Preserved history and unselected archives
 
-Actual-source extraction fixtures reproduce old false-document acceptance and new rejection of wrong/unknown frame/script/context/function/document before promise inspection. Missing context or destroyed/reused identity refuses scope. The old committed+missing-callback coupling loses the journal; corrected real controller persists recovered original events beforecleanup while retaining timeout/error RED. Journal/commit/persistence failures stay RED and real TypeError is retained. Existing admission/independentpage-sessionclosure/pending-red safeguards are also checked with Node built-ins and an owned virtualclock that enforces actual7000ms arguments. These are controller/source proofs, never native qualification.
+All earlier probes/diagnostics and first red results stay unchanged. Native
+PromiseState reader and old skill/b534 scripts are UNSELECTED by focused-repair;
+their historical requirements/partial results supply no new product PASS.
+Original42665955888 primary47PASS1FAIL stays OPEN. Last428008 original TypeError
+JS terminal was acquired; intrinsic PromiseState before first listener was not.
+No journal substitution, retry-for-green, filter/whitelist, skip or budget inflation.
 
-The independent ROOT report output/review-c40-observation-scope.md was not present in this run's accessible workspace/output; exact confirmed findings and mandate supplied by ROOT are the source of this correction. No access bypass attempted. Fresh COMPLETE independent FULL must inspect ALL observer files and ALL pinned product changes, not inherit previous verdicts. Any finding corrected requires another fresh FULL.
-
-No CI dispatch is authorized by this source-only task, even after review. Report frozen SHA/tree/light commands/verdicts and ONLY remaining boundary: real-browser acquisition of the correctly attributed original native promise state/terminal under the strict contract. P1 OPEN, primary47PASS1FAIL unchanged, all prior reds preserved. Any future native run/contract arbitration requires ROOT coordination; no UI534679 merge/capturewaiver, Slack, release/deploy/livegrant.
+No PR/source merge to main, UI534679merge absent Leo captures, release/deploy/
+livegrant/Slack effects. C40/B/D/storage HEAVY HOLD, slot ROOT. A product correction
+requires new immutable pin, affected canonical QA and fresh full reviews, no mix.
