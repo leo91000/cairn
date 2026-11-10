@@ -1,5 +1,41 @@
 # Direct owner missing receipt — PROVISIONAL SOURCE ONLY
 
+## Current selection after explicit ROOT H77 source-helper decision
+
+Product **4969f8ed41956b569399e0aaac87384ca5da1d37**, tree **aabc36da765e0900c3b9c3d908e74a0cafb9c613**,
+parent2344; canonicalQA ROOT DUE on this clean exact commit. Only
+`tests/e2e/availability-probe.ts` and its real existing source regression suite
+`apps/web/tests/availability-read.test.ts` changed. Runtimeb186/apps/factory/TypeError,
+MCPS/browser assertions, budgets/profiles/auth/grants remain immutable.
+Old2344 is the preserved RED source reference, never selected as current product.
+
+Helper forwards original fetch/json/abort arguments/receivers and original promises,
+throws/causes. Metadata unsupported is explicit observer-failed/UNKNOWN, not a fake
+native exception; existing incomplete-read audit refuses that diagnostic event.
+Original ownedabort brackets/readidentity/headers/body phases remain strict. No
+production Direct fix is inferred from test-helper transparency corrections.
+Eight permanent source regressions use the SAME real installAvailabilityProbe
+in the existing Vitest suite; not executed locally, canonical ROOT tools will run
+on exact committed source. Actual serialized bootstrap controller compares SAME
+final tests on2344:17PASS/3ASSERTFAIL, candidate4969:20PASS. Source only, no native.
+Source-repin overlay-control affected4PASS. Existing FIVE module payloadf48 still
+byte-identical, but no72PASS/lint/QA from old2344 is transferred to this new pin.
+
+Workflow selected ONE existing WebKit diagnostic only, pin currentproduct above;
+SDK/CLI/budgets/profile/policy unchanged. Source Node bootstrap checks now include
+the actual selected product helper. Existing module+availability-read Vitest suites
+are prepared before fixture build. TWO overlays fixed paths unchanged; originals
+are byte-identical across2344→current, guards/manifests nevertheless repinned. All
+other product bytes are captured from current commit, native unchanged and exact
+original-test restoration ALWAYS required. No workflow/PR/native admission here.
+
+QA canonical ROOT and possible format correction must precede NEW COMPLETE FULLs
+ALLproduct+ALLobserver/archives+pin/callers/contracts on exact stable final sources.
+No H75/H76/H77/QA2344 transfer. No review launched before canonical response.
+P1OPEN/slotROOT/B-DstorageHOLD/noUImergeLéo/Slackprod/grantsforensics intact.
+
+## Historical notes below (not current selection or transferable verdicts)
+
 Product2344e38c11909ff4bdfb5d3f8c862b8e7f48885c/tree56dd76916edf7550a097d0a689f36b116893ec46
 and runtimeb186 are immutable. Existing observer branch only; never merge it.
 PR731 readonly/ROOT solewriter. No production fix is authorized from an unproven

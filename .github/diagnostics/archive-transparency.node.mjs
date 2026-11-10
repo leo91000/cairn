@@ -3,16 +3,19 @@ import { readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { stripTypeScriptTypes } from 'node:module'
 import { test } from 'node:test'
+import { product } from './direct-owner-overlay-control.mjs'
 import { createContext, runInContext } from 'node:vm'
 import { MessageChannel as NativeMessageChannel } from 'node:worker_threads'
 import { setImmediate } from 'node:timers/promises'
 
 const reference = process.argv.includes('--reference')
+const productReferenceHead = process.env.C40_PRODUCT_REFERENCE || product
+assert.match(productReferenceHead, /^[a-f0-9]{40}$/)
 const referenceHead = process.env.C40_ARCHIVE_REFERENCE || '589e704e90bc451a181bd7fdcf667993e518522e'
 function fixture(t, name) {
   const productReference = name === 'availability-probe.ts'
   const raw = productReference
-    ? execFileSync('git', ['show', '2344e38c11909ff4bdfb5d3f8c862b8e7f48885c:tests/e2e/availability-probe.ts'], { encoding: 'utf8' })
+    ? execFileSync('git', ['show', `${productReferenceHead}:tests/e2e/availability-probe.ts`], { encoding: 'utf8' })
     : reference
     ? execFileSync('git', ['-c', `safe.directory=${process.cwd()}`, 'show', `${referenceHead}:.github/diagnostics/${name}`], { encoding: 'utf8' })
     : readFileSync(new URL('./' + name, import.meta.url), 'utf8')
@@ -187,7 +190,7 @@ for (const name of ['skill-availability-probe.ts', 'b534-navigation-probe.ts']) 
 }
 
 
-for (const name of process.argv.includes('--product-reference') ? ['availability-probe.ts'] : ['availability-reader-native.mjs']) {
+for (const name of ['availability-reader-native.mjs', ...(process.argv.includes('--product-reference') ? ['availability-probe.ts'] : [])]) {
   test(`H77 ${name}: preserve actual empty original argument list`, async (t) => {
     const f = fixture(t, name)
     const original = Promise.resolve(Response.json({ value: 'original' }))
