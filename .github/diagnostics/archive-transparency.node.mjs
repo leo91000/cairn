@@ -213,11 +213,14 @@ for (const name of process.argv.includes('--product-reference') ? ['availability
     const f = fixture(t, name)
     const original = Promise.resolve(Response.json({ value: 'original' }))
     let methodReads = 0
-    const init = { get method() { methodReads++; return methodReads === 1 ? 'GET' : 'POST' } }
-    f.queue.push((_, options) => { void options.method; return original })
+    let signalReads = 0
+    const controller = new AbortController()
+    const init = { get method() { methodReads++; return methodReads === 1 ? 'GET' : 'POST' }, get signal() { signalReads++; return controller.signal } }
+    f.queue.push((_, options) => { void options.method; void options.signal; return original })
     assert.equal(f.fetch('/api/installations', init), original)
     await original
     assert.equal(methodReads, 1)
+    assert.equal(signalReads, 1)
   })
 }
 

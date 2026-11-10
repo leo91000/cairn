@@ -111,3 +111,11 @@ authority cannot claim whole pin clean while that source finding remains open.
 Do not dispatch this observer under an old permission. Native owner receipt still
 missing; no production bug or original47/1 causal fix inferred from these source
 observer counterexamples. SlotROOT/HEAVYHOLD, P1OPEN, all forensic preserved.
+
+H77 evidence correction: first archived-reader reference extraction used a comment
+boundary removed by TS transform; that parser failure is NOT a regression receipt.
+Permanent runner now uses real function boundaries, checks both method/signal
+accessors. SAME final tests/real71a7 bootstrap: four ASSERTION failures (no setup
+error), corrected archive17PASS; frozenproduct2344 three ASSERTION failures/14PASS.
+No native execution and no change to fixed product helper. Full review remains
+NONclean/open product-test-helper issue, source correction requires ROOT scope.
