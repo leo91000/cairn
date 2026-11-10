@@ -1,33 +1,19 @@
-name: Chromium native BFCache reasons diagnostic ONLY
+name: Synthetic real-caller physical lifecycle ONLY
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  reader:
-    name: First native history reasons ONLY (NOT product qualification)
+  lifecycle:
+    name: Additional synthetic physical lifecycle (NOT app Direct qualification)
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    env:
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      CARGO_INCREMENTAL: '0'
-      CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@postgres:5432/cairn_beacon_test
-      PRODUCT_SHA: b1863f5601e483000d96eaab121ce3ec0ae44c7b
-      ORIGINAL_TEST_SHA256: ebd565007a49baee2d585efbb6270fd285815fabc1c8b3b454c066b92a21f15c
-      DIAGNOSTIC_TEST_SHA256: 1fc644bb0298a3faa5c06686b444e431b21556e4aee7a10994271fb2b2ab6e85
-    services:
-      postgres:
-        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
-        env:
-          POSTGRES_USER: cairn
-          POSTGRES_PASSWORD: test-only
-          POSTGRES_DB: cairn_beacon_test
-        options: >-
-          --health-cmd "pg_isready -U cairn -d cairn_beacon_test"
-          --health-interval 5s --health-timeout 5s --health-retries 10
     container:
       image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f
       options: --init --ipc=host
+    env:
+      PRODUCT_SHA: 2c11b656e799e36bc41cbc1c69fa61c63e148365
+      RUNTIME_SHA: b1863f5601e483000d96eaab121ce3ec0ae44c7b
     defaults:
       run:
         shell: bash
@@ -35,45 +21,44 @@ jobs:
       - uses: actions/checkout@v7.0.1
         timeout-minutes: 5
         with:
-          ref: b1863f5601e483000d96eaab121ce3ec0ae44c7b
-      - name: Bind immutable product and observer sources before diagnostic overlay
+          ref: 2c11b656e799e36bc41cbc1c69fa61c63e148365
+      - name: Bind source and require frozen runtime before any workload
         timeout-minutes: 5
         env:
           OBSERVER_SHA: ${{ github.sha }}
         run: |
           test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = "$PRODUCT_SHA"
           test -z "$(git -c safe.directory="$GITHUB_WORKSPACE" status --porcelain)"
-          git -c safe.directory="$GITHUB_WORKSPACE" log -1 --format='product=%H tree=%T'
-          git -c safe.directory="$GITHUB_WORKSPACE" fetch --depth=1 --no-tags origin "$OBSERVER_SHA"
-          export C40_EVIDENCE_DIR="$RUNNER_TEMP/cairn-native-bfcache-reasons"
+          git -c safe.directory="$GITHUB_WORKSPACE" fetch --depth=1 --no-tags origin "$RUNTIME_SHA"
+          export C40_EVIDENCE_DIR="$RUNNER_TEMP/cairn-synthetic-physical-lifecycle"
           echo "C40_EVIDENCE_DIR=$C40_EVIDENCE_DIR" >> "$GITHUB_ENV"
-          mkdir -p "$C40_EVIDENCE_DIR" test-results/native-bfcache-reasons
-          for file in bfcache-native-reasons.mjs bfcache-native-reasons.node.mjs bfcache-native-reasons.overlay.ts closed-target-error.mjs; do
-            git -c safe.directory="$GITHUB_WORKSPACE" show "$OBSERVER_SHA:.github/diagnostics/$file" > "test-results/native-bfcache-reasons/$file"
-          done
-          sha256sum test-results/native-bfcache-reasons/* > "$C40_EVIDENCE_DIR/observer-files.sha256"
+          mkdir -p "$C40_EVIDENCE_DIR"
           python3 - <<'PYCODE'
-          import os, pathlib, subprocess, hashlib, json
+          import os, subprocess, pathlib, json
           root=pathlib.Path.cwd(); evidence=pathlib.Path(os.environ['C40_EVIDENCE_DIR'])
-          target='tests/e2e/availability-bfcache.spec.ts'
-          content=(root/target).read_bytes()
-          assert hashlib.sha256(content).hexdigest()==os.environ['ORIGINAL_TEST_SHA256']
-          (evidence/'original.spec.ts').write_bytes(content)
-          files=subprocess.check_output(['git','-c','safe.directory='+str(root),'ls-files','-z']).decode().split('\0')
-          manifest={}
-          for name in files:
-              if not name or name==target: continue
-              path=root/name
-              data=os.readlink(path).encode() if path.is_symlink() else path.read_bytes()
-              manifest[name]=hashlib.sha256(data).hexdigest()
-          (evidence/'production-before.json').write_text(json.dumps(manifest,sort_keys=True))
-          (evidence/'source-binding.json').write_text(json.dumps({'product':os.environ['PRODUCT_SHA'],'observer':os.environ['OBSERVER_SHA'],'originalTestSha256':os.environ['ORIGINAL_TEST_SHA256'],'diagnosticOnly':True,'productQualified':False}))
+          def git(*args): return subprocess.check_output(['git','-c','safe.directory='+str(root),*args]).decode().strip()
+          expected={
+              'playwright.config.ts',
+              'tests/e2e/availability-lifecycle-fixture.ts',
+              'tests/e2e/availability-lifecycle-fixture.node.mjs',
+              'tests/e2e/availability-lifecycle.spec.ts',
+              'docs/agents/availability-lifecycle-fixture.md',
+          }
+          changed=set(git('diff','--name-only',os.environ['RUNTIME_SHA'],os.environ['PRODUCT_SHA']).splitlines())
+          assert changed==expected
+          assert not git('diff',os.environ['RUNTIME_SHA'],os.environ['PRODUCT_SHA'],'--','apps/web/src','tests/e2e/availability-bfcache.spec.ts')
+          (evidence/'source-binding.json').write_text(json.dumps({
+              'product':os.environ['PRODUCT_SHA'],'tree':git('rev-parse','HEAD^{tree}'),
+              'runtime':os.environ['RUNTIME_SHA'],'observer':os.environ['OBSERVER_SHA'],
+              'runtimeBlobsUnchanged':True,'originalAppTestUnchanged':True,
+              'appDirectQualified':False,'nativeGenerationPublicationCorrelation':False,
+          }))
           PYCODE
       - uses: ./.github/actions/setup-pnpm
         timeout-minutes: 5
         with:
           cache: true
-      - name: Require the exact preinstalled SDK and image version
+      - name: Require exact preinstalled SDK and image
         timeout-minutes: 5
         run: |
           node --input-type=module <<'JS'
@@ -82,25 +67,13 @@ jobs:
           assert.equal(JSON.parse(readFileSync('node_modules/@playwright/test/package.json','utf8')).version,'1.64.1')
           assert.equal(JSON.parse(readFileSync('/ms-playwright/.docker-info','utf8')).driverVersion,'1.64.1')
           JS
-      - name: Source controller regression only (NOT native acquisition)
+      - name: Real HTTP and closure controller light checks (NOT native)
         timeout-minutes: 5
-        run: node --test test-results/native-bfcache-reasons/bfcache-native-reasons.node.mjs
-      - name: Apply only the explicit hashed diagnostic test overlay
-        timeout-minutes: 5
-        run: |
-          printf '%s  %s\n' "$ORIGINAL_TEST_SHA256" tests/e2e/availability-bfcache.spec.ts | sha256sum --check
-          printf '%s  %s\n' "$DIAGNOSTIC_TEST_SHA256" test-results/native-bfcache-reasons/bfcache-native-reasons.overlay.ts | sha256sum --check
-          cp test-results/native-bfcache-reasons/bfcache-native-reasons.overlay.ts tests/e2e/availability-bfcache.spec.ts
-          printf '%s  %s\n' "$DIAGNOSTIC_TEST_SHA256" tests/e2e/availability-bfcache.spec.ts | sha256sum --check
-          test "$(git -c safe.directory="$GITHUB_WORKSPACE" diff --name-only)" = tests/e2e/availability-bfcache.spec.ts
-          git -c safe.directory="$GITHUB_WORKSPACE" diff --binary > "$C40_EVIDENCE_DIR/applied-diagnostic.patch"
-          sha256sum "$C40_EVIDENCE_DIR/applied-diagnostic.patch" > "$C40_EVIDENCE_DIR/applied-diagnostic.patch.sha256"
-          printf 'diagnostic-overlay=true\nproduct-qualified=false\n' > "$C40_EVIDENCE_DIR/mode.txt"
-      - name: Collect exactly one Chromium diagnostic before Cargo
+        run: node --test tests/e2e/availability-lifecycle-fixture.node.mjs
+      - name: Recollect exactly the two existing engine projects before build
         timeout-minutes: 5
         run: |
-          test ! -e target/debug/cairn
-          PLAYWRIGHT_JSON_OUTPUT_FILE="$C40_EVIDENCE_DIR/collection.json" ./node_modules/.bin/playwright test --config=playwright.config.ts --project=journeys-mcps tests/e2e/availability-bfcache.spec.ts --grep 'availability native not-restored reasons diagnostic only' --list --reporter=list,json
+          PLAYWRIGHT_JSON_OUTPUT_FILE="$C40_EVIDENCE_DIR/collection.json" ./node_modules/.bin/playwright test --config=playwright.config.ts --project=journeys-mcps --project=layout-webkit-mcps tests/e2e/availability-lifecycle.spec.ts --list --reporter=list,json
           node --input-type=module <<'JS'
           import assert from 'node:assert/strict'
           import { readFileSync, writeFileSync } from 'node:fs'
@@ -116,92 +89,34 @@ jobs:
             for (const child of suite.suites||[]) collect(child)
           }
           for (const suite of report.suites) collect(suite)
+          const title='restores the real availability caller in an eligible synthetic lifecycle fixture'
           assert.deepEqual(report.errors,[])
-          assert.deepEqual(cases,[['journeys-mcps','availability native not-restored reasons diagnostic only']])
-          writeFileSync(process.env.C40_EVIDENCE_DIR+'/collection-receipt.json',JSON.stringify({collectionOnly:true,cases,productQualified:false}))
+          assert.deepEqual(cases,[['journeys-mcps',title],['layout-webkit-mcps',title]])
+          writeFileSync(process.env.C40_EVIDENCE_DIR+'/collection-receipt.json',JSON.stringify({collectionOnly:true,cases,appDirectQualified:false}))
           JS
-      - name: Install the same disposable fixture build dependencies
-        timeout-minutes: 5
-        run: |
-          node scripts/prepare-browser-build-dependencies.mjs
-          timeout --signal=TERM --kill-after=5s 60s apt-get -o Acquire::Retries=0 -o Acquire::https::Timeout=20 install -y --no-install-recommends zip
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.97.1
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - name: Build only the manager fixtures needed by this original case
-        timeout-minutes: 5
-        run: cargo build --locked --bin cairn --example worker_fixture --example browser_fixture
-      - name: Build only the Beacon and SQL fixtures needed by this case
-        timeout-minutes: 5
-        run: cargo build --locked -p cairn-beacon --bin cairn-beacon --example beacon_sql_fixture
-      - name: Build the same PR browser configuration
+      - name: Build unchanged runtime entry for the isolated fixture only
         timeout-minutes: 5
         run: VITE_CAIRN_TEST_RESUME_DIAGNOSTICS=true pnpm exec vite build --config apps/web/vite.config.ts
-      - name: Qualify the same isolated Postgres fixture
-        timeout-minutes: 5
-        run: pnpm exec tsx scripts/qualify-beacon-sql-fixture.ts
-      - name: Require exact overlay and production bytes immediately before acquisition
-        timeout-minutes: 5
-        run: |
-          printf '%s  %s\n' "$DIAGNOSTIC_TEST_SHA256" tests/e2e/availability-bfcache.spec.ts | sha256sum --check
-          sha256sum --check "$C40_EVIDENCE_DIR/observer-files.sha256"
-          python3 - <<'PYCODE'
-          import os, pathlib, json, hashlib
-          root=pathlib.Path.cwd(); evidence=pathlib.Path(os.environ['C40_EVIDENCE_DIR'])
-          manifest=json.loads((evidence/'production-before.json').read_text())
-          assert manifest
-          changed=[]
-          for name,expected in manifest.items():
-              path=root/name
-              data=os.readlink(path).encode() if path.is_symlink() else path.read_bytes()
-              if hashlib.sha256(data).hexdigest()!=expected: changed.append(name)
-          (evidence/'production-pre-acquisition.json').write_text(json.dumps({'productionUnchanged':not changed,'changedCount':len(changed),'diagnosticOnly':True,'productQualified':False}))
-          assert not changed
-          PYCODE
-          test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = "$PRODUCT_SHA"
-          test "$(git -c safe.directory="$GITHUB_WORKSPACE" diff --name-only)" = tests/e2e/availability-bfcache.spec.ts
-      - name: Acquire first-history native Chromium reasons ONLY
+      - name: Physical lifecycle in the synthetic fixture only
         timeout-minutes: 5
         env:
-          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/native-bfcache-reasons
-        run: pnpm test:e2e --config=playwright.config.ts --project=journeys-mcps tests/e2e/availability-bfcache.spec.ts --grep 'availability native not-restored reasons diagnostic only' --workers=1 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results/native-bfcache-reasons-output
-      - name: Always restore exact original test and verify production bytes
+          PLAYWRIGHT_HTML_OUTPUT_DIR: playwright-report/synthetic-physical-lifecycle
+        run: pnpm test:e2e --config=playwright.config.ts --project=journeys-mcps --project=layout-webkit-mcps tests/e2e/availability-lifecycle.spec.ts --workers=1 --retries=0 --fail-on-flaky-tests --trace=on --output=test-results/synthetic-physical-lifecycle
+      - name: Always require exact final source identity
         timeout-minutes: 5
         if: always()
         run: |
-          python3 - <<'PYCODE'
-          import os, pathlib, subprocess, hashlib, json
-          root=pathlib.Path.cwd(); evidence=pathlib.Path(os.environ.get('C40_EVIDENCE_DIR',str(pathlib.Path(os.environ['RUNNER_TEMP'])/'cairn-native-bfcache-reasons')))
-          evidence.mkdir(parents=True,exist_ok=True)
-          target='tests/e2e/availability-bfcache.spec.ts'
-          before=(root/target).read_bytes() if (root/target).exists() else b''
-          before_sha=hashlib.sha256(before).hexdigest()
-          source=subprocess.check_output(['git','-c','safe.directory='+str(root),'show',os.environ['PRODUCT_SHA']+':'+target])
-          assert hashlib.sha256(source).hexdigest()==os.environ['ORIGINAL_TEST_SHA256']
-          (root/target).write_bytes(source)
-          restored=hashlib.sha256((root/target).read_bytes()).hexdigest()==os.environ['ORIGINAL_TEST_SHA256']
-          manifest_path=evidence/'production-before.json'
-          manifest=json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
-          baseline_known=manifest_path.exists() and bool(manifest)
-          changed=[]
-          for name,expected in manifest.items():
-              path=root/name
-              try: data=os.readlink(path).encode() if path.is_symlink() else path.read_bytes()
-              except Exception: changed.append(name); continue
-              if hashlib.sha256(data).hexdigest()!=expected: changed.append(name)
-          expected_overlay=before_sha in [os.environ['ORIGINAL_TEST_SHA256'],os.environ['DIAGNOSTIC_TEST_SHA256']]
-          (evidence/'restoration-receipt.json').write_text(json.dumps({'originalRestored':restored,'diagnosticHashExpected':expected_overlay,'productionUnchanged':baseline_known and not changed,'productionBaselineKnown':baseline_known,'productionChangedCount':len(changed),'productQualified':False}))
-          assert restored and expected_overlay and baseline_known and not changed
-          PYCODE
+          mkdir -p "$RUNNER_TEMP/cairn-synthetic-physical-lifecycle"
+          git -c safe.directory="$GITHUB_WORKSPACE" log -1 --format='product=%H tree=%T' > "$RUNNER_TEMP/cairn-synthetic-physical-lifecycle/final-identity.txt"
           test "$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)" = "$PRODUCT_SHA"
           test -z "$(git -c safe.directory="$GITHUB_WORKSPACE" status --porcelain)"
-          sha256sum --check "$C40_EVIDENCE_DIR/observer-files.sha256"
       - uses: actions/upload-artifact@v7.0.1
         timeout-minutes: 5
         if: always()
         with:
-          name: private-native-bfcache-reasons-first-history
+          name: private-additional-synthetic-physical-lifecycle
           path: |
-            ${{ env.C40_EVIDENCE_DIR }}
-            test-results/native-bfcache-reasons-output/
-            playwright-report/native-bfcache-reasons/
+            ${{ runner.temp }}/cairn-synthetic-physical-lifecycle/
+            test-results/synthetic-physical-lifecycle/
+            playwright-report/synthetic-physical-lifecycle/
           retention-days: 14
