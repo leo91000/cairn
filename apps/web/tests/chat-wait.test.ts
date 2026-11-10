@@ -222,6 +222,27 @@ describe('scheduled waits', () => {
     expect(immediate[2]).toMatchObject({ wait: { wakeup: null, observation: ready } })
   })
 
+  it.each(['chat.wait', 'chat.sleep', 'run.wait'])('keeps %s after final replies when the engine turn start arrives late', (type) => {
+    const scheduled = wakeup()
+    const turn = [
+      event(type, scheduled as unknown as Record<string, unknown>),
+      event('turn.started', {}),
+      event('item.completed', { item: { id: 'final-reply', type: 'agent_message', text: 'I will resume after the result.' } }),
+    ]
+    const shape = (events: RunEvent[]) => fixtureEntries(events, true, undefined, scheduled).map(entry => entry.kind)
+    // Streaming and reloaded completed turns use the same order.
+    expect(shape(turn)).toEqual(['message', 'wait'])
+    const completed = [...turn, event('turn.completed', {})]
+    expect(shape(completed)).toEqual(['message', 'wait'])
+    // The historical wait stays before the next turn's replies.
+    expect(shape([
+      ...completed,
+      event(type === 'run.wait' ? 'run.wakeup' : 'chat.wakeup', scheduled as unknown as Record<string, unknown>),
+      event('turn.started', {}),
+      event('item.completed', { item: { id: 'next-reply', type: 'agent_message', text: 'The result arrived.' } }),
+    ])).toEqual(['message', 'wait', 'message'])
+  })
+
   it('folds paginated ready and resumption events into the same card', () => {
     const observation = { state: 'completed', type: 'github_pr_checks', conclusion: 'success' }
     const scheduled = wakeup({ condition: checks, observation })
