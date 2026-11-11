@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { stripTypeScriptTypes } from 'node:module'
 import { test } from 'node:test'
 import { setImmediate } from 'node:timers/promises'
 import { createContext, runInContext, runInNewContext } from 'node:vm'
-import { applyTestOverlays, restoreTestOverlays, product, verifySourceTrustedChain, selectedSourceGateScript, sourceGateCommands } from './direct-owner-overlay-control.mjs'
+import { applyTestOverlays, restoreTestOverlays, product, verifySourceTrustedChain, selectedSourceGateScript, sourceGateCommands, historicalWorkflowReference, historicalSourceWorkflow, verifyHistoricalSourceAcquisition } from './direct-owner-overlay-control.mjs'
 import { observeDirectOwners, projectDirectOwners, createDirectOwnerObserver } from './direct-owner-probe.mjs'
 
 function fixture(t, options = {}) {
@@ -836,7 +836,7 @@ test('H82 selected workflow script explicitly enables product and two limit-reco
 })
 
 test('H82 actual source gate validator rejects the immutable old combined runner', () => {
-  const workflow = execFileSync('git', ['show', '7aac8c145f1e44d764c9f7150b01727fd0a1f19d:.github/workflows/webkit-dependency-regression.yaml'], { encoding: 'utf8' })
+  const workflow = historicalSourceWorkflow()
   assert.throws(() => selectedSourceGateScript(workflow), /complete shell block/)
 })
 
@@ -844,3 +844,77 @@ test('H82 source gate cannot omit the recognition selector while claiming that c
   const workflow = readFileSync(new URL('./selected-workflow.yaml', import.meta.url), 'utf8').replace(' --source-trusted-limit', '')
   assert.throws(() => selectedSourceGateScript(workflow), /limit recognition explicitly/)
 })
+
+
+function finalIdentityFixture(t, mode) {
+  const f = sourceFiles(t)
+  mkdirSync(f.evidence, { recursive: true })
+  const workflow = readFileSync(new URL('./selected-workflow.yaml', import.meta.url), 'utf8')
+  const name = 'ALWAYS restore exact original tests and product identity'
+  const blocks = workflow.split('      - name: ').filter(value => value.startsWith(name + '\n'))
+  assert.equal(blocks.length, 1)
+  const lines = blocks[0].split('\n')
+  const first = lines.indexOf('        run: |') + 1
+  assert(first > 0)
+  const body = []
+  for (const line of lines.slice(first)) {
+    if (!line.startsWith('          '))
+      break
+    body.push(line.slice(10))
+  }
+  let script = body.join('\n') + '\n'
+  const restore = 'node test-results/direct-owner-receipt/direct-owner-overlay-control.mjs restore'
+  assert(script.includes(restore))
+  // Controlled shell failure at the existing restore seam; no native claim and
+  // no copied finalization logic. Actual restoration itself is tested above.
+  script = script.replace(restore, mode === 'restore-failure' || mode === 'identity-unknown' ? 'exit 37' : ':')
+  const proof = path.join(f.evidence, 'observer-source.proof')
+  writeFileSync(proof, 'SOURCE FIXTURE')
+  const digest = mode === 'hash-failure' ? '0'.repeat(64) : execFileSync('sha256sum', [proof], { encoding: 'utf8' }).split(' ')[0]
+  writeFileSync(path.join(f.evidence, 'observer-source.sha256'), digest + '  ' + proof + '\n')
+  const env = { ...process.env, C40_EVIDENCE_DIR: f.evidence, GITHUB_WORKSPACE: process.cwd(), PRODUCT_SHA: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim() }
+  if (mode === 'identity-unknown')
+    env.GIT_DIR = path.join(f.root, 'missing-owned-git-directory')
+  const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', script], { cwd: process.cwd(), env, encoding: 'utf8' })
+  return { ...f, result, identity: path.join(f.evidence, 'final-identity.txt') }
+}
+
+test('H84 selected workflow explicitly acquires its bound historical source before binding', () => {
+  const workflow = readFileSync(new URL('./selected-workflow.yaml', import.meta.url), 'utf8')
+  verifyHistoricalSourceAcquisition(workflow)
+  assert.equal(historicalWorkflowReference.commit, '7aac8c145f1e44d764c9f7150b01727fd0a1f19d')
+  assert.throws(() => selectedSourceGateScript(historicalSourceWorkflow()), /complete shell block/)
+})
+
+test('H84 missing historical acquisition is refused even in a checkout that happens to hold the object', () => {
+  const workflow = readFileSync(new URL('./selected-workflow.yaml', import.meta.url), 'utf8').replace(' "$OBSERVER_SHA" ' + historicalWorkflowReference.commit, ' "$OBSERVER_SHA"')
+  assert.throws(() => verifyHistoricalSourceAcquisition(workflow), /explicitly acquired/)
+})
+
+test('H84 actual Git cannot read the historical source from an empty object view', (t) => {
+  const f = sourceFiles(t)
+  const objects = path.join(f.root, 'empty-owned-objects')
+  mkdirSync(objects)
+  const result = spawnSync('git', ['show', `${historicalWorkflowReference.commit}:${historicalWorkflowReference.path}`], {
+    env: { ...process.env, GIT_OBJECT_DIRECTORY: objects, GIT_ALTERNATE_OBJECT_DIRECTORIES: '', GIT_NO_LAZY_FETCH: '1' }, encoding: 'utf8',
+  })
+  assert.notEqual(result.status, 0)
+  assert.equal(result.status, 128)
+  assert.equal(result.stdout, '')
+})
+
+for (const mode of ['restore-failure', 'hash-failure', 'identity-unknown', 'success']) {
+  test(`H84 actual final workflow shell captures identity and preserves ${mode}`, (t) => {
+    const f = finalIdentityFixture(t, mode)
+    assert.equal(f.result.status, mode === 'restore-failure' || mode === 'identity-unknown' ? 37 : mode === 'hash-failure' ? 1 : 0)
+    assert.equal(existsSync(f.identity), true)
+    const identity = readFileSync(f.identity, 'utf8')
+    if (mode === 'identity-unknown') {
+      assert.equal(identity, 'product=UNKNOWN tree=UNKNOWN identityCaptured=false\n')
+    }
+    else {
+      const actual = execFileSync('git', ['log', '-1', '--format=product=%H tree=%T'], { encoding: 'utf8' })
+      assert.equal(identity, actual)
+    }
+  })
+}

@@ -73,6 +73,8 @@ for (const pending of ['authorization', 'offer'] as const) {
     })
     await page.clock.install()
     await page.addInitScript((holdOffer) => {
+      'use strict'
+
       let departing = false
       const request = window.fetch
       window.fetch = (...args) => {
@@ -98,17 +100,21 @@ for (const pending of ['authorization', 'offer'] as const) {
       const availability = new WeakSet<XMLHttpRequest>()
       const open = XMLHttpRequest.prototype.open
       const send = XMLHttpRequest.prototype.send
-      XMLHttpRequest.prototype.open = function (this: XMLHttpRequest, method: string, url: string | URL, async: boolean = true, username?: string | null, password?: string | null) {
+      XMLHttpRequest.prototype.open = function (this: XMLHttpRequest, ...args: unknown[]) {
+        const result = Reflect.apply(open, this, args)
+
         availability.delete(this)
-        if (method === 'GET' && String(url) === '/api/installations')
+        if (args[0] === 'GET' && args[1] === '/api/installations')
           availability.add(this)
-        return open.call(this, method, url, async, username, password)
+        return result
       }
 
-      XMLHttpRequest.prototype.send = function (this: XMLHttpRequest, body?: Document | XMLHttpRequestBodyInit | null) {
+      XMLHttpRequest.prototype.send = function (this: XMLHttpRequest, ...args: unknown[]) {
+        const result = Reflect.apply(send, this, args)
+
         if (availability.has(this) && departing)
           void window.cairnOAuthProbe({ kind: 'background' })
-        return send.call(this, body)
+        return result
       }
 
       if (!holdOffer || !location.pathname.endsWith('/mcps'))

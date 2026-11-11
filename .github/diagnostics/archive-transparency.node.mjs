@@ -589,3 +589,75 @@ test('H83 actual B534 ordinary controller retains native instance prototype and 
   assert.equal(controller.constructor, AbortController)
   assert.equal(controller.signal instanceof AbortSignal, true)
 })
+
+
+function oauthXhrFixture(settings = {}) {
+  const raw = execFileSync('git', ['show', `${productReferenceHead}:tests/e2e/mcps.spec.ts`], { encoding: 'utf8' })
+  const source = stripTypeScriptTypes(raw, { mode: 'transform' })
+  const marker = 'await page.addInitScript('
+  const testStart = source.indexOf('OAuth navigation does not leave background polls')
+  const start = source.indexOf(marker, testStart) + marker.length
+  const end = source.indexOf('}, pending ===', start) + 1
+  assert(testStart >= 0 && start > testStart && end > start)
+  const calls = []
+  const openResult = Symbol('original open return SOURCE stand-in')
+  const sendResult = Symbol('original send return SOURCE stand-in')
+  class OriginalXhr {}
+  OriginalXhr.prototype.open = function (...args) {
+    calls.push({ method: 'open', receiver: this, args })
+    if (settings.openFailure)
+      throw settings.openFailure
+    if (args.length >= 2)
+      String(args[1]) // SOURCE stand-in for the original conversion, never native credit.
+    return openResult
+  }
+  OriginalXhr.prototype.send = function (...args) {
+    calls.push({ method: 'send', receiver: this, args })
+    return sendResult
+  }
+  const context = createContext({ XMLHttpRequest: OriginalXhr, fetch() {}, cairnOAuthProbe() { return Promise.resolve() } })
+  runInContext('globalThis.window = globalThis', context)
+  runInContext(`(${source.slice(start, end)})(false)`, context)
+  return { Xhr: OriginalXhr, calls, openResult, sendResult }
+}
+
+test('H84 actual OAuth XHR bootstrap preserves real two-argument open and omitted send argument', () => {
+  const f = oauthXhrFixture()
+  const request = new f.Xhr()
+  assert.equal(request.open('GET', '/api/installations'), f.openResult)
+  assert.equal(request.send(), f.sendResult)
+  assert.deepEqual(f.calls.map(value => value.args), [['GET', '/api/installations'], []])
+  assert(f.calls.every(value => value.receiver === request))
+})
+
+test('H84 actual OAuth XHR bootstrap preserves all extra original arguments', () => {
+  const f = oauthXhrFixture()
+  const request = new f.Xhr()
+  const extra = Symbol('extra original argument')
+  const args = ['GET', '/api/installations', false, null, null, extra]
+  assert.equal(Reflect.apply(request.open, request, args), f.openResult)
+  assert.equal(Reflect.apply(request.send, request, ['body', extra]), f.sendResult)
+  assert.deepEqual(f.calls.map(value => value.args), [args, ['body', extra]])
+})
+
+test('H84 actual OAuth XHR bootstrap adds no URL coercion to original conversion', () => {
+  const f = oauthXhrFixture()
+  let conversions = 0
+  const url = { toString() { conversions++; return '/api/installations' } }
+  const request = new f.Xhr()
+  assert.equal(request.open('GET', url), f.openResult)
+  assert.equal(conversions, 1)
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.calls[0].args[1], url)
+})
+
+test('H84 actual OAuth XHR bootstrap preserves original conversion failure and native invocation count', () => {
+  const f = oauthXhrFixture()
+  const cause = new TypeError('original URL conversion SOURCE fixture')
+  let conversions = 0
+  const url = { toString() { conversions++; throw cause } }
+  const request = new f.Xhr()
+  assert.throws(() => request.open('GET', url), value => value === cause)
+  assert.equal(conversions, 1)
+  assert.equal(f.calls.length, 1)
+})

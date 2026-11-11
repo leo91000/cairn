@@ -1,9 +1,9 @@
 {
-  "product": "e7c3801796611a26956f22fe2f3311ad1a2130ff",
+  "product": "4dd7129626cc28287ea68490e064c0758a96168d",
   "files": {
     "tests/e2e/mcps.spec.ts": {
-      "originalSHA256": "43a9659c3bb8e176438025cc7812c6d72a5aec9308b9bc038f6745d5764fb43d",
-      "overlaySHA256": "33465fefa82cff152553b4a7f592cbe8a83aabd9bd898c9ac2fc6b7de6fbc9b7",
+      "originalSHA256": "b44db24d167eb74b88f5611a53267662b82440071e045b49fe30306ea59d3b0d",
+      "overlaySHA256": "b6fd3380d7e05f150cdb075c6c38f4388199100fdc0dd2b1b71962a1342de1ab",
       "overlayFile": "mcps.direct-owner.overlay.ts"
     },
     "apps/web/tests/direct-transport.test.ts": {
@@ -33,8 +33,14 @@
       ],
       "meaning": "Real fixture ID/slug association plus current route; no literal slug-as-UUID comparison, no runtime producer receipt"
     },
-    "productCommit": "e7c3801796611a26956f22fe2f3311ad1a2130ff",
-    "productTree": "d69924d3d3f7191629126a5c2f694e39aa74626a",
+    "historicalWorkflowReference": {
+      "commit": "7aac8c145f1e44d764c9f7150b01727fd0a1f19d",
+      "path": ".github/workflows/webkit-dependency-regression.yaml",
+      "gitBlob": "b24561e7500adcea0e98926cfca3e210211b0518",
+      "sha256": "8df3a113886a9671b8dcf2c5c017f0a8903b73f590e1a8ffa5219ff0115953c4"
+    },
+    "productCommit": "4dd7129626cc28287ea68490e064c0758a96168d",
+    "productTree": "485a41d874eb7d0db3ae5d4c84c4a1dcda5ebd0b",
     "observerCommit": "Recorded separately from github.sha in source-binding.json; this manifest is bound by that commit",
     "productFiles": {
       "apps/web/beacon.html": {
@@ -82,8 +88,8 @@
         "sha256": "12ad75e45fc3e368970aab99e41928cde1af64fc194e5d5f7655d9f9466ae4c2"
       },
       "tests/e2e/mcps.spec.ts": {
-        "gitBlob": "e9f48f33ccdf76fe7f60ea706c5cff5267d734b8",
-        "sha256": "43a9659c3bb8e176438025cc7812c6d72a5aec9308b9bc038f6745d5764fb43d"
+        "gitBlob": "72f56f70492bb525f44e6cd95d7cd2833e707b38",
+        "sha256": "b44db24d167eb74b88f5611a53267662b82440071e045b49fe30306ea59d3b0d"
       },
       "tests/e2e/fixtures.ts": {
         "gitBlob": "bf274a8784be4a35432676e7f2284831e2262ffd",
@@ -108,8 +114,8 @@
     },
     "observerFiles": {
       "archive-transparency.node.mjs": {
-        "gitBlob": "375d5161cdf688a4d726fc67b25e43d3d6a9a327",
-        "sha256": "33256f2d4008f668aa0575c79e6b2354c49ef5a502bb4a08a86c06d158247a7b"
+        "gitBlob": "4c20778bf9480d0e280351caee2fccd668e6b766",
+        "sha256": "1e7a648977cbf2bce460b8473eb57698bd8d2ea80ab5143fbe60df701c3c982d"
       },
       "availability-reader-native.mjs": {
         "gitBlob": "bdc55a0fc5f026938ddae6a87a8786ff0e33f505",
@@ -132,28 +138,28 @@
         "sha256": "5530fbbd4e225140aa9bf46f9ab06b3b2e5a5d8efbb2894f116c17206cfa874e"
       },
       "direct-owner-probe.node.mjs": {
-        "gitBlob": "054fd3c58600ab2cfe5336d346b7434f027a55ad",
-        "sha256": "52364b3c4eda10f1a6c106848e4e3edf7bdb9f151d7407a029f24a08002815fa"
+        "gitBlob": "192433025b3b7b76adbce9d3cb5d770432e8bf69",
+        "sha256": "30d3ef89f78d0fa3411263502073b0b7ecd3fc738f9805b816d0eab8274354ce"
       },
       "direct-owner-overlay-control.mjs": {
-        "gitBlob": "003e3255672786e7ec0a77013cefa33128dcdbca",
-        "sha256": "cd26591a41c18fa909c26795fc782956265ac5850817918e010416ba4bd4c4a6"
+        "gitBlob": "2de514ab7d75da1fedff40a3c1fceab69df68c78",
+        "sha256": "1800f09f90da5e7e872b7db36cb8a3da9408a97c92bbe47f9b192d0803045284"
       },
       "closed-target-error.mjs": {
         "gitBlob": "e4aa4b94c978342a5976e9fcf958f91440113e4b",
         "sha256": "c350fbf99633499c5fc64fba0dbe9fd45f5159da39ebbc5249e300ce123a9cfe"
       },
       "mcps.direct-owner.overlay.ts": {
-        "gitBlob": "db46554fd3ba2e67755e4bf9aa654921d3a158da",
-        "sha256": "33465fefa82cff152553b4a7f592cbe8a83aabd9bd898c9ac2fc6b7de6fbc9b7"
+        "gitBlob": "aa1a9c0f04ef4254c8965517bf82456f384e53d3",
+        "sha256": "b6fd3380d7e05f150cdb075c6c38f4388199100fdc0dd2b1b71962a1342de1ab"
       },
       "direct-transport.seam.overlay.ts": {
         "gitBlob": "be7ea5e7cac357e754e95739e3be05acfc803e21",
         "sha256": "f48ada4b8312643434f4f5469fd9387923fbd5aa002c94e2c26d07d63696b609"
       },
       "selected-workflow.yaml": {
-        "gitBlob": "c333447c3d838fd53d35fbdd72f8e05745040ca1",
-        "sha256": "8efb2372ba401a83f77af63a6a5adcb31cd1603ec449eda465de58048dd44637"
+        "gitBlob": "c48f572c3971c7db95b62b6ae40b4c27c14178c6",
+        "sha256": "b4b8fa7e735698e6318285cf3718fa0a2972253d7e3b0920f258ae4462f0ebea"
       }
     },
     "producers": {

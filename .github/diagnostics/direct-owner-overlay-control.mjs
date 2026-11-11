@@ -5,7 +5,25 @@ import { existsSync, mkdirSync, readFileSync, readlinkSync, lstatSync, writeFile
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const product = 'e7c3801796611a26956f22fe2f3311ad1a2130ff'
+export const product = '4dd7129626cc28287ea68490e064c0758a96168d'
+export const historicalWorkflowReference = Object.freeze({
+  commit: '7aac8c145f1e44d764c9f7150b01727fd0a1f19d',
+  path: '.github/workflows/webkit-dependency-regression.yaml',
+  gitBlob: 'b24561e7500adcea0e98926cfca3e210211b0518',
+  sha256: '8df3a113886a9671b8dcf2c5c017f0a8903b73f590e1a8ffa5219ff0115953c4',
+})
+export function verifyHistoricalSourceAcquisition(workflow) {
+  const fetch = 'git -c safe.directory="$GITHUB_WORKSPACE" fetch --depth=1 --no-tags origin "$OBSERVER_SHA" ' + historicalWorkflowReference.commit
+  assert(workflow.split('\n').some(line => line.trim() === fetch), 'Historical source reference must be explicitly acquired before bind')
+  const bind = workflow.indexOf('node test-results/direct-owner-receipt/direct-owner-overlay-control.mjs bind')
+  assert(bind > workflow.indexOf(fetch), 'Historical source acquisition must precede binding')
+}
+export function historicalSourceWorkflow(root = process.cwd()) {
+  const value = git(root, 'show', `${historicalWorkflowReference.commit}:${historicalWorkflowReference.path}`)
+  assert.equal(hash(value), historicalWorkflowReference.sha256, 'Historical source bytes must match declared reference')
+  assert.equal(git(root, 'rev-parse', `${historicalWorkflowReference.commit}:${historicalWorkflowReference.path}`).toString().trim(), historicalWorkflowReference.gitBlob)
+  return value.toString()
+}
 const targets = ['tests/e2e/mcps.spec.ts', 'apps/web/tests/direct-transport.test.ts']
 export const producerChainFiles = [
   'apps/web/beacon.html', 'apps/web/src/beacon.ts', 'apps/web/src/BeaconApp.vue',
@@ -72,7 +90,11 @@ export function verifySourceTrustedChain(root, directory = sourceDirectory, mani
   assert.deepEqual(Object.keys(chain.productFiles).sort(), [...producerChainFiles].sort())
   assert.deepEqual(Object.keys(chain.observerFiles).sort(), [...observerChainFiles].sort())
   assert.deepEqual(chain.selectedSourceGateCommands, sourceGateCommands)
-  selectedSourceGateScript(readFileSync(join(directory, 'selected-workflow.yaml'), 'utf8'))
+  const workflow = readFileSync(join(directory, 'selected-workflow.yaml'), 'utf8')
+  selectedSourceGateScript(workflow)
+  verifyHistoricalSourceAcquisition(workflow)
+  assert.deepEqual(chain.historicalWorkflowReference, historicalWorkflowReference)
+  historicalSourceWorkflow(root)
   for (const file of producerChainFiles) {
     const spec = chain.productFiles[file]
     const original = git(root, 'show', `${product}:${file}`)

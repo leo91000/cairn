@@ -1,7 +1,7 @@
 # SOURCE-TRUSTED diagnostic domain — SOURCE ONLY, NOT runtime qualification
 
-Product **e7c3801796611a26956f22fe2f3311ad1a2130ff**, tree **d69924d3d3f7191629126a5c2f694e39aa74626a**,
-parentdf6 (canonical whitespace-only test correction), app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
+Product **4dd7129626cc28287ea68490e064c0758a96168d**, tree **485a41d874eb7d0db3ae5d4c84c4a1dcda5ebd0b**,
+parente7c (test-only OAuth XHR transparent forwarding), app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
 and its permanent serialized-bootstrap regression. Canonical QA ROOT on this exact clean
 new product is DUE before fresh COMPLETE independent FULLs. The prior clean bc1c QA is historical
 for this changed product and does not transfer.
@@ -326,3 +326,32 @@ serialized strict bootstrap, original receiver/arguments/Promise assertions unch
 ROOT provisional formatted-dirty df6 QA1888 is preserved separately, not transferred
 to this new clean product. Canonical QA ROOT exact current product remains DUE before
 fresh whole independent FULLs; no source canonical tests duplicated by C40.
+
+## Current source snapshot after completed R83/H84
+
+Product test-only OAuth XHR observation forwards native receiver and ALL original
+arguments once via Reflect.apply, without default/fixed argument reconstruction or
+additional URL conversion. Primitive metadata only, after original native success;
+strict serialized bootstrap. App/runtime/factory/PR731 unchanged. Four real-source
+serialized callback regressions: olde7c four ASSERTFAIL, candidate four PASS. URL
+coercion case is an out-of-domain transparency witness, never ownership evidence.
+Selected workflow explicitly fetches the immutable historical7aac source required
+by its actual negative control; commit/path/blob/SHA256 are version bound and
+validated before the source gate. No full history/new ref/profile/environment.
+Final identity is captured independently by EXIT trap even when restore, identity
+guard or observer hash fails; initial exit status is retained, unknown identity
+explicitly RED. The actual final shell block has controlled source fault tests,
+not a native or end-to-end restoration qualification. Historical first failures
+and original restoration controls are retained. New exact product canonical ROOT
+QA is DUE before fresh complete product+observer reviews; e7c QA not transferable.
+
+Current affected SOURCE execution receipt: actual selected two-command shell block
+executed on13 materialized current source files: recorder/controller57/57PASS, then
+archive/product43/43PASS =41 support +2 limit recognitions (not ownership/native).
+Universal Proxy command remains43cases41PASS/2ASSERTFAIL. New workflow fault-source
+cases sevenPASS; corrected-controller oldworkflow baseline3PASS/4ASSERTFAIL. First
+prototype of these seven tests also had two fixture defects (Git wording and test
+HEAD/extraction); its first6FAIL is preserved but those two are NOT defect evidence.
+Actual old OAuth callback4ASSERTFAIL/candidate4PASS; no SDK/browser runtime credit.
+Only the Git/source-binding and owned Bash steps exercised; historical remote fetch
+is SOURCE-PREPARED, not executed outside a separately admitted future workflow.
