@@ -801,3 +801,42 @@ it('keeps native promises unchanged when observation storage or delivery fails, 
   assert.equal((ownerWindow.cairnAvailabilityProbeFailures as number) > 0, true)
   assert.equal(failures.some(event => event.kind === 'observer-failed'), true)
 })
+
+
+it.each([false, true])('rejects cross-option signal mutation even when the accessor removes itself (%s)', async (removesAccessor) => {
+  const actual = new NativeController()
+  const unrelated = new NativeController()
+  const native = Promise.withResolvers<NativeResponse>()
+  const cause = new HostException('original actual-request failure', 'AbortError')
+  const options: RequestInit = { signal: actual.signal }
+  Object.defineProperty(options, 'window', {
+    configurable: true,
+    enumerable: true,
+    get() {
+      options.signal = unrelated.signal
+      if (removesAccessor)
+        Reflect.deleteProperty(options, 'window')
+      return undefined
+    },
+  })
+  let used: AbortSignal | null | undefined
+  ownerWindow.fetch = (_input: unknown, init: RequestInit) => {
+    used = init.signal
+    void init.window
+    used!.addEventListener('abort', () => native.reject(cause), { once: true })
+    return native.promise
+  }
+  const storage = await installSourceProbe()
+  const returned = Reflect.apply(ownerWindow.fetch as typeof fetch, ownerWindow, ['/api/installations', options])
+  assert.equal(returned, native.promise)
+  assert.equal(used, actual.signal)
+  unrelated.abort(new HostException('different unrelated reason', 'AbortError'))
+  const rejected = assert.rejects(returned, error => error === cause)
+  actual.abort(cause)
+  await rejected
+  await flush()
+  const journal = JSON.parse(storage.get('cairn-e2e-availability-journal') || '[]') as AvailabilityReadEvent[]
+  assert.equal(journal.some(event => event.kind === 'observer-failed'), true)
+  assert.equal(journal.some(event => event.kind === 'rejected' && event.aborted), false)
+  assert.equal(incompleteAvailabilityReads(journal).length > 0, true)
+})

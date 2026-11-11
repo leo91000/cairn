@@ -167,46 +167,51 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
     }
 
     window.fetch = function (this: Window, ...args: Parameters<typeof fetch>) {
-      // Invoke the original once, with the exact argument list and receiver.
-      // Metadata inspection cannot become the application's fetch terminal.
-      const original = Reflect.apply(fetch, this, args) as ReturnType<typeof fetch>
       let signal: AbortSignal | null | undefined
+      let tracked = false
+      let metadataUnsupported = false
+      // Snapshot only ordinary own data before native dictionary conversion.
+      // Another option's accessor/coercion must not swap the observed owner.
       try {
         if (typeof args[0] !== 'string') {
-          observationFailed()
-          return original
+          metadataUnsupported = true
         }
-
-        if (args[0] !== '/api/installations')
-          return original
-        if (args[1] != null) {
-          const prototype = Object.getPrototypeOf(args[1])
-          const descriptors = Object.getOwnPropertyDescriptors(args[1])
-          if ((prototype !== null && prototype !== Object.prototype)
-            || (['method', 'signal'] as const).some(key => descriptors[key] && !('value' in descriptors[key]))) {
-            observationFailed()
-            return original
-          }
-
-          const method: unknown = descriptors.method?.value
-          if (method !== undefined && typeof method !== 'string') {
-            observationFailed()
-            return original
-          }
-
-          if (typeof method === 'string' && method.toUpperCase() !== 'GET')
-            return original
-          signal = descriptors.signal?.value
-          if (signal != null && !(signal instanceof AbortSignal)) {
-            observationFailed()
-            return original
+        else if (args[0] === '/api/installations') {
+          tracked = true
+          if (args[1] != null) {
+            const prototype = Object.getPrototypeOf(args[1])
+            const descriptors = Object.getOwnPropertyDescriptors(args[1])
+            const unsupportedValue = Object.entries(descriptors).some(([key, descriptor]) => {
+              if (!('value' in descriptor))
+                return true
+              const value: unknown = descriptor.value
+              return key !== 'signal' && value !== null && (typeof value === 'object' || typeof value === 'function')
+            })
+            const method: unknown = descriptors.method?.value
+            if ((prototype !== null && prototype !== Object.prototype) || unsupportedValue
+              || (method !== undefined && typeof method !== 'string')) {
+              metadataUnsupported = true
+            }
+            else {
+              tracked = method === undefined || method.toUpperCase() === 'GET'
+              signal = descriptors.signal?.value
+              metadataUnsupported = signal != null && !(signal instanceof AbortSignal)
+            }
           }
         }
       }
       catch {
+        metadataUnsupported = true
+      }
+      // Always invoke once with the ORIGINAL arguments/receiver, even if the
+      // observation surface is unsupported. Never replace its promise/cause.
+      const original = Reflect.apply(fetch, this, args) as ReturnType<typeof fetch>
+      if (metadataUnsupported) {
         observationFailed()
         return original
       }
+      if (!tracked)
+        return original
 
       const meta: Metadata = {
         read: ++sequence,
