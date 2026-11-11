@@ -130,20 +130,20 @@
         "sha256": "8e52e8ffa3af42cca0f5222b5af57e55356084665d2272a8610cb5c2901f3c73"
       },
       "direct-owner-probe.mjs": {
-        "gitBlob": "86e0fb77fbdc7d0de1b327e165872c023d81a947",
-        "sha256": "8b2e3fb3eb6142d0685375cb270ec91b040a4cf4190dbfffe8631b8a6a4e1264"
+        "gitBlob": "0af8485779ca7adb8911532e5564817c542050a9",
+        "sha256": "61d13d4f6e8288c4d4400c67edff73f5afd418a92e9e947303d79526efbe96bd"
       },
       "direct-owner-probe.d.mts": {
-        "gitBlob": "e5a1a897785bb4da238cc9a5135783eddccb0c3b",
-        "sha256": "fa8785903ef9eea3255c402ed68c45f69868d180ef6ede43965bdd35fe5e770e"
+        "gitBlob": "a27b20780822132e67c0b0dd118d21b9dd668cb4",
+        "sha256": "39bc2a199a36bfe48c75c9b7224e640dadf332fabb5038116fc1c805786aa389"
       },
       "direct-owner-probe.node.mjs": {
-        "gitBlob": "3b3c676b1ab850188aa22a6c1b7a10521c8120d7",
-        "sha256": "14d0b4c4f6f7bbbdea7049bdce472f7e8e023ed420f4087917831635762ecfd0"
+        "gitBlob": "cf8b383b723f4c1728f1d6aec1bdd6ba5a13bd9a",
+        "sha256": "c3aecceeae832cdfa350baccc6d523290c1fe0d4252f257f1b8bc239578019f8"
       },
       "direct-owner-overlay-control.mjs": {
-        "gitBlob": "590a1ddc8ed4e7ab910829080174c7763078155f",
-        "sha256": "5c70c9cd12c29f784cedddd5237e0b6a4aa9761a9d79156c9391ee251d38b55c"
+        "gitBlob": "b40fb01ebc4827c3d3ab8a226b8897a1872344c2",
+        "sha256": "1393d2f3c4979b12fbada6e93e6024b007f03e8d98eae1d3702f198c24819479"
       },
       "closed-target-error.mjs": {
         "gitBlob": "e4aa4b94c978342a5976e9fcf958f91440113e4b",
@@ -339,6 +339,30 @@
       "expectedUniversalResult": "RED: four archive assertions and one Direct assertion; original R90 remains confirmed",
       "sourceGateCategory": "OUT_OF_DOMAIN_OPERATION_LIMIT_RECOGNITION",
       "gateMeaning": "Demonstrated out-of-domain interference, NOT equivalence, ownership admission, repair or native qualification"
+    },
+    "hostSdkSse": {
+      "version": "DIRECT_OWNER_HOST_V2_PUBLIC_SDK_FIRST_SSE",
+      "rootDecisionSHA256": "cd86b824492c83e6c988beca555a1d79b26c5cf88023dc7af47aec1673df1f5d",
+      "events": [
+        "request",
+        "response",
+        "requestfailed",
+        "requestfinished"
+      ],
+      "sdk": "PUBLIC_PLAYWRIGHT_1.64.1_SOURCE_PRECONDITION",
+      "join": "PRIVATE_DOCUMENT_GRANT_CONNECTION_SOURCE_UNIQUE_JOIN_AND_REQUEST_OBJECT_IDENTITY",
+      "nativeDocumentIdentityExposed": false,
+      "nativeFirstRequestExposureGuaranteed": false,
+      "nativeStructuredReasonExposed": false,
+      "collectorRuntimeHTTP": false,
+      "guestPayloadChanged": false,
+      "previousHost": {
+        "observer": "f78e00669c6fd748bb3e4e2e286ff749d55cb6b8",
+        "path": ".github/diagnostics/direct-owner-probe.mjs",
+        "gitBlob": "86e0fb77fbdc7d0de1b327e165872c023d81a947",
+        "sha256": "8b2e3fb3eb6142d0685375cb270ec91b040a4cf4190dbfffe8631b8a6a4e1264",
+        "status": "HISTORICAL_HOST_BEFORE_PUBLIC_SDK_SSE_CAPTURE_NOT_RELABELLED"
+      }
     }
   }
 }

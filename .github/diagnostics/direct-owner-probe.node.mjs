@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
+import { EventEmitter, once } from 'node:events'
+import { createServer } from 'node:http'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import path from 'node:path'
@@ -97,6 +98,8 @@ function fixture(t, options = {}) {
   })
   runInContext("window=globalThis; top=window; document={defaultView:window}; location={href:'http://localhost:4422/installations/private/agents',origin:'http://localhost:4422',pathname:'/installations/private/agents'}; cairnAvailabilityDocument='PRIVATE_DOCUMENT_CANARY'", context)
   const installationScope = { installationId: options.installationId ?? 'private', installationSlug: options.installationSlug ?? 'private' }
+  if (options.origin)
+    runInContext(`location.origin=${JSON.stringify(options.origin)};location.href=location.origin+location.pathname`, context)
   if (options.installationSlug)
     runInContext(`location.pathname=${JSON.stringify('/installations/' + options.installationSlug + '/agents')};location.href=location.origin+location.pathname`, context)
   runInContext(`(${recorderBootstrapSource()})(${JSON.stringify(installationScope)})`, context)
@@ -1189,8 +1192,8 @@ test('R87 host cleanup retains both independent listener failures', async (t) =>
   t.after(() => { page.off = off; host.dispose() })
   page.off = (kind) => { attempted.push(kind); throw new Error('controlled listener cleanup failure') }
   assert.equal(host.dispose(), false)
-  assert.deepEqual(attempted, ['pageerror', 'console'])
-  assert.equal(host.finish(completeClosure).privateEvidence.observerFailures, 2)
+  assert.deepEqual(attempted, ['pageerror', 'console', 'request', 'response', 'requestfailed', 'requestfinished'])
+  assert.equal(host.finish(completeClosure).privateEvidence.observerFailures, 6)
   assert.equal(host.finish(completeClosure).projection.receiptStatus, 'UNKNOWN')
 })
 
@@ -1324,4 +1327,306 @@ test('GIT OWNERSHIP six ACTUAL H84/H87 fixture scenarios across the Git ownershi
   assert.equal(result.status, 0, 'The SAME six real fixture scenarios must run across the repository ownership guard')
   assert.equal(count('pass'), 6)
   assert.equal(count('fail'), 0)
+})
+
+// SOURCE SDK-interface adapters feed the ACTUAL installed handlers. They do not
+// claim real Playwright/browser Request exposure or native lifecycle acquisition.
+async function sseSdkHostFixture(t, options = {}) {
+  const origin = options.origin ?? 'http://localhost:4422'
+  const frame = { url: () => origin + '/installations/private/agents' }
+  const page = new EventEmitter()
+  page.mainFrame = () => frame
+  let binding
+  page.exposeFunction = async (_, callback) => {
+    binding = callback
+    options.beforeBinding?.(page, frame)
+  }
+  page.addInitScript = async () => {}
+  const host = createDirectOwnerObserver(page, { installationId: 'private', installationSlug: 'private' })
+  await host.install()
+  t.after(() => host.dispose())
+  const f = await completeSourceReceipt(t, { origin, returnFixture: true })
+  for (const error of privateErrors)
+    page.emit('pageerror', error)
+  const accept = (journal = f.snapshot().journal) => {
+    for (const event of journal)
+      binding(event)
+  }
+  if (!options.delayJournal)
+    accept()
+  const request = (overrides = {}) => ({
+    url: () => origin + '/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/events?NEVER_PUBLISH_TOKEN',
+    method: () => 'GET', resourceType: () => 'eventsource', frame: () => frame,
+    redirectedFrom: () => null, redirectedTo: () => null,
+    failure: () => ({ errorText: 'cancelled' }),
+    ...overrides,
+  })
+  const finish = () => { assert.equal(host.dispose(), true); return host.finish(completeClosure) }
+  return { page, host, frame, origin, f, accept, request, finish }
+}
+
+test('SDK SSE actual installed handlers correlate unique first Request and explicit SDK cancel without native cause claim', async (t) => {
+  const f = await sseSdkHostFixture(t)
+  const request = f.request()
+  f.page.emit('request', request)
+  f.page.emit('requestfailed', request)
+  const result = f.finish()
+  const x = result.projection.sdkSse
+  assert.equal(x.receiptStatus, 'SDK_TERMINAL_SOURCE_CONDITIONAL')
+  assert.equal(x.sameDocument, true)
+  assert.equal(x.sameGrantConnection, true)
+  assert.equal(x.sameSource, true)
+  assert.equal(x.requestObjectIdentityUsed, true)
+  assert.equal(x.requestFailedObserved, true)
+  assert.equal(x.requestFinishedObserved, false)
+  assert.equal(x.responseStatus, null)
+  assert.equal(x.sdkCancellationReport, 'KNOWN_FROM_SDK_TEXT')
+  assert.equal(x.nativeDocumentLoaderCancellation, 'UNKNOWN')
+  assert.equal(x.nativeCauseConclusive, false)
+  assert.equal(x.nativeFirstRequestExposureGuaranteed, false)
+  assert.equal(x.sdkNativeDocumentIdentityExposed, false)
+  assert.equal(result.privateEvidence.observerFailures, 0)
+  assert.equal(result.privateEvidence.sdkSse[0].sdkErrorText, 'cancelled')
+  for (const secret of ['PRIVATE_CONNECTION_CANARY', 'PRIVATE_DOCUMENT_CANARY', 'NEVER_PUBLISH', 'localhost', 'http://'])
+    assert.equal(JSON.stringify(result.projection).includes(secret), false)
+})
+
+test('SDK SSE actual HTTP403 response is observed status, finished not requestfailed, using real SOURCE HTTP fixture', async (t) => {
+  const server = createServer((_request, response) => { response.writeHead(403); response.end('SOURCE refusal') })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  t.after(async () => {
+    server.closeAllConnections()
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+  })
+  const address = server.address()
+  assert.equal(typeof address, 'object')
+  const f = await sseSdkHostFixture(t, { origin: 'http://127.0.0.1:' + address.port })
+  let failureReads = 0
+  const request = f.request({ failure() { failureReads++; throw new Error('HTTP response must not invent requestfailed') } })
+  f.page.emit('request', request)
+  const actualResponse = await fetch(request.url()) // SOURCE fixture only; collector performs no HTTP.
+  await actualResponse.text()
+  assert.equal(actualResponse.status, 403)
+  f.page.emit('response', { request: () => request, status: () => actualResponse.status })
+  f.page.emit('requestfinished', request)
+  const x = f.finish().projection.sdkSse
+  assert.equal(x.responseObserved, true)
+  assert.equal(x.responseStatus, 403)
+  assert.equal(x.requestFailedObserved, false)
+  assert.equal(x.requestFinishedObserved, true)
+  assert.equal(x.completion, 'SDK_FINISHED')
+  assert.equal(x.sdkCancellationReport, 'UNKNOWN')
+  assert.equal(x.nativeDocumentLoaderCancellation, 'UNKNOWN')
+  assert.equal(failureReads, 0)
+})
+
+for (const text of ['net::ERR_FAILED', 'opaque CORS access-control failure 403 text ONLY with PRIVATE_URL_TOKEN', null]) {
+  test(`SDK SSE opaque or missing failure text stays non-native and cannot invent HTTP403 (${text === null ? 'absent' : text.startsWith('net:') ? 'generic' : 'CORS'})`, async (t) => {
+    const f = await sseSdkHostFixture(t)
+    const request = f.request({ failure: () => text === null ? null : { errorText: text } })
+    f.page.emit('request', request)
+    f.page.emit('requestfailed', request)
+    const x = f.finish().projection.sdkSse
+    assert.equal(x.requestFailedObserved, true)
+    assert.equal(x.responseStatus, null)
+    assert.equal(JSON.stringify(x).includes('PRIVATE_URL_TOKEN'), false)
+    assert.equal(x.sdkCancellationReport, 'UNKNOWN')
+    assert.equal(x.nativeStructuredReason, 'NOT_EXPOSED_BY_PUBLIC_API')
+    assert.equal(x.nativeCauseConclusive, false)
+    assert.equal(x.receiptStatus, 'UNKNOWN')
+  })
+}
+
+for (const problem of ['wrong-connection', 'wrong-frame', 'wrong-origin', 'wrong-document-route', 'redirected-from', 'redirected-to', 'two-request-identities', 'response-without-request', 'terminal-without-request', 'duplicate-terminal']) {
+  test(`SDK SSE actual collector refuses ambiguous or foreign linkage: ${problem}`, async (t) => {
+    const f = await sseSdkHostFixture(t)
+    const opts = problem === 'wrong-connection' ? { url: () => f.origin + '/api/installations/private/direct/FOREIGN/events' }
+      : problem === 'wrong-frame' ? { frame: () => ({ url: f.frame.url }) }
+      : problem === 'wrong-origin' ? { url: () => 'http://other.invalid/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/events' }
+      : problem === 'wrong-document-route' ? { frame: () => ({ url: () => f.origin + '/health' }) }
+      : problem === 'redirected-from' ? { redirectedFrom: () => ({}) }
+      : problem === 'redirected-to' ? { redirectedTo: () => ({}) } : {}
+    const request = f.request(opts)
+    if (problem !== 'response-without-request' && problem !== 'terminal-without-request')
+      f.page.emit('request', request)
+    if (problem === 'two-request-identities')
+      f.page.emit('request', f.request())
+    if (problem === 'response-without-request')
+      f.page.emit('response', { request: () => request, status: () => 403 })
+    f.page.emit('requestfailed', request)
+    if (problem === 'duplicate-terminal')
+      f.page.emit('requestfinished', request)
+    const x = f.finish().projection.sdkSse
+    assert.equal(x.receiptStatus, 'UNKNOWN')
+    assert.equal(x.sameDocument === true, false)
+    assert.equal(x.nativeDocumentLoaderCancellation, 'UNKNOWN')
+  })
+}
+
+test('SDK SSE absent Request exposure remains UNKNOWN, no zero-events qualification', async (t) => {
+  const f = await sseSdkHostFixture(t)
+  const x = f.finish().projection.sdkSse
+  assert.equal(x.sdkCandidateRequestCount, 0)
+  assert.equal(x.receiptStatus, 'UNKNOWN')
+  assert.equal(x.requestFailedObserved, null)
+  assert.equal(x.sameSource, null)
+})
+
+for (const fault of ['frame', 'failure', 'response-status', 'guest-report']) {
+  test(`SDK SSE metadata/report error retained negatively without throwing into SDK emitter: ${fault}`, async (t) => {
+    const f = await sseSdkHostFixture(t, { delayJournal: fault === 'guest-report' })
+    const cause = new Error('same SDK metadata SOURCE exception')
+    const request = f.request(fault === 'frame' ? { frame() { throw cause } } : fault === 'failure' ? { failure() { throw cause } } : {})
+    assert.doesNotThrow(() => f.page.emit('request', request))
+    if (fault === 'response-status')
+      assert.doesNotThrow(() => f.page.emit('response', { request: () => request, status() { throw cause } }))
+    if (fault === 'guest-report') {
+      const event = { document: 'PRIVATE_DOCUMENT_CANARY', sequence: 1 }
+      Object.defineProperty(event, 'kind', { enumerable: true, get() { throw cause } })
+      assert.doesNotThrow(() => f.host.accept({ journal: [event], observerFailures: 0 }))
+    }
+    assert.doesNotThrow(() => f.page.emit('requestfailed', request))
+    const result = f.finish()
+    assert.equal(result.privateEvidence.observerFailures > 0, true)
+    assert.equal(result.projection.sdkSse.receiptStatus, 'UNKNOWN')
+    assert.equal(result.projection.receiptStatus, 'UNKNOWN')
+  })
+}
+
+test('SDK SSE all listeners attach BEFORE first SDK event and late guest delivery, then detach independently', async (t) => {
+  let earlyRequest
+  const f = await sseSdkHostFixture(t, { delayJournal: true, beforeBinding(page, frame) {
+    for (const kind of ['request', 'response', 'requestfailed', 'requestfinished'])
+      assert.equal(page.listenerCount(kind), 1)
+    earlyRequest = { url: () => 'http://localhost:4422/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/events', method: () => 'GET', resourceType: () => 'eventsource', frame: () => frame, redirectedFrom: () => null, redirectedTo: () => null, failure: () => ({ errorText: 'cancelled' }) }
+    page.emit('request', earlyRequest)
+    page.emit('requestfailed', earlyRequest)
+  } })
+  f.accept()
+  const x = f.finish().projection.sdkSse
+  assert.equal(x.receiptStatus, 'SDK_TERMINAL_SOURCE_CONDITIONAL')
+  assert.equal(x.captureClosed, true)
+  for (const kind of ['request', 'response', 'requestfailed', 'requestfinished'])
+    assert.equal(f.page.listenerCount(kind), 0)
+})
+
+test('SDK SSE source reuse in another Document refuses a URL-only first-source claim', async (t) => {
+  const f = await sseSdkHostFixture(t)
+  const request = f.request()
+  f.page.emit('request', request)
+  f.page.emit('requestfailed', request)
+  const second = f.f.snapshot().journal.map(event => ({ ...event, document: 'FOREIGN_PRIVATE_DOCUMENT' }))
+  f.accept(second)
+  const x = f.finish().projection.sdkSse
+  assert.equal(x.sourceMappingKnown, false)
+  assert.equal(x.receiptStatus, 'UNKNOWN')
+})
+
+test('SDK SSE listener metadata failure keeps actual requestfailed observation and conservative completion', async (t) => {
+  const f = await sseSdkHostFixture(t)
+  let reads = 0
+  const request = f.request({ redirectedTo() { reads++; throw new Error('SDK redirect metadata unavailable') } })
+  f.page.emit('request', request)
+  f.page.emit('requestfailed', request)
+  const result = f.finish()
+  assert.equal(reads, 1)
+  assert.equal(result.projection.sdkSse.requestFailedObserved, true)
+  assert.equal(result.projection.sdkSse.completion, 'UNKNOWN')
+  assert.equal(result.projection.sdkSse.receiptStatus, 'UNKNOWN')
+  assert.equal(result.privateEvidence.observerFailures > 0, true)
+})
+
+test('SDK SSE unknown cleanup attempts every owned listener and keeps SDK receipt non-green', async (t) => {
+  const f = await sseSdkHostFixture(t)
+  const request = f.request()
+  f.page.emit('request', request)
+  f.page.emit('requestfailed', request)
+  const off = f.page.off.bind(f.page)
+  const attempted = []
+  f.page.off = (kind, listener) => {
+    attempted.push(kind)
+    if (kind === 'response')
+      throw new Error('controlled SDK listener detach failure')
+    return off(kind, listener)
+  }
+  assert.equal(f.host.dispose(), false)
+  assert.deepEqual(attempted, ['pageerror', 'console', 'request', 'response', 'requestfailed', 'requestfinished'])
+  const x = f.host.finish(completeClosure).projection.sdkSse
+  assert.equal(x.captureClosed, false)
+  assert.equal(x.receiptStatus, 'UNKNOWN')
+  f.page.off = off
+  f.host.dispose()
+})
+
+test('SDK SSE identical URL on a DIFFERENT Request object never borrows the first request terminal', async (t) => {
+  const f = await sseSdkHostFixture(t)
+  const first = f.request()
+  const impostor = f.request()
+  f.page.emit('request', first)
+  f.page.emit('response', { request: () => impostor, status: () => 403 })
+  f.page.emit('requestfailed', impostor)
+  const x = f.finish().projection.sdkSse
+  assert.equal(x.receiptStatus, 'UNKNOWN')
+  assert.equal(x.orphanTerminalCount, 2)
+  assert.equal(x.responseStatus, null)
+  assert.equal(x.requestFailedObserved, false)
+})
+
+test('SDK SSE redirect HTTP status remains observed but cannot qualify the original first SSE', async (t) => {
+  const f = await sseSdkHostFixture(t)
+  const request = f.request()
+  f.page.emit('request', request)
+  f.page.emit('response', { request: () => request, status: () => 302 })
+  f.page.emit('requestfinished', request)
+  const x = f.finish().projection.sdkSse
+  assert.equal(x.redirectObserved, true)
+  assert.equal(x.receiptStatus, 'UNKNOWN')
+  assert.equal(x.sameSource, null)
+})
+
+test('SDK SSE no terminal before disposal stays UNKNOWN and detached callbacks cannot add evidence', async (t) => {
+  const f = await sseSdkHostFixture(t)
+  const request = f.request()
+  f.page.emit('request', request)
+  const before = f.finish()
+  assert.equal(before.projection.sdkSse.completion, 'UNKNOWN')
+  assert.equal(before.projection.sdkSse.receiptStatus, 'UNKNOWN')
+  f.page.emit('requestfailed', request)
+  assert.deepEqual(f.host.finish(completeClosure), before)
+})
+
+test('SDK SSE partial listener installation preserves ORIGINAL setup error and attempts every cleanup', async () => {
+  const page = new EventEmitter()
+  const original = new Error('same original SDK listener installation failure')
+  const on = page.on.bind(page)
+  const off = page.off.bind(page)
+  const attempted = []
+  page.on = (kind, callback) => {
+    if (kind === 'response')
+      throw original
+    return on(kind, callback)
+  }
+  page.off = (kind, callback) => { attempted.push(kind); return off(kind, callback) }
+  page.exposeFunction = async () => { throw new Error('must not enter binding after failed listener setup') }
+  page.addInitScript = async () => {}
+  const host = createDirectOwnerObserver(page, { installationId: 'private', installationSlug: 'private' })
+  await assert.rejects(host.install(), error => error === original)
+  assert.deepEqual(attempted, ['pageerror', 'console', 'request', 'response', 'requestfailed', 'requestfinished'])
+  assert.equal(host.finish(completeClosure).projection.sdkSse.receiptStatus, 'UNKNOWN')
+})
+
+
+test('SDK SSE versioned host manifest describes public SDK limits, not a native certificate', () => {
+  const m = actualChainManifest().sourceTrusted.hostSdkSse
+  assert.equal(m.version, 'DIRECT_OWNER_HOST_V2_PUBLIC_SDK_FIRST_SSE')
+  assert.deepEqual(m.events, ['request', 'response', 'requestfailed', 'requestfinished'])
+  assert.equal(m.nativeDocumentIdentityExposed, false)
+  assert.equal(m.nativeFirstRequestExposureGuaranteed, false)
+  assert.equal(m.nativeStructuredReasonExposed, false)
+  assert.equal(m.collectorRuntimeHTTP, false)
+  assert.equal(m.guestPayloadChanged, false)
+  const wrong = actualChainManifest()
+  wrong.sourceTrusted.hostSdkSse.nativeStructuredReasonExposed = true
+  assert.throws(() => verifySourceTrustedChain(process.cwd(), path.dirname(fileURLToPath(import.meta.url)), wrong))
 })

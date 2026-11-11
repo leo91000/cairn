@@ -56,6 +56,30 @@ export const sourceEvidenceDomains = {
     "outOfDomainAbsenceOfSideEffects": "NOT_CLAIMED"
   }
 }
+export const sdkSseHostContract = {
+  "version": "DIRECT_OWNER_HOST_V2_PUBLIC_SDK_FIRST_SSE",
+  "rootDecisionSHA256": "cd86b824492c83e6c988beca555a1d79b26c5cf88023dc7af47aec1673df1f5d",
+  "events": [
+    "request",
+    "response",
+    "requestfailed",
+    "requestfinished"
+  ],
+  "sdk": "PUBLIC_PLAYWRIGHT_1.64.1_SOURCE_PRECONDITION",
+  "join": "PRIVATE_DOCUMENT_GRANT_CONNECTION_SOURCE_UNIQUE_JOIN_AND_REQUEST_OBJECT_IDENTITY",
+  "nativeDocumentIdentityExposed": false,
+  "nativeFirstRequestExposureGuaranteed": false,
+  "nativeStructuredReasonExposed": false,
+  "collectorRuntimeHTTP": false,
+  "guestPayloadChanged": false,
+  "previousHost": {
+    "observer": "f78e00669c6fd748bb3e4e2e286ff749d55cb6b8",
+    "path": ".github/diagnostics/direct-owner-probe.mjs",
+    "gitBlob": "86e0fb77fbdc7d0de1b327e165872c023d81a947",
+    "sha256": "8b2e3fb3eb6142d0685375cb270ec91b040a4cf4190dbfffe8631b8a6a4e1264",
+    "status": "HISTORICAL_HOST_BEFORE_PUBLIC_SDK_SSE_CAPTURE_NOT_RELABELLED"
+  }
+}
 export const sourceGateCommands = [
   'node --test test-results/direct-owner-receipt/direct-owner-probe.node.mjs',
   'node test-results/direct-owner-receipt/archive-transparency.node.mjs --product-reference --source-trusted-limit',
@@ -110,6 +134,7 @@ export function verifySourceTrustedChain(root, directory = sourceDirectory, mani
   assert.equal(chain.operationDecisionSHA256, '62320974cc78a9acb700fa16c785b67bc93b62ec9d8bab3e3ec9c74aa4e04f54')
   assert.deepEqual(chain.domains, sourceEvidenceDomains)
   assert.equal(chain.universalOperationEquivalence, false)
+  assert.deepEqual(chain.hostSdkSse, sdkSseHostContract)
   assert.equal(chain.nativeReaderComposition.helper.commit, product)
   assert.deepEqual(chain.nativeReaderComposition.helper, {
     commit: product, path: 'tests/e2e/availability-probe.ts',

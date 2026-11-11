@@ -413,10 +413,7 @@ function errorIdentity(error) {
   catch { return null }
 }
 
-export function projectDirectOwners(journal, pageErrors, observerFailures = 0, closure) {
-  const inputKnown = Array.isArray(journal) && Array.isArray(pageErrors) && Number.isSafeInteger(observerFailures) && observerFailures >= 0
-  journal = Array.isArray(journal) ? journal.filter(value => value && typeof value === 'object') : []
-  pageErrors = Array.isArray(pageErrors) ? pageErrors : []
+function selectDirectOwnerIdentity(journal, pageErrors) {
   const identities = pageErrors.map(value => errorIdentity(value))
   const connections = [...new Set(identities.filter(Boolean).map(value => value.connection))]
   const installations = [...new Set(identities.filter(Boolean).map(value => value.installation))]
@@ -429,6 +426,14 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
   const owner = owners.length === 1 ? owners[0] : null
   const generations = [...new Set(grants.map(event => event.generationOwner).filter(Number.isInteger))]
   const generationOwner = generations.length === 1 ? generations[0] : null
+  return { identities, installations, connections, installation, connection, grants, document, owner, generationOwner }
+}
+
+export function projectDirectOwners(journal, pageErrors, observerFailures = 0, closure) {
+  const inputKnown = Array.isArray(journal) && Array.isArray(pageErrors) && Number.isSafeInteger(observerFailures) && observerFailures >= 0
+  journal = Array.isArray(journal) ? journal.filter(value => value && typeof value === 'object') : []
+  pageErrors = Array.isArray(pageErrors) ? pageErrors : []
+  const { identities, installations, connections, installation, connection, grants, document, owner, generationOwner } = selectDirectOwnerIdentity(journal, pageErrors)
   const related = journal.filter(event => document && event.document === document && (event.connection === connection || event.owner === owner || (generationOwner !== null && event.owner === generationOwner) || ['beforeunload', 'pagehide'].includes(event.kind)))
   const allowedKinds = ['grant-observed','control-start','control-headers','control-threw','control-rejected-reaction','request-abort-event','parent-abort-event','parent-abort-call-enter','parent-abort-call-return','source-created','source-open-event','source-error-event','source-close-enter','source-close-return','source-close-threw','beforeunload','pagehide','window-error-same-original-cause']
   const booleans = ['agentsDocument','ownContext','documentInstallationMappingKnown','installationMatchesDocument','parentIdentityKnown','requestSignalKnown','requestAborted','controlSignalKnown','controlAborted','generationSignalKnown','generationAborted','requestReasonMatches','controlReasonMatches','generationReasonMatches','nativeTrusted','insideOwnAbortCall','grantMatched','alreadyAborted','aborted']
@@ -538,6 +543,190 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
   }
 }
 
+// HOST ONLY. Public SDK objects stay private and are never serialized or mutated.
+function firstSseSdkCapture(page, scope, fail) {
+  const requests = new Map()
+  const documents = new Map()
+  let ordinal = 0
+  let metadataFailures = 0
+  let orphanTerminals = 0
+  let attached = false
+  let closed = false
+  const failedMetadata = () => { metadataFailures++; fail() }
+  const routeMatches = (value) => {
+    const route = /^\/installations\/([^/]+)\/agents$/.exec(value.pathname)
+    return Boolean(route && decodeURIComponent(route[1]) === scope.installationSlug)
+  }
+  const identify = (request) => {
+    const value = request.url()
+    if (typeof value !== 'string')
+      throw new Error('SDK Request URL metadata unavailable')
+    const url = new URL(value)
+    const match = /^\/api\/installations\/([^/]+)\/direct\/([^/]+)\/events$/.exec(url.pathname)
+    if (!match)
+      return null
+    const installation = decodeURIComponent(match[1])
+    if (installation !== scope.installationId)
+      return null
+    return { installation, connection: decodeURIComponent(match[2]), origin: url.origin }
+  }
+  const guest = (event) => {
+    if (!['grant-observed', 'source-created'].includes(event.kind) || event.agentsDocument !== true || event.ownContext !== true || typeof page.mainFrame !== 'function')
+      return
+    try {
+      const frame = page.mainFrame()
+      const value = new URL(frame.url())
+      // Late journal harvest from a replacement route cannot invent a Doc origin.
+      if (!routeMatches(value))
+        return
+      const prior = documents.get(event.document)
+      if (prior && (prior.frame !== frame || prior.origin !== value.origin)) {
+        prior.conflicting = true
+        failedMetadata()
+      }
+      else if (!prior) {
+        documents.set(event.document, { frame, origin: value.origin, conflicting: false })
+      }
+    }
+    catch { failedMetadata() }
+  }
+  const request = (value) => {
+    try {
+      const identity = identify(value)
+      if (!identity)
+        return
+      if (requests.has(value)) {
+        failedMetadata()
+        return
+      }
+      const row = { ordinal: ++ordinal, ...identity, method: value.method(), resourceType: value.resourceType(), responseObserved: false, responseStatus: null, requestFailedObserved: false, requestFinishedObserved: false, terminalEvents: 0, failureTextPresent: false, errorTextCategory: 'NOT_OBSERVED', redirected: value.redirectedFrom() !== null, frameKnown: false, frameMatchesMain: false, agentsRoute: false }
+      requests.set(value, row)
+      const frame = value.frame()
+      const url = new URL(frame.url())
+      row.frame = frame
+      row.frameKnown = true
+      row.frameMatchesMain = frame === page.mainFrame()
+      row.agentsRoute = routeMatches(url)
+      row.frameOriginMatchesRequest = url.origin === identity.origin
+    }
+    catch { failedMetadata() }
+  }
+  const known = (value) => {
+    const row = requests.get(value)
+    if (row)
+      return row
+    // A response/terminal without its Request event cannot become a first SSE.
+    if (identify(value)) {
+      orphanTerminals++
+      failedMetadata()
+    }
+    return null
+  }
+  const response = (value) => {
+    try {
+      const row = known(value.request())
+      if (!row)
+        return
+      row.responseEventObserved = true
+      const status = value.status()
+      if (!Number.isInteger(status) || status < 100 || status > 599 || row.responseObserved)
+        throw new Error('SDK response metadata inconsistent')
+      row.responseObserved = true
+      row.responseStatus = status
+      row.redirected ||= status >= 300 && status < 400
+    }
+    catch { failedMetadata() }
+  }
+  const terminal = (value, kind) => {
+    try {
+      const row = known(value)
+      if (!row)
+        return
+      row.requestFailedObserved ||= kind === 'requestfailed'
+      row.requestFinishedObserved ||= kind === 'requestfinished'
+      row.terminalEvents++
+      if (row.terminalEvents !== 1)
+        throw new Error('SDK request has duplicate terminal events')
+      row.redirected ||= value.redirectedTo() !== null
+      if (kind === 'requestfinished') {
+        row.requestFinishedObserved = true
+        return
+      }
+      row.requestFailedObserved = true
+      const failure = value.failure()
+      const text = failure?.errorText
+      if (typeof text !== 'string' || text.length === 0) {
+        row.errorTextCategory = 'SDK_FAILURE_TEXT_MISSING'
+        return
+      }
+      row.failureTextPresent = true
+      row.sdkErrorText = text // PRIVATE evidence only; never projected or coerced.
+      const normalized = text.trim().toLowerCase()
+      row.errorTextCategory = ['cancelled', 'canceled', 'net::err_aborted'].includes(normalized)
+        ? 'SDK_CANCEL_REPORTED'
+        : /cors|access[ -]control/.test(normalized) ? 'SDK_ACCESS_CONTROL_REPORTED' : 'SDK_OTHER_FAILURE'
+    }
+    catch { failedMetadata() }
+  }
+  const project = (journal, pageErrors, closure, totalFailures) => {
+    const id = selectDirectOwnerIdentity(journal, pageErrors)
+    const grants = journal.filter(e => e.kind === 'grant-observed' && e.installation === id.installation && e.connection === id.connection)
+    const creators = journal.filter(e => e.kind === 'source-created' && e.installation === id.installation && e.connection === id.connection)
+    const creator = creators.length === 1 ? creators[0] : null
+    const sourceKnown = id.grants.length === 1 && grants.length === 1 && creator !== null && id.document !== null && id.owner !== null && id.generationOwner !== null
+      && creator.document === id.document && creator.owner === id.owner && creator.generationOwner === id.generationOwner && creator.grantMatched === true && creator.ownContext === true && creator.installationMatchesDocument === true && Number.isSafeInteger(creator.source)
+    const candidates = [...requests.values()].filter(r => id.connection !== null && r.connection === id.connection && r.installation === id.installation)
+    const row = candidates.length === 1 ? candidates[0] : null
+    const doc = documents.get(id.document)
+    const requestKnown = sourceKnown && row !== null && row.method === 'GET' && row.resourceType === 'eventsource' && row.frameKnown && row.frameMatchesMain && row.agentsRoute && row.frameOriginMatchesRequest && doc !== undefined && !doc.conflicting && doc.frame === row.frame && doc.origin === row.origin && !row.redirected
+    const captureClosed = attached && closed
+    const closureKnown = captureClosed && closure?.pageClosed === true && closure?.gateClosed === true && closure?.cleanupFailureCount === 0
+    const observationKnown = requestKnown && metadataFailures === 0 && orphanTerminals === 0 && totalFailures === 0 && closureKnown
+    const terminalKnown = observationKnown && row.terminalEvents === 1 && (row.requestFinishedObserved || (row.requestFailedObserved && row.failureTextPresent))
+    return {
+      hostCollectorVersion: 'DIRECT_OWNER_HOST_V2_PUBLIC_SDK_FIRST_SSE',
+      receiptOrigin: 'PUBLIC_PLAYWRIGHT_PAGE_EVENTS_AND_UNIQUE_PINNED_GUEST_REFERENCE_JOIN',
+      correlationScope: 'PINNED_SOURCE_CONDITIONAL',
+      requestObjectIdentityUsed: true,
+      sourceMappingKnown: Boolean(sourceKnown),
+      sameDocument: observationKnown ? true : null,
+      sameGrantConnection: observationKnown ? true : null,
+      sameSource: observationKnown ? true : null,
+      sdkCandidateRequestCount: candidates.length,
+      nativeFirstRequestExposureGuaranteed: false,
+      sdkNativeDocumentIdentityExposed: false,
+      firstObservedSdkRequestIsUnique: requestKnown ? true : null,
+      redirectObserved: row ? row.redirected : null,
+      frameKnown: row ? row.frameKnown : null,
+      captureClosed, closureKnown,
+      metadataFailureCount: metadataFailures, orphanTerminalCount: orphanTerminals,
+      sdkResponseEventObserved: requestKnown ? row.responseEventObserved === true : null,
+      responseObserved: requestKnown ? row.responseObserved : null,
+      responseStatus: requestKnown && row.responseObserved ? row.responseStatus : null,
+      requestFailedObserved: requestKnown ? row.requestFailedObserved : null,
+      requestFinishedObserved: requestKnown ? row.requestFinishedObserved : null,
+      sdkTerminalEvent: terminalKnown ? row.requestFailedObserved ? 'requestfailed' : 'requestfinished' : 'UNKNOWN',
+      sdkErrorTextCategory: requestKnown ? row.errorTextCategory : 'UNKNOWN',
+      sdkCancellationReport: observationKnown && row.requestFailedObserved && row.errorTextCategory === 'SDK_CANCEL_REPORTED' ? 'KNOWN_FROM_SDK_TEXT' : 'UNKNOWN',
+      completion: terminalKnown ? row.requestFailedObserved ? 'SDK_FAILED' : 'SDK_FINISHED' : 'UNKNOWN',
+      receiptStatus: terminalKnown && (row.requestFinishedObserved || row.responseObserved || row.errorTextCategory === 'SDK_CANCEL_REPORTED') ? 'SDK_TERMINAL_SOURCE_CONDITIONAL' : 'UNKNOWN',
+      nativeStructuredReason: 'NOT_EXPOSED_BY_PUBLIC_API',
+      nativeDocumentLoaderCancellation: 'UNKNOWN',
+      nativeErrorObjectCorrespondence: 'UNKNOWN',
+      nativeOrderingAgainstPageErrors: 'UNKNOWN',
+      nativeCauseConclusive: false,
+      productQualified: false,
+    }
+  }
+  return {
+    listeners: [['request', request], ['response', response], ['requestfailed', value => terminal(value, 'requestfailed')], ['requestfinished', value => terminal(value, 'requestfinished')]],
+    guest, project,
+    attached() { attached = true; closed = false },
+    closed(value) { closed = value },
+    privateRows() { return [...requests.values()].map(({ frame, origin, ...row }) => row) },
+  }
+}
+
 export function createDirectOwnerObserver(page, installationScope) {
   if (!installationScope || typeof installationScope.installationId !== 'string' || !installationScope.installationId || typeof installationScope.installationSlug !== 'string' || !installationScope.installationSlug)
     throw new Error('Source-trusted installation mapping unavailable')
@@ -546,6 +735,7 @@ export function createDirectOwnerObserver(page, installationScope) {
   const pageErrors = []
   const conflicts = []
   let failures = 0
+  const sdkSse = firstSseSdkCapture(page, boundScope, () => { failures++ })
   const acceptEvent = (event, ingress) => {
     try {
       if (!event || typeof event.document !== 'string' || !Number.isSafeInteger(event.sequence) || event.sequence <= 0) {
@@ -553,6 +743,7 @@ export function createDirectOwnerObserver(page, installationScope) {
         return
       }
       const received = structuredClone(event)
+      sdkSse.guest(received)
       const key = JSON.stringify([received.document, received.sequence])
       const prior = journal.get(key)
       if (!prior) {
@@ -577,7 +768,7 @@ export function createDirectOwnerObserver(page, installationScope) {
     }
     catch { failures++ }
   }
-  const listeners = [['pageerror', onError], ['console', onFailureSignal]]
+  const listeners = [['pageerror', onError], ['console', onFailureSignal], ...sdkSse.listeners]
   let listenerAttached = false
   const detachListeners = () => {
     let detached = true
@@ -586,6 +777,7 @@ export function createDirectOwnerObserver(page, installationScope) {
       catch { failures++; detached = false }
     }
     listenerAttached = !detached
+    sdkSse.closed(detached)
     return detached
   }
   return {
@@ -596,6 +788,7 @@ export function createDirectOwnerObserver(page, installationScope) {
       try {
         for (const [kind, listener] of listeners)
           page.on(kind, listener)
+        sdkSse.attached()
         await closedTargetBound(() => page.exposeFunction('__c40RecordDirectOwner', (event) => {
           acceptEvent(event, performance.now())
         }), 'direct owner binding')
@@ -617,9 +810,10 @@ export function createDirectOwnerObserver(page, installationScope) {
         acceptEvent(event, null)
     },
     finish(closure) {
+      const events = [...journal.values()].map(value => value.event)
       return {
-        privateEvidence: { journal: [...journal.values()].map(value => ({ ...value.event, hostIngress: value.hostIngress })), conflicts, pageErrors, observerFailures: failures },
-        projection: projectDirectOwners([...journal.values()].map(value => value.event), pageErrors, failures, closure),
+        privateEvidence: { journal: [...journal.values()].map(value => ({ ...value.event, hostIngress: value.hostIngress })), conflicts, pageErrors, observerFailures: failures, sdkSse: sdkSse.privateRows() },
+        projection: { ...projectDirectOwners(events, pageErrors, failures, closure), sdkSse: sdkSse.project(events, pageErrors, closure, failures) },
       }
     },
     dispose() {

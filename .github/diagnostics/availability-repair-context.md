@@ -779,3 +779,61 @@ DUE before fresh FULLs ALL12product/ALL22observer/archives/entirechain, newSolHi
 forknone, sourcesfrozen untilbothverdicts. No oldR92/H93clean transferred.
 P1OPEN/causeDirect47-1UNKNOWN/run43008782246FAILsource68/6/browserNONATTEINT preserved.
 Admission71ed consumed, slotROOT/HOLD/noUImergecapturesLéo/Slackprodgrantsforensicintact.
+
+
+## Public SDK first-SSE HOST preparation — SOURCE ONLY
+
+ROOT decision0485f241/5746B/SHAcd86b824492c83e6c988beca555a1d79b26c5cf88023dc7af47aec1673df1f5d
+read ENTIRE/hashverified. First43029258667FAIL2Directpageerrors+ownerpartial persists,
+SDK network terminal absent from existing ZIP; no further ZIP/browser/probe/retry.
+Only existing HOSTcollector extended, versionDIRECT_OWNER_HOST_V2_PUBLIC_SDK_FIRST_SSE.
+Old f78e HOST source Gitblob/SHA declaredhistorical in manifest, no old result renamed.
+
+Listeners PUBLIC request/response/requestfailed/requestfinished attach BEFORE binding/
+original sequence, metadata synchronous/noawait. SDK Request OBJECT IDENTITIES retained
+privately; response/terminal event must refer to that exact object, never borrowedbyURL.
+Target joined to unique existing private grant/connection/document/owner/generation/
+Sourcecreator plus SDK main Frame reference and same-origin Agents route. Existing
+binding events record private Doc/frame/origin association whenavailable; lateharvest
+from replacement route cannot invent it. Doc/connection/source reuse, multipleRequests,
+redirect, wrongframe/route/origin, orphan/duplicate terminal, metadatafault =>UNKNOWN.
+This is PINNED_SOURCE_CONDITIONAL referencejoin, not SDK nativeDocidentity/sourceobject
+certificate. Public APIs expose neither guest Doc marker nor EventSource object;
+SDKFrame may survive navigation. UniqueobservedRequest is NOT proof of exposureof
+all nativeinitialrequests, no NativeFIRST visibility guarantee. Missing exposure is
+UNKNOWN/nonconclusive, no native event synthesized or fallback sourceinjection.
+
+responseStatus ONLY fromactual Response event; HTTPerror response is NOTrequestfailed.
+SDK failure().errorText PRIVATE only, published finitecategory. Explicitcanceltext
+canonly yield KNOWN_FROM_SDK_TEXT, NEVER structurednativecode/loadercancel. Generic/
+CORSopaque/missingtext leaves nativecauseUNKNOWN and targetedreceiptUNKNOWN unless
+independent HTTPresponse/finished observation is known. EvenpositiveSDKterminalreceipt
+is SOURCEconditional, nativeCauseConclusivefalse, nativeordering/errorobject/genpubUNKNOWN.
+No headers/cookies/body/query/rawURL read or published; parsedidentityonly private.
+Collector runtime performs NO HTTP/route/interception/abort/retry/CDP/evaluate/wrapper.
+Guest observeDirectOwners code+NativeReaderV5/payloads+bothfullOverlays+workflow+product
+9979/app/runtime/factory/PR731 EXACTLYUNCHANGED. Existing corepartial projection on
+private43029258667journal is VALUEIDENTICAL under the new sharedidentityselection.
+
+Meaningful SOURCE tests use ACTUAL installed handlers through EventEmitter SDK-shaped
+adapters and real guest VMjournal, not a copiedpolicy. Includes explicit SDKcancel,
+REALNodeHTTP403 response (testfixtureONLY, not collector/Playwright/browser), opaque/
+absent, wrongconn/frame/origin/route, redirect, requestidentityambiguity/orphans,
+metadatagetters/reportfail, listenersbeforefirstSDKevent andlatejournal, cleanup/partial
+installoriginalerror. Original2cleanup listeners still asserted; expandedcheckscover
+allSIXownedlisteners, negativefailcountsreflectallactualdetachfailures. Initialsetup
+fixture/selectionerrors and one overconfident correlationflag assertion retained as
+firstlogs, no setupcreditedasred/greenfix. No previousNativecausefixclaimed.
+
+Published API semantics: https://playwright.dev/docs/api/class-request and
+https://playwright.dev/docs/network . Currentdocs arepubliccontract, NOTpinnedSDKCI
+attestation. ROOT inspectedlocal1.64.1coreBundle SHA829521b67ed7be90c7d6d6098ff39f2241562d47e4ad7ccab13710924a56001d
+and reports knownloadingFailed->Request.failure; unknownrequestignored. No distant
+SDKtag404credited/noSDKinstalledorcodeexecuted. Actual runtime exposure remainsunknown.
+
+SOURCE105NodeHOSTcases +84archive underforcedGitguard passed0skip beforefinalidentity
+metadata; finalcommands/revisionsrecorded separately. No Vitest104applicationtests,
+1888qualityorunchangedcollectesreplayed. ROOTappropriateQA DUE beforefreshALL12product/
+ALL22observerarchives/ALLpin/wholechainreview, newSolHighforknone/sourcefreeze. No old
+R93/H94 orQAtransferred. No CI/native/PR/merge admitted, admissionsconsumed/slotROOT-HOLD,
+P1OPEN/causeDirectUNKNOWN/B-DstorageHOLD/noUImergecaptLéo/Slackprodgrantsforensicintacts.
