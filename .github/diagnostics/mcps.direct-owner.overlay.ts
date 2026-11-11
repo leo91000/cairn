@@ -68,6 +68,7 @@ for (const pending of ['authorization', 'offer'] as const) {
         observationFailures++
         return
       }
+
       if (probe.kind === 'background') {
         backgroundRequests++
         return
@@ -119,9 +120,12 @@ for (const pending of ['authorization', 'offer'] as const) {
             void window.cairnOAuthProbe({ kind: 'observer-error' })
           }
           catch (reportingFailure) {
-            Reflect.apply(enqueueDiagnosticError, window, [() => { throw reportingFailure }])
+            Reflect.apply(enqueueDiagnosticError, window, [() => {
+              throw reportingFailure
+            }])
           }
         }
+
         return result
       }
 

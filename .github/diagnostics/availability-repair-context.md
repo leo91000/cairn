@@ -1,7 +1,7 @@
 # SOURCE-TRUSTED diagnostic domain — SOURCE ONLY, NOT runtime qualification
 
-Product **596bee47faff3d9026bb993a8faa41b4de3b1689**, tree **0ba47d1323145168407e55086d364c1f43ef9a82**,
-parent01a (test-only OAuth metadata failure isolation), app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
+Product **756f2215dffb5ea45582294be8617be2bfb2bd20**, tree **31e0a90833ce2b26faa92c97c087b98f99a2b01a**,
+parent596 (canonical whitespace-only OAuth test formatting), app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
 and its permanent serialized-bootstrap regression. Canonical QA ROOT on this exact clean
 new product is DUE before fresh COMPLETE independent FULLs. The prior clean bc1c QA is historical
 for this changed product and does not transfer.
@@ -448,3 +448,11 @@ or universal ownership. Productworktreeclean and sourcechain17+12 matched. No
 canonical pnpmcheck/lint/types/build/Vitest104/CLI/native rerun C40. QA ROOT exact
 new clean product596 required before future complete independent FULLs. Prior
 Root01a1888QA is historical for this changed product; no transfer.
+
+Canonical ROOT patch856B/cacbd79eecbe82880627dda2c86c19dab25e2e5032a97722badad34c5e01002f
+applied exactly ONCE on clean596, diffidentical hash. ONLY mcps.spec.ts whitespace
+changed (5+/1-), full existing overlay receives identical formatting hunks. Metadata
+error audit, original promises/causes/throws and source regressions unchanged. New
+clean product QA ROOT is DUE before fresh complete independent FULLs; dirty5961888
+not transferred and no canonical checks duplicated C40. Existing first lintfailure
+and all reference/controller/log evidence remain preserved.
