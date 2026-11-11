@@ -138,8 +138,8 @@
         "sha256": "fa8785903ef9eea3255c402ed68c45f69868d180ef6ede43965bdd35fe5e770e"
       },
       "direct-owner-probe.node.mjs": {
-        "gitBlob": "5ec0f966b2fd83f0a0f730a550411bb2a5d66b58",
-        "sha256": "a4ffa1ddaf619db8e223de86dabba8d2b6b7282df0a29c2f12b6a9aa94fc6b03"
+        "gitBlob": "d509ce41fc9b8853ff520456313a9269b3f85792",
+        "sha256": "9d6450cb96ef00a4bca356cd19f4b4d276afa5e97a7bd37d74d17620ab634ef5"
       },
       "direct-owner-overlay-control.mjs": {
         "gitBlob": "ba9163a1701cab756f6fc4be8db44f96de946327",

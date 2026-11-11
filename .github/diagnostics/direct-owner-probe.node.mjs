@@ -403,6 +403,23 @@ test('ACTUAL overlay finally preserves an original closure error and still close
 })
 
 
+// Fixture acquisition trusts only its explicitly controlled repository, per Git child.
+// No host/global configuration is written; all original Git status/stderr survives.
+function controlledSourceGitArgs(args, root = process.cwd()) {
+  return ['-c', `safe.directory=${path.resolve(root)}`, ...args]
+}
+
+function controlledSourceGitEnvironment(env, root = process.cwd()) {
+  const count = Number(env.GIT_CONFIG_COUNT ?? 0)
+  assert(Number.isSafeInteger(count) && count >= 0)
+  return {
+    ...env,
+    GIT_CONFIG_COUNT: String(count + 1),
+    [`GIT_CONFIG_KEY_${count}`]: 'safe.directory',
+    [`GIT_CONFIG_VALUE_${count}`]: path.resolve(root),
+  }
+}
+
 function sourceFiles(t) {
   const targets = ['tests/e2e/mcps.spec.ts', 'apps/web/tests/direct-transport.test.ts']
   const originals = Object.fromEntries(targets.map(target => [target, execFileSync('git', ['-c', `safe.directory=${process.cwd()}`, 'show', `${product}:${target}`])]))
@@ -900,7 +917,7 @@ function finalIdentityFixture(t, mode) {
   writeFileSync(proof, 'SOURCE FIXTURE')
   const digest = mode === 'hash-failure' ? '0'.repeat(64) : execFileSync('sha256sum', [proof], { encoding: 'utf8' }).split(' ')[0]
   writeFileSync(path.join(f.evidence, 'observer-source.sha256'), digest + '  ' + proof + '\n')
-  const env = { ...process.env, C40_EVIDENCE_DIR: f.evidence, GITHUB_WORKSPACE: process.cwd(), PRODUCT_SHA: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim() }
+  const env = { ...process.env, C40_EVIDENCE_DIR: f.evidence, GITHUB_WORKSPACE: process.cwd(), PRODUCT_SHA: execFileSync('git', controlledSourceGitArgs(['rev-parse', 'HEAD']), { encoding: 'utf8' }).trim() }
   if (mode === 'identity-unknown')
     env.GIT_DIR = path.join(f.root, 'missing-owned-git-directory')
   const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', script], { cwd: process.cwd(), env, encoding: 'utf8' })
@@ -923,12 +940,13 @@ test('H84 actual Git cannot read the historical source from an empty object view
   const f = sourceFiles(t)
   const objects = path.join(f.root, 'empty-owned-objects')
   mkdirSync(objects)
-  const result = spawnSync('git', ['show', `${historicalWorkflowReference.commit}:${historicalWorkflowReference.path}`], {
+  const result = spawnSync('git', controlledSourceGitArgs(['show', `${historicalWorkflowReference.commit}:${historicalWorkflowReference.path}`]), {
     env: { ...process.env, GIT_OBJECT_DIRECTORY: objects, GIT_ALTERNATE_OBJECT_DIRECTORIES: '', GIT_NO_LAZY_FETCH: '1' }, encoding: 'utf8',
   })
   assert.notEqual(result.status, 0)
   assert.equal(result.status, 128)
   assert.equal(result.stdout, '')
+  assert.doesNotMatch(String(result.stderr), /dubious ownership/)
 })
 
 for (const mode of ['restore-failure', 'hash-failure', 'identity-unknown', 'success']) {
@@ -941,7 +959,7 @@ for (const mode of ['restore-failure', 'hash-failure', 'identity-unknown', 'succ
       assert.equal(identity, 'product=UNKNOWN tree=UNKNOWN identityCaptured=false\n')
     }
     else {
-      const actual = execFileSync('git', ['log', '-1', '--format=product=%H tree=%T'], { encoding: 'utf8' })
+      const actual = execFileSync('git', controlledSourceGitArgs(['log', '-1', '--format=product=%H tree=%T']), { encoding: 'utf8' })
       assert.equal(identity, actual)
     }
   })
@@ -1049,17 +1067,17 @@ for (const failure of ['binding-rejection', 'metadata-failure']) {
 function partialOriginalObjectView(f, selectedProduct) {
   const objects = path.join(f.root, 'owned-partial-git-objects')
   mkdirSync(objects)
-  const env = { ...process.env, GIT_OBJECT_DIRECTORY: objects, GIT_ALTERNATE_OBJECT_DIRECTORIES: '', GIT_NO_LAZY_FETCH: '1' }
-  const attributes = execFileSync('git', ['rev-parse', `${selectedProduct}:.gitattributes`], { encoding: 'utf8' }).trim()
+  const env = controlledSourceGitEnvironment({ ...process.env, GIT_OBJECT_DIRECTORY: objects, GIT_ALTERNATE_OBJECT_DIRECTORIES: '', GIT_NO_LAZY_FETCH: '1' })
+  const attributes = execFileSync('git', controlledSourceGitArgs(['rev-parse', `${selectedProduct}:.gitattributes`]), { encoding: 'utf8' }).trim()
   const entries = [[attributes, 'blob'], [selectedProduct, 'commit']]
   for (const tree of ['', ':tests', ':tests/e2e', ':apps', ':apps/web', ':apps/web/tests']) {
     const expression = tree ? selectedProduct + tree : selectedProduct + '^{tree}'
-    entries.push([execFileSync('git', ['rev-parse', expression], { encoding: 'utf8' }).trim(), 'tree'])
+    entries.push([execFileSync('git', controlledSourceGitArgs(['rev-parse', expression]), { encoding: 'utf8' }).trim(), 'tree'])
   }
-  entries.push([execFileSync('git', ['rev-parse', `${selectedProduct}:${f.targets[1]}`], { encoding: 'utf8' }).trim(), 'blob'])
+  entries.push([execFileSync('git', controlledSourceGitArgs(['rev-parse', `${selectedProduct}:${f.targets[1]}`]), { encoding: 'utf8' }).trim(), 'blob'])
   for (const [id, type] of entries) {
-    const bytes = execFileSync('git', ['cat-file', type, id])
-    const written = execFileSync('git', ['hash-object', '-w', '-t', type, '--stdin'], { input: bytes, env, encoding: 'utf8' }).trim()
+    const bytes = execFileSync('git', controlledSourceGitArgs(['cat-file', type, id]))
+    const written = execFileSync('git', controlledSourceGitArgs(['hash-object', '-w', '-t', type, '--stdin']), { input: bytes, env, encoding: 'utf8' }).trim()
     assert.equal(written, id)
   }
   return env
@@ -1071,9 +1089,9 @@ for (const phase of ['restore', 'restore-unit']) {
     const controller = await restorationSource(f)
     controller.applyTestOverlays(f.root)
     const env = partialOriginalObjectView(f, controller.product)
-    const missing = spawnSync('git', ['show', `${controller.product}:${f.targets[0]}`], { cwd: f.root, env, encoding: 'utf8' })
+    const missing = spawnSync('git', controlledSourceGitArgs(['show', `${controller.product}:${f.targets[0]}`]), { cwd: f.root, env, encoding: 'utf8' })
     assert.notEqual(missing.status, 0)
-    const available = execFileSync('git', ['show', `${controller.product}:${f.targets[1]}`], { cwd: f.root, env })
+    const available = execFileSync('git', controlledSourceGitArgs(['show', `${controller.product}:${f.targets[1]}`]), { cwd: f.root, env })
     assert.deepEqual(available, f.originals[f.targets[1]])
     const result = spawnSync(process.execPath, [controller.sourceFile, phase], { cwd: f.root, env: { ...env, C40_EVIDENCE_DIR: f.evidence }, encoding: 'utf8' })
     // Missing full runtime-binding metadata keeps this deliberately partial
@@ -1231,4 +1249,93 @@ test('A90 actual chain validator refuses a universal operation claim and missing
     mutate(manifest)
     assert.throws(() => verifySourceTrustedChain(process.cwd(), path.dirname(fileURLToPath(import.meta.url)), manifest))
   }
+})
+
+// Git's own test switch enters its actual repository-ownership guard. This is a
+// SOURCE process regression, not native navigation or a simulated JS Git policy.
+function gitOwnershipFixtureEnvironment(f) {
+  const global = path.join(f.root, 'empty-owned-global-git-config')
+  writeFileSync(global, '')
+  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: global, GIT_CONFIG_COUNT: '0', GIT_TEST_ASSUME_DIFFERENT_OWNER: '1' }
+  delete env.GIT_CONFIG_PARAMETERS
+  return env
+}
+
+test('GIT OWNERSHIP real Git refusal, bounded acquisition, foreign repository refusal and original failure', (t) => {
+  const f = sourceFiles(t)
+  const env = gitOwnershipFixtureEnvironment(f)
+  const setupEnv = { ...env, GIT_TEST_ASSUME_DIFFERENT_OWNER: '0' }
+  const repositories = ['controlled-source', 'outside-source'].map(name => path.join(f.root, name))
+  for (const root of repositories) {
+    execFileSync('git', ['init', '--quiet', root], { env: setupEnv })
+    const blob = execFileSync('git', ['-C', root, 'hash-object', '-w', '--stdin'], { env: setupEnv, input: 'SOURCE FIXTURE BYTES', encoding: 'utf8' }).trim()
+    const tree = execFileSync('git', ['-C', root, 'mktree'], { env: setupEnv, input: `100644 blob ${blob}\tprobe.txt\n`, encoding: 'utf8' }).trim()
+    const commit = execFileSync('git', ['-C', root, '-c', 'user.name=SOURCE Fixture', '-c', 'user.email=source-fixture@example.invalid', 'commit-tree', tree], { env: setupEnv, input: 'owned fixture\n', encoding: 'utf8' }).trim()
+    execFileSync('git', ['-C', root, 'update-ref', 'HEAD', commit], { env: setupEnv })
+  }
+  const [controlled, foreign] = repositories
+  const before = repositories.map(root => readFileSync(path.join(root, '.git/config')))
+  const args = ['show', 'HEAD:probe.txt']
+  const refused = spawnSync('git', args, { cwd: controlled, env, encoding: 'utf8' })
+  assert.equal(refused.status, 128)
+  assert.match(refused.stderr, /detected dubious ownership/)
+  assert.equal(refused.stdout, '')
+  const accepted = spawnSync('git', controlledSourceGitArgs(args, controlled), { cwd: controlled, env, encoding: 'utf8' })
+  assert.equal(accepted.status, 0)
+  assert.equal(accepted.stdout, 'SOURCE FIXTURE BYTES')
+  const outside = spawnSync('git', controlledSourceGitArgs(args, controlled), { cwd: foreign, env, encoding: 'utf8' })
+  assert.equal(outside.status, 128)
+  assert.match(outside.stderr, /detected dubious ownership/)
+  const delegatedEnv = controlledSourceGitEnvironment(env, controlled)
+  assert.equal(env.GIT_CONFIG_COUNT, '0')
+  assert.equal(delegatedEnv.GIT_CONFIG_COUNT, '1')
+  assert.equal(delegatedEnv.GIT_CONFIG_VALUE_0, controlled)
+  const delegated = spawnSync('git', args, { cwd: controlled, env: delegatedEnv, encoding: 'utf8' })
+  assert.equal(delegated.status, 0)
+  assert.equal(delegated.stdout, 'SOURCE FIXTURE BYTES')
+  const foreignDelegated = spawnSync('git', args, { cwd: foreign, env: delegatedEnv, encoding: 'utf8' })
+  assert.equal(foreignDelegated.status, 128)
+  assert.match(foreignDelegated.stderr, /detected dubious ownership/)
+  const missing = ['show', 'HEAD:missing-original']
+  const original = spawnSync('git', missing, { cwd: controlled, env: setupEnv, encoding: 'utf8' })
+  const preserved = spawnSync('git', controlledSourceGitArgs(missing, controlled), { cwd: controlled, env, encoding: 'utf8' })
+  assert.equal(original.status, 128)
+  assert.equal(preserved.status, original.status)
+  assert.equal(preserved.signal, original.signal)
+  assert.equal(preserved.stdout, original.stdout)
+  assert.equal(preserved.stderr, original.stderr)
+  for (let i = 0; i < repositories.length; i++)
+    assert.deepEqual(readFileSync(path.join(repositories[i], '.git/config')), before[i])
+  assert.equal(readFileSync(env.GIT_CONFIG_GLOBAL, 'utf8'), '')
+  t.diagnostic(JSON.stringify({ actualGitOwnershipGuardRefused: true, sameBoundedSourceReadable: true, foreignRepositoryStillRefused: true, gitFailureStatusAndStderrPreserved: true, configFilesUnchanged: true, nativeQualified: false, actualUidChanged: false }))
+})
+
+test('GIT OWNERSHIP six ACTUAL H84/H87 fixture scenarios across the Git ownership guard', (t) => {
+  const f = sourceFiles(t)
+  const directory = path.join(f.root, 'controlled-acquisition-source')
+  mkdirSync(directory)
+  const reference = process.env.C40_GIT_ACQUISITION_REFERENCE
+  if (reference)
+    assert.match(reference, /^[a-f0-9]{40}$/)
+  const files = ['direct-owner-probe.node.mjs', 'direct-owner-overlay-control.mjs', 'direct-owner-probe.mjs', 'closed-target-error.mjs', 'overlay-manifest.json', 'mcps.direct-owner.overlay.ts', 'direct-transport.seam.overlay.ts', 'selected-workflow.yaml']
+  for (const file of files) {
+    const sourcePath = file === 'selected-workflow.yaml' ? '.github/workflows/webkit-dependency-regression.yaml' : '.github/diagnostics/' + file
+    const bytes = reference
+      ? execFileSync('git', controlledSourceGitArgs(['show', `${reference}:${sourcePath}`]))
+      : readFileSync(new URL('./' + file, import.meta.url))
+    writeFileSync(path.join(directory, file), bytes)
+  }
+  const env = gitOwnershipFixtureEnvironment(f)
+  delete env.C40_RESTORE_REFERENCE
+  delete env.C40_RECORDER_REFERENCE
+  const result = spawnSync(process.execPath, ['--test', '--test-reporter=tap', '--test-name-pattern=^(H84 actual final workflow shell|H87 actual CLI)', path.join(directory, 'direct-owner-probe.node.mjs')], { cwd: process.cwd(), env, encoding: 'utf8' })
+  writeFileSync(path.resolve('test-results/source-only-direct-owner/git-ownership-child-' + (reference ?? 'candidate') + '.private.log'), result.stdout + '\nSTDERR\n' + result.stderr)
+  const count = field => Number(result.stdout.match(new RegExp(`^# ${field} (\\d+)$`, 'm'))?.[1])
+  t.diagnostic(JSON.stringify({ source: reference ?? 'CURRENT_CONTROLLED_SOURCE', actualSelectedScenarios: count('tests'), pass: count('pass'), fail: count('fail'), skipped: count('skipped'), subprocessExit: result.status, ownershipGuardEnforced: true, nativeQualified: false, actualUidChanged: false }))
+  assert.equal(count('tests'), 6)
+  assert.equal(count('skipped'), 0)
+  assert.equal(result.signal, null)
+  assert.equal(result.status, 0, 'The SAME six real fixture scenarios must run across the repository ownership guard')
+  assert.equal(count('pass'), 6)
+  assert.equal(count('fail'), 0)
 })

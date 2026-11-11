@@ -618,3 +618,55 @@ no replay just for receipt and no result implicitly transferred to this new pair
 ROOT exact clean-commit QA and affected source checks DUE before fresh FULLs.
 A81/A90 domains and all feasible guards intact. No runtime/app/factory/PR731,
 policy/SDK/profile/budget changes. No CI/native/PR/merge. P1 OPEN, cause47/1UNKNOWN.
+
+
+## First native admission result43008782246 and targeted H84/H87 SOURCE correction
+
+Run43008782246/attempt1/job130482837365 on f587/PIN9979 FAILED before browser.
+Binding/SDK PASS; FIRST SOURCE74 =68PASS/6FAIL/0skip (four H84 final-shell and two
+H87 partial CLI fixture acquisitions refused by actual Git ownership guard/status128).
+Second archive block NOT REACHED; overlay/module suites/CLI/native builds/PG/WebKit
+SKIPPED NONQUALIFIED. Native ownercontrol/ESclose/lifecycle/pageerrors NOTACQUIRED,
+not zero. Unit/final restore+identity/upload PASS; admission consumed, slotROOT/HOLD.
+Original private log82510B/SHA733b709898aca5ff659770d0b4366c03c079eff54a3a818f2d7dd8a0593bc3f5
+matches ROOT. Root report93f9df44/hashcb16da80 read ENTIRE/verified; closed receipt
+knownBefore/originalRestored true and final9979/treef0c72 exact according to ROOTZIP.
+No historical failure relabelled; this is NOT product/native47/1 causality.
+
+Separate ROOT source authorization corrects ONLY H84/H87 test/fixture acquisitions:
+explicit per-command safe.directory resolves the controlled source repository;
+partial CLI child inherits one additional exact safe.directory in process-only
+GIT_CONFIG_COUNT entries so its reads of the source parent repository are trusted.
+No wildcard, no host global/local config write, no profile/SDK/production change.
+Six scenarios/assertions retained. Negative empty-object acquisition keeps original
+Git128/stdout-empty and now excludes ownership refusal as a substitute cause.
+
+Permanent SOURCE regressions use REAL Git processes and its built-in
+GIT_TEST_ASSUME_DIFFERENT_OWNER switch, NOT JavaScript policy/Git mocks. Actual UID
+is NOT changed and no native/browser evidence follows. Raw read is refused128;
+exact controlled repository succeeds; another repository STILL refuses; original
+missing-file status/stdout/stderr and fixture config bytes remain unchanged.
+Same six ACTUAL H84/H87 child cases under this Git guard: oldf587 SIX FAIL;
+candidate SIX PASS, no skip. Outer counterfactual is one assertion failure on
+old child exit, not a syntax/reference/setup pass. Current affected final source
+command runs three tests (negative empty-object +two permanent ownership tests),
+allPASS, with the six real fixture cases nested. Original CLI partial-phase RED
+is retained: its restoration PROPERTY passes, not a whole CLI qualification.
+First candidate fixture lacked closed-target dependency (1 child-file fail), then
+corrected; first extra error-wording assertion expected bad-object but real Git
+reported path-not-in-ref, corrected to the existing128/emptyout +no-ownership
+classification without changing the six original expectations. All first logs kept.
+
+ALL new claims remain SOURCE/conditional. Product9979/runtimeb186/PR731 EXACTLY
+UNCHANGED. NativeReader V3 composition bytes/SHA, both full overlays, archives,
+selected workflow, SDK/image/profile/budgets and selection UNCHANGED, no new identity
+or old result renamed. Manifest updates ONLY the changed controller file binding.
+ROOT affected QA is DUE before fresh FULLs; no1888/104 replay or transfer claimed.
+
+Concrete separate observation, outside this correction: archive-transparency's
+second workflow block still has its own direct Git acquisitions without an exact
+safe.directory (product helper/factory/OAuth/composition reads). That block was
+NOT executed by43008782246 and has NOT been rerun or changed here. It needs ROOT
+scope/QA assessment; this targeted H84/H87 snapshot is NOT a claim that the whole
+workflow now crosses the container ownership boundary. No source scope expanded.
+No new CI/native/dispatch/PR/merge; P1OPEN/causeDirect47/1UNKNOWN, all limits/reds kept.
