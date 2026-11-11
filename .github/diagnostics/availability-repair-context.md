@@ -1,7 +1,7 @@
 # SOURCE-TRUSTED diagnostic domain — SOURCE ONLY, NOT runtime qualification
 
-Product **c6c676c12c84d2e5ebf82af3870bbd098fd8e5b9**, tree **092ffb6026ef2aac61759086dc8b726a9e8eee63**,
-parent5efd (canonical three blank lines only), app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
+Product **6edd796424f0a3054270c4a1a1fd2c60796e2e11**, tree **d230b475d54238ec9a62eaeb0ec1a67672171cd9**,
+parentc6c6 (test-only availability host failure audits), app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
 and its permanent serialized-bootstrap regression. Canonical QA ROOT on this exact clean
 new product is DUE before fresh COMPLETE independent FULLs. The prior clean bc1c QA is historical
 for this changed product and does not transfer.
@@ -492,3 +492,31 @@ three blank lines in MCPS only; same three hunks full overlay, nonwhitespace tok
 unchanged. New clean product canonical ROOT QA DUE before fresh full independent
 reviews. Root formatted-dirty5efd1888 and source contrasts remain historical, no
 transfer or canonical rerun C40. All prior firstfailures/sourcebytes preserved.
+
+## Current source candidate after completed R88/H89
+
+Availability probe now reports a CLOSED independent negative code to a host-owned
+Page console listener. Caller supplies an explicit failure callback; every current
+browser MCP/history caller keeps that count in its host closure and passes it to
+the real incompleteAvailabilityReads audit, which rejects nonzero/unknown counts.
+No synthetic read, observer-failed row, abort/body/rejected terminal, document ID or
+sequence is manufactured by host ingress. Original native read events and results
+remain unchanged. Listener belongs to Page lifetime and is removed on close.
+Existing unit adapter now uses a real EventEmitter Page shape and forwards its
+controlled console interface; no test expectations or factory behavior relaxed.
+Actual outer-helper + serialized callback + real audit source control: dual storage
+and binding failure loses a whole read; after replacement oldc6c6 audit remains
+empty while host failure is0 (ASSERTFAIL), candidate host count persists and audit
+throwsUNKNOWN. This is source/simulated replacement, no native delivery claim.
+New product6edd canonical ROOT QA DUE before fresh full reviews; runtime/app/factory/
+PR731 unchanged, no old QA or clean verdict transferred.
+
+Final exact selected SOURCE block72/72controller +61/61archive PASS, 17+12chain
+bytes matched and productworktreeclean. Archive61 =59 support/transparency/refusal
+controls +2 explicit limit recognitions, not ownership/native. Actual outer-helper
+and serialized-script regression: oldc6c6 oneASSERTFAIL/candidate onePASS, complete
+otherwise-valid read groups still pass WITHOUT host count, WITH retained host count
+audit failsUNKNOWN; originals stillsamePromise/body and no synthetic terminal/read.
+Current MCP/history/full-overlay callers ALL pass the host failure count explicitly.
+New product6edd exact ROOT canonical QA DUE before fresh complete full reviews; no
+c6c61888 QA or prior clean transferred, no compiler/browser/canonical duplicated.

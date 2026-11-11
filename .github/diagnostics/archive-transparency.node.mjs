@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { stripTypeScriptTypes } from 'node:module'
 import { test } from 'node:test'
+import { EventEmitter } from 'node:events'
 import { product } from './direct-owner-overlay-control.mjs'
 import { observeDirectOwners } from './direct-owner-probe.mjs'
 import { createContext, runInContext } from 'node:vm'
@@ -116,7 +117,8 @@ function fixture(t, name, settings = {}) {
     runInContext('Object=({}).constructor;Array=[].constructor;', context)
   if (settings.directOrder === 'direct-first')
     runInContext(`(${observeDirectOwners.toString()})({installationId:'source-id',installationSlug:'source-slug'})`, context)
-  runInContext(`(${bootstrap})(${name === 'availability-reader-native.mjs' ? JSON.stringify('pre-pagehide-original-body') : ''});`, context)
+  if (!settings.deferBootstrap)
+    runInContext(`(${bootstrap})(${name === 'availability-reader-native.mjs' ? JSON.stringify('pre-pagehide-original-body') : ''});`, context)
   if (settings.directOrder === 'direct-last')
     runInContext(`(${observeDirectOwners.toString()})({installationId:'source-id',installationSlug:'source-slug'})`, context)
   const ownWindow = runInContext('window', context)
@@ -863,4 +865,67 @@ test('R87 actual OAuth XHR original synchronous send failure remains original', 
   assert.deepEqual(sends[0].args, ['original body'])
   assert.equal(f.probes.length, 0)
   assert.equal(f.diagnosticTasks.length, 0)
+})
+
+
+test('R88 actual availability helper retains dual-sink failure in host audits after document replacement', async (t) => {
+  const f = fixture(t, 'availability-probe.ts', { deferBootstrap: true })
+  const source = stripTypeScriptTypes(execFileSync('git', ['show', `${productReferenceHead}:tests/e2e/availability-probe.ts`], { encoding: 'utf8' }), { mode: 'transform' }).replace(/^export /gm, '')
+  runInContext(source, f.context)
+  const page = new EventEmitter()
+  const reads = []
+  let hostFailures = 0
+  let failSinks = false
+  let bootstrap
+  page.exposeFunction = async (name, callback) => {
+    f.context[name] = event => failSinks ? Promise.reject(new Error('controlled binding refusal')) : Promise.resolve(callback(event))
+  }
+  page.addInitScript = async (callback) => {
+    bootstrap = callback.toString()
+    runInContext(`(${bootstrap})()`, f.context)
+  }
+  f.context.console = { error(...args) {
+    assert.equal(args.length, 1)
+    page.emit('console', { type: () => 'error', text: () => args[0] })
+  } }
+  const setItem = f.context.sessionStorage.setItem
+  f.context.sessionStorage.setItem = (key, value) => {
+    if (failSinks)
+      throw new Error('controlled storage refusal')
+    return setItem(key, value)
+  }
+  await f.context.installAvailabilityProbe(page, event => reads.push(event), () => { hostFailures++ })
+  const read = async (value) => {
+    const original = Promise.resolve(Response.json(value))
+    f.queue.push(original)
+    const result = f.fetch('/api/installations', { method: 'GET' })
+    assert.equal(result, original)
+    const response = await result
+    const body = response.json()
+    assert.equal(body, f.bodyCalls.at(-1).promise)
+    assert.deepEqual(await body, value)
+    await setImmediate()
+  }
+  await read({ complete: 'before' })
+  assert.deepEqual(Array.from(f.context.incompleteAvailabilityReads(reads)), [])
+  const readCountBefore = reads.length
+  page.emit('console', { type: () => 'error', text: () => 'UNRELATED_SOURCE_LOG_MUST_NOT_BE_COLLECTED' })
+  assert.equal(hostFailures, 0)
+  assert.equal(reads.length, readCountBefore)
+  failSinks = true
+  await read({ original: 'lost only to observation' })
+  assert.equal(f.context.cairnAvailabilityProbeFailures > 0, true)
+  failSinks = false
+  runInContext('document={defaultView:window}', f.context)
+  runInContext(`(${bootstrap})()`, f.context)
+  assert.equal(f.context.cairnAvailabilityProbeFailures, 0)
+  await read({ complete: 'after replacement' })
+  // The complete read census gap is genuinely invisible without host failure:
+  // this invokes the actual audit, not a rewritten checker or synthetic terminal.
+  assert.deepEqual(Array.from(f.context.incompleteAvailabilityReads(reads)), [])
+  assert.equal(hostFailures > 0, true)
+  assert.equal(reads.some(event => event.kind === 'observer-failed'), false)
+  assert.throws(() => f.context.incompleteAvailabilityReads(reads, hostFailures), /observation failure|observer failure/i)
+  page.emit('close')
+  assert.equal(page.listenerCount('console'), 0)
 })
