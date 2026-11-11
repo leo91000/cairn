@@ -1,7 +1,7 @@
 # SOURCE-TRUSTED diagnostic domain — SOURCE ONLY, NOT runtime qualification
 
-Product **01a5d56c00da7fce17657ba808e7218922c49219**, tree **be0688eecdc1d498edc61c70b64b647f75fc78be**,
-parent4dd (test-only OAuth Fetch dynamic receiver preservation), app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
+Product **596bee47faff3d9026bb993a8faa41b4de3b1689**, tree **0ba47d1323145168407e55086d364c1f43ef9a82**,
+parent01a (test-only OAuth metadata failure isolation), app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
 and its permanent serialized-bootstrap regression. Canonical QA ROOT on this exact clean
 new product is DUE before fresh COMPLETE independent FULLs. The prior clean bc1c QA is historical
 for this changed product and does not transfer.
@@ -416,3 +416,35 @@ replayed. Sourcechain17+12 matches and productworktreeclean; no compiler/browser
 canonical/retry. Product01a exact ROOTQA1888 retained on unchanged commit. Actual
 workflow, overlays, producers, budgets/profile/image/pin unchanged. Complete new
 independent product+observer/archives/pin/chain reviews remain required on newref.
+
+## Current source candidate after completed R86/H87
+
+OAuth metadata cannot replace original Fetch result/Promise/cause: original delegate
+invoked outside metadata guard, explicit observer-error counted/asserted0, reporting
+error remains strict asynchronous diagnostic error, not a manufactured appterminal.
+Direct recorder failure is sticky in same-origin private storage across document
+bootstrap replacement; missing/incoherent failure evidence forcesUNKNOWN. Counter
+is conservative lower-bound evidence, not a native generation correlation. No await
+added in critical Agents-to-health gap. Restoration original acquisition is lazy
+INSIDE each chosen target attempt; restore-unit does not acquire unselected MCP.
+Original hash checks and all failure/forensic guards remain RED. Product app/runtime/
+factory/PR731 unchanged; new clean product canonical ROOT QA DUE, then fresh full
+product+observer/archives/pin/chain reviews, no old clean transfer.
+
+Source regression receipt before next ROOT QA: OAuth descriptor failures old01a
+3ASSERTFAIL/candidate3PASS (original Promise/cause retained and explicit diagnostic
+error); Direct failure retention old76a9 fourASSERTFAIL/candidate covered by selected
+controller (same-origin replacement + missing/corrupt sticky evidence); actual CLI
+lazy acquisition old76a9 twoASSERTFAIL/candidate twoPASS with a controlled partial
+Git object view, not fake errors/copy of logic. Initial partial-view attribute
+warning kept separately, final fixture includes actual .gitattributes and no setup
+warning. No app/runtime/factory/PR731 changes. New product596 canonical ROOT QA is
+DUE; no fresh FULL before its exact QA/stability, no prior clean transfer.
+
+Final affected selected SOURCE gate: BOTH changed script/delegate chains executed
+from exact selected shell on13 hashed files,67/67controller +58/58archive PASS.
+Archive58 =56 support/transparency/refusal +2 explicit limit recognitions, not native
+or universal ownership. Productworktreeclean and sourcechain17+12 matched. No
+canonical pnpmcheck/lint/types/build/Vitest104/CLI/native rerun C40. QA ROOT exact
+new clean product596 required before future complete independent FULLs. Prior
+Root01a1888QA is historical for this changed product; no transfer.

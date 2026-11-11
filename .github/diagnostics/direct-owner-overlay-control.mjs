@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, readlinkSync, lstatSync, writeFile
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const product = '01a5d56c00da7fce17657ba808e7218922c49219'
+export const product = '596bee47faff3d9026bb993a8faa41b4de3b1689'
 export const historicalWorkflowReference = Object.freeze({
   commit: '7aac8c145f1e44d764c9f7150b01727fd0a1f19d',
   path: '.github/workflows/webkit-dependency-regression.yaml',
@@ -143,7 +143,8 @@ export function restoreTestOverlays(root, evidence, originals, unitOnly = false)
   for (const target of chosen) {
     try {
       const spec = manifest.files[target]
-      assert.equal(hash(originals[target]), spec.originalSHA256, 'Immutable original hash mismatch')
+      const original = typeof originals === 'function' ? originals(target) : originals[target]
+      assert.equal(hash(original), spec.originalSHA256, 'Immutable original hash mismatch')
 
       const file = join(root, target)
       const before = existsSync(file) ? readFileSync(file) : Buffer.alloc(0)
@@ -153,7 +154,7 @@ export function restoreTestOverlays(root, evidence, originals, unitOnly = false)
         mkdirSync(evidence, { recursive: true })
         writeFileSync(join(evidence, `unexpected-test-${targets.indexOf(target)}.private`), before)
       }
-      writeFileSync(file, originals[target])
+      writeFileSync(file, original)
       assert.equal(hash(readFileSync(file)), spec.originalSHA256)
     }
     catch (error) {
@@ -167,7 +168,7 @@ export function restoreTestOverlays(root, evidence, originals, unitOnly = false)
   return { originalRestored: true, knownBefore, unitOnly, productQualified: false }
 }
 function pinnedOriginals(root) {
-  return Object.fromEntries(targets.map(target => [target, git(root, 'show', `${product}:${target}`)]))
+  return target => git(root, 'show', `${product}:${target}`)
 }
 function trackedManifest(root) {
   const files = git(root, 'ls-files', '-z').toString().split('\0').filter(value => value && !targets.includes(value))

@@ -11,6 +11,18 @@ import { createContext, runInContext, runInNewContext } from 'node:vm'
 import { applyTestOverlays, restoreTestOverlays, product, verifySourceTrustedChain, selectedSourceGateScript, sourceGateCommands, historicalWorkflowReference, historicalSourceWorkflow, verifyHistoricalSourceAcquisition } from './direct-owner-overlay-control.mjs'
 import { observeDirectOwners, projectDirectOwners, createDirectOwnerObserver } from './direct-owner-probe.mjs'
 
+function recorderBootstrapSource() {
+  const reference = process.env.C40_RECORDER_REFERENCE
+  if (!reference)
+    return observeDirectOwners.toString()
+  assert.match(reference, /^[a-f0-9]{40}$/)
+  const source = execFileSync('git', ['show', `${reference}:.github/diagnostics/direct-owner-probe.mjs`], { encoding: 'utf8' })
+  const start = source.indexOf('export function observeDirectOwners(')
+  const end = source.indexOf('\nfunction errorIdentity(', start)
+  assert(start >= 0 && end > start)
+  return source.slice(start, end).replace('export function', 'function')
+}
+
 function fixture(t, options = {}) {
   const originalAny = AbortSignal.any
   const anyInputs = []
@@ -80,7 +92,7 @@ function fixture(t, options = {}) {
   const installationScope = { installationId: options.installationId ?? 'private', installationSlug: options.installationSlug ?? 'private' }
   if (options.installationSlug)
     runInContext(`location.pathname=${JSON.stringify('/installations/' + options.installationSlug + '/agents')};location.href=location.origin+location.pathname`, context)
-  runInContext(`(${observeDirectOwners.toString()})(${JSON.stringify(installationScope)})`, context)
+  runInContext(`(${recorderBootstrapSource()})(${JSON.stringify(installationScope)})`, context)
   const ownWindow = runInContext('window', context)
   const invokeFetch = (...args) => Reflect.apply(context.fetch, ownWindow, args)
   const generation = new AbortController()
@@ -549,7 +561,7 @@ async function completeSourceReceipt(t, options = {}) {
       lifecycleCallback(event);
     }`, f.context)
   }
-  return f.snapshot().journal
+  return options.returnFixture ? f : f.snapshot().journal
 }
 const completeClosure = { pageClosed: true, gateClosed: true, cleanupFailureCount: 0 }
 
@@ -923,7 +935,7 @@ for (const mode of ['restore-failure', 'hash-failure', 'identity-unknown', 'succ
 async function restorationSource(f) {
   const reference = process.env.C40_RESTORE_REFERENCE
   if (!reference)
-    return { applyTestOverlays, restoreTestOverlays }
+    return { applyTestOverlays, restoreTestOverlays, product, sourceFile: fileURLToPath(new URL('./direct-owner-overlay-control.mjs', import.meta.url)) }
   assert.match(reference, /^[a-f0-9]{40}$/)
   const directory = path.join(f.root, 'owned-reference-control')
   mkdirSync(directory)
@@ -931,7 +943,13 @@ async function restorationSource(f) {
     const bytes = execFileSync('git', ['show', `${reference}:.github/diagnostics/${name}`])
     writeFileSync(path.join(directory, name), bytes)
   }
-  return import(pathToFileURL(path.join(directory, 'direct-owner-overlay-control.mjs')).href)
+  const sourceFile = path.join(directory, 'direct-owner-overlay-control.mjs')
+  const controller = await import(pathToFileURL(sourceFile).href)
+  for (const target of f.targets) {
+    f.originals[target] = execFileSync('git', ['show', `${controller.product}:${target}`])
+    writeFileSync(path.join(f.root, target), f.originals[target])
+  }
+  return { ...controller, sourceFile }
 }
 
 for (const mode of ['first-read-failure', 'first-preservation-failure', 'both-read-failures', 'first-original-hash-failure']) {
@@ -973,5 +991,98 @@ for (const mode of ['first-read-failure', 'first-preservation-failure', 'both-re
       assert.equal(readFileSync(path.join(f.root, f.targets[0]), 'utf8'), 'UNKNOWN SOURCE BYTES MUST REMAIN')
     if (mode === 'first-original-hash-failure')
       assert.deepEqual(readFileSync(path.join(f.root, f.targets[0])), beforeFirst)
+  })
+}
+
+
+for (const failure of ['binding-rejection', 'metadata-failure']) {
+  test(`R86 actual recorder retains ${failure} across source document replacement and refuses partial evidence`, async (t) => {
+    const f = await completeSourceReceipt(t, { returnFixture: true })
+    const sufficientBeforeFailure = f.snapshot().journal
+    assert.equal(projectDirectOwners(sufficientBeforeFailure, privateErrors, 0, completeClosure).receiptStatus, 'SOURCE_CONDITIONAL_PARTIAL')
+    if (failure === 'binding-rejection') {
+      f.context.__c40RecordDirectOwner = () => Promise.reject(new Error('controlled original binding failure'))
+      f.context.failedLifecycle = f.callbacks.get('beforeunload')
+      runInContext(`{
+        const event = new BeforeUnloadEvent('beforeunload');
+        Object.defineProperties(event, {isTrusted:{value:true},target:{value:document},currentTarget:{value:window}});
+        failedLifecycle(event);
+      }`, f.context)
+      await setImmediate()
+    }
+    else {
+      const original = Promise.resolve(Response.json({ original: true }))
+      f.queue.push({ promise: original })
+      const options = new Proxy({ method: 'POST', signal: f.signal() }, { getOwnPropertyDescriptor() { throw new Error('controlled metadata observation failure') } })
+      assert.equal(f.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', options), original)
+      await original
+    }
+    assert.equal(f.snapshot().observerFailures > 0, true)
+    // SOURCE-only replacement: a new bootstrap closure/document shares the real
+    // journal storage adapter. No native navigation or generation correlation.
+    runInContext("delete window.__c40DirectOwnerReceipt; document={defaultView:window};cairnAvailabilityDocument='REPLACEMENT_SOURCE_DOCUMENT';location.pathname='/health'", f.context)
+    runInContext(`(${recorderBootstrapSource()})(${JSON.stringify(f.installationScope)})`, f.context)
+    const afterReplacement = f.snapshot()
+    assert.equal(afterReplacement.observerFailures > 0, true)
+    const projected = projectDirectOwners(sufficientBeforeFailure, privateErrors, afterReplacement.observerFailures, completeClosure)
+    assert.equal(projected.receiptStatus, 'UNKNOWN')
+  })
+}
+
+
+function partialOriginalObjectView(f, selectedProduct) {
+  const objects = path.join(f.root, 'owned-partial-git-objects')
+  mkdirSync(objects)
+  const env = { ...process.env, GIT_OBJECT_DIRECTORY: objects, GIT_ALTERNATE_OBJECT_DIRECTORIES: '', GIT_NO_LAZY_FETCH: '1' }
+  const attributes = execFileSync('git', ['rev-parse', `${selectedProduct}:.gitattributes`], { encoding: 'utf8' }).trim()
+  const entries = [[attributes, 'blob'], [selectedProduct, 'commit']]
+  for (const tree of ['', ':tests', ':tests/e2e', ':apps', ':apps/web', ':apps/web/tests']) {
+    const expression = tree ? selectedProduct + tree : selectedProduct + '^{tree}'
+    entries.push([execFileSync('git', ['rev-parse', expression], { encoding: 'utf8' }).trim(), 'tree'])
+  }
+  entries.push([execFileSync('git', ['rev-parse', `${selectedProduct}:${f.targets[1]}`], { encoding: 'utf8' }).trim(), 'blob'])
+  for (const [id, type] of entries) {
+    const bytes = execFileSync('git', ['cat-file', type, id])
+    const written = execFileSync('git', ['hash-object', '-w', '-t', type, '--stdin'], { input: bytes, env, encoding: 'utf8' }).trim()
+    assert.equal(written, id)
+  }
+  return env
+}
+
+for (const phase of ['restore', 'restore-unit']) {
+  test(`H87 actual CLI ${phase} acquires only each chosen original and restores the available unit`, async (t) => {
+    const f = sourceFiles(t)
+    const controller = await restorationSource(f)
+    controller.applyTestOverlays(f.root)
+    const env = partialOriginalObjectView(f, controller.product)
+    const missing = spawnSync('git', ['show', `${controller.product}:${f.targets[0]}`], { cwd: f.root, env, encoding: 'utf8' })
+    assert.notEqual(missing.status, 0)
+    const available = execFileSync('git', ['show', `${controller.product}:${f.targets[1]}`], { cwd: f.root, env })
+    assert.deepEqual(available, f.originals[f.targets[1]])
+    const result = spawnSync(process.execPath, [controller.sourceFile, phase], { cwd: f.root, env: { ...env, C40_EVIDENCE_DIR: f.evidence }, encoding: 'utf8' })
+    // Missing full runtime-binding metadata keeps this deliberately partial
+    // fixture RED; the assertion is the actual chosen-resource acquisition.
+    assert.notEqual(result.status, 0)
+    assert.deepEqual(readFileSync(path.join(f.root, f.targets[1])), f.originals[f.targets[1]])
+    if (phase === 'restore-unit') {
+      const receipt = JSON.parse(readFileSync(path.join(f.evidence, 'restore-unit-receipt.json'), 'utf8'))
+      assert.equal(receipt.unitOnly, true)
+      assert.equal(receipt.originalRestored, true)
+    }
+  })
+}
+
+
+for (const evidence of ['missing', 'corrupt']) {
+  test(`R86 actual recorder refuses ${evidence} persistent failure evidence`, (t) => {
+    const f = fixture(t)
+    const key = '__c40_direct_owner_journal_v1:observer-failure'
+    if (evidence === 'missing')
+      f.storage.delete(key)
+    else
+      f.storage.set(key, 'CORRUPT_SOURCE_EVIDENCE')
+    const snapshot = f.snapshot()
+    assert.equal(snapshot.observerFailures > 0, true)
+    assert.equal(projectDirectOwners(snapshot.journal, [], snapshot.observerFailures, completeClosure).receiptStatus, 'UNKNOWN')
   })
 }

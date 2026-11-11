@@ -38,6 +38,31 @@ export function observeDirectOwners(installationScope) {
   let sourceOrdinal = 0
   let requestOrdinal = 0
   let observerFailures = 0
+  const failureKey = key + ':observer-failure'
+  // Sticky same-origin failure evidence survives a new bootstrap closure.
+  // The numeric snapshot is a conservative lower bound, never proof of no loss.
+  const noteObserverFailure = () => {
+    observerFailures++
+    try { sessionStorage.setItem(failureKey, '1') }
+    catch { /* Local failure still forces UNKNOWN in this document. */ }
+  }
+  try {
+    const prior = sessionStorage.getItem(failureKey)
+    if (prior === null) {
+      const journal = JSON.parse(sessionStorage.getItem(key) || '[]')
+      if (!Array.isArray(journal) || journal.length > 0)
+        noteObserverFailure()
+      else
+        sessionStorage.setItem(failureKey, '0')
+    }
+    else if (prior === '1') {
+      observerFailures = 1
+    }
+    else if (prior !== '0') {
+      noteObserverFailure()
+    }
+  }
+  catch { noteObserverFailure() }
   const ownContext = () => ownerWindow.document === ownerDocument && ownerDocument.defaultView === ownerWindow && ownerWindow.top === ownerWindow
   const record = (kind, detail = {}) => {
     try {
@@ -63,10 +88,10 @@ export function observeDirectOwners(installationScope) {
       journal.push(event)
       sessionStorage.setItem(key, JSON.stringify(journal))
       const pending = window.__c40RecordDirectOwner(event)
-      void Reflect.apply(then, pending, [undefined, () => { observerFailures++ }])
+      void Reflect.apply(then, pending, [undefined, () => { noteObserverFailure() }])
     }
     catch {
-      observerFailures++
+      noteObserverFailure()
     }
   }
   const ordinaryData = (value) => {
@@ -134,12 +159,12 @@ export function observeDirectOwners(installationScope) {
   const observe = (promise, fulfilled, rejected) => {
     try {
       const observation = Reflect.apply(then, promise, [
-        value => { try { fulfilled?.(value) } catch { observerFailures++ } },
-        cause => { try { rejected?.(cause) } catch { observerFailures++ } },
+        value => { try { fulfilled?.(value) } catch { noteObserverFailure() } },
+        cause => { try { rejected?.(cause) } catch { noteObserverFailure() } },
       ])
-      void Reflect.apply(then, observation, [undefined, () => { observerFailures++ }])
+      void Reflect.apply(then, observation, [undefined, () => { noteObserverFailure() }])
     }
-    catch { observerFailures++ }
+    catch { noteObserverFailure() }
   }
   const signalState = (signal, cause) => {
     try {
@@ -164,7 +189,7 @@ export function observeDirectOwners(installationScope) {
   }
   const sourceRecord = (kind, meta, source, detail = {}) => {
     try { record(kind, { ...meta, ...detail, readyState: source.readyState }) }
-    catch { observerFailures++ }
+    catch { noteObserverFailure() }
   }
   const trackParent = (signal, role) => {
     let owner = signalOwners.get(signal)
@@ -200,7 +225,7 @@ export function observeDirectOwners(installationScope) {
         }
       }
     }
-    catch { observerFailures++ }
+    catch { noteObserverFailure() }
     // Validate supported iteration BEFORE the native call can remove/mutate it.
     // Do not consume any iterator for observation; return the ORIGINAL result.
     const result = Reflect.apply(any, this, args)
@@ -208,7 +233,7 @@ export function observeDirectOwners(installationScope) {
       if (parents)
         parentSets.set(result, parents)
     }
-    catch { observerFailures++ }
+    catch { noteObserverFailure() }
     return result
   }
   window.AbortController.prototype.abort = function (...args) {
@@ -221,17 +246,17 @@ export function observeDirectOwners(installationScope) {
     abortCalls.push(call)
     try {
       try { record('parent-abort-call-enter', { ...owner, alreadyAborted: Reflect.apply(abortedGetter, signal, []) }) }
-      catch { observerFailures++ }
+      catch { noteObserverFailure() }
       return Reflect.apply(abort, this, args)
     }
     finally {
       try { record('parent-abort-call-return', { ...owner, aborted: Reflect.apply(abortedGetter, signal, []) }) }
-      catch { observerFailures++ }
+      catch { noteObserverFailure() }
       const index = abortCalls.lastIndexOf(call)
       if (index >= 0)
         abortCalls.splice(index, 1)
       else
-        observerFailures++
+        noteObserverFailure()
     }
   }
   const controlIdentity = meta => ({ installation: meta.installation, category: meta.category, connection: meta.connection, request: meta.request, owner: meta.owner, generationOwner: meta.generationOwner, method: meta.method })
@@ -243,7 +268,7 @@ export function observeDirectOwners(installationScope) {
       const path = inspect(args[0])
       const data = path ? requestData(args[1]) : null
       if (path && !data)
-        observerFailures++
+        noteObserverFailure()
       const signal = data?.signal
       const parents = signal && parentSets.get(signal)
       if (path && path.category !== 'events') {
@@ -262,7 +287,7 @@ export function observeDirectOwners(installationScope) {
         record('control-start', { ...controlIdentity(meta), parentIdentityKnown: Boolean(parents), ...state(signal, control, generation) })
       }
     }
-    catch { observerFailures++ }
+    catch { noteObserverFailure() }
     let original
     try { original = Reflect.apply(fetch, this, args) }
     catch (cause) {
@@ -318,7 +343,7 @@ export function observeDirectOwners(installationScope) {
           }
         }
       }
-      catch { observerFailures++ }
+      catch { noteObserverFailure() }
       return original
     },
   })
@@ -357,11 +382,16 @@ export function observeDirectOwners(installationScope) {
         record('window-error-ambiguous-original-cause', { nativeTrusted: event.isTrusted === true, nativeEventTime: event.timeStamp })
       }
     }
-    catch { observerFailures++ }
+    catch { noteObserverFailure() }
   })
   window[api] = {
     snapshot() {
-      try { return { journal: JSON.parse(sessionStorage.getItem(key) || '[]'), observerFailures } }
+      try {
+        const prior = sessionStorage.getItem(failureKey)
+        if (prior !== '0' && prior !== '1')
+          throw new Error('Observer failure evidence UNKNOWN')
+        return { journal: JSON.parse(sessionStorage.getItem(key) || '[]'), observerFailures: Math.max(observerFailures, prior === '1' ? 1 : 0) }
+      }
       catch { return { journal: [], observerFailures: observerFailures + 1 } }
     },
   }

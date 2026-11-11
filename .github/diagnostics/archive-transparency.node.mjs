@@ -619,6 +619,7 @@ function oauthXhrFixture(settings = {}) {
   }
   const fetchCalls = []
   const probes = []
+  const diagnosticTasks = []
   const fetchResult = settings.fetchResult ?? Promise.resolve('original fetch SOURCE result')
   const context = createContext({
     XMLHttpRequest: OriginalXhr, AbortSignal, AbortController, EventTarget,
@@ -630,11 +631,12 @@ function oauthXhrFixture(settings = {}) {
         void args[1]?.signal
       return fetchResult
     },
-    cairnOAuthProbe(value) { probes.push(value); return Promise.resolve() },
+    queueMicrotask(callback) { diagnosticTasks.push(callback) },
+    cairnOAuthProbe(value) { probes.push(value); if (settings.probeFailure) throw settings.probeFailure; return Promise.resolve() },
   })
   runInContext('globalThis.window = globalThis', context)
   runInContext(`(${source.slice(start, end)})(false)`, context)
-  return { Xhr: OriginalXhr, calls, openResult, sendResult, context, fetchCalls, fetchResult, probes, ownerWindow: runInContext('window', context), wrappedFetch: runInContext('window.fetch', context) }
+  return { Xhr: OriginalXhr, calls, openResult, sendResult, context, fetchCalls, fetchResult, probes, diagnosticTasks, ownerWindow: runInContext('window', context), wrappedFetch: runInContext('window.fetch', context) }
 }
 
 test('H84 actual OAuth XHR bootstrap preserves real two-argument open and omitted send argument', () => {
@@ -786,4 +788,40 @@ test('H85 actual nativeDiagnostics serialized abort preserves unqualified receiv
   assert.equal(f.abortCalls.length, 1)
   assert.equal(f.abortCalls[0].receiver, undefined)
   assert.deepEqual(f.abortCalls[0].args, args)
+})
+
+
+for (const terminal of ['success', 'rejection']) {
+  test(`H87 actual OAuth metadata failure preserves original Fetch ${terminal} and becomes diagnostic failure`, async () => {
+    const originalCause = new TypeError('original Fetch terminal SOURCE')
+    const original = terminal === 'success' ? Promise.resolve('original SOURCE result') : Promise.reject(originalCause)
+    const settled = terminal === 'rejection' ? assert.rejects(original, error => error === originalCause) : original
+    const f = oauthXhrFixture({ fetchResult: original, nativeSignalRead: true })
+    const metadataCause = new Error('descriptor observation SOURCE failure')
+    const options = new Proxy({ signal: new AbortController().signal }, {
+      get(target, key, receiver) { return Reflect.get(target, key, receiver) },
+      getOwnPropertyDescriptor() { throw metadataCause },
+    })
+    let result
+    assert.doesNotThrow(() => { result = invokeOAuthFetch(f, 'ownerWindow', ['/api/installations/source/direct/authorize', options]) })
+    assert.equal(result, original)
+    assert.equal(f.fetchCalls.length, 1)
+    assert.equal(f.fetchCalls[0].receiver, f.ownerWindow)
+    assert.equal(f.fetchCalls[0].args[1], options)
+    assert.deepEqual(f.probes.map(value => value.kind), ['observer-error'])
+    await settled
+    // Proxy is OUTSIDE producer membership; this checks transparency, not admission.
+  })
+}
+
+test('H87 actual OAuth diagnostic reporter failure cannot replace the original Promise', () => {
+  const reportCause = new Error('original diagnostic reporter SOURCE failure')
+  const f = oauthXhrFixture({ probeFailure: reportCause })
+  const options = new Proxy({}, { getOwnPropertyDescriptor() { throw new Error('metadata SOURCE failure') } })
+  let result
+  assert.doesNotThrow(() => { result = invokeOAuthFetch(f, 'ownerWindow', ['/api/installations/source/direct/authorize', options]) })
+  assert.equal(result, f.fetchResult)
+  assert.equal(f.fetchCalls.length, 1)
+  assert.equal(f.diagnosticTasks.length, 1)
+  assert.throws(() => f.diagnosticTasks[0](), error => error === reportCause)
 })
