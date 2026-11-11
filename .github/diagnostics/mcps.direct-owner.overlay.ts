@@ -844,7 +844,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
 
 availabilityTest('availability preserves a scoped readonly outage before native navigation', async ({ page, workspace, responseGate }, testInfo) => {
   const { createDirectOwnerObserver } = await import('../../test-results/direct-owner-receipt/direct-owner-probe.mjs')
-  const directOwner = createDirectOwnerObserver(page)
+  const directOwner = createDirectOwnerObserver(page, { installationId: workspace.installationId, installationSlug: workspace.installationSlug })
   let directOwnerPageClosed = false
   let directOwnerGateClosed = false
   const reads: AvailabilityReadEvent[] = []

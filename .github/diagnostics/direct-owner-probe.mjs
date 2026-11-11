@@ -6,7 +6,7 @@ import { closedTargetBound } from './closed-target-error.mjs'
 // pinned producer/delegate chain; this code does not detect arbitrary Proxies.
 // All identities below stay private; publication
 // is exclusively through projectDirectOwners. No original promise is replaced.
-export function observeDirectOwners() {
+export function observeDirectOwners(installationScope) {
   'use strict'
   const key = '__c40_direct_owner_journal_v1'
   const api = '__c40DirectOwnerReceipt'
@@ -45,13 +45,16 @@ export function observeDirectOwners() {
       if (!Array.isArray(journal))
         throw new Error('Unknown private journal')
       const route = /^\/installations\/([^/]+)\/agents$/.exec(location.pathname)
-      const documentInstallation = route ? decodeURIComponent(route[1]) : null
+      const routeIdentity = route ? decodeURIComponent(route[1]) : null
+      const mappingKnown = typeof installationScope?.installationId === 'string' && installationScope.installationId.length > 0 && typeof installationScope?.installationSlug === 'string' && installationScope.installationSlug.length > 0
+      const documentInstallation = mappingKnown && (routeIdentity === installationScope.installationSlug || routeIdentity === installationScope.installationId) ? installationScope.installationId : null
       const event = {
         kind,
         sequence: journal.length + 1,
         document: typeof window.cairnAvailabilityDocument === 'string' ? window.cairnAvailabilityDocument : null,
         agentsDocument: documentInstallation !== null,
         documentInstallation,
+        documentInstallationMappingKnown: documentInstallation !== null,
         installationMatchesDocument: typeof detail.installation === 'string' && documentInstallation !== null ? detail.installation === documentInstallation : null,
         ownContext: ownContext(),
         browserTime: performance.now(),
@@ -391,7 +394,7 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
   const generationOwner = generations.length === 1 ? generations[0] : null
   const related = journal.filter(event => document && event.document === document && (event.connection === connection || event.owner === owner || (generationOwner !== null && event.owner === generationOwner) || ['beforeunload', 'pagehide'].includes(event.kind)))
   const allowedKinds = ['grant-observed','control-start','control-headers','control-threw','control-rejected-reaction','request-abort-event','parent-abort-event','parent-abort-call-enter','parent-abort-call-return','source-created','source-open-event','source-error-event','source-close-enter','source-close-return','source-close-threw','beforeunload','pagehide','window-error-same-original-cause']
-  const booleans = ['agentsDocument','ownContext','installationMatchesDocument','parentIdentityKnown','requestSignalKnown','requestAborted','controlSignalKnown','controlAborted','generationSignalKnown','generationAborted','requestReasonMatches','controlReasonMatches','generationReasonMatches','nativeTrusted','insideOwnAbortCall','grantMatched','alreadyAborted','aborted']
+  const booleans = ['agentsDocument','ownContext','documentInstallationMappingKnown','installationMatchesDocument','parentIdentityKnown','requestSignalKnown','requestAborted','controlSignalKnown','controlAborted','generationSignalKnown','generationAborted','requestReasonMatches','controlReasonMatches','generationReasonMatches','nativeTrusted','insideOwnAbortCall','grantMatched','alreadyAborted','aborted']
   const events = related.map((event) => {
     const out = {
       kind: allowedKinds.includes(event.kind) ? event.kind : 'UNKNOWN',
@@ -456,6 +459,7 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
     runtimeProducerReceipt: false,
     proxyDetection: 'NOT_PROVIDED',
     nativeGenerationPublicationCorrelation: false,
+    installationScopeBasis: 'Pinned Workspace fixture installationId/installationSlug binding plus current document route; no slug-as-UUID inference or producer receipt',
     ownershipRoleBasis: 'Conditional association for the reviewed pinned producers and complete delegate chain; descriptor agreement is not universal runtime membership or a Vue publication receipt',
     pageErrorCount: pageErrors.length,
     errorKinds: identities.map(value => value?.category ?? 'UNKNOWN'),
@@ -494,7 +498,10 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
   }
 }
 
-export function createDirectOwnerObserver(page) {
+export function createDirectOwnerObserver(page, installationScope) {
+  if (!installationScope || typeof installationScope.installationId !== 'string' || !installationScope.installationId || typeof installationScope.installationSlug !== 'string' || !installationScope.installationSlug)
+    throw new Error('Source-trusted installation mapping unavailable')
+  const boundScope = Object.freeze({ installationId: installationScope.installationId, installationSlug: installationScope.installationSlug })
   const journal = new Map()
   const pageErrors = []
   const conflicts = []
@@ -533,7 +540,7 @@ export function createDirectOwnerObserver(page) {
       await closedTargetBound(() => page.exposeFunction('__c40RecordDirectOwner', (event) => {
         acceptEvent(event, performance.now())
       }), 'direct owner binding')
-      await closedTargetBound(() => page.addInitScript(observeDirectOwners), 'direct owner bootstrap')
+      await closedTargetBound(() => page.addInitScript(observeDirectOwners, boundScope), 'direct owner bootstrap')
     },
     accept(snapshot) {
       if (!snapshot || !Array.isArray(snapshot.journal) || !Number.isSafeInteger(snapshot.observerFailures) || snapshot.observerFailures < 0) {

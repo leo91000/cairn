@@ -77,21 +77,24 @@ function fixture(t, options = {}) {
     addEventListener: (name, callback) => { callbacks.set(name, callback) },
   })
   runInContext("window=globalThis; top=window; document={defaultView:window}; location={href:'http://localhost:4422/installations/private/agents',origin:'http://localhost:4422',pathname:'/installations/private/agents'}; cairnAvailabilityDocument='PRIVATE_DOCUMENT_CANARY'", context)
-  runInContext(`(${observeDirectOwners.toString()})()`, context)
+  const installationScope = { installationId: options.installationId ?? 'private', installationSlug: options.installationSlug ?? 'private' }
+  if (options.installationSlug)
+    runInContext(`location.pathname=${JSON.stringify('/installations/' + options.installationSlug + '/agents')};location.href=location.origin+location.pathname`, context)
+  runInContext(`(${observeDirectOwners.toString()})(${JSON.stringify(installationScope)})`, context)
   const ownWindow = runInContext('window', context)
   const invokeFetch = (...args) => Reflect.apply(context.fetch, ownWindow, args)
   const generation = new AbortController()
   const control = new AbortController()
   const signal = () => context.AbortSignal.any([generation.signal, control.signal])
   return {
-    context, fetch: invokeFetch, Source, generation, control, signal, queue, requests, storage, ingresses,
+    context, fetch: invokeFetch, Source, generation, control, signal, queue, requests, storage, ingresses, installationScope,
     closeResult, originalJsonPromises, callbacks, unwrappedAbort: originalAbort, anyInputs, anyResults,
     snapshot: () => context.__c40DirectOwnerReceipt.snapshot(),
-    async authorize(sourceInstallation = 'private') {
+    async authorize(sourceInstallation = installationScope.installationId) {
       const native = Promise.withResolvers()
       queue.push(native)
       const options = { method: 'POST', signal: signal() }
-      const returned = invokeFetch('/api/installations/private/direct/authorize', options)
+      const returned = invokeFetch(`/api/installations/${installationScope.installationId}/direct/authorize`, options)
       assert.equal(returned, native.promise)
       native.resolve(Response.json({ available: true, grant: { claims: { connection_id: 'PRIVATE_CONNECTION_CANARY', token: 'NEVER_PUBLISH' } } }))
       const response = await returned
@@ -230,13 +233,15 @@ test('actual controller installs the same bootstrap, owns its listener and never
   const page = new EventEmitter()
   let callback
   let script
+  let bootstrapScope
   page.exposeFunction = async (_, value) => { callback = value }
-  page.addInitScript = async value => { script = value }
+  page.addInitScript = async (value, scope) => { script = value; bootstrapScope = scope }
   const errors = []
   page.on('pageerror', error => errors.push(error))
-  const controller = createDirectOwnerObserver(page)
+  const controller = createDirectOwnerObserver(page, { installationId: 'private', installationSlug: 'private' })
   await controller.install()
   assert.equal(script, observeDirectOwners)
+  assert.deepEqual(bootstrapScope, { installationId: 'private', installationSlug: 'private' })
   const cause = new Error('/direct/private/signal')
   page.emit('pageerror', cause)
   assert.equal(errors[0], cause)
@@ -252,7 +257,7 @@ test('actual existing bound keeps stalled installation red; it never starts a la
   page.exposeFunction = () => new Promise(() => {})
   let starts = 0
   page.addInitScript = async () => { starts++ }
-  const controller = createDirectOwnerObserver(page)
+  const controller = createDirectOwnerObserver(page, { installationId: 'private', installationSlug: 'private' })
   const pending = controller.install()
   const rejected = assert.rejects(pending, /observation deadline/)
   await setImmediate()
@@ -302,7 +307,7 @@ test('controller disposal failure is explicit and does not throw over a workload
   const page = new EventEmitter()
   page.exposeFunction = async () => {}
   page.addInitScript = async () => {}
-  const controller = createDirectOwnerObserver(page)
+  const controller = createDirectOwnerObserver(page, { installationId: 'private', installationSlug: 'private' })
   await controller.install()
   page.off = () => { throw new Error('controlled observer retirement failure') }
   assert.equal(controller.dispose(), false)
@@ -523,12 +528,12 @@ test('close provenance does not turn an original thrown close into a known retur
 
 
 async function completeSourceReceipt(t, options = {}) {
-  const f = fixture(t)
-  const source = await f.authorize(options.sourceInstallation ?? 'private')
+  const f = fixture(t, options)
+  const source = await f.authorize(options.sourceInstallation ?? f.installationScope.installationId)
   const native = Promise.withResolvers()
   f.queue.push(native)
   const signal = options.alternateGeneration ? f.context.AbortSignal.any([new AbortController().signal, f.control.signal]) : f.signal()
-  const original = f.fetch(`/api/installations/${options.requestInstallation ?? 'private'}/direct/PRIVATE_CONNECTION_CANARY/signal`, { method: options.method ?? 'POST', signal })
+  const original = f.fetch(`/api/installations/${options.requestInstallation ?? f.installationScope.installationId}/direct/PRIVATE_CONNECTION_CANARY/signal`, { method: options.method ?? 'POST', signal })
   const cause = new TypeError('same original controlled source terminal')
   native.reject(cause)
   await assert.rejects(original, value => value === cause)
@@ -566,7 +571,7 @@ test('H76 actual binding and snapshot retain conflicting receipts and refuse pro
   let binding
   page.exposeFunction = async (_, callback) => { binding = callback }
   page.addInitScript = async () => {}
-  const controller = createDirectOwnerObserver(page)
+  const controller = createDirectOwnerObserver(page, { installationId: 'private', installationSlug: 'private' })
   await controller.install()
   t.after(() => controller.dispose())
   for (const error of privateErrors)
@@ -794,4 +799,32 @@ test('SOURCE-TRUSTED declaration never admits a universal or runtime producer re
     manifest.sourceTrusted[key] = true
     assert.throws(() => verifySourceTrustedChain(process.cwd(), path.dirname(fileURLToPath(import.meta.url)), manifest))
   }
+})
+
+
+test('H81 actual route slug and Direct API UUID are coherently bound without treating them as equal', async (t) => {
+  const id = '11111111-1111-4111-8111-111111111111'
+  const journal = await completeSourceReceipt(t, { installationId: id, installationSlug: 'source-installation-slug' })
+  const errors = privateErrors.map(value => ({ message: value.message.replace('/installations/private/', `/installations/${id}/`) }))
+  const out = projectDirectOwners(journal, errors, 0, completeClosure)
+  assert.equal(out.receiptStatus, 'SOURCE_CONDITIONAL_PARTIAL')
+  assert.equal(out.ownerReactionStateKnown, true)
+  assert.equal(out.sourceCloseProvenanceKnown, true)
+  assert.equal(JSON.stringify(out).includes(id), false)
+  assert.equal(JSON.stringify(out).includes('source-installation-slug'), false)
+})
+
+
+test('H81 missing source fixture mapping is a diagnostic setup failure before any native action', () => {
+  const page = new EventEmitter()
+  assert.throws(() => createDirectOwnerObserver(page), /installation mapping unavailable/)
+  assert.throws(() => createDirectOwnerObserver(page, { installationId: '', installationSlug: 'route' }), /installation mapping unavailable/)
+  assert.equal(page.listenerCount('pageerror'), 0)
+})
+
+test('H81 a foreign API UUID cannot borrow a valid slug mapping', async (t) => {
+  const id = '11111111-1111-4111-8111-111111111111'
+  const journal = await completeSourceReceipt(t, { installationId: id, installationSlug: 'source-installation-slug', sourceInstallation: 'FOREIGN_INSTALLATION', requestInstallation: 'FOREIGN_INSTALLATION' })
+  const errors = privateErrors.map(value => ({ message: value.message.replace('/installations/private/', '/installations/FOREIGN_INSTALLATION/') }))
+  assert.equal(projectDirectOwners(journal, errors, 0, completeClosure).receiptStatus, 'UNKNOWN')
 })

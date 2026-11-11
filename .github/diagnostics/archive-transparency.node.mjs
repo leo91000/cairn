@@ -113,10 +113,10 @@ function fixture(t, name, settings = {}) {
   if (settings.localRealmData)
     runInContext('Object=({}).constructor;Array=[].constructor;', context)
   if (settings.directOrder === 'direct-first')
-    runInContext(`(${observeDirectOwners.toString()})()`, context)
+    runInContext(`(${observeDirectOwners.toString()})({installationId:'source-id',installationSlug:'source-slug'})`, context)
   runInContext(`(${bootstrap})(${name === 'availability-reader-native.mjs' ? JSON.stringify('pre-pagehide-original-body') : ''});`, context)
   if (settings.directOrder === 'direct-last')
-    runInContext(`(${observeDirectOwners.toString()})()`, context)
+    runInContext(`(${observeDirectOwners.toString()})({installationId:'source-id',installationSlug:'source-slug'})`, context)
   const ownWindow = runInContext('window', context)
   const fetch = (...args) => Reflect.apply(context.fetch, ownWindow, args)
   return { context, fetch, queue, calls, bodyCalls, events, closeResult, NativeSource, abortCalls, abortResult, storage, directEvents }

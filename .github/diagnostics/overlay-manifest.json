@@ -3,7 +3,7 @@
   "files": {
     "tests/e2e/mcps.spec.ts": {
       "originalSHA256": "43a9659c3bb8e176438025cc7812c6d72a5aec9308b9bc038f6745d5764fb43d",
-      "overlaySHA256": "a6c10c1982234924326a082b5d0f35dc9571b1de805f3ee69516e0b6482d125c",
+      "overlaySHA256": "33465fefa82cff152553b4a7f592cbe8a83aabd9bd898c9ac2fc6b7de6fbc9b7",
       "overlayFile": "mcps.direct-owner.overlay.ts"
     },
     "apps/web/tests/direct-transport.test.ts": {
@@ -24,6 +24,15 @@
     "runtimeProducerReceipt": false,
     "runtimeProxyDetection": false,
     "producerMembership": "Independent pinned source review precondition, not per-request runtime admission",
+    "installationMapping": {
+      "origin": "PINNED_WORKSPACE_FIXTURE_ID_SLUG",
+      "fixture": "tests/e2e/fixtures.ts",
+      "fields": [
+        "workspace.installationId",
+        "workspace.installationSlug"
+      ],
+      "meaning": "Real fixture ID/slug association plus current route; no literal slug-as-UUID comparison, no runtime producer receipt"
+    },
     "productCommit": "bc1c49957146ee2c972c878fc8d80d41d2139847",
     "productTree": "ac8afa8d762ad4ebdc7304702ac1e0b43549628c",
     "observerCommit": "Recorded separately from github.sha in source-binding.json; this manifest is bound by that commit",
@@ -99,8 +108,8 @@
     },
     "observerFiles": {
       "archive-transparency.node.mjs": {
-        "gitBlob": "e54945a2c8c42b3a90c4f9a574f444b0901f0bd0",
-        "sha256": "b7ce9a54964c6ffae94bbbf7af413326df3fa0cfcad045ce2a20fc6292be182a"
+        "gitBlob": "2a8d92f446d1aaa08a953aba82db54edc65eaeee",
+        "sha256": "71ec9f03dadd323442d255dfdde27f553aa7fa3fc97f7f7e59efcf582f42f4fd"
       },
       "availability-reader-native.mjs": {
         "gitBlob": "bdc55a0fc5f026938ddae6a87a8786ff0e33f505",
@@ -115,28 +124,28 @@
         "sha256": "f01d3fc79b710bd2f2c284ec4127f8a4f19dec342e781c8c47e670ea83cc20de"
       },
       "direct-owner-probe.mjs": {
-        "gitBlob": "36e86a6ee97306916a6be74e10df1d67d05a2622",
-        "sha256": "6d632e1f2abe0e9347d426b8fffb67d8857b27b5141b711785e746afe3470afb"
+        "gitBlob": "b41edb1a5333efd0bf8c33ca867cde7578967c86",
+        "sha256": "7c4931eb763073326cce008776a6d592c73e21b434da78e7454bdcd3e9081ee0"
       },
       "direct-owner-probe.d.mts": {
-        "gitBlob": "f1f74b4fbf7884edda45af55c7a2ebdc042f0869",
-        "sha256": "be08f403bc60199c577913be10f666e7dade6f10bd83a8b8734ac777b1c0e08d"
+        "gitBlob": "fa64bb17918cce4167b4f55d3e308b8c272aecac",
+        "sha256": "5530fbbd4e225140aa9bf46f9ab06b3b2e5a5d8efbb2894f116c17206cfa874e"
       },
       "direct-owner-probe.node.mjs": {
-        "gitBlob": "886e49519676bda216a87970baba162b0d620fa3",
-        "sha256": "22db51a521508b89bb3d3ec2a2f7ab8719a3a52118ee5eb597343c8d2c8ed901"
+        "gitBlob": "4426e07dc014f5ead13254fa59bd7ab6066e3328",
+        "sha256": "e8866d28b6cd16e975f915a3f151b2647c9c544616f41e300dcb627e13c0e5da"
       },
       "direct-owner-overlay-control.mjs": {
-        "gitBlob": "04c7b37007e568b78a36d52d2af06bb82e047824",
-        "sha256": "3fc0ce80434e436fbc4903ec571039717a5d9e4e1bc16fd71abc7ff2b5169967"
+        "gitBlob": "5bc35ab776853b2471ddad43db97deeb5d6d17c9",
+        "sha256": "8f4d2097193212937fccbed326d41026f319b310503feb46d58fc0795a2bbeb8"
       },
       "closed-target-error.mjs": {
         "gitBlob": "e4aa4b94c978342a5976e9fcf958f91440113e4b",
         "sha256": "c350fbf99633499c5fc64fba0dbe9fd45f5159da39ebbc5249e300ce123a9cfe"
       },
       "mcps.direct-owner.overlay.ts": {
-        "gitBlob": "68f6bb4a782acd1954a44e7d6384c05915d33200",
-        "sha256": "a6c10c1982234924326a082b5d0f35dc9571b1de805f3ee69516e0b6482d125c"
+        "gitBlob": "db46554fd3ba2e67755e4bf9aa654921d3a158da",
+        "sha256": "33465fefa82cff152553b4a7f592cbe8a83aabd9bd898c9ac2fc6b7de6fbc9b7"
       },
       "direct-transport.seam.overlay.ts": {
         "gitBlob": "be7ea5e7cac357e754e95739e3be05acfc803e21",

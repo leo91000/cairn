@@ -1,5 +1,10 @@
 import type { Page } from '@playwright/test'
 
+export interface DirectOwnerInstallationScope {
+  installationId: string
+  installationSlug: string
+}
+
 export interface DirectOwnerClosure {
   pageClosed: boolean
   gateClosed: boolean
@@ -13,6 +18,7 @@ export interface DirectOwnerProjection {
   universalRuntimeAdmission: false
   runtimeProducerReceipt: false
   proxyDetection: 'NOT_PROVIDED'
+  installationScopeBasis: string
   nativeGenerationPublicationCorrelation: false
   ownerReactionStateKnown: boolean
   sourceCloseProvenanceKnown: boolean
@@ -25,9 +31,9 @@ export interface DirectOwnerProjection {
   nativeOrderingAgainstBothPageErrors: 'UNKNOWN'
 }
 
-export function observeDirectOwners(): void
+export function observeDirectOwners(scope: DirectOwnerInstallationScope): void
 export function projectDirectOwners(journal: unknown, pageErrors: unknown, observerFailures?: unknown, closure?: DirectOwnerClosure): DirectOwnerProjection
-export function createDirectOwnerObserver(page: Page): {
+export function createDirectOwnerObserver(page: Page, scope: DirectOwnerInstallationScope): {
   install: () => Promise<void>
   accept: (snapshot: unknown) => void
   finish: (closure: DirectOwnerClosure) => { privateEvidence: unknown, projection: DirectOwnerProjection }

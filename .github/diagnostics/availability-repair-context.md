@@ -1,8 +1,8 @@
 # SOURCE-TRUSTED diagnostic domain — SOURCE ONLY, NOT runtime qualification
 
 Product **bc1c49957146ee2c972c878fc8d80d41d2139847**, tree **ac8afa8d762ad4ebdc7304702ac1e0b43549628c**,
-parent9235, app/runtime/factory/PR731 immutable. Canonical QA ROOT affected DUE on
-this exact new clean commit before fresh COMPLETE FULLs; oldQA not transferred.
+parent9235, app/runtime/factory/PR731 immutable. Canonical QA ROOT on this exact clean product is ACQUIRED; observer-chain
+changes require affected source validation and fresh FULLs, not duplicate productQA.
 
 ROOT engineering contract A81 SOURCE-TRUSTED_1 is explicit: observations of request
 ownership are conditional on pinned, reviewed REAL producers and their COMPLETE
@@ -275,3 +275,14 @@ Current selected source gate additionally runs the permanent Proxy counterexampl
 and is intentionally RED under unresolved R79; no default green is offered as
 admission/qualification. Root contract decision remains required, not another
 identical QA9235 or a new permission for the already-authorized observer fixes.
+
+Current scope configuration distinguishes route slug from API UUID: the selected
+MCP overlay passes real Workspace.installationId/installationSlug from the pinned
+fixture's authenticated installation response. Bootstrap compares current route
+with that source binding and API path with its UUID. This is observer context,
+not a producer-origin receipt or an app marker. Missing mapping is diagnostic
+setup failure; foreign installation still UNKNOWN, private IDs never published.
+Distinct slug/UUID positive and foreign/missing mapping negatives are permanent
+SOURCE controls. Productbc1c/runtime/factory/PR731 unchanged, QA1887 retained on
+bc1c. Complete observer-chain hashes updated; gate SOURCE support/limit recognition
+and universal RED witnesses preserved. No native acquisition or guarantee.
