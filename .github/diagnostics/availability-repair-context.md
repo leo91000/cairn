@@ -286,3 +286,15 @@ Distinct slug/UUID positive and foreign/missing mapping negatives are permanent
 SOURCE controls. Productbc1c/runtime/factory/PR731 unchanged, QA1887 retained on
 bc1c. Complete observer-chain hashes updated; gate SOURCE support/limit recognition
 and universal RED witnesses preserved. No native acquisition or guarantee.
+
+The exact selected Node gate is now two explicit invocations: recorder source
+controls with --test, then archive controller with --product-reference and
+--source-trusted-limit. The pinned selected workflow itself is parsed/validated,
+and old combined runner/missing selector are permanent negative controls. The
+exact selected shell block has been executed on materialized source files, two
+closed limit-recognition receipts acquired, no ownership/native PASS claimed.
+Earlier separate Node runs were real, but a prior textual substitution had not
+changed the combined workflow line; that omission is preserved in review history
+and corrected here, not treated as a passed selected-gate execution. Productbc1c
+and its clean1887QA unchanged; no identical pnpmcheck rerun. All other native
+command/SDK/profile/cachepolicy/budgets/producer constraints remain unchanged.

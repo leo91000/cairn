@@ -132,12 +132,12 @@
         "sha256": "5530fbbd4e225140aa9bf46f9ab06b3b2e5a5d8efbb2894f116c17206cfa874e"
       },
       "direct-owner-probe.node.mjs": {
-        "gitBlob": "4426e07dc014f5ead13254fa59bd7ab6066e3328",
-        "sha256": "e8866d28b6cd16e975f915a3f151b2647c9c544616f41e300dcb627e13c0e5da"
+        "gitBlob": "054fd3c58600ab2cfe5336d346b7434f027a55ad",
+        "sha256": "52364b3c4eda10f1a6c106848e4e3edf7bdb9f151d7407a029f24a08002815fa"
       },
       "direct-owner-overlay-control.mjs": {
-        "gitBlob": "5bc35ab776853b2471ddad43db97deeb5d6d17c9",
-        "sha256": "8f4d2097193212937fccbed326d41026f319b310503feb46d58fc0795a2bbeb8"
+        "gitBlob": "8afbf6ea0d739160c1e5519a3a76c97d02b34e6a",
+        "sha256": "39c7fe08642c772c690576b4723a02f7930d9a246fdaf597cb98ff699f3c9a9f"
       },
       "closed-target-error.mjs": {
         "gitBlob": "e4aa4b94c978342a5976e9fcf958f91440113e4b",
@@ -152,8 +152,8 @@
         "sha256": "f48ada4b8312643434f4f5469fd9387923fbd5aa002c94e2c26d07d63696b609"
       },
       "selected-workflow.yaml": {
-        "gitBlob": "b24561e7500adcea0e98926cfca3e210211b0518",
-        "sha256": "8df3a113886a9671b8dcf2c5c017f0a8903b73f590e1a8ffa5219ff0115953c4"
+        "gitBlob": "ca24cb4238d6648bcb04badd37242c5444ff3a60",
+        "sha256": "391d35d493cc0951c81930edfe7c9a1f55d02236b4196d79c41b0580936fcdd3"
       }
     },
     "producers": {
@@ -175,6 +175,10 @@
         "arguments": "Fresh two-element array [documentLifetime.signal, callerSignal]"
       }
     },
+    "selectedSourceGateCommands": [
+      "node --test test-results/direct-owner-receipt/direct-owner-probe.node.mjs",
+      "node test-results/direct-owner-receipt/archive-transparency.node.mjs --product-reference --source-trusted-limit"
+    ],
     "observerOrders": [
       "availability probe -> Direct recorder -> captured native delegates",
       "Direct recorder -> availability probe -> captured native delegates"

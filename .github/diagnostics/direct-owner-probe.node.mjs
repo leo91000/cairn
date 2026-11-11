@@ -8,7 +8,7 @@ import { stripTypeScriptTypes } from 'node:module'
 import { test } from 'node:test'
 import { setImmediate } from 'node:timers/promises'
 import { createContext, runInContext, runInNewContext } from 'node:vm'
-import { applyTestOverlays, restoreTestOverlays, product, verifySourceTrustedChain } from './direct-owner-overlay-control.mjs'
+import { applyTestOverlays, restoreTestOverlays, product, verifySourceTrustedChain, selectedSourceGateScript, sourceGateCommands } from './direct-owner-overlay-control.mjs'
 import { observeDirectOwners, projectDirectOwners, createDirectOwnerObserver } from './direct-owner-probe.mjs'
 
 function fixture(t, options = {}) {
@@ -827,4 +827,20 @@ test('H81 a foreign API UUID cannot borrow a valid slug mapping', async (t) => {
   const journal = await completeSourceReceipt(t, { installationId: id, installationSlug: 'source-installation-slug', sourceInstallation: 'FOREIGN_INSTALLATION', requestInstallation: 'FOREIGN_INSTALLATION' })
   const errors = privateErrors.map(value => ({ message: value.message.replace('/installations/private/', '/installations/FOREIGN_INSTALLATION/') }))
   assert.equal(projectDirectOwners(journal, errors, 0, completeClosure).receiptStatus, 'UNKNOWN')
+})
+
+
+test('H82 selected workflow script explicitly enables product and two limit-recognition controls', () => {
+  const workflow = readFileSync(new URL('./selected-workflow.yaml', import.meta.url), 'utf8')
+  assert.equal(selectedSourceGateScript(workflow), sourceGateCommands.join('\n') + '\n')
+})
+
+test('H82 actual source gate validator rejects the immutable old combined runner', () => {
+  const workflow = execFileSync('git', ['show', '7aac8c145f1e44d764c9f7150b01727fd0a1f19d:.github/workflows/webkit-dependency-regression.yaml'], { encoding: 'utf8' })
+  assert.throws(() => selectedSourceGateScript(workflow), /complete shell block/)
+})
+
+test('H82 source gate cannot omit the recognition selector while claiming that contract', () => {
+  const workflow = readFileSync(new URL('./selected-workflow.yaml', import.meta.url), 'utf8').replace(' --source-trusted-limit', '')
+  assert.throws(() => selectedSourceGateScript(workflow), /limit recognition explicitly/)
 })

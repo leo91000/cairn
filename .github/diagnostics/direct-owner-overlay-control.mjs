@@ -25,6 +25,24 @@ export const observerChainFiles = [
   'closed-target-error.mjs', 'mcps.direct-owner.overlay.ts',
   'direct-transport.seam.overlay.ts', 'selected-workflow.yaml',
 ]
+export const sourceGateCommands = [
+  'node --test test-results/direct-owner-receipt/direct-owner-probe.node.mjs',
+  'node test-results/direct-owner-receipt/archive-transparency.node.mjs --product-reference --source-trusted-limit',
+]
+export function selectedSourceGateScript(workflow) {
+  const stepName = 'Light actual recorder projection overlay and cleanup checks (NOT browser)'
+  const steps = workflow.split('      - name: ').filter(value => value.startsWith(stepName + '\n'))
+  assert.equal(steps.length, 1, 'Exactly one selected source support gate is required')
+  const lines = steps[0].split('\n')
+  const start = lines.indexOf('        run: |')
+  assert(start >= 0, 'Source support gate must declare the complete shell block')
+  const commands = lines.slice(start + 1).filter(value => value.trim()).map((value) => {
+    assert(value.startsWith('          '), 'Unexpected source gate nesting')
+    return value.slice(10)
+  })
+  assert.deepEqual(commands, sourceGateCommands, 'Selected source gate must execute support and limit recognition explicitly')
+  return commands.join('\n') + '\n'
+}
 const sourceDirectory = dirname(fileURLToPath(import.meta.url))
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const git = (root, ...args) => execFileSync('git', ['-c', `safe.directory=${root}`, ...args], { cwd: root })
@@ -53,6 +71,8 @@ export function verifySourceTrustedChain(root, directory = sourceDirectory, mani
   assert.equal(git(root, 'rev-parse', 'HEAD^{tree}').toString().trim(), chain.productTree)
   assert.deepEqual(Object.keys(chain.productFiles).sort(), [...producerChainFiles].sort())
   assert.deepEqual(Object.keys(chain.observerFiles).sort(), [...observerChainFiles].sort())
+  assert.deepEqual(chain.selectedSourceGateCommands, sourceGateCommands)
+  selectedSourceGateScript(readFileSync(join(directory, 'selected-workflow.yaml'), 'utf8'))
   for (const file of producerChainFiles) {
     const spec = chain.productFiles[file]
     const original = git(root, 'show', `${product}:${file}`)
