@@ -86,10 +86,11 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
   test(`availability native reload probe (${boundary})`, async ({ page }, testInfo) => {
     const journal: Array<{ kind: string, hostAt: number, browserAt?: number, document?: string, poll?: number }> = []
     const errors: string[] = []
+    let hostObserverFailures = 0
     const bodyFailures: Array<{ kind: string, document?: string, poll?: number }> = []
     const journalFailures: unknown[] = []
     const journalPath = testInfo.outputPath('availability-boundaries.json')
-    const saveJournal = () => saveAvailabilityJournal(journalPath, JSON.stringify({ boundary, journal, errors, bodyFailures }))
+    const saveJournal = () => saveAvailabilityJournal(journalPath, JSON.stringify({ boundary, journal, errors, bodyFailures, hostObserverFailures }))
     const record = (kind: string, browserAt?: number, document?: string, poll?: number) => {
       if (kind.endsWith('-body-rejected') || kind.endsWith('-body-threw'))
         bodyFailures.push({ kind, document, poll })
@@ -162,6 +163,7 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
       }, { message: `Reach the ${kind} response boundary` }).toBe(true)
     }
     const browserSettled = async () => {
+      assertArchiveObserver()
       await expect.poll(() => page.evaluate(() => (window as any).shellPending.size), {
         message: 'Current document finite HTTP work and body continuations have settled',
       }).toBe(0)
@@ -170,6 +172,16 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
       expect(bodyFailures).toEqual([])
     }
     record('setup-entered')
+    const archiveFailureListener = (message: import('@playwright/test').ConsoleMessage) => {
+      if (message.type() === 'error' && message.text() === '__c40_archived_observer_failure_v1__')
+        hostObserverFailures++
+    }
+    const assertArchiveObserver = () => {
+      if (hostObserverFailures > 0)
+        throw new Error('Archived observation failure makes evidence UNKNOWN')
+    }
+    page.on('console', archiveFailureListener)
+    page.once('close', () => page.off('console', archiveFailureListener))
     page.on('pageerror', (error) => {
       errors.push(error.message)
       record('page-error')
@@ -191,7 +203,8 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
           const { kind, poll } = event.data as { kind: string, poll: number }
           if (kind.endsWith('-headers') && consuming.has(poll))
             return
-          await probe(kind, poll)
+          try { await probe(kind, poll) }
+          catch { observerFailed(); return }
           if (kind.endsWith('-headers') && consuming.has(poll))
             return
           pending.delete(poll)
@@ -199,21 +212,24 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
         const probe = (kind: string, poll?: number) => {
           return (window as any).availabilityProbe(kind, performance.now(), documentId, poll) as Promise<void>
         }
-        for (const kind of ['beforeunload', 'pagehide', 'pageshow'])
-          window.addEventListener(kind, () => probe(kind))
-        const fetch = window.fetch
-        const promiseThen = Promise.prototype.then
-        const responses = new WeakMap<Response, { poll: number, settled: (kind: string) => void }>()
         ;(window as any).shellObserverFailed = false
+        const failureConsole = window.console
+        const failureConsoleError = failureConsole.error
         const observerFailed = () => {
           if ((window as any).shellObserverFailed)
             return
           ;(window as any).shellObserverFailed = true
+          try { Reflect.apply(failureConsoleError, failureConsole, ['__c40_archived_observer_failure_v1__']) } catch {}
           try { void probe('observer-failed').catch(() => {}) } catch {}
         }
         const safeProbe = (...args: Parameters<typeof probe>) => {
           try { void probe(...args).catch(observerFailed) } catch { observerFailed() }
         }
+        for (const kind of ['beforeunload', 'pagehide', 'pageshow'])
+          window.addEventListener(kind, () => safeProbe(kind))
+        const fetch = window.fetch
+        const promiseThen = Promise.prototype.then
+        const responses = new WeakMap<Response, { poll: number, settled: (kind: string) => void }>()
         const observe = <T>(original: Promise<T>, fulfilled: (value: T) => void, rejected: () => void) => {
           try {
             const observation = Reflect.apply(promiseThen, original, [
@@ -513,6 +529,7 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
                 if (reloadFailure)
                   throw reloadFailure
               },
+              () => assertArchiveObserver(),
               () => expect(bodyFailures).toEqual([]),
               () => expect(errors).toEqual([]),
             ]
@@ -543,6 +560,7 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
         }
       }
     }
+    try { assertArchiveObserver() } catch (cause) { cleanupFailures.push(cause) }
     if (primaryFailures.length || cleanupFailures.length || journalFailures.length)
       throw new AggregateError([...primaryFailures, ...cleanupFailures, ...journalFailures], 'Skill probe failed')
   })

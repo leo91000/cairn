@@ -528,3 +528,28 @@ tokens/directives/assertions unchanged. Root dirty6edd1888 NOT clean final QA.
 New clean product canonical ROOT QA and appropriate actual helper/unit suites and
 MCP/history collections DUE before fresh full reviews. Older104 on older helper
 bytes NOT transferred; no canonical tests replayed C40. Firstfailures preserved.
+
+## Archive-only retention after completed R89/H90
+
+Product0ff31 and its exact ROOT canonical1888/actual104 remain BYTEUNCHANGED.
+Archived skill/B534/native reader report one CLOSED failure code to host-owned
+console listeners, independent of failed binding/native journal and new Document
+flags. Host audits stay RED/UNKNOWN, host counter saved separately (not pageerror
+or native terminal). Only static diagnostic code, no raw payload/URL/id/errortext.
+Skill/B534 completion reporting rejection stays explicitly failed/pending and goes
+to the same host negative ingress, not an unhandled reporter promise or completion.
+Actual serialized old45f8 bootstraps3ASSERTFAIL/candidate3PASS with same controlled
+metadata-MessageChannel delivery held through source replacement, not NativeNav.
+First runner ports/fixtures and failed candidates kept uncredited; fixture retirement
+now closes late adapter ports without forcing runner exit or altering source budgets.
+Real callback error-preservation adapters support SDK Page.once/off and close cleanup;
+original8skill/12B534 scenarios pass unchanged expectations, initial setup faults kept.
+Fresh complete independent product+observer/archives/pin/chain reviews remain required.
+
+Affected final source execution: selected archive invocation64/64PASS =62 source
+support/transparency/refusal +2 explicit limit recognitions, no ownership/native.
+Actual skill8/B53412 preservation scenarios PASS unchanged expectations after Page
+adapter supports standard once/off/close; initial setup errors remain uncredited.
+Current product0ff31 exact ROOT1888/actual104 remains unchanged/no canonical replay.
+Workflow/pin/overlays/SDKprofile/image/cachepolicy/budgets unchanged, no native effect.
+Fresh complete independent product+observer/archives/pin/chain reviews still required.

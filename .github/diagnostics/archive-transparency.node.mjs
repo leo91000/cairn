@@ -59,7 +59,9 @@ function fixture(t, name, settings = {}) {
     }
   }
   const channels = []
+  let fixtureRetired = false
   t.after(() => {
+    fixtureRetired = true
     AbortController.prototype.abort = originalAbort
     AbortSignal.any = originalAny
     for (const [method, original] of originals)
@@ -93,9 +95,16 @@ function fixture(t, name, settings = {}) {
       constructor() {
         const channel = new NativeMessageChannel()
         channels.push(channel)
+        if (settings.holdCompletionMessages)
+          channel.port2.postMessage = () => {}
+        if (fixtureRetired) {
+          channel.port1.close()
+          channel.port2.close()
+        }
         return channel
       }
     },
+    console: { error(...args) { settings.onFailureSignal?.(...args) } },
     fetch: function (...args) {
       calls.push({ receiver: this, args })
       const next = queue.shift()
@@ -123,7 +132,7 @@ function fixture(t, name, settings = {}) {
     runInContext(`(${observeDirectOwners.toString()})({installationId:'source-id',installationSlug:'source-slug'})`, context)
   const ownWindow = runInContext('window', context)
   const fetch = (...args) => Reflect.apply(context.fetch, ownWindow, args)
-  return { context, fetch, queue, calls, bodyCalls, events, closeResult, NativeSource, abortCalls, abortResult, storage, directEvents }
+  return { context, fetch, queue, calls, bodyCalls, events, closeResult, NativeSource, abortCalls, abortResult, storage, directEvents, bootstrapExpression: `(${bootstrap})(${name === 'availability-reader-native.mjs' ? JSON.stringify('pre-pagehide-original-body') : ''});` }
 }
 for (const name of ['skill-availability-probe.ts', 'b534-navigation-probe.ts']) {
   test(`${name}: actual bootstrap preserves original fetch promise, arguments and receiver`, async (t) => {
@@ -929,3 +938,70 @@ test('R88 actual availability helper retains dual-sink failure in host audits af
   page.emit('close')
   assert.equal(page.listenerCount('console'), 0)
 })
+
+
+function actualArchiveHostGuard(name) {
+  const raw = readFileSync(new URL('./' + name, import.meta.url), 'utf8')
+  const source = stripTypeScriptTypes(raw, { mode: 'transform' })
+  const declaration = (name) => {
+    const start = source.indexOf('const ' + name + ' = ')
+    const open = source.indexOf('{', start)
+    const end = source.indexOf('}', open) + 1
+    assert(start >= 0 && open > start && end > open)
+    return source.slice(start, end)
+  }
+  assert(source.includes('assertArchiveObserver()'))
+  return runInContext(`(() => {let hostObserverFailures = 0;${declaration('archiveFailureListener')};${declaration('assertArchiveObserver')};return {accept:archiveFailureListener,count:()=>hostObserverFailures,audit:assertArchiveObserver}})()`, createContext({ Error }))
+}
+
+for (const name of ['skill-availability-probe.ts', 'b534-navigation-probe.ts', 'availability-reader-native.mjs']) {
+  test(`R89 actual ${name} retains failed reporting in its real host guard after source replacement`, async (t) => {
+    const host = actualArchiveHostGuard(name)
+    assert.doesNotThrow(() => host.audit())
+    const f = fixture(t, name, { holdCompletionMessages: true, onFailureSignal: (...args) => {
+      assert.equal(args.length, 1)
+      host.accept({ type: () => 'error', text: () => args[0] })
+    } })
+    let restore
+    if (name === 'availability-reader-native.mjs') {
+      const store = f.context.sessionStorage.setItem
+      f.context.sessionStorage.setItem = (key, value) => {
+        if (key === 'cairn-native-fetch-journal')
+          throw new Error('controlled native observation journal refusal')
+        return store(key, value)
+      }
+      restore = () => { f.context.sessionStorage.setItem = store }
+    }
+    else {
+      const binding = name.startsWith('skill') ? 'availabilityProbe' : 'b534Record'
+      const original = f.context[binding]
+      f.context[binding] = () => Promise.reject(new Error('controlled archived binding delivery failure'))
+      restore = () => { f.context[binding] = original }
+    }
+    const original = Promise.resolve(Response.json({ original: 'precise SOURCE body' }))
+    f.queue.push(original)
+    const nativeControl = name === 'availability-reader-native.mjs' ? new f.context.AbortController() : undefined
+    const result = f.fetch('/api/installations', { method: 'GET', ...(nativeControl ? { signal: nativeControl.signal } : {}) })
+    assert.equal(result, original)
+    const response = await result
+    const body = response.json()
+    assert.equal(body, f.bodyCalls.at(-1).promise)
+    assert.deepEqual(await body, { original: 'precise SOURCE body' })
+    nativeControl?.abort()
+    await setImmediate()
+    if (name !== 'availability-reader-native.mjs')
+      assert.equal(f.context.shellObserverFailed, true)
+    if (typeof f.context.cairnNativePagehideEntry === 'function')
+      f.context.cairnNativePagehideEntry()
+    restore()
+    // New bootstrap/document adapter, not a native navigation acquisition.
+    runInContext('document={defaultView:window}', f.context)
+    runInContext(f.bootstrapExpression, f.context)
+    if (typeof f.context.cairnNativePagehideEntry === 'function')
+      f.context.cairnNativePagehideEntry()
+    if (name !== 'availability-reader-native.mjs')
+      assert.equal(f.context.shellObserverFailed, false)
+    assert.equal(host.count() > 0, true)
+    assert.throws(() => host.audit(), /UNKNOWN/)
+  })
+}

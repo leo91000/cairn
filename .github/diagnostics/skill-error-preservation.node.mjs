@@ -54,6 +54,8 @@ for (const boundary of ['pending-poll', 'departing-timer']) {
     }
     const page = {
       on: (kind, fn) => listeners.set(kind, fn),
+      once: (kind, fn) => listeners.set(kind, (...args) => { listeners.delete(kind); return fn(...args) }),
+      off: (kind, fn) => { if (listeners.get(kind) === fn) listeners.delete(kind) },
       exposeFunction: async (_, fn) => { record = fn }, addInitScript: async () => {},
       getByRole: () => locator, getByLabel: () => locator,
       route: async (pattern, fn) => routes.set(pattern, fn),
@@ -74,7 +76,7 @@ for (const boundary of ['pending-poll', 'departing-timer']) {
         if (text.includes('shellObservation.document')) return document
         if (text.includes('shellPending.size')) return pending
       },
-      close: async () => { closeCalls++ },
+      close: async () => { closeCalls++; listeners.get('close')?.() },
       unrouteAll: async () => { routeDrainCalls++; await Promise.all(active) },
     }
     runInNewContext(text, {

@@ -9,6 +9,7 @@ import process from 'node:process'
   test(`B534 native Agents navigation (${control})`, async ({ page, workspace }, testInfo) => {
     const journal: Array<{ kind: string, hostAt: number, browserAt?: number, document?: string, poll?: number }> = []
     const errors: string[] = []
+    let hostObserverFailures = 0
     let epoch = 0
     const documentEpochs = new Map<string, number>()
     const fetchCalls = new Map<string, { document: string, method: string, path: string, aborted: boolean }>()
@@ -17,7 +18,7 @@ import process from 'node:process'
     const bodyFailures: Array<{ kind: string, document?: string, poll?: number }> = []
     const journalFailures: unknown[] = []
     const journalPath = testInfo.outputPath('b534-navigation.json')
-    const saveJournal = () => saveB534Journal(journalPath, JSON.stringify({ control, journal, errors, bodyFailures, nativeSourceErrors, fetchFailures }))
+    const saveJournal = () => saveB534Journal(journalPath, JSON.stringify({ control, journal, errors, bodyFailures, nativeSourceErrors, fetchFailures, hostObserverFailures }))
     const record = (kind: string, browserAt?: number, document?: string, poll?: number, request?: { method: string, path: string }) => {
       if (kind === 'document-start' && document)
         documentEpochs.set(document, epoch)
@@ -132,6 +133,7 @@ import process from 'node:process'
       }, { message: `Reach the ${kind} response boundary` }).toBe(true)
     }
     const browserSettled = async () => {
+      assertArchiveObserver()
       await expect.poll(() => page.evaluate(() => (window as any).shellPending.size), {
         message: 'Current document finite HTTP work and body continuations have settled',
       }).toBe(0)
@@ -253,6 +255,16 @@ import process from 'node:process'
     }
 
     record('setup-entered')
+    const archiveFailureListener = (message: import('@playwright/test').ConsoleMessage) => {
+      if (message.type() === 'error' && message.text() === '__c40_archived_observer_failure_v1__')
+        hostObserverFailures++
+    }
+    const assertArchiveObserver = () => {
+      if (hostObserverFailures > 0)
+        throw new Error('Archived observation failure makes evidence UNKNOWN')
+    }
+    page.on('console', archiveFailureListener)
+    page.once('close', () => page.off('console', archiveFailureListener))
     page.on('pageerror', (error) => {
       errors.push(error.message)
       record('page-error')
@@ -285,7 +297,8 @@ import process from 'node:process'
           const { kind, poll } = event.data as { kind: string, poll: number }
           if (kind.endsWith('-headers') && consuming.has(poll))
             return
-          await probe(`${kind}-cycle-completed`, poll)
+          try { await probe(`${kind}-cycle-completed`, poll) }
+          catch { observerFailed(); return }
           if (kind.endsWith('-headers') && consuming.has(poll))
             return
           pending.delete(poll)
@@ -293,15 +306,28 @@ import process from 'node:process'
         const probe = (kind: string, poll?: number, request?: { method: string, path: string }) => {
           return (window as any).b534Record(kind, performance.now(), documentId, poll, request) as Promise<void>
         }
-        void probe('document-start')
+        ;(window as any).shellObserverFailed = false
+        const failureConsole = window.console
+        const failureConsoleError = failureConsole.error
+        const observerFailed = () => {
+          if ((window as any).shellObserverFailed)
+            return
+          ;(window as any).shellObserverFailed = true
+          try { Reflect.apply(failureConsoleError, failureConsole, ['__c40_archived_observer_failure_v1__']) } catch {}
+          try { void probe('observer-failed').catch(() => {}) } catch {}
+        }
+        const safeProbe = (...args: Parameters<typeof probe>) => {
+          try { void probe(...args).catch(observerFailed) } catch { observerFailed() }
+        }
+        safeProbe('document-start')
         for (const kind of ['beforeunload', 'pagehide', 'pageshow']) {
           window.addEventListener(kind, (event) => {
             const persisted = 'persisted' in event && event.persisted === true
-            void probe(`${kind}-${persisted ? 'persisted' : 'ordinary'}`)
+            safeProbe(`${kind}-${persisted ? 'persisted' : 'ordinary'}`)
           })
         }
         window.addEventListener('cairn-transport-change', () => {
-          void probe('transport-change')
+          safeProbe('transport-change')
         })
         window.addEventListener('cairn-transport-observation', (event) => {
           const { route, path } = (event as CustomEvent).detail
@@ -310,7 +336,7 @@ import process from 'node:process'
           observation.chatAccepted = true
           if (route === 'direct')
             observation.directChatAccepted = true
-          void probe(route === 'direct' ? 'chat-batch-direct-accepted' : 'chat-batch-relay-accepted')
+          safeProbe(route === 'direct' ? 'chat-batch-direct-accepted' : 'chat-batch-relay-accepted')
         })
         const NativeEventSource = window.EventSource
         const observedChatSources = new WeakSet<EventSource>()
@@ -349,16 +375,6 @@ import process from 'node:process'
         const fetch = window.fetch
         const promiseThen = Promise.prototype.then
         const responses = new WeakMap<Response, { poll: number, settled: (kind: string) => void }>()
-        ;(window as any).shellObserverFailed = false
-        const observerFailed = () => {
-          if ((window as any).shellObserverFailed)
-            return
-          ;(window as any).shellObserverFailed = true
-          try { void probe('observer-failed').catch(() => {}) } catch {}
-        }
-        const safeProbe = (...args: Parameters<typeof probe>) => {
-          try { void probe(...args).catch(observerFailed) } catch { observerFailed() }
-        }
         const nativeControllerSignal = Object.getOwnPropertyDescriptor(NativeAbortController.prototype, 'signal')?.get
         window.AbortController = new Proxy(NativeAbortController, {
           construct(target, args, newTarget) {
@@ -742,6 +758,7 @@ import process from 'node:process'
       record('outcome-validation-failed')
       outcomeFailures.push(cause)
     }
+    try { assertArchiveObserver() } catch (cause) { outcomeFailures.push(cause) }
     if (outcomeFailures.length || journalFailures.length)
       throw new AggregateError([...outcomeFailures, ...journalFailures], 'B534 workload, cleanup, journal or outcome validation failed')
   })

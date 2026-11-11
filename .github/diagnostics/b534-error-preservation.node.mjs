@@ -66,6 +66,8 @@ for (const scenario of ['healthy-boundary', 'late-http403-after-drain', 'late-pe
   }
   const page = {
     on: (name, callback) => listeners.set(name, callback), mainFrame: () => frame,
+    once: (name, callback) => listeners.set(name, (...args) => { listeners.delete(name); return callback(...args) }),
+    off: (name, callback) => { if (listeners.get(name) === callback) listeners.delete(name) },
     exposeFunction: async (_, callback) => { record = callback }, addInitScript: async () => {},
     setViewportSize: async () => {}, emulateMedia: async () => {}, waitForURL: async () => {},
     getByRole: () => locator, getByLabel: () => locator, locator: () => locator,
@@ -110,6 +112,7 @@ for (const scenario of ['healthy-boundary', 'late-http403-after-drain', 'late-pe
       }
       if (scenario === 'late-pageerror-at-page-retirement')
         listeners.get('pageerror')(new Error('controlled late page error'))
+      listeners.get('close')?.()
     },
     isClosed: () => pageClosed,
     unrouteAll: async () => { if (scenario === 'workload-cleanup-error') throw cleanupError; await Promise.all(active) },

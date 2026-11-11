@@ -208,7 +208,10 @@ function nativeDiagnostics(mode) {
   }
 
   const signals = new WeakMap()
+  const failureConsole = window.console
+  const failureConsoleError = failureConsole.error
   const observationFailed = () => {
+    try { Reflect.apply(failureConsoleError, failureConsole, ['__c40_archived_observer_failure_v1__']) } catch {}
     try { record('observer-failed') } catch {}
   }
   let controllerPrototype = AbortController.prototype
@@ -362,6 +365,11 @@ async function observe(browser, cell, closedPrototype) {
   const dialogs = []
   const dialogActions = new Set()
   const pageErrors = []
+  let hostObserverFailures = 0
+  const assertArchiveObserver = () => {
+    if (hostObserverFailures > 0)
+      throw new Error('Archived observation failure makes evidence UNKNOWN')
+  }
   const failures = []
   const writes = new Set()
   const gates = []
@@ -465,6 +473,12 @@ async function observe(browser, cell, closedPrototype) {
     await observed(() => context.tracing.start({ screenshots: false, snapshots: true, sources: true }), 'trace setup')
     pageOwner = ownSdkResource(() => context.newPage(), async (value) => { pageCloseAttempted = true; await value.close(); pageCloseCompleted = true })
     page = await observed(() => pageOwner.result, 'page setup')
+    const archiveFailureListener = (message) => {
+      if (message.type() === 'error' && message.text() === '__c40_archived_observer_failure_v1__')
+        hostObserverFailures++
+    }
+    page.on('console', archiveFailureListener)
+    page.once('close', () => page.off('console', archiveFailureListener))
     page.on('pageerror', error => pageErrors.push(errorRecord(error)))
     page.on('dialog', dialog => {
       const receipt = { type: dialog.type(), dismissed: false }
@@ -963,6 +977,7 @@ async function observe(browser, cell, closedPrototype) {
   }
   if (cell.mode === 'proof-without-terminal' && destination?.received)
     remember('final pre-stop admission audit', new Error('Cancelled pre-stop navigation reached the destination gate'))
+  try { assertArchiveObserver() } catch (error) { remember('archived observer failure audit', error) }
   finalAudit.unknown = incompleteAvailabilityReads(received)
   for (const event of received) {
     if (event.kind === 'body' && !event.exactBody)
@@ -985,11 +1000,11 @@ async function observe(browser, cell, closedPrototype) {
       finalAudit.unexpected.push(event)
   }
   const ownCleanup = cleanupFailures.filter(event => event.arm === arm)
-  const observationComplete = !nativeEvents.some(event => event.kind === 'observer-failed') && journalAcknowledged && navigationValidated && !failures.length && !pageErrors.length
+  const observationComplete = hostObserverFailures === 0 && !nativeEvents.some(event => event.kind === 'observer-failed') && journalAcknowledged && navigationValidated && !failures.length && !pageErrors.length
     && !ownCleanup.length && !finalAudit.unknown.length && !finalAudit.unexpected.length
   const row = { arm, control, diagnosticOnly: true, productQualified: false, observationComplete, phase,
     pauseReceipts, postCommitReceipt, cleanupStartedAt, cdpAdmission, cdpCloseObserved, cdpTaskRecords, cdpCommandsDrained: cdpTasks.size === 0, originalPromiseBoundary, documentId, state, pendingProof, stateReceipts, dialogs, nativeNavigationCheckpoint, navigationRetirement, activatedViaClick, retainedAfterDialog, destinationAdmission: cell.mode === 'proof-without-terminal' && navigationValidated && !destination?.received ? 'cancelled-before-request' : null, outageEvidence, initialHeaderAdvance, initialClosureBoundary, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
-    allPageErrorsStrict: pageErrors.length === 0, pageErrors, failures, reads: received, nativeEvents, finalAudit,
+    allPageErrorsStrict: pageErrors.length === 0, hostObserverFailures, pageErrors, failures, reads: received, nativeEvents, finalAudit,
     gates: gates.map(({ label, response }) => ({ label, received: response.received, ready: response.ready, status: response.status ?? null, terminal: response.terminal, closed: response.closed, headersDelivered: response.headersDelivered, bodyReleased: response.bodyReleased })), cleanupFailures: ownCleanup }
   rows.push(row)
   await write(arm + '.json', row)
