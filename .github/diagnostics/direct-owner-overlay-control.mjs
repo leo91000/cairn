@@ -74,9 +74,26 @@ export function selectedSourceGateScript(workflow) {
   assert.deepEqual(commands, sourceGateCommands, 'Selected source gate must execute support and limit recognition explicitly')
   return commands.join('\n') + '\n'
 }
+// Fixture acquisition trusts only its explicitly controlled repository, per Git child.
+// No host/global configuration is written; all original Git status/stderr survives.
+export function controlledSourceGitArgs(args, root = process.cwd()) {
+  return ['-c', `safe.directory=${resolve(root)}`, ...args]
+}
+
+export function controlledSourceGitEnvironment(env, root = process.cwd()) {
+  const count = Number(env.GIT_CONFIG_COUNT ?? 0)
+  assert(Number.isSafeInteger(count) && count >= 0)
+  return {
+    ...env,
+    GIT_CONFIG_COUNT: String(count + 1),
+    [`GIT_CONFIG_KEY_${count}`]: 'safe.directory',
+    [`GIT_CONFIG_VALUE_${count}`]: resolve(root),
+  }
+}
+
 const sourceDirectory = dirname(fileURLToPath(import.meta.url))
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
-const git = (root, ...args) => execFileSync('git', ['-c', `safe.directory=${root}`, ...args], { cwd: root })
+const git = (root, ...args) => execFileSync('git', controlledSourceGitArgs(args, root), { cwd: root })
 const knownManifest = () => {
   const value = JSON.parse(readFileSync(join(sourceDirectory, 'overlay-manifest.json'), 'utf8'))
   assert.equal(value.product, product)
@@ -129,7 +146,7 @@ export function verifySourceTrustedChain(root, directory = sourceDirectory, mani
     const spec = chain.observerFiles[file]
     const bytes = readFileSync(join(directory, file))
     assert.equal(hash(bytes), spec.sha256, 'Pinned observer-chain source hash mismatch')
-    assert.equal(execFileSync('git', ['-c', `safe.directory=${root}`, 'hash-object', '--stdin'], { input: bytes, cwd: root }).toString().trim(), spec.gitBlob)
+    assert.equal(execFileSync('git', controlledSourceGitArgs(['hash-object', '--stdin'], root), { input: bytes, cwd: root }).toString().trim(), spec.gitBlob)
   }
   return {
     mode: 'PINNED_SOURCE_CONDITIONAL', sourceChainBytesMatched: true,

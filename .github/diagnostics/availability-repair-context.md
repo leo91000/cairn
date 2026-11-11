@@ -670,3 +670,61 @@ NOT executed by43008782246 and has NOT been rerun or changed here. It needs ROOT
 scope/QA assessment; this targeted H84/H87 snapshot is NOT a claim that the whole
 workflow now crosses the container ownership boundary. No source scope expanded.
 No new CI/native/dispatch/PR/merge; P1OPEN/causeDirect47/1UNKNOWN, all limits/reds kept.
+
+
+## Expanded ROOT SOURCE scope: complete selected Git acquisition chain
+
+ROOT report1c52411f read ENTIRE/hash2f27912e1722daf0122230febb2d7d4d459b90545633db8945aec4af5b192f9f verified.
+ROOT reproduced old3ec archive command73cases33PASS40FAIL under actual Git ownership
+guard. This is SOURCE acquisition failure, NOT second-blockCI evidence (unreached
+in43008782246), NOT40product defects or cause47/1. All first reds preserved.
+Separate authorization now includes BOTH exact Source blocks and real dependencies.
+
+Existing controlled Git argument/environment mechanism moved unchanged from test
+fixture to the already-used overlay controller and reused by BOTH Node controllers
+and NativeReader HOST metadata acquisition. Every selected current-source Git
+read, optional reviewed-reference read, source manifest/hash binding and partial
+fixture read is per-command scoped to the EXACT controlled repository; CLI-child
+trust stays process-only. No wildcard or host/global config write, no SDK/profile
+change, no producer/runtime/helper modification. H84/H87 six cases unchanged.
+
+NativeReader host composition is EXPLICIT V4_SCOPED_GIT_ACQUISITION; full V3 source
+Gitblob/SHA/binding is retained in previousCompositions, recursively preservingV2
+and older helper. NativeDiagnostics, composed install function and bootstrap/poll
+payload strings are BYTEIDENTICAL to3ec; both full overlays and other injected
+observer files unchanged. Only HOST Git acquisition/import/identity changed.
+No historical source result/native run is renamed V4.
+
+Audit covers ALL22 observer files:67 Git call/declaration sites classified, selected
+reads bounded. Intentional raw negative ownership probes and owned private Git
+setup/error-reference calls stay raw by design and test refusal/error fidelity.
+One older skill-controller Git read is unselected historical (not imported by
+these two blocks) and not broadened. Two immutable product fixture Git calls only
+initialize/commit a NEW owned fixture repo, not source reads; product stays9979.
+Callsite/sourceSHA audit and native-payload byte hashes are saved separately.
+
+NEW permanent regression executes the REAL NativeReader host acquisition fragment
+with actual Git, not SDK/browser main or copied JS Git policy. Old3ec reference
+fails assertion after actual first Git128, candidate two acquisitions succeed.
+This is a NEW counterfactual, not replay of old73cases for receipt. No actualUID
+changed. Config/env isolation is confined to owned child processes.
+
+TWO EXACT WORKFLOW SOURCE COMMANDS executed from product9979 under
+GIT_TEST_ASSUME_DIFFERENT_OWNER=1, system config disabled and empty PRIVATE global
+config: Direct76/76PASS then archive74/74PASS, ZEROskip, shellEXIT0. ConfigsHOME/XDG/
+system/repository bytes unchanged, private config empty unchanged, parent env
+unchanged. Counts include2ownership-limit +5operation-limit recognitions, NOTnative.
+First candidate whole-block attempt75PASS1FAIL exposed inherited NODE_TEST_CONTEXT
+causing the nested six-case runner to execute zero tests; count guard correctly
+rejected it. Only child NODE_TEST_CONTEXT is removed so the SAME six cases actually
+run; parent env unchanged, no assertion/skip or real status relabelled. First log
+and failed source materialization retained; no false-green runner accepted.
+
+Under forced Git guard, all FIVE universal R90 witnesses remain ASSERTFAIL (4archive
++1Direct), no acquisition/setup failures credited. Original A81/A90 limits strict.
+No1888/104/productQA/browser/CargoGradle/SDK/native/CI run or push-triggered PR.
+Product/app/runtime/factory9979/b186/PR731 immutable. Workflow selection/image/
+profile/budgets/retries EXACTLYUNCHANGED. ROOT affected QA DUE before new FULLs
+ALL12product/ALL22observer/archives/ALLpin/chain, freshSolHigh/forknone. OldR91/H92
+not transferred; no prospective native or whole-repair qualification claimed.
+Admission71ed consumed, slotROOT/HOLD, P1OPEN/causeDirectUNKNOWN, B/DstorageHOLD.

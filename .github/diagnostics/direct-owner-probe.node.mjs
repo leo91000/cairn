@@ -8,7 +8,7 @@ import { stripTypeScriptTypes } from 'node:module'
 import { test } from 'node:test'
 import { setImmediate } from 'node:timers/promises'
 import { createContext, runInContext, runInNewContext } from 'node:vm'
-import { applyTestOverlays, restoreTestOverlays, product, verifySourceTrustedChain, selectedSourceGateScript, sourceGateCommands, historicalWorkflowReference, historicalSourceWorkflow, verifyHistoricalSourceAcquisition } from './direct-owner-overlay-control.mjs'
+import { controlledSourceGitArgs, controlledSourceGitEnvironment, applyTestOverlays, restoreTestOverlays, product, verifySourceTrustedChain, selectedSourceGateScript, sourceGateCommands, historicalWorkflowReference, historicalSourceWorkflow, verifyHistoricalSourceAcquisition } from './direct-owner-overlay-control.mjs'
 import { observeDirectOwners, projectDirectOwners, createDirectOwnerObserver } from './direct-owner-probe.mjs'
 
 function recorderBootstrapSource() {
@@ -16,7 +16,7 @@ function recorderBootstrapSource() {
   if (!reference)
     return observeDirectOwners.toString()
   assert.match(reference, /^[a-f0-9]{40}$/)
-  const source = execFileSync('git', ['show', `${reference}:.github/diagnostics/direct-owner-probe.mjs`], { encoding: 'utf8' })
+  const source = execFileSync('git', controlledSourceGitArgs(['show', `${reference}:.github/diagnostics/direct-owner-probe.mjs`]), { encoding: 'utf8' })
   const start = source.indexOf('export function observeDirectOwners(')
   const end = source.indexOf('\nfunction errorIdentity(', start)
   assert(start >= 0 && end > start)
@@ -403,26 +403,9 @@ test('ACTUAL overlay finally preserves an original closure error and still close
 })
 
 
-// Fixture acquisition trusts only its explicitly controlled repository, per Git child.
-// No host/global configuration is written; all original Git status/stderr survives.
-function controlledSourceGitArgs(args, root = process.cwd()) {
-  return ['-c', `safe.directory=${path.resolve(root)}`, ...args]
-}
-
-function controlledSourceGitEnvironment(env, root = process.cwd()) {
-  const count = Number(env.GIT_CONFIG_COUNT ?? 0)
-  assert(Number.isSafeInteger(count) && count >= 0)
-  return {
-    ...env,
-    GIT_CONFIG_COUNT: String(count + 1),
-    [`GIT_CONFIG_KEY_${count}`]: 'safe.directory',
-    [`GIT_CONFIG_VALUE_${count}`]: path.resolve(root),
-  }
-}
-
 function sourceFiles(t) {
   const targets = ['tests/e2e/mcps.spec.ts', 'apps/web/tests/direct-transport.test.ts']
-  const originals = Object.fromEntries(targets.map(target => [target, execFileSync('git', ['-c', `safe.directory=${process.cwd()}`, 'show', `${product}:${target}`])]))
+  const originals = Object.fromEntries(targets.map(target => [target, execFileSync('git', controlledSourceGitArgs(['show', `${product}:${target}`]))]))
   mkdirSync('test-results/source-only-direct-owner', { recursive: true })
   const root = mkdtempSync(path.resolve('test-results/source-only-direct-owner/fixture-'))
   const evidence = path.join(root, 'private-evidence')
@@ -974,13 +957,13 @@ async function restorationSource(f) {
   const directory = path.join(f.root, 'owned-reference-control')
   mkdirSync(directory)
   for (const name of ['direct-owner-overlay-control.mjs', 'overlay-manifest.json', 'mcps.direct-owner.overlay.ts', 'direct-transport.seam.overlay.ts']) {
-    const bytes = execFileSync('git', ['show', `${reference}:.github/diagnostics/${name}`])
+    const bytes = execFileSync('git', controlledSourceGitArgs(['show', `${reference}:.github/diagnostics/${name}`]))
     writeFileSync(path.join(directory, name), bytes)
   }
   const sourceFile = path.join(directory, 'direct-owner-overlay-control.mjs')
   const controller = await import(pathToFileURL(sourceFile).href)
   for (const target of f.targets) {
-    f.originals[target] = execFileSync('git', ['show', `${controller.product}:${target}`])
+    f.originals[target] = execFileSync('git', controlledSourceGitArgs(['show', `${controller.product}:${target}`]))
     writeFileSync(path.join(f.root, target), f.originals[target])
   }
   return { ...controller, sourceFile }
@@ -1326,6 +1309,9 @@ test('GIT OWNERSHIP six ACTUAL H84/H87 fixture scenarios across the Git ownershi
     writeFileSync(path.join(directory, file), bytes)
   }
   const env = gitOwnershipFixtureEnvironment(f)
+  // Parent --test context must not turn this independent SOURCE child into a
+  // recursive runner with zero executed cases; parent environment stays intact.
+  delete env.NODE_TEST_CONTEXT
   delete env.C40_RESTORE_REFERENCE
   delete env.C40_RECORDER_REFERENCE
   const result = spawnSync(process.execPath, ['--test', '--test-reporter=tap', '--test-name-pattern=^(H84 actual final workflow shell|H87 actual CLI)', path.join(directory, 'direct-owner-probe.node.mjs')], { cwd: process.cwd(), env, encoding: 'utf8' })

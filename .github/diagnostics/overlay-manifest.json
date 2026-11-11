@@ -114,12 +114,12 @@
     },
     "observerFiles": {
       "archive-transparency.node.mjs": {
-        "gitBlob": "1b70284e489a82e11f345e010a10b46f14030550",
-        "sha256": "bc3ed158f49fee7f60450ee2bde4b13e9a51e4ee0fba233d4b4e6994e5df7e9d"
+        "gitBlob": "15efee55111a6d007aaafaf448edef40e960feb6",
+        "sha256": "352df05b49850634abba3638032966299b6ab242c3a0e35b7ff174fa15708723"
       },
       "availability-reader-native.mjs": {
-        "gitBlob": "8ee6e1f601ceaadf6ff69a790b0fd79e90236745",
-        "sha256": "eb6a2c964fdba4904e9c577af96da3fb8d4caca43a97fa63aad52a07275e3369"
+        "gitBlob": "96cb4ce22a8e92b1c3dcd5ab58eacafa9201c5a2",
+        "sha256": "4ba5c2f8d2af5161d49a03ee0f237bbb1aae166ddb78271cd551648d1de43319"
       },
       "skill-availability-probe.ts": {
         "gitBlob": "758f8c9545dff77f550f848266b7f6a04b97f8e2",
@@ -138,12 +138,12 @@
         "sha256": "fa8785903ef9eea3255c402ed68c45f69868d180ef6ede43965bdd35fe5e770e"
       },
       "direct-owner-probe.node.mjs": {
-        "gitBlob": "d509ce41fc9b8853ff520456313a9269b3f85792",
-        "sha256": "9d6450cb96ef00a4bca356cd19f4b4d276afa5e97a7bd37d74d17620ab634ef5"
+        "gitBlob": "3b3c676b1ab850188aa22a6c1b7a10521c8120d7",
+        "sha256": "14d0b4c4f6f7bbbdea7049bdce472f7e8e023ed420f4087917831635762ecfd0"
       },
       "direct-owner-overlay-control.mjs": {
-        "gitBlob": "ba9163a1701cab756f6fc4be8db44f96de946327",
-        "sha256": "3f8b6a9187316bee2dc6e3c39fe276943c3d9183127f8be0e22345c973b85837"
+        "gitBlob": "590a1ddc8ed4e7ab910829080174c7763078155f",
+        "sha256": "5c70c9cd12c29f784cedddd5237e0b6a4aa9761a9d79156c9391ee251d38b55c"
       },
       "closed-target-error.mjs": {
         "gitBlob": "e4aa4b94c978342a5976e9fcf958f91440113e4b",
@@ -219,7 +219,7 @@
       }
     },
     "nativeReaderComposition": {
-      "compositionId": "H91_NATIVE_READER_COMPOSITION_V3_CANONICAL_1C09",
+      "compositionId": "H91_NATIVE_READER_COMPOSITION_V4_SCOPED_GIT_ACQUISITION",
       "helper": {
         "commit": "9979b4ff1f36f48541e33ff93de6d19a07797886",
         "path": "tests/e2e/availability-probe.ts",
@@ -239,14 +239,14 @@
       "qualification": "SOURCE_ONLY_NEW_COMPOSITION_NO_HISTORICAL_RUN_TRANSFER",
       "previousCompositions": [
         {
-          "observer": "1d97ccd9aff5b2b021672343c421802c0fd1d2ad",
+          "observer": "3ec9244c7bbbab22894b73e4f539a97fd0149af9",
           "path": ".github/diagnostics/availability-reader-native.mjs",
-          "gitBlob": "21b211e5655529bc3ca6b9f658383cb6a22a210e",
-          "sha256": "2e4d6ccad84047b7bbdb6c40cfb6a64d0c0fcad482917c5b2903388637279f3c",
+          "gitBlob": "8ee6e1f601ceaadf6ff69a790b0fd79e90236745",
+          "sha256": "eb6a2c964fdba4904e9c577af96da3fb8d4caca43a97fa63aad52a07275e3369",
           "binding": {
-            "compositionId": "H91_NATIVE_READER_COMPOSITION_V2",
+            "compositionId": "H91_NATIVE_READER_COMPOSITION_V3_CANONICAL_1C09",
             "helper": {
-              "commit": "e81b99601d5abeec663dd0c7a1cde8b72b72b35d",
+              "commit": "9979b4ff1f36f48541e33ff93de6d19a07797886",
               "path": "tests/e2e/availability-probe.ts",
               "gitBlob": "fa8e4d1aa18dceb2750c2b71bb945e108822fd31",
               "sha256": "528e6098ade467928e691c3f377509ca131fba911ea9f05a791eadeabf2df626"
@@ -261,11 +261,42 @@
               "nativeDiagnostics",
               "installAvailabilityProbe"
             ],
-            "qualification": "SOURCE_ONLY_NEW_COMPOSITION_NO_HISTORICAL_RUN_TRANSFER"
+            "qualification": "SOURCE_ONLY_NEW_COMPOSITION_NO_HISTORICAL_RUN_TRANSFER",
+            "previousCompositions": [
+              {
+                "observer": "1d97ccd9aff5b2b021672343c421802c0fd1d2ad",
+                "path": ".github/diagnostics/availability-reader-native.mjs",
+                "gitBlob": "21b211e5655529bc3ca6b9f658383cb6a22a210e",
+                "sha256": "2e4d6ccad84047b7bbdb6c40cfb6a64d0c0fcad482917c5b2903388637279f3c",
+                "binding": {
+                  "compositionId": "H91_NATIVE_READER_COMPOSITION_V2",
+                  "helper": {
+                    "commit": "e81b99601d5abeec663dd0c7a1cde8b72b72b35d",
+                    "path": "tests/e2e/availability-probe.ts",
+                    "gitBlob": "fa8e4d1aa18dceb2750c2b71bb945e108822fd31",
+                    "sha256": "528e6098ade467928e691c3f377509ca131fba911ea9f05a791eadeabf2df626"
+                  },
+                  "historicalHelper": {
+                    "commit": "8835fa792c12633b1cca830659ebaf04a6cd5547",
+                    "path": "tests/e2e/availability-probe.ts",
+                    "gitBlob": "f72cd5102e901e17e77728d06834737552503748",
+                    "sha256": "5d315a1c12a2835838645d0804cb0dda5e8dfd8503eab8c963ac3d9442baae61"
+                  },
+                  "order": [
+                    "nativeDiagnostics",
+                    "installAvailabilityProbe"
+                  ],
+                  "qualification": "SOURCE_ONLY_NEW_COMPOSITION_NO_HISTORICAL_RUN_TRANSFER"
+                },
+                "status": "HISTORICAL_SOURCE_ONLY_NOT_NATIVE_OR_CURRENT_QA"
+              }
+            ]
           },
-          "status": "HISTORICAL_SOURCE_ONLY_NOT_NATIVE_OR_CURRENT_QA"
+          "status": "HISTORICAL_V3_SOURCE_EVIDENCE_NOT_RELABELLED"
         }
-      ]
+      ],
+      "hostGitAcquisition": "PER_COMMAND_EXACT_CONTROLLED_REPOSITORY",
+      "nativePayloadChanged": false
     },
     "outOfDomainOperationWitness": {
       "historicalUniversalCommands": [

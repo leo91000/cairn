@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { stripTypeScriptTypes } from 'node:module'
 import { test } from 'node:test'
 import { EventEmitter } from 'node:events'
-import { product } from './direct-owner-overlay-control.mjs'
+import { product, controlledSourceGitArgs } from './direct-owner-overlay-control.mjs'
 import { observeDirectOwners } from './direct-owner-probe.mjs'
 import { createContext, runInContext } from 'node:vm'
 import { MessageChannel as NativeMessageChannel } from 'node:worker_threads'
@@ -18,9 +18,9 @@ const referenceHead = process.env.C40_ARCHIVE_REFERENCE || '589e704e90bc451a181b
 function fixture(t, name, settings = {}) {
   const productReference = name === 'availability-probe.ts'
   const raw = productReference
-    ? execFileSync('git', ['show', `${productReferenceHead}:tests/e2e/availability-probe.ts`], { encoding: 'utf8' })
+    ? execFileSync('git', controlledSourceGitArgs(['show', `${productReferenceHead}:tests/e2e/availability-probe.ts`]), { encoding: 'utf8' })
     : reference
-    ? execFileSync('git', ['-c', `safe.directory=${process.cwd()}`, 'show', `${referenceHead}:.github/diagnostics/${name}`], { encoding: 'utf8' })
+    ? execFileSync('git', controlledSourceGitArgs(['show', `${referenceHead}:.github/diagnostics/${name}`]), { encoding: 'utf8' })
     : readFileSync(new URL('./' + name, import.meta.url), 'utf8')
   const source = stripTypeScriptTypes(raw, { mode: 'transform' })
   let bootstrap
@@ -546,7 +546,7 @@ if (process.argv.includes('--source-trusted-limit')) {
 for (const directOrder of ['direct-first', 'direct-last']) {
   test(`PINNED PRODUCER SOURCE SUPPORT: real readAvailability and complete probe composition (${directOrder})`, async (t) => {
     const f = fixture(t, 'availability-probe.ts', { directOrder, localRealmData: true })
-    const factorySource = execFileSync('git', ['show', `${productReferenceHead}:apps/web/src/availability-read.ts`], { encoding: 'utf8' })
+    const factorySource = execFileSync('git', controlledSourceGitArgs(['show', `${productReferenceHead}:apps/web/src/availability-read.ts`]), { encoding: 'utf8' })
     const factory = stripTypeScriptTypes(factorySource, { mode: 'transform' }).replace(/^export /gm, '')
     runInContext(`${factory}\nwindow.sourceReadAvailability=readAvailability`, f.context)
     const active = Promise.withResolvers()
@@ -606,7 +606,7 @@ test('H83 actual B534 ordinary controller retains native instance prototype and 
 
 
 function oauthXhrFixture(settings = {}) {
-  const raw = execFileSync('git', ['show', `${productReferenceHead}:tests/e2e/mcps.spec.ts`], { encoding: 'utf8' })
+  const raw = execFileSync('git', controlledSourceGitArgs(['show', `${productReferenceHead}:tests/e2e/mcps.spec.ts`]), { encoding: 'utf8' })
   const source = stripTypeScriptTypes(raw, { mode: 'transform' })
   const marker = 'await page.addInitScript('
   const testStart = source.indexOf('OAuth navigation does not leave background polls')
@@ -881,7 +881,7 @@ test('R87 actual OAuth XHR original synchronous send failure remains original', 
 
 test('R88 actual availability helper retains dual-sink failure in host audits after document replacement', async (t) => {
   const f = fixture(t, 'availability-probe.ts', { deferBootstrap: true })
-  const source = stripTypeScriptTypes(execFileSync('git', ['show', `${productReferenceHead}:tests/e2e/availability-probe.ts`], { encoding: 'utf8' }), { mode: 'transform' }).replace(/^export /gm, '')
+  const source = stripTypeScriptTypes(execFileSync('git', controlledSourceGitArgs(['show', `${productReferenceHead}:tests/e2e/availability-probe.ts`]), { encoding: 'utf8' }), { mode: 'transform' }).replace(/^export /gm, '')
   runInContext(source, f.context)
   const page = new EventEmitter()
   const reads = []
@@ -1073,11 +1073,11 @@ async function nativeReaderCompositionFixture(t) {
   const bindingEnd = raw.indexOf('\nconst helperBinding = ', bindingStart)
   assert(bindingStart > 40 && bindingEnd > bindingStart)
   const binding = JSON.parse(raw.slice(bindingStart, bindingEnd))
-  assert.equal(binding.compositionId, 'H91_NATIVE_READER_COMPOSITION_V3_CANONICAL_1C09')
+  assert.equal(binding.compositionId, 'H91_NATIVE_READER_COMPOSITION_V4_SCOPED_GIT_ACQUISITION')
   assert.deepEqual(binding.order, ['nativeDiagnostics', 'installAvailabilityProbe'])
   const selected = process.env.C40_NATIVE_READER_HELPER_REFERENCE === 'historical' ? binding.historicalHelper : binding.helper
-  const bytes = execFileSync('git', ['show', `${selected.commit}:${selected.path}`])
-  assert.equal(execFileSync('git', ['rev-parse', `${selected.commit}:${selected.path}`], { encoding: 'utf8' }).trim(), selected.gitBlob)
+  const bytes = execFileSync('git', controlledSourceGitArgs(['show', `${selected.commit}:${selected.path}`]))
+  assert.equal(execFileSync('git', controlledSourceGitArgs(['rev-parse', `${selected.commit}:${selected.path}`]), { encoding: 'utf8' }).trim(), selected.gitBlob)
   const { createHash } = await import('node:crypto')
   assert.equal(createHash('sha256').update(bytes).digest('hex'), selected.sha256)
   const f = fixture(t, name, { deferBootstrap: true })
@@ -1152,4 +1152,50 @@ test('H91 ENTIRE NativeReader composition: original abort actual receiver full a
   assert.equal(f.abortCalls[0].receiver, controller)
   assert.deepEqual(f.abortCalls[0].args, args)
   assert.equal(controller.signal.reason, reason)
+})
+
+// Execute the REAL NativeReader host acquisition fragment, without importing its
+// SDK/browser main. Git is real; only the child environment enforces ownership.
+test('GIT OWNERSHIP actual NativeReader host helper acquisition across the repository boundary', (t) => {
+  mkdirSync('test-results/source-only-native-reader-acquisition', { recursive: true })
+  const directory = mkdtempSync(join(process.cwd(), 'test-results/source-only-native-reader-acquisition/fixture-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const config = join(directory, 'empty-private-global-config')
+  writeFileSync(config, '')
+  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: config, GIT_CONFIG_COUNT: '0', GIT_TEST_ASSUME_DIFFERENT_OWNER: '1' }
+  delete env.GIT_CONFIG_PARAMETERS
+  const reference = process.env.C40_NATIVE_READER_GIT_REFERENCE
+  if (reference)
+    assert.match(reference, /^[a-f0-9]{40}$/)
+  const raw = reference
+    ? execFileSync('git', controlledSourceGitArgs(['show', `${reference}:.github/diagnostics/availability-reader-native.mjs`]), { encoding: 'utf8' })
+    : readFileSync(new URL('./availability-reader-native.mjs', import.meta.url), 'utf8')
+  const start = raw.indexOf('const nativeReaderCompositionBinding = ') + 'const nativeReaderCompositionBinding = '.length
+  const end = raw.indexOf('\nconst helperBinding = ', start)
+  assert(start > 40 && end > start)
+  const binding = JSON.parse(raw.slice(start, end))
+  const fragmentEnd = raw.indexOf('\nconst sourceHashes = ', end)
+  assert(fragmentEnd > end)
+  const fragment = raw.slice(end, fragmentEnd)
+  const source = {}
+  let calls = 0
+  let failure
+  try {
+    runInContext(fragment, createContext({
+      nativeReaderCompositionBinding: binding, sources: source, assert,
+      controlledSourceGitArgs,
+      execFileSync(command, args, options = {}) {
+        assert.equal(command, 'git')
+        calls++
+        return execFileSync(command, args, { ...options, cwd: process.cwd(), env })
+      },
+    }))
+  }
+  catch (error) { failure = error }
+  t.diagnostic(JSON.stringify({ sourceReference: reference ?? 'CURRENT_SOURCE', actualGitAcquisitions: calls, gitFailureStatus: failure?.status ?? null, ownershipGuardEnforced: true, actualUidChanged: false, nativeExecuted: false }))
+  assert.equal(failure, undefined, 'The real bound helper acquisitions must succeed only with exact repository trust')
+  assert.equal(calls, 2)
+  assert.equal(source.probe, execFileSync('git', controlledSourceGitArgs(['show', `${binding.helper.commit}:${binding.helper.path}`]), { encoding: 'utf8' }))
+  assert.equal(readFileSync(config, 'utf8'), '')
+  assert.equal(env.GIT_CONFIG_COUNT, '0')
 })
