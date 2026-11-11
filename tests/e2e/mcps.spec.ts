@@ -77,24 +77,34 @@ for (const pending of ['authorization', 'offer'] as const) {
 
       let departing = false
       const request = window.fetch
-      window.fetch = (...args) => {
+      const signalAborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')?.get
+      const listenForAbort = EventTarget.prototype.addEventListener
+      if (!signalAborted)
+        throw new Error('OAuth departure probe requires native AbortSignal state')
+
+      window.fetch = function (this: unknown, ...args: Parameters<typeof request>) {
+        const result = Reflect.apply(request, this, args)
         const path = args[0]
         if (typeof path === 'string' && path.endsWith('/direct/authorize')) {
-          const signal = args[1]?.signal
-          if (signal?.aborted) {
-            departing = true
-          }
-          else {
-            signal?.addEventListener('abort', () => {
+          const options = args[1]
+          const descriptor = options && typeof options === 'object' ? Object.getOwnPropertyDescriptor(options, 'signal') : undefined
+          const signal = descriptor && 'value' in descriptor ? descriptor.value : undefined
+          if (signal instanceof AbortSignal) {
+            if (Reflect.apply(signalAborted, signal, [])) {
               departing = true
-            }, { once: true })
+            }
+            else {
+              Reflect.apply(listenForAbort, signal, ['abort', () => {
+                departing = true
+              }, { once: true }])
+            }
           }
         }
 
         const background = typeof path === 'string' && (path === '/api/installations' || path.endsWith('/tasks/activity') || path.endsWith('/direct/authorize'))
         if (background && departing)
           void window.cairnOAuthProbe({ kind: 'background' })
-        return request(...args)
+        return result
       }
 
       const availability = new WeakSet<XMLHttpRequest>()
