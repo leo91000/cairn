@@ -615,6 +615,8 @@ function oauthXhrFixture(settings = {}) {
   }
   OriginalXhr.prototype.send = function (...args) {
     calls.push({ method: 'send', receiver: this, args })
+    if (settings.sendFailure)
+      throw settings.sendFailure
     return sendResult
   }
   const fetchCalls = []
@@ -824,4 +826,41 @@ test('H87 actual OAuth diagnostic reporter failure cannot replace the original P
   assert.equal(f.fetchCalls.length, 1)
   assert.equal(f.diagnosticTasks.length, 1)
   assert.throws(() => f.diagnosticTasks[0](), error => error === reportCause)
+})
+
+
+test('R87 actual OAuth XHR reporter cannot replace original successful send', () => {
+  const reportCause = new Error('original XHR reporter SOURCE failure')
+  const f = oauthXhrFixture({ probeFailure: reportCause })
+  const control = new AbortController()
+  invokeOAuthFetch(f, 'ownerWindow', ['/api/installations/source/direct/authorize', { signal: control.signal }])
+  control.abort()
+  const request = new f.Xhr()
+  request.open('GET', '/api/installations')
+  let result
+  assert.doesNotThrow(() => { result = request.send() })
+  assert.equal(result, f.sendResult)
+  const sends = f.calls.filter(value => value.method === 'send')
+  assert.equal(sends.length, 1)
+  assert.equal(sends[0].receiver, request)
+  assert.deepEqual(sends[0].args, [])
+  assert.deepEqual(f.probes.map(value => value.kind), ['background', 'observer-error'])
+  assert.equal(f.diagnosticTasks.length, 1)
+  assert.throws(() => f.diagnosticTasks[0](), error => error === reportCause)
+})
+
+test('R87 actual OAuth XHR original synchronous send failure remains original', () => {
+  const cause = new TypeError('original XHR send SOURCE cause')
+  const f = oauthXhrFixture({ sendFailure: cause, probeFailure: new Error('reporter must not run') })
+  const control = new AbortController()
+  invokeOAuthFetch(f, 'ownerWindow', ['/api/installations/source/direct/authorize', { signal: control.signal }])
+  control.abort()
+  const request = new f.Xhr()
+  request.open('GET', '/api/installations')
+  assert.throws(() => request.send('original body'), error => error === cause)
+  const sends = f.calls.filter(value => value.method === 'send')
+  assert.equal(sends.length, 1)
+  assert.deepEqual(sends[0].args, ['original body'])
+  assert.equal(f.probes.length, 0)
+  assert.equal(f.diagnosticTasks.length, 0)
 })

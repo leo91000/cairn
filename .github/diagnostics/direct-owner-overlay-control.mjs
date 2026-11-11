@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, readlinkSync, lstatSync, writeFile
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const product = '756f2215dffb5ea45582294be8617be2bfb2bd20'
+export const product = '5efdebc21b39e2e2497ec240eaa0121eae292946'
 export const historicalWorkflowReference = Object.freeze({
   commit: '7aac8c145f1e44d764c9f7150b01727fd0a1f19d',
   path: '.github/workflows/webkit-dependency-regression.yaml',

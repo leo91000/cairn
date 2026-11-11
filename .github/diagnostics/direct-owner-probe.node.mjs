@@ -55,6 +55,8 @@ function fixture(t, options = {}) {
   })
   const callbacks = new Map()
   const storage = new Map()
+  const faults = { markerWrite: false, journalWrite: false }
+  const failureSignals = []
   const ingresses = []
   const requests = []
   const queue = []
@@ -83,7 +85,12 @@ function fixture(t, options = {}) {
     AbortController, AbortSignal, Response, Event, EventSource: Source, Error, Object, Array,
     DOMException, URL, Map, WeakMap, Proxy, Promise, performance,
     BeforeUnloadEvent: class extends Event {}, PageTransitionEvent: class extends Event {},
-    sessionStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
+    sessionStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => {
+      if (faults.markerWrite && key === '__c40_direct_owner_journal_v1:observer-failure' && value === '1') throw new Error('controlled marker persistence failure')
+      if (faults.journalWrite && key === '__c40_direct_owner_journal_v1') throw new Error('controlled journal persistence failure')
+      return storage.set(key, value)
+    } },
+    console: { error(...args) { failureSignals.push(args); options.onFailureSignal?.(...args) } },
     fetch: nativeFetch,
     __c40RecordDirectOwner: event => { ingresses.push(event); return Promise.resolve() },
     addEventListener: (name, callback) => { callbacks.set(name, callback) },
@@ -100,7 +107,7 @@ function fixture(t, options = {}) {
   const signal = () => context.AbortSignal.any([generation.signal, control.signal])
   return {
     context, fetch: invokeFetch, Source, generation, control, signal, queue, requests, storage, ingresses, installationScope,
-    closeResult, originalJsonPromises, callbacks, unwrappedAbort: originalAbort, anyInputs, anyResults,
+    closeResult, originalJsonPromises, callbacks, faults, failureSignals, unwrappedAbort: originalAbort, anyInputs, anyResults,
     snapshot: () => context.__c40DirectOwnerReceipt.snapshot(),
     async authorize(sourceInstallation = installationScope.installationId) {
       const native = Promise.withResolvers()
@@ -321,7 +328,12 @@ test('controller disposal failure is explicit and does not throw over a workload
   page.addInitScript = async () => {}
   const controller = createDirectOwnerObserver(page, { installationId: 'private', installationSlug: 'private' })
   await controller.install()
-  page.off = () => { throw new Error('controlled observer retirement failure') }
+  const off = page.off.bind(page)
+  page.off = (kind, listener) => {
+    if (kind === 'pageerror')
+      throw new Error('controlled observer retirement failure')
+    return off(kind, listener)
+  }
   assert.equal(controller.dispose(), false)
   const result = controller.finish({ pageClosed: true, gateClosed: true, cleanupFailureCount: 0 })
   assert.equal(result.projection.observerFailureCount, 1)
@@ -561,6 +573,7 @@ async function completeSourceReceipt(t, options = {}) {
       lifecycleCallback(event);
     }`, f.context)
   }
+  f.originalCause = cause
   return options.returnFixture ? f : f.snapshot().journal
 }
 const completeClosure = { pageClosed: true, gateClosed: true, cleanupFailureCount: 0 }
@@ -1086,3 +1099,93 @@ for (const evidence of ['missing', 'corrupt']) {
     assert.equal(projectDirectOwners(snapshot.journal, [], snapshot.observerFailures, completeClosure).receiptStatus, 'UNKNOWN')
   })
 }
+
+
+for (const failure of ['binding-rejection', 'journal-failure']) {
+  test(`R87 actual recorder keeps ${failure} in host evidence when sticky persistence fails and document is replaced`, async (t) => {
+    const page = new EventEmitter()
+    page.exposeFunction = async () => {}
+    page.addInitScript = async () => {}
+    const host = createDirectOwnerObserver(page, { installationId: 'private', installationSlug: 'private' })
+    await host.install()
+    t.after(() => host.dispose())
+    const f = await completeSourceReceipt(t, { returnFixture: true, onFailureSignal: (...args) => {
+      assert.equal(args.length, 1)
+      page.emit('console', { type: () => 'error', text: () => args[0] })
+    } })
+    assert.equal(projectDirectOwners(f.snapshot().journal, privateErrors, 0, completeClosure).receiptStatus, 'SOURCE_CONDITIONAL_PARTIAL')
+    f.faults.markerWrite = true
+    f.faults.journalWrite = failure === 'journal-failure'
+    if (failure === 'binding-rejection')
+      f.context.__c40RecordDirectOwner = () => Promise.reject(new Error('controlled binding delivery failure'))
+    f.callbacks.get('error')({ error: f.originalCause, isTrusted: true, timeStamp: 123 })
+    await setImmediate()
+    assert.equal(f.snapshot().observerFailures > 0, true)
+    assert.equal(f.storage.get('__c40_direct_owner_journal_v1:observer-failure'), '0')
+    f.faults.markerWrite = false
+    f.faults.journalWrite = false
+    runInContext("delete window.__c40DirectOwnerReceipt;document={defaultView:window};cairnAvailabilityDocument='REPLACEMENT_SOURCE_DOCUMENT';location.pathname='/health'", f.context)
+    runInContext(`(${recorderBootstrapSource()})(${JSON.stringify(f.installationScope)})`, f.context)
+    const replaced = f.snapshot()
+    assert.equal(replaced.observerFailures, 0)
+    assert.equal(projectDirectOwners(replaced.journal, privateErrors, 0, completeClosure).receiptStatus, 'SOURCE_CONDITIONAL_PARTIAL')
+    host.accept(replaced)
+    const evidence = host.finish(completeClosure)
+    assert.equal(evidence.privateEvidence.observerFailures > 0, true)
+    assert.equal(evidence.projection.receiptStatus, 'UNKNOWN')
+  })
+}
+
+
+test('R87 host ingress accepts only the closed diagnostic code and detaches its owned listeners', async () => {
+  const page = new EventEmitter()
+  page.exposeFunction = async () => {}
+  page.addInitScript = async () => {}
+  const host = createDirectOwnerObserver(page, { installationId: 'private', installationSlug: 'private' })
+  await host.install()
+  assert.equal(page.listenerCount('console'), 1)
+  page.emit('console', { type: () => 'error', text: () => 'UNRELATED_PRIVATE_SOURCE_LOG_MUST_NOT_BE_COLLECTED' })
+  assert.equal(host.finish(completeClosure).privateEvidence.observerFailures, 0)
+  assert.equal(JSON.stringify(host.finish(completeClosure)).includes('UNRELATED_PRIVATE_SOURCE_LOG'), false)
+  page.emit('console', { type: () => 'error', text: () => '__c40_direct_observer_failure_v1__' })
+  assert.equal(host.finish(completeClosure).privateEvidence.observerFailures, 1)
+  assert.equal(host.dispose(), true)
+  assert.equal(page.listenerCount('console'), 0)
+  assert.equal(page.listenerCount('pageerror'), 0)
+})
+
+test('R87 failure-ingress cleanup attempts both owned listeners independently and keeps unknown red', async (t) => {
+  const page = new EventEmitter()
+  page.exposeFunction = async () => {}
+  page.addInitScript = async () => {}
+  const host = createDirectOwnerObserver(page, { installationId: 'private', installationSlug: 'private' })
+  await host.install()
+  const off = page.off.bind(page)
+  page.off = (kind, listener) => {
+    if (kind === 'pageerror')
+      throw new Error('controlled pageerror detachment failure')
+    return off(kind, listener)
+  }
+  t.after(() => { page.off = off; host.dispose() })
+  assert.equal(host.dispose(), false)
+  assert.equal(page.listenerCount('console'), 0)
+  assert.equal(host.finish(completeClosure).privateEvidence.observerFailures > 0, true)
+  assert.equal(host.finish(completeClosure).projection.receiptStatus, 'UNKNOWN')
+})
+
+
+test('R87 host cleanup retains both independent listener failures', async (t) => {
+  const page = new EventEmitter()
+  page.exposeFunction = async () => {}
+  page.addInitScript = async () => {}
+  const host = createDirectOwnerObserver(page, { installationId: 'private', installationSlug: 'private' })
+  await host.install()
+  const attempted = []
+  const off = page.off.bind(page)
+  t.after(() => { page.off = off; host.dispose() })
+  page.off = (kind) => { attempted.push(kind); throw new Error('controlled listener cleanup failure') }
+  assert.equal(host.dispose(), false)
+  assert.deepEqual(attempted, ['pageerror', 'console'])
+  assert.equal(host.finish(completeClosure).privateEvidence.observerFailures, 2)
+  assert.equal(host.finish(completeClosure).projection.receiptStatus, 'UNKNOWN')
+})

@@ -1,7 +1,7 @@
 # SOURCE-TRUSTED diagnostic domain — SOURCE ONLY, NOT runtime qualification
 
-Product **756f2215dffb5ea45582294be8617be2bfb2bd20**, tree **31e0a90833ce2b26faa92c97c087b98f99a2b01a**,
-parent596 (canonical whitespace-only OAuth test formatting), app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
+Product **5efdebc21b39e2e2497ec240eaa0121eae292946**, tree **49fb81eb980919dffa8741f80e70bec8d56f328e**,
+parent756 (test-only OAuth reporter terminal isolation), app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
 and its permanent serialized-bootstrap regression. Canonical QA ROOT on this exact clean
 new product is DUE before fresh COMPLETE independent FULLs. The prior clean bc1c QA is historical
 for this changed product and does not transfer.
@@ -456,3 +456,32 @@ error audit, original promises/causes/throws and source regressions unchanged. N
 clean product QA ROOT is DUE before fresh complete independent FULLs; dirty5961888
 not transferred and no canonical checks duplicated C40. Existing first lintfailure
 and all reference/controller/log evidence remain preserved.
+
+## Current source candidate after completed R87/H88
+
+A single CLOSED diagnostic code sent through captured native console.error now
+invalidates host-owned evidence independently of both binding delivery and page
+storage. This is NOT generic logging: no journal/error/URL/ID/query/header/cookie
+content is sent or retained by this ingress. Host counts only the exact code and
+retains it across document replacement; unrelated console messages are not stored.
+Both owned listeners are detached independently; setup/dispose uncertainty staysRED.
+Actual-bootstrap source controls combine failed binding/journal AND failed sticky
+write with replacement: old2aeb twoASSERTFAIL/candidate twoPASS. New listener privacy
+and independent cleanup controls twoPASS, no native transport qualification claimed.
+OAuth reporting is centralized in the existing bootstrap; Fetch/XHR and held-offer
+reporting cannot replace original native terminal with synchronous reporter error.
+Explicit diagnostic failures remain strict/countaudit0, reporting error rethrown
+asynchronously, original native send throw stays unchanged. Old756 oneASSERTFAIL/
+onebaselinePASS versus candidate twoPASS. All prior guards/firsterrors preserved.
+New clean product5efd canonical ROOT QA DUE before fresh complete reviews; product
+app/runtime/factory/PR731 unchanged and no prior QA/clean transferred.
+
+Final affected exact SOURCE block:72/72controller +60/60archive PASS, with17+12
+source-chain bytes matched and productworktreeclean. Archive60 =58 source support/
+transparency/refusal controls +2 explicit limit recognitions, not ownership/native.
+First integrated71 run retained70PASS/1FAIL: original disposal fixture failed BOTH
+new owned listeners but expected ONE. Its original exact-one assertion is preserved
+by targeting only the original pageerror failure, and an added exact-two assertion
+requires both attempts/failures when both listeners fail. No expectation weakened.
+New product5efd exact canonical ROOT QA DUE before fresh full reviews, old7561888
+not transferred. No compiler/browser/native/canonical checks duplicated C40.

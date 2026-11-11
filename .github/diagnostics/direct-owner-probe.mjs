@@ -38,13 +38,20 @@ export function observeDirectOwners(installationScope) {
   let sourceOrdinal = 0
   let requestOrdinal = 0
   let observerFailures = 0
+  const failureConsole = window.console
+  const failureConsoleError = failureConsole.error
+  const failureSignal = '__c40_direct_observer_failure_v1__'
   const failureKey = key + ':observer-failure'
   // Sticky same-origin failure evidence survives a new bootstrap closure.
   // The numeric snapshot is a conservative lower bound, never proof of no loss.
   const noteObserverFailure = () => {
     observerFailures++
     try { sessionStorage.setItem(failureKey, '1') }
-    catch { /* Local failure still forces UNKNOWN in this document. */ }
+    catch { /* Host-owned failure ingress below does not depend on storage. */ }
+    // One closed diagnostic code only: no event payload, URL or error text.
+    // Console protocol is independent of both the page binding and storage.
+    try { Reflect.apply(failureConsoleError, failureConsole, [failureSignal]) }
+    catch { /* Unsupported console still leaves local/sticky failure evidence. */ }
   }
   try {
     const prior = sessionStorage.getItem(failureKey)
@@ -560,17 +567,42 @@ export function createDirectOwnerObserver(page, installationScope) {
     try { pageErrors.push({ message: error.message, hostTime: performance.now() }) }
     catch { failures++ }
   }
+  const onFailureSignal = (message) => {
+    try {
+      if (message.type() === 'error' && message.text() === '__c40_direct_observer_failure_v1__')
+        failures++
+    }
+    catch { failures++ }
+  }
+  const listeners = [['pageerror', onError], ['console', onFailureSignal]]
   let listenerAttached = false
+  const detachListeners = () => {
+    let detached = true
+    for (const [kind, listener] of listeners) {
+      try { page.off(kind, listener) }
+      catch { failures++; detached = false }
+    }
+    listenerAttached = !detached
+    return detached
+  }
   return {
     async install() {
       if (listenerAttached)
         throw new Error('Direct owner observer installed twice')
-      page.on('pageerror', onError)
       listenerAttached = true
-      await closedTargetBound(() => page.exposeFunction('__c40RecordDirectOwner', (event) => {
-        acceptEvent(event, performance.now())
-      }), 'direct owner binding')
-      await closedTargetBound(() => page.addInitScript(observeDirectOwners, boundScope), 'direct owner bootstrap')
+      try {
+        for (const [kind, listener] of listeners)
+          page.on(kind, listener)
+        await closedTargetBound(() => page.exposeFunction('__c40RecordDirectOwner', (event) => {
+          acceptEvent(event, performance.now())
+        }), 'direct owner binding')
+        await closedTargetBound(() => page.addInitScript(observeDirectOwners, boundScope), 'direct owner bootstrap')
+      }
+      catch (error) {
+        if (!detachListeners())
+          throw new AggregateError([error, new Error('Direct owner listener cleanup UNKNOWN')], 'Observer installation and cleanup failed', { cause: error })
+        throw error
+      }
     },
     accept(snapshot) {
       if (!snapshot || !Array.isArray(snapshot.journal) || !Number.isSafeInteger(snapshot.observerFailures) || snapshot.observerFailures < 0) {
@@ -590,12 +622,7 @@ export function createDirectOwnerObserver(page, installationScope) {
     dispose() {
       if (!listenerAttached)
         return true
-      try {
-        page.off('pageerror', onError)
-        listenerAttached = false
-        return true
-      }
-      catch { failures++; return false }
+      return detachListeners()
     },
   }
 }

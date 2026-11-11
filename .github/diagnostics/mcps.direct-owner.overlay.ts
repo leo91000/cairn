@@ -91,6 +91,25 @@ for (const pending of ['authorization', 'offer'] as const) {
       if (!signalAborted)
         throw new Error('OAuth departure probe requires native AbortSignal state')
 
+      const reportObservationFailure = () => {
+        try {
+          void window.cairnOAuthProbe({ kind: 'observer-error' })
+        }
+        catch (reportingFailure) {
+          Reflect.apply(enqueueDiagnosticError, window, [() => {
+            throw reportingFailure
+          }])
+        }
+      }
+      const emitProbe = (probe: OAuthDepartureProbe) => {
+        try {
+          void window.cairnOAuthProbe(probe)
+        }
+        catch {
+          reportObservationFailure()
+        }
+      }
+
       window.fetch = function (this: unknown, ...args: Parameters<typeof request>) {
         const result = Reflect.apply(request, this, args)
         try {
@@ -113,17 +132,10 @@ for (const pending of ['authorization', 'offer'] as const) {
 
           const background = typeof path === 'string' && (path === '/api/installations' || path.endsWith('/tasks/activity') || path.endsWith('/direct/authorize'))
           if (background && departing)
-            void window.cairnOAuthProbe({ kind: 'background' })
+            emitProbe({ kind: 'background' })
         }
         catch {
-          try {
-            void window.cairnOAuthProbe({ kind: 'observer-error' })
-          }
-          catch (reportingFailure) {
-            Reflect.apply(enqueueDiagnosticError, window, [() => {
-              throw reportingFailure
-            }])
-          }
+          reportObservationFailure()
         }
 
         return result
@@ -135,17 +147,27 @@ for (const pending of ['authorization', 'offer'] as const) {
       XMLHttpRequest.prototype.open = function (this: XMLHttpRequest, ...args: unknown[]) {
         const result = Reflect.apply(open, this, args)
 
-        availability.delete(this)
-        if (args[0] === 'GET' && args[1] === '/api/installations')
-          availability.add(this)
+        try {
+          availability.delete(this)
+          if (args[0] === 'GET' && args[1] === '/api/installations')
+            availability.add(this)
+        }
+        catch {
+          reportObservationFailure()
+        }
         return result
       }
 
       XMLHttpRequest.prototype.send = function (this: XMLHttpRequest, ...args: unknown[]) {
         const result = Reflect.apply(send, this, args)
 
-        if (availability.has(this) && departing)
-          void window.cairnOAuthProbe({ kind: 'background' })
+        try {
+          if (availability.has(this) && departing)
+            emitProbe({ kind: 'background' })
+        }
+        catch {
+          reportObservationFailure()
+        }
         return result
       }
 
@@ -176,7 +198,7 @@ for (const pending of ['authorization', 'offer'] as const) {
           const released = new Promise<void>(resolve => heldOffers.set(this, resolve))
           document.documentElement.dataset.offerReady = 'true'
           await released
-          void window.cairnOAuthProbe({ kind: 'offer', closed: peerClosed() })
+          emitProbe({ kind: 'offer', closed: peerClosed() })
           return offer
         },
       })
