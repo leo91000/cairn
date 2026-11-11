@@ -12,6 +12,19 @@ import { observeDirectOwners, projectDirectOwners, createDirectOwnerObserver } f
 
 function fixture(t, options = {}) {
   const originalAny = AbortSignal.any
+  const anyInputs = []
+  const anyResults = []
+  if (options.sequenceAny) {
+    AbortSignal.any = function (input) {
+      // Source stand-in for browser WebIDL sequence conversion. Node's Array
+      // API is not credited as a native browser iterable-conversion result.
+      const values = Array.from(input)
+      anyInputs.push(values)
+      const result = Reflect.apply(originalAny, this, [values])
+      anyResults.push(result)
+      return result
+    }
+  }
   const originalAbort = AbortController.prototype.abort
   if (options.abortFailure)
     AbortController.prototype.abort = function () { throw options.abortFailure }
@@ -47,12 +60,14 @@ function fixture(t, options = {}) {
     const next = queue.shift()
     if (!next)
       throw new Error('controlled source fixture has no queued original')
+    if (typeof next === 'function')
+      return Reflect.apply(next, this, args)
     if (next.throw)
       throw next.throw
     return next.promise
   }
   const context = createContext({
-    AbortController, AbortSignal, Response, Event, EventSource: Source, Error,
+    AbortController, AbortSignal, Response, Event, EventSource: Source, Error, Object, Array,
     DOMException, URL, Map, WeakMap, Proxy, Promise, performance,
     BeforeUnloadEvent: class extends Event {}, PageTransitionEvent: class extends Event {},
     sessionStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
@@ -69,7 +84,7 @@ function fixture(t, options = {}) {
   const signal = () => context.AbortSignal.any([generation.signal, control.signal])
   return {
     context, fetch: invokeFetch, Source, generation, control, signal, queue, requests, storage, ingresses,
-    closeResult, originalJsonPromises, callbacks, unwrappedAbort: originalAbort,
+    closeResult, originalJsonPromises, callbacks, unwrappedAbort: originalAbort, anyInputs, anyResults,
     snapshot: () => context.__c40DirectOwnerReceipt.snapshot(),
     async authorize() {
       const native = Promise.withResolvers()
@@ -617,4 +632,97 @@ test('H78 selected recorder keeps an ORIGINAL abort exception and still retires 
   assert.equal(journal.filter(event => event.kind === 'parent-abort-call-enter' && event.role === 'control').length, 1)
   assert.equal(journal.filter(event => event.kind === 'parent-abort-call-return' && event.role === 'control').length, 1)
   assert.equal(f.snapshot().observerFailures, 0)
+})
+
+
+for (const inherited of [false, true]) {
+  test(`H79 selected fetch refuses signal provenance invalidated by ${inherited ? 'inherited' : 'own'} conversion`, async (t) => {
+    const f = fixture(t)
+    await f.authorize()
+    const actualControl = new AbortController()
+    const usedSignal = f.context.AbortSignal.any([f.generation.signal, actualControl.signal])
+    const nominal = f.signal()
+    const options = { signal: nominal }
+    const original = Promise.resolve(new Response(null, { status: 204 }))
+    let used
+    f.queue.push((_, init) => { void init.method; used = init.signal; return original })
+    const target = inherited ? Object.prototype : options
+    const prior = Object.getOwnPropertyDescriptor(target, 'method')
+    Object.defineProperty(target, 'method', { configurable: true, get() {
+      if (this === options)
+        options.signal = usedSignal
+      return 'POST'
+    } })
+    let returned
+    try { returned = f.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', options) }
+    finally {
+      if (prior)
+        Object.defineProperty(target, 'method', prior)
+      else
+        Reflect.deleteProperty(target, 'method')
+    }
+    assert.equal(returned, original)
+    assert.equal(used, usedSignal)
+    await returned
+    await setImmediate()
+    const snapshot = f.snapshot()
+    assert.equal(snapshot.journal.some(event => event.kind === 'control-start' && event.category === 'signal' && event.parentIdentityKnown), false)
+    assert.equal(snapshot.observerFailures > 0, true)
+  })
+}
+
+test('H79 selected fetch still observes the real caller shape with plain string headers and JSON body', async (t) => {
+  const f = fixture(t)
+  await f.authorize()
+  const original = Promise.resolve(new Response(null, { status: 204 }))
+  f.queue.push({ promise: original })
+  const options = { method: 'POST', signal: f.signal(), headers: { 'Content-Type': 'application/json', 'X-Source-Test': 'ordinary' }, body: '{}' }
+  assert.equal(f.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', options), original)
+  await original
+  await setImmediate()
+  assert.equal(f.snapshot().journal.some(event => event.kind === 'control-start' && event.category === 'signal' && event.parentIdentityKnown), true)
+  assert.equal(f.snapshot().observerFailures, 0)
+})
+
+for (const selfRemoving of [false, true]) {
+  test(`H79 any sequence rejects custom iteration without changing the original composite (self-removing ${selfRemoving})`, async (t) => {
+    const f = fixture(t, { sequenceAny: true })
+    const actualGeneration = new AbortController()
+    const actualControl = new AbortController()
+    const nominal = [f.generation.signal, f.control.signal]
+    let iterations = 0
+    Object.defineProperty(nominal, Symbol.iterator, { configurable: true, value: function* () {
+      iterations++
+      yield actualGeneration.signal
+      yield actualControl.signal
+      if (selfRemoving)
+        Reflect.deleteProperty(nominal, Symbol.iterator)
+    } })
+    const composite = f.context.AbortSignal.any(nominal)
+    assert.equal(composite, f.anyResults.at(-1))
+    assert.equal(iterations, 1)
+    assert.deepEqual(f.anyInputs.at(-1), [actualGeneration.signal, actualControl.signal])
+    const original = Promise.resolve(new Response(null, { status: 204 }))
+    f.queue.push({ promise: original })
+    assert.equal(f.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', { method: 'POST', signal: composite }), original)
+    await original
+    await setImmediate()
+    assert.equal(f.snapshot().journal.some(event => event.kind === 'control-start' && event.parentIdentityKnown), false)
+  })
+}
+
+test('H79 any sequence never consumes index accessors for observation', async (t) => {
+  const f = fixture(t, { sequenceAny: true })
+  let reads = 0
+  const nominal = [f.generation.signal, f.control.signal]
+  Object.defineProperty(nominal, '0', { get() { reads++; return f.generation.signal } })
+  const composite = f.context.AbortSignal.any(nominal)
+  assert.equal(composite, f.anyResults.at(-1))
+  assert.equal(reads, 1)
+  const original = Promise.resolve(new Response(null, { status: 204 }))
+  f.queue.push({ promise: original })
+  assert.equal(f.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', { signal: composite }), original)
+  await original
+  await setImmediate()
+  assert.equal(f.snapshot().journal.some(event => event.kind === 'control-start' && event.parentIdentityKnown), false)
 })

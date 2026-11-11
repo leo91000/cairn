@@ -14,6 +14,8 @@ export function observeDirectOwners() {
   const ownerDocument = document
   const fetch = window.fetch
   const json = window.Response.prototype.json
+  const arrayPrototype = window.Array.prototype
+  const arrayIterator = Object.getOwnPropertyDescriptor(arrayPrototype, Symbol.iterator)?.value
   const any = window.AbortSignal.any
   const abort = window.AbortController.prototype.abort
   const signalGetter = Object.getOwnPropertyDescriptor(window.AbortController.prototype, 'signal').get
@@ -57,6 +59,57 @@ export function observeDirectOwners() {
       observerFailures++
     }
   }
+  const ordinaryData = (value) => {
+    if (value == null)
+      return Object.create(null)
+    if (typeof value !== 'object')
+      return null
+    const prototype = Object.getPrototypeOf(value)
+    if (prototype !== null && prototype !== Object.prototype)
+      return null
+    if (prototype) {
+      const standard = ['constructor', '__defineGetter__', '__defineSetter__', 'hasOwnProperty', '__lookupGetter__', '__lookupSetter__', 'isPrototypeOf', 'propertyIsEnumerable', 'toString', 'valueOf', '__proto__', 'toLocaleString']
+      const inherited = Object.getOwnPropertyDescriptors(prototype)
+      Object.setPrototypeOf(inherited, null)
+      for (const key of Reflect.ownKeys(inherited)) {
+        if (typeof key !== 'string' || !standard.includes(key))
+          return null
+        const descriptor = Object.getOwnPropertyDescriptor(inherited, key).value
+        if (key !== '__proto__' && !Object.hasOwn(descriptor, 'value'))
+          return null
+      }
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(value)
+    Object.setPrototypeOf(descriptors, null)
+    const data = Object.create(null)
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (typeof key !== 'string')
+        return null
+      const descriptor = Object.getOwnPropertyDescriptor(descriptors, key).value
+      if (!Object.hasOwn(descriptor, 'value'))
+        return null
+      data[key] = descriptor.value
+    }
+    return data
+  }
+  const requestData = (value) => {
+    const data = ordinaryData(value)
+    if (!data)
+      return null
+    for (const [key, item] of Object.entries(data)) {
+      if (key === 'signal')
+        continue
+      if (key === 'headers' && item != null) {
+        const headers = ordinaryData(item)
+        if (!headers || Object.values(headers).some(value => typeof value !== 'string'))
+          return null
+      }
+      else if (item !== null && (typeof item === 'object' || typeof item === 'function'))
+        return null
+    }
+    return data
+  }
+
   const inspect = (value) => {
     if (typeof value !== 'string')
       return null
@@ -121,19 +174,29 @@ export function observeDirectOwners() {
     return owner
   }
   window.AbortSignal.any = function (...args) {
+    let parents
+    try {
+      const values = args[0]
+      if (Array.isArray(values) && Object.getPrototypeOf(values) === arrayPrototype) {
+        const iterator = Object.getOwnPropertyDescriptor(values, Symbol.iterator)
+        const inherited = Object.getOwnPropertyDescriptor(arrayPrototype, Symbol.iterator)
+        const length = Object.getOwnPropertyDescriptor(values, 'length')
+        const first = Object.getOwnPropertyDescriptor(values, '0')
+        const second = Object.getOwnPropertyDescriptor(values, '1')
+        if (!iterator && arrayIterator && inherited && Object.hasOwn(inherited, 'value') && inherited.value === arrayIterator
+          && length?.value === 2 && first && second && Object.hasOwn(first, 'value') && Object.hasOwn(second, 'value')
+          && first.value instanceof window.AbortSignal && second.value instanceof window.AbortSignal && first.value !== second.value) {
+          parents = { generation: first.value, control: second.value }
+        }
+      }
+    }
+    catch { observerFailures++ }
+    // Validate supported iteration BEFORE the native call can remove/mutate it.
+    // Do not consume any iterator for observation; return the ORIGINAL result.
     const result = Reflect.apply(any, this, args)
     try {
-      // The pinned documentSignal uses exactly [lifetime, caller]. Inspect only
-      // ordinary data elements AFTER the original call; never consume an iterator.
-      const values = args[0]
-      if (!Array.isArray(values))
-        return result
-      const first = Object.getOwnPropertyDescriptor(values, '0')
-      const second = Object.getOwnPropertyDescriptor(values, '1')
-      if (values.length === 2 && first && second && 'value' in first && 'value' in second
-        && first.value instanceof window.AbortSignal && second.value instanceof window.AbortSignal && first.value !== second.value) {
-        parentSets.set(result, { generation: first.value, control: second.value })
-      }
+      if (parents)
+        parentSets.set(result, parents)
     }
     catch { observerFailures++ }
     return result
@@ -167,8 +230,10 @@ export function observeDirectOwners() {
     let meta
     try {
       const path = inspect(args[0])
-      const descriptor = args[1] && Object.getOwnPropertyDescriptor(args[1], 'signal')
-      const signal = descriptor && 'value' in descriptor ? descriptor.value : undefined
+      const data = path ? requestData(args[1]) : null
+      if (path && !data)
+        observerFailures++
+      const signal = data?.signal
       const parents = signal && parentSets.get(signal)
       if (path && path.category !== 'events') {
         const control = parents?.control

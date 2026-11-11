@@ -246,12 +246,85 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
             return original
           }
         }
+        const ordinaryData = (value: unknown): Record<string, unknown> | null => {
+          if (value == null)
+            return Object.create(null)
+          if (typeof value !== 'object')
+            return null
+          const prototype = Object.getPrototypeOf(value)
+          if (prototype !== null && prototype !== Object.prototype)
+            return null
+          if (prototype) {
+            const standard = ['constructor', '__defineGetter__', '__defineSetter__', 'hasOwnProperty', '__lookupGetter__', '__lookupSetter__', 'isPrototypeOf', 'propertyIsEnumerable', 'toString', 'valueOf', '__proto__', 'toLocaleString']
+            const inherited = Object.getOwnPropertyDescriptors(prototype)
+            Object.setPrototypeOf(inherited, null)
+            for (const key of Reflect.ownKeys(inherited)) {
+              if (typeof key !== 'string' || !standard.includes(key))
+                return null
+              const descriptor = Object.getOwnPropertyDescriptor(inherited, key)!.value as PropertyDescriptor
+              if (key !== '__proto__' && !Object.hasOwn(descriptor, 'value'))
+                return null
+            }
+          }
+          const descriptors = Object.getOwnPropertyDescriptors(value)
+          Object.setPrototypeOf(descriptors, null)
+          const data = Object.create(null)
+          for (const key of Reflect.ownKeys(descriptors)) {
+            if (typeof key !== 'string')
+              return null
+            const descriptor = Object.getOwnPropertyDescriptor(descriptors, key)!.value as PropertyDescriptor
+            if (!Object.hasOwn(descriptor, 'value'))
+              return null
+            data[key] = descriptor.value
+          }
+          return data
+        }
+        const requestData = (value: unknown): Record<string, unknown> | null => {
+          const data = ordinaryData(value)
+          if (!data)
+            return null
+          for (const [key, item] of Object.entries(data)) {
+            if (key === 'signal')
+              continue
+            if (key === 'headers' && item != null) {
+              const headers = ordinaryData(item)
+              if (!headers || Object.values(headers).some(value => typeof value !== 'string'))
+                return null
+            }
+            else if (item !== null && (typeof item === 'object' || typeof item === 'function'))
+              return null
+          }
+          return data
+        }
+
         window.fetch = function (this: Window, ...args: Parameters<typeof fetch>) {
           if (this != null && this !== window)
             return Reflect.apply(fetch, this, args)
-          // Invoke FIRST, once, preserving its receiver, original promise and
-          // synchronous cause. Metadata never consumes a Request/URL/coercible
-          // input or accessor-backed options a second time.
+          let path: string | undefined
+          let signal: AbortSignal | undefined
+          let method = 'GET'
+          let metadataKnown = true
+          try {
+            if (typeof args[0] !== 'string') {
+              metadataKnown = false
+            }
+            else {
+              path = new URL(args[0], location.href).pathname
+              if (path.startsWith('/api/') || path === '/web-build.json') {
+                const data = requestData(args[1])
+                if (!data || (data.method !== undefined && typeof data.method !== 'string')) {
+                  metadataKnown = false
+                }
+                else {
+                  method = (data.method as string | undefined ?? 'GET').toUpperCase()
+                  signal = data.signal as AbortSignal | undefined
+                  if (signal !== undefined && !(signal instanceof AbortSignal))
+                    metadataKnown = false
+                }
+              }
+            }
+          }
+          catch { metadataKnown = false }
           let original: ReturnType<typeof fetch>
           try {
             original = Reflect.apply(fetch, this, args)
@@ -260,45 +333,12 @@ for (const boundary of ['pending-poll', 'departing-timer'] as const) {
             observerFailed()
             throw cause
           }
-          let path: string
-          let signal: AbortSignal | undefined
-          let method = 'GET'
-          try {
-            if (typeof args[0] !== 'string') {
-              observerFailed()
-              return original
-            }
-            path = new URL(args[0], location.href).pathname
-            if (!path.startsWith('/api/') && path !== '/web-build.json')
-              return original
-            if (args[1] != null) {
-              const descriptors = Object.getOwnPropertyDescriptors(args[1])
-              if (['method', 'signal'].some(key => descriptors[key] && !('value' in descriptors[key]))) {
-                observerFailed()
-                return original
-              }
-              const prototype = Object.getPrototypeOf(args[1])
-              if (prototype !== null && prototype !== Object.prototype) {
-                observerFailed()
-                return original
-              }
-              const value = descriptors.method?.value
-              if (value !== undefined && typeof value !== 'string') {
-                observerFailed()
-                return original
-              }
-              method = (value ?? 'GET').toUpperCase()
-              signal = descriptors.signal?.value
-              if (signal !== undefined && !(signal instanceof AbortSignal)) {
-                observerFailed()
-                return original
-              }
-            }
-          }
-          catch {
+          if (!metadataKnown) {
             observerFailed()
             return original
           }
+          if (!path || (!path.startsWith('/api/') && path !== '/web-build.json'))
+            return original
           try {
             const category = path === '/api/installations' ? 'poll' : 'http'
             const poll = ++pollId

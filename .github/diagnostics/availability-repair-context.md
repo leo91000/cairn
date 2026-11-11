@@ -2,8 +2,8 @@
 
 ## Current selection after explicit ROOT H77 source-helper decision
 
-Product **49752fd6fa358075bf53b80c70c4731d0a873e5f**, tree **8ba8db1d012c06b040be20924d6f55ad0156ca89**,
-parent6b9; canonicalQA ROOT DUE on this clean exact commit. Only
+Product **c1427cbfdbc945dc8c58360b2b60fbd9a69ec0db**, tree **8d51a6bfaa45169a71f9304439a3bc19c8aed81a**,
+parent4975; canonicalQA ROOT DUE on this clean exact commit. Only
 `tests/e2e/availability-probe.ts` and its real existing source regression suite
 `apps/web/tests/availability-read.test.ts` changed. Runtimeb186/apps/factory/TypeError,
 MCPS/browser assertions, budgets/profiles/auth/grants remain immutable.
@@ -205,3 +205,24 @@ Selected workflow/controller/manifest/default source selector all repin current
 product. Two overlays unchanged, original hashes verified. Fresh independent FULLs
 ALLproduct+ALLobserver/archives/pin required AFTER ROOT canonical receipt.
 No review launched early/no CI/native/PR/runtime/SDKenv effect; P1OPEN/slotROOT.
+
+Current source after COMPLETE R78/H79 NONclean reviews (owner reports separate):
+productc1427cbfdbc945dc8c58360b2b60fbd9a69ec0db/tree8d51a6bfaa45169a71f9304439a3bc19c8aed81a. Only
+testhelper/regressions changed, app/runtime/factory/PR731 frozen. Ordinary-data
+metadata rejects inherited dictionary members and uses private NULL-prototype
+maps/own descriptors, no inherited method/signal getter reads. Three permanent
+real-helper inherited-option cases prepared; same bootstrap reference4975 three
+ASSERTFAIL vs candidate31PASS, original native getter once/cause unchanged.
+Selected and archived RequestInit observation now uses same supported ordinary
+data surface before native conversion; real caller plain string headers + JSON
+body remains supported, coercible/accessor/inherited metadata UNKNOWN.
+Any-parent metadata only from plain two-slot data arrays with captured builtin
+iterator, validated BEFORE original sequence can remove its custom iterator.
+Original any invocation/result unchanged; observer NEVER iterates for metadata.
+Controlled SOURCE WebIDL sequence stand-in delegates to real Node composite,
+explicitly NOT native browser proof. Normal caller/header case positive preserved.
+All corrections made only AFTER BOTH R78/H79 reviews closed on frozen4975/0d74.
+ROOT cleanQA4975 and separate workflowSOURCE100PASS/collect1 are valid old-pin
+proofs, not currentQA/native or review verdict. Canonical ROOT newcleancommit QA
+DUE before fresh COMPLETE FULLs ALLproduct+ALLobserver/archives/pin. No oldclean
+transfer, no CI/native/PR/merge/budget/profile/cachepolicy change. P1OPEN/slotROOT.

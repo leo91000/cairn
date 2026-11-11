@@ -154,6 +154,57 @@ function nativeDiagnostics(mode) {
       }
     })
   }
+  const ordinaryData = (value) => {
+    if (value == null)
+      return Object.create(null)
+    if (typeof value !== 'object')
+      return null
+    const prototype = Object.getPrototypeOf(value)
+    if (prototype !== null && prototype !== Object.prototype)
+      return null
+    if (prototype) {
+      const standard = ['constructor', '__defineGetter__', '__defineSetter__', 'hasOwnProperty', '__lookupGetter__', '__lookupSetter__', 'isPrototypeOf', 'propertyIsEnumerable', 'toString', 'valueOf', '__proto__', 'toLocaleString']
+      const inherited = Object.getOwnPropertyDescriptors(prototype)
+      Object.setPrototypeOf(inherited, null)
+      for (const key of Reflect.ownKeys(inherited)) {
+        if (typeof key !== 'string' || !standard.includes(key))
+          return null
+        const descriptor = Object.getOwnPropertyDescriptor(inherited, key).value
+        if (key !== '__proto__' && !Object.hasOwn(descriptor, 'value'))
+          return null
+      }
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(value)
+    Object.setPrototypeOf(descriptors, null)
+    const data = Object.create(null)
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (typeof key !== 'string')
+        return null
+      const descriptor = Object.getOwnPropertyDescriptor(descriptors, key).value
+      if (!Object.hasOwn(descriptor, 'value'))
+        return null
+      data[key] = descriptor.value
+    }
+    return data
+  }
+  const requestData = (value) => {
+    const data = ordinaryData(value)
+    if (!data)
+      return null
+    for (const [key, item] of Object.entries(data)) {
+      if (key === 'signal')
+        continue
+      if (key === 'headers' && item != null) {
+        const headers = ordinaryData(item)
+        if (!headers || Object.values(headers).some(value => typeof value !== 'string'))
+          return null
+      }
+      else if (item !== null && (typeof item === 'object' || typeof item === 'function'))
+        return null
+    }
+    return data
+  }
+
   const signals = new WeakMap()
   const observationFailed = () => {
     try { record('observer-failed') } catch {}
@@ -195,13 +246,9 @@ function nativeDiagnostics(mode) {
     let signal
     let metadataKnown = true
     try {
-      if (args[1] != null) {
-        const descriptor = Object.getOwnPropertyDescriptor(args[1], 'signal')
-        if ((descriptor && !('value' in descriptor)) || ![null, Object.prototype].includes(Object.getPrototypeOf(args[1])))
-          metadataKnown = false
-        else
-          signal = descriptor?.value
-      }
+      const data = requestData(args[1])
+      metadataKnown = data !== null
+      signal = data?.signal
     }
     catch { metadataKnown = false }
     let request = args

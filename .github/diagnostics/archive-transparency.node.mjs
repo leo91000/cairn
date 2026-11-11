@@ -102,7 +102,7 @@ function fixture(t, name) {
   runInContext(`(${bootstrap})(${name === 'availability-reader-native.mjs' ? JSON.stringify('pre-pagehide-original-body') : ''});`, context)
   const ownWindow = runInContext('window', context)
   const fetch = (...args) => Reflect.apply(context.fetch, ownWindow, args)
-  return { context, fetch, queue, calls, bodyCalls, events, closeResult, NativeSource, abortCalls, abortResult }
+  return { context, fetch, queue, calls, bodyCalls, events, closeResult, NativeSource, abortCalls, abortResult, storage }
 }
 for (const name of ['skill-availability-probe.ts', 'b534-navigation-probe.ts']) {
   test(`${name}: actual bootstrap preserves original fetch promise, arguments and receiver`, async (t) => {
@@ -324,3 +324,107 @@ test('H78 archived original JSON consumer retains exact arguments and native pro
   assert.equal(f.bodyCalls.at(-1).receiver, returned)
   assert.deepEqual(await original, { original: true })
 })
+
+
+if (process.argv.includes('--product-reference')) {
+  for (const field of ['cache', 'method', 'signal']) {
+    test(`R78 actual product probe refuses inherited ${field} conversion and descriptor-map access`, async (t) => {
+      const f = fixture(t, 'availability-probe.ts')
+      const actual = new AbortController()
+      const unrelated = new AbortController()
+      const original = Promise.withResolvers()
+      const cause = new DOMException('same original actual request failure', 'AbortError')
+      const options = field === 'signal' ? { method: 'GET' } : { signal: unrelated.signal }
+      let used
+      let nativeGetterReads = 0
+      let metadataGetterReads = 0
+      f.queue.push((_, init) => {
+        void init.cache
+        void init.method
+        used = init.signal
+        const listenerOptions = Object.create(null)
+        listenerOptions.once = true
+        used.addEventListener('abort', () => original.reject(cause), listenerOptions)
+        return original.promise
+      })
+      const prior = Object.getOwnPropertyDescriptor(Object.prototype, field)
+      Object.defineProperty(Object.prototype, field, { configurable: true, get() {
+        if (this === options) {
+          nativeGetterReads++
+          if (field !== 'signal')
+            options.signal = actual.signal
+          return field === 'signal' ? actual.signal : field === 'method' ? 'GET' : 'default'
+        }
+        const marker = Object.getOwnPropertyDescriptor(this, field === 'signal' ? 'method' : 'signal')?.value
+        if (marker && typeof marker === 'object' && Object.hasOwn(marker, 'value')) {
+          metadataGetterReads++
+          return { value: field === 'signal' ? unrelated.signal : 'GET' }
+        }
+        return undefined
+      } })
+      let returned
+      try { returned = f.fetch('/api/installations', options) }
+      finally {
+        if (prior)
+          Object.defineProperty(Object.prototype, field, prior)
+        else
+          Reflect.deleteProperty(Object.prototype, field)
+      }
+      assert.equal(returned, original.promise)
+      assert.equal(used, actual.signal)
+      unrelated.abort(new DOMException('different unrelated reason', 'AbortError'))
+      const rejected = assert.rejects(returned, error => error === cause)
+      actual.abort(cause)
+      await rejected
+      await setImmediate()
+      const journal = f.events.map(args => args[0]).filter(value => value && typeof value === 'object')
+      t.diagnostic(JSON.stringify({ nativeGetterReads, metadataGetterReads, wrongOwnedRejectionCount: journal.filter(event => event.kind === 'rejected' && event.aborted).length }))
+      assert.equal(metadataGetterReads, 0)
+      assert.equal(nativeGetterReads, 1)
+      assert.equal(journal.some(event => event.kind === 'observer-failed'), true)
+      assert.equal(journal.some(event => event.kind === 'rejected' && event.aborted), false)
+    })
+  }
+}
+
+for (const name of ['skill-availability-probe.ts', 'b534-navigation-probe.ts', 'availability-reader-native.mjs']) {
+  test(`H79 ${name}: unsupported conversion cannot attach abort observation to another signal`, async (t) => {
+    const f = fixture(t, name)
+    const actual = new f.context.AbortController()
+    const unrelated = new f.context.AbortController()
+    const original = Promise.resolve(new Response(null, { status: 204 }))
+    const reader = name === 'availability-reader-native.mjs'
+    let options
+    options = reader
+      ? { signal: unrelated.signal, get method() { options.signal = actual.signal; return 'GET' } }
+      : { method: 'GET', signal: actual.signal, get window() { options.signal = unrelated.signal; return undefined } }
+    let used
+    f.queue.push((_, init) => {
+      if (reader) {
+        void init.method
+        used = init.signal
+      }
+      else {
+        used = init.signal
+        void init.window
+      }
+      return original
+    })
+    const returned = f.fetch('/api/installations', options)
+    assert.equal(returned, original)
+    assert.equal(used, actual.signal)
+    unrelated.abort()
+    await returned
+    await setImmediate()
+    if (reader) {
+      const journal = JSON.parse(f.storage.get('cairn-native-fetch-journal') || '[]')
+      assert.equal(journal.some(event => event.kind === 'observer-failed'), true)
+      assert.equal(journal.some(event => event.kind === 'private-native-signal'), false)
+    }
+    else {
+      assert.equal(f.context.shellObserverFailed, true)
+      assert.equal(f.events.some(event => event[0] === 'poll-abort'), false)
+    }
+    assert.equal(actual.signal.aborted, false)
+  })
+}
