@@ -1,7 +1,7 @@
 # SOURCE-TRUSTED diagnostic domain — SOURCE ONLY, NOT runtime qualification
 
-Product **5efdebc21b39e2e2497ec240eaa0121eae292946**, tree **49fb81eb980919dffa8741f80e70bec8d56f328e**,
-parent756 (test-only OAuth reporter terminal isolation), app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
+Product **c6c676c12c84d2e5ebf82af3870bbd098fd8e5b9**, tree **092ffb6026ef2aac61759086dc8b726a9e8eee63**,
+parent5efd (canonical three blank lines only), app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
 and its permanent serialized-bootstrap regression. Canonical QA ROOT on this exact clean
 new product is DUE before fresh COMPLETE independent FULLs. The prior clean bc1c QA is historical
 for this changed product and does not transfer.
@@ -485,3 +485,10 @@ by targeting only the original pageerror failure, and an added exact-two asserti
 requires both attempts/failures when both listeners fail. No expectation weakened.
 New product5efd exact canonical ROOT QA DUE before fresh full reviews, old7561888
 not transferred. No compiler/browser/native/canonical checks duplicated C40.
+
+Canonical ROOT755B/f8820047d71b908b32660253ddb583f30e744dae7016e77a4555d7324a41d836
+read/hash verified, applied exactly ONCE to clean5efd. Product difference EXACT patch
+three blank lines in MCPS only; same three hunks full overlay, nonwhitespace tokens
+unchanged. New clean product canonical ROOT QA DUE before fresh full independent
+reviews. Root formatted-dirty5efd1888 and source contrasts remain historical, no
+transfer or canonical rerun C40. All prior firstfailures/sourcebytes preserved.
