@@ -728,3 +728,54 @@ profile/budgets/retries EXACTLYUNCHANGED. ROOT affected QA DUE before new FULLs
 ALL12product/ALL22observer/archives/ALLpin/chain, freshSolHigh/forknone. OldR91/H92
 not transferred; no prospective native or whole-repair qualification claimed.
 Admission71ed consumed, slotROOT/HOLD, P1OPEN/causeDirectUNKNOWN, B/DstorageHOLD.
+
+
+## H93 targeted payload correction — explicit V5, SOURCE only
+
+R92 complete0/H93 completeNONclean1P2 on9979/f760 preserved as historical. ROOT
+explicitly lifted ONLY the NativeReader observer-payload freeze for this finding:
+decisiondf9654a4,4494B/SHA61710e1bebae112202094a88c0e5898b110fe66d3296f98d4d2f8496e24438aa
+read ENTIRE/hash verified. No product/factory/PR731 change or native admission.
+
+V5_REPORTER_RETENTION guards snapshot setup and MessageChannel construction/parsing/
+delivery; reporter Promise rejection is observed with captured intrinsic then and
+the SAME existing observationFailed/closed Page HOST negative ingress. JSON observer
+derived callbacks/registration are isolated, including their rejection. Original
+native Fetch/JSON/abort operations, receiver/FULLargs/once/Promise/result/cause/
+throws/terminal remain untouched; no new reporter/protocol/SDK/probe. A failure is
+UNKNOWN/non-green, not a fabricated read or passed negative. Existing Page errors
+and active error/audit/ownership/withdrawal/download/rearm/auth/cadence remain strict.
+
+Entire V4 file Gitblob/SHA/binding/sourcef760 is retained in previousCompositions,
+recursively preservingV3/V2/oldhelpers. New payload V5 gets its own observer identity
+and Source evidence, not old result renamed. Other injected files, both full
+Overlays, shared Git controllers, workflow/SDKimage/profile/budgets and product9979
+are BYTEUNCHANGED. Composition installer/bootstrap/poll and negative ingress code
+are unchanged; only declared NativeReader observer callback guards changed.
+
+Permanent actual serialized ENTIRE-composition SOURCE tests: construction storage/
+JSON/diagnosticState faults; synchronous reporter throw; asynchronous reporter
+rejection before AND after SOURCE document replacement; fulfilled/rejected JSON
+observer callback faults; two normal original success/activeTypeError baselines.
+Referencef760/V4 with SAME NEWcontroller :10cases2PASS/8ASSERTFAIL/0skip. Candidate
+V5:10/10PASS. Baseline2 alreadyPASS are NOT credited fixes. Seven-case initial
+counterfactual and extra late-rejection case remain separate logs, no old QA replay.
+Exact original Fetch/JSON identity/receivers/FULLargs/onecall and unchanged ACTIVE
+TypeError cause are asserted. Actual composed callbacks and existing host guard
+are invoked, not a mirror. Source controller holds native MessageChannel delivery
+then invokes its REAL serialized handler; Source doc replacement is explicit VM
+simulation, NEVER native lifecycle/application-generation correlation. A transparent
+SOURCE spy captures only selected body-observer derivatives to assert their failures
+without unrelated test-runner unhandled output; originals/native outcomes stay exact.
+No failure marker/host counter is fabricated by the test, candidate must emit it.
+
+BOTH exact workflow SOURCE commands reexecuted on changed payload under actual Git
+ownership guard/configPRIVATEempty :76/76 +84/84PASS/0skip/shellEXIT0, host/repository
+configbytes +private empty config +parentenvironment unchanged, actualUIDnotchanged.
+All prior Git refusal/bounded-trust controls preserved. FIVEuniversal outside-domain
+witnesses remain4+1ASSERTFAIL underforcedguard, not fixed/ownership/nativequalified.
+No1888/104/product/browser/SDK/CargoGradle/CI/collecte executed. ROOT appropriate QA
+DUE before fresh FULLs ALL12product/ALL22observer/archives/entirechain, newSolHigh/
+forknone, sourcesfrozen untilbothverdicts. No oldR92/H93clean transferred.
+P1OPEN/causeDirect47-1UNKNOWN/run43008782246FAILsource68/6/browserNONATTEINT preserved.
+Admission71ed consumed, slotROOT/HOLD/noUImergecapturesLéo/Slackprodgrantsforensicintact.

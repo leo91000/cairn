@@ -22,7 +22,7 @@ const paths = {
 const sources = Object.fromEntries(await Promise.all(Object.entries(paths).map(async ([key, path]) => [key, await readFile(path, 'utf8')])))
 // Versioned test-helper dependency; historical runtime fixture bytes stay frozen.
 const nativeReaderCompositionBinding = {
-  "compositionId": "H91_NATIVE_READER_COMPOSITION_V4_SCOPED_GIT_ACQUISITION",
+  "compositionId": "H93_NATIVE_READER_COMPOSITION_V5_REPORTER_RETENTION",
   "helper": {
     "commit": "9979b4ff1f36f48541e33ff93de6d19a07797886",
     "path": "tests/e2e/availability-probe.ts",
@@ -42,12 +42,12 @@ const nativeReaderCompositionBinding = {
   "qualification": "SOURCE_ONLY_NEW_COMPOSITION_NO_HISTORICAL_RUN_TRANSFER",
   "previousCompositions": [
     {
-      "observer": "3ec9244c7bbbab22894b73e4f539a97fd0149af9",
+      "observer": "f760d2b615e308d0b15094a220318ac06e3a573a",
       "path": ".github/diagnostics/availability-reader-native.mjs",
-      "gitBlob": "8ee6e1f601ceaadf6ff69a790b0fd79e90236745",
-      "sha256": "eb6a2c964fdba4904e9c577af96da3fb8d4caca43a97fa63aad52a07275e3369",
+      "gitBlob": "96cb4ce22a8e92b1c3dcd5ab58eacafa9201c5a2",
+      "sha256": "4ba5c2f8d2af5161d49a03ee0f237bbb1aae166ddb78271cd551648d1de43319",
       "binding": {
-        "compositionId": "H91_NATIVE_READER_COMPOSITION_V3_CANONICAL_1C09",
+        "compositionId": "H91_NATIVE_READER_COMPOSITION_V4_SCOPED_GIT_ACQUISITION",
         "helper": {
           "commit": "9979b4ff1f36f48541e33ff93de6d19a07797886",
           "path": "tests/e2e/availability-probe.ts",
@@ -67,14 +67,14 @@ const nativeReaderCompositionBinding = {
         "qualification": "SOURCE_ONLY_NEW_COMPOSITION_NO_HISTORICAL_RUN_TRANSFER",
         "previousCompositions": [
           {
-            "observer": "1d97ccd9aff5b2b021672343c421802c0fd1d2ad",
+            "observer": "3ec9244c7bbbab22894b73e4f539a97fd0149af9",
             "path": ".github/diagnostics/availability-reader-native.mjs",
-            "gitBlob": "21b211e5655529bc3ca6b9f658383cb6a22a210e",
-            "sha256": "2e4d6ccad84047b7bbdb6c40cfb6a64d0c0fcad482917c5b2903388637279f3c",
+            "gitBlob": "8ee6e1f601ceaadf6ff69a790b0fd79e90236745",
+            "sha256": "eb6a2c964fdba4904e9c577af96da3fb8d4caca43a97fa63aad52a07275e3369",
             "binding": {
-              "compositionId": "H91_NATIVE_READER_COMPOSITION_V2",
+              "compositionId": "H91_NATIVE_READER_COMPOSITION_V3_CANONICAL_1C09",
               "helper": {
-                "commit": "e81b99601d5abeec663dd0c7a1cde8b72b72b35d",
+                "commit": "9979b4ff1f36f48541e33ff93de6d19a07797886",
                 "path": "tests/e2e/availability-probe.ts",
                 "gitBlob": "fa8e4d1aa18dceb2750c2b71bb945e108822fd31",
                 "sha256": "528e6098ade467928e691c3f377509ca131fba911ea9f05a791eadeabf2df626"
@@ -89,17 +89,50 @@ const nativeReaderCompositionBinding = {
                 "nativeDiagnostics",
                 "installAvailabilityProbe"
               ],
-              "qualification": "SOURCE_ONLY_NEW_COMPOSITION_NO_HISTORICAL_RUN_TRANSFER"
+              "qualification": "SOURCE_ONLY_NEW_COMPOSITION_NO_HISTORICAL_RUN_TRANSFER",
+              "previousCompositions": [
+                {
+                  "observer": "1d97ccd9aff5b2b021672343c421802c0fd1d2ad",
+                  "path": ".github/diagnostics/availability-reader-native.mjs",
+                  "gitBlob": "21b211e5655529bc3ca6b9f658383cb6a22a210e",
+                  "sha256": "2e4d6ccad84047b7bbdb6c40cfb6a64d0c0fcad482917c5b2903388637279f3c",
+                  "binding": {
+                    "compositionId": "H91_NATIVE_READER_COMPOSITION_V2",
+                    "helper": {
+                      "commit": "e81b99601d5abeec663dd0c7a1cde8b72b72b35d",
+                      "path": "tests/e2e/availability-probe.ts",
+                      "gitBlob": "fa8e4d1aa18dceb2750c2b71bb945e108822fd31",
+                      "sha256": "528e6098ade467928e691c3f377509ca131fba911ea9f05a791eadeabf2df626"
+                    },
+                    "historicalHelper": {
+                      "commit": "8835fa792c12633b1cca830659ebaf04a6cd5547",
+                      "path": "tests/e2e/availability-probe.ts",
+                      "gitBlob": "f72cd5102e901e17e77728d06834737552503748",
+                      "sha256": "5d315a1c12a2835838645d0804cb0dda5e8dfd8503eab8c963ac3d9442baae61"
+                    },
+                    "order": [
+                      "nativeDiagnostics",
+                      "installAvailabilityProbe"
+                    ],
+                    "qualification": "SOURCE_ONLY_NEW_COMPOSITION_NO_HISTORICAL_RUN_TRANSFER"
+                  },
+                  "status": "HISTORICAL_SOURCE_ONLY_NOT_NATIVE_OR_CURRENT_QA"
+                }
+              ]
             },
-            "status": "HISTORICAL_SOURCE_ONLY_NOT_NATIVE_OR_CURRENT_QA"
+            "status": "HISTORICAL_V3_SOURCE_EVIDENCE_NOT_RELABELLED"
           }
-        ]
+        ],
+        "hostGitAcquisition": "PER_COMMAND_EXACT_CONTROLLED_REPOSITORY",
+        "nativePayloadChanged": false
       },
-      "status": "HISTORICAL_V3_SOURCE_EVIDENCE_NOT_RELABELLED"
+      "status": "HISTORICAL_V4_PAYLOAD_AND_SOURCE_RESULTS_NOT_RELABELLED"
     }
   ],
   "hostGitAcquisition": "PER_COMMAND_EXACT_CONTROLLED_REPOSITORY",
-  "nativePayloadChanged": false
+  "nativePayloadChanged": true,
+  "payloadChangeScope": "EXISTING_OBSERVER_SNAPSHOT_AND_JSON_CALLBACK_NEGATIVE_RETENTION_ONLY",
+  "rootDecisionSHA256": "61710e1bebae112202094a88c0e5898b110fe66d3296f98d4d2f8496e24438aa"
 }
 const helperBinding = nativeReaderCompositionBinding.helper
 assert.equal(execFileSync('git', controlledSourceGitArgs(['rev-parse', `${helperBinding.commit}:${helperBinding.path}`]), { encoding: 'utf8' }).trim(), helperBinding.gitBlob)
@@ -212,27 +245,39 @@ function nativeDiagnostics(mode) {
   const fetch = window.fetch
   const abort = AbortController.prototype.abort
   const json = Response.prototype.json
+  const promiseThen = Promise.prototype.then
   const responses = new WeakMap()
   const snapshots = []
   let channel
   const snapshot = (trigger, selectedRead) => {
-    snapshots.push({ trigger, read: selectedRead })
-    if (channel)
-      return
-    channel = new MessageChannel()
-    channel.port1.onmessage = () => {
-      const batch = snapshots.splice(0)
-      channel.port1.close(); channel.port2.close(); channel = undefined
-      const receipt = {
-        document: window.cairnAvailabilityDocument, pendingSnapshots: snapshots.length,
-        state: window.diagnosticState?.() ?? null,
-        journal: JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]'),
-        native: JSON.parse(sessionStorage.getItem('cairn-native-fetch-journal') || '[]'),
+    try {
+      snapshots.push({ trigger, read: selectedRead })
+      if (channel)
+        return
+      channel = new MessageChannel()
+      channel.port1.onmessage = () => {
+        try {
+          const batch = snapshots.splice(0)
+          channel.port1.close(); channel.port2.close(); channel = undefined
+          const receipt = {
+            document: window.cairnAvailabilityDocument, pendingSnapshots: snapshots.length,
+            state: window.diagnosticState?.() ?? null,
+            journal: JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]'),
+            native: JSON.parse(sessionStorage.getItem('cairn-native-fetch-journal') || '[]'),
+          }
+          for (const selected of batch) {
+            try {
+              const delivery = window.nativeStateReceipt({ ...receipt, ...selected })
+              void Reflect.apply(promiseThen, delivery, [undefined, observationFailed])
+            }
+            catch { observationFailed() }
+          }
+        }
+        catch { observationFailed() }
       }
-      for (const selected of batch)
-        void window.nativeStateReceipt({ ...receipt, ...selected })
+      channel.port2.postMessage(null)
     }
-    channel.port2.postMessage(null)
+    catch { observationFailed() }
   }
   const pagehideEntry = function diagnosticPagehideEntry() {
     if (channel) { channel.port1.close(); channel.port2.close(); channel = undefined }
@@ -402,7 +447,14 @@ function nativeDiagnostics(mode) {
       // CDP reads its internal state while paused BEFORE the first pagehide callback.
       if (mode === 'pre-pagehide-original-body' && current === 3)
         window.cairnNativeOriginalJSON = original
-      void original.then(() => snapshot('body', current), () => snapshot('body-rejected', current))
+      try {
+        const observer = Reflect.apply(promiseThen, original, [
+          () => { try { snapshot('body', current) } catch { observationFailed() } },
+          () => { try { snapshot('body-rejected', current) } catch { observationFailed() } },
+        ])
+        void Reflect.apply(promiseThen, observer, [undefined, observationFailed])
+      }
+      catch { observationFailed() }
     }
     return original
   }

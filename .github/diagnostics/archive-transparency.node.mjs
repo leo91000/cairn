@@ -17,11 +17,11 @@ assert.match(productReferenceHead, /^[a-f0-9]{40}$/)
 const referenceHead = process.env.C40_ARCHIVE_REFERENCE || '589e704e90bc451a181bd7fdcf667993e518522e'
 function fixture(t, name, settings = {}) {
   const productReference = name === 'availability-probe.ts'
-  const raw = productReference
+  const raw = settings.rawSource ?? (productReference
     ? execFileSync('git', controlledSourceGitArgs(['show', `${productReferenceHead}:tests/e2e/availability-probe.ts`]), { encoding: 'utf8' })
     : reference
     ? execFileSync('git', controlledSourceGitArgs(['show', `${referenceHead}:.github/diagnostics/${name}`]), { encoding: 'utf8' })
-    : readFileSync(new URL('./' + name, import.meta.url), 'utf8')
+    : readFileSync(new URL('./' + name, import.meta.url), 'utf8'))
   const source = stripTypeScriptTypes(raw, { mode: 'transform' })
   let bootstrap
   if (name === 'availability-reader-native.mjs') {
@@ -38,6 +38,8 @@ function fixture(t, name, settings = {}) {
   }
   const originals = new Map()
   const bodyCalls = []
+  const diagnosticBodyFailures = []
+  const originalThen = Promise.prototype.then
   const originalAny = AbortSignal.any
   const originalAbort = AbortController.prototype.abort
   const abortCalls = []
@@ -55,6 +57,16 @@ function fixture(t, name, settings = {}) {
     Response.prototype[method] = function (...args) {
       const promise = Reflect.apply(original, this, args)
       bodyCalls.push({ method, receiver: this, args, promise })
+      if (settings.captureBodyObserverRejections && method === 'json') {
+        // Transparent SOURCE spy on this selected original Promise: keep this,
+        // args, native derivative and original promise/cause. Candidate metadata
+        // uses the captured intrinsic; historical metadata uses this entry.
+        Object.defineProperty(promise, 'then', { value: function (...thenArgs) {
+          const derived = Reflect.apply(originalThen, this, thenArgs)
+          void Reflect.apply(originalThen, derived, [undefined, error => { diagnosticBodyFailures.push(error) }])
+          return derived
+        }, configurable: true })
+      }
       return promise
     }
   }
@@ -133,7 +145,7 @@ function fixture(t, name, settings = {}) {
     runInContext(`(${observeDirectOwners.toString()})({installationId:'source-id',installationSlug:'source-slug'})`, context)
   const ownWindow = runInContext('window', context)
   const fetch = (...args) => Reflect.apply(context.fetch, ownWindow, args)
-  return { context, fetch, unwrappedFetch, queue, calls, bodyCalls, events, closeResult, NativeSource, abortCalls, abortResult, storage, directEvents, bootstrapExpression: `(${bootstrap})(${name === 'availability-reader-native.mjs' ? JSON.stringify('pre-pagehide-original-body') : ''});` }
+  return { context, fetch, unwrappedFetch, queue, calls, bodyCalls, diagnosticBodyFailures, channels, events, closeResult, NativeSource, abortCalls, abortResult, storage, directEvents, bootstrapExpression: `(${bootstrap})(${name === 'availability-reader-native.mjs' ? JSON.stringify('pre-pagehide-original-body') : ''});` }
 }
 for (const name of ['skill-availability-probe.ts', 'b534-navigation-probe.ts']) {
   test(`${name}: actual bootstrap preserves original fetch promise, arguments and receiver`, async (t) => {
@@ -1066,21 +1078,26 @@ test('H91 actual OAuth asynchronous reporting rejection remains host-owned after
 
 // The actual driver function composes both serialized observers in its declared order.
 // The optional historical helper is a permanent SOURCE counterfactual, not an old run relabelled.
-async function nativeReaderCompositionFixture(t) {
+async function nativeReaderCompositionFixture(t, settings = {}) {
   const name = 'availability-reader-native.mjs'
-  const raw = readFileSync(new URL('./' + name, import.meta.url), 'utf8')
+  const reference = settings.h93Case ? process.env.C40_H93_PAYLOAD_REFERENCE : undefined
+  if (reference)
+    assert.match(reference, /^[a-f0-9]{40}$/)
+  const raw = reference
+    ? execFileSync('git', controlledSourceGitArgs(['show', `${reference}:.github/diagnostics/${name}`]), { encoding: 'utf8' })
+    : readFileSync(new URL('./' + name, import.meta.url), 'utf8')
   const bindingStart = raw.indexOf('const nativeReaderCompositionBinding = ') + 'const nativeReaderCompositionBinding = '.length
   const bindingEnd = raw.indexOf('\nconst helperBinding = ', bindingStart)
   assert(bindingStart > 40 && bindingEnd > bindingStart)
   const binding = JSON.parse(raw.slice(bindingStart, bindingEnd))
-  assert.equal(binding.compositionId, 'H91_NATIVE_READER_COMPOSITION_V4_SCOPED_GIT_ACQUISITION')
+  assert.equal(binding.compositionId, reference ? 'H91_NATIVE_READER_COMPOSITION_V4_SCOPED_GIT_ACQUISITION' : 'H93_NATIVE_READER_COMPOSITION_V5_REPORTER_RETENTION')
   assert.deepEqual(binding.order, ['nativeDiagnostics', 'installAvailabilityProbe'])
   const selected = process.env.C40_NATIVE_READER_HELPER_REFERENCE === 'historical' ? binding.historicalHelper : binding.helper
   const bytes = execFileSync('git', controlledSourceGitArgs(['show', `${selected.commit}:${selected.path}`]))
   assert.equal(execFileSync('git', controlledSourceGitArgs(['rev-parse', `${selected.commit}:${selected.path}`]), { encoding: 'utf8' }).trim(), selected.gitBlob)
   const { createHash } = await import('node:crypto')
   assert.equal(createHash('sha256').update(bytes).digest('hex'), selected.sha256)
-  const f = fixture(t, name, { deferBootstrap: true })
+  const f = fixture(t, name, { ...settings, rawSource: raw, deferBootstrap: true })
   runInContext(stripTypeScriptTypes(bytes.toString(), { mode: 'transform' }).replace(/^export /gm, ''), f.context)
   const diagnosticFunction = f.bootstrapExpression.slice(0, f.bootstrapExpression.lastIndexOf(')("pre-pagehide-original-body");') + 1)
   f.context.nativeDiagnostics = runInContext(diagnosticFunction, f.context)
@@ -1093,11 +1110,12 @@ async function nativeReaderCompositionFixture(t) {
   const reads = []
   let failures = 0
   page.exposeFunction = async (key, callback) => { f.context[key] = (...args) => Promise.resolve(callback(...args)) }
-  page.addInitScript = async (script) => { runInContext(script, f.context) }
+  let combinedBootstrap
+  page.addInitScript = async (script) => { combinedBootstrap = script; runInContext(script, f.context) }
   f.context.console = { error(...args) { page.emit('console', { type: () => 'error', text: () => args[0] }) } }
   await f.context.installNativeReaderComposition(page, event => reads.push(event), () => { failures++ }, 'pre-pagehide-original-body')
   t.after(() => page.emit('close'))
-  return { ...f, page, reads, failures: () => failures, binding, selected }
+  return { ...f, page, reads, failures: () => failures, binding, selected, replaceSourceDocument() { runInContext('document={defaultView:window}', f.context); runInContext(combinedBootstrap, f.context) } }
 }
 
 test('H91 ENTIRE NativeReader composition: strict unqualified receiver and empty full argument list', async (t) => {
@@ -1198,4 +1216,221 @@ test('GIT OWNERSHIP actual NativeReader host helper acquisition across the repos
   assert.equal(source.probe, execFileSync('git', controlledSourceGitArgs(['show', `${binding.helper.commit}:${binding.helper.path}`]), { encoding: 'utf8' }))
   assert.equal(readFileSync(config, 'utf8'), '')
   assert.equal(env.GIT_CONFIG_COUNT, '0')
+})
+
+async function h93CompositionFixture(t) {
+  const f = await nativeReaderCompositionFixture(t, { h93Case: true, holdCompletionMessages: true, captureBodyObserverRejections: true })
+  const host = actualArchiveHostGuard('availability-reader-native.mjs')
+  f.page.on('console', host.accept)
+  t.after(() => f.page.off('console', host.accept))
+  const callbackFailures = []
+  let delivered = 0
+  return {
+    ...f, host, callbackFailures,
+    deliverSnapshots() {
+      while (delivered < f.channels.length) {
+        const port = f.channels[delivered++].port1
+        const callback = port.onmessage
+        assert.equal(typeof callback, 'function')
+        try { Reflect.apply(callback, port, [{ data: null }]) }
+        catch (error) { callbackFailures.push(error) }
+      }
+    },
+    assertRetiredHostFailure() {
+      assert.equal(host.count() > 0, true, 'Actual closed negative ingress must retain the observation failure on the Page host')
+      const before = host.count()
+      // SOURCE-only replacement and loss of document journal, never native lifecycle evidence.
+      f.storage.delete('cairn-native-fetch-journal')
+      f.replaceSourceDocument()
+      assert.equal(host.count(), before)
+      assert.throws(() => host.audit(), /UNKNOWN/)
+      assert.equal(f.failures(), 0)
+    },
+  }
+}
+
+async function h93OriginalFetch(f, response = Response.json({ original: 'body' })) {
+  const original = Promise.resolve(response)
+  const options = { method: 'GET', signal: new AbortController().signal }
+  const extra = Symbol('same original fetch extra argument')
+  f.queue.push(original)
+  const result = f.fetch('/api/installations', options, extra)
+  assert.equal(result, original)
+  assert.equal(await result, response)
+  assert.equal(f.calls.length, 1)
+  assert.deepEqual(f.calls[0].args, ['/api/installations', options, extra])
+  assert.equal(f.calls[0].receiver, runInContext('window', f.context))
+  return response
+}
+
+for (const failure of ['storage', 'JSON', 'diagnosticState']) {
+  test(`H93 ENTIRE composition snapshot construction ${failure} failure survives source document replacement`, async (t) => {
+    const f = await h93CompositionFixture(t)
+    assert.doesNotThrow(() => f.host.audit())
+    const response = await h93OriginalFetch(f)
+    const cause = new Error('controlled snapshot construction SOURCE failure')
+    const get = f.context.sessionStorage.getItem
+    if (failure === 'storage') {
+      f.context.sessionStorage.getItem = key => {
+        if (key === 'cairn-native-fetch-journal')
+          throw cause
+        return get(key)
+      }
+    }
+    else if (failure === 'JSON') {
+      f.context.sessionStorage.getItem = key => key === 'cairn-native-fetch-journal' ? '{malformed SOURCE journal' : get(key)
+    }
+    else {
+      f.context.diagnosticState = () => { throw cause }
+    }
+    f.deliverSnapshots()
+    f.context.sessionStorage.getItem = get
+    delete f.context.diagnosticState
+    const body = response.json()
+    assert.equal(body, f.bodyCalls.at(-1).promise)
+    assert.equal(f.bodyCalls.length, 1)
+    assert.deepEqual(await body, { original: 'body' })
+    await setImmediate()
+    f.assertRetiredHostFailure()
+    assert.equal(f.callbackFailures.length, 0)
+    assert.equal(f.diagnosticBodyFailures.length, 0)
+  })
+}
+
+test('H93 ENTIRE composition synchronous state reporter throw retains host negative without replacing originals', async (t) => {
+  const f = await h93CompositionFixture(t)
+  const response = await h93OriginalFetch(f)
+  const cause = new Error('original synchronous state reporter SOURCE failure')
+  const reporter = f.context.nativeStateReceipt
+  let calls = 0
+  f.context.nativeStateReceipt = function (...args) {
+    assert.equal(this, runInContext('window', f.context))
+    assert.equal(args.length, 1)
+    calls++
+    throw cause
+  }
+  f.deliverSnapshots()
+  assert.equal(calls, 1)
+  f.context.nativeStateReceipt = reporter
+  const body = response.json()
+  assert.equal(body, f.bodyCalls.at(-1).promise)
+  assert.equal(f.bodyCalls.length, 1)
+  assert.deepEqual(await body, { original: 'body' })
+  await setImmediate()
+  f.assertRetiredHostFailure()
+  assert.equal(f.callbackFailures.length, 0)
+})
+
+test('H93 ENTIRE composition asynchronous state reporter rejection retains Page host negative after replacement', async (t) => {
+  const f = await h93CompositionFixture(t)
+  const response = await h93OriginalFetch(f)
+  const cause = new Error('same asynchronous state reporter SOURCE rejection')
+  const delivery = Promise.withResolvers()
+  const exactCause = assert.rejects(delivery.promise, error => error === cause)
+  const reporter = f.context.nativeStateReceipt
+  let calls = 0
+  f.context.nativeStateReceipt = function (...args) {
+    assert.equal(this, runInContext('window', f.context))
+    assert.equal(args.length, 1)
+    calls++
+    return delivery.promise
+  }
+  f.deliverSnapshots()
+  assert.equal(calls, 1)
+  delivery.reject(cause)
+  await exactCause
+  await setImmediate()
+  f.context.nativeStateReceipt = reporter
+  const body = response.json()
+  assert.equal(body, f.bodyCalls.at(-1).promise)
+  assert.equal(f.bodyCalls.length, 1)
+  assert.deepEqual(await body, { original: 'body' })
+  await setImmediate()
+  f.assertRetiredHostFailure()
+  assert.equal(f.callbackFailures.length, 0)
+})
+
+for (const terminal of ['fulfilled', 'rejected']) {
+  test(`H93 ENTIRE composition JSON ${terminal} observer callback failure keeps original terminal and host negative`, async (t) => {
+    const f = await h93CompositionFixture(t)
+    const nativeCause = new TypeError('same genuine ACTIVE original body SOURCE failure')
+    const response = terminal === 'fulfilled' ? Response.json({ original: 'body' }) : new Response(new ReadableStream({ start(controller) { controller.error(nativeCause) } }))
+    await h93OriginalFetch(f, response)
+    f.deliverSnapshots()
+    assert.equal(f.host.count(), 0)
+    const Channel = f.context.MessageChannel
+    f.context.MessageChannel = class { constructor() { throw new Error('controlled derived snapshot SOURCE failure') } }
+    const extra = Symbol('same original JSON argument')
+    const body = Reflect.apply(response.json, response, [extra])
+    assert.equal(body, f.bodyCalls.at(-1).promise)
+    assert.equal(f.bodyCalls.length, 1)
+    assert.equal(f.bodyCalls.at(-1).receiver, response)
+    assert.deepEqual(f.bodyCalls.at(-1).args, [extra])
+    if (terminal === 'fulfilled')
+      assert.deepEqual(await body, { original: 'body' })
+    else
+      await assert.rejects(body, error => error === nativeCause)
+    await setImmediate()
+    f.context.MessageChannel = Channel
+    f.assertRetiredHostFailure()
+    assert.equal(f.diagnosticBodyFailures.length, 0)
+    assert.equal(f.callbackFailures.length, 0)
+  })
+}
+
+for (const terminal of ['fulfilled', 'rejected']) {
+  test(`H93 ENTIRE composition BASELINE original JSON ${terminal} without observation failure stays exact`, async (t) => {
+    const f = await h93CompositionFixture(t)
+    const cause = new TypeError('same genuine ACTIVE unchanged baseline body failure')
+    const response = terminal === 'fulfilled' ? Response.json({ original: 'body' }) : new Response(new ReadableStream({ start(controller) { controller.error(cause) } }))
+    await h93OriginalFetch(f, response)
+    f.deliverSnapshots()
+    const body = response.json()
+    assert.equal(body, f.bodyCalls.at(-1).promise)
+    assert.equal(f.bodyCalls.length, 1)
+    if (terminal === 'fulfilled')
+      assert.deepEqual(await body, { original: 'body' })
+    else
+      await assert.rejects(body, error => error === cause)
+    await setImmediate()
+    f.deliverSnapshots()
+    assert.equal(f.host.count(), 0)
+    assert.equal(f.failures(), 0)
+    assert.equal(f.callbackFailures.length, 0)
+    assert.equal(f.diagnosticBodyFailures.length, 0)
+    assert.doesNotThrow(() => f.host.audit())
+  })
+}
+
+test('H93 ENTIRE composition pending original state reporter rejects AFTER source document replacement', async (t) => {
+  const f = await h93CompositionFixture(t)
+  const response = await h93OriginalFetch(f)
+  const cause = new Error('same late original reporter SOURCE rejection')
+  const delivery = Promise.withResolvers()
+  const exactCause = assert.rejects(delivery.promise, error => error === cause)
+  const reporter = f.context.nativeStateReceipt
+  let calls = 0
+  f.context.nativeStateReceipt = function (...args) {
+    assert.equal(this, runInContext('window', f.context))
+    assert.equal(args.length, 1)
+    calls++
+    return delivery.promise
+  }
+  f.deliverSnapshots()
+  assert.equal(calls, 1)
+  const body = response.json()
+  assert.equal(body, f.bodyCalls.at(-1).promise)
+  assert.equal(f.bodyCalls.length, 1)
+  assert.deepEqual(await body, { original: 'body' })
+  await setImmediate()
+  f.context.nativeStateReceipt = reporter
+  f.storage.delete('cairn-native-fetch-journal')
+  f.replaceSourceDocument()
+  assert.equal(f.host.count(), 0)
+  delivery.reject(cause)
+  await exactCause
+  await setImmediate()
+  f.assertRetiredHostFailure()
+  assert.equal(f.callbackFailures.length, 0)
+  assert.equal(f.diagnosticBodyFailures.length, 0)
 })
