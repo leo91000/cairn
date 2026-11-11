@@ -186,6 +186,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
             return null
         }
       }
+
       const descriptors = Object.getOwnPropertyDescriptors(value)
       Object.setPrototypeOf(descriptors, null)
       const data = Object.create(null)
@@ -197,6 +198,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
           return null
         data[key] = descriptor.value
       }
+
       return data
     }
 

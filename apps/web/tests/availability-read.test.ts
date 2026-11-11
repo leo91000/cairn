@@ -841,7 +841,6 @@ it.each([false, true])('rejects cross-option signal mutation even when the acces
   assert.equal(incompleteAvailabilityReads(journal).length > 0, true)
 })
 
-
 it.each(['cache', 'method', 'signal'])('rejects inherited %s metadata without reading inherited descriptor-map properties', async (field) => {
   const actual = new NativeController()
   const unrelated = new NativeController()
@@ -860,8 +859,10 @@ it.each(['cache', 'method', 'signal'])('rejects inherited %s metadata without re
     used!.addEventListener('abort', () => native.reject(cause), listenerOptions)
     return native.promise
   }
+
   const storage = await installSourceProbe()
   const previous = Object.getOwnPropertyDescriptor(Object.prototype, field)
+  // eslint-disable-next-line no-extend-native -- Controlled inherited-option fixture, restored synchronously in finally.
   Object.defineProperty(Object.prototype, field, {
     configurable: true,
     get(this: object) {
@@ -871,11 +872,13 @@ it.each(['cache', 'method', 'signal'])('rejects inherited %s metadata without re
           options.signal = actual.signal
         return field === 'signal' ? actual.signal : field === 'method' ? 'GET' : 'default'
       }
+
       const marker = Object.getOwnPropertyDescriptor(this, field === 'signal' ? 'method' : 'signal')?.value
       if (marker && typeof marker === 'object' && Object.hasOwn(marker, 'value')) {
         metadataGetterReads++
         return { value: field === 'signal' ? unrelated.signal : 'GET' }
       }
+
       return undefined
     },
   })
@@ -885,10 +888,12 @@ it.each(['cache', 'method', 'signal'])('rejects inherited %s metadata without re
   }
   finally {
     if (previous)
+      // eslint-disable-next-line no-extend-native -- Restore the original prototype before any await.
       Object.defineProperty(Object.prototype, field, previous)
     else
       Reflect.deleteProperty(Object.prototype, field)
   }
+
   assert.equal(returned, native.promise)
   assert.equal(used, actual.signal)
   unrelated.abort(new HostException('different unrelated reason', 'AbortError'))
