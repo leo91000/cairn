@@ -2,6 +2,9 @@ import type { Page } from '@playwright/test'
 
 export interface AvailabilityReadEvent {
   sequence: number
+  // Ownership association is conditional on the reviewed, pinned producer chain.
+  // This label is not a runtime producer receipt or universal Proxy admission.
+  ownershipScope?: 'PINNED_SOURCE_CONDITIONAL'
   kind: 'start' | 'fetch-fulfilled' | 'headers' | 'body' | 'body-start' | 'rejected' | 'body-rejected' | 'abort' | 'abort-call-enter' | 'abort-call-return' | 'pagehide' | 'pageshow' | 'observer-failed'
   document: string
   read: number
@@ -69,7 +72,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
     }
 
     const record = (event: Omit<AvailabilityReadEvent, 'sequence'>) => {
-      const entry = { ...event, sequence: ++eventSequence }
+      const entry = { ...event, sequence: ++eventSequence, ownershipScope: 'PINNED_SOURCE_CONDITIONAL' as const }
       try {
         store(entry)
       }
@@ -166,6 +169,9 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
       })
     }
 
+    // This filter rejects unsupported shapes in the source-trusted domain.
+    // Descriptor agreement NEVER certifies an arbitrary input/Proxy as a producer.
+    // The full pinned chain and its preconditions are required independently.
     const ordinaryData = (value: unknown): Record<string, unknown> | null => {
       if (value == null)
         return Object.create(null)

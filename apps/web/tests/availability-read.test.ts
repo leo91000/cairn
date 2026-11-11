@@ -446,6 +446,7 @@ it('observes the original fetch and JSON promises without clones, replacement pr
   const journal = JSON.parse(storage.get('cairn-e2e-availability-journal') || '[]') as AvailabilityReadEvent[]
   assert.equal(journal.filter(event => event.kind === 'headers' && event.status === 503).length, 1)
   assert.equal(journal.filter(event => event.kind === 'body').length, 1)
+  assert.equal(journal.every(event => event.ownershipScope === 'PINNED_SOURCE_CONDITIONAL'), true)
   assert.equal(calls[1]!.jsonCalls, 0)
   // Node's later AbortSignal listeners can receive currentTarget=null. Positive
   // native disposal provenance is checked in the pinned browser controls.

@@ -142,3 +142,69 @@ This is web document-lifecycle error handling, not a new UI capability. Android,
 public MCP and the built-in installation tool retain their existing contracts;
 no Rust/backend, Android, mutation replay, grants, history/cursors or storage
 behavior is changed by this repair. Incoming main changes are preserved.
+
+
+## Source-trusted ownership observation domain
+
+Ownership labels from the test helper and the prepared Direct recorder are
+**conditional on the reviewed, pinned producer and complete observer chain**.
+They are not a universal runtime admission certificate, a Proxy detector, or an
+injected producer-origin receipt. Descriptor agreement alone cannot establish
+which signal an arbitrary JavaScript object supplied to native Fetch. The two
+permanent descriptor/Get Proxy counterexamples remain RED under that abandoned
+universal claim; they are not repaired or qualified as native successes.
+
+The supported producers are exactly these internal call sites:
+
+| Producer and entry | Fresh argument construction and signal origin | Delegation path to the native operation |
+| --- | --- | --- |
+| `beacon.html` → `beacon.ts` → `BeaconApp.vue` → `refreshAvailability` → `readAvailability` | The factory creates its private native controller and a fresh RequestInit literal: same-origin credentials, keepalive and that controller's signal. No caller-supplied RequestInit/Proxy enters this call. | The factory captures the current `window.fetch`, `Response.prototype.json` and `AbortController.prototype.abort`. The availability probe and optional Direct recorder each forward the original receiver, full arguments, original promise/result/cause, through their captured delegates. |
+| `api.ts` document/session watcher → `InstallationTransport.start/connect/control` | `connect` creates the control controller. `control` constructs a fresh POST literal with `documentSignal(controlAbort.signal)`, ordinary string headers and a serialized JSON body. Authorize and signal use the same connection's control context. | `documentSignal` uses a fresh two-element array `[documentLifetime.signal, callerSignal]` for native `AbortSignal.any`. The control literal reaches the captured fetch delegates; authorization JSON and the native EventSource constructor/close are observed without replacing their results. |
+
+This domain includes the complete selected test chain, not only the producers:
+
+- The official `playwright.config.ts` and locked Playwright1.64.1 image/profile;
+  the shared fixture and `native-response-gate.ts` use a real HTTP proxy/gate.
+  The gate can disconnect only the scoped readonly availability requests and
+  does not replace JavaScript Fetch or its arguments.
+- `installAvailabilityProbe` and, in the versioned diagnostic overlay only,
+  `observeDirectOwners` wrap Fetch/JSON/abort/any/EventSource. Both supported
+  compositions of the two bootstraps must preserve delegation. Script order is
+  not an ownership assumption.
+- The selected scoped-outage MCP case installs those observers before loading
+  the application and uses the existing clock cadence. Other MCP/OAuth test
+  wrappers are not enabled by this selection. The exact full overlay, original
+  case, shared fixture, response gate and controller bytes are pinned as well.
+- The SDK clock controls timers, not ownership admission. Its version/image and
+  the selected profile are fixed; extra scripts, extensions, wrappers or profile
+  changes are outside this qualification until reviewed and requalified.
+
+The observer's versioned manifest binds the exact product commit/tree and Git
+blob/SHA256 of the producer, entry, helper, fixture, configuration and complete
+selected observer chain. The controller verifies that binding before applying
+and using the two fixed test overlays, and verifies restoration afterward. The
+manifest is a **source precondition**, never a per-request runtime membership
+receipt. Unsupported, absent or conflicting observations inside this domain
+remain UNKNOWN/diagnostic failures.
+
+Any change to a producer, delegate, wrapper, overlay, build entry, dependency
+lock, SDK image, profile or fixture chain invalidates this evidence. Update the
+pin/blob manifest, review the whole affected chain and repeat its qualification
+before using the conditional ownership interpretation. A new input shape or
+unreviewed script cannot inherit trust merely by looking like ordinary data.
+
+The SOURCE gate distinguishes in-domain support checks from explicit recognition
+of the out-of-domain Proxy limit. Recognition requires the original native
+invocation/promise/cause to remain intact and the known descriptor/Get mismatch
+to remain demonstrable; it does not turn either historical failing counterexample
+into a passing ownership claim. The original counterexample command is preserved
+separately. No `isProxy` heuristic, second native conversion, argument replacement,
+new producer hook, error allowance or runtime policy is introduced.
+
+All other criteria remain strict: the first owned withdrawal, original terminals,
+headers/body/read/document identity, active TypeError/HTTP/JSON errors, empty
+pageerror/unhandled audits, retained downloads, rearming, authenticated
+history/reload, CSRF, ACCOUNT/OAuth401 and the existing cadence/backoff. This
+engineering boundary changes no product capability or authorization. It does not
+establish the cause or repair of the outstanding native47/1 failure, native
+app-generation/publication correlation or physical BFCache qualification.
