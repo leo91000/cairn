@@ -840,3 +840,66 @@ it.each([false, true])('rejects cross-option signal mutation even when the acces
   assert.equal(journal.some(event => event.kind === 'rejected' && event.aborted), false)
   assert.equal(incompleteAvailabilityReads(journal).length > 0, true)
 })
+
+
+it.each(['cache', 'method', 'signal'])('rejects inherited %s metadata without reading inherited descriptor-map properties', async (field) => {
+  const actual = new NativeController()
+  const unrelated = new NativeController()
+  const native = Promise.withResolvers<NativeResponse>()
+  const cause = new HostException('original actual request failure', 'AbortError')
+  const options: RequestInit = field === 'signal' ? { method: 'GET' } : { signal: unrelated.signal }
+  let used: AbortSignal | null | undefined
+  let nativeGetterReads = 0
+  let metadataGetterReads = 0
+  ownerWindow.fetch = (_input: unknown, init: RequestInit) => {
+    void init.cache
+    void init.method
+    used = init.signal
+    const listenerOptions = Object.create(null) as AddEventListenerOptions
+    listenerOptions.once = true
+    used!.addEventListener('abort', () => native.reject(cause), listenerOptions)
+    return native.promise
+  }
+  const storage = await installSourceProbe()
+  const previous = Object.getOwnPropertyDescriptor(Object.prototype, field)
+  Object.defineProperty(Object.prototype, field, {
+    configurable: true,
+    get(this: object) {
+      if (this === options) {
+        nativeGetterReads++
+        if (field !== 'signal')
+          options.signal = actual.signal
+        return field === 'signal' ? actual.signal : field === 'method' ? 'GET' : 'default'
+      }
+      const marker = Object.getOwnPropertyDescriptor(this, field === 'signal' ? 'method' : 'signal')?.value
+      if (marker && typeof marker === 'object' && Object.hasOwn(marker, 'value')) {
+        metadataGetterReads++
+        return { value: field === 'signal' ? unrelated.signal : 'GET' }
+      }
+      return undefined
+    },
+  })
+  let returned: Promise<Response>
+  try {
+    returned = Reflect.apply(ownerWindow.fetch as typeof fetch, ownerWindow, ['/api/installations', options])
+  }
+  finally {
+    if (previous)
+      Object.defineProperty(Object.prototype, field, previous)
+    else
+      Reflect.deleteProperty(Object.prototype, field)
+  }
+  assert.equal(returned, native.promise)
+  assert.equal(used, actual.signal)
+  unrelated.abort(new HostException('different unrelated reason', 'AbortError'))
+  const rejected = assert.rejects(returned, error => error === cause)
+  actual.abort(cause)
+  await rejected
+  await flush()
+  const journal = JSON.parse(storage.get('cairn-e2e-availability-journal') || '[]') as AvailabilityReadEvent[]
+  assert.equal(nativeGetterReads, 1)
+  assert.equal(metadataGetterReads, 0)
+  assert.equal(journal.some(event => event.kind === 'observer-failed'), true)
+  assert.equal(journal.some(event => event.kind === 'rejected' && event.aborted), false)
+  assert.equal(incompleteAvailabilityReads(journal).length > 0, true)
+})

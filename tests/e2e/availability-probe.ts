@@ -166,6 +166,40 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
       })
     }
 
+    const ordinaryData = (value: unknown): Record<string, unknown> | null => {
+      if (value == null)
+        return Object.create(null)
+      if (typeof value !== 'object')
+        return null
+      const prototype = Object.getPrototypeOf(value)
+      if (prototype !== null && prototype !== Object.prototype)
+        return null
+      if (prototype) {
+        const standard = ['constructor', '__defineGetter__', '__defineSetter__', 'hasOwnProperty', '__lookupGetter__', '__lookupSetter__', 'isPrototypeOf', 'propertyIsEnumerable', 'toString', 'valueOf', '__proto__', 'toLocaleString']
+        const inherited = Object.getOwnPropertyDescriptors(prototype)
+        Object.setPrototypeOf(inherited, null)
+        for (const key of Reflect.ownKeys(inherited)) {
+          if (typeof key !== 'string' || !standard.includes(key))
+            return null
+          const descriptor = Object.getOwnPropertyDescriptor(inherited, key)!.value as PropertyDescriptor
+          if (key !== '__proto__' && !Object.hasOwn(descriptor, 'value'))
+            return null
+        }
+      }
+      const descriptors = Object.getOwnPropertyDescriptors(value)
+      Object.setPrototypeOf(descriptors, null)
+      const data = Object.create(null)
+      for (const key of Reflect.ownKeys(descriptors)) {
+        if (typeof key !== 'string')
+          return null
+        const descriptor = Object.getOwnPropertyDescriptor(descriptors, key)!.value as PropertyDescriptor
+        if (!Object.hasOwn(descriptor, 'value'))
+          return null
+        data[key] = descriptor.value
+      }
+      return data
+    }
+
     window.fetch = function (this: Window, ...args: Parameters<typeof fetch>) {
       let signal: AbortSignal | null | undefined
       let tracked = false
@@ -179,23 +213,19 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
         else if (args[0] === '/api/installations') {
           tracked = true
           if (args[1] != null) {
-            const prototype = Object.getPrototypeOf(args[1])
-            const descriptors = Object.getOwnPropertyDescriptors(args[1])
-            const unsupportedValue = Object.entries(descriptors).some(([key, descriptor]) => {
-              if (!('value' in descriptor))
-                return true
-              const value: unknown = descriptor.value
-              return key !== 'signal' && value !== null && (typeof value === 'object' || typeof value === 'function')
-            })
-            const method: unknown = descriptors.method?.value
-            if ((prototype !== null && prototype !== Object.prototype) || unsupportedValue
-              || (method !== undefined && typeof method !== 'string')) {
+            const data = ordinaryData(args[1])
+            const unsupportedValue = data === null || Object.entries(data).some(([key, value]) => key !== 'signal' && value !== null && (typeof value === 'object' || typeof value === 'function'))
+            const method = data?.method
+            if (unsupportedValue || (method !== undefined && typeof method !== 'string')) {
               metadataUnsupported = true
             }
             else {
               tracked = method === undefined || method.toUpperCase() === 'GET'
-              signal = descriptors.signal?.value
-              metadataUnsupported = signal != null && !(signal instanceof AbortSignal)
+              const value = data?.signal
+              if (value != null && !(value instanceof AbortSignal))
+                metadataUnsupported = true
+              else
+                signal = value as AbortSignal | null | undefined
             }
           }
         }
