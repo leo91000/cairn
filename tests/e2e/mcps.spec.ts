@@ -15,7 +15,7 @@ import {
 } from './fixtures'
 import { nativeResponseGate } from './native-response-gate'
 
-type OAuthDepartureProbe = { kind: 'background' } | { kind: 'offer', closed: boolean }
+type OAuthDepartureProbe = { kind: 'background' } | { kind: 'offer', closed: boolean } | { kind: 'observer-error' }
 
 declare global {
   interface Window {
@@ -60,9 +60,14 @@ for (const pending of ['authorization', 'offer'] as const) {
   test(`OAuth navigation does not leave background polls running in the departing page (${pending} pending)`, async ({ page, workspace, browserName }) => {
     const name = `Slow OAuth (${pending})`
     let backgroundRequests = 0
+    let observationFailures = 0
     const closedOffers: boolean[] = []
     const offerCompleted = Promise.withResolvers<void>()
     await page.exposeFunction('cairnOAuthProbe', (probe: OAuthDepartureProbe) => {
+      if (probe.kind === 'observer-error') {
+        observationFailures++
+        return
+      }
       if (probe.kind === 'background') {
         backgroundRequests++
         return
@@ -77,6 +82,9 @@ for (const pending of ['authorization', 'offer'] as const) {
 
       let departing = false
       const request = window.fetch
+      const enqueueDiagnosticError = window.queueMicrotask
+      if (typeof enqueueDiagnosticError !== 'function')
+        throw new Error('OAuth probe requires native diagnostic scheduling')
       const signalAborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted')?.get
       const listenForAbort = EventTarget.prototype.addEventListener
       if (!signalAborted)
@@ -84,26 +92,36 @@ for (const pending of ['authorization', 'offer'] as const) {
 
       window.fetch = function (this: unknown, ...args: Parameters<typeof request>) {
         const result = Reflect.apply(request, this, args)
-        const path = args[0]
-        if (typeof path === 'string' && path.endsWith('/direct/authorize')) {
-          const options = args[1]
-          const descriptor = options && typeof options === 'object' ? Object.getOwnPropertyDescriptor(options, 'signal') : undefined
-          const signal = descriptor && 'value' in descriptor ? descriptor.value : undefined
-          if (signal instanceof AbortSignal) {
-            if (Reflect.apply(signalAborted, signal, [])) {
-              departing = true
-            }
-            else {
-              Reflect.apply(listenForAbort, signal, ['abort', () => {
+        try {
+          const path = args[0]
+          if (typeof path === 'string' && path.endsWith('/direct/authorize')) {
+            const options = args[1]
+            const descriptor = options && typeof options === 'object' ? Object.getOwnPropertyDescriptor(options, 'signal') : undefined
+            const signal = descriptor && 'value' in descriptor ? descriptor.value : undefined
+            if (signal instanceof AbortSignal) {
+              if (Reflect.apply(signalAborted, signal, [])) {
                 departing = true
-              }, { once: true }])
+              }
+              else {
+                Reflect.apply(listenForAbort, signal, ['abort', () => {
+                  departing = true
+                }, { once: true }])
+              }
             }
           }
-        }
 
-        const background = typeof path === 'string' && (path === '/api/installations' || path.endsWith('/tasks/activity') || path.endsWith('/direct/authorize'))
-        if (background && departing)
-          void window.cairnOAuthProbe({ kind: 'background' })
+          const background = typeof path === 'string' && (path === '/api/installations' || path.endsWith('/tasks/activity') || path.endsWith('/direct/authorize'))
+          if (background && departing)
+            void window.cairnOAuthProbe({ kind: 'background' })
+        }
+        catch {
+          try {
+            void window.cairnOAuthProbe({ kind: 'observer-error' })
+          }
+          catch (reportingFailure) {
+            Reflect.apply(enqueueDiagnosticError, window, [() => { throw reportingFailure }])
+          }
+        }
         return result
       }
 
@@ -229,6 +247,7 @@ for (const pending of ['authorization', 'offer'] as const) {
       await expect(card.getByText('Connected', { exact: true })).toBeVisible()
       expect(provider.exchanges).toBe(1)
       expect(backgroundRequests).toBe(0)
+      expect(observationFailures).toBe(0)
       if (pending === 'offer')
         expect(closedOffers).toEqual([true])
       else
