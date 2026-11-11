@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test'
+import type { ConsoleMessage, Page } from '@playwright/test'
 
 export interface AvailabilityReadEvent {
   sequence: number
@@ -31,8 +31,15 @@ declare global {
   }
 }
 
-export async function installAvailabilityProbe(page: Page, recordRead: (event: AvailabilityReadEvent) => void) {
+export async function installAvailabilityProbe(page: Page, recordRead: (event: AvailabilityReadEvent) => void, recordObserverFailure: () => void) {
   await page.exposeFunction('cairnAvailabilityRecord', recordRead)
+  const onFailure = (message: ConsoleMessage) => {
+    if (message.type() === 'error' && message.text() === '__c40_availability_observer_failure_v1__')
+      recordObserverFailure()
+  }
+  // Owned by this Page across every Document; no read or terminal is fabricated.
+  page.on('console', onFailure)
+  page.once('close', () => page.off('console', onFailure))
   await page.addInitScript(() => {
     'use strict'
     const documentId = crypto.randomUUID()
@@ -42,6 +49,8 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
     let eventSequence = 0
     const then = Promise.prototype.then
     window.cairnAvailabilityProbeFailures = 0
+    const failureConsole = window.console
+    const failureConsoleError = failureConsole.error
     const store = (entry: AvailabilityReadEvent) => {
       const journal = JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]') as AvailabilityReadEvent[]
       journal.push(entry)
@@ -50,6 +59,12 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
 
     const observationFailed = () => {
       window.cairnAvailabilityProbeFailures++
+      // Closed negative evidence, independent of storage and exposed binding.
+      // No URL, document identity, error text or native terminal is sent here.
+      try {
+        Reflect.apply(failureConsoleError, failureConsole, ['__c40_availability_observer_failure_v1__'])
+      }
+      catch {}
       const entry: AvailabilityReadEvent = {
         kind: 'observer-failed',
         sequence: ++eventSequence,
@@ -363,7 +378,10 @@ export function availabilityBodiesAfter(reads: readonly AvailabilityReadEvent[],
 // Validate native fetch and optional JSON phases separately. A deliberately
 // unread HTTP failure still requires owned disposal; its wire closure must be
 // proved independently by the response gate, never inferred from this journal.
-export function incompleteAvailabilityReads(reads: readonly AvailabilityReadEvent[]) {
+export function incompleteAvailabilityReads(reads: readonly AvailabilityReadEvent[], observerFailures = 0) {
+  if (!Number.isSafeInteger(observerFailures) || observerFailures < 0 || observerFailures > 0)
+    throw new Error('Availability observation failure makes the read audit UNKNOWN')
+
   const kinds = new Set(['start', 'fetch-fulfilled', 'headers', 'body-start', 'body', 'rejected', 'body-rejected', 'abort-call-enter', 'abort', 'abort-call-return'])
   const identities = new Map<string, AvailabilityReadEvent[]>()
   for (const event of reads) {

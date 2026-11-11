@@ -415,6 +415,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
   availabilityTest(title, async ({ page, workspace, responseGate }, testInfo) => {
     const errors: string[] = []
     const reads: AvailabilityReadEvent[] = []
+    let availabilityProbeFailures = 0
     const downloads: Download[] = []
     const withdrawalReceipts: Array<{
       label: string
@@ -465,7 +466,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
     // Accepted grants belong to this worker's earlier pages until expiry. Use
     // the existing tunnel reset to establish real capacity before this case.
     await workspace.restart()
-    await installAvailabilityProbe(page, recordRead)
+    await installAvailabilityProbe(page, recordRead, () => { availabilityProbeFailures++ })
     const harvestReads = async () => {
       const journal = await page.evaluate(() => JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]') as AvailabilityReadEvent[])
       for (const event of journal)
@@ -821,7 +822,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
     // Audit independent failure categories after every owned producer closes.
     // One late rejection must not discard an HTTP failure or a pageerror.
     const audits = [
-      () => expect(incompleteAvailabilityReads(reads)).toEqual([]),
+      () => expect(incompleteAvailabilityReads(reads, availabilityProbeFailures)).toEqual([]),
       () => expect(reads.filter(event => ['rejected', 'body-rejected'].includes(event.kind) && !event.aborted && event !== committedTerminal)).toEqual([]),
       () => expect(reads.filter(event => event.kind === 'headers' && event.status !== 200
         && !(expectedFailure && event.document === expectedFailure.document && event.read === expectedFailure.read && event.status === 503))).toEqual([]),
@@ -908,6 +909,7 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
 
 availabilityTest('availability preserves a scoped readonly outage before native navigation', async ({ page, workspace, responseGate }, testInfo) => {
   const reads: AvailabilityReadEvent[] = []
+  let availabilityProbeFailures = 0
   const errors: string[] = []
   const failures: unknown[] = []
   const record = (event: AvailabilityReadEvent) => {
@@ -940,7 +942,7 @@ availabilityTest('availability preserves a scoped readonly outage before native 
   }
   page.on('pageerror', error => errors.push(error.message))
   await workspace.restart()
-  await installAvailabilityProbe(page, record)
+  await installAvailabilityProbe(page, record, () => { availabilityProbeFailures++ })
   try {
     await page.clock.install()
     await page.goto(workspacePath('/mcps'))
@@ -949,7 +951,7 @@ availabilityTest('availability preserves a scoped readonly outage before native 
     await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
     original = await page.evaluate(() => window.cairnAvailabilityDocument)
     await expect.poll(() => reads.some(event => event.document === original && event.kind === 'body')).toBe(true)
-    await expect.poll(() => incompleteAvailabilityReads(reads)).toEqual([])
+    await expect.poll(() => incompleteAvailabilityReads(reads, availabilityProbeFailures)).toEqual([])
     await page.clock.pauseAt(new Date(Date.now() + 1000))
     await harvest()
     const earlier = reads.filter(event => event.document === original && event.kind === 'start').length
@@ -1017,7 +1019,7 @@ availabilityTest('availability preserves a scoped readonly outage before native 
     await expect(page.getByRole('heading', { name: 'Agents', exact: true })).toBeVisible()
     await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
     expect(reads.filter(event => event.document === original && event.read === target && event.kind === 'abort')).toEqual([])
-    await expect.poll(() => incompleteAvailabilityReads(reads)).toEqual([])
+    await expect.poll(() => incompleteAvailabilityReads(reads, availabilityProbeFailures)).toEqual([])
     stage = 'retire application and acknowledge its final journal'
     await page.goto(new URL('/health', workspace.url).href)
     await harvest()
@@ -1050,7 +1052,7 @@ availabilityTest('availability preserves a scoped readonly outage before native 
   }
 
   const audits = [
-    () => expect(incompleteAvailabilityReads(reads)).toEqual([]),
+    () => expect(incompleteAvailabilityReads(reads, availabilityProbeFailures)).toEqual([]),
     () => responseGate.check(),
     () => expect(reads.filter(event => ['rejected', 'body-rejected'].includes(event.kind) && !event.aborted
       && !failureReceipts.some(expected => event.document === expected.document && event.sequence === expected.sequence))).toEqual([]),

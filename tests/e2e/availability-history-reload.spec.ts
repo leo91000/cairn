@@ -26,6 +26,7 @@ const recoveryTest = test.extend<{ responseGate: Awaited<ReturnType<typeof nativ
 // history/reload network loads, with new documents, NOT retained-document restores.
 recoveryTest('availability recovers exact fresh documents through authenticated history and reload', async ({ page, workspace, responseGate }, testInfo) => {
   const reads: AvailabilityReadEvent[] = []
+  let availabilityProbeFailures = 0
   const errors: string[] = []
   const primaryFailures: unknown[] = []
   const failures: unknown[] = []
@@ -61,7 +62,7 @@ recoveryTest('availability recovers exact fresh documents through authenticated 
   page.on('pageerror', error => errors.push(error.message))
   try {
     await workspace.restart()
-    await installAvailabilityProbe(page, record)
+    await installAvailabilityProbe(page, record, () => { availabilityProbeFailures++ })
     await page.goto(workspacePath('/mcps'))
     await signIn(page)
     await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
@@ -78,7 +79,7 @@ recoveryTest('availability recovers exact fresh documents through authenticated 
 
     for (const mode of ['history', 'reload'] as const) {
       await harvest()
-      await expect.poll(() => incompleteAvailabilityReads(reads)).toEqual([])
+      await expect.poll(() => incompleteAvailabilityReads(reads, availabilityProbeFailures)).toEqual([])
       const departedDocument = await page.evaluate(() => window.cairnAvailabilityDocument)
       const applicationUrl = page.url()
       const earlierReads = reads.filter(event => event.document === departedDocument && event.kind === 'start').length
@@ -145,7 +146,7 @@ recoveryTest('availability recovers exact fresh documents through authenticated 
       await expect(page.getByRole('status', { name: 'Installation availability', exact: true })).toHaveText('Online')
       await expect(route).toHaveAttribute('data-transport-route', 'direct')
       await harvest()
-      await expect.poll(() => incompleteAvailabilityReads(reads)).toEqual([])
+      await expect.poll(() => incompleteAvailabilityReads(reads, availabilityProbeFailures)).toEqual([])
       recoveries.push({
         mode,
         departedDocument,
@@ -198,7 +199,7 @@ recoveryTest('availability recovers exact fresh documents through authenticated 
   }
 
   for (const audit of [
-    () => expect(incompleteAvailabilityReads(reads)).toEqual([]),
+    () => expect(incompleteAvailabilityReads(reads, availabilityProbeFailures)).toEqual([]),
     () => responseGate.check(),
     () => expect(reads.filter(event => ['rejected', 'body-rejected'].includes(event.kind) && !event.aborted)).toEqual([]),
     () => expect(reads.filter(event => event.kind === 'headers' && event.status !== 200)).toEqual([]),

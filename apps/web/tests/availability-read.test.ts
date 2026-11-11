@@ -1,6 +1,7 @@
 import type { Page } from '@playwright/test'
 import type { AvailabilityReadEvent } from '../../../tests/e2e/availability-probe'
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { runInNewContext } from 'node:vm'
 import {
   afterEach,
@@ -416,7 +417,7 @@ async function installSourceProbe(serialized = false) {
     getItem: (key: string) => storage.get(key) ?? null,
     setItem: (key: string, data: string) => storage.set(key, data),
   })
-  const page = {
+  const page = Object.assign(new EventEmitter(), {
     async exposeFunction(name: string, callback: (event: unknown) => void) { ownerWindow[name] = async (event: unknown) => callback(event) },
     async addInitScript(callback: () => void) {
       if (serialized) {
@@ -439,8 +440,9 @@ async function installSourceProbe(serialized = false) {
         callback()
       }
     },
-  }
-  await installAvailabilityProbe(page as unknown as Page, () => {})
+  })
+  ownerWindow.console = { error: (...args: unknown[]) => page.emit('console', { type: () => 'error', text: () => args[0] }) }
+  await installAvailabilityProbe(page as unknown as Page, () => {}, () => {})
   return storage
 }
 
