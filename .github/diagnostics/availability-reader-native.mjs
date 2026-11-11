@@ -107,6 +107,8 @@ async function observed(operation, label) {
 // Negative adapters alter only their declared boundary. All original promises,
 // Response objects and native JSON results are returned unchanged.
 function nativeDiagnostics(mode) {
+  'use strict'
+
   let read = 0
   const fetch = window.fetch
   const abort = AbortController.prototype.abort

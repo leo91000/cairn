@@ -114,12 +114,12 @@
     },
     "observerFiles": {
       "archive-transparency.node.mjs": {
-        "gitBlob": "b18916b171b949c22785ec3512e9546b38261f83",
-        "sha256": "fe48ec661d6025172f69734373054466e676d9b88d71b31a9f16a06fbe9a73f4"
+        "gitBlob": "e1c5397bcd47c3cd56389074b99004509d8036d4",
+        "sha256": "6b8400588415cdd4170e58147b5cc61403f962edf886061c8582ef44fc37cdbe"
       },
       "availability-reader-native.mjs": {
-        "gitBlob": "bdc55a0fc5f026938ddae6a87a8786ff0e33f505",
-        "sha256": "00fa5953eeba04ecd5405f2962a4d9ce77305b303e7ce66952abc9faf9274d56"
+        "gitBlob": "de7ec2b4e91e10e96d2a8d20194fbb0a3db933e2",
+        "sha256": "cd1cf17cdc85f457243fef25c16c44acf62da25716e0eb7915d2dbeb709028ed"
       },
       "skill-availability-probe.ts": {
         "gitBlob": "a5f12a6add74436eab6024b0dbd5bb0ef9580474",

@@ -43,6 +43,8 @@ function fixture(t, name, settings = {}) {
   const abortResult = Symbol('original abort return stand-in')
   AbortController.prototype.abort = function (...args) {
     abortCalls.push({ receiver: this, args })
+    if (settings.abortFailure)
+      throw settings.abortFailure
     Reflect.apply(originalAbort, this, args)
     return abortResult
   }
@@ -746,3 +748,42 @@ for (const alreadyAborted of [false, true]) {
     assert.deepEqual(f.probes.map(value => value.kind), alreadyAborted ? ['background', 'background'] : ['background'])
   })
 }
+
+
+test('H85 actual nativeDiagnostics serialized Fetch preserves strict unqualified receiver and original promise', async (t) => {
+  const f = fixture(t, 'availability-reader-native.mjs')
+  const original = Promise.resolve(Response.json({ original: true }))
+  const options = { method: 'GET' }
+  f.queue.push(original)
+  f.context.sourceArgs = ['/api/installations', options]
+  const result = runInContext('(() => { "use strict"; const request = window.fetch; return request(...sourceArgs) })()', f.context)
+  assert.equal(result, original)
+  await result
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.calls[0].receiver, undefined)
+  assert.deepEqual(f.calls[0].args, f.context.sourceArgs)
+})
+
+test('H85 actual nativeDiagnostics serialized JSON preserves an unqualified original receiver and promise', async (t) => {
+  const f = fixture(t, 'availability-reader-native.mjs')
+  const method = f.context.Response.prototype.json
+  const args = [Symbol('original extra JSON argument')]
+  const result = Reflect.apply(method, undefined, args)
+  // Invalid native receiver is a SOURCE transparency negative, not ownership.
+  await assert.rejects(result)
+  assert.equal(f.bodyCalls.length, 1)
+  assert.equal(result, f.bodyCalls[0].promise)
+  assert.equal(f.bodyCalls[0].receiver, undefined)
+  assert.deepEqual(f.bodyCalls[0].args, args)
+})
+
+test('H85 actual nativeDiagnostics serialized abort preserves unqualified receiver and original throw', (t) => {
+  const cause = new TypeError('original abort delegate SOURCE cause')
+  const f = fixture(t, 'availability-reader-native.mjs', { abortFailure: cause })
+  const method = f.context.AbortController.prototype.abort
+  const args = [Symbol('original reason')]
+  assert.throws(() => Reflect.apply(method, undefined, args), error => error === cause)
+  assert.equal(f.abortCalls.length, 1)
+  assert.equal(f.abortCalls[0].receiver, undefined)
+  assert.deepEqual(f.abortCalls[0].args, args)
+})

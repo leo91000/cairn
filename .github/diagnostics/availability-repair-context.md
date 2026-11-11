@@ -382,3 +382,18 @@ and2 separately named limit recognitions, not ownership/native. First unchanged
 recorder command57 has NOT been replayed or credited on the new pin. H84 red
 references, Proxy universal counterexamples, and ROOT frozen2035B repro are retained
 without rerun. Complete prior gate outputs and initial fixture mistakes are preserved.
+
+## Archive-only correction after completed R84/H85
+
+Product01a is BYTEUNCHANGED and retains ROOT exact clean1888QA; no productcanonical
+check repeated. nativeDiagnostics now has explicit strictness INSIDE its serialized
+function, preserving ordinary Fetch/JSON/abort receiver even for unqualified calls.
+Three permanent actual serialized controls: frozen oldcfbe3ASSERTFAIL/candidate3PASS,
+Promise/args/cause preserved; invalid JSON/abort receiver cases are SOURCE transparency
+negatives, not ownership or native proof. Selected affected archive invocation55/55
+PASS =53 support/transparency/refusal controls +2 separately named recognition of
+limits. Source chain17+12 exact, nativeQualified:false. First recorder57 unchanged
+and NOT replayed. Actual workflow, overlays, producers, SDK/profile/cachepolicy/
+7s5m25m budgets unchanged. This is appropriate affected source validation only,
+not native qualification or independent clean verdict. Fresh COMPLETE product+
+observer/archives/pin/chain reviews on this new frozen observer remain required.
