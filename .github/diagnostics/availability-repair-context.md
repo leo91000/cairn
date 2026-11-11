@@ -397,3 +397,22 @@ and NOT replayed. Actual workflow, overlays, producers, SDK/profile/cachepolicy/
 7s5m25m budgets unchanged. This is appropriate affected source validation only,
 not native qualification or independent clean verdict. Fresh COMPLETE product+
 observer/archives/pin/chain reviews on this new frozen observer remain required.
+
+## Independent restoration correction after completed R85/H86
+
+Product01a and its exact ROOT clean1888QA remain unchanged; no productcheck replay.
+The fixed two-target restoration now checks/preserves/restores/verifies each chosen
+target independently, retaining the original one failure or ordered AggregateError
+with first cause when multiple fail. An unknown source is NOT overwritten when its
+private preservation fails. Unit-only still touches ONLY its selected unit target.
+Actual filesystem regressions on old8c module and candidate same controller: four
+ASSERTFAIL versus fourPASS (first-read, first-preservation, both-read, first-original
+hash failures). No copied logic/native qualification. Historical reports and first
+failures preserved; new complete independent reviews still required.
+
+Affected source execution receipt: exact selected FIRST Node invocation61/61PASS,
+including four new real-filesystem regressions. Second archive55 unchanged and NOT
+replayed. Sourcechain17+12 matches and productworktreeclean; no compiler/browser/
+canonical/retry. Product01a exact ROOTQA1888 retained on unchanged commit. Actual
+workflow, overlays, producers, budgets/profile/image/pin unchanged. Complete new
+independent product+observer/archives/pin/chain reviews remain required on newref.

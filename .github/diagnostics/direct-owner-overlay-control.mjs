@@ -138,22 +138,32 @@ export function applyTestOverlays(root) {
 export function restoreTestOverlays(root, evidence, originals, unitOnly = false) {
   const manifest = knownManifest()
   const chosen = unitOnly ? [targets[1]] : targets
-  for (const target of chosen)
-    assert.equal(hash(originals[target]), manifest.files[target].originalSHA256, 'Immutable original hash mismatch')
-  mkdirSync(evidence, { recursive: true })
   let knownBefore = true
+  const failures = []
   for (const target of chosen) {
-    const file = join(root, target)
-    const before = existsSync(file) ? readFileSync(file) : Buffer.alloc(0)
-    const spec = manifest.files[target]
-    const known = [spec.originalSHA256, spec.overlaySHA256].includes(hash(before))
-    if (!known) {
-      knownBefore = false
-      writeFileSync(join(evidence, `unexpected-test-${targets.indexOf(target)}.private`), before)
+    try {
+      const spec = manifest.files[target]
+      assert.equal(hash(originals[target]), spec.originalSHA256, 'Immutable original hash mismatch')
+
+      const file = join(root, target)
+      const before = existsSync(file) ? readFileSync(file) : Buffer.alloc(0)
+      const known = [spec.originalSHA256, spec.overlaySHA256].includes(hash(before))
+      if (!known) {
+        knownBefore = false
+        mkdirSync(evidence, { recursive: true })
+        writeFileSync(join(evidence, `unexpected-test-${targets.indexOf(target)}.private`), before)
+      }
+      writeFileSync(file, originals[target])
+      assert.equal(hash(readFileSync(file)), spec.originalSHA256)
     }
-    writeFileSync(file, originals[target])
-    assert.equal(hash(readFileSync(file)), spec.originalSHA256)
+    catch (error) {
+      failures.push(error)
+    }
   }
+  if (failures.length === 1)
+    throw failures[0]
+  if (failures.length > 1)
+    throw new AggregateError(failures, 'Independent test restoration failures', { cause: failures[0] })
   return { originalRestored: true, knownBefore, unitOnly, productQualified: false }
 }
 function pinnedOriginals(root) {

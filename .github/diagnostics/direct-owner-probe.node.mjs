@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { stripTypeScriptTypes } from 'node:module'
 import { test } from 'node:test'
 import { setImmediate } from 'node:timers/promises'
@@ -916,5 +916,62 @@ for (const mode of ['restore-failure', 'hash-failure', 'identity-unknown', 'succ
       const actual = execFileSync('git', ['log', '-1', '--format=product=%H tree=%T'], { encoding: 'utf8' })
       assert.equal(identity, actual)
     }
+  })
+}
+
+
+async function restorationSource(f) {
+  const reference = process.env.C40_RESTORE_REFERENCE
+  if (!reference)
+    return { applyTestOverlays, restoreTestOverlays }
+  assert.match(reference, /^[a-f0-9]{40}$/)
+  const directory = path.join(f.root, 'owned-reference-control')
+  mkdirSync(directory)
+  for (const name of ['direct-owner-overlay-control.mjs', 'overlay-manifest.json', 'mcps.direct-owner.overlay.ts', 'direct-transport.seam.overlay.ts']) {
+    const bytes = execFileSync('git', ['show', `${reference}:.github/diagnostics/${name}`])
+    writeFileSync(path.join(directory, name), bytes)
+  }
+  return import(pathToFileURL(path.join(directory, 'direct-owner-overlay-control.mjs')).href)
+}
+
+for (const mode of ['first-read-failure', 'first-preservation-failure', 'both-read-failures', 'first-original-hash-failure']) {
+  test(`H86 actual overlay controller attempts every target independently after ${mode}`, async (t) => {
+    const f = sourceFiles(t)
+    const controller = await restorationSource(f)
+    controller.applyTestOverlays(f.root)
+    const beforeFirst = readFileSync(path.join(f.root, f.targets[0]))
+    const originals = mode === 'first-original-hash-failure' ? { ...f.originals, [f.targets[0]]: Buffer.from('CORRUPT SOURCE ORIGINAL') } : f.originals
+    if (mode === 'first-preservation-failure') {
+      writeFileSync(path.join(f.root, f.targets[0]), 'UNKNOWN SOURCE BYTES MUST REMAIN')
+      mkdirSync(path.join(f.evidence, 'unexpected-test-0.private'), { recursive: true })
+    }
+    else if (mode !== 'first-original-hash-failure') {
+      rmSync(path.join(f.root, f.targets[0]))
+      mkdirSync(path.join(f.root, f.targets[0]))
+      if (mode === 'both-read-failures') {
+        rmSync(path.join(f.root, f.targets[1]))
+        mkdirSync(path.join(f.root, f.targets[1]))
+      }
+    }
+    let failure
+    assert.throws(() => controller.restoreTestOverlays(f.root, f.evidence, originals), error => {
+      failure = error
+      return true
+    })
+    const errors = failure instanceof AggregateError ? failure.errors : [failure]
+    assert.equal(errors[0].code, mode === 'first-original-hash-failure' ? 'ERR_ASSERTION' : 'EISDIR')
+    if (mode === 'both-read-failures') {
+      assert.equal(errors.length, 2)
+      assert.equal(errors[1].code, 'EISDIR')
+      assert.equal(failure.cause, errors[0])
+    }
+    else {
+      assert.equal(errors.length, 1)
+      assert.deepEqual(readFileSync(path.join(f.root, f.targets[1])), f.originals[f.targets[1]])
+    }
+    if (mode === 'first-preservation-failure')
+      assert.equal(readFileSync(path.join(f.root, f.targets[0]), 'utf8'), 'UNKNOWN SOURCE BYTES MUST REMAIN')
+    if (mode === 'first-original-hash-failure')
+      assert.deepEqual(readFileSync(path.join(f.root, f.targets[0])), beforeFirst)
   })
 }
