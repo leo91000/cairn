@@ -258,3 +258,11 @@ helper; that development RangeError is preserved, corrected before commit, and
 NOT credited as a baseline/native failure. No app/factory/product/PR731 mutation.
 Source proofs and adjudication are separate owner reports, not a FULL clean.
 No CI/native/PR/merge/newSDKenvframeworkpiloteréf. P1OPEN/slotROOT/otherheavyHOLD.
+
+The source fixtures for older owner/request/duplicate/lifecycle regressions now
+explicitly use POST, preserving their load-bearing negatives after method checks.
+Only the GET-negative test uses GET; no failure can pass merely for wrongmethod.
+Current selected source gate additionally runs the permanent Proxy counterexamples
+and is intentionally RED under unresolved R79; no default green is offered as
+admission/qualification. Root contract decision remains required, not another
+identical QA9235 or a new permission for the already-authorized observer fixes.
