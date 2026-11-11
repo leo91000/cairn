@@ -3,7 +3,7 @@
 ## Current selection after explicit ROOT H77 source-helper decision
 
 Product **9235c452ef7fac95f2c0458555497889e7817c19**, tree **3f94a8f8e10af6018bda53d4a049ec2ae96c8555**,
-parentc142; canonicalQA ROOT DUE on this clean exact commit. Only
+parentc142; canonicalQA ROOT ACQUIRED on this exact clean commit; not native qualification. Only
 `tests/e2e/availability-probe.ts` and its real existing source regression suite
 `apps/web/tests/availability-read.test.ts` changed. Runtimeb186/apps/factory/TypeError,
 MCPS/browser assertions, budgets/profiles/auth/grants remain immutable.
@@ -239,3 +239,22 @@ Selected checkout/env/controller/manifest/default selector all repinned together
 original two overlay hashes verified unchanged, no workload/budget/profile change.
 No canonical checks repeated, no review started before QA, no CI/native/PR/merge.
 Runtime app/factory/contracts/PR731 intact; P1OPEN/slotROOT/otherheavyHOLD.
+
+Current proof boundary: PRODUCT9235 REMAINS BYTE-UNCHANGED and its clean ROOT
+QA1887 is acquired. No duplicate QA9235 is awaited. Source Node proxy counterexamples
+are deliberately selected in the workflow's source gate and remain RED; no native
+workload is ready/admitted. Descriptor/Get disagreement cannot be certified as
+universal native signal ownership by ordinary reflection. ROOT proof-scope decision
+is required; no error/first-withdrawal waiver or new producer seam applied.
+Observer now keeps private installation+connection scope, document-scope coherence,
+generation parent identity on every request/rejection, and supported POST metadata
+for the requested signalling receipt. Foreign scope/generation/method remains
+UNKNOWN while original calls/terminals stay intact. All scope IDs remain private,
+projection contains closed booleans/enums only. Existing positive SOURCE fixture
+now explicitly uses POST to model the actual requested caller; GET is negative.
+Source checks39PASS and three referenceASSERTFAIL are observer evidence only.
+A first uncommitted correction pass accidentally recursed in a small metadata
+helper; that development RangeError is preserved, corrected before commit, and
+NOT credited as a baseline/native failure. No app/factory/product/PR731 mutation.
+Source proofs and adjudication are separate owner reports, not a FULL clean.
+No CI/native/PR/merge/newSDKenvframeworkpiloteréf. P1OPEN/slotROOT/otherheavyHOLD.

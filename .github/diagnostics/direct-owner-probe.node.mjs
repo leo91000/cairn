@@ -86,7 +86,7 @@ function fixture(t, options = {}) {
     context, fetch: invokeFetch, Source, generation, control, signal, queue, requests, storage, ingresses,
     closeResult, originalJsonPromises, callbacks, unwrappedAbort: originalAbort, anyInputs, anyResults,
     snapshot: () => context.__c40DirectOwnerReceipt.snapshot(),
-    async authorize() {
+    async authorize(sourceInstallation = 'private') {
       const native = Promise.withResolvers()
       queue.push(native)
       const options = { method: 'POST', signal: signal() }
@@ -98,7 +98,7 @@ function fixture(t, options = {}) {
       assert.equal(body, originalJsonPromises.get(response))
       await body
       await setImmediate()
-      return new context.EventSource('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/events')
+      return new context.EventSource(`/api/installations/${sourceInstallation}/direct/PRIVATE_CONNECTION_CANARY/events`)
     },
   }
 }
@@ -517,12 +517,13 @@ test('close provenance does not turn an original thrown close into a known retur
 })
 
 
-async function completeSourceReceipt(t) {
+async function completeSourceReceipt(t, options = {}) {
   const f = fixture(t)
-  const source = await f.authorize()
+  const source = await f.authorize(options.sourceInstallation ?? 'private')
   const native = Promise.withResolvers()
   f.queue.push(native)
-  const original = f.fetch('/api/installations/private/direct/PRIVATE_CONNECTION_CANARY/signal', { signal: f.signal() })
+  const signal = options.alternateGeneration ? f.context.AbortSignal.any([new AbortController().signal, f.control.signal]) : f.signal()
+  const original = f.fetch(`/api/installations/${options.requestInstallation ?? 'private'}/direct/PRIVATE_CONNECTION_CANARY/signal`, { method: options.method ?? 'POST', signal })
   const cause = new TypeError('same original controlled source terminal')
   native.reject(cause)
   await assert.rejects(original, value => value === cause)
@@ -725,4 +726,26 @@ test('H79 any sequence never consumes index accessors for observation', async (t
   await original
   await setImmediate()
   assert.equal(f.snapshot().journal.some(event => event.kind === 'control-start' && event.parentIdentityKnown), false)
+})
+
+
+test('H80 original POST receipt refuses a different actual generation parent on the same controller', async (t) => {
+  const journal = await completeSourceReceipt(t, { alternateGeneration: true })
+  const out = projectDirectOwners(journal, privateErrors, 0, completeClosure)
+  assert.equal(out.ownerReactionStateKnown, false)
+  assert.equal(out.receiptStatus, 'UNKNOWN')
+})
+
+test('H80 same connection string cannot borrow a grant from another installation', async (t) => {
+  const journal = await completeSourceReceipt(t, { sourceInstallation: 'FOREIGN_INSTALLATION', requestInstallation: 'FOREIGN_INSTALLATION' })
+  const errors = privateErrors.map(value => ({ message: value.message.replace('/installations/private/', '/installations/FOREIGN_INSTALLATION/') }))
+  assert.equal(journal.find(event => event.kind === 'source-created').grantMatched, false)
+  assert.equal(projectDirectOwners(journal, errors, 0, completeClosure).receiptStatus, 'UNKNOWN')
+})
+
+test('H80 GET cannot satisfy the requested original signalling POST receipt', async (t) => {
+  const journal = await completeSourceReceipt(t, { method: 'GET' })
+  const out = projectDirectOwners(journal, privateErrors, 0, completeClosure)
+  assert.equal(out.ownerReactionStateKnown, false)
+  assert.equal(out.receiptStatus, 'UNKNOWN')
 })

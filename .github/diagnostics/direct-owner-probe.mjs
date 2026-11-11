@@ -29,6 +29,7 @@ export function observeDirectOwners() {
   const responses = new WeakMap()
   const sources = new WeakMap()
   const grants = new Map()
+  const grantKey = (installation, connection) => JSON.stringify([installation, connection])
   const causes = new WeakMap()
   const abortCalls = []
   let ownerOrdinal = 0
@@ -41,11 +42,15 @@ export function observeDirectOwners() {
       const journal = JSON.parse(sessionStorage.getItem(key) || '[]')
       if (!Array.isArray(journal))
         throw new Error('Unknown private journal')
+      const route = /^\/installations\/([^/]+)\/agents$/.exec(location.pathname)
+      const documentInstallation = route ? decodeURIComponent(route[1]) : null
       const event = {
         kind,
         sequence: journal.length + 1,
         document: typeof window.cairnAvailabilityDocument === 'string' ? window.cairnAvailabilityDocument : null,
-        agentsDocument: /\/installations\/[^/]+\/agents$/.test(location.pathname),
+        agentsDocument: documentInstallation !== null,
+        documentInstallation,
+        installationMatchesDocument: typeof detail.installation === 'string' && documentInstallation !== null ? detail.installation === documentInstallation : null,
         ownContext: ownContext(),
         browserTime: performance.now(),
         ...detail,
@@ -116,10 +121,10 @@ export function observeDirectOwners() {
     const url = new URL(value, location.href)
     if (url.origin !== location.origin)
       return null
-    const match = /^\/api\/installations\/[^/]+\/direct\/(authorize|([^/]+)\/(signal|events))$/.exec(url.pathname)
+    const match = /^\/api\/installations\/([^/]+)\/direct\/(authorize|([^/]+)\/(signal|events))$/.exec(url.pathname)
     if (!match)
       return null
-    return { category: match[1] === 'authorize' ? 'authorize' : match[3], connection: match[2] ? decodeURIComponent(match[2]) : null }
+    return { installation: decodeURIComponent(match[1]), category: match[2] === 'authorize' ? 'authorize' : match[4], connection: match[3] ? decodeURIComponent(match[3]) : null }
   }
   const observe = (promise, fulfilled, rejected) => {
     try {
@@ -224,6 +229,7 @@ export function observeDirectOwners() {
         observerFailures++
     }
   }
+  const controlIdentity = meta => ({ installation: meta.installation, category: meta.category, connection: meta.connection, request: meta.request, owner: meta.owner, generationOwner: meta.generationOwner, method: meta.method })
   window.fetch = function (...args) {
     if (this != null && this !== ownerWindow)
       return Reflect.apply(fetch, this, args)
@@ -238,17 +244,17 @@ export function observeDirectOwners() {
       if (path && path.category !== 'events') {
         const control = parents?.control
         const generation = parents?.generation
-        meta = { ...path, request: ++requestOrdinal, signal, control, generation, owner: parents ? trackParent(control, 'control').owner : null }
+        meta = { ...path, request: ++requestOrdinal, signal, control, generation, method: data && data.method === undefined ? 'GET' : typeof data?.method === 'string' ? data.method : null, owner: parents ? trackParent(control, 'control').owner : null }
         meta.generationOwner = parents ? trackParent(generation, 'generation').owner : null
         if (signal instanceof window.AbortSignal) {
           signal.addEventListener('abort', (event) => record('request-abort-event', {
-            category: meta.category, connection: meta.connection, request: meta.request, owner: meta.owner,
+            ...controlIdentity(meta),
             nativeTrusted: event.isTrusted === true && event instanceof ownerWindow.Event && event.target === signal && event.currentTarget === signal,
             insideOwnAbortCall: Boolean(parents && abortCalls.some(call => call.signal === control || call.signal === generation)),
             nativeEventTime: event.timeStamp,
           }), { once: true })
         }
-        record('control-start', { category: meta.category, connection: meta.connection, request: meta.request, owner: meta.owner, parentIdentityKnown: Boolean(parents), ...state(signal, control, generation) })
+        record('control-start', { ...controlIdentity(meta), parentIdentityKnown: Boolean(parents), ...state(signal, control, generation) })
       }
     }
     catch { observerFailures++ }
@@ -256,18 +262,18 @@ export function observeDirectOwners() {
     try { original = Reflect.apply(fetch, this, args) }
     catch (cause) {
       if (meta)
-        record('control-threw', { category: meta.category, connection: meta.connection, request: meta.request, owner: meta.owner, ...state(meta.signal, meta.control, meta.generation, cause) })
+        record('control-threw', { ...controlIdentity(meta), ...state(meta.signal, meta.control, meta.generation, cause) })
       throw cause
     }
     if (meta) {
       observe(original, (response) => {
         responses.set(response, meta)
-        record('control-headers', { category: meta.category, connection: meta.connection, request: meta.request, owner: meta.owner, status: response.status })
+        record('control-headers', { ...controlIdentity(meta), status: response.status })
       }, (cause) => {
         if (cause && (typeof cause === 'object' || typeof cause === 'function'))
           causes.set(cause, [...(causes.get(cause) ?? []), meta])
         record('control-rejected-reaction', {
-          category: meta.category, connection: meta.connection, request: meta.request, owner: meta.owner,
+          ...controlIdentity(meta),
           causeClass: (cause instanceof window.Error || cause instanceof window.DOMException) && ['TypeError', 'AbortError'].includes(cause.name) ? cause.name : 'other',
           ...state(meta.signal, meta.control, meta.generation, cause),
         })
@@ -281,9 +287,9 @@ export function observeDirectOwners() {
     if (meta?.category === 'authorize') {
       observe(original, (value) => {
         const connection = value?.available === true && value?.grant?.claims?.connection_id
-        if (typeof connection === 'string' && meta.owner !== null) {
-          grants.set(connection, meta)
-          record('grant-observed', { connection, owner: meta.owner, generationOwner: meta.generationOwner, request: meta.request, parentIdentityKnown: Boolean(meta.control && meta.generation) })
+        if (typeof connection === 'string' && meta.owner !== null && meta.method === 'POST') {
+          grants.set(grantKey(meta.installation, connection), meta)
+          record('grant-observed', { installation: meta.installation, connection, owner: meta.owner, generationOwner: meta.generationOwner, request: meta.request, method: meta.method, parentIdentityKnown: Boolean(meta.control && meta.generation) })
         }
       })
     }
@@ -295,8 +301,8 @@ export function observeDirectOwners() {
       try {
         const path = inspect(args[0])
         if (path?.category === 'events') {
-          const grant = grants.get(path.connection)
-          const meta = { connection: path.connection, source: ++sourceOrdinal, owner: grant?.owner ?? null, grantMatched: Boolean(grant) }
+          const grant = grants.get(grantKey(path.installation, path.connection))
+          const meta = { installation: path.installation, connection: path.connection, source: ++sourceOrdinal, owner: grant?.owner ?? null, generationOwner: grant?.generationOwner ?? null, grantMatched: Boolean(grant) }
           sources.set(original, meta)
           sourceRecord('source-created', meta, original)
           for (const kind of ['open', 'error']) {
@@ -340,7 +346,7 @@ export function observeDirectOwners() {
       const matches = event.error && causes.get(event.error)
       if (matches?.length === 1) {
         const meta = matches[0]
-        record('window-error-same-original-cause', { connection: meta.connection, owner: meta.owner, request: meta.request, category: meta.category, nativeTrusted: event.isTrusted === true, nativeEventTime: event.timeStamp })
+        record('window-error-same-original-cause', { ...controlIdentity(meta), nativeTrusted: event.isTrusted === true, nativeEventTime: event.timeStamp })
       }
       else if (matches?.length > 1) {
         record('window-error-ambiguous-original-cause', { nativeTrusted: event.isTrusted === true, nativeEventTime: event.timeStamp })
@@ -359,8 +365,8 @@ export function observeDirectOwners() {
 function errorIdentity(error) {
   try {
     const message = typeof error?.message === 'string' ? error.message : ''
-    const match = /\/direct\/([^/?\s]+)\/(signal|events)(?:[?\s]|$)/.exec(message)
-    return match ? { connection: decodeURIComponent(match[1]), category: match[2] } : null
+    const match = /\/api\/installations\/([^/?\s]+)\/direct\/([^/?\s]+)\/(signal|events)(?:[?\s]|$)/.exec(message)
+    return match ? { installation: decodeURIComponent(match[1]), connection: decodeURIComponent(match[2]), category: match[3] } : null
   }
   catch { return null }
 }
@@ -371,8 +377,10 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
   pageErrors = Array.isArray(pageErrors) ? pageErrors : []
   const identities = pageErrors.map(value => errorIdentity(value))
   const connections = [...new Set(identities.filter(Boolean).map(value => value.connection))]
-  const connection = connections.length === 1 ? connections[0] : null
-  const grants = journal.filter(event => connection !== null && event.kind === 'grant-observed' && event.connection === connection && event.agentsDocument === true && event.ownContext === true && event.parentIdentityKnown === true)
+  const installations = [...new Set(identities.filter(Boolean).map(value => value.installation))]
+  const installation = installations.length === 1 ? installations[0] : null
+  const connection = installation !== null && connections.length === 1 ? connections[0] : null
+  const grants = journal.filter(event => connection !== null && event.kind === 'grant-observed' && event.installation === installation && event.installationMatchesDocument === true && event.method === 'POST' && event.connection === connection && event.agentsDocument === true && event.ownContext === true && event.parentIdentityKnown === true)
   const documents = [...new Set(grants.map(event => event.document).filter(value => typeof value === 'string'))]
   const document = documents.length === 1 ? documents[0] : null
   const owners = [...new Set(grants.map(event => event.owner).filter(Number.isInteger))]
@@ -381,7 +389,7 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
   const generationOwner = generations.length === 1 ? generations[0] : null
   const related = journal.filter(event => document && event.document === document && (event.connection === connection || event.owner === owner || (generationOwner !== null && event.owner === generationOwner) || ['beforeunload', 'pagehide'].includes(event.kind)))
   const allowedKinds = ['grant-observed','control-start','control-headers','control-threw','control-rejected-reaction','request-abort-event','parent-abort-event','parent-abort-call-enter','parent-abort-call-return','source-created','source-open-event','source-error-event','source-close-enter','source-close-return','source-close-threw','beforeunload','pagehide','window-error-same-original-cause']
-  const booleans = ['agentsDocument','ownContext','parentIdentityKnown','requestSignalKnown','requestAborted','controlSignalKnown','controlAborted','generationSignalKnown','generationAborted','requestReasonMatches','controlReasonMatches','generationReasonMatches','nativeTrusted','insideOwnAbortCall','grantMatched','alreadyAborted','aborted']
+  const booleans = ['agentsDocument','ownContext','installationMatchesDocument','parentIdentityKnown','requestSignalKnown','requestAborted','controlSignalKnown','controlAborted','generationSignalKnown','generationAborted','requestReasonMatches','controlReasonMatches','generationReasonMatches','nativeTrusted','insideOwnAbortCall','grantMatched','alreadyAborted','aborted']
   const events = related.map((event) => {
     const out = {
       kind: allowedKinds.includes(event.kind) ? event.kind : 'UNKNOWN',
@@ -389,6 +397,9 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
       browserTime: Number.isFinite(event.browserTime) ? event.browserTime : null,
       nativeEventTime: Number.isFinite(event.nativeEventTime) ? event.nativeEventTime : null,
       category: ['authorize','signal','events'].includes(event.category) ? event.category : null,
+      method: ['POST', 'GET'].includes(event.method) ? event.method : event.method === undefined ? null : 'OTHER',
+      installationMatchesSelected: typeof event.installation === 'string' ? event.installation === installation : null,
+      generationMatchesGrant: Number.isInteger(event.generationOwner) ? event.generationOwner === generationOwner : null,
       role: ['control','generation'].includes(event.role) ? event.role : null,
       causeClass: ['TypeError','AbortError','other'].includes(event.causeClass) ? event.causeClass : null,
       readyState: [0,1,2].includes(event.readyState) ? event.readyState : null,
@@ -401,18 +412,18 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
   const rejected = events.filter(event => event.kind === 'control-rejected-reaction' && event.category === 'signal')
   const privateRejections = related.filter(event => event.kind === 'control-rejected-reaction' && event.category === 'signal' && event.connection === connection)
   const selectedRejection = privateRejections.length === 1 ? privateRejections[0] : null
-  const rejectionStarts = selectedRejection ? related.filter(event => event.kind === 'control-start' && event.category === 'signal' && event.connection === connection && event.owner === owner && event.request === selectedRejection.request && event.sequence < selectedRejection.sequence && event.parentIdentityKnown === true) : []
-  const rejectionIdentityKnown = grants.length === 1 && selectedRejection !== null && selectedRejection.owner === owner && Number.isSafeInteger(selectedRejection.request) && rejectionStarts.length === 1
+  const rejectionStarts = selectedRejection ? related.filter(event => event.kind === 'control-start' && event.category === 'signal' && event.connection === connection && event.owner === owner && event.generationOwner === generationOwner && event.installation === installation && event.installationMatchesDocument === true && event.method === 'POST' && event.request === selectedRejection.request && event.sequence < selectedRejection.sequence && event.parentIdentityKnown === true) : []
+  const rejectionIdentityKnown = grants.length === 1 && selectedRejection !== null && selectedRejection.owner === owner && selectedRejection.generationOwner === generationOwner && selectedRejection.installation === installation && selectedRejection.installationMatchesDocument === true && selectedRejection.method === 'POST' && Number.isSafeInteger(selectedRejection.request) && rejectionStarts.length === 1
   const closed = events.filter(event => event.kind === 'source-close-return')
   // First count EVERY source on this document/connection. Filtering by an
   // already-matched owner would conceal the very ambiguity this receipt tests.
   const sourceCreators = related.filter(event => event.kind === 'source-created' && event.connection === connection)
   const source = sourceCreators.length === 1 && Number.isSafeInteger(sourceCreators[0].source) ? sourceCreators[0].source : null
-  const creatorKnown = source !== null && sourceCreators[0].grantMatched === true && sourceCreators[0].owner === owner && sourceCreators[0].ownContext === true
+  const creatorKnown = source !== null && sourceCreators[0].grantMatched === true && sourceCreators[0].owner === owner && sourceCreators[0].generationOwner === generationOwner && sourceCreators[0].installation === installation && sourceCreators[0].installationMatchesDocument === true && sourceCreators[0].ownContext === true
   const closeEntries = related.filter(event => event.kind === 'source-close-enter' && event.connection === connection)
   const allCloses = related.filter(event => event.kind === 'source-close-return' && event.connection === connection)
   const ownedCloses = creatorKnown && closeEntries.length === 1 && allCloses.length === 1
-    ? allCloses.filter(event => event.source === source && closeEntries[0].source === source && event.owner === owner && closeEntries[0].owner === owner && event.grantMatched === true && closeEntries[0].grantMatched === true && event.ownContext === true && event.readyState === 2 && closeEntries[0].sequence < event.sequence)
+    ? allCloses.filter(event => event.source === source && closeEntries[0].source === source && event.installation === installation && closeEntries[0].installation === installation && event.generationOwner === generationOwner && closeEntries[0].generationOwner === generationOwner && event.installationMatchesDocument === true && closeEntries[0].installationMatchesDocument === true && event.owner === owner && closeEntries[0].owner === owner && event.grantMatched === true && closeEntries[0].grantMatched === true && event.ownContext === true && event.readyState === 2 && closeEntries[0].sequence < event.sequence)
     : []
   const structural = related.every(event => allowedKinds.includes(event.kind) && Number.isInteger(event.sequence) && event.sequence > 0 && event.ownContext === true) && new Set(related.map(event => event.sequence)).size === related.length
   const documentJournal = journal.filter(event => document !== null && event.document === document)
@@ -426,7 +437,7 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
     && unloads[0].sequence < hides[0].sequence
   const nativeErrors = events.filter(event => event.kind === 'window-error-same-original-cause' && event.nativeTrusted)
   const closureKnown = typeof closure?.pageClosed === 'boolean' && typeof closure?.gateClosed === 'boolean' && Number.isSafeInteger(closure?.cleanupFailureCount) && closure.cleanupFailureCount >= 0
-  const firstErrorPairReproduced = identities.length === 2 && connections.length === 1 && identities.every(Boolean) && new Set(identities.map(value => value.category)).size === 2
+  const firstErrorPairReproduced = identities.length === 2 && installations.length === 1 && connections.length === 1 && identities.every(Boolean) && new Set(identities.map(value => value.category)).size === 2
   const sequence = predicate => {
     const values = events.filter(predicate)
     return values.length === 1 && Number.isInteger(values[0].sequence) ? values[0].sequence : null
@@ -443,6 +454,7 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
     pageErrorCount: pageErrors.length,
     errorKinds: identities.map(value => value?.category ?? 'UNKNOWN'),
     errorConnectionUnique: connection !== null,
+    errorInstallationUnique: installation !== null,
     actualGrantDocumentUnique: document !== null,
     actualControlOwnerUnique: owner !== null,
     actualGenerationParentUnique: generationOwner !== null,

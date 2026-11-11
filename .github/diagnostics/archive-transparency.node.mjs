@@ -428,3 +428,43 @@ for (const name of ['skill-availability-probe.ts', 'b534-navigation-probe.ts', '
     assert.equal(actual.signal.aborted, false)
   })
 }
+
+
+if (process.argv.includes('--proxy-counterexample')) {
+  for (const sameReason of [false, true]) {
+    test(`R79 descriptor/Get disagreement cannot certify another signal (same reason ${sameReason})`, async (t) => {
+      const f = fixture(t, 'availability-probe.ts')
+      const actual = new AbortController()
+      const unrelated = new AbortController()
+      const native = Promise.withResolvers()
+      const cause = new DOMException('same original actual request rejection', 'AbortError')
+      let nativeGetReads = 0
+      const target = { signal: unrelated.signal }
+      const options = new Proxy(target, { get(object, key, receiver) {
+        if (key === 'signal') {
+          nativeGetReads++
+          return actual.signal
+        }
+        return Reflect.get(object, key, receiver)
+      } })
+      let used
+      f.queue.push((_, init) => {
+        used = init.signal
+        used.addEventListener('abort', () => native.reject(cause), { once: true })
+        return native.promise
+      })
+      const returned = f.fetch('/api/installations', options)
+      assert.equal(returned, native.promise)
+      assert.equal(used, actual.signal)
+      unrelated.abort(sameReason ? cause : new DOMException('different unrelated reason', 'AbortError'))
+      const rejected = assert.rejects(returned, value => value === cause)
+      actual.abort(cause)
+      await rejected
+      await setImmediate()
+      const journal = f.events.map(args => args[0]).filter(value => value && typeof value === 'object')
+      t.diagnostic(JSON.stringify({ sameReason, nativeUsedA: used === actual.signal, nativeGetReads, descriptorReportedB: Object.getOwnPropertyDescriptor(target, 'signal').value === unrelated.signal, wrongOwnedRejectionCount: journal.filter(event => event.kind === 'rejected' && event.aborted).length, observerFailureCount: f.context.cairnAvailabilityProbeFailures }))
+      assert.equal(journal.some(event => event.kind === 'rejected' && event.aborted), false)
+      assert.equal(journal.some(event => event.kind === 'observer-failed'), true)
+    })
+  }
+}
