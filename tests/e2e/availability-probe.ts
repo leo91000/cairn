@@ -203,6 +203,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
       catch {
         metadataUnsupported = true
       }
+
       // Always invoke once with the ORIGINAL arguments/receiver, even if the
       // observation surface is unsupported. Never replace its promise/cause.
       const original = Reflect.apply(fetch, this, args) as ReturnType<typeof fetch>
@@ -210,6 +211,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
         observationFailed()
         return original
       }
+
       if (!tracked)
         return original
 

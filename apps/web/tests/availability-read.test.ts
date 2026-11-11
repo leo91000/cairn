@@ -802,7 +802,6 @@ it('keeps native promises unchanged when observation storage or delivery fails, 
   assert.equal(failures.some(event => event.kind === 'observer-failed'), true)
 })
 
-
 it.each([false, true])('rejects cross-option signal mutation even when the accessor removes itself (%s)', async (removesAccessor) => {
   const actual = new NativeController()
   const unrelated = new NativeController()
@@ -826,6 +825,7 @@ it.each([false, true])('rejects cross-option signal mutation even when the acces
     used!.addEventListener('abort', () => native.reject(cause), { once: true })
     return native.promise
   }
+
   const storage = await installSourceProbe()
   const returned = Reflect.apply(ownerWindow.fetch as typeof fetch, ownerWindow, ['/api/installations', options])
   assert.equal(returned, native.promise)
