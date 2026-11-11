@@ -37,6 +37,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
     if (message.type() === 'error' && message.text() === '__c40_availability_observer_failure_v1__')
       recordObserverFailure()
   }
+
   // Owned by this Page across every Document; no read or terminal is fabricated.
   page.on('console', onFailure)
   page.once('close', () => page.off('console', onFailure))
@@ -65,6 +66,7 @@ export async function installAvailabilityProbe(page: Page, recordRead: (event: A
         Reflect.apply(failureConsoleError, failureConsole, ['__c40_availability_observer_failure_v1__'])
       }
       catch {}
+
       const entry: AvailabilityReadEvent = {
         kind: 'observer-failed',
         sequence: ++eventSequence,

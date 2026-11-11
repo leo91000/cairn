@@ -466,7 +466,9 @@ for (const destination of ['committed', 'cancelled', 'restored'] as const) {
     // Accepted grants belong to this worker's earlier pages until expiry. Use
     // the existing tunnel reset to establish real capacity before this case.
     await workspace.restart()
-    await installAvailabilityProbe(page, recordRead, () => { availabilityProbeFailures++ })
+    await installAvailabilityProbe(page, recordRead, () => {
+      availabilityProbeFailures++
+    })
     const harvestReads = async () => {
       const journal = await page.evaluate(() => JSON.parse(sessionStorage.getItem('cairn-e2e-availability-journal') || '[]') as AvailabilityReadEvent[])
       for (const event of journal)
@@ -942,7 +944,9 @@ availabilityTest('availability preserves a scoped readonly outage before native 
   }
   page.on('pageerror', error => errors.push(error.message))
   await workspace.restart()
-  await installAvailabilityProbe(page, record, () => { availabilityProbeFailures++ })
+  await installAvailabilityProbe(page, record, () => {
+    availabilityProbeFailures++
+  })
   try {
     await page.clock.install()
     await page.goto(workspacePath('/mcps'))

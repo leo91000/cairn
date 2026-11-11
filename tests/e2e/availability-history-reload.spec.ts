@@ -62,7 +62,9 @@ recoveryTest('availability recovers exact fresh documents through authenticated 
   page.on('pageerror', error => errors.push(error.message))
   try {
     await workspace.restart()
-    await installAvailabilityProbe(page, record, () => { availabilityProbeFailures++ })
+    await installAvailabilityProbe(page, record, () => {
+      availabilityProbeFailures++
+    })
     await page.goto(workspacePath('/mcps'))
     await signIn(page)
     await expect(page.getByRole('heading', { name: 'MCPs', exact: true })).toBeVisible()
