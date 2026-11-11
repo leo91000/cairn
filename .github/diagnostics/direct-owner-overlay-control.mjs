@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, readlinkSync, lstatSync, writeFile
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const product = '0ff31c7a58dcc760e959c447b350047da50cd096'
+export const product = 'e81b99601d5abeec663dd0c7a1cde8b72b72b35d'
 export const historicalWorkflowReference = Object.freeze({
   commit: '7aac8c145f1e44d764c9f7150b01727fd0a1f19d',
   path: '.github/workflows/webkit-dependency-regression.yaml',
@@ -43,6 +43,19 @@ export const observerChainFiles = [
   'closed-target-error.mjs', 'mcps.direct-owner.overlay.ts',
   'direct-transport.seam.overlay.ts', 'selected-workflow.yaml',
 ]
+export const sourceEvidenceDomains = {
+  "ownership": {
+    "scope": "PINNED_SOURCE_CONDITIONAL",
+    "requirement": "Association only for the exact reviewed internal producers and complete observer/delegate chain",
+    "universalRuntimeAdmission": false
+  },
+  "operation": {
+    "scope": "PINNED_SOURCE_CONDITIONAL",
+    "requirement": "Counterfactual original native operation and terminals for the exact reviewed internal producers and complete observer/delegate chain",
+    "universalOperationEquivalence": false,
+    "outOfDomainAbsenceOfSideEffects": "NOT_CLAIMED"
+  }
+}
 export const sourceGateCommands = [
   'node --test test-results/direct-owner-receipt/direct-owner-probe.node.mjs',
   'node test-results/direct-owner-receipt/archive-transparency.node.mjs --product-reference --source-trusted-limit',
@@ -76,7 +89,15 @@ const knownManifest = () => {
 export function verifySourceTrustedChain(root, directory = sourceDirectory, manifest = knownManifest()) {
   const chain = manifest.sourceTrusted
   assert.equal(chain?.mode, 'PINNED_SOURCE_CONDITIONAL')
-  assert.equal(chain.contractVersion, 'A81_SOURCE_TRUSTED_1')
+  assert.equal(chain.contractVersion, 'A81_A90_SOURCE_TRUSTED_2')
+  assert.equal(chain.operationDecisionSHA256, '62320974cc78a9acb700fa16c785b67bc93b62ec9d8bab3e3ec9c74aa4e04f54')
+  assert.deepEqual(chain.domains, sourceEvidenceDomains)
+  assert.equal(chain.universalOperationEquivalence, false)
+  assert.equal(chain.nativeReaderComposition.helper.commit, product)
+  assert.deepEqual(chain.nativeReaderComposition.helper, {
+    commit: product, path: 'tests/e2e/availability-probe.ts',
+    ...chain.productFiles['tests/e2e/availability-probe.ts'],
+  })
   assert.equal(chain.rootDecisionSHA256, '8870ad8fd913883e366703bd3371304fdc11ed650e05f8dc6f61805f9a00d883')
   assert.equal(chain.universalRuntimeAdmission, false)
   assert.equal(chain.runtimeProducerReceipt, false)
@@ -115,7 +136,7 @@ export function verifySourceTrustedChain(root, directory = sourceDirectory, mani
     product, productTree: chain.productTree,
     producerFileCount: producerChainFiles.length, observerFileCount: observerChainFiles.length,
     runtimeProducerReceipt: false, universalRuntimeAdmission: false,
-    runtimeProxyDetection: false, nativeQualified: false,
+    runtimeProxyDetection: false, universalOperationEquivalence: false, domains: sourceEvidenceDomains, nativeQualified: false,
   }
 }
 export function validatedPlan(root) {

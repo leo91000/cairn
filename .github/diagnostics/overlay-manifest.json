@@ -1,9 +1,9 @@
 {
-  "product": "0ff31c7a58dcc760e959c447b350047da50cd096",
+  "product": "e81b99601d5abeec663dd0c7a1cde8b72b72b35d",
   "files": {
     "tests/e2e/mcps.spec.ts": {
-      "originalSHA256": "64c4325cf9a240ced7affddd53d39909db2ccce930938845ba59a0a47933ac30",
-      "overlaySHA256": "b255bb0fb18de020135e7c7fba64e2c434ba543a908277462cdb9f85122f3973",
+      "originalSHA256": "afd2e614ad844c8590b9dc9d8b4aae4e663ad6f3f2f0373c280bd7340f4a77c4",
+      "overlaySHA256": "7b7c83e063a0ce634773644546eee4ddc6a441357144a80a4d301e2b4e87072e",
       "overlayFile": "mcps.direct-owner.overlay.ts"
     },
     "apps/web/tests/direct-transport.test.ts": {
@@ -17,7 +17,7 @@
   "runtimeChanged": false,
   "sourceTrusted": {
     "schema": 1,
-    "contractVersion": "A81_SOURCE_TRUSTED_1",
+    "contractVersion": "A81_A90_SOURCE_TRUSTED_2",
     "rootDecisionSHA256": "8870ad8fd913883e366703bd3371304fdc11ed650e05f8dc6f61805f9a00d883",
     "mode": "PINNED_SOURCE_CONDITIONAL",
     "universalRuntimeAdmission": false,
@@ -39,8 +39,8 @@
       "gitBlob": "b24561e7500adcea0e98926cfca3e210211b0518",
       "sha256": "8df3a113886a9671b8dcf2c5c017f0a8903b73f590e1a8ffa5219ff0115953c4"
     },
-    "productCommit": "0ff31c7a58dcc760e959c447b350047da50cd096",
-    "productTree": "894c35fac6a885464e1d788e44b5a63f94e72a06",
+    "productCommit": "e81b99601d5abeec663dd0c7a1cde8b72b72b35d",
+    "productTree": "3b3b5ef242d4db0b48011bcdefa9766de349305b",
     "observerCommit": "Recorded separately from github.sha in source-binding.json; this manifest is bound by that commit",
     "productFiles": {
       "apps/web/beacon.html": {
@@ -84,12 +84,12 @@
         "sha256": "5dabc925797cd89adf4fb2245062059e156cec8748ef164542c7474f8eb6dce9"
       },
       "tests/e2e/availability-probe.ts": {
-        "gitBlob": "1036281113ba0d9b4455f79c3f73b8d6a532aa01",
-        "sha256": "7b1b4ae7ea7dc14327d4ac642d4df865f9142083a0ee529d9d876a64d5581c13"
+        "gitBlob": "fa8e4d1aa18dceb2750c2b71bb945e108822fd31",
+        "sha256": "528e6098ade467928e691c3f377509ca131fba911ea9f05a791eadeabf2df626"
       },
       "tests/e2e/mcps.spec.ts": {
-        "gitBlob": "e8a4cf56836b38ca1a1b69e276abc27b40b05e4a",
-        "sha256": "64c4325cf9a240ced7affddd53d39909db2ccce930938845ba59a0a47933ac30"
+        "gitBlob": "0ab5358db2da7da6873043d99ae56d245228621d",
+        "sha256": "afd2e614ad844c8590b9dc9d8b4aae4e663ad6f3f2f0373c280bd7340f4a77c4"
       },
       "tests/e2e/fixtures.ts": {
         "gitBlob": "bf274a8784be4a35432676e7f2284831e2262ffd",
@@ -114,12 +114,12 @@
     },
     "observerFiles": {
       "archive-transparency.node.mjs": {
-        "gitBlob": "5a6fe2df7e0996e72b06476600f1d952bc959b5d",
-        "sha256": "8c507cb532b5bcb2e71ec62d5c034fd23a1ff4ccc47da33e06d8ba79e1255958"
+        "gitBlob": "11396eec5e3e92af48b56935c06c1aea29dc395c",
+        "sha256": "b2fca1a0b1cf934dd31cec2e21346f6b0436f6b453ab18cf0876b55a59c033fe"
       },
       "availability-reader-native.mjs": {
-        "gitBlob": "77337dd6ac0ddb8cbc46022f7e656b49abb2a494",
-        "sha256": "e786a87bab0e6e721479b712e4e6da672c33516d5df146d8c9e671f0b6a5da6e"
+        "gitBlob": "21b211e5655529bc3ca6b9f658383cb6a22a210e",
+        "sha256": "2e4d6ccad84047b7bbdb6c40cfb6a64d0c0fcad482917c5b2903388637279f3c"
       },
       "skill-availability-probe.ts": {
         "gitBlob": "758f8c9545dff77f550f848266b7f6a04b97f8e2",
@@ -130,36 +130,36 @@
         "sha256": "8e52e8ffa3af42cca0f5222b5af57e55356084665d2272a8610cb5c2901f3c73"
       },
       "direct-owner-probe.mjs": {
-        "gitBlob": "b900ea773a1a1879031d9b63fef380497df01c59",
-        "sha256": "1113913738933206157b001b915f4f8072f1699ffecd33743c85f363faf38bcd"
+        "gitBlob": "86e0fb77fbdc7d0de1b327e165872c023d81a947",
+        "sha256": "8b2e3fb3eb6142d0685375cb270ec91b040a4cf4190dbfffe8631b8a6a4e1264"
       },
       "direct-owner-probe.d.mts": {
-        "gitBlob": "fa64bb17918cce4167b4f55d3e308b8c272aecac",
-        "sha256": "5530fbbd4e225140aa9bf46f9ab06b3b2e5a5d8efbb2894f116c17206cfa874e"
+        "gitBlob": "e5a1a897785bb4da238cc9a5135783eddccb0c3b",
+        "sha256": "fa8785903ef9eea3255c402ed68c45f69868d180ef6ede43965bdd35fe5e770e"
       },
       "direct-owner-probe.node.mjs": {
-        "gitBlob": "62ae6cbee8dc9874ba27c148e22b28d332c71909",
-        "sha256": "6003de6c0c3919a524e4a92915bab05b43342d7e77e14b623b78afd9fec44eb7"
+        "gitBlob": "5ec0f966b2fd83f0a0f730a550411bb2a5d66b58",
+        "sha256": "a4ffa1ddaf619db8e223de86dabba8d2b6b7282df0a29c2f12b6a9aa94fc6b03"
       },
       "direct-owner-overlay-control.mjs": {
-        "gitBlob": "84557c8368a5288bc52afab8309118f5b93660a4",
-        "sha256": "235583488a27ed851296d1a9f73db9cf1b3387e9b7df4b2000350bd1f31ed8cf"
+        "gitBlob": "a1a5089647771db12857e4a41aa545a2d47e7f15",
+        "sha256": "d38332fb977336b9b38e6ed999fb7e5bfc604be12511a0bf0b556f5a942e505e"
       },
       "closed-target-error.mjs": {
         "gitBlob": "e4aa4b94c978342a5976e9fcf958f91440113e4b",
         "sha256": "c350fbf99633499c5fc64fba0dbe9fd45f5159da39ebbc5249e300ce123a9cfe"
       },
       "mcps.direct-owner.overlay.ts": {
-        "gitBlob": "1516a824ae557f0b6700cad6d607806fe56c4dba",
-        "sha256": "b255bb0fb18de020135e7c7fba64e2c434ba543a908277462cdb9f85122f3973"
+        "gitBlob": "0a6c73b41625495a082ecc3a463fd9e3f5077a07",
+        "sha256": "7b7c83e063a0ce634773644546eee4ddc6a441357144a80a4d301e2b4e87072e"
       },
       "direct-transport.seam.overlay.ts": {
         "gitBlob": "be7ea5e7cac357e754e95739e3be05acfc803e21",
         "sha256": "f48ada4b8312643434f4f5469fd9387923fbd5aa002c94e2c26d07d63696b609"
       },
       "selected-workflow.yaml": {
-        "gitBlob": "3bba93d889ea3633b281e94c957002299ac98e8c",
-        "sha256": "c06c8ba98816b4e08e5d2a2290dca6db351b62add58ea3f623b9664d4d3824ca"
+        "gitBlob": "fab67f4fcf2eddb30385063336f78c4c1e44aab0",
+        "sha256": "4dcd8c2468365fded465de0879d17ed51ba0917167cf81514e4558e1ac8429e2"
       }
     },
     "producers": {
@@ -202,6 +202,50 @@
       "expectedUniversalResult": "RED: two assertion failures remain, no universal ownership admission",
       "sourceGateCommand": "node archive-transparency.node.mjs --product-reference --source-trusted-limit",
       "gateMeaning": "In-domain support plus separately labelled recognition of limit, not Proxy detection or ownership/native PASS"
+    },
+    "operationDecisionSHA256": "62320974cc78a9acb700fa16c785b67bc93b62ec9d8bab3e3ec9c74aa4e04f54",
+    "universalOperationEquivalence": false,
+    "domains": {
+      "ownership": {
+        "scope": "PINNED_SOURCE_CONDITIONAL",
+        "requirement": "Association only for the exact reviewed internal producers and complete observer/delegate chain",
+        "universalRuntimeAdmission": false
+      },
+      "operation": {
+        "scope": "PINNED_SOURCE_CONDITIONAL",
+        "requirement": "Counterfactual original native operation and terminals for the exact reviewed internal producers and complete observer/delegate chain",
+        "universalOperationEquivalence": false,
+        "outOfDomainAbsenceOfSideEffects": "NOT_CLAIMED"
+      }
+    },
+    "nativeReaderComposition": {
+      "compositionId": "H91_NATIVE_READER_COMPOSITION_V2",
+      "helper": {
+        "commit": "e81b99601d5abeec663dd0c7a1cde8b72b72b35d",
+        "path": "tests/e2e/availability-probe.ts",
+        "gitBlob": "fa8e4d1aa18dceb2750c2b71bb945e108822fd31",
+        "sha256": "528e6098ade467928e691c3f377509ca131fba911ea9f05a791eadeabf2df626"
+      },
+      "historicalHelper": {
+        "commit": "8835fa792c12633b1cca830659ebaf04a6cd5547",
+        "path": "tests/e2e/availability-probe.ts",
+        "gitBlob": "f72cd5102e901e17e77728d06834737552503748",
+        "sha256": "5d315a1c12a2835838645d0804cb0dda5e8dfd8503eab8c963ac3d9442baae61"
+      },
+      "order": [
+        "nativeDiagnostics",
+        "installAvailabilityProbe"
+      ],
+      "qualification": "SOURCE_ONLY_NEW_COMPOSITION_NO_HISTORICAL_RUN_TRANSFER"
+    },
+    "outOfDomainOperationWitness": {
+      "historicalUniversalCommands": [
+        "node archive-transparency.node.mjs --product-reference --reflection-side-effect-counterexample",
+        "node direct-owner-probe.node.mjs --reflection-side-effect-counterexample"
+      ],
+      "expectedUniversalResult": "RED: four archive assertions and one Direct assertion; original R90 remains confirmed",
+      "sourceGateCategory": "OUT_OF_DOMAIN_OPERATION_LIMIT_RECOGNITION",
+      "gateMeaning": "Demonstrated out-of-domain interference, NOT equivalence, ownership admission, repair or native qualification"
     }
   }
 }

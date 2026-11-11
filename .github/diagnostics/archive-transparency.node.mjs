@@ -124,6 +124,7 @@ function fixture(t, name, settings = {}) {
   runInContext('window=globalThis;top=window;document={defaultView:window};', context)
   if (settings.localRealmData)
     runInContext('Object=({}).constructor;Array=[].constructor;', context)
+  const unwrappedFetch = context.fetch
   if (settings.directOrder === 'direct-first')
     runInContext(`(${observeDirectOwners.toString()})({installationId:'source-id',installationSlug:'source-slug'})`, context)
   if (!settings.deferBootstrap)
@@ -132,7 +133,7 @@ function fixture(t, name, settings = {}) {
     runInContext(`(${observeDirectOwners.toString()})({installationId:'source-id',installationSlug:'source-slug'})`, context)
   const ownWindow = runInContext('window', context)
   const fetch = (...args) => Reflect.apply(context.fetch, ownWindow, args)
-  return { context, fetch, queue, calls, bodyCalls, events, closeResult, NativeSource, abortCalls, abortResult, storage, directEvents, bootstrapExpression: `(${bootstrap})(${name === 'availability-reader-native.mjs' ? JSON.stringify('pre-pagehide-original-body') : ''});` }
+  return { context, fetch, unwrappedFetch, queue, calls, bodyCalls, events, closeResult, NativeSource, abortCalls, abortResult, storage, directEvents, bootstrapExpression: `(${bootstrap})(${name === 'availability-reader-native.mjs' ? JSON.stringify('pre-pagehide-original-body') : ''});` }
 }
 for (const name of ['skill-availability-probe.ts', 'b534-navigation-probe.ts']) {
   test(`${name}: actual bootstrap preserves original fetch promise, arguments and receiver`, async (t) => {
@@ -645,7 +646,8 @@ function oauthXhrFixture(settings = {}) {
       return fetchResult
     },
     queueMicrotask(callback) { diagnosticTasks.push(callback) },
-    cairnOAuthProbe(value) { probes.push(value); if (settings.probeFailure) throw settings.probeFailure; return Promise.resolve() },
+    console: { error(...args) { settings.onDiagnosticSignal?.(...args) } },
+    cairnOAuthProbe(value) { probes.push(value); if (settings.probeFailure) throw settings.probeFailure; return settings.probeResult ?? Promise.resolve() },
   })
   runInContext('globalThis.window = globalThis', context)
   runInContext(`(${source.slice(start, end)})(false)`, context)
@@ -1005,3 +1007,149 @@ for (const name of ['skill-availability-probe.ts', 'b534-navigation-probe.ts', '
     assert.throws(() => host.audit(), /UNKNOWN/)
   })
 }
+
+
+{
+  const universalClaim = process.argv.includes('--reflection-side-effect-counterexample')
+  for (const name of ['availability-probe.ts', 'availability-reader-native.mjs', 'skill-availability-probe.ts', 'b534-navigation-probe.ts']) {
+    test(`${universalClaim ? 'R90 UNIVERSAL TRANSPARENCY COUNTEREXAMPLE' : 'OUT_OF_DOMAIN_OPERATION_LIMIT_RECOGNITION'}: reflective Proxy trap changes native entry (${name})`, async (t) => {
+      const f = fixture(t, name)
+      const makeOptions = () => {
+        const controller = new AbortController()
+        const cause = new DOMException('observer-only reflection aborted SOURCE request', 'AbortError')
+        const options = new Proxy({ method: 'GET', signal: controller.signal }, {
+          getPrototypeOf() { controller.abort(cause); return Object.prototype },
+        })
+        return { controller, cause, options }
+      }
+      const nativeOperation = (_input, options) => options.signal.aborted ? Promise.reject(options.signal.reason) : Promise.resolve(Response.json({ original: true }))
+      const baseline = makeOptions()
+      f.queue.push(nativeOperation)
+      const unobserved = Reflect.apply(f.unwrappedFetch, runInContext('window', f.context), ['/api/installations', baseline.options])
+      await unobserved
+      assert.equal(baseline.controller.signal.aborted, false)
+      const observed = makeOptions()
+      f.queue.push(nativeOperation)
+      const result = f.fetch('/api/installations', observed.options)
+      const outcome = await result.then(() => ({ aborted: false }), cause => ({ aborted: true, sameCause: cause === observed.cause }))
+      t.diagnostic(JSON.stringify({ category: universalClaim ? 'UNIVERSAL_OPERATION_COUNTEREXAMPLE' : 'OUT_OF_DOMAIN_OPERATION_LIMIT_RECOGNITION', universalOperationEquivalenceQualified: false, inputDomain: 'OUTSIDE_PINNED_PRODUCERS', baselineEnteredUnaborted: true, observedEnteredAborted: observed.controller.signal.aborted, originalDelegateCalls: f.calls.length, nativeBrowserExecuted: false }))
+      assert.equal(f.calls.length, 2)
+      assert.equal(outcome.sameCause, true)
+      assert.equal(outcome.aborted, !universalClaim, 'Universal equivalence is RED; recognition preserves the demonstrated out-of-domain interference')
+    })
+  }
+}
+
+
+test('H91 actual OAuth asynchronous reporting rejection remains host-owned after source departure', async () => {
+  const cause = new Error('original asynchronous reporting SOURCE rejection')
+  const rejected = Promise.reject(cause)
+  const observedRejection = assert.rejects(rejected, error => error === cause)
+  let hostFailures = 0
+  const f = oauthXhrFixture({ probeResult: rejected, onDiagnosticSignal: (...args) => {
+    assert.deepEqual(args, ['__c40_oauth_observer_failure_v1__'])
+    hostFailures++
+  } })
+  const control = new AbortController()
+  control.abort()
+  const result = invokeOAuthFetch(f, 'ownerWindow', ['/api/installations/source/direct/authorize', { signal: control.signal }])
+  assert.equal(result, f.fetchResult)
+  assert.equal(f.fetchCalls.length, 1)
+  await observedRejection
+  await setImmediate()
+  // The retained owner is outside the disappearing bootstrap closure.
+  assert.equal(hostFailures > 0, true)
+  assert.equal(f.probes.some(probe => probe.kind === 'observer-error'), true)
+  assert.equal(f.diagnosticTasks.length > 0, true)
+  assert.throws(() => f.diagnosticTasks[0](), error => error === cause)
+})
+
+// The actual driver function composes both serialized observers in its declared order.
+// The optional historical helper is a permanent SOURCE counterfactual, not an old run relabelled.
+async function nativeReaderCompositionFixture(t) {
+  const name = 'availability-reader-native.mjs'
+  const raw = readFileSync(new URL('./' + name, import.meta.url), 'utf8')
+  const bindingStart = raw.indexOf('const nativeReaderCompositionBinding = ') + 'const nativeReaderCompositionBinding = '.length
+  const bindingEnd = raw.indexOf('\nconst helperBinding = ', bindingStart)
+  assert(bindingStart > 40 && bindingEnd > bindingStart)
+  const binding = JSON.parse(raw.slice(bindingStart, bindingEnd))
+  assert.equal(binding.compositionId, 'H91_NATIVE_READER_COMPOSITION_V2')
+  assert.deepEqual(binding.order, ['nativeDiagnostics', 'installAvailabilityProbe'])
+  const selected = process.env.C40_NATIVE_READER_HELPER_REFERENCE === 'historical' ? binding.historicalHelper : binding.helper
+  const bytes = execFileSync('git', ['show', `${selected.commit}:${selected.path}`])
+  assert.equal(execFileSync('git', ['rev-parse', `${selected.commit}:${selected.path}`], { encoding: 'utf8' }).trim(), selected.gitBlob)
+  const { createHash } = await import('node:crypto')
+  assert.equal(createHash('sha256').update(bytes).digest('hex'), selected.sha256)
+  const f = fixture(t, name, { deferBootstrap: true })
+  runInContext(stripTypeScriptTypes(bytes.toString(), { mode: 'transform' }).replace(/^export /gm, ''), f.context)
+  const diagnosticFunction = f.bootstrapExpression.slice(0, f.bootstrapExpression.lastIndexOf(')("pre-pagehide-original-body");') + 1)
+  f.context.nativeDiagnostics = runInContext(diagnosticFunction, f.context)
+  f.context.assert = assert
+  const start = raw.indexOf('async function installNativeReaderComposition(')
+  const end = raw.indexOf('\nconst pollStart = ', start)
+  assert(start > 0 && end > start)
+  runInContext(raw.slice(start, end), f.context)
+  const page = new EventEmitter()
+  const reads = []
+  let failures = 0
+  page.exposeFunction = async (key, callback) => { f.context[key] = (...args) => Promise.resolve(callback(...args)) }
+  page.addInitScript = async (script) => { runInContext(script, f.context) }
+  f.context.console = { error(...args) { page.emit('console', { type: () => 'error', text: () => args[0] }) } }
+  await f.context.installNativeReaderComposition(page, event => reads.push(event), () => { failures++ }, 'pre-pagehide-original-body')
+  t.after(() => page.emit('close'))
+  return { ...f, page, reads, failures: () => failures, binding, selected }
+}
+
+test('H91 ENTIRE NativeReader composition: strict unqualified receiver and empty full argument list', async (t) => {
+  const f = await nativeReaderCompositionFixture(t)
+  const original = Promise.resolve(Response.json({ original: true }))
+  f.queue.push(original)
+  const result = Reflect.apply(f.context.fetch, undefined, [])
+  assert.equal(result, original)
+  await result
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.calls[0].receiver, undefined)
+  assert.deepEqual(f.calls[0].args, [])
+})
+
+test('H91 ENTIRE NativeReader composition: ownerWindow full arguments and original rejected terminal', async (t) => {
+  const f = await nativeReaderCompositionFixture(t)
+  const cause = new TypeError('same ORIGINAL composition SOURCE failure')
+  const original = Promise.reject(cause)
+  const settled = assert.rejects(original, error => error === cause)
+  const options = { method: 'GET', signal: new AbortController().signal }
+  const args = ['/api/installations', options, Symbol('original extra argument')]
+  f.queue.push(original)
+  const result = f.fetch(...args)
+  assert.equal(result, original)
+  await settled
+  assert.equal(f.calls.length, 1)
+  assert.equal(f.calls[0].receiver, runInContext('window', f.context))
+  assert.deepEqual(f.calls[0].args, args)
+})
+
+test('H91 ENTIRE NativeReader composition: original JSON receiver full arguments and promise', async (t) => {
+  const f = await nativeReaderCompositionFixture(t)
+  const response = Response.json({ original: true })
+  f.queue.push(Promise.resolve(response))
+  await f.fetch('/api/installations', { method: 'GET' })
+  const args = [Symbol('original JSON extra argument')]
+  const result = Reflect.apply(response.json, response, args)
+  assert.deepEqual(await result, { original: true })
+  assert.equal(f.bodyCalls.at(-1).receiver, response)
+  assert.deepEqual(f.bodyCalls.at(-1).args, args)
+  assert.equal(f.bodyCalls.at(-1).promise, result)
+})
+
+test('H91 ENTIRE NativeReader composition: original abort actual receiver full arguments and cause', async (t) => {
+  const f = await nativeReaderCompositionFixture(t)
+  const controller = new AbortController()
+  const reason = new Error('original abort SOURCE cause')
+  const args = [reason, Symbol('original abort extra argument')]
+  const result = Reflect.apply(AbortController.prototype.abort, controller, args)
+  assert.equal(result, f.abortResult)
+  assert.equal(f.abortCalls.length, 1)
+  assert.equal(f.abortCalls[0].receiver, controller)
+  assert.deepEqual(f.abortCalls[0].args, args)
+  assert.equal(controller.signal.reason, reason)
+})

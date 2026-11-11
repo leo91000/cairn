@@ -106,7 +106,7 @@ function fixture(t, options = {}) {
   const control = new AbortController()
   const signal = () => context.AbortSignal.any([generation.signal, control.signal])
   return {
-    context, fetch: invokeFetch, Source, generation, control, signal, queue, requests, storage, ingresses, installationScope,
+    context, fetch: invokeFetch, nativeFetch, Source, generation, control, signal, queue, requests, storage, ingresses, installationScope,
     closeResult, originalJsonPromises, callbacks, faults, failureSignals, unwrappedAbort: originalAbort, anyInputs, anyResults,
     snapshot: () => context.__c40DirectOwnerReceipt.snapshot(),
     async authorize(sourceInstallation = installationScope.installationId) {
@@ -199,6 +199,9 @@ test('real native parent/composite signals preserve exact rejection reason and s
   assert.equal(projected.receiptStatus, 'UNKNOWN')
   assert.equal(projected.productQualified, false)
   assert.equal(projected.ownershipEvidenceScope, 'PINNED_SOURCE_CONDITIONAL')
+  assert.equal(projected.nativeOperationEvidenceScope, 'PINNED_SOURCE_CONDITIONAL')
+  assert.equal(projected.universalNativeOperationEquivalence, false)
+  assert.equal(projected.outOfDomainOperationEquivalence, 'NOT_CLAIMED')
   assert.equal(projected.universalRuntimeAdmission, false)
   assert.equal(projected.runtimeProducerReceipt, false)
   assert.equal(projected.proxyDetection, 'NOT_PROVIDED')
@@ -1188,4 +1191,44 @@ test('R87 host cleanup retains both independent listener failures', async (t) =>
   assert.deepEqual(attempted, ['pageerror', 'console'])
   assert.equal(host.finish(completeClosure).privateEvidence.observerFailures, 2)
   assert.equal(host.finish(completeClosure).projection.receiptStatus, 'UNKNOWN')
+})
+
+
+{
+  const universalClaim = process.argv.includes('--reflection-side-effect-counterexample')
+  test(`${universalClaim ? 'R90 UNIVERSAL TRANSPARENCY COUNTEREXAMPLE' : 'OUT_OF_DOMAIN_OPERATION_LIMIT_RECOGNITION'}: Direct reflective trap changes original native entry`, async (t) => {
+    const f = fixture(t)
+    const makeOptions = () => {
+      const controller = new AbortController()
+      const reason = new DOMException('observer-only Direct reflection SOURCE abort', 'AbortError')
+      return { controller, options: new Proxy({ method: 'POST', signal: controller.signal }, {
+        getPrototypeOf() { controller.abort(reason); return Object.prototype },
+      }) }
+    }
+    const native = (_input, options) => options.signal.aborted ? Promise.reject(options.signal.reason) : Promise.resolve(Response.json({ available: false }))
+    const baseline = makeOptions()
+    f.queue.push(native)
+    await Reflect.apply(f.nativeFetch, runInContext('window', f.context), ['/api/installations/private/direct/authorize', baseline.options])
+    assert.equal(baseline.controller.signal.aborted, false)
+    const observed = makeOptions()
+    f.queue.push(native)
+    const result = f.fetch('/api/installations/private/direct/authorize', observed.options)
+    const rejected = await result.then(() => false, () => true)
+    t.diagnostic(JSON.stringify({ category: universalClaim ? 'UNIVERSAL_OPERATION_COUNTEREXAMPLE' : 'OUT_OF_DOMAIN_OPERATION_LIMIT_RECOGNITION', universalOperationEquivalenceQualified: false, inputDomain: 'OUTSIDE_PINNED_PRODUCERS', baselineEnteredUnaborted: true, observedEnteredAborted: observed.controller.signal.aborted, originalDelegateCalls: f.requests.length, nativeBrowserExecuted: false }))
+    assert.equal(f.requests.length, 2)
+    assert.equal(rejected, !universalClaim, 'Universal equivalence is RED; recognition preserves the demonstrated out-of-domain interference')
+  })
+}
+
+
+test('A90 actual chain validator refuses a universal operation claim and missing separate domain', () => {
+  for (const mutate of [
+    manifest => { manifest.sourceTrusted.universalOperationEquivalence = true },
+    manifest => { delete manifest.sourceTrusted.domains.operation },
+    manifest => { manifest.sourceTrusted.nativeReaderComposition.helper.commit = '0'.repeat(40) },
+  ]) {
+    const manifest = actualChainManifest()
+    mutate(manifest)
+    assert.throws(() => verifySourceTrustedChain(process.cwd(), path.dirname(fileURLToPath(import.meta.url)), manifest))
+  }
 })

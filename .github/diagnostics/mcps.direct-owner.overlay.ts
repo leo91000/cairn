@@ -1,4 +1,4 @@
-import type { Download } from '@playwright/test'
+import type { ConsoleMessage, Download } from '@playwright/test'
 import type { AvailabilityReadEvent } from './availability-probe'
 import { writeFileSync as saveAvailabilityObservation } from 'node:fs'
 import { mcpProvider } from '../fixtures/mcp-provider'
@@ -61,6 +61,12 @@ for (const pending of ['authorization', 'offer'] as const) {
     const name = `Slow OAuth (${pending})`
     let backgroundRequests = 0
     let observationFailures = 0
+    const onOAuthObservationFailure = (message: ConsoleMessage) => {
+      if (message.type() === 'error' && message.text() === '__c40_oauth_observer_failure_v1__')
+        observationFailures++
+    }
+    page.on('console', onOAuthObservationFailure)
+    page.once('close', () => page.off('console', onOAuthObservationFailure))
     const closedOffers: boolean[] = []
     const offerCompleted = Promise.withResolvers<void>()
     await page.exposeFunction('cairnOAuthProbe', (probe: OAuthDepartureProbe) => {
@@ -83,6 +89,9 @@ for (const pending of ['authorization', 'offer'] as const) {
 
       let departing = false
       const request = window.fetch
+      const promiseThen = Promise.prototype.then
+      const failureConsole = window.console
+      const failureConsoleError = failureConsole.error
       const enqueueDiagnosticError = window.queueMicrotask
       if (typeof enqueueDiagnosticError !== 'function')
         throw new Error('OAuth probe requires native diagnostic scheduling')
@@ -91,20 +100,37 @@ for (const pending of ['authorization', 'offer'] as const) {
       if (!signalAborted)
         throw new Error('OAuth departure probe requires native AbortSignal state')
 
-      const reportObservationFailure = () => {
+      const signalHostFailure = () => {
         try {
-          void window.cairnOAuthProbe({ kind: 'observer-error' })
+          Reflect.apply(failureConsoleError, failureConsole, ['__c40_oauth_observer_failure_v1__'])
+        }
+        catch (failure) {
+          Reflect.apply(enqueueDiagnosticError, window, [() => {
+            throw failure
+          }])
+        }
+      }
+      const failedReporting = (failure: unknown) => {
+        signalHostFailure()
+        Reflect.apply(enqueueDiagnosticError, window, [() => {
+          throw failure
+        }])
+      }
+      const reportObservationFailure = () => {
+        signalHostFailure()
+        try {
+          const delivery = window.cairnOAuthProbe({ kind: 'observer-error' })
+          void Reflect.apply(promiseThen, delivery, [undefined, failedReporting])
         }
         catch (reportingFailure) {
-          Reflect.apply(enqueueDiagnosticError, window, [() => {
-            throw reportingFailure
-          }])
+          failedReporting(reportingFailure)
         }
       }
 
       const emitProbe = (probe: OAuthDepartureProbe) => {
         try {
-          void window.cairnOAuthProbe(probe)
+          const delivery = window.cairnOAuthProbe(probe)
+          void Reflect.apply(promiseThen, delivery, [undefined, reportObservationFailure])
         }
         catch {
           reportObservationFailure()

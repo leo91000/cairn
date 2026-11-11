@@ -1,17 +1,23 @@
 # SOURCE-TRUSTED diagnostic domain — SOURCE ONLY, NOT runtime qualification
 
-Product **0ff31c7a58dcc760e959c447b350047da50cd096**, tree **894c35fac6a885464e1d788e44b5a63f94e72a06**,
-parent6edd (canonical style-only host audit formatting), app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
-and its permanent serialized-bootstrap regression. Canonical QA ROOT on this exact clean
-new product is DUE before fresh COMPLETE independent FULLs. The prior clean bc1c QA is historical
-for this changed product and does not transfer.
+Current product **e81b99601d5abeec663dd0c7a1cde8b72b72b35d**, tree **3b3b5ef242d4db0b48011bcdefa9766de349305b**.
+App/runtime/factory/PR731 immutable. Test-only OAuth async negative host retention,
+separate helper evidence labels and repair-contract documentation changed; ROOT
+canonical QA of this exact new clean commit is DUE before fresh complete FULLs.
+No older QA is transferred.
 
-ROOT engineering contract A81 SOURCE-TRUSTED_1 is explicit: observations of request
-ownership are conditional on pinned, reviewed REAL producers and their COMPLETE
-observer/delegate chain. No universal runtime admission, no Proxy detection, no
-runtime producer-origin receipt is provided. Shape/descriptor agreement is a
-filter, NEVER membership certification. Original same this/args/promises/causes/
-throws/terminals and ALL actual error/audit/lifecycle/auth/cadence criteria remain.
+ROOT contracts A81/A90 SOURCE-TRUSTED_2 declare TWO separate source domains:
+ownership association and counterfactual native-operation/terminal equivalence.
+Each is CONDITIONAL on exact reviewed fresh internal literals/private native
+signals and the ENTIRE pinned producer/delegate/wrapper/composition/profile/SDK.
+No universal ownership admission, universal operation equivalence or absence of
+observer effects outside that domain is claimed. Shape/descriptor agreement is
+NEVER an object/Proxy membership certificate. Every feasible forwarding/catch/
+reporter/negative diagnostic guard remains required; original this/fullargs/once/
+Promise/result/cause/throws/terminal and all actual error/lifecycle/auth/cadence
+criteria stay strict. Any chain change invalidates evidence and requires repin,
+full review and qualification. ROOT A90 decision SHA256
+62320974cc78a9acb700fa16c785b67bc93b62ec9d8bab3e3ec9c74aa4e04f54.
 
 Producer domain: Beacon entry -> BeaconApp.refreshAvailability -> readAvailability
 fresh own literal; api watcher -> InstallationTransport.connect/control fresh POST
@@ -553,3 +559,42 @@ adapter supports standard once/off/close; initial setup errors remain uncredited
 Current product0ff31 exact ROOT1888/actual104 remains unchanged/no canonical replay.
 Workflow/pin/overlays/SDKprofile/image/cachepolicy/budgets unchanged, no native effect.
 Fresh complete independent product+observer/archives/pin/chain reviews still required.
+
+
+## A90 / H91 current SOURCE changes (historical findings retained)
+
+R90 remains CONFIRMED/UPHELD: out-of-domain reflection can abort the pending
+native operation even after its invocation. Its four archive witnesses and one
+Direct witness remain permanent RED under --reflection-side-effect-counterexample.
+The selected SOURCE gate labels demonstrated interference separately as
+OUT_OF_DOMAIN_OPERATION_LIMIT_RECOGNITION, NOT ownership support, operation
+equivalence, native PASS or a fixed Proxy. Existing two ownership-limit witnesses
+and their RED command remain distinct and unchanged.
+
+H91 OAuth async reporter rejection is retained by a closed-code Page host counter;
+original operation promises/results/causes stay intact. The same serialized SOURCE
+controller fails on old0ff31 and passes on the candidate, no native receipt claimed.
+NativeReader composition H91_NATIVE_READER_COMPOSITION_V2 explicitly binds the new
+helper commit/blob/SHA and executes BOTH serialized observers in declared order.
+Its older helper binding and historical sources/hashes/runs remain historical.
+The same complete-composition SOURCE controller tests empty/unqualified Fetch,
+ownerWindow full arguments/rejection, JSON arguments/promise and abort cause:
+historical helper FOUR ASSERT FAIL, candidate FOUR PASS; no browser or old native
+run requalified. Missing host-negative metadata remains UNKNOWN; no terminal is
+fabricated or erased. This archived driver is NOT selected for any current native
+run, and no archived control is executed by this source preparation.
+
+ROOT canonical clean-commit QA and fresh independent FULLs of both whole sources
+remain DUE. Runtime47/1 cause UNKNOWN, P1 OPEN; all old forensic material preserved.
+
+
+A90 source execution on the new candidate (not canonical QA/native): selected
+workflow block 74 Direct +73 archive/product controls passed, including five
+OPERATION-limit recognitions and two separate OWNERSHIP-limit recognitions.
+Both universal operation witness commands remain RED: four archive assertions and
+one Direct assertion, zero setup failures. An initial invocation using Node
+--test plus custom arguments selected zero matching cases and is explicitly NOT
+credited; the commands without --test executed the exact witnesses and failed as
+expected. The complete NativeReader SOURCE contrast is four ASSERT failures on
+the explicitly historical helper and four passes on V2. No older native result
+or clean FULL verdict is transferred to this snapshot.

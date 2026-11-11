@@ -15,6 +15,9 @@ export interface DirectOwnerProjection {
   diagnosticOnly: true
   productQualified: false
   ownershipEvidenceScope: 'PINNED_SOURCE_CONDITIONAL'
+  nativeOperationEvidenceScope: 'PINNED_SOURCE_CONDITIONAL'
+  universalNativeOperationEquivalence: false
+  outOfDomainOperationEquivalence: 'NOT_CLAIMED'
   universalRuntimeAdmission: false
   runtimeProducerReceipt: false
   proxyDetection: 'NOT_PROVIDED'

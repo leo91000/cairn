@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { once } from 'node:events'
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
@@ -13,11 +14,34 @@ await mkdir(output, { recursive: true })
 const control = 'chromium-original-json-state-before-first-pagehide-only'
 const paths = {
   gate: 'tests/e2e/native-response-gate.ts',
-  probe: 'tests/e2e/availability-probe.ts',
   transport: 'apps/web/src/availability-read.ts',
   shell: 'apps/web/src/BeaconApp.vue',
 }
 const sources = Object.fromEntries(await Promise.all(Object.entries(paths).map(async ([key, path]) => [key, await readFile(path, 'utf8')])))
+// Versioned test-helper dependency; historical runtime fixture bytes stay frozen.
+const nativeReaderCompositionBinding = {
+  "compositionId": "H91_NATIVE_READER_COMPOSITION_V2",
+  "helper": {
+    "commit": "e81b99601d5abeec663dd0c7a1cde8b72b72b35d",
+    "path": "tests/e2e/availability-probe.ts",
+    "gitBlob": "fa8e4d1aa18dceb2750c2b71bb945e108822fd31",
+    "sha256": "528e6098ade467928e691c3f377509ca131fba911ea9f05a791eadeabf2df626"
+  },
+  "historicalHelper": {
+    "commit": "8835fa792c12633b1cca830659ebaf04a6cd5547",
+    "path": "tests/e2e/availability-probe.ts",
+    "gitBlob": "f72cd5102e901e17e77728d06834737552503748",
+    "sha256": "5d315a1c12a2835838645d0804cb0dda5e8dfd8503eab8c963ac3d9442baae61"
+  },
+  "order": [
+    "nativeDiagnostics",
+    "installAvailabilityProbe"
+  ],
+  "qualification": "SOURCE_ONLY_NEW_COMPOSITION_NO_HISTORICAL_RUN_TRANSFER"
+}
+const helperBinding = nativeReaderCompositionBinding.helper
+assert.equal(execFileSync('git', ['rev-parse', `${helperBinding.commit}:${helperBinding.path}`], { encoding: 'utf8' }).trim(), helperBinding.gitBlob)
+sources.probe = execFileSync('git', ['show', `${helperBinding.commit}:${helperBinding.path}`], { encoding: 'utf8' })
 const sourceHashes = Object.fromEntries(Object.entries(sources).map(([key, value]) => [key, createHash('sha256').update(value).digest('hex')]))
 const acquiredPositiveEvidence = {
   "runId": 42618105477,
@@ -61,12 +85,25 @@ const acquiredNegativeEvidence = {
     "shell": "805ddd3d9fb33f0b1bea89ce1bd1860bedb8d8a0eb815355ac50f878e62b0bb1"
   }
 }
-const expectedCurrentHashes = {'gate': 'f5f8cc85a78a13f3c2af37eaa06cfc61641787b6fa65434d6283f70f1dcd8b95', 'probe': '5d315a1c12a2835838645d0804cb0dda5e8dfd8503eab8c963ac3d9442baae61', 'transport': '13593f5f5e928985d287e8b72fa667ce21deeb006dd724dc806c624bd52af727', 'shell': '805ddd3d9fb33f0b1bea89ce1bd1860bedb8d8a0eb815355ac50f878e62b0bb1'}
+const expectedCurrentHashes = {'gate': 'f5f8cc85a78a13f3c2af37eaa06cfc61641787b6fa65434d6283f70f1dcd8b95', 'probe': helperBinding.sha256, 'transport': '13593f5f5e928985d287e8b72fa667ce21deeb006dd724dc806c624bd52af727', 'shell': '805ddd3d9fb33f0b1bea89ce1bd1860bedb8d8a0eb815355ac50f878e62b0bb1'}
 for (const [key, sha256] of Object.entries(expectedCurrentHashes))
   assert.equal(sourceHashes[key], sha256, 'Frozen selected source changed: ' + key)
 const loadTypeScript = text => import('data:text/javascript;base64,' + Buffer.from(stripTypeScriptTypes(text)).toString('base64'))
 const { nativeResponseGate } = await loadTypeScript(sources.gate)
 const { installAvailabilityProbe, incompleteAvailabilityReads } = await loadTypeScript(sources.probe)
+// Executed and source-tested as one composition, not just nativeDiagnostics alone.
+async function installNativeReaderComposition(page, record, recordObserverFailure, mode) {
+  const initializers = []
+  await installAvailabilityProbe({
+    exposeFunction: (...args) => page.exposeFunction(...args),
+    on: (...args) => page.on(...args),
+    once: (...args) => page.once(...args),
+    off: (...args) => page.off(...args),
+    addInitScript: callback => { initializers.push(callback.toString()) },
+  }, record, recordObserverFailure)
+  assert.equal(initializers.length, 1)
+  await page.addInitScript(`(${nativeDiagnostics.toString()})(${JSON.stringify(mode)});(${initializers[0]})();`)
+}
 const pollStart = sources.shell.indexOf('let availabilityTimer:')
 const pollEnd = sources.shell.indexOf('function installationStatus(', pollStart)
 assert.ok(pollStart >= 0 && pollEnd > pollStart)
@@ -496,13 +533,6 @@ async function observe(browser, cell, closedPrototype) {
       void action.finally(() => dialogActions.delete(action))
     })
 
-    // One init script fixes adapter ordering before the actual product captures
-    // its producer functions. The probe itself is the unmodified source callback.
-    const initializers = []
-    await installAvailabilityProbe({
-      exposeFunction: (...args) => page.exposeFunction(...args),
-      addInitScript: callback => { initializers.push(callback.toString()) },
-    }, record)
     await page.exposeFunction('nativeStateReceipt', receipt => {
       stateReceipts.push(receipt)
       for (const event of receipt.journal) {
@@ -514,8 +544,7 @@ async function observe(browser, cell, closedPrototype) {
       writes.add(pending)
       void pending.catch(error => cleanupFailure('state-write', error)).finally(() => writes.delete(pending))
     })
-    assert.equal(initializers.length, 1)
-    await page.addInitScript(`(${nativeDiagnostics.toString()})(${JSON.stringify(cell.mode)});(${initializers[0]})();`)
+    await installNativeReaderComposition(page, record, () => { hostObserverFailures++ }, cell.mode)
     await stage('same actual poll and clock seed')
     await page.clock.install()
     await page.goto(origin + '/live')
@@ -1002,7 +1031,7 @@ async function observe(browser, cell, closedPrototype) {
   const ownCleanup = cleanupFailures.filter(event => event.arm === arm)
   const observationComplete = hostObserverFailures === 0 && !nativeEvents.some(event => event.kind === 'observer-failed') && journalAcknowledged && navigationValidated && !failures.length && !pageErrors.length
     && !ownCleanup.length && !finalAudit.unknown.length && !finalAudit.unexpected.length
-  const row = { arm, control, diagnosticOnly: true, productQualified: false, observationComplete, phase,
+  const row = { arm, control, nativeReaderCompositionBinding, diagnosticOnly: true, productQualified: false, observationComplete, phase,
     pauseReceipts, postCommitReceipt, cleanupStartedAt, cdpAdmission, cdpCloseObserved, cdpTaskRecords, cdpCommandsDrained: cdpTasks.size === 0, originalPromiseBoundary, documentId, state, pendingProof, stateReceipts, dialogs, nativeNavigationCheckpoint, navigationRetirement, activatedViaClick, retainedAfterDialog, destinationAdmission: cell.mode === 'proof-without-terminal' && navigationValidated && !destination?.received ? 'cancelled-before-request' : null, outageEvidence, initialHeaderAdvance, initialClosureBoundary, initialClosureBeforeRelease, navigationValidated, journalAcknowledged,
     allPageErrorsStrict: pageErrors.length === 0, hostObserverFailures, pageErrors, failures, reads: received, nativeEvents, finalAudit,
     gates: gates.map(({ label, response }) => ({ label, received: response.received, ready: response.ready, status: response.status ?? null, terminal: response.terminal, closed: response.closed, headersDelivered: response.headersDelivered, bodyReleased: response.bodyReleased })), cleanupFailures: ownCleanup }
@@ -1036,7 +1065,7 @@ for (const engine of new Set(planned.map(cell => cell.engine))) {
 }
 const allCellsObserved = rows.length === planned.length && rows.every(row => row.observationComplete)
 const result = { control, diagnosticOnly: true, productQualified: false, retainedPollingQualified: false, bfCacheQualified: false,
-  genuineFailureHandlingQualified: false, sourceHashes, acquiredPositiveEvidence, acquiredNegativeEvidence, fullEightCellRunComplete: false, planned, allCellsObserved,
+  genuineFailureHandlingQualified: false, nativeReaderCompositionBinding, sourceHashes, acquiredPositiveEvidence, acquiredNegativeEvidence, fullEightCellRunComplete: false, planned, allCellsObserved,
   allPageErrorsStrict: rows.every(row => row.allPageErrorsStrict), rows, cleanupFailures, engineFailures }
 await write('result.json', result)
 console.log(JSON.stringify({ ...result, rows: rows.length, cleanupFailures: cleanupFailures.length, engineFailures: engineFailures.length }))
