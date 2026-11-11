@@ -2,8 +2,8 @@
 
 ## Current selection after explicit ROOT H77 source-helper decision
 
-Product **c1427cbfdbc945dc8c58360b2b60fbd9a69ec0db**, tree **8d51a6bfaa45169a71f9304439a3bc19c8aed81a**,
-parent4975; canonicalQA ROOT DUE on this clean exact commit. Only
+Product **9235c452ef7fac95f2c0458555497889e7817c19**, tree **3f94a8f8e10af6018bda53d4a049ec2ae96c8555**,
+parentc142; canonicalQA ROOT DUE on this clean exact commit. Only
 `tests/e2e/availability-probe.ts` and its real existing source regression suite
 `apps/web/tests/availability-read.test.ts` changed. Runtimeb186/apps/factory/TypeError,
 MCPS/browser assertions, budgets/profiles/auth/grants remain immutable.
@@ -226,3 +226,16 @@ ROOT cleanQA4975 and separate workflowSOURCE100PASS/collect1 are valid old-pin
 proofs, not currentQA/native or review verdict. Canonical ROOT newcleancommit QA
 DUE before fresh COMPLETE FULLs ALLproduct+ALLobserver/archives/pin. No oldclean
 transfer, no CI/native/PR/merge/budget/profile/cachepolicy change. P1OPEN/slotROOT.
+
+ROOT canonical c142 patch95ea4f197eaf04f3928a3a7f6b19c694604929758516e1050a99f6e83c7821f5,
+3025B/artifactf62b0c08, applied EXACTLY ONCE. Post-images match Git blobs; only
+whitespace and TWO localized fixture no-extend-native annotations (prototype
+restored synchronously FINALLY before any await), no assertion/helper logic change.
+First ROOT lintfix two deliberate fixture rule failures preserved. Subsequent ROOT
+lintfixEXIT0 and pnpmcheck141files1887tests/types/buildPASS on c142+patchDIRTY are
+historical, NOT newcleancommit QA. Product9235c452ef7fac95f2c0458555497889e7817c19
+/tree3f94a8f8e10af6018bda53d4a049ec2ae96c8555 is clean, ROOT exact QA DUE before fresh FULLs.
+Selected checkout/env/controller/manifest/default selector all repinned together;
+original two overlay hashes verified unchanged, no workload/budget/profile change.
+No canonical checks repeated, no review started before QA, no CI/native/PR/merge.
+Runtime app/factory/contracts/PR731 intact; P1OPEN/slotROOT/otherheavyHOLD.

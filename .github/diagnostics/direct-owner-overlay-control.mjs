@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, readlinkSync, lstatSync, writeFile
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const product = 'c1427cbfdbc945dc8c58360b2b60fbd9a69ec0db'
+export const product = '9235c452ef7fac95f2c0458555497889e7817c19'
 const targets = ['tests/e2e/mcps.spec.ts', 'apps/web/tests/direct-transport.test.ts']
 const sourceDirectory = dirname(fileURLToPath(import.meta.url))
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')

@@ -12,7 +12,7 @@ jobs:
       image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f
       options: --init --ipc=host
     env:
-      PRODUCT_SHA: c1427cbfdbc945dc8c58360b2b60fbd9a69ec0db
+      PRODUCT_SHA: 9235c452ef7fac95f2c0458555497889e7817c19
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
       CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@postgres:5432/cairn_beacon_test
@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         timeout-minutes: 5
         with:
-          ref: c1427cbfdbc945dc8c58360b2b60fbd9a69ec0db
+          ref: 9235c452ef7fac95f2c0458555497889e7817c19
       - name: Bind immutable product and versioned TEST ONLY observer bytes
         timeout-minutes: 5
         env:
@@ -73,7 +73,7 @@ jobs:
         timeout-minutes: 5
         run: |
           pnpm exec vitest run apps/web/tests/direct-transport.test.ts apps/web/tests/availability-read.test.ts --maxWorkers=1
-          printf 'source-product=c1427cbfdbc945dc8c58360b2b60fbd9a69ec0db\nsource-only=true\nnative-cause-established=false\n' > "$C40_EVIDENCE_DIR/source-seam-meaning.txt"
+          printf 'source-product=9235c452ef7fac95f2c0458555497889e7817c19\nsource-only=true\nnative-cause-established=false\n' > "$C40_EVIDENCE_DIR/source-seam-meaning.txt"
       - name: Restore the original source unit test before any browser build
         timeout-minutes: 5
         if: always()
