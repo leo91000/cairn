@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { stripTypeScriptTypes } from 'node:module'
 import { test } from 'node:test'
 import { product } from './direct-owner-overlay-control.mjs'
+import { observeDirectOwners } from './direct-owner-probe.mjs'
 import { createContext, runInContext } from 'node:vm'
 import { MessageChannel as NativeMessageChannel } from 'node:worker_threads'
 import { setImmediate } from 'node:timers/promises'
@@ -12,7 +14,7 @@ const reference = process.argv.includes('--reference')
 const productReferenceHead = process.env.C40_PRODUCT_REFERENCE || product
 assert.match(productReferenceHead, /^[a-f0-9]{40}$/)
 const referenceHead = process.env.C40_ARCHIVE_REFERENCE || '589e704e90bc451a181bd7fdcf667993e518522e'
-function fixture(t, name) {
+function fixture(t, name, settings = {}) {
   const productReference = name === 'availability-probe.ts'
   const raw = productReference
     ? execFileSync('git', ['show', `${productReferenceHead}:tests/e2e/availability-probe.ts`], { encoding: 'utf8' })
@@ -35,6 +37,7 @@ function fixture(t, name) {
   }
   const originals = new Map()
   const bodyCalls = []
+  const originalAny = AbortSignal.any
   const originalAbort = AbortController.prototype.abort
   const abortCalls = []
   const abortResult = Symbol('original abort return stand-in')
@@ -55,6 +58,7 @@ function fixture(t, name) {
   const channels = []
   t.after(() => {
     AbortController.prototype.abort = originalAbort
+    AbortSignal.any = originalAny
     for (const [method, original] of originals)
       Response.prototype[method] = original
     for (const channel of channels) {
@@ -74,11 +78,13 @@ function fixture(t, name) {
     close() { this.readyState = 2; this.closes++; return closeResult }
   }
   const storage = new Map()
+  const listeners = new Map()
+  const directEvents = []
   const context = createContext({
     sessionStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
     cairnAvailabilityRecord: (...args) => { events.push(args); return Promise.resolve() },
     nativeStateReceipt: (...args) => { events.push(args); return Promise.resolve() },
-    URL, Request, Response, AbortController, AbortSignal, DOMException, Error, TypeError, Object, EventSource: NativeSource, crypto,
+    URL, Request, Response, AbortController, AbortSignal, DOMException, Error, TypeError, Object, Array, EventSource: NativeSource, crypto,
     Event, MessageEvent, Promise, performance,
     MessageChannel: class {
       constructor() {
@@ -95,14 +101,25 @@ function fixture(t, name) {
     },
     availabilityProbe: (...args) => { events.push(args); return Promise.resolve() },
     b534Record: (...args) => { events.push(args); return Promise.resolve() },
-    addEventListener() {},
+    __c40RecordDirectOwner: event => { directEvents.push(event); return Promise.resolve() },
+    addEventListener(kind, callback) {
+      if (!listeners.has(kind)) listeners.set(kind, new Set())
+      listeners.get(kind).add(callback)
+    },
+    removeEventListener(kind, callback) { listeners.get(kind)?.delete(callback) },
     location: { href: 'http://localhost:4422/fixture', origin: 'http://localhost:4422' },
   })
-  runInContext('window=globalThis;', context)
+  runInContext('window=globalThis;top=window;document={defaultView:window};', context)
+  if (settings.localRealmData)
+    runInContext('Object=({}).constructor;Array=[].constructor;', context)
+  if (settings.directOrder === 'direct-first')
+    runInContext(`(${observeDirectOwners.toString()})()`, context)
   runInContext(`(${bootstrap})(${name === 'availability-reader-native.mjs' ? JSON.stringify('pre-pagehide-original-body') : ''});`, context)
+  if (settings.directOrder === 'direct-last')
+    runInContext(`(${observeDirectOwners.toString()})()`, context)
   const ownWindow = runInContext('window', context)
   const fetch = (...args) => Reflect.apply(context.fetch, ownWindow, args)
-  return { context, fetch, queue, calls, bodyCalls, events, closeResult, NativeSource, abortCalls, abortResult, storage }
+  return { context, fetch, queue, calls, bodyCalls, events, closeResult, NativeSource, abortCalls, abortResult, storage, directEvents }
 }
 for (const name of ['skill-availability-probe.ts', 'b534-navigation-probe.ts']) {
   test(`${name}: actual bootstrap preserves original fetch promise, arguments and receiver`, async (t) => {
@@ -430,41 +447,122 @@ for (const name of ['skill-availability-probe.ts', 'b534-navigation-probe.ts', '
 }
 
 
+async function descriptorGetCounterexample(t, sameReason) {
+  const f = fixture(t, 'availability-probe.ts')
+  const actual = new AbortController()
+  const unrelated = new AbortController()
+  const native = Promise.withResolvers()
+  const cause = new DOMException('same original actual request rejection', 'AbortError')
+  let nativeGetReads = 0
+  const target = { signal: unrelated.signal }
+  const options = new Proxy(target, { get(object, key, receiver) {
+    if (key === 'signal') {
+      nativeGetReads++
+      return actual.signal
+    }
+    return Reflect.get(object, key, receiver)
+  } })
+  let used
+  f.queue.push((_, init) => {
+    used = init.signal
+    used.addEventListener('abort', () => native.reject(cause), { once: true })
+    return native.promise
+  })
+  const returned = f.fetch('/api/installations', options)
+  assert.equal(returned, native.promise)
+  assert.equal(used, actual.signal)
+  unrelated.abort(sameReason ? cause : new DOMException('different unrelated reason', 'AbortError'))
+  let originalCausePreserved = false
+  const rejected = assert.rejects(returned, value => {
+    originalCausePreserved = value === cause
+    return originalCausePreserved
+  })
+  actual.abort(cause)
+  await rejected
+  await setImmediate()
+  const journal = f.events.map(args => args[0]).filter(value => value && typeof value === 'object')
+  return {
+    sameReason,
+    // Out-of-domain is known because THIS fixture constructs a Proxy. This is
+    // never a proposed runtime classification algorithm.
+    fixtureDomain: 'OUTSIDE_PINNED_PRODUCERS',
+    nativeUsedA: used === actual.signal,
+    nativeGetReads,
+    descriptorReportedB: Object.getOwnPropertyDescriptor(target, 'signal').value === unrelated.signal,
+    originalPromisePreserved: returned === native.promise,
+    originalCausePreserved,
+    wrongOwnedRejectionCount: journal.filter(event => event.kind === 'rejected' && event.aborted).length,
+    observerFailureCount: f.context.cairnAvailabilityProbeFailures,
+    declaredScope: journal.find(event => event.kind === 'rejected')?.ownershipScope ?? null,
+  }
+}
+
 if (process.argv.includes('--proxy-counterexample')) {
   for (const sameReason of [false, true]) {
-    test(`R79 descriptor/Get disagreement cannot certify another signal (same reason ${sameReason})`, async (t) => {
-      const f = fixture(t, 'availability-probe.ts')
-      const actual = new AbortController()
-      const unrelated = new AbortController()
-      const native = Promise.withResolvers()
-      const cause = new DOMException('same original actual request rejection', 'AbortError')
-      let nativeGetReads = 0
-      const target = { signal: unrelated.signal }
-      const options = new Proxy(target, { get(object, key, receiver) {
-        if (key === 'signal') {
-          nativeGetReads++
-          return actual.signal
-        }
-        return Reflect.get(object, key, receiver)
-      } })
-      let used
-      f.queue.push((_, init) => {
-        used = init.signal
-        used.addEventListener('abort', () => native.reject(cause), { once: true })
-        return native.promise
-      })
-      const returned = f.fetch('/api/installations', options)
-      assert.equal(returned, native.promise)
-      assert.equal(used, actual.signal)
-      unrelated.abort(sameReason ? cause : new DOMException('different unrelated reason', 'AbortError'))
-      const rejected = assert.rejects(returned, value => value === cause)
-      actual.abort(cause)
-      await rejected
-      await setImmediate()
-      const journal = f.events.map(args => args[0]).filter(value => value && typeof value === 'object')
-      t.diagnostic(JSON.stringify({ sameReason, nativeUsedA: used === actual.signal, nativeGetReads, descriptorReportedB: Object.getOwnPropertyDescriptor(target, 'signal').value === unrelated.signal, wrongOwnedRejectionCount: journal.filter(event => event.kind === 'rejected' && event.aborted).length, observerFailureCount: f.context.cairnAvailabilityProbeFailures }))
-      assert.equal(journal.some(event => event.kind === 'rejected' && event.aborted), false)
-      assert.equal(journal.some(event => event.kind === 'observer-failed'), true)
+    test(`R79 UNIVERSAL CLAIM REMAINS RED: descriptor/Get (same reason ${sameReason})`, async (t) => {
+      const evidence = await descriptorGetCounterexample(t, sameReason)
+      t.diagnostic(JSON.stringify(evidence))
+      assert.equal(evidence.wrongOwnedRejectionCount, 0)
+      assert.equal(evidence.observerFailureCount > 0, true)
     })
   }
+}
+
+if (process.argv.includes('--source-trusted-limit')) {
+  for (const sameReason of [false, true]) {
+    test(`SOURCE LIMIT RECOGNITION ONLY, NOT OWNERSHIP PASS: descriptor/Get (same reason ${sameReason})`, async (t) => {
+      const evidence = await descriptorGetCounterexample(t, sameReason)
+      assert.equal(evidence.fixtureDomain, 'OUTSIDE_PINNED_PRODUCERS')
+      assert.equal(evidence.originalPromisePreserved, true)
+      assert.equal(evidence.originalCausePreserved, true)
+      assert.equal(evidence.nativeUsedA, true)
+      assert.equal(evidence.nativeGetReads, 1)
+      assert.equal(evidence.descriptorReportedB, true)
+      assert.equal(evidence.wrongOwnedRejectionCount, 1)
+      assert.equal(evidence.observerFailureCount, 0)
+      assert.equal(evidence.declaredScope, 'PINNED_SOURCE_CONDITIONAL')
+      const receipt = { category: 'OUT_OF_DOMAIN_LIMIT_RECOGNITION', universalOwnershipClaimQualified: false, proxyDetectedAtRuntime: false, nativeQualified: false, historicalCounterexampleStillRed: true, ...evidence }
+      t.diagnostic(JSON.stringify(receipt))
+      if (process.env.C40_EVIDENCE_DIR)
+        writeFileSync(join(process.env.C40_EVIDENCE_DIR, `proxy-limit-${sameReason ? 'same' : 'distinct'}-reason.json`), JSON.stringify(receipt))
+    })
+  }
+}
+
+for (const directOrder of ['direct-first', 'direct-last']) {
+  test(`PINNED PRODUCER SOURCE SUPPORT: real readAvailability and complete probe composition (${directOrder})`, async (t) => {
+    const f = fixture(t, 'availability-probe.ts', { directOrder, localRealmData: true })
+    const factorySource = execFileSync('git', ['show', `${productReferenceHead}:apps/web/src/availability-read.ts`], { encoding: 'utf8' })
+    const factory = stripTypeScriptTypes(factorySource, { mode: 'transform' }).replace(/^export /gm, '')
+    runInContext(`${factory}\nwindow.sourceReadAvailability=readAvailability`, f.context)
+    const active = Promise.withResolvers()
+    f.queue.push(active.promise)
+    const first = f.context.sourceReadAvailability(new f.context.AbortController().signal)
+    assert.equal(f.calls.length, 1)
+    assert.equal(f.calls[0].args[0], '/api/installations')
+    assert.equal(f.calls[0].args[1].credentials, 'same-origin')
+    assert.equal(f.calls[0].args[1].keepalive, true)
+    const cause = new TypeError('same active original factory fetch rejection')
+    const rejected = assert.rejects(first.response, value => value === cause)
+    active.reject(cause)
+    await rejected
+    const expected = [{ online: true }]
+    f.context.cairnExpectedAvailability = expected
+    const response = Response.json(expected)
+    response.clone = () => { throw new Error('producer must not clone the original response') }
+    f.queue.push(Promise.resolve(response))
+    const next = f.context.sourceReadAvailability(new f.context.AbortController().signal)
+    const headers = await next.response
+    assert.deepEqual(await headers.json(), expected)
+    await setImmediate()
+    assert.equal(f.calls.length, 2)
+    assert.equal(f.bodyCalls.length, 1)
+    assert.equal(f.bodyCalls[0].receiver, response)
+    const journal = JSON.parse(f.storage.get('cairn-e2e-availability-journal') || '[]')
+    assert.equal(journal.some(event => event.kind === 'rejected' && event.errorName === 'TypeError' && !event.aborted), true)
+    assert.equal(journal.filter(event => event.kind === 'body' && event.exactBody).length, 1)
+    assert.equal(journal.every(event => event.ownershipScope === 'PINNED_SOURCE_CONDITIONAL'), true)
+    assert.equal(f.context.cairnAvailabilityProbeFailures, 0)
+    assert.equal(f.context.__c40DirectOwnerReceipt.snapshot().observerFailures, 0)
+  })
 }

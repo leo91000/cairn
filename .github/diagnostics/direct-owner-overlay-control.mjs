@@ -5,8 +5,26 @@ import { existsSync, mkdirSync, readFileSync, readlinkSync, lstatSync, writeFile
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const product = '9235c452ef7fac95f2c0458555497889e7817c19'
+export const product = 'bc1c49957146ee2c972c878fc8d80d41d2139847'
 const targets = ['tests/e2e/mcps.spec.ts', 'apps/web/tests/direct-transport.test.ts']
+export const producerChainFiles = [
+  'apps/web/beacon.html', 'apps/web/src/beacon.ts', 'apps/web/src/BeaconApp.vue',
+  'apps/web/src/availability-read.ts', 'apps/web/src/document-lifetime.ts',
+  'apps/web/src/api.ts', 'apps/web/src/installation-transport.ts',
+  'apps/web/src/direct-channel.ts', 'apps/web/src/beacon-location.ts',
+  'apps/web/vite.config.ts', 'tests/e2e/availability-probe.ts',
+  'tests/e2e/mcps.spec.ts', 'tests/e2e/fixtures.ts',
+  'tests/e2e/native-response-gate.ts', 'playwright.config.ts',
+  'package.json', 'pnpm-lock.yaml',
+]
+export const observerChainFiles = [
+  'archive-transparency.node.mjs', 'availability-reader-native.mjs',
+  'skill-availability-probe.ts', 'b534-navigation-probe.ts',
+  'direct-owner-probe.mjs', 'direct-owner-probe.d.mts',
+  'direct-owner-probe.node.mjs', 'direct-owner-overlay-control.mjs',
+  'closed-target-error.mjs', 'mcps.direct-owner.overlay.ts',
+  'direct-transport.seam.overlay.ts', 'selected-workflow.yaml',
+]
 const sourceDirectory = dirname(fileURLToPath(import.meta.url))
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const git = (root, ...args) => execFileSync('git', ['-c', `safe.directory=${root}`, ...args], { cwd: root })
@@ -17,6 +35,43 @@ const knownManifest = () => {
   assert.equal(value.files[targets[0]].overlayFile, 'mcps.direct-owner.overlay.ts')
   assert.equal(value.files[targets[1]].overlayFile, 'direct-transport.seam.overlay.ts')
   return value
+}
+// Byte/source review precondition only: never a runtime producer certificate.
+export function verifySourceTrustedChain(root, directory = sourceDirectory, manifest = knownManifest()) {
+  const chain = manifest.sourceTrusted
+  assert.equal(chain?.mode, 'PINNED_SOURCE_CONDITIONAL')
+  assert.equal(chain.contractVersion, 'A81_SOURCE_TRUSTED_1')
+  assert.equal(chain.rootDecisionSHA256, '8870ad8fd913883e366703bd3371304fdc11ed650e05f8dc6f61805f9a00d883')
+  assert.equal(chain.universalRuntimeAdmission, false)
+  assert.equal(chain.runtimeProducerReceipt, false)
+  assert.equal(chain.runtimeProxyDetection, false)
+  assert.equal(chain.productCommit, product)
+  assert.equal(git(root, 'rev-parse', 'HEAD').toString().trim(), product)
+  assert.equal(git(root, 'rev-parse', 'HEAD^{tree}').toString().trim(), chain.productTree)
+  assert.deepEqual(Object.keys(chain.productFiles).sort(), [...producerChainFiles].sort())
+  assert.deepEqual(Object.keys(chain.observerFiles).sort(), [...observerChainFiles].sort())
+  for (const file of producerChainFiles) {
+    const spec = chain.productFiles[file]
+    const original = git(root, 'show', `${product}:${file}`)
+    assert.equal(hash(original), spec.sha256, 'Pinned producer-chain source hash mismatch')
+    assert.equal(git(root, 'rev-parse', `${product}:${file}`).toString().trim(), spec.gitBlob)
+    const actual = hash(readFileSync(join(root, file)))
+    const overlay = manifest.files[file]?.overlaySHA256
+    assert(actual === spec.sha256 || (overlay !== undefined && actual === overlay), 'Producer-chain bytes changed outside the exact known overlay')
+  }
+  for (const file of observerChainFiles) {
+    const spec = chain.observerFiles[file]
+    const bytes = readFileSync(join(directory, file))
+    assert.equal(hash(bytes), spec.sha256, 'Pinned observer-chain source hash mismatch')
+    assert.equal(execFileSync('git', ['-c', `safe.directory=${root}`, 'hash-object', '--stdin'], { input: bytes, cwd: root }).toString().trim(), spec.gitBlob)
+  }
+  return {
+    mode: 'PINNED_SOURCE_CONDITIONAL', sourceChainBytesMatched: true,
+    product, productTree: chain.productTree,
+    producerFileCount: producerChainFiles.length, observerFileCount: observerChainFiles.length,
+    runtimeProducerReceipt: false, universalRuntimeAdmission: false,
+    runtimeProxyDetection: false, nativeQualified: false,
+  }
 }
 export function validatedPlan(root) {
   const manifest = knownManifest()
@@ -80,12 +135,15 @@ export function runOverlayPhase(phase, root, evidence) {
     assert.equal(git(root, 'rev-parse', 'HEAD').toString().trim(), product)
     assert.equal(git(root, 'status', '--porcelain').toString().trim(), '')
     validatedPlan(root)
+    const chainReceipt = verifySourceTrustedChain(root)
+    writeFileSync(join(evidence, 'source-trusted-chain.json'), JSON.stringify(chainReceipt))
     writeFileSync(join(evidence, 'production-before.json'), JSON.stringify(trackedManifest(root)))
-    writeFileSync(join(evidence, 'source-binding.json'), JSON.stringify({ product, tree: git(root, 'rev-parse', 'HEAD^{tree}').toString().trim(), observer: process.env.OBSERVER_SHA, diagnosticOnly: true, productQualified: false }))
+    writeFileSync(join(evidence, 'source-binding.json'), JSON.stringify({ product, tree: git(root, 'rev-parse', 'HEAD^{tree}').toString().trim(), observer: process.env.OBSERVER_SHA, ownershipEvidenceScope: 'PINNED_SOURCE_CONDITIONAL', universalRuntimeAdmission: false, runtimeProducerReceipt: false, diagnosticOnly: true, productQualified: false }))
     return
   }
   if (phase === 'apply') {
     checkRuntime(root, evidence)
+    verifySourceTrustedChain(root)
     applyTestOverlays(root)
   }
   else if (phase === 'restore-unit' || phase === 'restore') {
@@ -93,11 +151,13 @@ export function runOverlayPhase(phase, root, evidence) {
     writeFileSync(join(evidence, phase + '-receipt.json'), JSON.stringify(receipt))
     assert.equal(receipt.knownBefore, true, 'Unexpected test bytes preserved privately; restoration is non-green')
     checkRuntime(root, evidence)
+    verifySourceTrustedChain(root)
     if (phase === 'restore')
       assert.equal(git(root, 'status', '--porcelain').toString().trim(), '')
   }
   else {
     checkRuntime(root, evidence)
+    verifySourceTrustedChain(root)
     assert.equal(hash(readFileSync(join(root, targets[0]))), manifest.files[targets[0]].overlaySHA256)
     assert.equal(hash(readFileSync(join(root, targets[1]))), manifest.files[targets[1]].originalSHA256)
     assert.deepEqual(git(root, 'diff', '--name-only').toString().trim().split('\n'), [targets[0]])

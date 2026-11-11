@@ -1,38 +1,47 @@
-# Direct owner missing receipt — PROVISIONAL SOURCE ONLY
+# SOURCE-TRUSTED diagnostic domain — SOURCE ONLY, NOT runtime qualification
 
-## Current selection after explicit ROOT H77 source-helper decision
+Product **bc1c49957146ee2c972c878fc8d80d41d2139847**, tree **ac8afa8d762ad4ebdc7304702ac1e0b43549628c**,
+parent9235, app/runtime/factory/PR731 immutable. Canonical QA ROOT affected DUE on
+this exact new clean commit before fresh COMPLETE FULLs; oldQA not transferred.
 
-Product **9235c452ef7fac95f2c0458555497889e7817c19**, tree **3f94a8f8e10af6018bda53d4a049ec2ae96c8555**,
-parentc142; canonicalQA ROOT ACQUIRED on this exact clean commit; not native qualification. Only
-`tests/e2e/availability-probe.ts` and its real existing source regression suite
-`apps/web/tests/availability-read.test.ts` changed. Runtimeb186/apps/factory/TypeError,
-MCPS/browser assertions, budgets/profiles/auth/grants remain immutable.
-Old2344 is the preserved RED source reference, never selected as current product.
+ROOT engineering contract A81 SOURCE-TRUSTED_1 is explicit: observations of request
+ownership are conditional on pinned, reviewed REAL producers and their COMPLETE
+observer/delegate chain. No universal runtime admission, no Proxy detection, no
+runtime producer-origin receipt is provided. Shape/descriptor agreement is a
+filter, NEVER membership certification. Original same this/args/promises/causes/
+throws/terminals and ALL actual error/audit/lifecycle/auth/cadence criteria remain.
 
-Helper forwards original fetch/json/abort arguments/receivers and original promises,
-throws/causes. Metadata unsupported is explicit observer-failed/UNKNOWN, not a fake
-native exception; existing incomplete-read audit refuses that diagnostic event.
-Original ownedabort brackets/readidentity/headers/body phases remain strict. No
-production Direct fix is inferred from test-helper transparency corrections.
-Eight permanent source regressions use the SAME real installAvailabilityProbe
-in the existing Vitest suite; not executed locally, canonical ROOT tools will run
-on exact committed source. Actual serialized bootstrap controller compares SAME
-final tests on2344:17PASS/3ASSERTFAIL, candidate4969:20PASS. Source only, no native.
-Source-repin overlay-control affected4PASS. Existing FIVE module payloadf48 still
-byte-identical, but no72PASS/lint/QA from old2344 is transferred to this new pin.
+Producer domain: Beacon entry -> BeaconApp.refreshAvailability -> readAvailability
+fresh own literal; api watcher -> InstallationTransport.connect/control fresh POST
+literal/plain string headers/JSON -> documentSignal fresh two-slot array. Full
+path and invalidation requirements are in product repair doc. Versioned manifest
+binds exact product commit/tree +17 producer/fixture/config/lock blobs and12
+selected observer/control file blobs, including the selected workflow. Controller
+verifies this source precondition before/after the two known overlays; it never
+claims per-request producer certification. Extra scripts/wrappers/profiles or any
+chain change invalidate source evidence and require fresh review/qualification.
 
-Workflow selected ONE existing WebKit diagnostic only, pin currentproduct above;
-SDK/CLI/budgets/profile/policy unchanged. Source Node bootstrap checks now include
-the actual selected product helper. Existing module+availability-read Vitest suites
-are prepared before fixture build. TWO overlays fixed paths unchanged; originals
-are byte-identical across2344→current, guards/manifests nevertheless repinned. All
-other product bytes are captured from current commit, native unchanged and exact
-original-test restoration ALWAYS required. No workflow/PR/native admission here.
+Availability rows carry PINNED_SOURCE_CONDITIONAL label; Direct projection carries
+same scope, universalRuntimeAdmission:false, runtimeProducerReceipt:false and
+proxyDetection:NOT_PROVIDED. Positive status is SOURCE_CONDITIONAL_PARTIAL only,
+not native/universal ownership or Vue-generation/publication correlation.
 
-QA canonical ROOT and possible format correction must precede NEW COMPLETE FULLs
-ALLproduct+ALLobserver/archives+pin/callers/contracts on exact stable final sources.
-No H75/H76/H77/QA2344 transfer. No review launched before canonical response.
-P1OPEN/slotROOT/B-DstorageHOLD/noUImergeLéo/Slackprod/grantsforensics intact.
+Selected source gate: existing support cases plus both REAL factory/probe orders,
+with separately named OUT_OF_DOMAIN_LIMIT_RECOGNITION cases. The two descriptor/
+Get Proxy counterexamples remain permanent and RED under the universal command;
+recognizing this limit is not correcting them/Proxy detection/native PASS. No
+skip/whitelist/global error exception. Gate command and preserved RED command are
+recorded in manifest. No unsupported in-domain record becomes successful.
+
+Prepared runtime selection remains ONE existing WebKit scoped-outage case, exact
+same SDK1.64.1/image/profile/cachepolicy/7sassert/5mstep/25mjob. Native command is
+unchanged. No workflow dispatch/current native admission, PR, merge, app hook,
+SDK/env/framework/pilot/ref. Two original overlays only; strict byte/source guards,
+unit restore before builder and ALWAYS exact original restoration remain.
+
+Any future native acquisition requires separate ROOT admission AFTER clean source
+QA and NEW COMPLETE independent FULLs ALLproduct+ALLobserver/archives+pin read.
+P1OPEN/causeDirect47/1UNKNOWN, B-DstorageHOLD/noUImergeLéo/Slackprodforensics intact.
 
 ## Historical notes below (not current selection or transferable verdicts)
 

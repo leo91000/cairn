@@ -12,7 +12,7 @@ jobs:
       image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f
       options: --init --ipc=host
     env:
-      PRODUCT_SHA: 9235c452ef7fac95f2c0458555497889e7817c19
+      PRODUCT_SHA: bc1c49957146ee2c972c878fc8d80d41d2139847
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
       CAIRN_BEACON_TEST_DATABASE_URL: postgres://cairn:test-only@postgres:5432/cairn_beacon_test
@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@v7.0.1
         timeout-minutes: 5
         with:
-          ref: 9235c452ef7fac95f2c0458555497889e7817c19
+          ref: bc1c49957146ee2c972c878fc8d80d41d2139847
       - name: Bind immutable product and versioned TEST ONLY observer bytes
         timeout-minutes: 5
         env:
@@ -48,6 +48,7 @@ jobs:
           for file in archive-transparency.node.mjs availability-reader-native.mjs skill-availability-probe.ts b534-navigation-probe.ts direct-owner-probe.mjs direct-owner-probe.d.mts direct-owner-probe.node.mjs direct-owner-overlay-control.mjs closed-target-error.mjs mcps.direct-owner.overlay.ts direct-transport.seam.overlay.ts overlay-manifest.json; do
             git -c safe.directory="$GITHUB_WORKSPACE" show "$OBSERVER_SHA:.github/diagnostics/$file" > "test-results/direct-owner-receipt/$file"
           done
+          git -c safe.directory="$GITHUB_WORKSPACE" show "$OBSERVER_SHA:.github/workflows/webkit-dependency-regression.yaml" > test-results/direct-owner-receipt/selected-workflow.yaml
           sha256sum test-results/direct-owner-receipt/* > "$C40_EVIDENCE_DIR/observer-source.sha256"
           node test-results/direct-owner-receipt/direct-owner-overlay-control.mjs bind
       - uses: ./.github/actions/setup-pnpm
@@ -73,7 +74,7 @@ jobs:
         timeout-minutes: 5
         run: |
           pnpm exec vitest run apps/web/tests/direct-transport.test.ts apps/web/tests/availability-read.test.ts --maxWorkers=1
-          printf 'source-product=9235c452ef7fac95f2c0458555497889e7817c19\nsource-only=true\nnative-cause-established=false\n' > "$C40_EVIDENCE_DIR/source-seam-meaning.txt"
+          printf 'source-product=bc1c49957146ee2c972c878fc8d80d41d2139847\nsource-only=true\nnative-cause-established=false\n' > "$C40_EVIDENCE_DIR/source-seam-meaning.txt"
       - name: Restore the original source unit test before any browser build
         timeout-minutes: 5
         if: always()

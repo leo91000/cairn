@@ -1059,8 +1059,8 @@ availabilityTest('availability preserves a scoped readonly outage before native 
     saveAvailabilityObservation(testInfo.outputPath('direct-owner-private.json'), JSON.stringify(receipt.privateEvidence))
     saveAvailabilityObservation(testInfo.outputPath('direct-owner-projection.json'), JSON.stringify(receipt.projection))
     // A non-reproduced/unknown observation never becomes diagnostic success.
-    if (receipt.projection.receiptStatus !== 'PARTIAL' || !observerRetired || !receipt.projection.ownerReactionStateKnown || !receipt.projection.sourceCloseProvenanceKnown || !receipt.projection.firstErrorPairReproduced || !receipt.projection.closureKnown || !receipt.projection.pageClosed || !receipt.projection.gateClosed || receipt.projection.cleanupFailureCount !== 0)
-      failures.push(new Error('Direct owner receipt remains UNKNOWN'))
+    if (receipt.projection.ownershipEvidenceScope !== 'PINNED_SOURCE_CONDITIONAL' || receipt.projection.universalRuntimeAdmission !== false || receipt.projection.runtimeProducerReceipt !== false || receipt.projection.proxyDetection !== 'NOT_PROVIDED' || receipt.projection.receiptStatus !== 'SOURCE_CONDITIONAL_PARTIAL' || !observerRetired || !receipt.projection.ownerReactionStateKnown || !receipt.projection.sourceCloseProvenanceKnown || !receipt.projection.firstErrorPairReproduced || !receipt.projection.closureKnown || !receipt.projection.pageClosed || !receipt.projection.gateClosed || receipt.projection.cleanupFailureCount !== 0)
+      failures.push(new Error('Source-conditional Direct receipt remains UNKNOWN'))
   }
   catch (cause) {
     failures.push(cause)

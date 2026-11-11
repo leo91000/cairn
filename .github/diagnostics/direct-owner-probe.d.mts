@@ -9,6 +9,10 @@ export interface DirectOwnerClosure {
 export interface DirectOwnerProjection {
   diagnosticOnly: true
   productQualified: false
+  ownershipEvidenceScope: 'PINNED_SOURCE_CONDITIONAL'
+  universalRuntimeAdmission: false
+  runtimeProducerReceipt: false
+  proxyDetection: 'NOT_PROVIDED'
   nativeGenerationPublicationCorrelation: false
   ownerReactionStateKnown: boolean
   sourceCloseProvenanceKnown: boolean
@@ -17,7 +21,7 @@ export interface DirectOwnerProjection {
   pageClosed: boolean | null
   gateClosed: boolean | null
   cleanupFailureCount: number | null
-  receiptStatus: 'PARTIAL' | 'UNKNOWN'
+  receiptStatus: 'SOURCE_CONDITIONAL_PARTIAL' | 'UNKNOWN'
   nativeOrderingAgainstBothPageErrors: 'UNKNOWN'
 }
 

@@ -2,7 +2,9 @@ import { performance } from 'node:perf_hooks'
 import { isDeepStrictEqual } from 'node:util'
 import { closedTargetBound } from './closed-target-error.mjs'
 
-// Serialized into the real page. All identities below stay private; publication
+// Serialized into the real page. Ownership association requires the reviewed
+// pinned producer/delegate chain; this code does not detect arbitrary Proxies.
+// All identities below stay private; publication
 // is exclusively through projectDirectOwners. No original promise is replaced.
 export function observeDirectOwners() {
   'use strict'
@@ -449,8 +451,12 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
   return {
     diagnosticOnly: true,
     productQualified: false,
+    ownershipEvidenceScope: 'PINNED_SOURCE_CONDITIONAL',
+    universalRuntimeAdmission: false,
+    runtimeProducerReceipt: false,
+    proxyDetection: 'NOT_PROVIDED',
     nativeGenerationPublicationCorrelation: false,
-    ownershipRoleBasis: 'Actual native any-input identities plus pinned documentSignal source order; not a Vue publication receipt',
+    ownershipRoleBasis: 'Conditional association for the reviewed pinned producers and complete delegate chain; descriptor agreement is not universal runtime membership or a Vue publication receipt',
     pageErrorCount: pageErrors.length,
     errorKinds: identities.map(value => value?.category ?? 'UNKNOWN'),
     errorConnectionUnique: connection !== null,
@@ -483,7 +489,7 @@ export function projectDirectOwners(journal, pageErrors, observerFailures = 0, c
     },
     nativeOrderingAgainstBothPageErrors: 'UNKNOWN',
     orderingLimit: 'Browser-local sequence is real observation order. Host pageerror delivery is not native error creation; no cross-clock ordering is inferred.',
-    receiptStatus: inputKnown && observerFailures === 0 && firstErrorPairReproduced && closureKnown && closure.pageClosed && closure.gateClosed && closure.cleanupFailureCount === 0 && structural && documentJournalContinuous && lifecycleObserved && document !== null && owner !== null && generationOwner !== null && rejectionIdentityKnown && rejected.length === 1 && rejected[0].requestSignalKnown === true && rejected[0].controlSignalKnown === true && rejected[0].generationSignalKnown === true && ownedCloses.length === 1 ? 'PARTIAL' : 'UNKNOWN',
+    receiptStatus: inputKnown && observerFailures === 0 && firstErrorPairReproduced && closureKnown && closure.pageClosed && closure.gateClosed && closure.cleanupFailureCount === 0 && structural && documentJournalContinuous && lifecycleObserved && document !== null && owner !== null && generationOwner !== null && rejectionIdentityKnown && rejected.length === 1 && rejected[0].requestSignalKnown === true && rejected[0].controlSignalKnown === true && rejected[0].generationSignalKnown === true && ownedCloses.length === 1 ? 'SOURCE_CONDITIONAL_PARTIAL' : 'UNKNOWN',
     events,
   }
 }

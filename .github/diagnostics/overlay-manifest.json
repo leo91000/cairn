@@ -1,9 +1,9 @@
 {
-  "product": "9235c452ef7fac95f2c0458555497889e7817c19",
+  "product": "bc1c49957146ee2c972c878fc8d80d41d2139847",
   "files": {
     "tests/e2e/mcps.spec.ts": {
       "originalSHA256": "43a9659c3bb8e176438025cc7812c6d72a5aec9308b9bc038f6745d5764fb43d",
-      "overlaySHA256": "48f4a80c78adbabbcb2a034b5abd7a0d79faf013f5c31d53b40597bc8b6d9006",
+      "overlaySHA256": "a6c10c1982234924326a082b5d0f35dc9571b1de805f3ee69516e0b6482d125c",
       "overlayFile": "mcps.direct-owner.overlay.ts"
     },
     "apps/web/tests/direct-transport.test.ts": {
@@ -14,5 +14,175 @@
   },
   "testOnly": true,
   "productQualified": false,
-  "runtimeChanged": false
+  "runtimeChanged": false,
+  "sourceTrusted": {
+    "schema": 1,
+    "contractVersion": "A81_SOURCE_TRUSTED_1",
+    "rootDecisionSHA256": "8870ad8fd913883e366703bd3371304fdc11ed650e05f8dc6f61805f9a00d883",
+    "mode": "PINNED_SOURCE_CONDITIONAL",
+    "universalRuntimeAdmission": false,
+    "runtimeProducerReceipt": false,
+    "runtimeProxyDetection": false,
+    "producerMembership": "Independent pinned source review precondition, not per-request runtime admission",
+    "productCommit": "bc1c49957146ee2c972c878fc8d80d41d2139847",
+    "productTree": "ac8afa8d762ad4ebdc7304702ac1e0b43549628c",
+    "observerCommit": "Recorded separately from github.sha in source-binding.json; this manifest is bound by that commit",
+    "productFiles": {
+      "apps/web/beacon.html": {
+        "gitBlob": "dc6225b2c148fa664f9f00f74ba383bf06883969",
+        "sha256": "7dd11a12d38c6f2d143dbeb2a8b1cfd875c0e0bd53eef767b4f2e382df9f206c"
+      },
+      "apps/web/src/beacon.ts": {
+        "gitBlob": "db7373b258a68927b43669618c41089cf5ba5821",
+        "sha256": "c582656218858ae189862efcf4342501d8efe27093c070239ba19bfd99e0689f"
+      },
+      "apps/web/src/BeaconApp.vue": {
+        "gitBlob": "4e7eb5145f6c94296603c57bcc006301b6ed3ca0",
+        "sha256": "039b3becb8433fc7f325b818a4c003b903c91b57752ad4a7fb52acdeff13c34c"
+      },
+      "apps/web/src/availability-read.ts": {
+        "gitBlob": "d88d9d65021c4b1229839b019c27f6b1a9b18b07",
+        "sha256": "13593f5f5e928985d287e8b72fa667ce21deeb006dd724dc806c624bd52af727"
+      },
+      "apps/web/src/document-lifetime.ts": {
+        "gitBlob": "b463119651d93def1614fb155ce8a88d1a4555d2",
+        "sha256": "8bb032a343a4c5928f612eadfa316f1f6095cec6c3f4561d5f710b090800a70f"
+      },
+      "apps/web/src/api.ts": {
+        "gitBlob": "54dbdf4c85653e47bc4fe6dfc7833afc17d3a632",
+        "sha256": "ae2f258d0a71e035b8659b3dfd69e4652d8636824e1d971fee9f9bcec3352ec1"
+      },
+      "apps/web/src/installation-transport.ts": {
+        "gitBlob": "f1f722b7bb8431d461da33db6347c720927c5536",
+        "sha256": "5d9019aaed0d8bbd2f62fcc1f56451e664c2a19463b4b9af1d413be5259f5823"
+      },
+      "apps/web/src/direct-channel.ts": {
+        "gitBlob": "7b49b343cc012111b7327b9f03d413cd0dfc59d1",
+        "sha256": "4a5ff85ba709802f46dbe6b39f591bac4a4a6dbb0ef1ae794a8845bd38a59aa3"
+      },
+      "apps/web/src/beacon-location.ts": {
+        "gitBlob": "dfc80fdb1334d7b85def2371925da05a4b63c78a",
+        "sha256": "c9eee56af4d968c6c3ee11b9e165a2a0a76f799e905322432bad60b0d1fa963f"
+      },
+      "apps/web/vite.config.ts": {
+        "gitBlob": "c374137bd960591e9531bd4101e7a10b38bbe6cd",
+        "sha256": "5dabc925797cd89adf4fb2245062059e156cec8748ef164542c7474f8eb6dce9"
+      },
+      "tests/e2e/availability-probe.ts": {
+        "gitBlob": "a053f29165c85e70409ba281f00eaf00b85a3c45",
+        "sha256": "ab015c46e8e93a23cd3a2360610246fea089ef43971cd0504b95b1449885fd7d"
+      },
+      "tests/e2e/mcps.spec.ts": {
+        "gitBlob": "e9f48f33ccdf76fe7f60ea706c5cff5267d734b8",
+        "sha256": "43a9659c3bb8e176438025cc7812c6d72a5aec9308b9bc038f6745d5764fb43d"
+      },
+      "tests/e2e/fixtures.ts": {
+        "gitBlob": "bf274a8784be4a35432676e7f2284831e2262ffd",
+        "sha256": "dcf021138f07262c7255d06fb556d48d00359fb437d26a524aa2e011f12d1513"
+      },
+      "tests/e2e/native-response-gate.ts": {
+        "gitBlob": "7b34999ed35c601abd88c5cdd007adf7880a4a3f",
+        "sha256": "b0f6b6556b7cb4ffc7d8e8d0d49147e16e6c28fe331e8758333c29b6033da680"
+      },
+      "playwright.config.ts": {
+        "gitBlob": "672b4c8cf4eed070330c17e8fd2965b647883222",
+        "sha256": "9b26e8947c39597a9577e16ad4be7c9cdedba1ecab092e08c6d5dd7b76ce1240"
+      },
+      "package.json": {
+        "gitBlob": "c1f15c921f72921dd6c59c92804236d8c8e9bc56",
+        "sha256": "5506cca2d6c6385ae5958dd19def8bfbd1071a64622b9f8dd0eed0a5a81cd4aa"
+      },
+      "pnpm-lock.yaml": {
+        "gitBlob": "5f9b1378a629006af21acf9daf25cce1be40cde0",
+        "sha256": "b7c18918cdc6d253c14aa29ca10e96c891b357c0a9f556d8d1a1c6c5353e8c8a"
+      }
+    },
+    "observerFiles": {
+      "archive-transparency.node.mjs": {
+        "gitBlob": "e54945a2c8c42b3a90c4f9a574f444b0901f0bd0",
+        "sha256": "b7ce9a54964c6ffae94bbbf7af413326df3fa0cfcad045ce2a20fc6292be182a"
+      },
+      "availability-reader-native.mjs": {
+        "gitBlob": "bdc55a0fc5f026938ddae6a87a8786ff0e33f505",
+        "sha256": "00fa5953eeba04ecd5405f2962a4d9ce77305b303e7ce66952abc9faf9274d56"
+      },
+      "skill-availability-probe.ts": {
+        "gitBlob": "a5f12a6add74436eab6024b0dbd5bb0ef9580474",
+        "sha256": "6433e356b08aa58f8e1652808934c10d86f770897b292e3c308b577449524067"
+      },
+      "b534-navigation-probe.ts": {
+        "gitBlob": "e62fc85194333d02eb28adbac5b3848315febedd",
+        "sha256": "f01d3fc79b710bd2f2c284ec4127f8a4f19dec342e781c8c47e670ea83cc20de"
+      },
+      "direct-owner-probe.mjs": {
+        "gitBlob": "36e86a6ee97306916a6be74e10df1d67d05a2622",
+        "sha256": "6d632e1f2abe0e9347d426b8fffb67d8857b27b5141b711785e746afe3470afb"
+      },
+      "direct-owner-probe.d.mts": {
+        "gitBlob": "f1f74b4fbf7884edda45af55c7a2ebdc042f0869",
+        "sha256": "be08f403bc60199c577913be10f666e7dade6f10bd83a8b8734ac777b1c0e08d"
+      },
+      "direct-owner-probe.node.mjs": {
+        "gitBlob": "886e49519676bda216a87970baba162b0d620fa3",
+        "sha256": "22db51a521508b89bb3d3ec2a2f7ab8719a3a52118ee5eb597343c8d2c8ed901"
+      },
+      "direct-owner-overlay-control.mjs": {
+        "gitBlob": "04c7b37007e568b78a36d52d2af06bb82e047824",
+        "sha256": "3fc0ce80434e436fbc4903ec571039717a5d9e4e1bc16fd71abc7ff2b5169967"
+      },
+      "closed-target-error.mjs": {
+        "gitBlob": "e4aa4b94c978342a5976e9fcf958f91440113e4b",
+        "sha256": "c350fbf99633499c5fc64fba0dbe9fd45f5159da39ebbc5249e300ce123a9cfe"
+      },
+      "mcps.direct-owner.overlay.ts": {
+        "gitBlob": "68f6bb4a782acd1954a44e7d6384c05915d33200",
+        "sha256": "a6c10c1982234924326a082b5d0f35dc9571b1de805f3ee69516e0b6482d125c"
+      },
+      "direct-transport.seam.overlay.ts": {
+        "gitBlob": "be7ea5e7cac357e754e95739e3be05acfc803e21",
+        "sha256": "f48ada4b8312643434f4f5469fd9387923fbd5aa002c94e2c26d07d63696b609"
+      },
+      "selected-workflow.yaml": {
+        "gitBlob": "b24561e7500adcea0e98926cfca3e210211b0518",
+        "sha256": "8df3a113886a9671b8dcf2c5c017f0a8903b73f590e1a8ffa5219ff0115953c4"
+      }
+    },
+    "producers": {
+      "availability": {
+        "module": "apps/web/src/availability-read.ts",
+        "entry": "readAvailability",
+        "caller": "BeaconApp.refreshAvailability",
+        "arguments": "Fresh literal with same-origin credentials, keepalive, private controller.signal"
+      },
+      "directControl": {
+        "module": "apps/web/src/installation-transport.ts",
+        "entry": "InstallationTransport.control",
+        "caller": "InstallationTransport.connect and signalling handlers",
+        "arguments": "Fresh POST literal, documentSignal(controlAbort.signal), plain string headers, JSON body"
+      },
+      "signalComposition": {
+        "module": "apps/web/src/document-lifetime.ts",
+        "entry": "documentSignal",
+        "arguments": "Fresh two-element array [documentLifetime.signal, callerSignal]"
+      }
+    },
+    "observerOrders": [
+      "availability probe -> Direct recorder -> captured native delegates",
+      "Direct recorder -> availability probe -> captured native delegates"
+    ],
+    "stockEnvironment": "Only pinned product and reviewed fixture/observer scripts, fixed SDK1.64.1 image/profile; no extensions or additional script/wrapper",
+    "sdkImage": "mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f",
+    "invalidatedBy": [
+      "any product commit/tree or producer/delegate/fixture/configuration byte change",
+      "observer/overlay/wrapper or installation-order support change",
+      "dependency lock, SDK image/profile/cache policy change",
+      "extra scripts/extensions or new producer/input shape outside reviewed chain"
+    ],
+    "outOfDomainProxyWitness": {
+      "historicalUniversalCommand": "node archive-transparency.node.mjs --product-reference --proxy-counterexample",
+      "expectedUniversalResult": "RED: two assertion failures remain, no universal ownership admission",
+      "sourceGateCommand": "node archive-transparency.node.mjs --product-reference --source-trusted-limit",
+      "gateMeaning": "In-domain support plus separately labelled recognition of limit, not Proxy detection or ownership/native PASS"
+    }
+  }
 }

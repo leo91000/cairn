@@ -3,11 +3,12 @@ import { EventEmitter } from 'node:events'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { stripTypeScriptTypes } from 'node:module'
 import { test } from 'node:test'
 import { setImmediate } from 'node:timers/promises'
 import { createContext, runInContext, runInNewContext } from 'node:vm'
-import { applyTestOverlays, restoreTestOverlays, product } from './direct-owner-overlay-control.mjs'
+import { applyTestOverlays, restoreTestOverlays, product, verifySourceTrustedChain } from './direct-owner-overlay-control.mjs'
 import { observeDirectOwners, projectDirectOwners, createDirectOwnerObserver } from './direct-owner-probe.mjs'
 
 function fixture(t, options = {}) {
@@ -175,6 +176,10 @@ test('real native parent/composite signals preserve exact rejection reason and s
   assert.equal(projected.lifecycleObserved, false)
   assert.equal(projected.receiptStatus, 'UNKNOWN')
   assert.equal(projected.productQualified, false)
+  assert.equal(projected.ownershipEvidenceScope, 'PINNED_SOURCE_CONDITIONAL')
+  assert.equal(projected.universalRuntimeAdmission, false)
+  assert.equal(projected.runtimeProducerReceipt, false)
+  assert.equal(projected.proxyDetection, 'NOT_PROVIDED')
   const output = JSON.stringify(projected)
   for (const secret of ['PRIVATE_CONNECTION_CANARY', 'PRIVATE_DOCUMENT_CANARY', 'NEVER_PUBLISH', 'localhost', 'cookie', 'Authorization'])
     assert.equal(output.includes(secret), false)
@@ -545,7 +550,7 @@ const completeClosure = { pageClosed: true, gateClosed: true, cleanupFailureCoun
 
 test('H76 missing or ambiguous native lifecycle receipts must stay UNKNOWN', async (t) => {
   const complete = await completeSourceReceipt(t)
-  assert.equal(projectDirectOwners(complete, privateErrors, 0, completeClosure).receiptStatus, 'PARTIAL')
+  assert.equal(projectDirectOwners(complete, privateErrors, 0, completeClosure).receiptStatus, 'SOURCE_CONDITIONAL_PARTIAL')
   for (const kind of ['beforeunload', 'pagehide']) {
     const missing = complete.filter(event => event.kind !== kind)
     assert.equal(projectDirectOwners(missing, privateErrors, 0, completeClosure).receiptStatus, 'UNKNOWN')
@@ -569,7 +574,7 @@ test('H76 actual binding and snapshot retain conflicting receipts and refuse pro
   for (const event of complete)
     binding(event)
   controller.accept({ journal: complete.map(event => ({ ...event })), observerFailures: 0 })
-  assert.equal(controller.finish(completeClosure).projection.receiptStatus, 'PARTIAL')
+  assert.equal(controller.finish(completeClosure).projection.receiptStatus, 'SOURCE_CONDITIONAL_PARTIAL')
   const target = complete.find(event => event.kind === 'source-close-return')
   const conflict = { ...target, readyState: 0 }
   controller.accept({ journal: [conflict], observerFailures: 0 })
@@ -748,4 +753,45 @@ test('H80 GET cannot satisfy the requested original signalling POST receipt', as
   const out = projectDirectOwners(journal, privateErrors, 0, completeClosure)
   assert.equal(out.ownerReactionStateKnown, false)
   assert.equal(out.receiptStatus, 'UNKNOWN')
+})
+
+
+function actualChainManifest() {
+  return JSON.parse(readFileSync(new URL('./overlay-manifest.json', import.meta.url), 'utf8'))
+}
+
+test('SOURCE-TRUSTED actual chain validator binds the real pinned producer and every selected delegate', () => {
+  const result = verifySourceTrustedChain(process.cwd())
+  assert.equal(result.mode, 'PINNED_SOURCE_CONDITIONAL')
+  assert.equal(result.sourceChainBytesMatched, true)
+  assert.equal(result.runtimeProducerReceipt, false)
+  assert.equal(result.universalRuntimeAdmission, false)
+  assert.equal(result.runtimeProxyDetection, false)
+  assert.equal(result.nativeQualified, false)
+})
+
+test('SOURCE-TRUSTED actual chain validator refuses a changed producer hash without touching any source', () => {
+  const manifest = actualChainManifest()
+  manifest.sourceTrusted.productFiles['apps/web/src/availability-read.ts'].sha256 = '0'.repeat(64)
+  assert.throws(() => verifySourceTrustedChain(process.cwd(), path.dirname(fileURLToPath(import.meta.url)), manifest), /producer-chain source hash mismatch/)
+})
+
+test('SOURCE-TRUSTED actual chain validator refuses changed delegate bytes in its manifest', () => {
+  const manifest = actualChainManifest()
+  manifest.sourceTrusted.observerFiles['direct-owner-probe.mjs'].sha256 = '0'.repeat(64)
+  assert.throws(() => verifySourceTrustedChain(process.cwd(), path.dirname(fileURLToPath(import.meta.url)), manifest), /observer-chain source hash mismatch/)
+})
+
+test('SOURCE-TRUSTED actual chain validator refuses removal of a required delegate', () => {
+  const manifest = actualChainManifest()
+  delete manifest.sourceTrusted.observerFiles['mcps.direct-owner.overlay.ts']
+  assert.throws(() => verifySourceTrustedChain(process.cwd(), path.dirname(fileURLToPath(import.meta.url)), manifest))
+})
+
+test('SOURCE-TRUSTED declaration never admits a universal or runtime producer receipt', () => {
+  for (const key of ['universalRuntimeAdmission', 'runtimeProducerReceipt', 'runtimeProxyDetection']) {
+    const manifest = actualChainManifest()
+    manifest.sourceTrusted[key] = true
+    assert.throws(() => verifySourceTrustedChain(process.cwd(), path.dirname(fileURLToPath(import.meta.url)), manifest))
+  }
 })
