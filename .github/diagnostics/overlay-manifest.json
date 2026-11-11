@@ -1,5 +1,5 @@
 {
-  "product": "bc1c49957146ee2c972c878fc8d80d41d2139847",
+  "product": "df6ff85fa036d060b4463f82eaf575fb2ac8e28f",
   "files": {
     "tests/e2e/mcps.spec.ts": {
       "originalSHA256": "43a9659c3bb8e176438025cc7812c6d72a5aec9308b9bc038f6745d5764fb43d",
@@ -33,8 +33,8 @@
       ],
       "meaning": "Real fixture ID/slug association plus current route; no literal slug-as-UUID comparison, no runtime producer receipt"
     },
-    "productCommit": "bc1c49957146ee2c972c878fc8d80d41d2139847",
-    "productTree": "ac8afa8d762ad4ebdc7304702ac1e0b43549628c",
+    "productCommit": "df6ff85fa036d060b4463f82eaf575fb2ac8e28f",
+    "productTree": "0aaaa1ec3fade699b51f0d66adeb12508a4edfb7",
     "observerCommit": "Recorded separately from github.sha in source-binding.json; this manifest is bound by that commit",
     "productFiles": {
       "apps/web/beacon.html": {
@@ -78,8 +78,8 @@
         "sha256": "5dabc925797cd89adf4fb2245062059e156cec8748ef164542c7474f8eb6dce9"
       },
       "tests/e2e/availability-probe.ts": {
-        "gitBlob": "a053f29165c85e70409ba281f00eaf00b85a3c45",
-        "sha256": "ab015c46e8e93a23cd3a2360610246fea089ef43971cd0504b95b1449885fd7d"
+        "gitBlob": "ab3bcfa334f8de0a3d58a071ff03d554d5dbf8fa",
+        "sha256": "12ad75e45fc3e368970aab99e41928cde1af64fc194e5d5f7655d9f9466ae4c2"
       },
       "tests/e2e/mcps.spec.ts": {
         "gitBlob": "e9f48f33ccdf76fe7f60ea706c5cff5267d734b8",
@@ -108,8 +108,8 @@
     },
     "observerFiles": {
       "archive-transparency.node.mjs": {
-        "gitBlob": "2a8d92f446d1aaa08a953aba82db54edc65eaeee",
-        "sha256": "71ec9f03dadd323442d255dfdde27f553aa7fa3fc97f7f7e59efcf582f42f4fd"
+        "gitBlob": "375d5161cdf688a4d726fc67b25e43d3d6a9a327",
+        "sha256": "33256f2d4008f668aa0575c79e6b2354c49ef5a502bb4a08a86c06d158247a7b"
       },
       "availability-reader-native.mjs": {
         "gitBlob": "bdc55a0fc5f026938ddae6a87a8786ff0e33f505",
@@ -120,8 +120,8 @@
         "sha256": "6433e356b08aa58f8e1652808934c10d86f770897b292e3c308b577449524067"
       },
       "b534-navigation-probe.ts": {
-        "gitBlob": "e62fc85194333d02eb28adbac5b3848315febedd",
-        "sha256": "f01d3fc79b710bd2f2c284ec4127f8a4f19dec342e781c8c47e670ea83cc20de"
+        "gitBlob": "64a078b590fc3edf11b216c6b096f6b09cb71d1e",
+        "sha256": "8d53a661b20414ff0bcfb3172ceaa5fb435bcf7381810f8c1ae632cdb7290e5f"
       },
       "direct-owner-probe.mjs": {
         "gitBlob": "b41edb1a5333efd0bf8c33ca867cde7578967c86",
@@ -136,8 +136,8 @@
         "sha256": "52364b3c4eda10f1a6c106848e4e3edf7bdb9f151d7407a029f24a08002815fa"
       },
       "direct-owner-overlay-control.mjs": {
-        "gitBlob": "8afbf6ea0d739160c1e5519a3a76c97d02b34e6a",
-        "sha256": "39c7fe08642c772c690576b4723a02f7930d9a246fdaf597cb98ff699f3c9a9f"
+        "gitBlob": "bc880c4f370f22086098d7d81ead64a5291a77f6",
+        "sha256": "f15c262d322d8b3d17b04dba59c783648fcb860aca2396a3b53cce65ed88bcb5"
       },
       "closed-target-error.mjs": {
         "gitBlob": "e4aa4b94c978342a5976e9fcf958f91440113e4b",
@@ -152,8 +152,8 @@
         "sha256": "f48ada4b8312643434f4f5469fd9387923fbd5aa002c94e2c26d07d63696b609"
       },
       "selected-workflow.yaml": {
-        "gitBlob": "ca24cb4238d6648bcb04badd37242c5444ff3a60",
-        "sha256": "391d35d493cc0951c81930edfe7c9a1f55d02236b4196d79c41b0580936fcdd3"
+        "gitBlob": "df28cf9dc9dda95657d1ba72e8952b7b9a5b094c",
+        "sha256": "44085ebbf36f5e91db7cce90f44ce27673e65a40fa4019e18c3d612de8bd2ee4"
       }
     },
     "producers": {

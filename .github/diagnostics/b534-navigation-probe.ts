@@ -267,12 +267,6 @@ import process from 'node:process'
         let pollId = 0
         const controllers = new WeakMap<AbortSignal, AbortController>()
         const NativeAbortController = window.AbortController
-        window.AbortController = class extends NativeAbortController {
-          constructor() {
-            super()
-            controllers.set(this.signal, this)
-          }
-        }
         const observation = {
           documentId,
           armed: false,
@@ -365,6 +359,20 @@ import process from 'node:process'
         const safeProbe = (...args: Parameters<typeof probe>) => {
           try { void probe(...args).catch(observerFailed) } catch { observerFailed() }
         }
+        const nativeControllerSignal = Object.getOwnPropertyDescriptor(NativeAbortController.prototype, 'signal')?.get
+        window.AbortController = new Proxy(NativeAbortController, {
+          construct(target, args, newTarget) {
+            const original = Reflect.construct(target, args, newTarget) as AbortController
+            try {
+              if (nativeControllerSignal)
+                controllers.set(Reflect.apply(nativeControllerSignal, original, []), original)
+              else
+                observerFailed()
+            }
+            catch { observerFailed() }
+            return original
+          },
+        })
         const observe = <T>(original: Promise<T>, fulfilled: (value: T) => void, rejected: () => void) => {
           try {
             const observation = Reflect.apply(promiseThen, original, [

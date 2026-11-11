@@ -566,3 +566,26 @@ for (const directOrder of ['direct-first', 'direct-last']) {
     assert.equal(f.context.__c40DirectOwnerReceipt.snapshot().observerFailures, 0)
   })
 }
+
+
+for (const directOrder of [undefined, 'direct-first', 'direct-last']) {
+  test(`R82 actual serialized bootstrap preserves strict unqualified caller receiver (${directOrder ?? 'availability-only'})`, async (t) => {
+    const f = fixture(t, 'availability-probe.ts', { directOrder, localRealmData: true })
+    const original = Promise.resolve(new Response(null, { status: 204 }))
+    f.queue.push(original)
+    const returned = runInContext(`(function(){'use strict';const request=window.fetch;return request('/api/installations/source-id/direct/source-connection/signal',{method:'POST'});})()`, f.context)
+    assert.equal(returned, original)
+    await returned
+    assert.equal(f.calls.length, 1)
+    assert.equal(f.calls[0].receiver, undefined)
+    assert.equal(f.calls[0].args[0], '/api/installations/source-id/direct/source-connection/signal')
+  })
+}
+
+test('H83 actual B534 ordinary controller retains native instance prototype and constructor', (t) => {
+  const f = fixture(t, 'b534-navigation-probe.ts')
+  const controller = new f.context.AbortController()
+  assert.equal(Object.getPrototypeOf(controller), AbortController.prototype)
+  assert.equal(controller.constructor, AbortController)
+  assert.equal(controller.signal instanceof AbortSignal, true)
+})

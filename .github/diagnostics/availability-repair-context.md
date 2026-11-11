@@ -1,8 +1,10 @@
 # SOURCE-TRUSTED diagnostic domain — SOURCE ONLY, NOT runtime qualification
 
-Product **bc1c49957146ee2c972c878fc8d80d41d2139847**, tree **ac8afa8d762ad4ebdc7304702ac1e0b43549628c**,
-parent9235, app/runtime/factory/PR731 immutable. Canonical QA ROOT on this exact clean product is ACQUIRED; observer-chain
-changes require affected source validation and fresh FULLs, not duplicate productQA.
+Product **df6ff85fa036d060b4463f82eaf575fb2ac8e28f**, tree **0aaaa1ec3fade699b51f0d66adeb12508a4edfb7**,
+parentbc1c, app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
+and its permanent serialized-bootstrap regression. Canonical QA ROOT on this exact clean
+new product is DUE before fresh COMPLETE independent FULLs. The prior clean bc1c QA is historical
+for this changed product and does not transfer.
 
 ROOT engineering contract A81 SOURCE-TRUSTED_1 is explicit: observations of request
 ownership are conditional on pinned, reviewed REAL producers and their COMPLETE
@@ -298,3 +300,21 @@ changed the combined workflow line; that omission is preserved in review history
 and corrected here, not treated as a passed selected-gate execution. Productbc1c
 and its clean1887QA unchanged; no identical pnpmcheck rerun. All other native
 command/SDK/profile/cachepolicy/budgets/producer constraints remain unchanged.
+
+## Current source correction receipt after completed R82/H83
+
+Both frozen complete independent reviews finished before edits. R82 identified the
+serialized ordinary-script bootstrap coercing an undefined native Fetch receiver;
+explicit strict bootstrap plus actual serialized unqualified-caller regressions
+preserve original receiver/arguments/Promise in both wrapper orders. H83 identified
+the archived B534 AbortController subclass changing native instance prototypes;
+transparent Proxy/Reflect.construct now records actual native controllers without
+changing instance prototype/constructor. Actual previous source assertions remain
+RED: three receiver cases on old bc1c, and one prototype case on old observer3b8.
+Candidate source gate39/39 =37 support controls +2 separately labelled recognition
+of out-of-domain limits, not39 ownership/native qualifications. Universal Proxy
+command remains37PASS/2ASSERTFAIL. Recorder/controller50PASS; B534 preservation12
+controlled scenarios PASS. Product app/runtime/factory/PR731 and native command,
+profile/cache policy/image/assertion7s/step5m/job25m are unchanged. New exact product
+canonical QA and fresh whole product/observer reviews remain DUE; no prior clean
+verdict transfers, no native cause/fix47/1 inferred.
