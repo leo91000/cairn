@@ -34,6 +34,7 @@ declare global {
 export async function installAvailabilityProbe(page: Page, recordRead: (event: AvailabilityReadEvent) => void) {
   await page.exposeFunction('cairnAvailabilityRecord', recordRead)
   await page.addInitScript(() => {
+    'use strict'
     const documentId = crypto.randomUUID()
     window.cairnAvailabilityDocument = documentId
     let pageHidden = false

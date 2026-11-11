@@ -1,6 +1,7 @@
 import type { Page } from '@playwright/test'
 import type { AvailabilityReadEvent } from '../../../tests/e2e/availability-probe'
 import assert from 'node:assert/strict'
+import { runInNewContext } from 'node:vm'
 import {
   afterEach,
   beforeEach,
@@ -409,7 +410,7 @@ it('preserves parsing failures and a successful original body settled before lat
   assert.deepEqual(await complete, { original: true })
 })
 
-async function installSourceProbe() {
+async function installSourceProbe(serialized = false) {
   const storage = new Map<string, string>()
   vi.stubGlobal('sessionStorage', {
     getItem: (key: string) => storage.get(key) ?? null,
@@ -417,7 +418,19 @@ async function installSourceProbe() {
   })
   const page = {
     async exposeFunction(name: string, callback: (event: unknown) => void) { ownerWindow[name] = async (event: unknown) => callback(event) },
-    async addInitScript(callback: () => void) { callback() },
+    async addInitScript(callback: () => void) {
+      if (serialized) {
+        runInNewContext(`(${callback.toString()})()`, {
+          window: ownerWindow, document: ownerDocument,
+          sessionStorage: globalThis.sessionStorage, crypto,
+          Object, Promise, Response: NativeResponse, AbortController: NativeController,
+          AbortSignal, Event: HostEvent, DOMException: HostException, Error,
+        })
+      }
+      else {
+        callback()
+      }
+    },
   }
   await installAvailabilityProbe(page as unknown as Page, () => {})
   return storage
@@ -908,4 +921,22 @@ it.each(['cache', 'method', 'signal'])('rejects inherited %s metadata without re
   assert.equal(journal.some(event => event.kind === 'observer-failed'), true)
   assert.equal(journal.some(event => event.kind === 'rejected' && event.aborted), false)
   assert.equal(incompleteAvailabilityReads(journal).length > 0, true)
+})
+
+
+it('preserves a strict unqualified caller receiver through the actual serialized bootstrap', async () => {
+  const original = Promise.resolve(new NativeResponse({} as Call, 200))
+  const received: { receiver: unknown, args: unknown[] }[] = []
+  ownerWindow.fetch = function (...args: unknown[]) {
+    received.push({ receiver: this, args })
+    return original
+  }
+  await installSourceProbe(true)
+  const request = ownerWindow.fetch as typeof fetch
+  const options = { method: 'POST' }
+  assert.equal(request('/api/installations/source-id/direct/source-connection/signal', options), original)
+  await original
+  assert.equal(received.length, 1)
+  assert.equal(received[0]!.receiver, undefined)
+  assert.deepEqual(received[0]!.args, ['/api/installations/source-id/direct/source-connection/signal', options])
 })
