@@ -101,6 +101,7 @@ for (const pending of ['authorization', 'offer'] as const) {
           }])
         }
       }
+
       const emitProbe = (probe: OAuthDepartureProbe) => {
         try {
           void window.cairnOAuthProbe(probe)
@@ -155,6 +156,7 @@ for (const pending of ['authorization', 'offer'] as const) {
         catch {
           reportObservationFailure()
         }
+
         return result
       }
 
@@ -168,6 +170,7 @@ for (const pending of ['authorization', 'offer'] as const) {
         catch {
           reportObservationFailure()
         }
+
         return result
       }
 
