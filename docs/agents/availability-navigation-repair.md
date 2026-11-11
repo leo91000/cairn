@@ -208,3 +208,36 @@ history/reload, CSRF, ACCOUNT/OAuth401 and the existing cadence/backoff. This
 engineering boundary changes no product capability or authorization. It does not
 establish the cause or repair of the outstanding native47/1 failure, native
 app-generation/publication correlation or physical BFCache qualification.
+
+
+### A90: separate operation-equivalence domain
+
+The ownership domain above and the **native-operation equivalence domain** are
+separate source preconditions. Both cover only the exact fresh internal literals,
+private native signals, producers, captured delegates, full wrapper compositions,
+fixture, profile and SDK identified in the pinned manifest. Inside that domain,
+the original native operation and its terminals, receiver, complete arguments,
+single invocation, promise/result, cause and throws must remain equivalent to the
+unobserved operation. Ownership association alone does not establish equivalence.
+
+Outside that domain, reflective metadata inspection can trigger a Proxy trap that
+aborts a controller or changes a still-pending Fetch/body operation. Inspecting
+after Fetch does not solve this. Equal arguments, promises or descriptors do not
+certify equivalence or admit hostile objects. Universal operation equivalence and
+absence of observer-induced effects outside the reviewed chain are explicitly
+not claimed; this is distinct from A81's ownership-admission limitation.
+
+The R90 witnesses remain permanent RED under
+`--reflection-side-effect-counterexample` in both existing Node controllers.
+The ordinary SOURCE gate instead reports their demonstrated interference as
+`OUT_OF_DOMAIN_OPERATION_LIMIT_RECOGNITION`, separately from ownership-limit
+recognition, in-domain support and native qualification. This does not repair or
+waive those counterexamples. Existing forwarding, protected metadata capture,
+isolated reporting and persistent negative diagnostics remain required and tested.
+
+A change to either domain's producer, delegates, observers, composition, profile
+or SDK invalidates the corresponding evidence and requires repinning, full review
+and qualification. No runtime certificate, Proxy detector, second conversion,
+argument replacement or application producer hook is introduced. Historical R90
+remains confirmed; the revised contract requires fresh independent evaluation.
+Neither SOURCE evidence nor this boundary establishes the cause of native47/1.
