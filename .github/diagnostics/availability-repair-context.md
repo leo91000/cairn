@@ -1,7 +1,7 @@
 # SOURCE-TRUSTED diagnostic domain — SOURCE ONLY, NOT runtime qualification
 
-Product **4dd7129626cc28287ea68490e064c0758a96168d**, tree **485a41d874eb7d0db3ae5d4c84c4a1dcda5ebd0b**,
-parente7c (test-only OAuth XHR transparent forwarding), app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
+Product **01a5d56c00da7fce17657ba808e7218922c49219**, tree **be0688eecdc1d498edc61c70b64b647f75fc78be**,
+parent4dd (test-only OAuth Fetch dynamic receiver preservation), app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
 and its permanent serialized-bootstrap regression. Canonical QA ROOT on this exact clean
 new product is DUE before fresh COMPLETE independent FULLs. The prior clean bc1c QA is historical
 for this changed product and does not transfer.
@@ -355,3 +355,30 @@ HEAD/extraction); its first6FAIL is preserved but those two are NOT defect evide
 Actual old OAuth callback4ASSERTFAIL/candidate4PASS; no SDK/browser runtime credit.
 Only the Git/source-binding and owned Bash steps exercised; historical remote fetch
 is SOURCE-PREPARED, not executed outside a separately admitted future workflow.
+
+## Current source correction — OAuth Fetch dynamic receiver
+
+Same OAuth test bootstrap now forwards ordinary dynamic this/restargs with
+Reflect.apply to the captured original delegate ONCE and returns its ORIGINAL
+Promise/value. Original sync throw propagates before metadata. Supported primitive
+metadata uses own data descriptors and captured native AbortSignal state/listener,
+no extra RequestInit getter or signal own accessor. Actual pinned sources create
+ordinary fresh literals/native signals; accessor witness is transparency outside
+that producer domain, never ownership admission. Nine permanent actual serialized
+callback controls cover ownerWindow and unqualified undefined, original args/Promise/
+cause/throws/callcount and before/after-abort departure audits. Same final controller
+on4dd gives5PASS/4ASSERTFAIL; candidate9PASS. Initial prototype audit expectation and
+early rejected-promise fixture handling were corrected and their first log retained
+without claiming those fixture errors as native/product evidence. ROOT original
+2035B repro remains pinned4dd RED and is not modified or rerun for receipt.
+H84 historical Git acquisition/XHR/restoration-independent final identity remain
+unchanged. New clean product QA ROOT is DUE before full independent reviews; no
+prior4dd/e7c QA or clean review transfers, no native cause/fix47-1 inferred.
+
+Final affected source gate receipt: after matching the success fixture to the REAL
+factory two-argument call shape, same final controller on4dd is9cases5PASS/4ASSERTFAIL;
+selected affected archive invocation on candidate is52/52PASS =50 support controls
+and2 separately named limit recognitions, not ownership/native. First unchanged
+recorder command57 has NOT been replayed or credited on the new pin. H84 red
+references, Proxy universal counterexamples, and ROOT frozen2035B repro are retained
+without rerun. Complete prior gate outputs and initial fixture mistakes are preserved.

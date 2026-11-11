@@ -615,10 +615,24 @@ function oauthXhrFixture(settings = {}) {
     calls.push({ method: 'send', receiver: this, args })
     return sendResult
   }
-  const context = createContext({ XMLHttpRequest: OriginalXhr, fetch() {}, cairnOAuthProbe() { return Promise.resolve() } })
+  const fetchCalls = []
+  const probes = []
+  const fetchResult = settings.fetchResult ?? Promise.resolve('original fetch SOURCE result')
+  const context = createContext({
+    XMLHttpRequest: OriginalXhr, AbortSignal, AbortController, EventTarget,
+    fetch: function (...args) {
+      fetchCalls.push({ receiver: this, args })
+      if (settings.fetchFailure)
+        throw settings.fetchFailure
+      if (settings.nativeSignalRead)
+        void args[1]?.signal
+      return fetchResult
+    },
+    cairnOAuthProbe(value) { probes.push(value); return Promise.resolve() },
+  })
   runInContext('globalThis.window = globalThis', context)
   runInContext(`(${source.slice(start, end)})(false)`, context)
-  return { Xhr: OriginalXhr, calls, openResult, sendResult }
+  return { Xhr: OriginalXhr, calls, openResult, sendResult, context, fetchCalls, fetchResult, probes, ownerWindow: runInContext('window', context), wrappedFetch: runInContext('window.fetch', context) }
 }
 
 test('H84 actual OAuth XHR bootstrap preserves real two-argument open and omitted send argument', () => {
@@ -661,3 +675,74 @@ test('H84 actual OAuth XHR bootstrap preserves original conversion failure and n
   assert.equal(conversions, 1)
   assert.equal(f.calls.length, 1)
 })
+
+
+function invokeOAuthFetch(f, receiver, args) {
+  if (receiver === 'ownerWindow')
+    return Reflect.apply(f.wrappedFetch, f.ownerWindow, args)
+  f.context.sourceArgs = args
+  return runInContext('(() => { "use strict"; const request = window.fetch; return request(...sourceArgs) })()', f.context)
+}
+
+for (const receiver of ['ownerWindow', 'unqualified']) {
+  for (const terminal of ['success', 'rejection']) {
+    test(`OAuth Fetch actual serialized bootstrap preserves ${receiver} receiver and original ${terminal}`, async () => {
+      const cause = new TypeError('original Fetch cause SOURCE')
+      const original = terminal === 'success' ? Promise.resolve('original body SOURCE') : Promise.reject(cause)
+      const settlement = terminal === 'rejection' ? assert.rejects(original, error => error === cause) : original
+      const f = oauthXhrFixture({ fetchResult: original })
+      const options = { credentials: 'same-origin', keepalive: true, signal: new AbortController().signal }
+      const args = terminal === 'success' ? ['/api/installations', options] : ['/api/installations', options, Symbol('extra original argument')]
+      const result = invokeOAuthFetch(f, receiver, args)
+      assert.equal(result, original)
+      assert.equal(f.fetchCalls.length, 1)
+      assert.equal(f.fetchCalls[0].receiver, receiver === 'ownerWindow' ? f.ownerWindow : undefined)
+      assert.deepEqual(f.fetchCalls[0].args, args)
+      if (terminal === 'rejection')
+        await settlement
+      else
+        assert.equal(await result, 'original body SOURCE')
+    })
+  }
+  test(`OAuth Fetch actual serialized bootstrap preserves ${receiver} original synchronous cause`, () => {
+    const cause = new TypeError('original synchronous Fetch SOURCE')
+    const f = oauthXhrFixture({ fetchFailure: cause })
+    const args = ['/api/installations', { keepalive: true }]
+    assert.throws(() => invokeOAuthFetch(f, receiver, args), error => error === cause)
+    assert.equal(f.fetchCalls.length, 1)
+    assert.equal(f.fetchCalls[0].receiver, receiver === 'ownerWindow' ? f.ownerWindow : undefined)
+    assert.deepEqual(f.fetchCalls[0].args, args)
+  })
+}
+
+test('OAuth Fetch actual serialized bootstrap adds no RequestInit or signal accessor evaluation', () => {
+  const controller = new AbortController()
+  let optionReads = 0
+  let signalReads = 0
+  Object.defineProperty(controller.signal, 'aborted', { get() { signalReads++; return false } })
+  const options = { get signal() { optionReads++; return controller.signal } }
+  const f = oauthXhrFixture({ nativeSignalRead: true })
+  const result = invokeOAuthFetch(f, 'ownerWindow', ['/api/installations/source/direct/authorize', options])
+  assert.equal(result, f.fetchResult)
+  assert.equal(f.fetchCalls.length, 1)
+  assert.equal(optionReads, 1)
+  assert.equal(signalReads, 0)
+  // Accessor inputs are outside pinned fresh literals: transparency only,
+  // no ownership/producer admission is established by this witness.
+})
+
+for (const alreadyAborted of [false, true]) {
+  test(`OAuth Fetch actual serialized departure audit retains abort notification (initially ${alreadyAborted})`, () => {
+    const controller = new AbortController()
+    if (alreadyAborted)
+      controller.abort()
+    const f = oauthXhrFixture()
+    const options = { signal: controller.signal }
+    assert.equal(invokeOAuthFetch(f, 'ownerWindow', ['/api/installations/source/direct/authorize', options]), f.fetchResult)
+    if (!alreadyAborted)
+      controller.abort()
+    assert.equal(invokeOAuthFetch(f, 'ownerWindow', ['/api/installations', options]), f.fetchResult)
+    assert.equal(f.fetchCalls.length, 2)
+    assert.deepEqual(f.probes.map(value => value.kind), alreadyAborted ? ['background', 'background'] : ['background'])
+  })
+}

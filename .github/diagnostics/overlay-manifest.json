@@ -1,9 +1,9 @@
 {
-  "product": "4dd7129626cc28287ea68490e064c0758a96168d",
+  "product": "01a5d56c00da7fce17657ba808e7218922c49219",
   "files": {
     "tests/e2e/mcps.spec.ts": {
-      "originalSHA256": "b44db24d167eb74b88f5611a53267662b82440071e045b49fe30306ea59d3b0d",
-      "overlaySHA256": "b6fd3380d7e05f150cdb075c6c38f4388199100fdc0dd2b1b71962a1342de1ab",
+      "originalSHA256": "cef7cc5782a7340fd5b6fc4fae1a0a5a2fb83144a7f54d17df31d3ecaed57d9d",
+      "overlaySHA256": "1986298a04e598da6eba8ca77c58c9493d6412be5b70fda857415876ea857ad2",
       "overlayFile": "mcps.direct-owner.overlay.ts"
     },
     "apps/web/tests/direct-transport.test.ts": {
@@ -39,8 +39,8 @@
       "gitBlob": "b24561e7500adcea0e98926cfca3e210211b0518",
       "sha256": "8df3a113886a9671b8dcf2c5c017f0a8903b73f590e1a8ffa5219ff0115953c4"
     },
-    "productCommit": "4dd7129626cc28287ea68490e064c0758a96168d",
-    "productTree": "485a41d874eb7d0db3ae5d4c84c4a1dcda5ebd0b",
+    "productCommit": "01a5d56c00da7fce17657ba808e7218922c49219",
+    "productTree": "be0688eecdc1d498edc61c70b64b647f75fc78be",
     "observerCommit": "Recorded separately from github.sha in source-binding.json; this manifest is bound by that commit",
     "productFiles": {
       "apps/web/beacon.html": {
@@ -88,8 +88,8 @@
         "sha256": "12ad75e45fc3e368970aab99e41928cde1af64fc194e5d5f7655d9f9466ae4c2"
       },
       "tests/e2e/mcps.spec.ts": {
-        "gitBlob": "72f56f70492bb525f44e6cd95d7cd2833e707b38",
-        "sha256": "b44db24d167eb74b88f5611a53267662b82440071e045b49fe30306ea59d3b0d"
+        "gitBlob": "35e4e197d81b60d017975ed8a23573458e0ab40d",
+        "sha256": "cef7cc5782a7340fd5b6fc4fae1a0a5a2fb83144a7f54d17df31d3ecaed57d9d"
       },
       "tests/e2e/fixtures.ts": {
         "gitBlob": "bf274a8784be4a35432676e7f2284831e2262ffd",
@@ -114,8 +114,8 @@
     },
     "observerFiles": {
       "archive-transparency.node.mjs": {
-        "gitBlob": "4c20778bf9480d0e280351caee2fccd668e6b766",
-        "sha256": "1e7a648977cbf2bce460b8473eb57698bd8d2ea80ab5143fbe60df701c3c982d"
+        "gitBlob": "b18916b171b949c22785ec3512e9546b38261f83",
+        "sha256": "fe48ec661d6025172f69734373054466e676d9b88d71b31a9f16a06fbe9a73f4"
       },
       "availability-reader-native.mjs": {
         "gitBlob": "bdc55a0fc5f026938ddae6a87a8786ff0e33f505",
@@ -142,24 +142,24 @@
         "sha256": "30d3ef89f78d0fa3411263502073b0b7ecd3fc738f9805b816d0eab8274354ce"
       },
       "direct-owner-overlay-control.mjs": {
-        "gitBlob": "2de514ab7d75da1fedff40a3c1fceab69df68c78",
-        "sha256": "1800f09f90da5e7e872b7db36cb8a3da9408a97c92bbe47f9b192d0803045284"
+        "gitBlob": "da50e16fc57b78de47f84bdf3b3c3757037295ea",
+        "sha256": "1de7d0e2732f352d38be297ea1ebc8421c39eb4ee063427989d8cc2bdee14985"
       },
       "closed-target-error.mjs": {
         "gitBlob": "e4aa4b94c978342a5976e9fcf958f91440113e4b",
         "sha256": "c350fbf99633499c5fc64fba0dbe9fd45f5159da39ebbc5249e300ce123a9cfe"
       },
       "mcps.direct-owner.overlay.ts": {
-        "gitBlob": "aa1a9c0f04ef4254c8965517bf82456f384e53d3",
-        "sha256": "b6fd3380d7e05f150cdb075c6c38f4388199100fdc0dd2b1b71962a1342de1ab"
+        "gitBlob": "0961744b29415920b62d22b5530a3cb8786c0743",
+        "sha256": "1986298a04e598da6eba8ca77c58c9493d6412be5b70fda857415876ea857ad2"
       },
       "direct-transport.seam.overlay.ts": {
         "gitBlob": "be7ea5e7cac357e754e95739e3be05acfc803e21",
         "sha256": "f48ada4b8312643434f4f5469fd9387923fbd5aa002c94e2c26d07d63696b609"
       },
       "selected-workflow.yaml": {
-        "gitBlob": "c48f572c3971c7db95b62b6ae40b4c27c14178c6",
-        "sha256": "b4b8fa7e735698e6318285cf3718fa0a2972253d7e3b0920f258ae4462f0ebea"
+        "gitBlob": "5ed01278faee67a9d4d31dee9de4592da11f21cc",
+        "sha256": "143ac3f3eb4b04e2e213fa7259eeac6d13d981f0ec57455ea13a2ba14f3a467e"
       }
     },
     "producers": {
