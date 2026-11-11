@@ -421,10 +421,18 @@ async function installSourceProbe(serialized = false) {
     async addInitScript(callback: () => void) {
       if (serialized) {
         runInNewContext(`(${callback.toString()})()`, {
-          window: ownerWindow, document: ownerDocument,
-          sessionStorage: globalThis.sessionStorage, crypto,
-          Object, Promise, Response: NativeResponse, AbortController: NativeController,
-          AbortSignal, Event: HostEvent, DOMException: HostException, Error,
+          window: ownerWindow,
+          document: ownerDocument,
+          sessionStorage: globalThis.sessionStorage,
+          crypto,
+          Object,
+          Promise,
+          Response: NativeResponse,
+          AbortController: NativeController,
+          AbortSignal,
+          Event: HostEvent,
+          DOMException: HostException,
+          Error,
         })
       }
       else {
@@ -923,7 +931,6 @@ it.each(['cache', 'method', 'signal'])('rejects inherited %s metadata without re
   assert.equal(incompleteAvailabilityReads(journal).length > 0, true)
 })
 
-
 it('preserves a strict unqualified caller receiver through the actual serialized bootstrap', async () => {
   const original = Promise.resolve(new NativeResponse({} as Call, 200))
   const received: { receiver: unknown, args: unknown[] }[] = []
@@ -931,6 +938,7 @@ it('preserves a strict unqualified caller receiver through the actual serialized
     received.push({ receiver: this, args })
     return original
   }
+
   await installSourceProbe(true)
   const request = ownerWindow.fetch as typeof fetch
   const options = { method: 'POST' }
