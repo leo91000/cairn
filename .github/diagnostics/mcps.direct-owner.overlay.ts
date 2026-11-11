@@ -65,6 +65,7 @@ for (const pending of ['authorization', 'offer'] as const) {
       if (message.type() === 'error' && message.text() === '__c40_oauth_observer_failure_v1__')
         observationFailures++
     }
+
     page.on('console', onOAuthObservationFailure)
     page.once('close', () => page.off('console', onOAuthObservationFailure))
     const closedOffers: boolean[] = []
@@ -110,12 +111,14 @@ for (const pending of ['authorization', 'offer'] as const) {
           }])
         }
       }
+
       const failedReporting = (failure: unknown) => {
         signalHostFailure()
         Reflect.apply(enqueueDiagnosticError, window, [() => {
           throw failure
         }])
       }
+
       const reportObservationFailure = () => {
         signalHostFailure()
         try {

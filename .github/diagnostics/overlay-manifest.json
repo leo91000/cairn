@@ -1,9 +1,9 @@
 {
-  "product": "e81b99601d5abeec663dd0c7a1cde8b72b72b35d",
+  "product": "9979b4ff1f36f48541e33ff93de6d19a07797886",
   "files": {
     "tests/e2e/mcps.spec.ts": {
-      "originalSHA256": "afd2e614ad844c8590b9dc9d8b4aae4e663ad6f3f2f0373c280bd7340f4a77c4",
-      "overlaySHA256": "7b7c83e063a0ce634773644546eee4ddc6a441357144a80a4d301e2b4e87072e",
+      "originalSHA256": "9f868fa615b49d29d08703ca2f32973bafa948ec61add802e9e4dab5523a5759",
+      "overlaySHA256": "7fb4ec12878e6d52ae3ab91ee708da4e34190035b0dacead7e97efb29c2ddaad",
       "overlayFile": "mcps.direct-owner.overlay.ts"
     },
     "apps/web/tests/direct-transport.test.ts": {
@@ -39,8 +39,8 @@
       "gitBlob": "b24561e7500adcea0e98926cfca3e210211b0518",
       "sha256": "8df3a113886a9671b8dcf2c5c017f0a8903b73f590e1a8ffa5219ff0115953c4"
     },
-    "productCommit": "e81b99601d5abeec663dd0c7a1cde8b72b72b35d",
-    "productTree": "3b3b5ef242d4db0b48011bcdefa9766de349305b",
+    "productCommit": "9979b4ff1f36f48541e33ff93de6d19a07797886",
+    "productTree": "f0c72fbfd8d745219b86cd35f558c67efc6d26d3",
     "observerCommit": "Recorded separately from github.sha in source-binding.json; this manifest is bound by that commit",
     "productFiles": {
       "apps/web/beacon.html": {
@@ -88,8 +88,8 @@
         "sha256": "528e6098ade467928e691c3f377509ca131fba911ea9f05a791eadeabf2df626"
       },
       "tests/e2e/mcps.spec.ts": {
-        "gitBlob": "0ab5358db2da7da6873043d99ae56d245228621d",
-        "sha256": "afd2e614ad844c8590b9dc9d8b4aae4e663ad6f3f2f0373c280bd7340f4a77c4"
+        "gitBlob": "38e261b36fa311b566cce7ea2c2f68e5df6a65c2",
+        "sha256": "9f868fa615b49d29d08703ca2f32973bafa948ec61add802e9e4dab5523a5759"
       },
       "tests/e2e/fixtures.ts": {
         "gitBlob": "bf274a8784be4a35432676e7f2284831e2262ffd",
@@ -114,12 +114,12 @@
     },
     "observerFiles": {
       "archive-transparency.node.mjs": {
-        "gitBlob": "11396eec5e3e92af48b56935c06c1aea29dc395c",
-        "sha256": "b2fca1a0b1cf934dd31cec2e21346f6b0436f6b453ab18cf0876b55a59c033fe"
+        "gitBlob": "1b70284e489a82e11f345e010a10b46f14030550",
+        "sha256": "bc3ed158f49fee7f60450ee2bde4b13e9a51e4ee0fba233d4b4e6994e5df7e9d"
       },
       "availability-reader-native.mjs": {
-        "gitBlob": "21b211e5655529bc3ca6b9f658383cb6a22a210e",
-        "sha256": "2e4d6ccad84047b7bbdb6c40cfb6a64d0c0fcad482917c5b2903388637279f3c"
+        "gitBlob": "8ee6e1f601ceaadf6ff69a790b0fd79e90236745",
+        "sha256": "eb6a2c964fdba4904e9c577af96da3fb8d4caca43a97fa63aad52a07275e3369"
       },
       "skill-availability-probe.ts": {
         "gitBlob": "758f8c9545dff77f550f848266b7f6a04b97f8e2",
@@ -142,24 +142,24 @@
         "sha256": "a4ffa1ddaf619db8e223de86dabba8d2b6b7282df0a29c2f12b6a9aa94fc6b03"
       },
       "direct-owner-overlay-control.mjs": {
-        "gitBlob": "a1a5089647771db12857e4a41aa545a2d47e7f15",
-        "sha256": "d38332fb977336b9b38e6ed999fb7e5bfc604be12511a0bf0b556f5a942e505e"
+        "gitBlob": "ba9163a1701cab756f6fc4be8db44f96de946327",
+        "sha256": "3f8b6a9187316bee2dc6e3c39fe276943c3d9183127f8be0e22345c973b85837"
       },
       "closed-target-error.mjs": {
         "gitBlob": "e4aa4b94c978342a5976e9fcf958f91440113e4b",
         "sha256": "c350fbf99633499c5fc64fba0dbe9fd45f5159da39ebbc5249e300ce123a9cfe"
       },
       "mcps.direct-owner.overlay.ts": {
-        "gitBlob": "0a6c73b41625495a082ecc3a463fd9e3f5077a07",
-        "sha256": "7b7c83e063a0ce634773644546eee4ddc6a441357144a80a4d301e2b4e87072e"
+        "gitBlob": "4743e6e631013834c4bdfa7808ce7ff74d44fa8b",
+        "sha256": "7fb4ec12878e6d52ae3ab91ee708da4e34190035b0dacead7e97efb29c2ddaad"
       },
       "direct-transport.seam.overlay.ts": {
         "gitBlob": "be7ea5e7cac357e754e95739e3be05acfc803e21",
         "sha256": "f48ada4b8312643434f4f5469fd9387923fbd5aa002c94e2c26d07d63696b609"
       },
       "selected-workflow.yaml": {
-        "gitBlob": "fab67f4fcf2eddb30385063336f78c4c1e44aab0",
-        "sha256": "4dcd8c2468365fded465de0879d17ed51ba0917167cf81514e4558e1ac8429e2"
+        "gitBlob": "a7c82108e2a3821166b18374859c70a8f9a4282e",
+        "sha256": "abcfff8742ab588eb35787605e803f0f7de90fa5c44797ff2aac88bdfa92795f"
       }
     },
     "producers": {
@@ -219,9 +219,9 @@
       }
     },
     "nativeReaderComposition": {
-      "compositionId": "H91_NATIVE_READER_COMPOSITION_V2",
+      "compositionId": "H91_NATIVE_READER_COMPOSITION_V3_CANONICAL_1C09",
       "helper": {
-        "commit": "e81b99601d5abeec663dd0c7a1cde8b72b72b35d",
+        "commit": "9979b4ff1f36f48541e33ff93de6d19a07797886",
         "path": "tests/e2e/availability-probe.ts",
         "gitBlob": "fa8e4d1aa18dceb2750c2b71bb945e108822fd31",
         "sha256": "528e6098ade467928e691c3f377509ca131fba911ea9f05a791eadeabf2df626"
@@ -236,7 +236,36 @@
         "nativeDiagnostics",
         "installAvailabilityProbe"
       ],
-      "qualification": "SOURCE_ONLY_NEW_COMPOSITION_NO_HISTORICAL_RUN_TRANSFER"
+      "qualification": "SOURCE_ONLY_NEW_COMPOSITION_NO_HISTORICAL_RUN_TRANSFER",
+      "previousCompositions": [
+        {
+          "observer": "1d97ccd9aff5b2b021672343c421802c0fd1d2ad",
+          "path": ".github/diagnostics/availability-reader-native.mjs",
+          "gitBlob": "21b211e5655529bc3ca6b9f658383cb6a22a210e",
+          "sha256": "2e4d6ccad84047b7bbdb6c40cfb6a64d0c0fcad482917c5b2903388637279f3c",
+          "binding": {
+            "compositionId": "H91_NATIVE_READER_COMPOSITION_V2",
+            "helper": {
+              "commit": "e81b99601d5abeec663dd0c7a1cde8b72b72b35d",
+              "path": "tests/e2e/availability-probe.ts",
+              "gitBlob": "fa8e4d1aa18dceb2750c2b71bb945e108822fd31",
+              "sha256": "528e6098ade467928e691c3f377509ca131fba911ea9f05a791eadeabf2df626"
+            },
+            "historicalHelper": {
+              "commit": "8835fa792c12633b1cca830659ebaf04a6cd5547",
+              "path": "tests/e2e/availability-probe.ts",
+              "gitBlob": "f72cd5102e901e17e77728d06834737552503748",
+              "sha256": "5d315a1c12a2835838645d0804cb0dda5e8dfd8503eab8c963ac3d9442baae61"
+            },
+            "order": [
+              "nativeDiagnostics",
+              "installAvailabilityProbe"
+            ],
+            "qualification": "SOURCE_ONLY_NEW_COMPOSITION_NO_HISTORICAL_RUN_TRANSFER"
+          },
+          "status": "HISTORICAL_SOURCE_ONLY_NOT_NATIVE_OR_CURRENT_QA"
+        }
+      ]
     },
     "outOfDomainOperationWitness": {
       "historicalUniversalCommands": [

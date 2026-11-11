@@ -20,9 +20,9 @@ const paths = {
 const sources = Object.fromEntries(await Promise.all(Object.entries(paths).map(async ([key, path]) => [key, await readFile(path, 'utf8')])))
 // Versioned test-helper dependency; historical runtime fixture bytes stay frozen.
 const nativeReaderCompositionBinding = {
-  "compositionId": "H91_NATIVE_READER_COMPOSITION_V2",
+  "compositionId": "H91_NATIVE_READER_COMPOSITION_V3_CANONICAL_1C09",
   "helper": {
-    "commit": "e81b99601d5abeec663dd0c7a1cde8b72b72b35d",
+    "commit": "9979b4ff1f36f48541e33ff93de6d19a07797886",
     "path": "tests/e2e/availability-probe.ts",
     "gitBlob": "fa8e4d1aa18dceb2750c2b71bb945e108822fd31",
     "sha256": "528e6098ade467928e691c3f377509ca131fba911ea9f05a791eadeabf2df626"
@@ -37,7 +37,36 @@ const nativeReaderCompositionBinding = {
     "nativeDiagnostics",
     "installAvailabilityProbe"
   ],
-  "qualification": "SOURCE_ONLY_NEW_COMPOSITION_NO_HISTORICAL_RUN_TRANSFER"
+  "qualification": "SOURCE_ONLY_NEW_COMPOSITION_NO_HISTORICAL_RUN_TRANSFER",
+  "previousCompositions": [
+    {
+      "observer": "1d97ccd9aff5b2b021672343c421802c0fd1d2ad",
+      "path": ".github/diagnostics/availability-reader-native.mjs",
+      "gitBlob": "21b211e5655529bc3ca6b9f658383cb6a22a210e",
+      "sha256": "2e4d6ccad84047b7bbdb6c40cfb6a64d0c0fcad482917c5b2903388637279f3c",
+      "binding": {
+        "compositionId": "H91_NATIVE_READER_COMPOSITION_V2",
+        "helper": {
+          "commit": "e81b99601d5abeec663dd0c7a1cde8b72b72b35d",
+          "path": "tests/e2e/availability-probe.ts",
+          "gitBlob": "fa8e4d1aa18dceb2750c2b71bb945e108822fd31",
+          "sha256": "528e6098ade467928e691c3f377509ca131fba911ea9f05a791eadeabf2df626"
+        },
+        "historicalHelper": {
+          "commit": "8835fa792c12633b1cca830659ebaf04a6cd5547",
+          "path": "tests/e2e/availability-probe.ts",
+          "gitBlob": "f72cd5102e901e17e77728d06834737552503748",
+          "sha256": "5d315a1c12a2835838645d0804cb0dda5e8dfd8503eab8c963ac3d9442baae61"
+        },
+        "order": [
+          "nativeDiagnostics",
+          "installAvailabilityProbe"
+        ],
+        "qualification": "SOURCE_ONLY_NEW_COMPOSITION_NO_HISTORICAL_RUN_TRANSFER"
+      },
+      "status": "HISTORICAL_SOURCE_ONLY_NOT_NATIVE_OR_CURRENT_QA"
+    }
+  ]
 }
 const helperBinding = nativeReaderCompositionBinding.helper
 assert.equal(execFileSync('git', ['rev-parse', `${helperBinding.commit}:${helperBinding.path}`], { encoding: 'utf8' }).trim(), helperBinding.gitBlob)

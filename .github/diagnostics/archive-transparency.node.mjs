@@ -1073,7 +1073,7 @@ async function nativeReaderCompositionFixture(t) {
   const bindingEnd = raw.indexOf('\nconst helperBinding = ', bindingStart)
   assert(bindingStart > 40 && bindingEnd > bindingStart)
   const binding = JSON.parse(raw.slice(bindingStart, bindingEnd))
-  assert.equal(binding.compositionId, 'H91_NATIVE_READER_COMPOSITION_V2')
+  assert.equal(binding.compositionId, 'H91_NATIVE_READER_COMPOSITION_V3_CANONICAL_1C09')
   assert.deepEqual(binding.order, ['nativeDiagnostics', 'installAvailabilityProbe'])
   const selected = process.env.C40_NATIVE_READER_HELPER_REFERENCE === 'historical' ? binding.historicalHelper : binding.helper
   const bytes = execFileSync('git', ['show', `${selected.commit}:${selected.path}`])

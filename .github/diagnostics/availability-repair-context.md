@@ -1,6 +1,6 @@
 # SOURCE-TRUSTED diagnostic domain — SOURCE ONLY, NOT runtime qualification
 
-Current product **e81b99601d5abeec663dd0c7a1cde8b72b72b35d**, tree **3b3b5ef242d4db0b48011bcdefa9766de349305b**.
+Current product **9979b4ff1f36f48541e33ff93de6d19a07797886**, tree **f0c72fbfd8d745219b86cd35f558c67efc6d26d3**.
 App/runtime/factory/PR731 immutable. Test-only OAuth async negative host retention,
 separate helper evidence labels and repair-contract documentation changed; ROOT
 canonical QA of this exact new clean commit is DUE before fresh complete FULLs.
@@ -598,3 +598,23 @@ credited; the commands without --test executed the exact witnesses and failed as
 expected. The complete NativeReader SOURCE contrast is four ASSERT failures on
 the explicitly historical helper and four passes on V2. No older native result
 or clean FULL verdict is transferred to this snapshot.
+
+
+## Canonical ROOT patch1c09 — current source repin
+
+ROOT e81/1d97 provisional QA report e62dc10b read ENTIRE, SHA256
+f2d3cbe64a061352f9b4642b14607aaea0ab310864c4ead567e169879ed68284.
+Patch cc3b798a exactly945B/SHA256
+1c09e838e4901c6563daa3835ddf8eba0ab13142bcdcbe5d2820f489be159ba3
+applied ONCE to product MCPS and the same three blank additions in fullOverlay.
+No tokens, logic, assertions or runtime bytes changed. ROOT formatted-DIRTY1888
+is historical and is NOT exact clean-commit QA of this new product/repin.
+Current NativeReader composition is V3_CANONICAL_1C09: helper commit repinned to
+current product, same helper Gitblob/SHA. Complete V2 binding + observer source
+Gitblob/SHA retained explicitly in previousCompositions; historical helper8835,
+original hashes/RED witnesses/native run statuses remain unchanged.
+Old74/73 source blocks and ROOT contrasts remain attached to old e81/1d97;
+no replay just for receipt and no result implicitly transferred to this new pair.
+ROOT exact clean-commit QA and affected source checks DUE before fresh FULLs.
+A81/A90 domains and all feasible guards intact. No runtime/app/factory/PR731,
+policy/SDK/profile/budget changes. No CI/native/PR/merge. P1 OPEN, cause47/1UNKNOWN.
