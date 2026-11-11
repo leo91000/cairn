@@ -1,7 +1,7 @@
 # SOURCE-TRUSTED diagnostic domain — SOURCE ONLY, NOT runtime qualification
 
-Product **df6ff85fa036d060b4463f82eaf575fb2ac8e28f**, tree **0aaaa1ec3fade699b51f0d66adeb12508a4edfb7**,
-parentbc1c, app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
+Product **e7c3801796611a26956f22fe2f3311ad1a2130ff**, tree **d69924d3d3f7191629126a5c2f694e39aa74626a**,
+parentdf6 (canonical whitespace-only test correction), app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
 and its permanent serialized-bootstrap regression. Canonical QA ROOT on this exact clean
 new product is DUE before fresh COMPLETE independent FULLs. The prior clean bc1c QA is historical
 for this changed product and does not transfer.
@@ -318,3 +318,11 @@ controlled scenarios PASS. Product app/runtime/factory/PR731 and native command,
 profile/cache policy/image/assertion7s/step5m/job25m are unchanged. New exact product
 canonical QA and fresh whole product/observer reviews remain DUE; no prior clean
 verdict transfers, no native cause/fix47/1 inferred.
+
+Canonical formatting correction receipt: ROOT patch1852B/SHA256
+d97ed83c65f251a4878960d51e98ff55681e1a824847a5bedf28d215e1d4976a
+applied exactly once on clean df6. Only availability-read.test.ts whitespace changed;
+serialized strict bootstrap, original receiver/arguments/Promise assertions unchanged.
+ROOT provisional formatted-dirty df6 QA1888 is preserved separately, not transferred
+to this new clean product. Canonical QA ROOT exact current product remains DUE before
+fresh whole independent FULLs; no source canonical tests duplicated by C40.

@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, readlinkSync, lstatSync, writeFile
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-export const product = 'df6ff85fa036d060b4463f82eaf575fb2ac8e28f'
+export const product = 'e7c3801796611a26956f22fe2f3311ad1a2130ff'
 const targets = ['tests/e2e/mcps.spec.ts', 'apps/web/tests/direct-transport.test.ts']
 export const producerChainFiles = [
   'apps/web/beacon.html', 'apps/web/src/beacon.ts', 'apps/web/src/BeaconApp.vue',

@@ -1,5 +1,5 @@
 {
-  "product": "df6ff85fa036d060b4463f82eaf575fb2ac8e28f",
+  "product": "e7c3801796611a26956f22fe2f3311ad1a2130ff",
   "files": {
     "tests/e2e/mcps.spec.ts": {
       "originalSHA256": "43a9659c3bb8e176438025cc7812c6d72a5aec9308b9bc038f6745d5764fb43d",
@@ -33,8 +33,8 @@
       ],
       "meaning": "Real fixture ID/slug association plus current route; no literal slug-as-UUID comparison, no runtime producer receipt"
     },
-    "productCommit": "df6ff85fa036d060b4463f82eaf575fb2ac8e28f",
-    "productTree": "0aaaa1ec3fade699b51f0d66adeb12508a4edfb7",
+    "productCommit": "e7c3801796611a26956f22fe2f3311ad1a2130ff",
+    "productTree": "d69924d3d3f7191629126a5c2f694e39aa74626a",
     "observerCommit": "Recorded separately from github.sha in source-binding.json; this manifest is bound by that commit",
     "productFiles": {
       "apps/web/beacon.html": {
@@ -136,8 +136,8 @@
         "sha256": "52364b3c4eda10f1a6c106848e4e3edf7bdb9f151d7407a029f24a08002815fa"
       },
       "direct-owner-overlay-control.mjs": {
-        "gitBlob": "bc880c4f370f22086098d7d81ead64a5291a77f6",
-        "sha256": "f15c262d322d8b3d17b04dba59c783648fcb860aca2396a3b53cce65ed88bcb5"
+        "gitBlob": "003e3255672786e7ec0a77013cefa33128dcdbca",
+        "sha256": "cd26591a41c18fa909c26795fc782956265ac5850817918e010416ba4bd4c4a6"
       },
       "closed-target-error.mjs": {
         "gitBlob": "e4aa4b94c978342a5976e9fcf958f91440113e4b",
@@ -152,8 +152,8 @@
         "sha256": "f48ada4b8312643434f4f5469fd9387923fbd5aa002c94e2c26d07d63696b609"
       },
       "selected-workflow.yaml": {
-        "gitBlob": "df28cf9dc9dda95657d1ba72e8952b7b9a5b094c",
-        "sha256": "44085ebbf36f5e91db7cce90f44ce27673e65a40fa4019e18c3d612de8bd2ee4"
+        "gitBlob": "c333447c3d838fd53d35fbdd72f8e05745040ca1",
+        "sha256": "8efb2372ba401a83f77af63a6a5adcb31cd1603ec449eda465de58048dd44637"
       }
     },
     "producers": {
