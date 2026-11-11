@@ -2,8 +2,8 @@
 
 ## Current selection after explicit ROOT H77 source-helper decision
 
-Product **6b9bd17241f0bb736bc0884e5e54c69a8ea3437e**, tree **ccddd879c4c42aed4d7c8025e6b7c5329b5d8ed8**,
-parent937e; canonicalQA ROOT DUE on this clean exact commit. Only
+Product **49752fd6fa358075bf53b80c70c4731d0a873e5f**, tree **8ba8db1d012c06b040be20924d6f55ad0156ca89**,
+parent6b9; canonicalQA ROOT DUE on this clean exact commit. Only
 `tests/e2e/availability-probe.ts` and its real existing source regression suite
 `apps/web/tests/availability-read.test.ts` changed. Runtimeb186/apps/factory/TypeError,
 MCPS/browser assertions, budgets/profiles/auth/grants remain immutable.
@@ -193,3 +193,15 @@ and verified. ROOT prior CLEAN937eQA1882 is historical on937e only; newproduct
 canonicalQA DUE before fresh FULL ALL12product+ALL22observer/archives+pin. Sources
 reviewed were frozen; edits only after BOTH reviews completed. No CI/native/PR
 admission, no oldverdict/QA transferred, P1OPEN/slotROOT/otherheavyHOLD.
+
+ROOT canonical6b9 whitespace patch applied ONCE: artifactb463b98c,1858B,
+SHA25694b7442f0ce6918dd6d2050aedf2da6573da3541c62d41569e329137d4826511.
+Verified exact base6b9/clean, post-image Git blobs, gitdiffcheck and whitespace-only
+diff (same two files3insertions1deletion). New clean product49752fd6fa358075bf53b80c70c4731d0a873e5f
+/tree8ba8db1d012c06b040be20924d6f55ad0156ca89. No functional/runtime/contract/assertion change.
+ROOT lintfixEXIT0 and pnpmcheck141files1884tests/types/buildPASS on formatted6b9
+DIRTY are historical ONLY; exact new CLEANcommit QA remains DUE, no result transfer.
+Selected workflow/controller/manifest/default source selector all repin current
+product. Two overlays unchanged, original hashes verified. Fresh independent FULLs
+ALLproduct+ALLobserver/archives/pin required AFTER ROOT canonical receipt.
+No review launched early/no CI/native/PR/runtime/SDKenv effect; P1OPEN/slotROOT.
