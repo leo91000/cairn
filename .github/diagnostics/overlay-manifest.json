@@ -1,9 +1,9 @@
 {
-  "product": "6edd796424f0a3054270c4a1a1fd2c60796e2e11",
+  "product": "0ff31c7a58dcc760e959c447b350047da50cd096",
   "files": {
     "tests/e2e/mcps.spec.ts": {
-      "originalSHA256": "76cde6b325e2d8bf47b3dd3af4cc761066b06a72641bffb769612faa0f896dad",
-      "overlaySHA256": "5deba935ffa0fcc5e565ce9efd02f503298d1fa1767d1522d58db06c88c131c8",
+      "originalSHA256": "64c4325cf9a240ced7affddd53d39909db2ccce930938845ba59a0a47933ac30",
+      "overlaySHA256": "b255bb0fb18de020135e7c7fba64e2c434ba543a908277462cdb9f85122f3973",
       "overlayFile": "mcps.direct-owner.overlay.ts"
     },
     "apps/web/tests/direct-transport.test.ts": {
@@ -39,8 +39,8 @@
       "gitBlob": "b24561e7500adcea0e98926cfca3e210211b0518",
       "sha256": "8df3a113886a9671b8dcf2c5c017f0a8903b73f590e1a8ffa5219ff0115953c4"
     },
-    "productCommit": "6edd796424f0a3054270c4a1a1fd2c60796e2e11",
-    "productTree": "d230b475d54238ec9a62eaeb0ec1a67672171cd9",
+    "productCommit": "0ff31c7a58dcc760e959c447b350047da50cd096",
+    "productTree": "894c35fac6a885464e1d788e44b5a63f94e72a06",
     "observerCommit": "Recorded separately from github.sha in source-binding.json; this manifest is bound by that commit",
     "productFiles": {
       "apps/web/beacon.html": {
@@ -84,12 +84,12 @@
         "sha256": "5dabc925797cd89adf4fb2245062059e156cec8748ef164542c7474f8eb6dce9"
       },
       "tests/e2e/availability-probe.ts": {
-        "gitBlob": "b97021587a235d9f0a2b785d53f9deaccc7f9800",
-        "sha256": "01042f74b6b03f67d2e78476da4daa4df7bcabede2a7d17f6ff27cffbfd4bf67"
+        "gitBlob": "1036281113ba0d9b4455f79c3f73b8d6a532aa01",
+        "sha256": "7b1b4ae7ea7dc14327d4ac642d4df865f9142083a0ee529d9d876a64d5581c13"
       },
       "tests/e2e/mcps.spec.ts": {
-        "gitBlob": "9e1d99e0db2cb8843d1cb13b1dfda75157344cc1",
-        "sha256": "76cde6b325e2d8bf47b3dd3af4cc761066b06a72641bffb769612faa0f896dad"
+        "gitBlob": "e8a4cf56836b38ca1a1b69e276abc27b40b05e4a",
+        "sha256": "64c4325cf9a240ced7affddd53d39909db2ccce930938845ba59a0a47933ac30"
       },
       "tests/e2e/fixtures.ts": {
         "gitBlob": "bf274a8784be4a35432676e7f2284831e2262ffd",
@@ -142,24 +142,24 @@
         "sha256": "6003de6c0c3919a524e4a92915bab05b43342d7e77e14b623b78afd9fec44eb7"
       },
       "direct-owner-overlay-control.mjs": {
-        "gitBlob": "337d20dd712ea028b286151c2551e5790bf9f20d",
-        "sha256": "7cacd501d6953a83ea336ecc2ce9c02ae99d5b323ca2bb8520ea76e222e23434"
+        "gitBlob": "84557c8368a5288bc52afab8309118f5b93660a4",
+        "sha256": "235583488a27ed851296d1a9f73db9cf1b3387e9b7df4b2000350bd1f31ed8cf"
       },
       "closed-target-error.mjs": {
         "gitBlob": "e4aa4b94c978342a5976e9fcf958f91440113e4b",
         "sha256": "c350fbf99633499c5fc64fba0dbe9fd45f5159da39ebbc5249e300ce123a9cfe"
       },
       "mcps.direct-owner.overlay.ts": {
-        "gitBlob": "bc1ebc20e9c0738ce81d98ee5d4197676794737a",
-        "sha256": "5deba935ffa0fcc5e565ce9efd02f503298d1fa1767d1522d58db06c88c131c8"
+        "gitBlob": "1516a824ae557f0b6700cad6d607806fe56c4dba",
+        "sha256": "b255bb0fb18de020135e7c7fba64e2c434ba543a908277462cdb9f85122f3973"
       },
       "direct-transport.seam.overlay.ts": {
         "gitBlob": "be7ea5e7cac357e754e95739e3be05acfc803e21",
         "sha256": "f48ada4b8312643434f4f5469fd9387923fbd5aa002c94e2c26d07d63696b609"
       },
       "selected-workflow.yaml": {
-        "gitBlob": "1518943ea22b9a6fe3bd5f13dbaf33488c960ec0",
-        "sha256": "20be8df11b7accbc340d6a92dd719862ad9f4901b744e50a70a2b6ec3f57dbf4"
+        "gitBlob": "3bba93d889ea3633b281e94c957002299ac98e8c",
+        "sha256": "c06c8ba98816b4e08e5d2a2290dca6db351b62add58ea3f623b9664d4d3824ca"
       }
     },
     "producers": {

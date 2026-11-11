@@ -1,7 +1,7 @@
 # SOURCE-TRUSTED diagnostic domain — SOURCE ONLY, NOT runtime qualification
 
-Product **6edd796424f0a3054270c4a1a1fd2c60796e2e11**, tree **d230b475d54238ec9a62eaeb0ec1a67672171cd9**,
-parentc6c6 (test-only availability host failure audits), app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
+Product **0ff31c7a58dcc760e959c447b350047da50cd096**, tree **894c35fac6a885464e1d788e44b5a63f94e72a06**,
+parent6edd (canonical style-only host audit formatting), app/runtime/factory/PR731 immutable. This new snapshot changes only the test helper
 and its permanent serialized-bootstrap regression. Canonical QA ROOT on this exact clean
 new product is DUE before fresh COMPLETE independent FULLs. The prior clean bc1c QA is historical
 for this changed product and does not transfer.
@@ -520,3 +520,11 @@ audit failsUNKNOWN; originals stillsamePromise/body and no synthetic terminal/re
 Current MCP/history/full-overlay callers ALL pass the host failure count explicitly.
 New product6edd exact ROOT canonical QA DUE before fresh complete full reviews; no
 c6c61888 QA or prior clean transferred, no compiler/browser/canonical duplicated.
+
+Canonical ROOT3070B/6545677c91380551944f39b881e0aca5863256bffc30000d6fdf31d64ff61737
+read/hash/base verified and applied exactly ONCE, diff exact hash. Three test files
+styles only11+/3-, same callback formatting in full MCPS overlay; nonwhitespace
+tokens/directives/assertions unchanged. Root dirty6edd1888 NOT clean final QA.
+New clean product canonical ROOT QA and appropriate actual helper/unit suites and
+MCP/history collections DUE before fresh full reviews. Older104 on older helper
+bytes NOT transferred; no canonical tests replayed C40. Firstfailures preserved.
