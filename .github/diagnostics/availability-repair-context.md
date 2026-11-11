@@ -2,8 +2,8 @@
 
 ## Current selection after explicit ROOT H77 source-helper decision
 
-Product **937e8f6da1b2bb8d05e0fe1b3142ca87e5592b10**, tree **9f52901ebbffbfeb9021690cf22aaccf5954b7b8**,
-parent4969; canonicalQA ROOT DUE on this clean exact commit. Only
+Product **6b9bd17241f0bb736bc0884e5e54c69a8ea3437e**, tree **ccddd879c4c42aed4d7c8025e6b7c5329b5d8ed8**,
+parent937e; canonicalQA ROOT DUE on this clean exact commit. Only
 `tests/e2e/availability-probe.ts` and its real existing source regression suite
 `apps/web/tests/availability-read.test.ts` changed. Runtimeb186/apps/factory/TypeError,
 MCPS/browser assertions, budgets/profiles/auth/grants remain immutable.
@@ -168,3 +168,28 @@ remains historicalRED, not selected. Prior4969Node20PASS remains source proof
 on4969 only, no native proof/currentQA. ROOT exact clean-commit QA then fresh
 COMPLETE ALLproduct+ALLobserver/archives/callers FULLs required, not launched early.
 No additional functional edits or runtime mutation, no CI/PR/native effects.
+
+R77/H78 COMPLETE independent FULLs on937e/0f18 are archived NONclean, no transfer.
+R77 helper cross-option mutation confirmed: actual native dictionary captures A,
+window accessor swaps metadata toB, Bownedabort plus ORIGINAL AAbortError could
+look aborted:true. Actual bootstrap diagnostics reference937e wrongownedcount1 in
+both persistent/self-removing accessor variants. Fix snapshots only ordinary own
+data before native conversion, rejects ALL accessor/coercible option metadata,
+original native invocation/promise/cause untouched. Two permanent SAMEhelper
+Vitest regressions prepared. Runtime/factory/app/PR731 unchanged. New source
+bootstrap candidate wrongownedcount0/explicitobserverfailure, ORIGINAL rejection
+identical. This is helper SOURCE correctness, not native47/1 causality.
+H78 selected abort recorder uses captured native abortedGetter in protected
+observation, brackets retired even when original throws. Three actual-controller
+RED0f18 cases nowGREEN; original exception preserved and later outside-call actual
+abort cannot inherit leaked bracket. Selected controller30PASS. Archived ordinary
+abort/json now preserve native this/args/returns and avoid instance signal getter;
+three actualbootstrap RED0f18/GREENcandidate. Declared outside-call adapter remains
+distinct; no oldnative workload or PromiseState acquisition selected.
+Actual source controller comparisons on final tests: product937e23PASS/2ASSERTFAIL
+vs correctedcandidate25PASS; archived0f18 with correctedproduct22PASS/3ASSERTFAIL.
+Repin guards/control/manifests currentproduct above; overlay originals unchanged
+and verified. ROOT prior CLEAN937eQA1882 is historical on937e only; newproduct
+canonicalQA DUE before fresh FULL ALL12product+ALL22observer/archives+pin. Sources
+reviewed were frozen; edits only after BOTH reviews completed. No CI/native/PR
+admission, no oldverdict/QA transferred, P1OPEN/slotROOT/otherheavyHOLD.

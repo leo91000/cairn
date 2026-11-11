@@ -146,13 +146,19 @@ export function observeDirectOwners() {
       return Reflect.apply(abort, this, args)
     const call = { signal }
     abortCalls.push(call)
-    record('parent-abort-call-enter', { ...owner, alreadyAborted: signal.aborted })
     try {
+      try { record('parent-abort-call-enter', { ...owner, alreadyAborted: Reflect.apply(abortedGetter, signal, []) }) }
+      catch { observerFailures++ }
       return Reflect.apply(abort, this, args)
     }
     finally {
-      record('parent-abort-call-return', { ...owner, aborted: signal.aborted })
-      abortCalls.pop()
+      try { record('parent-abort-call-return', { ...owner, aborted: Reflect.apply(abortedGetter, signal, []) }) }
+      catch { observerFailures++ }
+      const index = abortCalls.lastIndexOf(call)
+      if (index >= 0)
+        abortCalls.splice(index, 1)
+      else
+        observerFailures++
     }
   }
   window.fetch = function (...args) {

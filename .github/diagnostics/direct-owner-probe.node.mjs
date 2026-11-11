@@ -13,6 +13,8 @@ import { observeDirectOwners, projectDirectOwners, createDirectOwnerObserver } f
 function fixture(t, options = {}) {
   const originalAny = AbortSignal.any
   const originalAbort = AbortController.prototype.abort
+  if (options.abortFailure)
+    AbortController.prototype.abort = function () { throw options.abortFailure }
   const originalJson = Response.prototype.json
   const originalJsonPromises = new WeakMap()
   Response.prototype.json = function (...args) {
@@ -67,7 +69,7 @@ function fixture(t, options = {}) {
   const signal = () => context.AbortSignal.any([generation.signal, control.signal])
   return {
     context, fetch: invokeFetch, Source, generation, control, signal, queue, requests, storage, ingresses,
-    closeResult, originalJsonPromises, callbacks,
+    closeResult, originalJsonPromises, callbacks, unwrappedAbort: originalAbort,
     snapshot: () => context.__c40DirectOwnerReceipt.snapshot(),
     async authorize() {
       const native = Promise.withResolvers()
@@ -575,4 +577,44 @@ test('H76 lifecycle receipt refuses gaps, wrong context, untrusted or reversed l
   ]
   for (const journal of variants)
     assert.equal(projectDirectOwners(journal, privateErrors, 0, completeClosure).receiptStatus, 'UNKNOWN')
+})
+
+
+for (const throwsOnRead of [1, 2]) {
+  test(`H78 selected recorder preserves original abort with an own aborted getter throwing on read ${throwsOnRead}`, async (t) => {
+    const f = fixture(t)
+    await f.authorize()
+    const signal = f.control.signal
+    let reads = 0
+    Object.defineProperty(signal, 'aborted', { get() {
+      if (++reads === throwsOnRead)
+        throw new Error('observer property getter refusal')
+      return false
+    } })
+    const cause = new DOMException('same original reason', 'AbortError')
+    assert.doesNotThrow(() => f.control.abort(cause))
+    const aborted = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'aborted').get
+    assert.equal(Reflect.apply(aborted, signal, []), true)
+    assert.equal(reads, 0)
+    const journal = f.snapshot().journal
+    assert.equal(journal.filter(event => event.kind === 'parent-abort-call-enter' && event.role === 'control').length, 1)
+    assert.equal(journal.filter(event => event.kind === 'parent-abort-call-return' && event.role === 'control').length, 1)
+    assert.equal(f.snapshot().observerFailures, 0)
+  })
+}
+
+test('H78 selected recorder keeps an ORIGINAL abort exception and still retires its observation bracket', async (t) => {
+  const cause = new Error('original controlled abort throw')
+  const f = fixture(t, { abortFailure: cause })
+  await f.authorize()
+  Object.defineProperty(f.control.signal, 'aborted', { get() { throw new Error('metadata must not replace original cause') } })
+  assert.throws(() => f.control.abort(), error => error === cause)
+  // A later actual native abort outside the wrapper must not inherit a leaked
+  // recorder bracket from that throwing invocation.
+  Reflect.apply(f.unwrappedAbort, f.control, [new DOMException('later outside-call reason', 'AbortError')])
+  const journal = f.snapshot().journal
+  assert.equal(journal.find(event => event.kind === 'parent-abort-event' && event.role === 'control').insideOwnAbortCall, false)
+  assert.equal(journal.filter(event => event.kind === 'parent-abort-call-enter' && event.role === 'control').length, 1)
+  assert.equal(journal.filter(event => event.kind === 'parent-abort-call-return' && event.role === 'control').length, 1)
+  assert.equal(f.snapshot().observerFailures, 0)
 })

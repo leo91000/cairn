@@ -36,6 +36,13 @@ function fixture(t, name) {
   const originals = new Map()
   const bodyCalls = []
   const originalAbort = AbortController.prototype.abort
+  const abortCalls = []
+  const abortResult = Symbol('original abort return stand-in')
+  AbortController.prototype.abort = function (...args) {
+    abortCalls.push({ receiver: this, args })
+    Reflect.apply(originalAbort, this, args)
+    return abortResult
+  }
   for (const method of ['json', 'text', 'arrayBuffer', 'blob', 'formData']) {
     const original = Response.prototype[method]
     originals.set(method, original)
@@ -71,7 +78,7 @@ function fixture(t, name) {
     sessionStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
     cairnAvailabilityRecord: (...args) => { events.push(args); return Promise.resolve() },
     nativeStateReceipt: (...args) => { events.push(args); return Promise.resolve() },
-    URL, Request, Response, AbortController, AbortSignal, Object, EventSource: NativeSource, crypto,
+    URL, Request, Response, AbortController, AbortSignal, DOMException, Error, TypeError, Object, EventSource: NativeSource, crypto,
     Event, MessageEvent, Promise, performance,
     MessageChannel: class {
       constructor() {
@@ -95,7 +102,7 @@ function fixture(t, name) {
   runInContext(`(${bootstrap})(${name === 'availability-reader-native.mjs' ? JSON.stringify('pre-pagehide-original-body') : ''});`, context)
   const ownWindow = runInContext('window', context)
   const fetch = (...args) => Reflect.apply(context.fetch, ownWindow, args)
-  return { context, fetch, queue, calls, bodyCalls, events, closeResult, NativeSource }
+  return { context, fetch, queue, calls, bodyCalls, events, closeResult, NativeSource, abortCalls, abortResult }
 }
 for (const name of ['skill-availability-probe.ts', 'b534-navigation-probe.ts']) {
   test(`${name}: actual bootstrap preserves original fetch promise, arguments and receiver`, async (t) => {
@@ -236,4 +243,84 @@ test('H77 B534 native constructor resource/prototype survives unsupported coerci
   assert.equal(conversions, 1)
   assert.equal(Object.getPrototypeOf(returned), f.NativeSource.prototype)
   assert.equal(returned.readyState, 0)
+})
+
+
+if (process.argv.includes('--product-reference')) {
+  for (const removesAccessor of [false, true]) {
+    test(`R77 actual product probe refuses cross-option signal mutation (self-removing accessor ${removesAccessor})`, async (t) => {
+      const f = fixture(t, 'availability-probe.ts')
+      const actual = new AbortController()
+      const unrelated = new AbortController()
+      const original = Promise.withResolvers()
+      const cause = new DOMException('same ORIGINAL native A failure', 'AbortError')
+      let used
+      let options
+      options = {
+        signal: actual.signal,
+        get window() {
+          options.signal = unrelated.signal
+          if (removesAccessor)
+            delete options.window
+          return undefined
+        },
+      }
+      // Model only the relevant native dictionary conversion order. The actual
+      // observer bootstrap is executed unchanged; no helper logic is copied.
+      f.queue.push((_, init) => {
+        used = init.signal
+        void init.window
+        used.addEventListener('abort', () => original.reject(cause), { once: true })
+        return original.promise
+      })
+      const returned = f.fetch('/api/installations', options)
+      assert.equal(returned, original.promise)
+      assert.equal(used, actual.signal)
+      unrelated.abort(new DOMException('different B reason', 'AbortError'))
+      const rejected = assert.rejects(returned, error => error === cause)
+      actual.abort(cause)
+      await rejected
+      await setImmediate()
+      const journal = f.events.map(args => args[0]).filter(value => value && typeof value === 'object')
+      t.diagnostic(JSON.stringify({ nativeUsedA: used === actual.signal, observerFailures: journal.filter(event => event.kind === 'observer-failed').length, wrongOwnedRejectionCount: journal.filter(event => event.kind === 'rejected' && event.aborted === true).length }))
+      assert.equal(journal.some(event => event.kind === 'observer-failed'), true)
+      assert.equal(journal.some(event => event.kind === 'rejected' && event.aborted === true), false)
+    })
+  }
+}
+
+
+test('H78 archived ordinary abort preserves exact arguments and an original native result', (t) => {
+  const f = fixture(t, 'availability-reader-native.mjs')
+  for (const args of [[], [new DOMException('original reason', 'AbortError'), 'extra']]) {
+    const controller = new f.context.AbortController()
+    const returned = Reflect.apply(controller.abort, controller, args)
+    assert.equal(returned, f.abortResult)
+    assert.equal(f.abortCalls.at(-1).receiver, controller)
+    assert.deepEqual(f.abortCalls.at(-1).args, args)
+  }
+})
+
+test('H78 archived ordinary abort never reads an instance signal accessor before the original', (t) => {
+  const f = fixture(t, 'availability-reader-native.mjs')
+  const controller = new f.context.AbortController()
+  const signal = controller.signal
+  Object.defineProperty(controller, 'signal', { get() { throw new Error('observer-only instance getter refusal') } })
+  let returned
+  assert.doesNotThrow(() => { returned = controller.abort() })
+  assert.equal(returned, f.abortResult)
+  assert.equal(f.abortCalls.length, 1)
+  assert.equal(signal.aborted, true)
+})
+
+test('H78 archived original JSON consumer retains exact arguments and native promise', async (t) => {
+  const f = fixture(t, 'availability-reader-native.mjs')
+  const response = Response.json({ original: true })
+  f.queue.push(Promise.resolve(response))
+  const returned = await f.fetch('/api/installations')
+  const original = Reflect.apply(returned.json, returned, ['extra', undefined])
+  assert.equal(original, f.bodyCalls.at(-1).promise)
+  assert.deepEqual(f.bodyCalls.at(-1).args, ['extra', undefined])
+  assert.equal(f.bodyCalls.at(-1).receiver, returned)
+  assert.deepEqual(await original, { original: true })
 })

@@ -155,17 +155,31 @@ function nativeDiagnostics(mode) {
     })
   }
   const signals = new WeakMap()
-  AbortController.prototype.abort = function (reason) {
-    const target = signals.get(this.signal)
-    if (mode === 'outside-call' && target === 2) {
-      queueMicrotask(() => abort.call(this, reason))
-      record('deferred-owned-call-return', { read: target })
-      return
-    }
-    return abort.call(this, reason)
-  }
   const observationFailed = () => {
     try { record('observer-failed') } catch {}
+  }
+  let controllerPrototype = AbortController.prototype
+  let controllerSignal
+  while (controllerPrototype && !controllerSignal) {
+    controllerSignal = Object.getOwnPropertyDescriptor(controllerPrototype, 'signal')?.get
+    controllerPrototype = Object.getPrototypeOf(controllerPrototype)
+  }
+  AbortController.prototype.abort = function (...args) {
+    let target
+    try {
+      if (controllerSignal)
+        target = signals.get(Reflect.apply(controllerSignal, this, []))
+      else
+        observationFailed()
+    }
+    catch { observationFailed() }
+    if (mode === 'outside-call' && target === 2) {
+      queueMicrotask(() => Reflect.apply(abort, this, args))
+      try { record('deferred-owned-call-return', { read: target }) }
+      catch { observationFailed() }
+      return
+    }
+    return Reflect.apply(abort, this, args)
   }
   window.fetch = function (...args) {
     // Only the declared proof-without-terminal negative changes a wire signal.
@@ -229,8 +243,8 @@ function nativeDiagnostics(mode) {
     return original
   }
 
-  Response.prototype.json = function () {
-    const original = json.call(this)
+  Response.prototype.json = function (...args) {
+    const original = Reflect.apply(json, this, args)
     const current = responses.get(this)
     if (current) {
       // Fixture reference only: preserve and return the ORIGINAL native promise.
