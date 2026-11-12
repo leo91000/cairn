@@ -330,7 +330,9 @@ Hook rules ([guide](HOOK-RULES.md)) use the same definitions as HTTP and
 `replace_hook_rule`, `set_hook_rule_enabled`, `set_hook_rule_emergency_pause`,
 `lift_hook_rule_budget`, `duplicate_hook_rule` and `delete_hook_rule` use manage. A rule
 created through the public MCP belongs to the owner who authorized the client; scopes
-alone give it no native authority.
+alone give it no native authority. Plugin rule templates are listed with
+`list_hook_rule_templates` (read) and installed with `install_hook_rule_template`
+(manage), which creates ordinary rules for the same owner, all or none.
 
 `get_installation_settings`, `get_installation_overview`, `list_audit` and
 `get_storage_settings` use the read scope; storage views never contain credentials.

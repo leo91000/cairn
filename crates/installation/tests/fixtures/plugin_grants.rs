@@ -38,6 +38,8 @@ pub(crate) struct Fixture {
     pub(crate) hold_upload: Arc<AtomicBool>,
     pub(crate) upload_entered: Arc<tokio::sync::Notify>,
     pub(crate) upload_release: Arc<tokio::sync::Notify>,
+    pub(crate) manifest: Value,
+    pub(crate) source: &'static str,
 }
 
 impl Fixture {
@@ -308,7 +310,7 @@ return {
         let installed = common::package_install(
             &s,
             &json!({
-                "manifest": manifest,
+                "manifest": manifest.clone(),
                 "source": source,
             }),
         )
@@ -370,7 +372,26 @@ return {
             hold_upload,
             upload_entered,
             upload_release,
+            manifest,
+            source,
         }
+    }
+
+    /// Installs and approves another version of the probe package, which becomes active.
+    pub(crate) async fn publish(&self, manifest: &Value) -> Result<Value> {
+        let installed = common::package_install(
+            &self.s,
+            &json!({ "manifest": manifest, "source": self.source }),
+        )
+        .await?;
+        common::package_approve(
+            &self.s,
+            "grant-probe",
+            text(manifest, "version"),
+            text(&installed, "digest"),
+        )
+        .await?;
+        Ok(installed)
     }
 
     pub(crate) async fn marker(&self, value: &str) {

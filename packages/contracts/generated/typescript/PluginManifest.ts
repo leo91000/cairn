@@ -9,6 +9,7 @@ import type { PluginInstances } from './PluginInstances'
 import type { PluginProgram } from './PluginProgram'
 import type { PluginProjectSource } from './PluginProjectSource'
 import type { PluginResourceType } from './PluginResourceType'
+import type { PluginRuleTemplate } from './PluginRuleTemplate'
 import type { PluginRunCredentials } from './PluginRunCredentials'
 import type { PluginSetup } from './PluginSetup'
 import type { PluginSkillSource } from './PluginSkillSource'
@@ -42,6 +43,10 @@ export interface PluginManifest {
   tools?: Array<PluginTool>
   hooks?: Array<PluginHook>
   resources?: Array<PluginResourceType>
+  /**
+   * Ready-made sets of hook rules people install with their own parameters.
+   */
+  ruleTemplates?: Array<PluginRuleTemplate>
   /**
    * Added to the prompt of runs whose agent is granted on an enabled instance.
    */

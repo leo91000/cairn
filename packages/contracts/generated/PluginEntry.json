@@ -514,6 +514,14 @@
           },
           "type": "array"
         },
+        "ruleTemplates": {
+          "default": [],
+          "description": "Ready-made sets of hook rules people install with their own parameters.",
+          "items": {
+            "$ref": "#/definitions/PluginRuleTemplate"
+          },
+          "type": "array"
+        },
         "runCredentials": {
           "anyOf": [
             {
@@ -760,6 +768,79 @@
       "required": [
         "name",
         "description"
+      ],
+      "type": "object"
+    },
+    "PluginRuleTemplate": {
+      "additionalProperties": false,
+      "description": "A set of hook rules. Each rule is a hook rule definition without the instance: its\nplugin trigger and tool calls use the instance it is installed from. Any JSON value\nmay be `{\"$parameter\": name}`, or `{\"$parameter\": name, \"field\": \"id\"}` for the\nidentifiers of a resource parameter.",
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parameters": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginRuleTemplateParameter"
+          },
+          "type": "array"
+        },
+        "rules": {
+          "items": true,
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "rules"
+      ],
+      "type": "object"
+    },
+    "PluginRuleTemplateParameter": {
+      "additionalProperties": false,
+      "properties": {
+        "default": {
+          "description": "For `text`, `number` and `boolean` only."
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "kind": {
+          "pattern": "^(agent|resource|resources|text|number|boolean)$",
+          "type": "string"
+        },
+        "name": {
+          "description": "Referenced by `{\"$parameter\": name}` in the template's rules.",
+          "type": "string"
+        },
+        "required": {
+          "default": false,
+          "type": "boolean"
+        },
+        "resourceType": {
+          "description": "A resource type the manifest declares, for `resource` and `resources`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "kind"
       ],
       "type": "object"
     },

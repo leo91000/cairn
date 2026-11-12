@@ -1,0 +1,122 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "HookRuleTemplate": {
+      "additionalProperties": false,
+      "description": "A rule template a plugin instance offers. Its rules use that instance.",
+      "properties": {
+        "instanceId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "instanceName": {
+          "type": "string"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "pluginVersion": {
+          "type": "string"
+        },
+        "template": {
+          "$ref": "#/definitions/PluginRuleTemplate"
+        }
+      },
+      "required": [
+        "instanceId",
+        "instanceName",
+        "pluginId",
+        "pluginVersion",
+        "template"
+      ],
+      "type": "object"
+    },
+    "PluginRuleTemplate": {
+      "additionalProperties": false,
+      "description": "A set of hook rules. Each rule is a hook rule definition without the instance: its\nplugin trigger and tool calls use the instance it is installed from. Any JSON value\nmay be `{\"$parameter\": name}`, or `{\"$parameter\": name, \"field\": \"id\"}` for the\nidentifiers of a resource parameter.",
+      "properties": {
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parameters": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PluginRuleTemplateParameter"
+          },
+          "type": "array"
+        },
+        "rules": {
+          "items": true,
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "rules"
+      ],
+      "type": "object"
+    },
+    "PluginRuleTemplateParameter": {
+      "additionalProperties": false,
+      "properties": {
+        "default": {
+          "description": "For `text`, `number` and `boolean` only."
+        },
+        "description": {
+          "default": "",
+          "type": "string"
+        },
+        "kind": {
+          "pattern": "^(agent|resource|resources|text|number|boolean)$",
+          "type": "string"
+        },
+        "name": {
+          "description": "Referenced by `{\"$parameter\": name}` in the template's rules.",
+          "type": "string"
+        },
+        "required": {
+          "default": false,
+          "type": "boolean"
+        },
+        "resourceType": {
+          "description": "A resource type the manifest declares, for `resource` and `resources`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "title",
+        "kind"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "templates": {
+      "items": {
+        "$ref": "#/definitions/HookRuleTemplate"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "templates"
+  ],
+  "title": "ListHookRuleTemplatesOutput",
+  "type": "object"
+}

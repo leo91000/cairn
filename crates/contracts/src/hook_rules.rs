@@ -761,3 +761,57 @@ pub struct HookRuleCatalog {
     pub agents: Vec<RuleCatalogAgent>,
     pub limits: RuleCatalogLimits,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListHookRuleTemplatesInput {
+    /// Only the templates of this instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub instance_id: Option<PluginInstanceId>,
+}
+
+/// A rule template a plugin instance offers. Its rules use that instance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HookRuleTemplate {
+    pub instance_id: PluginInstanceId,
+    pub instance_name: String,
+    pub plugin_id: String,
+    pub plugin_version: String,
+    pub template: cairn_plugin_api::RuleTemplate,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListHookRuleTemplatesOutput {
+    pub templates: Vec<HookRuleTemplate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstallHookRuleTemplateInput {
+    /// A random UUID: retrying returns the same rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub creation_id: Option<HookRuleId>,
+    pub instance_id: PluginInstanceId,
+    #[schemars(length(min = 1, max = 40))]
+    pub template: String,
+    /// Values by parameter name: an agent identifier, `{resourceType, id}`, a list of
+    /// them, a text, a number or a boolean. Omitted optional parameters take their default.
+    #[ts(type = "Record<string, any>")]
+    #[schemars(extend("x-cairn-json-object" = true))]
+    pub parameters: BTreeMap<String, serde_json::Value>,
+    /// The new rules trigger at once unless they start disabled.
+    #[serde(default = "enabled")]
+    #[schemars(default, extend("default" = true))]
+    pub enabled: bool,
+}
+
+/// Ordinary rules owned by whoever installed the template, with no link to it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InstallHookRuleTemplateOutput {
+    pub rules: Vec<HookRule>,
+}
