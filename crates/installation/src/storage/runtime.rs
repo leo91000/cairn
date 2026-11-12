@@ -1660,7 +1660,9 @@ mod tests {
     async fn running_journal_pressure_consolidates_without_guest_control_or_turn_completion() {
         let root = tempfile::tempdir().unwrap();
         let (volume, _, _) = controller_fixture(root.path()).await;
-        volume.disk.write_at(0, b"running").unwrap();
+        let mut initial = [0; 4096];
+        initial[..7].copy_from_slice(b"running");
+        volume.disk.write_at(0, &initial).unwrap();
         monitor_consolidation(&volume, 4096);
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             while volume.disk.accounting().unwrap()["dirtyBytes"] != 0 {
