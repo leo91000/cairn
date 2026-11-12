@@ -331,7 +331,7 @@ async fn disk_storage(
     }
     let directory = crate::storage::environment::directory(&broker.state, run)?;
     if !crate::storage::runtime::exists(&directory) {
-        return Err(Error::conflict("Conversation has no S3-backed journal."));
+        return Err(Error::conflict("Conversation has no local journal."));
     }
     if operation == "storage-status" {
         let volume = crate::storage::runtime::load_for_inspection(&directory).await?;

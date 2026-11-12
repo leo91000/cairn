@@ -74,15 +74,19 @@ def configure_native_s3():
         resource.setrlimit(resource.RLIMIT_NOFILE, (NATIVE_S3_OPEN_FILES, hard))
 
 
-def run_case(repo, env, case):
-    result = subprocess.run(['pnpm', 'test:backend', '-p', 'cairn-installation', '--test', 'nodes', case,
-                             '--', '--ignored', '--nocapture'], cwd=repo, env=env,
+def run_qualification(repo, env, arguments, label):
+    result = subprocess.run(['pnpm', 'test:backend', *arguments], cwd=repo, env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     print(result.stdout, end='', flush=True)
     result.check_returncode()
     import re
     if not re.search(r'^test result: ok\. [1-9][0-9]* passed; 0 failed;', result.stdout, re.MULTILINE):
-        raise RuntimeError(f'No passing S3 qualification selected by {case!r}')
+        raise RuntimeError(f'No passing qualification selected by {label!r}')
+
+
+def run_case(repo, env, case):
+    run_qualification(repo, env, ['-p', 'cairn-installation', '--test', 'nodes', case,
+                                 '--', '--ignored', '--nocapture'], case)
 
 
 def main():
@@ -152,10 +156,8 @@ def main():
         # production. Exercise local storage, retirement and launch without S3.
         client.put_object(Bucket='cairn-node-test', Key='qualification-preserved-object', Body=b'keep legacy disk objects')
         for selected in ['storage::', 'storage_migration::', 'microvm::pool::', 'runner::']:
-            subprocess.run(['pnpm', 'test:backend', '--workspace', '--lib', selected],
-                           cwd=args.repo, env=env, check=True)
-        subprocess.run(['pnpm', 'test:backend', '-p', 'cairn-installation', '--test', 'worker'],
-                       cwd=args.repo, env=env, check=True)
+            run_qualification(args.repo, env, ['--workspace', '--lib', selected], selected)
+        run_qualification(args.repo, env, ['-p', 'cairn-installation', '--test', 'worker'], 'worker')
         assert client.list_objects_v2(Bucket='cairn-node-test').get('KeyCount', 0) == 1
         assert client.get_object(Bucket='cairn-node-test', Key='qualification-preserved-object')['Body'].read() == b'keep legacy disk objects'
 

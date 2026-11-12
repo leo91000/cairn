@@ -393,7 +393,7 @@ impl Vm {
         let volume = crate::storage::runtime::load(&disk_dir).await?;
         if volume.disk.size() != resources.disk_mi_b * 1024 * 1024 {
             return Err(Error::conflict(
-                "VM disk size does not match its S3-backed journal.",
+                "VM disk size does not match its local journal.",
             ));
         }
         volume.limit_backing(resources.disk_mi_b * 1024 * 1024)?;

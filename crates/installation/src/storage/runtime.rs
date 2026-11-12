@@ -338,8 +338,8 @@ fn monitor_consolidation(volume: &Arc<Volume>, journal_threshold: u64) {
     });
 }
 
-/// Run one consolidation without retaining the volume, so its release and a
-/// later reopen never wait for it. Returns false when it should be retried later.
+/// Drain sealed work without retaining the volume. Contention and transient
+/// failures keep the disk scheduled after execution releases its ownership.
 async fn consolidate(disk: Arc<LazyDisk>) -> bool {
     let stop = disk.consolidation_stop();
     let _background = tokio::select! {
@@ -474,7 +474,8 @@ fn try_inspect(directory: &Path) -> Result<Option<Arc<Volume>>> {
     try_open_with_intent(directory, open_volume, false)
 }
 
-pub async fn load_for_inspection(directory: &Path) -> Result<Arc<Volume>> {
+/// Observation waits for detached maintenance without asking it to yield.
+pub(crate) async fn load_for_inspection(directory: &Path) -> Result<Arc<Volume>> {
     load_with_opener(directory, std::time::Duration::from_secs(60), try_inspect).await
 }
 

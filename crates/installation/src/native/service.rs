@@ -1453,10 +1453,17 @@ impl Controller {
                 _ = timer.tick() => {
                     let leased = self.leased(id).await;
                     let expired = self.expired(id, plan["expires"].as_i64()).await;
-                    let workspace_bytes = view.filesystems.iter().try_fold(0u64, |total, path| block::used_bytes(path).map(|used| total.saturating_add(used)))?;
-                    let disk_directory = crate::storage::environment::directory(&self.state, text(&plan, "runId"))?;
-                    let local_backing = tokio::task::spawn_blocking(move || crate::microvm::budget::allocated(&disk_directory))
-                        .await.map_err(Error::internal)??;
+                    let workspace_bytes = view.filesystems.iter().try_fold(0u64, |total, path| {
+                        block::used_bytes(path).map(|used| total.saturating_add(used))
+                    })?;
+                    let disk_directory = crate::storage::environment::directory(
+                        &self.state, text(&plan, "runId"),
+                    )?;
+                    let local_backing = tokio::task::spawn_blocking(move || {
+                        crate::microvm::budget::allocated(&disk_directory)
+                    })
+                    .await
+                    .map_err(Error::internal)??;
                     let workspace_bytes = workspace_bytes.max(local_backing);
                     let temporary_bytes = disk::bytes_if_present(&temporary).await?;
                     let conversation_bytes = workspace_bytes.saturating_add(temporary_bytes);
