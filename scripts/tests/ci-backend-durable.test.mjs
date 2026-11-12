@@ -127,7 +127,7 @@ function current(pid, read = readFileSync) {
     text = read(`/proc/${pid}/stat`, 'utf8')
   }
   catch (error) {
-    if (error.code === 'ENOENT')
+    if (error.code === 'ENOENT' || error.code === 'ESRCH')
       return undefined
     throw error
   }
@@ -217,9 +217,9 @@ it('reads a complete process identity even when its command contains parentheses
   assert.deepEqual(current(ownedProcess.pid, () => procStat()), activeProcess)
 })
 
-it('accepts only ENOENT as a missing process identity', () => {
+it.each(['ENOENT', 'ESRCH'])('accepts %s as a missing process identity', (code) => {
   assert.equal(current(ownedProcess.pid, () => {
-    throw Object.assign(new Error('gone'), { code: 'ENOENT' })
+    throw Object.assign(new Error('gone'), { code })
   }), undefined)
   for (const code of ['EACCES', 'EPERM', 'EIO']) {
     const error = Object.assign(new Error('unreadable'), { code })
