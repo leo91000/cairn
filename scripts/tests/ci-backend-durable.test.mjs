@@ -127,7 +127,7 @@ function current(pid, read = readFileSync) {
     text = read(`/proc/${pid}/stat`, 'utf8')
   }
   catch (error) {
-    if (error.code === 'ENOENT')
+    if (error.code === 'ENOENT' || error.code === 'ESRCH')
       return undefined
     throw error
   }
@@ -217,9 +217,9 @@ it('reads a complete process identity even when its command contains parentheses
   assert.deepEqual(current(ownedProcess.pid, () => procStat()), activeProcess)
 })
 
-it('accepts only ENOENT as a missing process identity', () => {
+it.each(['ENOENT', 'ESRCH'])('accepts %s as a missing process identity', (code) => {
   assert.equal(current(ownedProcess.pid, () => {
-    throw Object.assign(new Error('gone'), { code: 'ENOENT' })
+    throw Object.assign(new Error('gone'), { code })
   }), undefined)
   for (const code of ['EACCES', 'EPERM', 'EIO']) {
     const error = Object.assign(new Error('unreadable'), { code })
@@ -293,6 +293,24 @@ it('preserves individual fixture outcomes while always running cleanup', async (
 // one-second window even without contention. Exercise both publisher timings.
 it.each([0, 250])('commits source/clock/startup before the real child, checkpoints a never-exiting child, and keeps timeout nonzero (periodic upload delay %i ms)', async (periodicDelayMs, t) => {
   const f = fixture(t, 'success', periodicDelayMs)
+  const publish = f.options.publish
+  let sampledWorkload = false
+  f.options.publish = async (payload, options) => {
+    const result = await publish(payload, options)
+    if (payload.acquisition === 'periodic' && !sampledWorkload) {
+      // Rolling uploads begin before containment startup finishes. Hold the
+      // first return until the real workload is sampled, so later checkpoints
+      // exercise live processes even when all uploads finish quickly.
+      await vi.waitFor(() => {
+        const proof = readProof(path.join(f.output, 'latest.json'))
+        assert.ok(proof.samples.some(sample => sample.processCount >= 2))
+      }, { timeout: 2000, interval: 10 })
+      sampledWorkload = true
+    }
+
+    return result
+  }
+
   const marker = path.join(f.root, 'child.json')
   f.options.args = ['-e', `
     const fs=require('node:fs');
@@ -405,17 +423,21 @@ for (const mode of ['hang', 'periodic-hang', 'finished-hang']) {
       signal: signal.signal,
       args: mode === 'finished-hang' ? ['-e', 'process.exit(0)'] : f.options.args,
     })
-    const until = Date.now() + 1000
-    const marker = path.join(f.root, 'hanging-uploader')
-    while (!existsSync(marker) && Date.now() < until)
-      await delay(10)
-    assert.ok(existsSync(marker))
-    signal.abort()
-    assert.equal(await result, 130)
-    const pid = JSON.parse(readFileSync(marker, 'utf8'))
-    assert.ok(!isLive({ pid: pid.pid, startTicks: pid.start }))
-    const proof = readProof(path.join(f.output, 'latest.json'))
-    assert.equal(proof.samples.at(-1).processCount, 0)
+    await withCleanup(async () => {
+      const marker = path.join(f.root, 'hanging-uploader')
+      // The final publisher follows the startup upload, containment startup and
+      // command completion; one upload's bound cannot cover that whole path.
+      await vi.waitFor(() => assert.ok(existsSync(marker)), { timeout: 3000, interval: 10 })
+      signal.abort()
+      assert.equal(await result, 130)
+      const pid = JSON.parse(readFileSync(marker, 'utf8'))
+      assert.ok(!isLive({ pid: pid.pid, startTicks: pid.start }))
+      const proof = readProof(path.join(f.output, 'latest.json'))
+      assert.equal(proof.samples.at(-1).processCount, 0)
+    }, async () => {
+      signal.abort()
+      await result
+    })
   })
 }
 
