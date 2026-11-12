@@ -16,6 +16,21 @@ describe('persistent Android tooling', () => {
     for (const option of ['--update', '--sdk_root=/tmp/foo', '../foo', 'system-images;android-36;google_apis;x86_64;evil'])
       expect(() => packages([option])).toThrow(/SDK package/)
   })
+  it.each(['36', '37.0', '37.1', '37.2'])('accepts stable Android platform %s', (version) => {
+    const platform = `platforms;android-${version}`
+    expect(packages(['--accept-licenses', platform, platform])).toEqual(['platform-tools', platform])
+  })
+  it.each([
+    'platforms;android-37.2-beta1',
+    'platforms;android-37.2-rc1',
+    'platforms;android-37.0.1',
+    'platforms;android-37.',
+    'platforms;android-.0',
+    'platforms;android-37.0;evil',
+    'system-images;android-37.0;google_apis;x86_64',
+  ])('rejects unsupported SDK package ID %s', (option) => {
+    expect(() => packages([option])).toThrow(/SDK package/)
+  })
   it('compares Temurin patch and build releases without downgrading or accepting EA', () => {
     const old = 'temurin-21.0.11+10.0.LTS'
     const next = 'temurin-21.0.12+101.0.LTS'
