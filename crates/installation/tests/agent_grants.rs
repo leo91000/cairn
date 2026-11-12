@@ -278,9 +278,14 @@ async fn invalid_live_grants_are_refused() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{key}");
     }
 
-    owner
-        .send("POST", &format!("/api/nodes/{NODE}/revoke"), json!({}))
+    let (status, revoked) = owner
+        .send(
+            "POST",
+            &format!("/api/nodes/{NODE}/revoke"),
+            json!({ "discardWorkingFiles": true }),
+        )
         .await;
+    assert_eq!(status, StatusCode::OK, "{revoked}");
     agent["exclusiveNodes"] = json!([NODE]);
     let (status, _) = owner.send("PUT", &path(&agent), agent).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -441,7 +446,11 @@ async fn deleting_an_agent_or_revoking_a_node_removes_its_live_grants() {
     kept["exclusiveNodes"] = json!([NODE]);
     let (_, kept) = owner.send("PUT", &path(&kept), kept).await;
     let (status, revoked) = owner
-        .send("POST", &format!("/api/nodes/{NODE}/revoke"), json!({}))
+        .send(
+            "POST",
+            &format!("/api/nodes/{NODE}/revoke"),
+            json!({ "discardWorkingFiles": true }),
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "{revoked}");
     assert_eq!(revoked["node"]["exclusiveAgents"], json!([]));
