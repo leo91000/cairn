@@ -408,11 +408,35 @@ pub(crate) fn check_template(text: &str, scope: &Scope) -> Result<(), String> {
     Ok(())
 }
 
-/// The variable roots of a formula, for the editor's author detection and summaries.
-pub(crate) fn mentions(source: &str, word: &str) -> bool {
-    source
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .any(|token| token.eq_ignore_ascii_case(word))
+/// Whether a formula reads a variable or field whose name contains `word`, such as
+/// `payload.author.id` or `authorId`. Text inside string literals does not count.
+pub(crate) fn reads(source: &str, word: &str) -> bool {
+    fn walk(node: &IdedExpr, word: &str) -> bool {
+        let named = |name: &str| name.to_lowercase().contains(word);
+        match &node.expr {
+            Expr::Ident(name) => named(name),
+            Expr::Select(select) => named(&select.field) || walk(&select.operand, word),
+            Expr::Call(call) => {
+                call.target
+                    .as_deref()
+                    .is_some_and(|target| walk(target, word))
+                    || call.args.iter().any(|argument| walk(argument, word))
+            }
+            Expr::List(list) => list.elements.iter().any(|element| walk(element, word)),
+            Expr::Map(map) => map.entries.iter().any(|entry| match &entry.expr {
+                EntryExpr::MapEntry(entry) => walk(&entry.key, word) || walk(&entry.value, word),
+                EntryExpr::StructField(field) => walk(&field.value, word),
+            }),
+            Expr::Comprehension(comprehension) => {
+                walk(&comprehension.iter_range, word)
+                    || walk(&comprehension.loop_step, word)
+                    || walk(&comprehension.loop_cond, word)
+                    || walk(&comprehension.result, word)
+            }
+            Expr::Literal(_) | Expr::Struct(_) | Expr::Unspecified => false,
+        }
+    }
+    parse(source).is_ok_and(|expression| walk(&expression, word))
 }
 
 #[cfg(test)]
@@ -508,5 +532,14 @@ mod tests {
         );
         let many = "{{1}}".repeat(MAX_PLACEHOLDERS + 1);
         assert!(template(&many).is_err());
+    }
+
+    #[test]
+    fn reading_the_author_ignores_text_that_merely_names_it() {
+        assert!(reads("payload.author.id == '1'", "author"));
+        assert!(reads("authorId in ['1']", "author"));
+        assert!(reads("payload.items.exists(i, i.author == 'x')", "author"));
+        assert!(!reads("payload.content.contains('author')", "author"));
+        assert!(!reads("payload.channel == 'support'", "author"));
     }
 }

@@ -38,9 +38,11 @@ Formulas read `payload` (the event), each top-level payload field by its own nam
 CEL standard library, the strings and lists extensions and these Cairn functions:
 `truncate(text, length)`, `chunks(text, size)`, `formatDate(time, format, timezone?)`,
 `lower(text)`, `upper(text)`, `toJson(value)` and `fromJson(text)`. A formula is pure
-and its cost is bounded before it runs: at most 2,000 characters and 300 nodes, no
+and its cost is bounded. Saving checks it: at most 2,000 characters and 300 nodes, no
 more than two nested `all`/`exists`/`exists_one`/`map`/`filter`, no namespaced
-function (such as `lists.range`), no message construction and no optional syntax.
+function (such as `lists.range`), no message construction and no optional syntax. The
+rule engine also caps the size of every intermediate value and the iterations of every
+macro while it evaluates one.
 
 ### Conditions
 
@@ -110,7 +112,8 @@ execution agent; `allowed.viewDetails` says which applies to the reader.
 Removing a hook or tool from an execution agent is refused to `cairn_installation`
 while a rule of a current account uses it on that agent, resource restrictions
 included and whatever the rule's state. The owner may still reduce it from the apps or
-the public MCP, which blocks the rule.
+the public MCP: removing the hook blocks the rule (`rightsLost`), and an action whose
+tool or resource is no longer granted fails when it runs.
 
 ### Warnings
 

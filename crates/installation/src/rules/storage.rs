@@ -53,7 +53,7 @@ pub(crate) fn upgrade(connection: &mut Connection) -> Result<()> {
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // Recheck under the write lock: another startup may have completed the upgrade.
     let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == 31 {
+    if (31..=crate::store::DATABASE_VERSION).contains(&version) {
         return Ok(());
     }
     if version != 30 {
@@ -275,7 +275,7 @@ impl Db<'_> {
     ) -> Result<Vec<String>> {
         Ok(self
             .0
-            .prepare_cached("SELECT DISTINCT rule_id FROM hook_rule_uses WHERE (?1 IS NULL OR (agent_id=?1 AND kind IN ('executionAgent','startedAgent'))) AND (?2 IS NULL OR (instance_id=?2 AND kind IN ('hook','tool'))) ORDER BY rule_id")?
+            .prepare_cached("SELECT id FROM hook_rules WHERE (?1 IS NULL OR id IN (SELECT rule_id FROM hook_rule_uses WHERE agent_id=?1 AND kind IN ('executionAgent','startedAgent'))) AND (?2 IS NULL OR id IN (SELECT rule_id FROM hook_rule_uses WHERE instance_id=?2 AND kind IN ('hook','tool'))) ORDER BY id")?
             .query_map(params![agent, instance], |row| row.get(0))?
             .collect::<rusqlite::Result<_>>()?)
     }

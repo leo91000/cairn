@@ -18,6 +18,8 @@ pub(crate) const MAX_NODES: usize = 200;
 pub(crate) const MAX_DEPTH: usize = 8;
 pub(crate) const MAX_CONDITION_DEPTH: usize = 6;
 pub(crate) const MAX_LITERAL: usize = 16_384;
+/// Fits the apps' request limit, so a saved rule can always be saved again.
+pub(crate) const MAX_DEFINITION: usize = 120_000;
 pub(crate) const MAX_WAIT_SECONDS: u32 = 7 * 86_400;
 pub(crate) const MAX_TRIGGERINGS_PER_HOUR: u32 = 600;
 pub(crate) const MAX_CONVERSATIONS_PER_HOUR: u32 = 100;
@@ -113,6 +115,12 @@ pub(crate) fn check(db: &Db<'_>, request: &Request<'_>) -> Result<Checked> {
     let name = definition.name.trim();
     if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
         checker.problem("/name", "Enter a name of 1 to 100 characters.");
+    }
+    if serde_json::to_vec(definition).map_or(true, |bytes| bytes.len() > MAX_DEFINITION) {
+        checker.problem(
+            "",
+            "A rule has at most 120 KB: shorten its texts or split it.",
+        );
     }
     if definition.description.chars().count() > 2000 {
         checker.problem("/description", "A description has at most 2000 characters.");
@@ -337,7 +345,7 @@ pub(crate) fn tests_author(nodes: &[RuleNode]) -> bool {
             RuleCondition::Compare { left, right, .. } => {
                 mentions_author(left) || right.as_ref().is_some_and(mentions_author)
             }
-            RuleCondition::Formula { expression } => formula::mentions(expression, "author"),
+            RuleCondition::Formula { expression } => formula::reads(expression, "author"),
             RuleCondition::AuthorIn { .. }
             | RuleCondition::AuthorStartedConversation { .. }
             | RuleCondition::AuthorQuota { .. } => true,
@@ -439,18 +447,22 @@ fn check_tool(
     }
     let schema = &declaration.input_schema;
     let properties = schema["properties"].as_object();
-    let closed = schema["additionalProperties"] == false;
+    let closed =
+        schema["additionalProperties"] == false && schema.get("patternProperties").is_none();
     for (key, value) in input {
         let property = properties.and_then(|properties| properties.get(key));
-        if property.is_none() && (closed || properties.is_some()) {
+        if property.is_none() && closed {
             checker.problem(
                 &format!("{path}/input/{}", pointer(key)),
                 &format!("{tool} has no input named {key}."),
             );
             continue;
         }
-        if let (Some(property), RuleValue::Literal { value }) = (property, value)
-            && !jsonschema::is_valid(property, value)
+        // A property may refer to the rest of its schema: one that does not compile alone
+        // is checked when the tool is called.
+        let validator = property.and_then(|property| jsonschema::validator_for(property).ok());
+        if let (Some(validator), RuleValue::Literal { value }) = (validator, value)
+            && !validator.is_valid(value)
         {
             checker.problem(
                 &format!("{path}/input/{}", pointer(key)),
@@ -493,11 +505,22 @@ fn actions_with_paths<'a>(
     }
 }
 
+/// A payload field readable as a variable of its own.
 fn identifier(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()
         .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && name.len() <= 40
+}
+
+/// A name the rule chooses: a value's name may start with a capital, an item's not.
+fn name(name: &str, capital: bool) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_lowercase() || capital && first.is_ascii_uppercase())
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
         && name.len() <= 40
 }
@@ -598,7 +621,7 @@ impl Checker {
                     ..
                 } => {
                     self.value(items, &format!("{path}/items"), scope);
-                    if !identifier(item_name)
+                    if !name(item_name, false)
                         || RESERVED.contains(&item_name.as_str())
                         || scope.names.contains(item_name)
                     {
@@ -666,7 +689,7 @@ impl Checker {
                 name,
                 value,
             } => {
-                if !identifier(name) {
+                if !self::name(name, true) {
                     self.problem(
                         &format!("{path}/name"),
                         "Name the value with letters, digits and _ (at most 40).",
@@ -705,6 +728,14 @@ impl Checker {
                 }
             }
         }
+    }
+
+    /// The author comes from the event; a fixed value would test nobody.
+    fn author(&mut self, author: &RuleValue, path: &str, scope: &Scope) {
+        if matches!(author, RuleValue::Literal { .. }) {
+            self.problem(path, "Choose the payload field that holds the author.");
+        }
+        self.value(author, path, scope);
     }
 
     fn key(&mut self, key: &RuleValue, path: &str, scope: &Scope) {
@@ -809,7 +840,7 @@ impl Checker {
                 }
             }
             RuleCondition::AuthorIn { author, people } => {
-                self.value(author, &format!("{path}/author"), scope);
+                self.author(author, &format!("{path}/author"), scope);
                 if people.is_empty() || people.len() > 200 {
                     self.problem(&format!("{path}/people"), "Choose 1 to 200 people.");
                 }
@@ -827,7 +858,7 @@ impl Checker {
                 }
             }
             RuleCondition::AuthorStartedConversation { author, key } => {
-                self.value(author, &format!("{path}/author"), scope);
+                self.author(author, &format!("{path}/author"), scope);
                 self.key(key, &format!("{path}/key"), scope);
             }
             RuleCondition::ConversationExists { key } => {
@@ -838,7 +869,7 @@ impl Checker {
                 limit,
                 window_minutes,
             } => {
-                self.value(author, &format!("{path}/author"), scope);
+                self.author(author, &format!("{path}/author"), scope);
                 if !(1..=10_000).contains(limit) {
                     self.problem(&format!("{path}/limit"), "Allow 1 to 10000 triggerings.");
                 }
@@ -856,7 +887,12 @@ impl Checker {
 fn mentions_author(value: &RuleValue) -> bool {
     match value {
         RuleValue::Literal { .. } => false,
-        RuleValue::Template { text } => formula::mentions(text, "author"),
-        RuleValue::Formula { expression } => formula::mentions(expression, "author"),
+        RuleValue::Template { text } => formula::template(text).is_ok_and(|parts| {
+            parts.iter().any(|part| match part {
+                formula::Part::Expression(source) => formula::reads(source, "author"),
+                formula::Part::Text(_) => false,
+            })
+        }),
+        RuleValue::Formula { expression } => formula::reads(expression, "author"),
     }
 }

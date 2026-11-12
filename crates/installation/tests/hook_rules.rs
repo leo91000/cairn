@@ -159,6 +159,12 @@ async fn the_owner_creates_versions_and_lists_a_rule_without_running_it() {
     let path = format!("/api/hook-rules?instanceId={}", f.instance);
     let (_, by_instance) = call(&f, OWNER, "GET", &path, Value::Null).await;
     assert_eq!(by_instance["rules"].as_array().unwrap().len(), 1);
+    let path = format!(
+        "/api/hook-rules?agentId={MAIN_AGENT_ID}&instanceId={}",
+        f.instance
+    );
+    let (_, both) = call(&f, OWNER, "GET", &path, Value::Null).await;
+    assert_eq!(both["rules"].as_array().unwrap().len(), 1, "{both}");
     let other = cairn_installation::config::id();
     let path = format!("/api/hook-rules?agentId={other}");
     let (_, by_agent) = call(&f, OWNER, "GET", &path, Value::Null).await;
@@ -312,6 +318,39 @@ async fn saving_refuses_trees_formulas_and_rights_that_do_not_hold() {
         "{messages}"
     );
     assert!(messages.contains("A loop cannot wait"), "{messages}");
+
+    // Names follow the contract, authors come from the event, and a rule stays savable.
+    let mut named = definition(&f, MAIN_AGENT_ID);
+    named["steps"][0]["then"][1]["action"]["name"] = "_tmp".into();
+    named["steps"][0]["condition"]["conditions"][0]["author"] =
+        json!({ "type": "literal", "value": "alice" });
+    let filler = "x".repeat(15_000);
+    for index in 0..9 {
+        named["steps"][0]["otherwise"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "type": "action",
+                "id": format!("fill{index}"),
+                "action": {
+                    "type": "storeValue", "scope": "rule", "name": format!("fill{index}"),
+                    "value": { "type": "literal", "value": filler },
+                },
+            }));
+    }
+    let (_, validated) = call(
+        &f,
+        OWNER,
+        "POST",
+        "/api/hook-rules/validate",
+        json!({ "definition": named }),
+    )
+    .await;
+    let problems = validated["problems"].as_array().unwrap();
+    let at = |path: &str| problems.iter().any(|problem| problem["path"] == path);
+    assert!(at("/steps/0/then/1/action/name"), "{validated}");
+    assert!(at("/steps/0/condition/conditions/0/author"), "{validated}");
+    assert!(at(""), "{validated}");
 }
 
 #[tokio::test]
