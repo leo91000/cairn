@@ -5,7 +5,7 @@ Cairn permet de conduire des conversations avec des agents et de retrouver leur 
 ## Language
 
 **Placement automatique** :
-Le choix d’une node autorisée et disponible pour un nouvel environnement de travail, qu’elle exécute des VM ou des processus natifs. Il ne change jamais la node d’un environnement existant : seul un changement de node confirmé fait repartir une conversation ailleurs.
+Le choix d’une node autorisée et disponible pour un nouvel environnement de travail, qu’elle exécute des VM ou des processus natifs. Il ne change jamais la node d’un environnement existant : seul un changement de node confirmé fait repartir ailleurs une conversation dont l’environnement existe encore.
 
 **Priorité de nodes d’un agent** :
 L’ordre de préférence propre à un agent pour placer ses nouveaux environnements de travail. Une node prioritaire indisponible laisse la place à la suivante, puis aux autres nodes autorisées. Une préférence ne donne aucun droit d’accès.

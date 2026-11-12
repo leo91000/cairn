@@ -12,8 +12,8 @@ disques ([ADR-0008](0008-current-disk-publication-without-archives.md),
 [ADR-0021](0021-final-publication-without-blocking-the-next-turn.md),
 [ADR-0023](0023-periodic-journal-capture-without-guest-freeze.md),
 [ADR-0027](0027-stopped-disk-publication-reader.md),
-[ADR-0036](0036-compressed-immutable-disk-objects.md)) et la réutilisation des
-disques entre backends ([ADR-0054](0054-explicit-conversation-backend-migration.md),
+[ADR-0036](0036-compressed-immutable-disk-objects.md)) et la conversion et la
+réutilisation des disques entre backends ([ADR-0054](0054-explicit-conversation-backend-migration.md),
 [ADR-0082](0082-move-vm-disks-between-execution-backends.md)). Les statuts des
 ADR partiellement concernées indiquent ce qui reste applicable.
 
@@ -35,8 +35,9 @@ L’environnement de travail d’une conversation est purement local à sa node
 d’exécution. Il n’en existe aucune copie distante : la perte ou la révocation d’une
 node entraîne la perte des fichiers de travail des conversations qui s’y trouvent.
 Leur historique, leurs pièces jointes et leurs artefacts restent conservés.
-Révoquer une node fait donc expirer les environnements qu’elle contient ; une
-conversation dont la node est simplement perdue expire lors de sa révocation.
+Révoquer une node fait donc expirer les environnements qu’elle contient, et sa
+confirmation l’indique. L’environnement d’une conversation dont la node est
+simplement perdue expire lors de la révocation de cette node.
 
 Le disque garde son format : le journal local durable
 ([ADR-0007](0007-demand-paged-disks-with-durable-local-journal.md),
@@ -83,15 +84,15 @@ sa prochaine node ne demande pas cet avertissement.
 La destination et les autorisations sont vérifiées avant l’expiration, qui est
 irréversible. Le changement interrompt alors le tour en cours et clôt les questions
 ouvertes ; la destination est fixée pour le nouvel environnement. Sauf lorsque
-l’agent change lui-même de node, une conversation attend ensuite son prochain
-message ; les messages en file et les attentes planifiées démarrent sur la
+l’agent change lui-même la node de sa propre conversation, celle-ci attend ensuite
+son prochain message ; les messages en file et les attentes planifiées démarrent sur la
 destination, et une mission active y reprend automatiquement.
 
-Un agent peut aussi changer sa propre conversation de node avec l’outil
-`move_to_node` de son espace de travail, à condition de confirmer explicitement la
-perte de ses fichiers. Son tour s’arrête, l’environnement expire, puis la
-conversation reprend automatiquement sur la destination dans un environnement vide,
-avec le même avertissement.
+Un agent peut aussi changer sa propre conversation de node, avec l’outil
+`move_to_node` de son espace de travail ou avec `cairn_installation`, à condition de
+confirmer explicitement la perte de ses fichiers. Son tour s’arrête, l’environnement
+expire, puis la conversation reprend automatiquement sur la destination dans un
+environnement vide, avec l’avertissement d’expiration décrit plus haut.
 
 Le placement automatique ([ADR-0073](0073-automatic-agent-placement.md)) choisit
 toujours la node d’un nouvel environnement, mais ne change jamais la node d’un
@@ -127,16 +128,19 @@ anciens blocs du bucket. La note de version demande de pousser les commits et de
 sauvegarder les fichiers à conserver avant la mise à jour. Les fichiers expirés ne
 reviennent qu’avec un retour complet à la base de données sauvegardée avant la mise
 à jour et au bucket correspondant, et seulement jusqu’à leur dernière génération
-publiée. La mise à jour retire le service Garage intégré sans effacer ses données.
-L’exploitant conserve donc le bucket, ses identifiants et ces données tant qu’un
-retour arrière reste envisagé, puis les supprime.
+publiée. La mise à jour retire le service Garage intégré mais n’efface ni
+`storage-s3.json`, ni les valeurs `STORAGE_S3_*` de l’environnement, ni la
+configuration et les données de Garage. L’exploitant conserve donc le bucket, ses
+identifiants et ces données tant qu’un retour arrière reste envisagé, puis les
+supprime.
 
 ## Conséquences
 
 Le manager n’a plus besoin de S3 ni de ses identifiants, et l’installateur n’embarque
 plus Garage. Les réglages S3 du web, d’Android, du MCP public et de
-`cairn_installation` disparaissent, ainsi que les variables `STORAGE_S3_*`, le
-budget de cache de publication de l’installation et, pour les nodes, l’intervalle de
+`cairn_installation` disparaissent, ainsi que les variables `STORAGE_S3_*`,
+l’objectif de synchronisation et le budget de cache de publication de
+l’installation et, pour les nodes, l’intervalle de
 synchronisation, le délai de retard de synchronisation et le budget de cache propre.
 Restent la réserve disque et le cache mémoire de chaque node, les délais de
 déconnexion, d’arrêt et d’attente de capacité de l’installation, et la limite de
@@ -149,7 +153,7 @@ que leurs tests et leur documentation.
 La durabilité d’un environnement se limite désormais au disque de sa node. Une
 sauvegarde de la machine reste à la charge de son exploitant. Une node conserve
 chacun de ses environnements en entier : son espace n’est libéré que par
-l’expiration ou la suppression d’une conversation, ou par un changement de node.
+l’expiration de leur environnement ou la suppression d’une conversation.
 Si l’expiration automatique est désactivée, rien ne libère l’espace d’une node
 pleine sans action explicite. La réserve disque de la node et la limite de stockage
 par tâche s’appliquent à ce volume complet ; une admission sans espace attend.
