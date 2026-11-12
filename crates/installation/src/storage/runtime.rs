@@ -1,6 +1,9 @@
 //! Controller-owned mounted disks. One live journal per conversation directory.
 use super::{Disk, DiskWrite, LazyDisk, policy::Policy, source::Source};
-use crate::error::{Error, Result};
+use crate::{
+    error::{Error, Result},
+    microvm::budget::allocated,
+};
 use serde_json::Value;
 use std::{
     collections::HashMap,
@@ -1049,21 +1052,6 @@ impl Volume {
     }
 }
 
-fn allocated(directory: &Path) -> io::Result<u64> {
-    use std::os::unix::fs::MetadataExt;
-    let mut total = 0u64;
-    for entry in std::fs::read_dir(directory)? {
-        let entry = entry?;
-        let metadata = entry.metadata()?;
-        if entry.file_type()?.is_dir() {
-            total = total.saturating_add(allocated(&entry.path())?);
-        } else {
-            total = total.saturating_add(metadata.blocks().saturating_mul(512));
-        }
-    }
-    Ok(total)
-}
-
 /// Exceptional local materialization for existing ext4 resizing tools. The caller
 /// holds the conversation disk lock. Failure leaves the journal authoritative.
 pub async fn materialize(directory: &Path, stop: &CancellationToken) -> Result<()> {
@@ -1780,6 +1768,53 @@ mod tests {
         let mut bytes = [0; 10];
         volume.read_at(0, &mut bytes).unwrap();
         assert_eq!(&bytes, b"runningnew");
+    }
+
+    #[tokio::test]
+    async fn quota_admission_tolerates_segments_reclaimed_during_accounting() {
+        use std::sync::atomic::AtomicBool;
+        let root = tempfile::tempdir().unwrap();
+        let (volume, _, _) = controller_fixture(root.path()).await;
+        volume.limit_backing(1024 * 1024 * 1024).unwrap();
+        let directory = volume.directory.join("lazy");
+        for index in 0..128 {
+            std::fs::write(
+                directory.join(format!("reclaimed-{index}.segment")),
+                b"retired",
+            )
+            .unwrap();
+        }
+        let stopped = Arc::new(AtomicBool::new(false));
+        let stop = stopped.clone();
+        let reclaimer = std::thread::spawn(move || {
+            while !stop.load(Ordering::Acquire) {
+                for index in 0..128 {
+                    let path = directory.join(format!("reclaimed-{index}.segment"));
+                    std::fs::remove_file(&path).unwrap();
+                    std::fs::write(path, b"retired").unwrap();
+                }
+            }
+        });
+        let mut errors = Vec::new();
+        for index in 0..2048 {
+            *volume.task_usage.lock().unwrap() = None;
+            if let Err(error) = volume.task_has_room(4096) {
+                errors.push(error.kind());
+            }
+            if index % 128 == 0 {
+                *volume.task_usage.lock().unwrap() = None;
+                if let Err(error) = volume.write_at(0, b"x") {
+                    errors.push(error.kind());
+                }
+            }
+        }
+        stopped.store(true, Ordering::Release);
+        reclaimer.join().unwrap();
+        assert!(
+            errors.is_empty(),
+            "reclamation failed healthy admission: {errors:?}"
+        );
+        assert!(!volume.fault.load(Ordering::Acquire));
     }
 
     #[tokio::test]
