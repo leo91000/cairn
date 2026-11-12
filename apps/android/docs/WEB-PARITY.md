@@ -667,8 +667,13 @@ state.
 Local conversation disks (ADR-0083): both apps remove the owner's S3 configuration
 and probe section. HTTP, public MCP and `cairn_installation` also remove
 `get_storage_settings`, `save_storage_settings` and `check_storage`, including their
-generated clients and schemas. The per-task storage limit and local node resource
-policies remain available with their existing authorization. No platform difference:
+generated clients and schemas. The per-task storage limit, node disk reserve and shared memory cache remain
+available with their existing authorization. Both apps also remove the clean disk
+cache budget, synchronization interval and lag threshold from node storage editors
+and summaries. Installation runtime settings retain only disconnection and shutdown
+deadlines; publication interval/cache and capacity-wait controls are removed.
+`get_node_runtime_settings` and `save_node_runtime_settings` share the typed HTTP
+contract and live authorization on public MCP and `cairn_installation`. No platform difference:
 web retains the installation settings sections and Android the native settings
 panels surrounding the removed section. Browser and native Compose settings
 journeys cover the retained task limit and absence of S3 controls.

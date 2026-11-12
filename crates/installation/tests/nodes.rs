@@ -2626,33 +2626,37 @@ async fn explicit_resource_requests_are_rejected_before_moving() {
 }
 
 #[tokio::test]
-async fn recovery_settings_validate_and_preserve_the_last_good_configuration() {
+async fn runtime_settings_remove_publication_controls_and_preserve_the_last_good_configuration() {
     let owner = Owner::new().await;
     let (status, initial) = owner.get(NODE_SETTINGS).await;
     assert_eq!(status, StatusCode::OK);
     assert!(initial.get("destination").is_none());
     assert!(initial.get("retention").is_none());
-    let settings = json!({
-        "intervalSeconds": 30,
-        "budgetMiB": 4096,
-        "disconnectTimeoutSeconds": 60,
-        "shutdownTimeoutSeconds": 300,
-        "maxCapacityWaitSeconds": 3600,
-    });
+    assert_eq!(
+        initial,
+        json!({ "disconnectTimeoutSeconds": 60, "shutdownTimeoutSeconds": 300 })
+    );
+    let settings = json!({ "disconnectTimeoutSeconds": 30, "shutdownTimeoutSeconds": 90 });
     assert_eq!(
         owner.send("PUT", NODE_SETTINGS, settings.clone()).await.0,
         StatusCode::OK
     );
-    let mut bad = settings.clone();
-    bad["intervalSeconds"] = 0.into();
-    assert_eq!(
-        owner.send("PUT", NODE_SETTINGS, bad).await.0,
-        StatusCode::BAD_REQUEST
-    );
-    // The S3 status is reported alongside the settings but never stored.
-    let mut expected = settings;
-    expected["s3Configured"] = false.into();
-    assert_eq!(owner.get(NODE_SETTINGS).await.1, expected);
+    for (field, value) in [
+        ("disconnectTimeoutSeconds", 9),
+        ("shutdownTimeoutSeconds", 301),
+        ("intervalSeconds", 60),
+        ("budgetMiB", 128),
+        ("maxCapacityWaitSeconds", 30),
+    ] {
+        let mut bad = settings.clone();
+        bad[field] = value.into();
+        assert_eq!(
+            owner.send("PUT", NODE_SETTINGS, bad).await.0,
+            StatusCode::BAD_REQUEST,
+            "{field}"
+        );
+        assert_eq!(owner.get(NODE_SETTINGS).await.1, settings);
+    }
 }
 
 #[tokio::test]
@@ -3483,14 +3487,18 @@ async fn configure_loopback_s3(owner: &Owner, endpoint: &str) {
         json!({ "bucket": "cairn-node-test", "awsBinary": wrapper }).to_string(),
     )
     .unwrap();
-    let (status, value) = owner
-        .send(
-            "PUT",
-            NODE_SETTINGS,
+    // This legacy engine fixture configures its private publication budget directly.
+    // The public node settings API no longer accepts publication settings.
+    owner
+        .service
+        .store
+        .set(
+            "node-backup-settings",
             json!({ "intervalSeconds": 60, "budgetMiB": 128 }),
+            None,
         )
-        .await;
-    assert_eq!(status, StatusCode::OK, "{value}");
+        .await
+        .unwrap();
 }
 
 /// An S3 outage fails reads with a retryable status, without dropping the

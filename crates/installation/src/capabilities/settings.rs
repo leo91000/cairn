@@ -16,6 +16,16 @@ pub(crate) struct SettingsOperation {
 
 pub(crate) const SETTINGS_OPERATIONS: &[SettingsOperation] = &[
     SettingsOperation {
+        name: "get_node_runtime_settings",
+        scope: "read",
+        description: "Read the installation's node disconnection and shutdown deadlines. Conversation disks remain local to their node.",
+    },
+    SettingsOperation {
+        name: "save_node_runtime_settings",
+        scope: "manage",
+        description: "Save the installation's node disconnection and shutdown deadlines. S3 publication and cache settings are no longer supported.",
+    },
+    SettingsOperation {
         name: "get_chat_plan_settings",
         scope: "read",
         description: "Read whether new chat plan requests are enabled for this installation and the current revision. Disabled by default, including existing installations.",
@@ -74,6 +84,14 @@ pub(crate) fn settings_operation(name: &str) -> Option<&'static SettingsOperatio
 impl SettingsOperation {
     pub(crate) fn descriptor(&self) -> Value {
         let (input, output) = match self.name {
+            "get_node_runtime_settings" => (
+                schema_for::<GetNodeRuntimeSettingsInput>(Contract::Deserialize),
+                schema_for::<NodeRuntimeSettings>(Contract::Serialize),
+            ),
+            "save_node_runtime_settings" => (
+                schema_for::<NodeRuntimeSettings>(Contract::Deserialize),
+                schema_for::<NodeRuntimeSettings>(Contract::Serialize),
+            ),
             "get_chat_plan_settings" => (
                 schema_for::<GetChatPlanSettingsInput>(Contract::Deserialize),
                 schema_for::<ChatPlanSettings>(Contract::Serialize),
@@ -132,6 +150,28 @@ impl SettingsOperation {
         input: Value,
         context: ResumeContext,
     ) -> Result<Value> {
+        if matches!(
+            self.name,
+            "get_node_runtime_settings" | "save_node_runtime_settings"
+        ) {
+            let authority =
+                super::plugin_packages::Authority::for_grants(s, context, self.scope).await?;
+            let authorize = crate::authorization::Authorization::live(s, authority);
+            let name = self.name;
+            return s
+                .store
+                .transaction(move |db| {
+                    authorize.authorize(db)?;
+                    let result = if name == "get_node_runtime_settings" {
+                        let _: GetNodeRuntimeSettingsInput = decode(input)?;
+                        crate::nodes::settings::view(db)?
+                    } else {
+                        crate::nodes::settings::save(db, decode(input)?)?
+                    };
+                    Ok(serde_json::to_value(result)?)
+                })
+                .await;
+        }
         if matches!(
             self.name,
             "get_chat_plan_settings" | "save_chat_plan_settings"

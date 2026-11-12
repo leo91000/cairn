@@ -821,6 +821,9 @@ is never borrowed. Personal writes require the `manage` scope. HTTP keeps the ow
 role for settings and audit. S3 settings and probes have been removed from both
 apps, HTTP, public MCP, `cairn_installation` and their generated contracts. Task
 storage limits remain available with their existing authorization.
+`NodeRuntimeSettings` is the shared contract for the retained disconnection and
+shutdown deadlines on HTTP, public MCP, `cairn_installation` and both apps.
+`NodeStoragePolicy` retains only memory cache and free disk reserve controls.
 
 SQLite 17 → 18 imports the KV state atomically; see
 [migration 0018](migrations/0018-personal-read-state.md). Constrained

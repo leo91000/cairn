@@ -101,6 +101,10 @@ fn insert(db: &Connection, id: &str, node: &Value) {
 fn assert_preserved(before: &Value, after: &Value) {
     if let Some(fields) = before.as_object() {
         for (field, value) in fields {
+            if ["cacheMiB", "backupSeconds", "maxDirtySeconds"].contains(&field.as_str()) {
+                assert!(after.get(field).is_none(), "retired field {field}");
+                continue;
+            }
             assert!(after.get(field).is_some(), "missing field {field}");
             assert_preserved(value, &after[field]);
         }

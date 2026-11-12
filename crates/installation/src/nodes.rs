@@ -24,6 +24,7 @@ pub mod publication;
 pub mod relay;
 pub mod restore;
 pub mod run_placement;
+pub(crate) mod settings;
 pub mod shared_blocks;
 pub mod snapshots;
 pub mod storage;
@@ -551,12 +552,17 @@ pub async fn admin(s: &Service, input: &Input) -> Result<Value> {
             s.migrate_chat_backend(args, |_| Ok(())).await
         }
         ("GET", ["nodes", "alerts"]) => alerts::recent(s).await,
-        ("GET", ["nodes", "settings"]) => {
-            let mut value = publication::settings(s).await?;
-            value["s3Configured"] = crate::object_storage::Storage::configured(s).is_ok().into();
-            Ok(value)
+        ("GET", ["nodes", "settings"]) | ("PUT", ["nodes", "settings"]) => {
+            let (name, body) = if input.method == "GET" {
+                ("get_node_runtime_settings", json!({}))
+            } else {
+                ("save_node_runtime_settings", input.body.clone())
+            };
+            crate::capabilities::settings_operation(name)
+                .expect("registered runtime settings capability")
+                .invoke(s, body, crate::capabilities::ResumeContext::http(input)?)
+                .await
         }
-        ("PUT", ["nodes", "settings"]) => publication::configure(s, input.body.clone()).await,
         ("GET", ["nodes", "backups", run]) => backups(s, run).await,
         ("POST", ["nodes", node, "stale-disks", "delete"]) => delete_stale_disks(s, node).await,
         ("PUT", ["nodes", node, "agents"]) => grant_agents(s, node, input.body.clone()).await,

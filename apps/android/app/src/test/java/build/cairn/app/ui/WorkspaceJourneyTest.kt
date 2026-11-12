@@ -105,6 +105,7 @@ class WorkspaceJourneyTest {
                         val data =
                             when (path) {
                                 "/api/installations" -> beaconInstallationsFixture()
+                                "/api/account/methods" -> """{"methods":[]}"""
                                 "/api/account/session" ->
                                     """{"authenticated":false,"csrf":null,"account":null,"installations":[]}"""
                                 "/api/account/email-code" ->
@@ -286,10 +287,11 @@ class WorkspaceJourneyTest {
                                     """{"id":"run","taskId":"00000000-0000-4000-8000-000000000099","status":"running","snapshot":{"task":$task,"agent":${wireJson.encodeToString(newAgent().copy(name = "Reviewer"))},"project":null,"projects":[{"id":"46d045dd-9bce-51e3-8a99-65aa9384efc9","name":"Cairn","path":"/fixtures/cairn","origin":"","revision":"fixture","createdAt":0}]}}"""
                                 "/api/installations/fixture/api/runs/run/events" ->
                                     """[{"id":1,"createdAt":1789315200000,"type":"run.started","text":"Le worker démarre la mission"}]"""
-                                else ->
+                                else -> {
                                     return MockResponse()
                                         .setResponseCode(404)
                                         .setBody("""{"error":"Unknown fixture endpoint"}""")
+                                }
                             }
                         return MockResponse()
                             .setHeader("Content-Type", "application/json")

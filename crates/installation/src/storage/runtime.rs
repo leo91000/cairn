@@ -880,7 +880,7 @@ impl Volume {
             .ok_or_else(|| io::Error::other("Invalid disk path"))?;
         match std::fs::read(state.join("storage-policy.json")) {
             Ok(bytes) => {
-                let policy: Policy = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                let policy = super::policy::from_persisted(&bytes).map_err(io::Error::other)?;
                 policy.validate().map_err(io::Error::other)?;
                 Ok(policy)
             }

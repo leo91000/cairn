@@ -106,3 +106,39 @@ pub struct InstallationOverview {
     pub missions: u32,
     pub concurrency: u32,
 }
+
+/// Installation-wide runtime deadlines. Working disks are local to their node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct NodeRuntimeSettings {
+    #[ts(type = "number")]
+    #[schemars(range(min = 10, max = 300))]
+    pub disconnect_timeout_seconds: u64,
+    #[ts(type = "number")]
+    #[schemars(range(min = 30, max = 300))]
+    pub shutdown_timeout_seconds: u64,
+}
+
+impl Default for NodeRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            disconnect_timeout_seconds: 60,
+            shutdown_timeout_seconds: 300,
+        }
+    }
+}
+
+impl NodeRuntimeSettings {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !(10..=300).contains(&self.disconnect_timeout_seconds)
+            || !(30..=300).contains(&self.shutdown_timeout_seconds)
+        {
+            return Err("Invalid node runtime deadlines.");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(deny_unknown_fields)]
+pub struct GetNodeRuntimeSettingsInput {}

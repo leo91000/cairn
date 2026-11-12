@@ -80,16 +80,9 @@ export function usedPercent(used: number, limit: number) {
   return limit > 0 ? Math.min(100, Math.max(0, used / limit * 100)) : 0
 }
 
-export type { NodeStoragePolicy } from './generated/typescript/NodeStoragePolicy'
+export type { NodeRuntimeSettings } from './generated/typescript/NodeRuntimeSettings'
 
-export interface NodeSyncSettings {
-  intervalSeconds: number
-  budgetMiB: number
-  disconnectTimeoutSeconds: number
-  shutdownTimeoutSeconds: number
-  maxCapacityWaitSeconds: number
-  s3Configured?: boolean
-}
+export type { NodeStoragePolicy } from './generated/typescript/NodeStoragePolicy'
 
 export function formatMiB(value: number) {
   return value < 1024 ? `${Number(value.toFixed(1))} MiB` : `${Number((value / 1024).toFixed(1))} GiB`

@@ -337,7 +337,10 @@ alone give it no native authority. Plugin rule templates are listed with
 `get_installation_settings`, `get_installation_overview` and `list_audit` use the
 read scope. S3 storage settings and probes are no longer exposed on HTTP, public
 MCP or `cairn_installation`. Task storage limits remain available through
-`get_task_storage_limits` and `save_task_storage_limits`.
+`get_task_storage_limits` and `save_task_storage_limits`. Node storage policies
+retain the shared memory cache and disk reserve, without S3 cache/synchronization
+fields. `get_node_runtime_settings` (read) and `save_node_runtime_settings` (manage)
+read or save only the installation's disconnection and shutdown deadlines.
 `mark_read` and `set_outcome_aside` use manage and
 change the read marks and set-aside outcomes of the Cairn account that authorized the
 connection; `list_chats` and `list_task_activity` report `unread`, `preview` and

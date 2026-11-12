@@ -870,9 +870,9 @@ async fn node_storage_controls_share_probes_persistence_and_permissions_across_b
     let owner_token = common::relay_fixture::grant(&s, &["read", "manage"]).await;
     let app = common::relay_fixture::router(s.clone()).await.unwrap();
     let policy = json!({
-        "cacheMiB": 4096, "memoryCacheMiB": 512,
-        "reserveMiB": 2048, "reservePercent": 7,
-        "backupSeconds": 30, "maxDirtySeconds": 120,
+        "memoryCacheMiB": 512,
+        "reserveMiB": 2048,
+        "reservePercent": 7,
     });
     let mut last_node = String::new();
     for (endpoint, token) in [
@@ -898,6 +898,26 @@ async fn node_storage_controls_share_probes_persistence_and_permissions_across_b
         )
         .await;
         assert_eq!(result(&updated)["storage"], policy);
+        for removed in ["cacheMiB", "backupSeconds", "maxDirtySeconds"] {
+            let mut obsolete = policy.clone();
+            obsolete[removed] = 60.into();
+            let revision = s.get_node(node).await.unwrap().revision;
+            let (_, refused) = node_management_call(
+                &app,
+                endpoint,
+                token,
+                "update_node_storage",
+                json!({
+                    "nodeId": node,
+                    "revision": revision,
+                    "storage": obsolete,
+                }),
+            )
+            .await;
+            assert_eq!(refused["result"]["isError"], true, "{removed}: {refused}");
+            let stored = s.get_node(node).await.unwrap().storage;
+            assert_eq!(serde_json::to_value(stored).unwrap(), policy);
+        }
         assert_eq!(probes.lock().unwrap().last(), Some(&policy));
         let (_, listed) =
             node_management_call(&app, endpoint, token, "list_nodes", json!({})).await;
@@ -1613,6 +1633,8 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "save_coding_agent_configuration",
         "get_installation_overview",
         "list_audit",
+        "get_node_runtime_settings",
+        "save_node_runtime_settings",
         "get_task_storage_limits",
         "save_task_storage_limits",
         "get_chat_plan_settings",
@@ -7395,6 +7417,7 @@ async fn installation_settings_and_audit_match_and_s3_settings_are_removed_on_ev
 
     for (name, path) in [
         ("get_installation_settings", "/api/settings"),
+        ("get_node_runtime_settings", "/api/nodes/settings"),
         ("get_installation_overview", "/api/overview"),
         ("list_audit", "/api/audit"),
     ] {
@@ -7418,6 +7441,75 @@ async fn installation_settings_and_audit_match_and_s3_settings_are_removed_on_ev
     let latest = &audit["entries"][0];
     assert_eq!(latest["action"], "conversation.retention.updated");
     assert_eq!(latest["detail"], json!({ "inactivityDays": 9 }).to_string());
+    for internal in [false, true] {
+        let settings = json!({
+            "disconnectTimeoutSeconds": if internal { 40 } else { 30 },
+            "shutdownTimeoutSeconds": 90,
+        });
+        let updated = if internal {
+            call(
+                &s,
+                &configuration,
+                "save_node_runtime_settings",
+                settings.clone(),
+            )
+            .await
+        } else {
+            public_call("save_node_runtime_settings", settings.clone()).await
+        };
+        assert_eq!(result(&updated), &settings);
+        assert_eq!(
+            http(&owner, "GET", "/api/nodes/settings", Value::Null)
+                .await
+                .1,
+            settings
+        );
+        for field in [
+            "intervalSeconds",
+            "budgetMiB",
+            "maxCapacityWaitSeconds",
+            "s3Configured",
+        ] {
+            let mut invalid = settings.clone();
+            invalid[field] = 60.into();
+            let refused = if internal {
+                call(&s, &configuration, "save_node_runtime_settings", invalid).await
+            } else {
+                public_call("save_node_runtime_settings", invalid).await
+            };
+            assert_eq!(refused["result"]["isError"], true, "{field}: {refused}");
+            assert_eq!(
+                http(&owner, "GET", "/api/nodes/settings", Value::Null)
+                    .await
+                    .1,
+                settings
+            );
+        }
+    }
+
+    let readonly = common::relay_fixture::grant(&s, &["read"]).await;
+    let (_, denied) = node_management_call(
+        &app,
+        "/mcp",
+        &readonly,
+        "save_node_runtime_settings",
+        json!({ "disconnectTimeoutSeconds": 60, "shutdownTimeoutSeconds": 300 }),
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    assert!(
+        denied["result"]["_meta"]["mcp/www_authenticate"]
+            .as_str()
+            .unwrap()
+            .contains("manage")
+    );
+    assert_eq!(
+        http(&member, "PUT", "/api/nodes/settings", json!({}))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+
     let saved = std::fs::read(s.config.data_dir.join("storage-s3.json")).unwrap();
     for (name, method, path) in [
         ("get_storage_settings", "GET", "/api/settings/storage"),
@@ -7442,7 +7534,10 @@ async fn installation_settings_and_audit_match_and_s3_settings_are_removed_on_ev
             public_call(name, arguments).await,
         ] {
             assert_eq!(response["result"]["isError"], true, "{response}");
-            assert!(response.to_string().contains("Unknown operation"), "{response}");
+            assert!(
+                response.to_string().contains("Unknown operation"),
+                "{response}"
+            );
             assert!(!response.to_string().contains("fixture-secret-key"));
         }
     }

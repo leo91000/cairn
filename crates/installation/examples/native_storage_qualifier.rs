@@ -100,8 +100,7 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
             let grant = disk_grants::new_disk(s, &run, nodes::LOCAL_NODE_ID).await?;
             Ok(
                 json!({ "master": s.config.public_url, "grant": grant, "policy": {
-                "cacheMiB": 128, "memoryCacheMiB": 4, "reserveMiB": 64, "reservePercent": 1,
-                "backupSeconds": 60, "maxDirtySeconds": 300
+                "memoryCacheMiB": 4, "reserveMiB": 64, "reservePercent": 1
             } }),
             )
         }
@@ -368,7 +367,6 @@ async fn main() -> Result<()> {
                     reserve_mi_b: 64,
                     reserve_percent: 1,
                     memory_cache_mi_b: 4,
-                    cache_mi_b: 128,
                     ..Default::default()
                 },
                 ..Default::default()

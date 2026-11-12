@@ -478,22 +478,10 @@ const reserve = computed(() => {
                 {{ formatMiB(node.storage.memoryCacheMiB) }}
               </dd>
               <dt class="text-muted">
-                Disk cache budget
-              </dt>
-              <dd class="text-right tabular-nums">
-                {{ formatMiB(node.storage.cacheMiB) }}
-              </dd>
-              <dt class="text-muted">
                 Minimum free disk
               </dt>
               <dd class="text-right tabular-nums">
                 {{ reserve }}
-              </dd>
-              <dt class="text-muted">
-                Synchronization target
-              </dt>
-              <dd class="text-right tabular-nums">
-                {{ node.storage.backupSeconds }} s
               </dd>
             </dl>
             <NodeStorage :node="node" @saved="emit('changed')" />

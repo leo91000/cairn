@@ -52,12 +52,9 @@ it('formats node sizes, recovery ages and blocking reasons for people', () => {
     staleDisks: { count: 0, diskMiB: 0 },
     diskAccounting: null,
     storage: {
-      cacheMiB: 102400,
       memoryCacheMiB: 256,
       reserveMiB: 10240,
       reservePercent: 5,
-      backupSeconds: 60,
-      maxDirtySeconds: 300,
     },
 
     id: 'n',

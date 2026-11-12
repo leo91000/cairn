@@ -1683,7 +1683,9 @@ abstract class NodePlacementCases {
                                     configured = true
                                     "{}"
                                 }
-                                path == "/api/installations/fixture/api/nodes/settings" -> "{}"
+                                path == "/api/installations/fixture/api/nodes/settings" ->
+                                    writes.lastOrNull { it.first == path }?.second?.toString()
+                                        ?: """{"disconnectTimeoutSeconds":60,"shutdownTimeoutSeconds":300}"""
                                 path ==
                                     "/api/installations/fixture/api/nodes/f65d5a2a-81d0-5580-bfa4-7ec33313e328/agents" -> {
                                     granted = true
@@ -1796,7 +1798,8 @@ abstract class NodePlacementCases {
             capture("nodes")
             compose.onNodeWithText("Stockage").performScrollTo().performClick()
             compose.onNodeWithText("Cache mémoire partagé (Mio)").performTextReplacement("1024")
-            compose.onNodeWithText("Cache propre (Mio)").performTextReplacement("51200")
+            compose.onNodeWithText("Cache propre (Mio)").assertDoesNotExist()
+            compose.onNodeWithText("Synchroniser toutes les (secondes)").assertDoesNotExist()
             capture("storage")
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) {
@@ -1818,7 +1821,7 @@ abstract class NodePlacementCases {
                     .second
             assertEquals("fixture", storage["revision"]!!.jsonPrimitive.content)
             val policy = storage["storage"]!!.jsonObject
-            assertEquals(51200, policy["cacheMiB"]!!.jsonPrimitive.int)
+            assertEquals(setOf("memoryCacheMiB", "reserveMiB", "reservePercent"), policy.keys)
             assertEquals(1024, policy["memoryCacheMiB"]!!.jsonPrimitive.int)
             // Agent access is read-only here: it is set on each agent's page.
             compose.onNodeWithText("Choisir les agents").assertDoesNotExist()
@@ -1844,31 +1847,34 @@ abstract class NodePlacementCases {
                         .fetchSemanticsNodes()
                         .isEmpty()
             }
-            compose
-                .onNodeWithText("Avancé : synchronisation et délais")
-                .performScrollTo()
-                .performClick()
-            compose.onNodeWithText("Configurer la synchronisation").performScrollTo().performClick()
+            compose.onNodeWithText("Avancé : délais des machines").performScrollTo().performClick()
+            compose.onNodeWithText("Configurer les délais").performScrollTo().performClick()
             compose.waitUntil(10000) {
                 compose
-                    .onAllNodesWithText("Intervalle (secondes)")
+                    .onAllNodesWithText("Suspension après déconnexion (secondes)")
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
             capture("installation-timing")
-            compose.onNodeWithText("Budget du cache de publication (Gio)").performScrollTo()
-            capture("installation-cache")
-            compose.onNodeWithText("Intervalle (secondes)").performScrollTo().performTextReplacement("30")
+            compose.onNodeWithText("Intervalle (secondes)").assertDoesNotExist()
+            compose.onNodeWithText("Budget du cache de publication (Gio)").assertDoesNotExist()
+            compose.onNodeWithText("Attente de capacité maximale (secondes)").assertDoesNotExist()
+            compose
+                .onNodeWithText("Suspension après déconnexion (secondes)")
+                .performTextReplacement("30")
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) {
                 writes.any { it.first == "/api/installations/fixture/api/nodes/settings" } &&
-                    compose.onAllNodesWithText("Synchronisation S3").fetchSemanticsNodes().isEmpty()
+                    compose
+                        .onAllNodesWithText("Délais des machines")
+                        .fetchSemanticsNodes()
+                        .isEmpty()
             }
             assertEquals(
                 30,
                 writes
                     .first { it.first == "/api/installations/fixture/api/nodes/settings" }
-                    .second["intervalSeconds"]!!
+                    .second["disconnectTimeoutSeconds"]!!
                     .jsonPrimitive
                     .int,
             )
