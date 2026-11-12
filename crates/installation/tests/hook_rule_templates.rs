@@ -241,12 +241,15 @@ async fn installing_a_template_creates_ordinary_rules_that_updates_never_change(
         "Hello"
     );
 
-    // Retrying returns the same rules.
-    let (status, again) = call(&f, OWNER, "POST", INSTALL, body).await;
+    // Retrying returns the same rules, by their creator only.
+    let (status, again) = call(&f, OWNER, "POST", INSTALL, body.clone()).await;
     assert_eq!(status, StatusCode::OK, "{again}");
     assert_eq!(again["rules"][0]["id"], rules[0]["id"]);
     assert_eq!(again["rules"][1]["id"], rules[1]["id"]);
     assert_eq!(rule_count(&f).await, 2);
+    common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
+    let (status, taken) = call(&f, MEMBER, "POST", INSTALL, body.clone()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{taken}");
 
     // Disabled on request, and an ordinary rule its creator edits.
     let mut disabled = install(&f, &parameters(MAIN_AGENT_ID));
@@ -257,6 +260,7 @@ async fn installing_a_template_creates_ordinary_rules_that_updates_never_change(
 
     // A plugin update changes the template, never the rules it created.
     let id = text(&rules[0], "id").to_owned();
+    let second = text(&rules[1], "id").to_owned();
     with_template(&f, "3", "Renamed by the update").await;
     let (_, kept) = call(
         &f,
@@ -270,6 +274,19 @@ async fn installing_a_template_creates_ordinary_rules_that_updates_never_change(
     assert_eq!(kept["definition"], rules[0]["definition"]);
     let (_, listed) = call(&f, OWNER, "GET", "/api/hook-rules/templates", Value::Null).await;
     assert_eq!(listed["templates"][0]["pluginVersion"], "3");
+
+    // Once one of its rules is deleted, the creation identity no longer installs.
+    let (status, _) = call(
+        &f,
+        OWNER,
+        "DELETE",
+        &format!("/api/hook-rules/{second}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, partial) = call(&f, OWNER, "POST", INSTALL, body).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{partial}");
     assert_eq!(
         listed["templates"][0]["template"]["rules"][0]["name"],
         "Renamed by the update"
@@ -295,7 +312,7 @@ async fn template_installation_follows_the_rule_authority() {
         install(&f, &parameters(&private)),
     )
     .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
     assert!(
         refused["error"]
             .as_str()
@@ -382,6 +399,15 @@ async fn template_installation_follows_the_rule_authority() {
     )
     .await;
     assert_eq!(offered["templates"], json!([]));
+    let (status, refused) = call(
+        &f,
+        "other-member",
+        "POST",
+        INSTALL,
+        install(&f, &parameters(MAIN_AGENT_ID)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{refused}");
 }
 
 #[tokio::test]
@@ -409,4 +435,11 @@ async fn packages_declare_only_templates_using_their_own_hooks_and_tools() {
         "{}",
         error.message
     );
+
+    let mut formula = template("Support replies");
+    formula["rules"][1]["steps"][0]["action"]["prompt"] =
+        json!({ "type": "formula", "expression": "missing_field" });
+    manifest["ruleTemplates"] = json!([formula]);
+    let error = f.publish(&manifest).await.unwrap_err();
+    assert!(error.message.contains("Rule 2:"), "{}", error.message);
 }

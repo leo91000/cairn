@@ -164,7 +164,8 @@ fn sample(parameter: &RuleTemplateParameter) -> Value {
 
 /// Package admission: every rule of every template, with all parameters given and with
 /// only the required ones, is a hook rule using the hooks and tools this manifest
-/// declares. Installing checks the rest against the installation.
+/// declares, with a valid tree and formulas. Installing checks the rest against the
+/// installation.
 pub(crate) fn check_manifest(manifest: &Manifest) -> std::result::Result<(), String> {
     let instance = uuid::Uuid::nil().to_string();
     for template in &manifest.rule_templates {
@@ -186,8 +187,25 @@ pub(crate) fn check_manifest(manifest: &Manifest) -> std::result::Result<(), Str
             })
             .collect::<BTreeMap<_, _>>();
         for values in [full, minimal] {
-            instantiate(manifest, template, &instance, &values)
+            let definitions = instantiate(manifest, template, &instance, &values)
                 .map_err(|message| format!("Rule template {}: {message}", template.name))?;
+            for (index, definition) in definitions.iter().enumerate() {
+                let payload = match &definition.trigger {
+                    HookRuleTrigger::Plugin { hook, .. } => manifest
+                        .hook(hook)
+                        .map(|declaration| declaration.payload_schema.clone()),
+                    HookRuleTrigger::Cairn { hook } => Some(catalog::cairn_payload(*hook)),
+                };
+                if let Some(problem) = validation::structure(definition, payload.as_ref()).first() {
+                    return Err(format!(
+                        "Rule template {}: Rule {}: {} [{}]",
+                        template.name,
+                        index + 1,
+                        problem.message,
+                        problem.path
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -242,13 +260,12 @@ pub(crate) fn values(
         let title = &parameter.title;
         match parameter.kind {
             ParameterKind::Agent => {
-                if value
-                    .as_str()
-                    .and_then(|id| uuid::Uuid::parse_str(id).ok())
-                    .is_none()
-                {
+                let Some(agent) = value.as_str().and_then(|id| uuid::Uuid::parse_str(id).ok())
+                else {
                     return Err(Error::bad(format!("{title} takes an agent identifier.")));
-                }
+                };
+                values.insert(parameter.name.clone(), json!(agent));
+                continue;
             }
             ParameterKind::Resource => resource(value, parameter)?,
             ParameterKind::Resources => {
@@ -305,8 +322,14 @@ pub(crate) fn authorize_agents(
         let Some(agent) = values.get(&parameter.name).and_then(Value::as_str) else {
             continue;
         };
+        if db.agent(agent)?.is_none() {
+            return Err(Error::bad(format!(
+                "{}: this agent no longer exists.",
+                parameter.title
+            )));
+        }
         if !creator.uses_agent(db, agent)? {
-            return Err(Error::forbidden(format!(
+            return Err(Error::bad(format!(
                 "{}: you don't have access to this agent. Ask the installation owner to give you access.",
                 parameter.title
             )));
@@ -324,7 +347,11 @@ mod tests {
             "id": "chat", "name": "Chat", "version": "1", "apiVersion": 2,
             "capabilities": ["hooks"], "agentAccess": {},
             "resources": [{ "name": "channel", "description": "Channel" }],
-            "hooks": [{ "name": "message", "description": "Message", "payloadSchema": { "type": "object" } }],
+            "hooks": [{
+                "name": "message",
+                "description": "Message",
+                "payloadSchema": { "type": "object", "properties": { "channel": { "type": "string" } } },
+            }],
             "tools": [{ "name": "chat_post", "description": "Post", "inputSchema": { "type": "object" } }],
             "ruleTemplates": [{
                 "name": "support",
@@ -406,7 +433,13 @@ mod tests {
         let mut optional = rule();
         optional["name"] = json!({ "$parameter": "greeting" });
         optional["steps"][0]["then"][0]["action"]["input"] = json!({ "$parameter": "channels" });
+        let mut formula = rule();
+        formula["steps"][0]["condition"]["left"]["expression"] = "unknown_variable".into();
+        let mut limits = rule();
+        limits["limits"] = json!({ "triggeringsPerHour": 1000, "conversationsPerHour": 5 });
         for (label, invalid) in [
+            ("formula", formula),
+            ("limits", limits),
             ("instance", named),
             ("hook", hook),
             ("tool", tool),

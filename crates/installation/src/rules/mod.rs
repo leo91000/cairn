@@ -977,22 +977,15 @@ pub(crate) async fn catalog(
     Ok(catalog)
 }
 
-/// The rule templates of the instances on which an agent the caller may use holds a
-/// grant, like the catalog's hooks and tools.
-pub(crate) async fn list_templates(
-    s: &Service,
-    input: ListHookRuleTemplatesInput,
-    actor: Actor,
-) -> Result<ListHookRuleTemplatesOutput> {
-    actor.require_scope("read")?;
-    actor.recheck().await?;
-    let usable = usable_agents(s, &actor)
+/// The instances on which an agent the caller may use holds a grant: their templates
+/// are offered, like the catalog's hooks and tools.
+async fn offered_instances(s: &Service, actor: &Actor) -> Result<BTreeSet<String>> {
+    let usable = usable_agents(s, actor)
         .await?
         .into_iter()
         .map(|agent| agent.to_string())
         .collect::<Vec<_>>();
-    let (instances, granted) = s
-        .store
+    s.store
         .read(move |db| {
             let mut granted = BTreeSet::new();
             for agent in &usable {
@@ -1000,9 +993,21 @@ pub(crate) async fn list_templates(
                     granted.insert(grant.instance_id.to_string());
                 }
             }
-            Ok((db.plugin_instances()?, granted))
+            Ok(granted)
         })
-        .await?;
+        .await
+}
+
+/// The rule templates of the offered instances.
+pub(crate) async fn list_templates(
+    s: &Service,
+    input: ListHookRuleTemplatesInput,
+    actor: Actor,
+) -> Result<ListHookRuleTemplatesOutput> {
+    actor.require_scope("read")?;
+    actor.recheck().await?;
+    let granted = offered_instances(s, &actor).await?;
+    let instances = s.store.plugin_instances().await?;
     let mut templates = Vec::new();
     for instance in instances {
         if !granted.contains(&instance.id)
@@ -1044,11 +1049,19 @@ pub(crate) async fn install_template(
     actor.recheck().await?;
     let creation = creation_id(input.creation_id)?;
     let instance = input.instance_id.to_string();
-    let connection = required(
-        s.store.plugin_instance(&instance).await?,
-        "Plugin instance not found",
-    )?;
-    let package = crate::plugins::registry::active(s, &connection.plugin_id).await?;
+    // Like the listing, only instances on which an agent the caller may use holds a grant.
+    let offered = offered_instances(s, &actor).await?;
+    let connection = s.store.plugin_instance(&instance).await?;
+    let Some(connection) = connection.filter(|_| offered.contains(&instance)) else {
+        return Err(Error::not_found(
+            "No agent you may use holds a grant on this plugin instance.",
+        ));
+    };
+    let package = crate::plugins::registry::active(s, &connection.plugin_id)
+        .await
+        .map_err(|_| {
+            Error::conflict("This plugin is not active. The owner approves it in Plugins.")
+        })?;
     let template = package
         .manifest
         .rule_template(&input.template)
@@ -1100,10 +1113,18 @@ pub(crate) async fn install_template(
             if let Actor::Installation(bearer, _) = &actor {
                 installation_writer(db, bearer)?;
             }
-            if let Some(existing) = db.hook_rule(&ids[0])? {
-                if existing.creator_account_id != writer.creator.account {
+            let mut existing = Vec::new();
+            for id in &ids {
+                existing.extend(db.hook_rule(id)?);
+            }
+            if !existing.is_empty() {
+                if existing.len() != ids.len()
+                    || existing
+                        .iter()
+                        .any(|rule| rule.creator_account_id != writer.creator.account)
+                {
                     return Err(Error::conflict(
-                        "This creation identity belongs to another rule.",
+                        "This creation identity belongs to other rules, or some were deleted since. Install the template again with a new one.",
                     ));
                 }
                 let rules = ids
