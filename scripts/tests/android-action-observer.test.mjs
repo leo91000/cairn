@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process'
+import { once } from 'node:events'
 import {
   chmodSync,
   mkdirSync,
@@ -382,10 +383,14 @@ describe('android action closure observer', () => {
   it('spawns a detached sampler promptly and stops it after its owned target disappears', async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'cairn-observer-spawn-'))
     const outputDirectory = path.join(root, 'snapshots')
-    const target = spawn(process.execPath, ['-e', 'process.title = "node"; setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+    const target = spawn(process.execPath, ['-e', 'process.title = "node"; setInterval(() => {}, 1000); process.send("ready")'], { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] })
     let observer
 
     try {
+      const [ready] = await once(target, 'message', { signal: AbortSignal.timeout(3000) })
+      expect(ready).toBe('ready')
+      target.disconnect()
+
       const targetStartTicks = readProcessStartTicks(target.pid)
       const startedAt = Date.now()
       observer = startObservation({
