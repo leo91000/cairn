@@ -35,6 +35,26 @@
     "path": "/hook-rules/validate"
   },
   {
+    "input": "ListHookRuleTemplatesInput",
+    "method": "GET",
+    "name": "listHookRuleTemplates",
+    "optionalQuery": [
+      "instanceId"
+    ],
+    "output": "ListHookRuleTemplatesOutput",
+    "path": "/hook-rules/templates",
+    "query": [
+      "instanceId"
+    ]
+  },
+  {
+    "input": "InstallHookRuleTemplateInput",
+    "method": "POST",
+    "name": "installHookRuleTemplate",
+    "output": "InstallHookRuleTemplateOutput",
+    "path": "/hook-rules/templates/install"
+  },
+  {
     "input": "HookRuleInput",
     "method": "GET",
     "name": "getHookRule",

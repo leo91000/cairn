@@ -330,6 +330,13 @@ async fn rule_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
             json!({ "agentId": query("agentId") }),
         ),
         ("POST", ["hook-rules", "validate"]) => ("validate_hook_rule", input.body.clone()),
+        ("GET", ["hook-rules", "templates"]) => (
+            "list_hook_rule_templates",
+            json!({ "instanceId": query("instanceId") }),
+        ),
+        ("POST", ["hook-rules", "templates", "install"]) => {
+            ("install_hook_rule_template", input.body.clone())
+        }
         ("POST", ["hook-rules"]) => ("create_hook_rule", input.body.clone()),
         ("GET", ["hook-rules", id]) => ("get_hook_rule", json!({ "ruleId": id })),
         ("GET", ["hook-rules", id, "versions"]) => {

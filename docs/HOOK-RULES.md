@@ -122,6 +122,27 @@ plugin rights, MCP connections, several projects, file writes or commands,
 delegation, native execution or installation access, the rule carries an
 `openToAnyone` warning naming the agent and its rights. Saving is still allowed.
 
+## Rule templates
+
+A plugin may declare rule templates in its manifest
+([format](PLUGINS.md#rule-templates-adr-0075-ticket-h)): ready-made sets of rules
+with parameters (agents, resources, texts, numbers, booleans).
+`list_hook_rule_templates` offers the templates of the instances on which an agent
+the caller may use holds a grant, with their parameters and rules.
+
+`install_hook_rule_template` takes the instance, the template's name, the parameter
+values and optionally `enabled` (default `true`) and `creationId` (retrying returns
+the same rules, even after the template changes or disappears; deleting one of the
+installed rules requires a new creation identity). It checks the values (unknown,
+missing or ill-typed ones are refused, and the installer must have access to every
+agent they name), then creates
+one rule per template rule through the same validation and authority as
+`create_hook_rule`, all or none: a rule that fails names its position (`Rule 2: …`).
+The rules belong to the installer, record the `template` source and keep no link to
+the template: a plugin update changes the template, never the rules it created. Each
+rule carries its warnings: the installer is warned like any creator when a rule
+starts an agent with broad rights without testing the author.
+
 ## Surfaces
 
 The HTTP API lives under `/api/hook-rules`. The same definitions back the public MCP
@@ -141,6 +162,8 @@ and `cairn_installation`:
 | `lift_hook_rule_budget` | `POST /hook-rules/{ruleId}/budget` | manage |
 | `duplicate_hook_rule` | `POST /hook-rules/{ruleId}/duplicate` | manage |
 | `delete_hook_rule` | `DELETE /hook-rules/{ruleId}` | manage |
+| `list_hook_rule_templates` | `GET /hook-rules/templates?instanceId` | read |
+| `install_hook_rule_template` | `POST /hook-rules/templates/install` | manage |
 
 `validate_hook_rule` checks a definition as saving would and returns problems located
 by JSON Pointer into the definition, with warnings. The catalog lists the hooks with
@@ -154,8 +177,9 @@ owner who authorized the client.
 
 ### Agents with installation access
 
-`cairn_installation` reads rules, their versions and the catalog, and validates
-definitions. It writes rules only for one person who remains, when it writes, the
+`cairn_installation` reads rules, their versions, the catalog and the rule templates,
+and validates definitions. Installing a template writes rules and follows the same
+limits. It writes rules only for one person who remains, when it writes, the
 owner or a member with access to the conversation's agent, in a conversation that this
 person alone has written since its creation, from the web, Android or the public MCP,
 and whose turn this person launched; never in a task (scheduled, manual or delegated)
@@ -166,6 +190,6 @@ skills written through Cairn's skill tools (`save_skill`, `edit_skill_files`) ar
 skills written by an agent, not repository content.
 
 Until Cairn records who writes each conversation entry, no conversation meets these
-conditions: `cairn_installation` writes no rule. It never grants a right, never lifts
+conditions: `cairn_installation` writes no rule and installs no template. It never grants a right, never lifts
 an emergency pause or exhausted budget, never touches another account's rule and never
 reduces a grant a rule of a current account uses.

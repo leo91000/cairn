@@ -9,6 +9,7 @@ mod capability;
 mod catalog;
 pub(crate) mod formula;
 pub(crate) mod storage;
+pub(crate) mod templates;
 pub(crate) mod validation;
 
 pub(crate) use capability::{RULE_OPERATIONS, RuleOperation, rule_operation};
@@ -30,6 +31,7 @@ use storage::{RuleRow, VersionRow};
 use validation::{Creator, Instances};
 
 /// Who asks. Constructed by authenticated transport adapters, never from command JSON.
+#[derive(Clone)]
 pub(crate) enum Actor {
     /// A person in the web or Android app.
     Person(InstallationIdentity),
@@ -171,6 +173,19 @@ async fn writer(s: &Service, actor: &Actor) -> Result<(Writer, Option<TaskAuthor
         },
         policy,
     ))
+}
+
+/// Rule creation, whether direct or through a template, uses the same provenance gate.
+async fn creation_writer(s: &Service, actor: &Actor) -> Result<Writer> {
+    match actor {
+        Actor::Installation(bearer, _) => {
+            let bearer = bearer.clone();
+            s.store
+                .read(move |db| installation_writer(db, &bearer))
+                .await
+        }
+        _ => writer(s, actor).await.map(|(writer, _)| writer),
+    }
 }
 
 /// The instances a definition names, with their active manifests, read before the
@@ -554,18 +569,7 @@ pub(crate) async fn create(
     refresh_native(s, &input.definition).await?;
     let _authors = s.missions.authors.lock().await;
     actor.recheck().await?;
-    let (writer, _) = match &actor {
-        Actor::Installation(bearer, _) => {
-            let bearer = bearer.clone();
-            (
-                s.store
-                    .read(move |db| installation_writer(db, &bearer))
-                    .await?,
-                None,
-            )
-        }
-        _ => writer(s, &actor).await?,
-    };
+    let writer = creation_writer(s, &actor).await?;
     let viewer = Viewer {
         account: Some(writer.creator.account.clone()),
         owner: writer.creator.owner,
@@ -948,6 +952,20 @@ pub(crate) async fn validate(
         .await
 }
 
+/// The agents a person may designate: the owner, public clients and agents reach all.
+async fn usable_agents(s: &Service, actor: &Actor) -> Result<Vec<AgentId>> {
+    match actor {
+        Actor::Person(identity) => crate::agent_access::usable_now(s, identity.clone()).await,
+        _ => Ok(s
+            .store
+            .agents()
+            .await?
+            .into_iter()
+            .map(|agent| agent.id)
+            .collect()),
+    }
+}
+
 pub(crate) async fn catalog(
     s: &Service,
     input: GetHookRuleCatalogInput,
@@ -955,20 +973,225 @@ pub(crate) async fn catalog(
 ) -> Result<HookRuleCatalog> {
     actor.require_scope("read")?;
     actor.recheck().await?;
-    let usable = match &actor {
-        Actor::Person(identity) => crate::agent_access::usable_now(s, identity.clone()).await?,
-        _ => s
-            .store
-            .agents()
-            .await?
-            .into_iter()
-            .map(|agent| agent.id)
-            .collect(),
-    };
+    let usable = usable_agents(s, &actor).await?;
     let catalog = catalog::build(s, usable, input.agent_id).await?;
     actor.recheck().await?;
     s.store.read(move |db| actor.authorize(db)).await?;
     Ok(catalog)
+}
+
+/// The instances on which an agent the caller may use holds a grant: their templates
+/// are offered, like the catalog's hooks and tools.
+async fn offered_instances(s: &Service, actor: &Actor) -> Result<BTreeSet<String>> {
+    let usable = usable_agents(s, actor)
+        .await?
+        .into_iter()
+        .map(|agent| agent.to_string())
+        .collect::<Vec<_>>();
+    s.store
+        .read(move |db| {
+            let mut granted = BTreeSet::new();
+            for agent in &usable {
+                for grant in db.agent_plugin_grants(agent)?.grants {
+                    granted.insert(grant.instance_id.to_string());
+                }
+            }
+            Ok(granted)
+        })
+        .await
+}
+
+/// The rule templates of the offered instances.
+pub(crate) async fn list_templates(
+    s: &Service,
+    input: ListHookRuleTemplatesInput,
+    actor: Actor,
+) -> Result<ListHookRuleTemplatesOutput> {
+    actor.require_scope("read")?;
+    actor.recheck().await?;
+    let granted = offered_instances(s, &actor).await?;
+    let instances = s.store.plugin_instances().await?;
+    let mut templates = Vec::new();
+    for instance in instances {
+        if !granted.contains(&instance.id)
+            || input
+                .instance_id
+                .is_some_and(|only| only.to_string() != instance.id)
+        {
+            continue;
+        }
+        let Ok(package) = crate::plugins::registry::active(s, &instance.plugin_id).await else {
+            continue;
+        };
+        let Ok(instance_id) = uuid::Uuid::parse_str(&instance.id).map(PluginInstanceId) else {
+            continue;
+        };
+        for template in package.manifest.rule_templates {
+            templates.push(HookRuleTemplate {
+                instance_id,
+                instance_name: instance.name.clone(),
+                plugin_id: instance.plugin_id.clone(),
+                plugin_version: package.manifest.version.clone(),
+                template,
+            });
+        }
+    }
+    actor.recheck().await?;
+    s.store.read(move |db| actor.authorize(db)).await?;
+    Ok(ListHookRuleTemplatesOutput { templates })
+}
+
+/// Retry identity only: no package or template reference is retained.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TemplateCreation {
+    creator_account_id: String,
+    rule_ids: Vec<String>,
+}
+
+fn template_creation(
+    db: &Db<'_>,
+    key: &str,
+    viewer: &Viewer,
+) -> Result<Option<InstallHookRuleTemplateOutput>> {
+    let Some(creation) = db.kv_as::<TemplateCreation>(key)? else {
+        return Ok(None);
+    };
+    if viewer.account.as_ref() != Some(&creation.creator_account_id) {
+        return Err(Error::conflict(
+            "This creation identity belongs to another account.",
+        ));
+    }
+    let mut rules = Vec::new();
+    for id in creation.rule_ids {
+        let row = db.hook_rule(&id)?.ok_or_else(|| {
+            Error::conflict("Some installed rules were deleted since. Install the template again with a new creation identity.")
+        })?;
+        if row.creator_account_id != creation.creator_account_id {
+            return Err(Error::conflict(
+                "This creation identity belongs to another account.",
+            ));
+        }
+        rules.push(view(db, &id, viewer)?);
+    }
+    Ok(Some(InstallHookRuleTemplateOutput { rules }))
+}
+
+/// Creates one ordinary rule per template rule, all or none, through the same checks as
+/// [`create`]. The rules belong to the installer and keep no link to the template.
+pub(crate) async fn install_template(
+    s: &Service,
+    input: InstallHookRuleTemplateInput,
+    actor: Actor,
+) -> Result<InstallHookRuleTemplateOutput> {
+    actor.require_scope("manage")?;
+    actor.recheck().await?;
+    let retry_requested = input.creation_id.is_some();
+    let creation = creation_id(input.creation_id)?;
+    let creation_key = format!("hook-rule-template-creation:{creation}");
+    // Completed retries do not depend on a template that may since have changed or
+    // disappeared. Membership and the rule-write provenance gate still apply.
+    if retry_requested {
+        let _authors = s.missions.authors.lock().await;
+        actor.recheck().await?;
+        let writer = creation_writer(s, &actor).await?;
+        let viewer = Viewer {
+            account: Some(writer.creator.account),
+            owner: writer.creator.owner,
+        };
+        let retry_actor = actor.clone();
+        let retry_key = creation_key.clone();
+        let existing = s
+            .store
+            .read(move |db| {
+                retry_actor.authorize(db)?;
+                template_creation(db, &retry_key, &viewer)
+            })
+            .await?;
+        if let Some(existing) = existing {
+            return Ok(existing);
+        }
+    }
+    let instance = input.instance_id.to_string();
+    // Like the listing, only instances on which an agent the caller may use holds a grant.
+    let offered = offered_instances(s, &actor).await?;
+    let connection = s.store.plugin_instance(&instance).await?;
+    let Some(connection) = connection.filter(|_| offered.contains(&instance)) else {
+        return Err(Error::not_found(
+            "No agent you may use holds a grant on this plugin instance.",
+        ));
+    };
+    let package = crate::plugins::registry::active(s, &connection.plugin_id)
+        .await
+        .map_err(|_| {
+            Error::conflict("This plugin is not active. The owner approves it in Plugins.")
+        })?;
+    let template = package
+        .manifest
+        .rule_template(&input.template)
+        .cloned()
+        .ok_or_else(|| Error::not_found("This plugin offers no such rule template."))?;
+    let values = templates::values(&template, &input.parameters)?;
+    let definitions = templates::instantiate(&package.manifest, &template, &instance, &values)
+        .map_err(Error::bad)?;
+    let mut known = Instances::default();
+    for definition in &definitions {
+        known.0.extend(instances(s, definition).await?.0);
+        refresh_native(s, definition).await?;
+    }
+    let ids = (0..definitions.len()).map(|_| id()).collect::<Vec<_>>();
+
+    let _authors = s.missions.authors.lock().await;
+    actor.recheck().await?;
+    let mut writer = creation_writer(s, &actor).await?;
+    writer.source = HookRuleSource::Template;
+    let viewer = Viewer {
+        account: Some(writer.creator.account.clone()),
+        owner: writer.creator.owner,
+    };
+    s.store
+        .transaction(move |db| {
+            actor.authorize(db)?;
+            if let Actor::Installation(bearer, _) = &actor {
+                installation_writer(db, bearer)?;
+            }
+            if let Some(existing) = template_creation(db, &creation_key, &viewer)? {
+                return Ok(existing);
+            }
+            templates::authorize_agents(db, &writer.creator, &template, &values)?;
+            for (index, (id, definition)) in ids.iter().zip(definitions).enumerate() {
+                fresh_identity(db, id)?;
+                let mut row = new_row(id.clone(), &writer, !input.enabled);
+                save_version(db, &mut row, definition, &writer, &known).map_err(|mut error| {
+                    error.message = format!("Rule {}: {}", index + 1, error.message);
+                    error
+                })?;
+            }
+            if retry_requested {
+                db.set_as(
+                    &creation_key,
+                    &TemplateCreation {
+                        creator_account_id: writer.creator.account.clone(),
+                        rule_ids: ids.clone(),
+                    },
+                    None,
+                )?;
+            }
+            db.audit(
+                "hook_rule.template_installed",
+                &json!({
+                    "instanceId": instance,
+                    "template": template.name,
+                    "ruleIds": ids,
+                    "creator": writer.creator.account,
+                }),
+            )?;
+            let rules = ids
+                .iter()
+                .map(|id| view(db, id, &viewer))
+                .collect::<Result<_>>()?;
+            Ok(InstallHookRuleTemplateOutput { rules })
+        })
+        .await
 }
 
 /// Marks the rules of ended memberships, in the transaction that observes them.

@@ -1630,6 +1630,8 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "set_hook_rule_emergency_pause",
         "lift_hook_rule_budget",
         "duplicate_hook_rule",
+        "list_hook_rule_templates",
+        "install_hook_rule_template",
         "delete_hook_rule",
     ]);
     assert_eq!(installed_names, public_names);
