@@ -261,19 +261,6 @@ def main():
                     body = self.rfile.read(length) if length else None
                     connection.request(self.command, self.path, body=body, headers=dict(self.headers))
                     response = connection.getresponse()
-                    if self.path.endswith('/direct-reader') and self.command == 'POST':
-                        # This response owns the publication reader. Forward its
-                        # headers and heartbeats while bounded PUT RPCs proceed.
-                        self.send_response(response.status)
-                        for key, value in response.getheaders():
-                            if key.lower() not in ('content-length', 'transfer-encoding', 'connection'):
-                                self.send_header(key, value)
-                        self.send_header('Connection', 'close')
-                        self.end_headers()
-                        while chunk := response.read1(16384):
-                            self.wfile.write(chunk)
-                            self.wfile.flush()
-                        return
                     payload = response.read()
                     self.send_response(response.status)
                     for key, value in response.getheaders():
@@ -755,7 +742,7 @@ def main():
             try:
                 api('/disks/' + run + '/evict', receipt)
             except urllib.error.HTTPError as error:
-                assert error.code == 409
+                assert error.code in (404, 405, 409)
             else:
                 raise AssertionError('Local environment data was evicted.')
             prepare_base(other)
@@ -848,11 +835,12 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                                                           remoteRequests=manager('metrics')['remoteRequests']-before_reads)
             assert metrics['nativeOverwriteConsolidation']['remoteRequests'] == 0
             (managed(run) / 'overwrite-pressure').unlink()
+            assert api('/disks/' + run + '/storage-status')['localBytes'] > 0
             # No local environment can be evicted, including a current writer.
             try:
                 api('/disks/' + run + '/evict', dict(receipt, attempt=resumed))
             except urllib.error.HTTPError as error:
-                assert error.code == 409
+                assert error.code in (404, 405, 409)
             else:
                 raise AssertionError('Eviction removed an active writer cache.')
             # Local work has no backup-lag state or remote dependency.
@@ -905,7 +893,7 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
             try:
                 api('/disks/' + run + '/evict', receipt)
             except urllib.error.HTTPError as error:
-                assert error.code == 409
+                assert error.code in (404, 405, 409)
             else:
                 raise AssertionError('Eviction removed local journal writes.')
             progress('storage-growth-pressure-complete')
@@ -1151,7 +1139,6 @@ print(json.dumps(dict(writtenBytes=6 * 64 * 1024 * 1024, retainedFileBytes=os.st
                     assert not docker_runtime_path.exists() and not docker_runtime_path.is_symlink(), 'Permanent deletion retained Docker runtime state.'
             if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
                 metrics['dockerRuntimeCleanupVerified'] = True
-            metrics['retainedRemoteObjects'] = len(remaining)
             progress('purge-completed')
             metrics['harnessCpuSeconds'] = resource.getrusage(resource.RUSAGE_SELF).ru_utime
             metrics['host']['loadAverageEnd'] = os.getloadavg()

@@ -29,6 +29,12 @@ if (values.reference) {
   // No server or bucket is created, and the workload requires zero remote reads.
   process.env.CAIRN_NODE_TEST_S3_ENDPOINT = 'http://127.0.0.1:1'
   process.env.AWS_ACCESS_KEY_ID = 'node-fixture'
+  process.env.AWS_SECRET_ACCESS_KEY = 'node-fixture-secret'
+  process.env.AWS_ENDPOINT_URL_S3 = 'http://127.0.0.1:1'
+  process.env.AWS_REGION = 'us-east-1'
+  process.env.AWS_EC2_METADATA_DISABLED = 'true'
+  process.env.AWS_CONFIG_FILE = '/dev/null'
+  process.env.AWS_SHARED_CREDENTIALS_FILE = '/dev/null'
 }
 
 const result = spawnSync('python3', [path.join(repo, 'scripts/tests/native_runtime_test.py'), binary, qualifier], {

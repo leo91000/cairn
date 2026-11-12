@@ -8,13 +8,9 @@ import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
 import { storageProbeCommand } from './storage-probe-command.mjs'
 
-export async function prepareLocalStorage({ api, root, managerOrigin }) {
+export async function prepareLocalStorage({ api }) {
   const policy = { memoryCacheMiB: 8, reserveMiB: 64, reservePercent: 1 }
-  // PR2b retains the authorization packet; local base reads never use it remotely.
-  const master = new URL(managerOrigin || 'http://127.0.0.1:4313/')
-  const storage = { master: master.href, grant: 'fixture-storage-grant', policy }
-  if (root && managerOrigin)
-    await writeFile(path.join(root, 'data/manager-origin'), master.origin)
+  const storage = { owner: randomUUID(), policy }
   let generation = 0
 
   async function applyPolicy(policy) {
@@ -29,6 +25,7 @@ export async function inspectLocalDisk(api, runId) {
   const status = await (await api(`/disks/${runId}/storage-status`, 'POST', {})).json()
   assert.equal(status.mode, 'on-demand')
   assert.ok(status.localBytes > 0, 'The environment retains its local backing')
+  assert.equal(status.grantId, undefined, 'Local disks expose no remote read grant')
   if (status.published)
     assert.equal(status.published.local, true, 'Base retirement uses a local consolidation receipt')
   return status
@@ -67,7 +64,7 @@ export async function storageSmoke({
         soak,
       })],
       resources: { cpu: 1, memoryMiB: 512, diskMiB: 512 },
-      storage,
+      storage: { ...storage, owner: runId },
       imports: [{ source: workspace, target: workspace }, { source: `/data/runs/${runId}/chat-input`, target: '/run/cairn-chat', readOnly: true }],
     }
     await writeFile(path.join(root, 'data/runner-plans', `${id}.json`), JSON.stringify(plan))

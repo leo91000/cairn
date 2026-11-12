@@ -13,7 +13,7 @@ import {
 import path from 'node:path'
 import process from 'node:process'
 import { setTimeout } from 'node:timers/promises'
-import { prepareLocalStorage } from './runner-storage-smoke.mjs'
+import { inspectLocalDisk, prepareLocalStorage } from './runner-storage-smoke.mjs'
 import { ublkDeviceArguments } from './ublk-devices.mjs'
 
 async function main() {
@@ -147,7 +147,7 @@ console.log('exclusive-live-ok '+mode+' pid='+process.pid);
       expires: Date.now() + (android ? 1800000 : 300000),
       sandbox: 'yolo',
       cwd: `${runRoot}/workspace`,
-      storage,
+      storage: { ...storage, owner: runId },
       resources: { cpu: 2, memoryMiB: envelopeMiB, diskMiB: 32768 },
       command: ['node', `${runRoot}/workspace/probe.mjs`],
       chat: { provider: 'codex' },
@@ -220,10 +220,9 @@ console.log('exclusive-live-ok '+mode+' pid='+process.pid);
     assert.ok((logs(owner).match(/tick owner/g) || []).length > ownerTicks, 'Exclusive owner continues running')
     const denied = await request(`/runs/${waiting.id}`, 'POST')
     assert.equal(denied.status, 409, 'New admissions wait behind the exclusive reservation')
-    const checkpoint = await (await api(`/runs/${victim.id}/snapshot`, 'POST', { consistency: 'filesystem' })).json()
-    await api(`/snapshots/${checkpoint.id}/discard`, 'DELETE')
+    await inspectLocalDisk(api, victim.runId)
     await setTimeout(300)
-    assert.equal(logs(victim), paused, 'Checkpoint completion does not release exclusivity')
+    assert.equal(logs(victim), paused, 'Local disk inspection does not release exclusivity')
     const pausedNestedCounter = nestedProgress()
     await api('/exclusive/release', 'POST', { id: held.id, epoch: held.epoch })
     await requireNestedProgress(pausedNestedCounter)
@@ -292,7 +291,7 @@ console.log('exclusive-live-ok '+mode+' pid='+process.pid);
       },
       android,
       memoryRequired,
-      scope: 'Real Firecracker and ublk; same active commands, nested vCPU, guest RAM contents, checkpoint arbitration, admission and reservation expiry. Private synthetic local storage origin.',
+      scope: 'Real Firecracker and ublk; same active commands, nested vCPU, guest RAM contents, local disk inspection, admission and reservation expiry. Private local journals.',
     })}\n`)
   }
   finally {

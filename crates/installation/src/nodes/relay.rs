@@ -229,7 +229,7 @@ fn route(method: &str, path: &str) -> Result<()> {
         ["disks", id, operation] => {
             method == "POST"
                 && uuid(id)
-                && ["delete", "prune", "storage-status"].contains(operation)
+                && ["delete", "prune", "storage-status", "publication-fence"].contains(operation)
         }
         _ => false,
     };

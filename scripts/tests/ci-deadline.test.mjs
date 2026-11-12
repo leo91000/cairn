@@ -264,6 +264,23 @@ it('adopts a fast setsid daemon with closed stdio before its parent disappears',
   }
 })
 
+it.each(['backend', 'native'])('accepts workflow diagnostic prerequisites without the retired migration input (%s)', (role) => {
+  const environment = {
+    ...process.env,
+    BACKEND_ONLY: 'true',
+    VALIDATION_ONLY: 'true',
+    PLAN_STORAGE_REFERENCE: '',
+    DIAGNOSTIC_CANDIDATE: '358461be03f947ff168950d0a85999e5ad5f9274',
+    DIAGNOSTIC_REFERENCE: '06829d1b5f3d7accb9791c09d49522e7e2d2ab25',
+    GITHUB_REPOSITORY: 'invalid',
+  }
+  delete environment.BACKEND_QUALIFICATION
+  const result = spawnSync(process.execPath, [new URL('../ci-diagnostic-source.mjs', import.meta.url).pathname, role], { encoding: 'utf8', env: environment })
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /Invalid CI clock identity/)
+  assert.doesNotMatch(result.stderr, /Diagnostics require/)
+})
+
 it('rejects an independent Plan storage request before reading CI metadata or fetching sources', () => {
   const file = new URL('../ci-diagnostic-source.mjs', import.meta.url)
   const result = spawnSync(process.execPath, [file.pathname, 'backend'], {
@@ -272,7 +289,6 @@ it('rejects an independent Plan storage request before reading CI metadata or fe
       ...process.env,
       BACKEND_ONLY: 'true',
       VALIDATION_ONLY: 'true',
-      BACKEND_QUALIFICATION: 'none',
       DIAGNOSTIC_CANDIDATE: '358461be03f947ff168950d0a85999e5ad5f9274',
       PLAN_STORAGE_REFERENCE: '06829d1b5f3d7accb9791c09d49522e7e2d2ab25',
     },

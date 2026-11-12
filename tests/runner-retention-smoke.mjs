@@ -181,7 +181,7 @@ async function main() {
       const plan = {
         id,
         runId,
-        storage,
+        storage: { ...storage, owner: runId },
         expires: Date.now() + 120000,
         sandbox: 'yolo',
         cwd: chat.cwd,
@@ -306,7 +306,7 @@ async function main() {
         const plan = {
           id,
           runId: taskRun,
-          storage,
+          storage: { ...storage, owner: taskRun },
           expires: Date.now() + 120000,
           sandbox: 'yolo',
           cwd,

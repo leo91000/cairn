@@ -20,10 +20,10 @@ async function main() {
   const reference = process.env.DIAGNOSTIC_REFERENCE
   const immutable = value => /^[0-9a-f]{40}$/.test(value ?? '') && value !== '0'.repeat(40)
   if (!['backend', 'native'].includes(role) || process.env.BACKEND_ONLY !== 'true'
-    || process.env.VALIDATION_ONLY !== 'true' || process.env.BACKEND_QUALIFICATION !== 'none'
+    || process.env.VALIDATION_ONLY !== 'true'
     || (process.env.PLAN_STORAGE_REFERENCE ?? '') !== ''
     || !immutable(candidate) || (role === 'native' && !immutable(reference))) {
-    throw new Error('Diagnostics require validation-only/backend-only, immutable source SHAs and no migration qualification')
+    throw new Error('Diagnostics require validation-only/backend-only, immutable source SHAs and no Plan storage qualification')
   }
 
   const repository = process.env.GITHUB_REPOSITORY
