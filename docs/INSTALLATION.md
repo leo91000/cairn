@@ -28,10 +28,9 @@ socket. Private identity and agent credentials must stay on this host. Do not
 publish the directory or `docker compose config` output.
 
 The manager's origin, `http://manager:4310`, exists only on that private Compose
-network. At startup the manager records it in the data directory it shares with
-its local runner, which then reads conversation disks from exactly this origin.
-Every other controller keeps the HTTPS rule: remote nodes enroll, connect and
-read disks over HTTPS, HTTP being accepted only on loopback. A node added without
+network, which the manager and local runner use to communicate. Additional
+nodes enroll and connect to the manager over HTTPS; HTTP is accepted only on
+loopback. A node added without
 an address uses that loopback exception: its local gateway carries each connection
 to the manager, directly or through Beacon, encrypted to the manager's pinned node
 certificate, so this installation still publishes no port. See
@@ -77,7 +76,8 @@ capacity, retention and recovery.
 
 New installations have no Garage service and need no bucket or S3 credentials.
 Updating an older installation expires environments that depend on S3, without
-copying their files back. The release note describes this loss: push commits and
+copying their files back. The [migration and release note](migrations/0032-local-conversation-disks.md)
+describe this loss: push commits and
 save files to keep before updating. The update does not erase old
 `data/storage-s3.json`, `garage.env`, `garage.toml`, Garage data, external buckets
 or environment values. Rerunning the installer leaves those files untouched.

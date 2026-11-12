@@ -151,8 +151,7 @@ les données.
    (`/var/lib/cairn-installation` par défaut), dont `installation.json`, la
    configuration Compose et de mise à jour, `data`, `home`, `workspaces`,
    `runner-state` et, s’il existe encore, `garage`. Cela efface les anciens objets
-   Garage, les
-   anciennes images sélectionnées, l’identité et les secrets. Effacer également
+   Garage, les anciennes images sélectionnées, l’identité et les secrets. Effacer également
    la configuration et tout l’état local de chaque node (disques, journaux et caches).
 3. Réinstaller dans des racines vides avec les images et binaires de la même
    release, selon [l’installation](INSTALLATION.md), puis revendiquer l’installation.
