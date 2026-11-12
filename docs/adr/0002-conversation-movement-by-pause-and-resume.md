@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0084](0084-local-conversation-disks-without-s3.md) : un changement de node fait expirer l’environnement de travail ; l’absence de conservation des processus et de leur mémoire reste applicable.
+> Statut : Remplacée par [ADR-0083](0083-local-conversation-disks-without-s3.md) : un changement de node fait expirer l’environnement de travail ; l’absence de conservation des processus et de leur mémoire reste applicable.
 
 # Déplacer une conversation par pause et reprise
 

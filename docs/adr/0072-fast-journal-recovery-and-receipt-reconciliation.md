@@ -1,4 +1,4 @@
-> Statut : [ADR-0084](0084-local-conversation-disks-without-s3.md) retire les reçus de publication et leur réconciliation ; la récupération rapide du journal reste applicable.
+> Statut : [ADR-0083](0083-local-conversation-disks-without-s3.md) retire les reçus de publication et leur réconciliation ; la récupération rapide du journal reste applicable.
 
 # Fast journal recovery and reconciliation of durable publication receipts
 

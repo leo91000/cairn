@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0084](0084-local-conversation-disks-without-s3.md) : les disques ne sont plus transférés vers un stockage distant.
+> Statut : Remplacée par [ADR-0083](0083-local-conversation-disks-without-s3.md) : les disques ne sont plus transférés vers un stockage distant.
 
 # Transferts directs de stockage confiés aux nodes
 

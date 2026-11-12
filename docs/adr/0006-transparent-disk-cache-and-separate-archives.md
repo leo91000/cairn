@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0008](0008-current-disk-publication-without-archives.md) pour l’archivage et [ADR-0009](0009-s3-backed-disks-required-on-every-node.md) pour l’activation et la migration par node ; [ADR-0084](0084-local-conversation-disks-without-s3.md) retire le cache évinçable et la reprise à la demande.
+> Statut : Remplacée par [ADR-0008](0008-current-disk-publication-without-archives.md) pour l’archivage et [ADR-0009](0009-s3-backed-disks-required-on-every-node.md) pour l’activation et la migration par node ; [ADR-0083](0083-local-conversation-disks-without-s3.md) retire le cache évinçable et la reprise à la demande.
 
 # Cache disque transparent et archivage distinct
 

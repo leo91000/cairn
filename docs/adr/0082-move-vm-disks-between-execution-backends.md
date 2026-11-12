@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0084](0084-local-conversation-disks-without-s3.md) : changer de backend est un changement de node qui fait expirer l’environnement de travail ; aucun disque n’est réutilisé entre nodes. Les vérifications d’autorité native et d’approbation de la destination restent applicables.
+> Statut : Remplacée par [ADR-0083](0083-local-conversation-disks-without-s3.md) : changer de backend est un changement de node qui fait expirer l’environnement de travail ; aucun disque n’est réutilisé entre nodes. Les vérifications d’autorité native et d’approbation de la destination restent applicables.
 
 # Explicit backend moves reuse VM disks
 

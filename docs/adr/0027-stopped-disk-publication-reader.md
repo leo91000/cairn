@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0084](0084-local-conversation-disks-without-s3.md) : les disques ne sont plus publiés.
+> Statut : Remplacée par [ADR-0083](0083-local-conversation-disks-without-s3.md) : les disques ne sont plus publiés.
 
 # One journal reader for a stopped-disk publication transfer
 

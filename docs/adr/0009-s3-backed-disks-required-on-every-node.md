@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0055](0055-ublk-only-vm-storage.md) pour le transport FUSE, [ADR-0019](0019-booted-vms-with-ready-codex.md) pour le retrait du préchauffage anonyme, [ADR-0070](0070-automatic-native-disk-growth.md) pour la restriction d’agrandissement des disques plats natifs compatibles, puis par [ADR-0084](0084-local-conversation-disks-without-s3.md) : les disques de travail restent locaux à leur node, sans S3. Le journal local comme seul format de disque, sans image locale ni dm-era, reste applicable.
+> Statut : Remplacée par [ADR-0055](0055-ublk-only-vm-storage.md) pour le transport FUSE, [ADR-0019](0019-booted-vms-with-ready-codex.md) pour le retrait du préchauffage anonyme, [ADR-0070](0070-automatic-native-disk-growth.md) pour la restriction d’agrandissement des disques plats natifs compatibles, puis par [ADR-0083](0083-local-conversation-disks-without-s3.md) : les disques de travail restent locaux à leur node, sans S3. Le journal local comme seul format de disque, sans image locale ni dm-era, reste applicable.
 
 # Disques S3 obligatoires sur toutes les nodes
 

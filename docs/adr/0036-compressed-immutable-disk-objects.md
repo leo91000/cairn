@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0084](0084-local-conversation-disks-without-s3.md) : plus aucun objet de disque n’est écrit sur S3.
+> Statut : Remplacée par [ADR-0083](0083-local-conversation-disks-without-s3.md) : plus aucun objet de disque n’est écrit sur S3.
 
 # Compression of immutable disk objects
 

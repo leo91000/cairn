@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0009](0009-s3-backed-disks-required-on-every-node.md) pour l’activation, [ADR-0023](0023-periodic-journal-capture-without-guest-freeze.md) pour le gel périodique et [ADR-0055](0055-ublk-only-vm-storage.md) pour le transport, et par [ADR-0084](0084-local-conversation-disks-without-s3.md) pour la lecture à la demande depuis S3 et la publication ; le journal durable reste applicable.
+> Statut : Remplacée par [ADR-0009](0009-s3-backed-disks-required-on-every-node.md) pour l’activation, [ADR-0023](0023-periodic-journal-capture-without-guest-freeze.md) pour le gel périodique et [ADR-0055](0055-ublk-only-vm-storage.md) pour le transport, et par [ADR-0083](0083-local-conversation-disks-without-s3.md) pour la lecture à la demande depuis S3 et la publication ; le journal durable reste applicable.
 
 # Disques à la demande et journal local durable
 
