@@ -69,7 +69,7 @@ describe('disposable Rust test runner disk preparation', () => {
     const callers = Object.entries(workflow.jobs).filter(([, job]) => job.steps?.some(step => step.uses === './.github/actions/prepare-rust-runner'))
     expect(callers.map(([name]) => name).sort()).toEqual(['backend', 'cli-qualification'])
     for (const [, job] of callers) {
-      expect(job['runs-on']).toBe('ubuntu-latest')
+      expect(job['runs-on']).toBe('ubuntu-24.04')
       expect(job.container).toBeUndefined()
       const preparation = job.steps.findIndex(step => step.uses === './.github/actions/prepare-rust-runner')
       const dependencies = job.steps.findIndex(step => step.name === 'Install native test dependencies')

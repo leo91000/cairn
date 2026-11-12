@@ -347,6 +347,11 @@ not proved by the generic supervisor. All of this runs on disposable CI hosts.
 
 ## GitHub responsibilities
 
+GitHub-hosted jobs run on `ubuntu-24.04`, not `ubuntu-latest`. The bounded native
+dependency setup and its tests rely on GNU coreutils `timeout`; the `ubuntu-26.04`
+image replaces it, which changes their exit statuses. Move the pin only together
+with that setup and its tests.
+
 `PR validation` runs on every PR and push to main: the `quality` suite always,
 contracts and Android unit/lint checks when their inputs change. Its aggregate
 `PR validation required` check succeeds only when each selected job succeeds.
