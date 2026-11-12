@@ -3,8 +3,9 @@
 Date : 2026-11-08.
 
 Statut : acceptée, non implémentée. Elle précise
-[ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) et remplacera, une fois
-livrée, les missions et leurs runs.
+[ADR-0075](0075-plugin-hooks-rules-and-scoped-grants.md) et
+[ADR-0074](0074-common-agent-question-tool.md), et remplacera, une fois livrée, les
+missions et leurs runs.
 
 ## Constat
 
@@ -18,7 +19,7 @@ Cette dualité se paie dans tout le code. Les attentes durables existent en deux
 variantes ([MISSION-WAITS](../MISSION-WAITS.md),
 [ADR-0065](0065-durable-conversation-wakeups.md)). L’autorité native, la migration
 de mode d’exécution, les déplacements de node et la reprise traitent chacun les deux
-cas (environ 25 branches `trigger != "chat"`). Web, Android, le MCP public et
+cas (environ 25 tests de `trigger` contre `"chat"` dans `crates/installation`). Web, Android, le MCP public et
 `cairn_installation` ont chacun leurs écrans et outils de missions. Une partie de ce
 que les missions portaient a d’ailleurs déjà migré vers les conversations : la
 délégation passe par des tâches déléguées
@@ -29,8 +30,8 @@ conversations, jamais des missions
 Il reste deux besoins propres aux missions : faire travailler un agent à heure fixe,
 et l’administrer comme un objet durable, avec son auteur, son historique et sa pause.
 ADR-0075 donne déjà aux règles de hook un créateur dont l’autorité est revérifiée à
-chaque action, des états (désactivée, pause d’urgence, budget épuisé, droits perdus,
-adhésion terminée), un historique des déclenchements, des versions, la duplication
+chaque action, des empêchements (désactivée, pause d’urgence, budget épuisé, droits
+perdus, adhésion terminée), un historique des déclenchements, des versions, la duplication
 et un éditeur sans code. Seul un déclencheur horaire manque.
 
 ## Décision
@@ -41,7 +42,9 @@ et un éditeur sans code. Seul un déclencheur horaire manque.
 
 - Cairn émet un hook **Horloge**, paramétré par la règle qui l’écoute : un cron à
   cinq champs ou une date unique, dans un fuseau IANA. Sa payload porte la date
-  prévue et la date d’émission.
+  prévue et la date d’émission. Elle s’ajoute aux hooks de Cairn d’ADR-0075, mais
+  n’est liée à aucune clé ni conversation et n’exige aucun droit d’agent : la règle
+  désigne tout de même un agent d’exécution, que son créateur doit pouvoir utiliser.
 - Une **programmation** est une règle de hook ordinaire qui écoute l’Horloge et
   démarre un agent avec un brief. Ce n’est pas une entité à part : elle a le créateur,
   l’autorité, les états, l’historique, les versions, la duplication et le budget de
@@ -63,7 +66,8 @@ et un éditeur sans code. Seul un déclencheur horaire manque.
   déclenchement ; l’éditeur complet permet de l’enlever.
 - **Éditeur rapide** : « Programmer un agent » demande l’agent, le projet, le brief,
   le cron ou la date, et le fuseau, puis crée une règle ordinaire, comme un modèle de
-  règles fourni par Cairn. On la modifie ensuite dans l’éditeur complet.
+  règles fourni par Cairn, dont l’agent d’exécution est l’agent démarré. On la modifie
+  ensuite dans l’éditeur complet.
   « Lancer maintenant » la déclenche sans attendre l’Horloge.
 
 ### Ce qui disparaît avec les missions
@@ -72,9 +76,10 @@ et un éditeur sans code. Seul un déclencheur horaire manque.
   projet.
 - La sélection explicite des skills : un agent reçoit toujours toutes ses skills.
 - Les tags.
-- `run_task` et les missions lancées par des missions : le travail immédiat d’un agent
-  passe uniquement par la délégation ([ADR-0059](0059-delegated-tasks.md)), avec ses
-  limites.
+- `run_task` et les missions lancées par des missions : un agent démarre du travail
+  immédiat par la délégation ([ADR-0059](0059-delegated-tasks.md)), avec ses limites,
+  ou, s’il a l’accès à l’installation, par les outils de conversation de
+  `cairn_installation`, comme aujourd’hui.
 - Le « demandeur d’une mission » et la conversion d’un run en conversation.
 
 Un agent qui a l’accès à l’installation gère les programmations comme toute règle :
@@ -85,7 +90,8 @@ démarrée par une règle.
 ### Résultats et « Pour vous »
 
 - `report_outcome` garde `completed` et `blocked`. `needs_input` disparaît : l’agent
-  pose une question à la place.
+  pose une question à la place. Comme le prévoit ADR-0074 pour `needs_input`, un
+  résultat `blocked` conserve les questionnaires en attente ; `completed` les retire.
 - Le résultat `blocked` fait remonter n’importe quelle conversation dans « Pour vous ».
 - Une conversation démarrée par une règle (programmation comprise) n’y apparaît que
   lorsqu’elle a besoin de quelqu’un : une question, un échec ou un résultat `blocked`.
@@ -99,10 +105,11 @@ démarrée par une règle.
 
 Tout est migré ; il ne reste qu’un lecteur de conversations.
 
-- Une mission devient une règle sur l’Horloge. Son créateur est l’auteur de la
-  mission, ou le propriétaire pour une mission créée par un agent. Une mission dont
-  l’auteur a été retiré devient une règle « Adhésion terminée », qu’il faut dupliquer.
-  Une mission désactivée ou archivée devient une règle désactivée.
+- Une mission devient une règle sur l’Horloge, dont le créateur est l’auteur de la
+  mission. Une mission dont l’auteur a été retiré devient une règle « Adhésion
+  terminée », qu’il faut dupliquer ; une mission suspendue faute d’accès de son auteur
+  à l’agent devient une règle « Droits perdus ». Une mission désactivée ou archivée
+  devient une règle désactivée.
 - L’autorité native enregistrée sur la mission devient celle de la version migrée.
   Une mission sans autorité native enregistrée n’atteint pas d’agent natif tant que
   son créateur ne réenregistre pas la règle.
@@ -132,8 +139,10 @@ le moteur et l’interface des règles.
 ## Conséquences
 
 Les programmations dépendent du moteur de règles : tant qu’il n’est pas livré, les
-missions restent la seule façon de programmer un agent. Une mission ne peut plus en
-créer d’autres, et une programmation ne peut pas être créée par une conversation
-qu’une règle a démarrée. Les entrées du glossaire propres aux missions (« Demandeur
-d’une mission », « Mise de côté d’un résultat », « Auteur d’une tâche ») seront
-retirées ou reformulées avec leur suppression.
+missions restent la seule façon de programmer un agent. Une fois les missions
+remplacées, une conversation qu’une règle a démarrée, programmation comprise, ne crée
+pas de programmation. Les entrées du glossaire qui dépendent des missions ou de la
+sélection des skills seront retirées ou reformulées avec leur suppression, notamment
+« Demandeur d’une mission », « Mise de côté d’un résultat », « Auteur d’une tâche »,
+« Limite de stockage par tâche », « Migration du mode d’exécution d’une conversation »
+et « Skill ».
