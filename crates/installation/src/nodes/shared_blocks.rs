@@ -11,7 +11,7 @@ use futures_util::{StreamExt, stream};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::collections::HashMap;
 
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS shared_publications(id TEXT PRIMARY KEY,run_id TEXT NOT NULL);
@@ -469,39 +469,6 @@ pub async fn collect(s: &Service) -> Result<usize> {
     Ok(count)
 }
 
-pub(crate) async fn maintain(s: Arc<Service>) {
-    maintain_batches(s.shutdown.clone(), move || {
-        let service = s.clone();
-        async move { collect(&service).await }
-    })
-    .await;
-}
-
-async fn maintain_batches<F: std::future::Future<Output = Result<usize>>>(
-    shutdown: tokio_util::sync::CancellationToken,
-    mut collect: impl FnMut() -> F,
-) {
-    let mut timer = tokio::time::interval(Duration::from_secs(5));
-    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        tokio::select! {
-            biased;
-            () = shutdown.cancelled() => return,
-            _ = timer.tick() => {}
-        }
-        match collect().await {
-            // Keep each transaction and four-request network batch bounded, but
-            // don't cap a healthy store at 32 objects per five seconds.
-            Ok(count) if count >= BATCH as usize => timer.reset_immediately(),
-            Ok(_) => timer.reset(),
-            Err(error) => {
-                timer.reset();
-                tracing::warn!(message = %error.message, "Shared block cleanup will retry");
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod retirement_tests;
 
@@ -510,97 +477,6 @@ mod tests {
     use super::*;
     use crate::store::Store;
     use tempfile::TempDir;
-
-    #[tokio::test(start_paused = true)]
-    async fn full_cleanup_batches_continue_before_the_idle_poll_interval() {
-        let shutdown = tokio_util::sync::CancellationToken::new();
-        let stop = shutdown.clone();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let worker = tokio::spawn(async move {
-            let mut calls = 0;
-            maintain_batches(stop, move || {
-                sender.send(calls).unwrap();
-                calls += 1;
-                let full = calls <= 2;
-                async move {
-                    if !full {
-                        tokio::time::sleep(Duration::from_secs(6)).await;
-                    }
-                    Ok(if full { BATCH as usize } else { 0 })
-                }
-            })
-            .await;
-        });
-
-        for expected in 0..3 {
-            let observed = tokio::time::timeout(Duration::from_millis(1), receiver.recv())
-                .await
-                .expect("a full batch must not wait five seconds before continuing");
-            assert_eq!(observed, Some(expected));
-        }
-        assert!(receiver.try_recv().is_err());
-        tokio::time::advance(Duration::from_secs(6)).await;
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_secs(4)).await;
-        tokio::task::yield_now().await;
-        assert!(
-            receiver.try_recv().is_err(),
-            "empty queues keep their idle poll"
-        );
-        tokio::time::advance(Duration::from_secs(1)).await;
-        assert_eq!(receiver.recv().await, Some(3));
-        shutdown.cancel();
-        worker.await.unwrap();
-        assert!(receiver.recv().await.is_none());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn failed_cleanup_waits_for_the_next_poll_and_can_stop() {
-        let shutdown = tokio_util::sync::CancellationToken::new();
-        let stop = shutdown.clone();
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let worker = tokio::spawn(async move {
-            maintain_batches(stop, move || {
-                sender.send(()).unwrap();
-                async {
-                    tokio::time::sleep(Duration::from_secs(6)).await;
-                    Err(Error::unavailable("Synthetic storage outage"))
-                }
-            })
-            .await;
-        });
-
-        assert_eq!(receiver.recv().await, Some(()));
-        tokio::time::advance(Duration::from_secs(6)).await;
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_secs(4)).await;
-        tokio::task::yield_now().await;
-        assert!(
-            receiver.try_recv().is_err(),
-            "storage failures must not spin"
-        );
-        tokio::time::advance(Duration::from_secs(1)).await;
-        assert_eq!(receiver.recv().await, Some(()));
-        shutdown.cancel();
-        worker.await.unwrap();
-        assert!(receiver.recv().await.is_none());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn shutdown_stops_between_full_cleanup_batches() {
-        let shutdown = tokio_util::sync::CancellationToken::new();
-        let stop = shutdown.clone();
-        let mut calls = 0;
-        maintain_batches(shutdown, || {
-            calls += 1;
-            if calls == 3 {
-                stop.cancel();
-            }
-            std::future::ready(Ok(BATCH as usize))
-        })
-        .await;
-        assert_eq!(calls, 3);
-    }
 
     fn point(run: &str, bucket: &str) -> Value {
         json!({

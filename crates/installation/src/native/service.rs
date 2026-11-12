@@ -2504,22 +2504,12 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 }
             }
         }
-        ("POST", ["disks", run, "evict"]) => {
-            let _disk = disk::lock(&controller.state).await?;
-            uuid(run)?;
-            if controller
-                .active
-                .lock()
-                .await
-                .values()
-                .any(|attempt| attempt.run == *run)
-            {
-                return Err(Error::conflict(
-                    "Native execution must finish stopping before cache eviction.",
-                ));
-            }
-            let expected = input(request, 16384).await?;
-            block::evict(&controller.data, &controller.state, run, &expected).await?
+        ("POST", ["disks", _, "evict"]) => {
+            // Local base blocks are the conversation disk itself. An older
+            // manager may still request eviction; nothing is ever evicted.
+            return Err(Error::conflict(
+                "Native conversation disks are local and are never evicted.",
+            ));
         }
         ("POST", ["disks", run, "restore"]) => {
             let _disk = disk::lock(&controller.state).await?;

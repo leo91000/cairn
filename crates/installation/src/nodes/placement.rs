@@ -300,17 +300,13 @@ pub(crate) async fn reserve_authorized(
     s.store
         .transaction(move |db| {
             authorize.check(db)?;
-            let result = match reserve_in(db, &run, &attempt, configured) {
-                Ok(placement) => Ok(placement),
-                Err(error) if is_no_capacity(&error) => Err(error),
-                Err(error) => return Err(error),
-            };
-            if result.as_ref().is_err_and(is_no_capacity) {
-                request_reclamation(db, &run, configured)?;
+            // Local environments are never evicted: an admission without
+            // capacity waits for it, and returns that decision as data.
+            match reserve_in(db, &run, &attempt, configured) {
+                Ok(placement) => Ok(Ok(placement)),
+                Err(error) if is_no_capacity(&error) => Ok(Err(error)),
+                Err(error) => Err(error),
             }
-            // A failed transaction rolls back its pressure signal as well.
-            // Return the decision as data so the independent signal commits.
-            Ok(result)
         })
         .await?
 }
@@ -529,29 +525,6 @@ fn reserve_in(db: &Db<'_>, run: &Value, attempt: &str, configured: bool) -> Resu
     admit(db, &request, &best, &snapshot.attempts, attempt)
 }
 
-fn request_reclamation(db: &Db<'_>, run: &Value, configured: bool) -> Result<()> {
-    let snapshot = Snapshot::load(db, run, configured)?;
-    let request = Request::new(run, &snapshot.access, &snapshot.checkpoint);
-    for node in &snapshot.nodes {
-        if node["diskGrowthProtocol"] == 1
-            && request.eligible(node, configured)
-            && snapshot.fleet().free_slots(&request, node) > 0
-            && request.resources_for(node).is_some_and(|resources| {
-                !super::disk_capacity::admission_fits(
-                    node,
-                    &snapshot.attempts,
-                    request.run_id(),
-                    resources.disk_mi_b.saturating_mul(1_048_576),
-                    !request.replacing(text(node, "id")),
-                )
-            })
-        {
-            super::eviction::request(db, node)?;
-        }
-    }
-    Ok(())
-}
-
 /// Growth leaves enough capacity for the oldest eligible queued conversation.
 /// This is a transaction-local ceiling, not an allocation or an authority grant.
 pub(super) fn waiting_disk_bytes(db: &Db<'_>, node: &Value, attempts: &[Attempt]) -> Result<u64> {
@@ -634,10 +607,7 @@ pub async fn check(s: &Service, run: &Value) -> Result<()> {
             }
             match snapshot.select(&request, configured) {
                 Ok(_) => Ok(Ok(())),
-                Err(error) if is_no_capacity(&error) => {
-                    request_reclamation(db, run, configured)?;
-                    Ok(Err(error))
-                }
+                Err(error) if is_no_capacity(&error) => Ok(Err(error)),
                 Err(error) => Err(error),
             }
         })

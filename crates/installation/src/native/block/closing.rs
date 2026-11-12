@@ -304,11 +304,6 @@ mod tests {
                     .await
                     .is_err()
             );
-            assert!(
-                crate::native::block::evict(root.path(), &state, &run, &json!({}))
-                    .await
-                    .is_err()
-            );
             let (_, mut second_state, second_operations, second_owner) =
                 fixture(&state, None).await;
             let second_started = std::time::Instant::now();

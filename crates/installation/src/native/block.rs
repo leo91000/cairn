@@ -660,9 +660,17 @@ impl Mounted {
             // Keep the mount and its leases alive through an uncancellable
             // metadata commit; the caller owns the native lifecycle lock.
             let disk = self.volume.disk.clone();
-            let result = tokio::task::spawn_blocking(move || disk.grow(bytes))
-                .await
-                .map_err(Error::internal)?;
+            let result = tokio::task::spawn_blocking(move || {
+                // Fold sealed generations into the base first: none may later
+                // reinstall the previous geometry. A concurrent consolidation
+                // leaves them pending, and growth retries on the next tick.
+                if disk.sealed_pending() {
+                    disk.consolidate()?;
+                }
+                disk.grow(bytes)
+            })
+            .await
+            .map_err(Error::internal)?;
             match result {
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(false),
                 result => result?,
@@ -1153,53 +1161,6 @@ pub fn free_bytes(path: &Path) -> Result<u64> {
     Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
 }
 
-pub async fn evict(data: &Path, state: &Path, run: &str, expected: &Value) -> Result<Value> {
-    let root = workspace::directory(state, run)?;
-    let _owner =
-        crate::file_lock::exclusive(&root.join("owner.lock"), "Native workspace is active.")?;
-    let lease = environment::lock(state, run, DISK_BUSY).await?;
-    if root.join("block-restore.pending.json").exists()
-        || lease.directory.join("restore.pending").exists()
-        || !root.join("block-initialized").exists()
-    {
-        return Err(Error::conflict(
-            "Native recovery must finish before cache eviction.",
-        ));
-    }
-    let attempt = tokio::fs::read_to_string(root.join("attempt")).await?;
-    let volume = storage::runtime::load(&lease.directory).await?;
-    let status = volume.inspect().await?;
-    if attempt != text(expected, "attempt")
-        || status["dirtyBytes"] != 0
-        || status["published"]["backupId"] != expected["backupId"]
-        || status["published"]["generation"] != expected["generation"]
-        || status["grantId"] != expected["grantId"]
-        || expected["backupId"].as_str().is_none()
-        || expected["generation"].as_i64().is_none()
-    {
-        return Err(Error::conflict(
-            "Native cache has no matching acknowledged S3 generation.",
-        ));
-    }
-    let (state, directory) = (state.to_owned(), lease.directory.clone());
-    let evicted =
-        tokio::task::spawn_blocking(move || storage::cache::evict_clean(&state, &directory))
-            .await
-            .map_err(Error::internal)??;
-    remove(&root.join("tmp")).await?;
-    cleanup_attempt_files(data, state_path(&lease.directory)?, run).await?;
-    let mut status = volume.inspect().await?;
-    status["evictedBytes"] = evicted.into();
-    Ok(status)
-}
-
-fn state_path(directory: &Path) -> Result<&Path> {
-    directory
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| Error::bad("Invalid native disk directory."))
-}
-
 async fn remove(path: &Path) -> Result<()> {
     match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
@@ -1208,42 +1169,6 @@ async fn remove(path: &Path) -> Result<()> {
         Ok(_) => tokio::fs::remove_file(path).await?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
-    }
-    Ok(())
-}
-
-async fn cleanup_attempt_files(data: &Path, state: &Path, run: &str) -> Result<()> {
-    remove(&data.join("runs").join(run)).await?;
-    let mut entries = tokio::fs::read_dir(state).await?;
-    while let Some(entry) = entries.next_entry().await? {
-        if entry
-            .path()
-            .extension()
-            .is_some_and(|extension| extension == "run")
-            && tokio::fs::read_to_string(entry.path())
-                .await
-                .is_ok_and(|owner| owner == run)
-        {
-            let attempt = entry
-                .path()
-                .file_stem()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
-            crate::validation::uuid(&attempt)?;
-            for extension in ["log", "lease"] {
-                remove(&state.join(&attempt).with_extension(extension)).await?;
-            }
-            remove(
-                &state
-                    .join("roots")
-                    .join(&attempt)
-                    .with_extension("plan.json"),
-            )
-            .await?;
-            remove(&state.join("roots").join(&attempt)).await?;
-            remove(&data.join("runner-plans").join(format!("{attempt}.json"))).await?;
-        }
     }
     Ok(())
 }

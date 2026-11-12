@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(signature, [0x53, 0xef]);
         assert!(!directory.join("data.ext4").exists());
         assert!(volume.source.grant_id().is_err());
-        assert!(!volume.disk.has_remote_base().unwrap());
+        assert!(!volume.disk.has_base_blocks().unwrap());
         let context = super::super::LazyDisk::context(&directory.join("lazy")).unwrap();
         assert!(context.get("master").is_none() && context.get("grant").is_none());
         let physical = crate::file_lock::exclusive(&directory.join("lock"), "busy").unwrap();

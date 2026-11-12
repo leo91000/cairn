@@ -212,52 +212,6 @@ enum CaptureProtocol {
     LegacyControllerDrain,
 }
 
-/// Select the old controller's publication protocol before capture or transfer.
-/// This compatibility operation exists only while draining a node for upgrade.
-pub(crate) async fn capture_for_update(s: &Service, run: &Value, node: &str) -> Result<Value> {
-    let response = s
-        .http
-        .get(format!("{}/health", super::controller_url(s, node)))
-        .bearer_auth(super::runner_secret(s).await?)
-        .timeout(Duration::from_secs(20))
-        .send()
-        .await
-        .map_err(|_| {
-            Error::unavailable(
-                "Unable to identify the controller's storage protocol before update.",
-            )
-        })?;
-    if !response.status().is_success() {
-        return Err(Error::unavailable(
-            "Controller health is required before update publication.",
-        ));
-    }
-    let bytes = snapshots::response_block(response).await?;
-    let health: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| Error::unavailable("Invalid controller health response."))?;
-    if health["status"] != "ok" || health["nodeProtocol"] != 2 {
-        return Err(Error::unavailable(
-            "Unsupported controller protocol during update.",
-        ));
-    }
-    let protocol = match health["directStorageProtocol"].as_u64() {
-        Some(1) => CaptureProtocol::Direct,
-        None if health["directStorageProtocol"].is_null() => CaptureProtocol::LegacyControllerDrain,
-        _ => {
-            return Err(Error::unavailable(
-                "Unsupported direct storage protocol during update.",
-            ));
-        }
-    };
-    capture_with(
-        s,
-        run,
-        protocol,
-        crate::authorization::Authorization::default(),
-    )
-    .await
-}
-
 async fn capture_with(
     s: &Service,
     run: &Value,
@@ -2004,7 +1958,8 @@ pub async fn latest(s: &Service, run: &str) -> Result<Option<Value>> {
     }
 }
 
-/// Retire a conversation's recovery references and durably queue remote reclamation.
+/// Forget a deleted conversation's former publications. Remote objects are
+/// never deleted: they stay in the bucket, which its operator may remove.
 pub async fn purge(s: &Service, run: &str) -> Result<()> {
     retire_environment(s, run).await
 }
@@ -2052,16 +2007,11 @@ pub(crate) fn detach_environment_in(
 /// directory, account lease, publications, grants or acknowledgement slot.
 pub(crate) async fn retire_detached_environment(
     s: &Service,
-    run: &str,
+    _run: &str,
     retired: &RetiredPublications,
-    directory: &Path,
+    _directory: &Path,
 ) -> Result<()> {
     super::journal_acknowledgements::retire_publications(s, &retired.publications).await?;
-    let mut locations = retired.points.clone();
-    locations.extend(local_locations_at(directory, run).await?);
-    for point in locations.into_iter().filter(in_s3) {
-        queue_deletion(s, &point, &manifest_key(run, text(&point, "id")), false).await?;
-    }
     Ok(())
 }
 
@@ -2072,22 +2022,7 @@ async fn retire_environment(s: &Service, run: &str) -> Result<()> {
     crate::validation::uuid(run)?;
     let _operation = s.node_backup_operation.lock(run).await;
     let _readers = s.node_backup_operation.drain(run).await;
-    super::journal_acknowledgements::retire(s, run).await?;
     let points = s.store.node_backups_for_run(run).await?;
-    let mut locations = points
-        .iter()
-        .filter(|p| in_s3(p))
-        .cloned()
-        .collect::<Vec<_>>();
-    locations.extend(local_locations(s, run).await?);
-
-    let mut deleted = HashSet::new();
-    for location in locations {
-        let storage = storage_for(s, &location)?;
-        if deleted.insert((storage.endpoint.clone(), storage.bucket.clone())) {
-            queue_deletion(s, &location, &format!("node-backups/{run}/"), true).await?;
-        }
-    }
     let directory = root(s, run);
     if directory.exists() {
         tokio::fs::remove_dir_all(directory).await?;
@@ -2096,6 +2031,11 @@ async fn retire_environment(s: &Service, run: &str) -> Result<()> {
     let run = run.to_owned();
     s.store
         .transaction(move |db| {
+            // No node commits a publication any longer: its fence is moot.
+            db.0.execute(
+                "DELETE FROM direct_journal_acknowledgements WHERE run_id=?1",
+                [&run],
+            )?;
             shared_blocks::release_run(db, &run, &HashSet::new())?;
             for point in points {
                 db.remove("node-backups", text(&point, "id"))?;
@@ -2108,28 +2048,6 @@ async fn retire_environment(s: &Service, run: &str) -> Result<()> {
             Ok(())
         })
         .await
-}
-
-/// S3 locations known only from local upload intents and block receipts.
-async fn local_locations(s: &Service, run: &str) -> Result<Vec<Value>> {
-    local_locations_at(&root(s, run), run).await
-}
-
-async fn local_locations_at(directory: &Path, run: &str) -> Result<Vec<Value>> {
-    let mut locations = Vec::new();
-    if directory.exists() {
-        let mut entries = tokio::fs::read_dir(&directory).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let Some(id) = intent_id(&entry) else {
-                continue;
-            };
-            let point = read_intent(&entry.path(), &id, run, "purge").await?;
-            if in_s3(&point) {
-                locations.push(point);
-            }
-        }
-    }
-    Ok(locations)
 }
 
 #[cfg(test)]

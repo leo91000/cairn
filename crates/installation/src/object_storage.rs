@@ -719,13 +719,6 @@ impl Storage {
         self.validate_checked(None).await
     }
 
-    pub(crate) async fn validate_live(
-        &self,
-        authorize: &crate::authorization::Authorization,
-    ) -> Result<()> {
-        self.validate_checked(Some(authorize)).await
-    }
-
     async fn validation_call(
         &self,
         args: Vec<String>,

@@ -69,7 +69,6 @@ pub(crate) fn configure(state: &Path, policy: &Policy) -> Result<()> {
         let Some(volume) = volume.upgrade() else {
             continue;
         };
-        *volume.control_policy.write().map_err(Error::internal)? = policy.clone();
         let (total, free) = super::policy::space(&directory)?;
         volume
             .space_pressure
@@ -125,11 +124,8 @@ pub struct Volume {
     pub stop: CancellationToken,
     directory: PathBuf,
     policy: RwLock<Policy>,
-    control_policy: RwLock<Policy>,
     active_since: AtomicI64,
     active_attempt: Mutex<String>,
-    /// Upload lag is visible without suspending safe local work.
-    backup_degraded: AtomicBool,
     pressure: AtomicBool,
     space_pressure: AtomicBool,
     fault: AtomicBool,
@@ -190,9 +186,11 @@ fn try_open_with(
                 }
                 return Ok(Some(volume));
             }
-            // A publication may retain the journal after its Volume is gone.
-            // Its exclusive writer lock must drain before reopening it.
-            if disk.strong_count() > 0 {
+            // A background consolidation may retain the journal after its
+            // Volume is gone. Ask it to yield; its exclusive lock then drains
+            // and the reopened volume consolidates the same generations.
+            if let Some(disk) = disk.upgrade() {
+                disk.yield_consolidation();
                 return Ok(None);
             }
         }
@@ -236,9 +234,9 @@ fn open_volume(directory: &Path) -> Result<Arc<Volume>> {
         .persistent(&root)?,
     );
     let disk = Arc::new(LazyDisk::open(&root, source.clone())?);
-    if unassigned && disk.has_remote_base()? {
+    if unassigned && disk.has_base_blocks()? {
         return Err(Error::conflict(
-            "Unassigned disk must not contain a remote base.",
+            "Unassigned disk must remain entirely journal-backed.",
         ));
     }
     let policy: Policy = serde_json::from_value(context["policy"].clone()).unwrap_or_default();
@@ -249,11 +247,9 @@ fn open_volume(directory: &Path) -> Result<Arc<Volume>> {
         source,
         stop,
         directory: directory.to_owned(),
-        control_policy: RwLock::new(policy.clone()),
         policy: RwLock::new(policy),
         active_since: AtomicI64::new(0),
         active_attempt: Mutex::new(String::new()),
-        backup_degraded: AtomicBool::new(false),
         pressure: AtomicBool::new(false),
         space_pressure: AtomicBool::new(false),
         fault: AtomicBool::new(false),
@@ -261,7 +257,83 @@ fn open_volume(directory: &Path) -> Result<Arc<Volume>> {
         transition: Mutex::new(None),
     });
     volume.health()?;
+    monitor_consolidation(&volume);
     Ok(volume)
+}
+
+/// Consolidate a mounted journal once it retains this much since its base.
+const CONSOLIDATE_JOURNAL_BYTES: u64 = 1024 * 1024 * 1024;
+const CONSOLIDATION_CHECK: std::time::Duration = std::time::Duration::from_secs(5);
+/// A refused consolidation (usually for disk space) is retried less often.
+const CONSOLIDATION_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Consolidations hold only their journal, outside the bounded open pool.
+static CONSOLIDATIONS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+/// While a volume is open, fold sealed generations into its local base and
+/// seal a crash-consistent boundary once the journal exceeds its bound, as
+/// a periodic capture did. The guest keeps running; the task ends with the volume.
+fn monitor_consolidation(volume: &Arc<Volume>) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let volume = Arc::downgrade(volume);
+    runtime.spawn(async move {
+        let mut wait = CONSOLIDATION_CHECK;
+        loop {
+            tokio::time::sleep(wait).await;
+            wait = CONSOLIDATION_CHECK;
+            let Some(volume) = volume.upgrade() else {
+                return;
+            };
+            if volume.stop.is_cancelled() {
+                return;
+            }
+            if !volume.consolidates() {
+                continue;
+            }
+            if !volume.disk.sealed_pending()
+                && volume.disk.journal_bytes() >= CONSOLIDATE_JOURNAL_BYTES
+                && let Err(error) = volume.seal().await
+            {
+                tracing::warn!(target: "cairn_performance", operation = "journal_consolidation", phase = "seal", message = %error.message);
+                wait = CONSOLIDATION_RETRY;
+                continue;
+            }
+            if !volume.disk.sealed_pending() {
+                continue;
+            }
+            let disk = Arc::downgrade(&volume.disk);
+            drop(volume);
+            if !consolidate(disk).await {
+                wait = CONSOLIDATION_RETRY;
+            }
+        }
+    });
+}
+
+/// Run one consolidation without retaining the volume, so its release and a
+/// later reopen never wait for it. Returns false when it should be retried later.
+async fn consolidate(disk: Weak<LazyDisk>) -> bool {
+    let Ok(_permit) = CONSOLIDATIONS.acquire().await else {
+        return false;
+    };
+    let Some(disk) = disk.upgrade() else {
+        return true;
+    };
+    let identity = disk.performance_identity();
+    match tokio::task::spawn_blocking(move || disk.consolidate()).await {
+        Ok(Ok(_)) => true,
+        Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => true,
+        Ok(Err(error)) => {
+            tracing::warn!(target: "cairn_performance", operation = "journal_consolidation", id = identity, kind = ?error.kind(), message = %error);
+            false
+        }
+        Err(error) => {
+            tracing::warn!(target: "cairn_performance", operation = "journal_consolidation", id = identity, message = %error);
+            false
+        }
+    }
 }
 
 /// A durable fence excludes detached acknowledgements even after transport loss
@@ -293,31 +365,46 @@ impl Drop for Replacement {
 }
 
 pub async fn replacement(directory: &Path) -> Result<Replacement> {
-    let directory = directory.to_owned();
-    blocking(move || {
-        let entry = entry(&directory)?;
-        let mut entry = match entry.try_lock() {
-            Ok(entry) => entry,
-            Err(TryLockError::WouldBlock) => {
-                return Err(Error::conflict("Disk is opening; retry restoration."));
+    // A background consolidation yields within one block; an owner does not.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let path = directory.to_owned();
+        let replacement = blocking(move || {
+            let entry = entry(&path)?;
+            let mut entry = match entry.try_lock() {
+                Ok(entry) => entry,
+                Err(TryLockError::WouldBlock) => {
+                    return Err(Error::conflict("Disk is opening; retry restoration."));
+                }
+                Err(error) => return Err(Error::internal(error)),
+            };
+            match entry.as_ref() {
+                Some(Entry::Replacing) => {
+                    return Err(Error::conflict("Disk replacement is in progress."));
+                }
+                Some(Entry::Open { volume, .. }) if volume.strong_count() > 0 => {
+                    return Err(Error::conflict("Disk is still in use; retry restoration."));
+                }
+                Some(Entry::Open { disk, .. }) => {
+                    if let Some(disk) = disk.upgrade() {
+                        disk.yield_consolidation();
+                        return Ok(None);
+                    }
+                }
+                None => {}
             }
-            Err(error) => return Err(Error::internal(error)),
-        };
-        match entry.as_ref() {
-            Some(Entry::Replacing) => {
-                return Err(Error::conflict("Disk replacement is in progress."));
-            }
-            Some(Entry::Open { volume, disk })
-                if volume.strong_count() > 0 || disk.strong_count() > 0 =>
-            {
-                return Err(Error::conflict("Disk is still in use; retry restoration."));
-            }
-            _ => {}
+            *entry = Some(Entry::Replacing);
+            Ok(Some(Replacement { directory: path }))
+        })
+        .await?;
+        if let Some(replacement) = replacement {
+            return Ok(replacement);
         }
-        *entry = Some(Entry::Replacing);
-        Ok(Replacement { directory })
-    })
-    .await
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Error::conflict("Disk is still in use; retry restoration."));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 async fn blocking<T: Send + 'static>(
@@ -513,8 +600,7 @@ impl Volume {
                 volume.disk.sync()?;
                 Ok(())
             })?;
-            *volume.policy.write().map_err(Error::internal)? = policy.clone();
-            *volume.control_policy.write().map_err(Error::internal)? = policy;
+            *volume.policy.write().map_err(Error::internal)? = policy;
             Ok(())
         })
         .await
@@ -537,9 +623,24 @@ impl Volume {
         blocking(move || Ok(disk.seal()?)).await
     }
 
+    /// The completed turn is folded into the local base in the background;
+    /// releasing the execution never waits for that consolidation.
     pub async fn seal_completed(self: &Arc<Self>) -> Result<i64> {
         let disk = self.disk.clone();
-        blocking(move || Ok(disk.seal_completed()?)).await
+        let generation = blocking(move || Ok(disk.seal_completed()?)).await?;
+        if self.consolidates()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            runtime.spawn(consolidate(Arc::downgrade(&self.disk)));
+        }
+        Ok(generation)
+    }
+
+    /// Prepared disks stay entirely journal-backed until a conversation claims them.
+    fn consolidates(&self) -> bool {
+        self.source
+            .authorization()
+            .is_ok_and(|grant| grant.is_some())
     }
 
     pub async fn inspect(self: &Arc<Self>) -> Result<Value> {
@@ -548,10 +649,10 @@ impl Volume {
     }
 
     pub async fn needs_pause(self: &Arc<Self>) -> Result<bool> {
-        Ok(self.control_reason(crate::config::now())?.is_some())
+        Ok(self.control_reason()?.is_some())
     }
 
-    fn control_reason(&self, now: i64) -> Result<Option<&'static str>> {
+    fn control_reason(&self) -> Result<Option<&'static str>> {
         if self.fault.load(Ordering::SeqCst) {
             return Ok(Some("integrity"));
         }
@@ -561,20 +662,12 @@ impl Volume {
         if self.source.waiting() {
             return Ok(Some("storage-unavailable"));
         }
-        let policy = self.control_policy.read().map_err(Error::internal)?;
-        let active_since = self.active_since.load(Ordering::Acquire);
-        let late = self.disk.dirty_since().is_some_and(|at| {
-            now.saturating_sub(at.max(active_since)) >= (policy.max_dirty_seconds * 1000) as i64
-        });
-        self.backup_degraded.store(late, Ordering::Release);
-        // A remote publication backlog does not endanger the durable local
-        // journal. Keep work running; only integrity, space and needed reads pause.
+        // Local disks have no publication backlog; only integrity and space pause.
         Ok(None)
     }
 
-    /// VM and native attempts share the bounded active synchronization window.
-    /// This never changes the original dirty timestamp or an existing attempt's
-    /// deadline, even when a monitor retries a transition.
+    /// Records when the current VM or native attempt became active. A retried
+    /// monitor transition keeps the original timestamp.
     pub(crate) fn activate_attempt(&self, attempt: &str) -> Result<()> {
         let mut active = self.active_attempt.lock().map_err(Error::internal)?;
         if active.as_str() != attempt {
@@ -587,7 +680,7 @@ impl Volume {
 
     /// CPU protection must not wait for filesystem accounting or remote reads.
     pub(crate) fn cpu_pause_reason(&self) -> Result<Option<&'static str>> {
-        self.control_reason(crate::config::now())
+        self.control_reason()
     }
 
     /// Called under the attempt's control lock, shared with checkpoint capture.
@@ -610,8 +703,6 @@ impl Volume {
         if stop.is_cancelled() {
             return Err(Error::conflict("Execution stopped."));
         }
-        // A resumed VM gets one bounded active synchronization window. Its
-        // original dirty timestamp is retained for backup urgency and telemetry.
         self.activate_attempt(attempt)?;
         // No filesystem scan, policy read, journal lock, or blocking task belongs
         // in this CPU safety decision. Writers fence space admission themselves.
@@ -675,14 +766,6 @@ impl Volume {
     }
 
     pub fn status(&self) -> Result<Value> {
-        let state = self
-            .directory
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| Error::bad("Invalid disk directory."))?;
-        // Cache reconciliation is maintenance, not a CPU safety probe. Writers
-        // continue to enforce the disk reserve under node-wide admission.
-        super::cache::maintain(state, &self.policy()?)?;
         let mut status = self.health()?;
         status["localBytes"] = allocated(&self.directory)?.into();
         status["activeLocalBytes"] = allocated(&self.directory.join("lazy"))?.into();
@@ -698,7 +781,6 @@ impl Volume {
     fn health(&self) -> Result<Value> {
         let mut status = self.disk.accounting()?;
         let policy = self.policy()?;
-        *self.control_policy.write().map_err(Error::internal)? = policy.clone();
         self.disk
             .memory_budget(policy.memory_cache_mi_b as usize * 1024 * 1024)?;
         let (total, free) = super::policy::space(&self.directory)?;
@@ -711,36 +793,15 @@ impl Volume {
         } else if self.source.waiting() {
             Some("storage-unavailable")
         } else {
-            policy.pause_reason(
-                total,
-                free,
-                status["dirtySince"]
-                    .as_i64()
-                    .map(|at| at.max(self.active_since.load(Ordering::Acquire))),
-                crate::config::now(),
-            )
+            // Without a dirty timestamp, the policy only reports disk space.
+            policy.pause_reason(total, free, None, crate::config::now())
         };
-        let degraded = status["dirtySince"].as_i64().is_some_and(|at| {
-            crate::config::now().saturating_sub(at.max(self.active_since.load(Ordering::Acquire)))
-                >= policy.max_dirty_seconds as i64 * 1000
-        });
-        self.backup_degraded.store(degraded, Ordering::Release);
-        let reason = reason.filter(|reason| *reason != "backup-lag");
-        status["backupDegraded"] = degraded.into();
         status["mode"] = "on-demand".into();
         status["grantId"] = self.source.authorization()?.into();
         status["waitingFor"] = reason.into();
         status["freeBytes"] = free.into();
         status["reserveBytes"] = policy.reserve(total).into();
-        status["backupSeconds"] = policy.backup_seconds.into();
-        status["maxDirtySeconds"] = policy.max_dirty_seconds.into();
         status["activeSince"] = self.active_since.load(Ordering::Acquire).into();
-        status["backupUrgent"] = status["dirtySince"]
-            .as_i64()
-            .is_some_and(|at| {
-                crate::config::now().saturating_sub(at) >= (policy.backup_seconds * 1000) as i64
-            })
-            .into();
         Ok(status)
     }
 }
@@ -1297,19 +1358,18 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let (volume, _, _) = controller_fixture(root.path()).await;
         volume.disk.write_at(0, b"durable native backlog").unwrap();
-        let dirty = volume.disk.dirty_since().unwrap();
+        let before = crate::config::now();
         volume.activate_attempt("native-first").unwrap();
         let first = volume.active_since.load(Ordering::Acquire);
-        assert!(first >= dirty);
+        assert!(first >= before);
         volume.activate_attempt("native-first").unwrap();
         assert_eq!(volume.active_since.load(Ordering::Acquire), first);
-        // Retrying the same attempt cannot reset an expired active window.
+        // Retrying the same attempt keeps its original activation.
         volume.active_since.store(1, Ordering::Release);
         volume.activate_attempt("native-first").unwrap();
         assert_eq!(volume.active_since.load(Ordering::Acquire), 1);
         volume.activate_attempt("native-resumed").unwrap();
         assert!(volume.active_since.load(Ordering::Acquire) >= first);
-        assert_eq!(volume.disk.dirty_since().unwrap(), dirty);
         volume.fault.store(true, Ordering::Release);
         assert_eq!(volume.cpu_pause_reason().unwrap(), Some("integrity"));
         volume.fault.store(false, Ordering::Release);
@@ -1318,49 +1378,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resumed_backlog_gets_one_active_window_without_hiding_its_age() {
+    async fn local_journal_backlog_never_pauses_work_but_disk_faults_still_do() {
         let root = tempfile::tempdir().unwrap();
         let (volume, _, _) = controller_fixture(root.path()).await;
-        volume.disk.write_at(0, b"durable backlog").unwrap();
-        let dirty_since = volume.disk.dirty_since().unwrap();
-        let resumed = dirty_since + 3_600_000;
-        volume.active_since.store(resumed, Ordering::Release);
-        assert_eq!(volume.control_reason(resumed + 299_999).unwrap(), None);
-        assert_eq!(volume.control_reason(resumed + 300_000).unwrap(), None);
-        assert!(volume.backup_degraded.load(Ordering::Acquire));
-        assert_eq!(volume.disk.accounting().unwrap()["dirtySince"], dirty_since);
-        volume.fault.store(true, Ordering::SeqCst);
-        assert_eq!(volume.control_reason(resumed).unwrap(), Some("integrity"));
-        volume.fault.store(false, Ordering::SeqCst);
-        volume.pressure.store(true, Ordering::SeqCst);
-        assert_eq!(volume.control_reason(resumed).unwrap(), Some("disk-space"));
-    }
-
-    #[tokio::test]
-    async fn failed_uploads_never_pause_local_work_but_disk_faults_still_do() {
-        let root = tempfile::tempdir().unwrap();
-        let (volume, _, _) = controller_fixture(root.path()).await;
-        volume.disk.write_at(0, b"unsaved work").unwrap();
-        let dirty = volume.disk.dirty_since().unwrap();
-        for age in [300_000, 900_000, 86_400_000] {
-            assert_eq!(volume.control_reason(dirty + age).unwrap(), None);
-            assert!(volume.backup_degraded.load(Ordering::Acquire));
-            volume.disk.write_at(0, b"still working").unwrap();
+        volume.disk.write_at(0, b"unconsolidated work").unwrap();
+        assert_eq!(volume.control_reason().unwrap(), None);
+        let status = volume.inspect().await.unwrap();
+        assert!(status["dirtyBytes"].as_u64().unwrap() > 0);
+        assert_eq!(status["waitingFor"], Value::Null);
+        for removed in ["backupDegraded", "backupUrgent", "backupSeconds", "maxDirtySeconds"] {
+            assert!(status.get(removed).is_none(), "{removed} is still reported");
         }
         volume.pressure.store(true, Ordering::SeqCst);
-        assert_eq!(
-            volume.control_reason(dirty + 86_400_000).unwrap(),
-            Some("disk-space")
-        );
+        assert_eq!(volume.control_reason().unwrap(), Some("disk-space"));
         volume.pressure.store(false, Ordering::SeqCst);
         volume.fault.store(true, Ordering::SeqCst);
-        assert_eq!(
-            volume.control_reason(dirty + 86_400_000).unwrap(),
-            Some("integrity")
-        );
+        assert_eq!(volume.control_reason().unwrap(), Some("integrity"));
         volume.fault.store(false, Ordering::SeqCst);
-        assert_eq!(volume.control_reason(dirty).unwrap(), None);
-        assert!(!volume.backup_degraded.load(Ordering::Acquire));
+        assert_eq!(volume.control_reason().unwrap(), None);
     }
 
     #[tokio::test]

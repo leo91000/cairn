@@ -1048,7 +1048,6 @@ impl Execution<'_> {
         launch: &mut Launch,
     ) -> Result<()> {
         let s = self.s;
-        crate::object_storage::Storage::configured(s)?;
         let mut timing = Operation::new("runner_prepare", &self.id, "placement");
         let (runner, placement) = match self.reservation.take() {
             Some(reservation) => reservation,

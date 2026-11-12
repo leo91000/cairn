@@ -13,12 +13,13 @@ pub(super) struct Retained {
     pub key: Value,
     pub expires: Instant,
     pub reservation: Reservation,
-    pub volume: Option<std::sync::Arc<crate::storage::runtime::Volume>>,
+    /// Keeps the journal open, with its consolidation, while the guest is idle.
+    pub _volume: Option<std::sync::Arc<crate::storage::runtime::Volume>>,
 }
 
 impl Retained {
     pub fn compatible(&self, plan: &Plan, budget: &Budget, now: Instant) -> bool {
-        (now < self.expires || self.publication_pending())
+        now < self.expires
             && self.budget == *budget
             && self.key == key(plan)
             && self
@@ -30,17 +31,6 @@ impl Retained {
 
     pub fn bytes(&self) -> Option<u64> {
         self.reservation.vm.as_ref()?.resident_bytes()
-    }
-
-    /// This is cached durable-journal accounting, never a filesystem inspection
-    /// in the admission path. Uncertain accounting fails closed.
-    pub fn publication_pending(&self) -> bool {
-        self.volume.as_ref().is_some_and(|volume| {
-            volume
-                .disk
-                .accounting()
-                .map_or(true, |status| status["dirtyBytes"] != 0)
-        })
     }
 }
 

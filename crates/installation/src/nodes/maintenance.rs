@@ -262,7 +262,7 @@ async fn drain(s: &Service, node: &str, diagnostic: &mut Drain) -> Result<()> {
             .event(
                 run_id,
                 &EventKind::Status,
-                "Node maintenance: pausing and saving the environment before restart.",
+                "Node maintenance: pausing the environment before restart.",
                 None,
             )
             .await?;
@@ -286,35 +286,9 @@ async fn drain(s: &Service, node: &str, diagnostic: &mut Drain) -> Result<()> {
             ));
             continue;
         }
-        if !native {
-            release_placement(s, &attempt.id, diagnostic).await?;
-        }
-        let mut synchronized = true;
-        if run["sessionId"].is_string() {
-            loop {
-                diagnostic.next(Phase::Capture);
-                diagnostic.counters.capture_calls += 1;
-                match super::publication::capture_for_update(s, &run, node).await {
-                    Ok(_) => break,
-                    Err(error) if native && error.status == 425 => {
-                        // The enclosing drain deadline bounds this wait. Keep
-                        // placement until the node's stopped archive is ready.
-                        diagnostic.counters.capture_waits += 1;
-                        diagnostic.next(Phase::CaptureWait);
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                    Err(error) => {
-                        diagnostic.counters.capture_failures += 1;
-                        failure = Some(error);
-                        synchronized = false;
-                        break;
-                    }
-                }
-            }
-        }
-        if native && synchronized {
-            release_placement(s, &attempt.id, diagnostic).await?;
-        }
+        // The paused environment stays on this node and resumes there after
+        // the restart; nothing is published before the update.
+        release_placement(s, &attempt.id, diagnostic).await?;
     }
     failure.map_or(Ok(()), Err)
 }

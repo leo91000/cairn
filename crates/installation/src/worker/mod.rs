@@ -94,13 +94,9 @@ impl Worker {
             .spawn(crate::project_archives::maintain(s.clone()));
         self.tasks
             .spawn(crate::plugins::conditions::maintain(s.clone()));
-        self.tasks
-            .spawn(crate::nodes::publication::maintain(s.clone()));
-        self.tasks
-            .spawn(crate::nodes::shared_blocks::maintain(s.clone()));
+        // Disks are local to their node: no publication, eviction or remote
+        // object collection runs. Storage status is still observed.
         self.tasks.spawn(crate::nodes::storage::monitor(s.clone()));
-        self.tasks
-            .spawn(crate::nodes::eviction::maintain(s.clone()));
         self.tasks
             .spawn(crate::nodes::exclusive::maintain(s.clone()));
         self.tasks.spawn(clean_conversations(s.clone()));

@@ -527,20 +527,6 @@ async fn release(
         s.store.audit("account.release_failed", detail).await?;
     }
     s.mcps.revoke_run(s, run_id).await?;
-    if fenced && saved.managed() {
-        let run = s.store.run_record(run_id).await?;
-        let native = saved
-            .prepared()
-            .is_some_and(|prepared| prepared["backend"] == "native");
-        let status = run.state.status;
-        if crate::nodes::publication::protected(&run.wire()?)
-            && (native || matches!(status, RunStatus::Succeeded | RunStatus::Waiting))
-        {
-            // Native work can only be captured after fencing, including failed,
-            // cancelled and paused turns. Durable demand survives upload errors.
-            crate::nodes::publication::request(s, run_id).await?;
-        }
-    }
     if fenced {
         clear_credentials(s, run_id).await;
     }
