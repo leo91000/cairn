@@ -367,7 +367,6 @@ async fn main() -> Result<()> {
                     reserve_mi_b: 64,
                     reserve_percent: 1,
                     memory_cache_mi_b: 4,
-                    ..Default::default()
                 },
                 ..Default::default()
             })
