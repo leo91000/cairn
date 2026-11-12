@@ -258,7 +258,7 @@ function move() {
     await moveConversationToNode(api, {
       runId: props.run.id,
       nodeId: destination.value,
-      discardWorkingFiles: true,
+      ...(props.run.environmentState !== 'expired' && { discardWorkingFiles: true }),
     })
     moving.value = false
     saved.value = 'Move requested.'
@@ -554,10 +554,15 @@ onUnmounted(() => {
           placeholder="Select a node"
           :disabled="busy"
         />
-        <p class="m-0! mt-2!">
+        <p v-if="run.environmentState !== 'expired'" class="m-0! mt-2!">
           This conversation's working files will be lost. Its history, attachments and artifacts are kept.
         </p>
-        <p>The current turn stops and open questions close. The next environment waits for capacity on this destination. Queued messages, scheduled waits and active missions continue there; otherwise the conversation waits for your next message.</p>
+        <p v-if="run.environmentState === 'expired'">
+          The previous environment expired. Choose the node for its first admission.
+        </p>
+        <p v-else>
+          The current turn stops and open questions close. The next environment waits for capacity on this destination. Queued messages, scheduled waits and active missions continue there; otherwise the conversation waits for your next message.
+        </p>
         <div class="mt-3 flex justify-end">
           <UiButton size="small" :disabled="!canMove" type="submit">
             Move now

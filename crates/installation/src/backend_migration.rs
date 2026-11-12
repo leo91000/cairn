@@ -96,7 +96,12 @@ fn chat_run(db: &Db<'_>, chat_id: &str) -> Result<(Value, Value, Value, bool)> {
     Ok((chat, run, agent, automatic))
 }
 
-fn prospective(db: &Db<'_>, run: &Value, agent: &Value, origin: &Origin) -> Result<Value> {
+pub(crate) fn prospective(
+    db: &Db<'_>,
+    run: &Value,
+    agent: &Value,
+    origin: &Origin,
+) -> Result<Value> {
     check_access(run, agent)?;
     let mut proposed = run.clone();
     proposed["snapshot"]["agent"] = agent.clone();
@@ -235,9 +240,9 @@ fn change_expired_backend(
             workspace: Some(None),
             recovery_pending: Some(false),
             placement: Some(Box::new(nodes::run_placement::PlacementChanges {
-                node_id: Some(serde_json::from_value(node["id"].clone())?),
-                pinned_node_id: Some(serde_json::from_value(node["id"].clone())?),
-                target_node_id: Some(None),
+                node_id: Some(None),
+                pinned_node_id: Some(None),
+                target_node_id: Some(serde_json::from_value(node["id"].clone())?),
                 execution_backend: Some(
                     proposed["snapshot"]["agent"]["access"]["backend"]
                         .as_str()
@@ -267,7 +272,6 @@ fn change_expired_backend(
     )?;
 
     policy::apply(&mut chat, proposed);
-    chat["sessionRestartRequested"] = true.into();
     save_subject(db, &chat)?;
 
     for action in [

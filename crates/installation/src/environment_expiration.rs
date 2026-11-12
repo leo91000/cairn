@@ -160,6 +160,15 @@ pub(crate) fn expire_node_in(
     Ok(expired)
 }
 
+/// Explicit Stop wins over the automatic continuation recorded by a self move or mission.
+pub(crate) fn cancel_continuation_in(db: &Db<'_>, run: &str) -> Result<()> {
+    if let Some(mut pending) = db.get(PENDING, run)? {
+        pending["continueTurn"] = false.into();
+        db.put(PENDING, &pending)?;
+    }
+    Ok(())
+}
+
 /// Runs whose expiration waits for their interrupted execution to stop.
 pub(crate) async fn pending_runs(s: &Service) -> Result<std::collections::HashSet<String>> {
     Ok(s.store
@@ -257,6 +266,18 @@ pub(crate) fn request_in(
             },
         )?;
     }
+    db.event(
+        run_id,
+        &EventKind::Status,
+        &format!(
+            "Environment expired {}. {WARNING}",
+            expiration.cause.reason()
+        ),
+        Some(&json!({
+            "environmentExpiredAt": expired_at,
+            "environmentExpirationCause": expiration.cause,
+        })),
+    )?;
     let pending = Pending {
         id: run_id.to_owned(),
         run_id: run_id.to_owned(),
@@ -387,7 +408,11 @@ fn detach_environment_in(
     let mission = run["trigger"] != "chat";
     let interrupted = RunStatus::of(&run).is_some_and(RunStatus::is_active);
     let waiting = chat.as_ref().is_some_and(|chat| chat.wakeup.is_some());
-    let resume = expiration.continue_turn && (mission || run["chatExecution"].is_object());
+    let chat_ready = chat.as_ref().is_none_or(|chat| {
+        chat.lifecycle == cairn_contracts::ConversationLifecycle::Active && !chat.paused
+    });
+    let resume =
+        expiration.continue_turn && chat_ready && (mission || run["chatExecution"].is_object());
     let node_change = expiration.cause == Cause::NodeChange;
     let keep_pins = expiration.cause == Cause::NodeRevocation;
 
@@ -435,13 +460,14 @@ fn detach_environment_in(
         completed: Some(true),
         ..Default::default()
     };
+    if mission {
+        fresh.remaining_ms = checkpoint.remaining_ms;
+        boundary["sessionHandoff"] = crate::chats::handoff_context(db, run_id)?.into();
+    }
     if resume {
         fresh.completed = Some(false);
         fresh.launched = Some(false);
-        if mission {
-            fresh.remaining_ms = checkpoint.remaining_ms;
-            boundary["sessionHandoff"] = crate::chats::handoff_context(db, run_id)?.into();
-        } else {
+        if !mission {
             fresh.turn_pending = Some(true);
             fresh.remaining_ms = Some(crate::run_limits::budget_ms(&run["snapshot"]["agent"]));
             let mut execution = run["chatExecution"].clone();
@@ -706,4 +732,30 @@ fn save_progress(
         db.save_conversation(&chat)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::run_fixture::DbRunFixture;
+
+    #[tokio::test]
+    async fn startup_finishes_legacy_cleaning_once_and_preserves_its_expiration_time() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        let run = id();
+        store.transaction(move |db| {
+            db.add_run_fixture(&json!({ "id": run, "taskId": "chat", "trigger": "chat", "status": "succeeded", "createdAt": 0 }), None)?;
+            db.save_conversation_boundary(&json!({ "id": "chat", "runId": run, "environmentState": "cleaning", "environmentExpiredAt": 1234, "environmentError": "offline" }))?;
+            finish_legacy_cleaning(db)?;
+            finish_legacy_cleaning(db)?;
+            let chat = db.conversation_boundary("chat")?.unwrap();
+            assert_eq!(chat["environmentState"], "expired");
+            assert_eq!(chat["environmentExpiredAt"], 1234);
+            assert!(chat["environmentError"].is_null());
+            assert_eq!(db.run(&run)?.unwrap()["environmentExpirationCause"], "inactivity");
+            assert_eq!(db.list(RETIREMENTS)?.len(), 1);
+            Ok(())
+        }).await.unwrap();
+    }
 }

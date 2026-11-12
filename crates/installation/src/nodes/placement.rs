@@ -479,6 +479,11 @@ fn without_stale_target(db: &Db<'_>, run: &Value) -> Result<Option<Value>> {
 }
 
 fn reserve_in(db: &Db<'_>, run: &Value, attempt: &str, configured: bool) -> Result<Value> {
+    if crate::environment_expiration::admission_blocked(db, text(run, "id"))? {
+        return Err(Error::unavailable(
+            "Waiting for the previous environment to stop and release its local files.",
+        ));
+    }
     // Moves deliberately supply a prospective environment. Automatic admission
     // reads the latest persisted run so stale callers cannot rebind its backend.
     let persisted;

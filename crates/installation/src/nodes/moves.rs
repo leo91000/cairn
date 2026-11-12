@@ -398,12 +398,14 @@ async fn requested(
             ));
         }
         let grant = if crossing {
-            let agent = db
+            let mut agent = db
                 .agent_snapshot(super::run_agent(&current))?
-                .unwrap_or_default();
-            Some(crate::backend_migration::migration_grant(
-                db, &current, &agent, &source,
-            )?)
+                .ok_or_else(|| Error::forbidden("Agent removed."))?;
+            agent["access"]["backend"] = target.clone().into();
+            current = crate::backend_migration::prospective(db, &current, &agent, &source)?;
+            let mut grant = json!({});
+            crate::native::policy::apply(&mut grant, &current);
+            Some(grant)
         } else if by_agent {
             None
         } else {

@@ -1075,7 +1075,9 @@ async fn expired_conversations_explicitly_change_backend_without_recovering_dele
             migrated["snapshot"]["agent"]["access"]["backend"],
             destination_backend
         );
-        assert_eq!(migrated["nodeId"], destination["id"]);
+        assert!(migrated["nodeId"].is_null());
+        assert!(migrated["pinnedNodeId"].is_null());
+        assert_eq!(migrated["targetNodeId"], destination["id"]);
         assert!(migrated["backup"].is_null());
         assert!(migrated["backendMigration"].is_null());
         assert!(migrated["sessionId"].is_null());
@@ -4738,45 +4740,44 @@ async fn installation_can_direct_its_own_native_run_without_widening_authority_o
     let denied = delegated_move_result(
         &f,
         &configuration,
-        json!({ "runId": run["id"], "nodeId": additional["id"] }),
+        json!({ "runId": run["id"], "nodeId": additional["id"], "discardWorkingFiles": true }),
     )
     .await;
     assert_eq!(
         denied.state,
         cairn_contracts::NodeMoveOperationState::Failed
     );
-    // Placement filters nodes outside the native ceiling before selection;
-    // its established no-authorized-node result is 503, not a grant mutation.
-    assert_eq!(denied.error_status, Some(503), "{denied:?}");
-    assert!(
-        denied
-            .error
-            .as_deref()
-            .unwrap()
-            .starts_with(placement::NO_CAPACITY),
-        "{denied:?}"
-    );
+    assert_eq!(denied.error_status, Some(403), "{denied:?}");
     assert!(f.service.store.run(text(&run, "id")).await.unwrap()["moveRequest"].is_null());
-    let moved = delegated_move_result(
+    let moved = delegated_call(
         &f,
         &configuration,
+        "move_to_node",
         json!({
-            "runId":run["id"], "nodeId":f.node["id"]
+            "runId": run["id"], "nodeId": f.node["id"], "discardWorkingFiles": true
         }),
     )
     .await;
-    assert_eq!(
-        moved.state,
-        cairn_contracts::NodeMoveOperationState::Completed
-    );
-    assert_eq!(
-        serde_json::to_value(moved.result.unwrap()).unwrap()["nodeId"],
-        f.node["id"]
-    );
+    assert_ne!(moved["result"]["isError"], true, "{moved}");
+    // A self move revokes the old turn's token: observe its committed effect rather
+    // than polling with that obsolete token.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let state = f.service.store.run(text(&run, "id")).await.unwrap();
+            if state["environmentExpirationCause"] == "node-change" {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     let current = f.service.store.run(text(&run, "id")).await.unwrap();
     assert!(current["nativeParentRunId"].is_null());
     assert_eq!(current["nativeAuthorityNodes"], json!([f.node["id"]]));
-    assert_eq!(current["moveRequest"]["nodeId"], f.node["id"]);
+    assert!(current["moveRequest"].is_null());
+    assert_eq!(current["targetNodeId"], f.node["id"]);
+    assert_eq!(current["status"], "queued");
     let node = f.node.clone();
     assert!(
         f.service
@@ -4785,4 +4786,201 @@ async fn installation_can_direct_its_own_native_run_without_widening_authority_o
             .await
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn both_backend_change_routes_require_file_loss_confirmation_and_expire_without_conversion() {
+    for destination_backend in ["native", "firecracker"] {
+        for direct_move in [false, true] {
+            let mut f = Fixture::new().await;
+            let vm = f.vm_node().await;
+            f.node["nativeAccounts"] = json!([TRUSTED, OTHER]);
+            f.service
+                .store
+                .put_node_fixture(f.node.clone())
+                .await
+                .unwrap();
+            f.agent = f
+                .service
+                .agent_fixture(
+                    json!({ "access": { "backend": "auto", "nodes": [f.node["id"], vm["id"]] } }),
+                    f.agent["id"].as_str(),
+                )
+                .await
+                .unwrap();
+            let (chat, run) = f.conversation().await;
+            let run_id = text(&run, "id").to_owned();
+            let from = if destination_backend == "native" {
+                "firecracker"
+            } else {
+                "native"
+            };
+            let (source, destination) = if from == "native" {
+                (&f.node, &vm)
+            } else {
+                (&vm, &f.node)
+            };
+            let mut snapshot = run["snapshot"].clone();
+            snapshot["agent"]["access"]["backend"] = from.into();
+            f.service
+                .store
+                .change_run(
+                    &run_id,
+                    cairn_installation::runs::RunChanges {
+                        status: Some(cairn_installation::run_status::RunStatus::Succeeded),
+                        snapshot: Some(serde_json::from_value(snapshot).unwrap()),
+                        session_id: Some(Some("old-engine".into())),
+                        placement: Some(Box::new(
+                            cairn_installation::nodes::run_placement::PlacementChanges {
+                                node_id: Some(source["id"].as_str().map(str::to_owned)),
+                                ..Default::default()
+                            },
+                        )),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            common::set_checkpoint(&f.service.store, &run_id, json!({ "nodeId": source["id"], "runnerId": id(), "completed": true, "prepared": { "backend": from, "isolated": true } })).await;
+            let path = format!(
+                "/api/nodes/placement/{run_id}/{}",
+                if direct_move {
+                    "move"
+                } else {
+                    "backend-migration"
+                }
+            );
+            let mut input = json!({ "nodeId": destination["id"] });
+            if !direct_move {
+                input["backend"] = destination_backend.into();
+                input["confirm"] = true.into();
+            }
+            let (status, refused) = f.owner_call("POST", &path, input.clone()).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+            assert!(
+                text(&refused, "error")
+                    .contains(cairn_installation::environment_expiration::WARNING),
+                "{refused}"
+            );
+            assert_eq!(
+                f.service.store.run(&run_id).await.unwrap()["sessionId"],
+                "old-engine"
+            );
+            input["discardWorkingFiles"] = true.into();
+            let (status, changed) = f.owner_call("POST", &path, input).await;
+            assert_eq!(status, StatusCode::OK, "{changed}");
+            let expired = f.service.store.run(&run_id).await.unwrap();
+            assert_eq!(expired["environmentState"], "expired");
+            assert_eq!(expired["environmentExpirationCause"], "node-change");
+            assert_eq!(expired["targetNodeId"], destination["id"]);
+            assert_eq!(expired["executionBackend"], destination_backend);
+            assert!(expired["sessionId"].is_null());
+            assert!(expired["backendMigration"].is_null());
+            let checkpoint = f
+                .service
+                .store
+                .checkpoint_boundary(&run_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(checkpoint["prepared"].is_null());
+            assert!(checkpoint["runnerId"].is_null());
+            assert_eq!(
+                f.service
+                    .conversation_boundary(text(&chat, "id"))
+                    .await
+                    .unwrap()["runId"],
+                run_id
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn expired_backend_override_replaces_a_pending_destination_without_pinning_or_losing_the_wait()
+ {
+    for pending in [false, true] {
+        let mut f = Fixture::new().await;
+        let vm = f.vm_node().await;
+        f.node["nativeAccounts"] = json!([TRUSTED, OTHER]);
+        f.service
+            .store
+            .put_node_fixture(f.node.clone())
+            .await
+            .unwrap();
+        let mut replacement = f.node.clone();
+        replacement["id"] = id().into();
+        f.service
+            .store
+            .put_node_fixture(replacement.clone())
+            .await
+            .unwrap();
+        f.agent = f.service.agent_fixture(json!({ "access": { "backend": "auto", "nodes": [f.node["id"], vm["id"], replacement["id"]] } }), f.agent["id"].as_str()).await.unwrap();
+        let (chat, run) = f.conversation().await;
+        let (cid, rid) = (text(&chat, "id").to_owned(), text(&run, "id").to_owned());
+        let wake = json!({ "id": id(), "messageId": run["chatExecution"]["messageId"], "seconds": 1, "createdAt": now() - 2000, "wakeAt": now() - 1000, "reason": "Continue after the wait" });
+        let (chat_id, run_id, source, wakeup) =
+            (cid.clone(), rid.clone(), f.node["id"].clone(), wake.clone());
+        f.service.store.transaction(move |db| {
+            let mut chat = db.conversation_boundary(&chat_id)?.unwrap();
+            chat["wakeup"] = wakeup;
+            db.save_conversation_boundary(&chat)?;
+            db.change_run(&run_id, cairn_installation::runs::RunChanges {
+                status: Some(if pending { cairn_contracts::RunStatus::Running } else { cairn_contracts::RunStatus::Succeeded }),
+                placement: Some(Box::new(cairn_installation::nodes::run_placement::PlacementChanges { node_id: Some(source.as_str().map(str::to_owned)), ..Default::default() })),
+                ..Default::default()
+            })?;
+            db.save_checkpoint_boundary(&run_id, &json!({ "nodeId": source, "completed": true, "remainingMs": 123000, "prepared": { "backend": "native", "isolated": true } }))
+        }).await.unwrap();
+        if pending {
+            f.service
+                .worker
+                .active
+                .lock()
+                .await
+                .insert(rid.clone(), tokio_util::sync::CancellationToken::new());
+        }
+        let (status, moved) = f
+            .owner_call(
+                "POST",
+                &format!("/api/nodes/placement/{rid}/move"),
+                json!({ "nodeId": vm["id"], "discardWorkingFiles": true }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{moved}");
+        let (status, replaced) = f
+            .owner_call(
+                "POST",
+                &format!("/api/nodes/placement/{rid}/backend-migration"),
+                json!({ "nodeId": replacement["id"], "backend": "native", "confirm": true }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{replaced}");
+        let changed = f.service.store.run(&rid).await.unwrap();
+        assert_eq!(changed["targetNodeId"], replacement["id"]);
+        assert!(changed["nodeId"].is_null());
+        assert!(changed["pinnedNodeId"].is_null());
+        if pending {
+            f.service.worker.active.lock().await.remove(&rid);
+            f.service.detach_stopped_environments().await.unwrap();
+        }
+        let chat = f.service.conversation_boundary(&cid).await.unwrap();
+        assert_eq!(chat["wakeup"], wake);
+        assert_ne!(chat["sessionRestartRequested"], true);
+        f.service.chat_tick(&HashSet::new()).await.unwrap();
+        let continued = f.service.store.run(&rid).await.unwrap();
+        assert_eq!(continued["status"], "queued");
+        assert_eq!(continued["targetNodeId"], replacement["id"]);
+        assert!(continued["chatExecution"]["context"].is_string());
+        f.service.retire_environments().await.unwrap();
+        let attempt = id();
+        let placed = placement::reserve(&f.service, &continued, &attempt)
+            .await
+            .unwrap();
+        assert_eq!(placed["nodeId"], replacement["id"]);
+        let admitted = f.service.store.run(&rid).await.unwrap();
+        assert!(admitted["targetNodeId"].is_null());
+        assert!(admitted["pinnedNodeId"].is_null());
+        placement::release(&f.service, &attempt).await.unwrap();
+    }
 }

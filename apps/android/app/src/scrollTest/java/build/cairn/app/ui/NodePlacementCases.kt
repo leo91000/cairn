@@ -1282,6 +1282,7 @@ abstract class NodePlacementCases {
     @Test
     fun ownerCanPreferOrPinAnAuthorizedNodeAndSeeSynchronizationAge() {
         val publishedDisk = mutableStateOf(false)
+        val expired = mutableStateOf(false)
         MockWebServer().use { server ->
             val saved = CopyOnWriteArrayList<JsonObject>()
             val moved = CopyOnWriteArrayList<JsonObject>()
@@ -1372,6 +1373,7 @@ abstract class NodePlacementCases {
                                 Run(
                                     id = "00000000-0000-4000-8000-000000000095",
                                     status = "succeeded",
+                                    environmentState = if (expired.value) "expired" else null,
                                     nodeId = "b40903f9-0487-53d0-a309-c589f0cae405",
                                     resources =
                                         ExecutionResources(
@@ -1465,6 +1467,12 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Confirmer").performClick()
             compose.waitUntil(10000) { moved.isNotEmpty() }
             assertEquals(true, moved[0]["discardWorkingFiles"]?.jsonPrimitive?.boolean)
+            compose.runOnIdle { expired.value = true }
+            compose.onNodeWithText("Déplacer…").performScrollTo().performClick()
+            compose.onNodeWithText("Déplacer maintenant").performScrollTo().performClick()
+            compose.waitUntil(10000) { moved.size == 2 }
+            compose.onNodeWithText("Changer de node ?").assertDoesNotExist()
+            assertNotEquals(true, moved[1]["discardWorkingFiles"]?.jsonPrimitive?.booleanOrNull)
         }
     }
 
@@ -1570,7 +1578,7 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Migrer cette conversation…").performScrollTo().performClick()
             compose
                 .onNodeWithText(
-                    if (expired) "L’environnement précédent a expiré"
+                    if (expired) "La première admission attend la capacité"
                     else "Les fichiers de travail de cette conversation seront perdus.",
                     substring = true,
                 )

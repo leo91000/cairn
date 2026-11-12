@@ -271,12 +271,13 @@ async fn confirmed_node_change_expires_the_environment_and_imposes_its_destinati
         .unwrap();
     assert_eq!(retiring, vec![change.source.clone()]);
 
-    // Nothing is left to lose: a second change needs no warning and is refused.
-    let (status, again) = change
-        .move_to(json!({ "nodeId": change.source, "discardWorkingFiles": true }))
-        .await;
-    assert_eq!(status, StatusCode::CONFLICT, "{again}");
-    assert!(again["error"].as_str().unwrap().contains("already expired"));
+    assert!(
+        placement::reserve(&change.owner.service, &expired, &id())
+            .await
+            .is_err(),
+        "fencing precedes every admission"
+    );
+    change.owner.service.retire_environments().await.unwrap();
 
     // The first admission happens on the destination, then placement is automatic.
     let attempt = id();
@@ -313,6 +314,7 @@ async fn imposed_destination_waits_while_authorized_then_falls_back_to_automatic
         .await;
     assert_eq!(status, StatusCode::OK, "{moved}");
 
+    change.owner.service.retire_environments().await.unwrap();
     // A full destination keeps the new environment waiting for it.
     let expired = change.owner.run(&change.run).await;
     let error = placement::reserve(&change.owner.service, &expired, &id())
@@ -712,4 +714,220 @@ async fn unavailable_or_unauthorized_nodes_keep_their_environment_waiting() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn choosing_again_before_admission_replaces_the_destination_without_discard_confirmation() {
+    let change = Change::new(RunStatus::Succeeded).await;
+    let (status, moved) = change
+        .move_to(json!({ "nodeId": change.destination, "discardWorkingFiles": true }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    let expired_at = change.owner.run(&change.run).await["environmentExpiredAt"].clone();
+    let (status, chosen) = change.move_to(json!({ "nodeId": change.source })).await;
+    assert_eq!(status, StatusCode::OK, "{chosen}");
+    let waiting = change.owner.run(&change.run).await;
+    assert_eq!(waiting["targetNodeId"], change.source);
+    assert_eq!(waiting["environmentExpiredAt"], expired_at);
+    assert_eq!(change.retirements().await.len(), 1);
+    // A saved placement replaces the one-use destination too, including automatic.
+    let (status, saved) = change
+        .owner
+        .send(
+            "PUT",
+            &format!("/api/nodes/placement/{}", change.run),
+            json!({ "selection": { "pinnedNodeId": null, "preferredNodeId": null } }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert!(change.owner.run(&change.run).await["targetNodeId"].is_null());
+}
+
+#[tokio::test]
+async fn a_retired_disk_blocks_only_readmission_to_its_own_node_until_deleted() {
+    let change = Change::new(RunStatus::Succeeded).await;
+    let (status, moved) = change
+        .move_to(json!({ "nodeId": change.destination, "discardWorkingFiles": true }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    // The attempt is stopped; the source disk is on an unreachable node.
+    change.owner.service.retire_environments().await.unwrap();
+    assert!(!change.admission_blocked().await);
+    assert_eq!(
+        change.retirements().await[0]["nodes"],
+        json!([change.source])
+    );
+    assert!(change.retirements().await[0]["error"].is_string());
+    let run = change.owner.run(&change.run).await;
+    let attempt = id();
+    let admitted = placement::reserve(&change.owner.service, &run, &attempt)
+        .await
+        .unwrap();
+    assert_eq!(admitted["nodeId"], change.destination);
+    placement::release(&change.owner.service, &attempt)
+        .await
+        .unwrap();
+    let (status, chosen) = change.move_to(json!({ "nodeId": change.source })).await;
+    assert_eq!(status, StatusCode::OK, "{chosen}");
+    let run = change.owner.run(&change.run).await;
+    assert!(
+        placement::reserve(&change.owner.service, &run, &id())
+            .await
+            .is_err(),
+        "old disk must be deleted before reuse on the same node"
+    );
+}
+
+#[tokio::test]
+async fn a_waiting_mission_keeps_its_wakeup_when_changing_node() {
+    let change = Change::new(RunStatus::Waiting).await;
+    let wakeup = json!({ "id": id(), "messageId": "mission-turn", "seconds": 1, "createdAt": now() - 2000, "wakeAt": now() - 1000, "reason": "Wait for the scheduled continuation" });
+    let (run, chat, retained) = (change.run.clone(), change.chat.clone(), wakeup.clone());
+    change
+        .owner
+        .service
+        .store
+        .transaction(move |db| {
+            db.0.execute("DELETE FROM conversations WHERE id=?", [chat])?;
+            db.change_run(
+                &run,
+                cairn_installation::runs::RunChanges {
+                    trigger: Some("manual".into()),
+                    wakeup: Some(Some(serde_json::from_value(retained)?)),
+                    ..Default::default()
+                },
+            )?;
+            db.update_run_boundary(
+                &run,
+                &json!({ "chatExecution": null, "missionTurnId": "mission-turn" }),
+            )?;
+            db.save_checkpoint_boundary(&run, &json!({ "completed": true, "remainingMs": 123000 }))
+        })
+        .await
+        .unwrap();
+    let (status, moved) = change
+        .move_to(json!({ "nodeId": change.destination, "discardWorkingFiles": true }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    let waiting = change.owner.run(&change.run).await;
+    assert_eq!(waiting["status"], RunStatus::Waiting);
+    assert_eq!(waiting["wakeup"], wakeup);
+    assert_eq!(waiting["targetNodeId"], change.destination);
+    assert_eq!(waiting["environmentExpirationCause"], "node-change");
+    let checkpoint = change
+        .owner
+        .service
+        .store
+        .checkpoint_boundary(&change.run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint["remainingMs"], 123000);
+    let prompt = cairn_installation::run_output::prompt(&waiting, false);
+    assert!(prompt.contains("when the conversation changed node"));
+    assert!(prompt.contains("<previous_conversation>"));
+    change
+        .owner
+        .service
+        .worker
+        .tick(&change.owner.service)
+        .await
+        .unwrap();
+    let resumed = change.owner.run(&change.run).await;
+    assert_eq!(resumed["status"], RunStatus::Queued);
+    assert!(resumed["wakeup"].is_null());
+    let checkpoint = change
+        .owner
+        .service
+        .store
+        .checkpoint_boundary(&change.run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint["remainingMs"], 123000);
+}
+
+#[tokio::test]
+async fn explicit_stop_wins_over_a_pending_self_move_or_mission_continuation() {
+    for mission in [false, true] {
+        let change = Change::new(RunStatus::Running).await;
+        if mission {
+            let (run, chat) = (change.run.clone(), change.chat.clone());
+            change
+                .owner
+                .service
+                .store
+                .transaction(move |db| {
+                    db.0.execute("DELETE FROM conversations WHERE id=?", [chat])?;
+                    db.change_run(
+                        &run,
+                        cairn_installation::runs::RunChanges {
+                            trigger: Some("manual".into()),
+                            ..Default::default()
+                        },
+                    )?;
+                    db.update_run_boundary(&run, &json!({ "chatExecution": null }))
+                })
+                .await
+                .unwrap();
+        }
+        let token = CancellationToken::new();
+        change
+            .owner
+            .service
+            .worker
+            .active
+            .lock()
+            .await
+            .insert(change.run.clone(), token);
+        if mission {
+            let (status, moved) = change
+                .move_to(json!({ "nodeId": change.destination, "discardWorkingFiles": true }))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{moved}");
+            change
+                .owner
+                .service
+                .worker
+                .cancel(&change.owner.service, &change.run)
+                .await
+                .unwrap();
+        } else {
+            let moved = agent_move(
+                &change.owner,
+                &change.run,
+                json!({ "nodeId": change.destination, "discardWorkingFiles": true }),
+            )
+            .await;
+            assert_ne!(moved["isError"], true, "{moved}");
+            let (status, stopped) = change
+                .owner
+                .send(
+                    "POST",
+                    &format!("/api/chats/{}/stop", change.chat),
+                    json!({}),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{stopped}");
+        }
+        change
+            .owner
+            .service
+            .worker
+            .active
+            .lock()
+            .await
+            .remove(&change.run);
+        change
+            .owner
+            .service
+            .detach_stopped_environments()
+            .await
+            .unwrap();
+        let stopped = change.owner.run(&change.run).await;
+        assert_eq!(stopped["status"], RunStatus::Cancelled);
+        assert_eq!(stopped["environmentState"], "expired");
+        assert_eq!(stopped["targetNodeId"], change.destination);
+        assert!(stopped["cancelRequestedAt"].is_number());
+    }
 }

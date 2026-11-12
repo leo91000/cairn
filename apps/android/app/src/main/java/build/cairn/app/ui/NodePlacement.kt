@@ -353,7 +353,19 @@ fun NodePlacement(vm: CairnViewModel, run: Run) {
             }
             TextButton(
                 enabled = !busy && destination.isNotEmpty(),
-                onClick = { confirmMove = true },
+                onClick = {
+                    if (run.environmentState != "expired") confirmMove = true
+                    else
+                        request(
+                            {
+                                api.moveConversationToNode(
+                                    MoveToNodeInput(runId = run.id, nodeId = destination)
+                                )
+                                moving = false
+                            },
+                            "Destination enregistrée.",
+                        )
+                },
             ) {
                 Text("Déplacer maintenant")
             }

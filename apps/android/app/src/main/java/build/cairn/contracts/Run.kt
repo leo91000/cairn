@@ -35,6 +35,12 @@ data class Run(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val dismissal: OutcomeDismissal? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val environmentExpirationCause: String? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val environmentExpiredAt: Long? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
+    val environmentState: String? = null,
+    @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val error: String? = null,
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
     val executionBackend: String? = null,
@@ -112,6 +118,13 @@ data class Run(
 ) {
     init {
         accountRequired?.let { require(Regex("^(codex|claude|opencode)\$").containsMatchIn(it)) }
+        environmentExpirationCause?.let {
+            require(
+                Regex("^(inactivity|node-change|node-revocation|storage-migration)\$")
+                    .containsMatchIn(it)
+            )
+        }
+        environmentState?.let { require(Regex("^(cleaning|expired)\$").containsMatchIn(it)) }
         provider?.let { require(Regex("^(codex|claude|opencode)\$").containsMatchIn(it)) }
         require(resumeCount >= 0L)
         require(

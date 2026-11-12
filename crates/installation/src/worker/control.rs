@@ -79,6 +79,7 @@ impl Worker {
                 let chat = crate::chats::pause_in(db, &id, true)?;
                 if let Some(run_id) = chat["runId"].as_str() {
                     crate::chats::coding_agent::cancel_in(db, run_id)?;
+                    crate::environment_expiration::cancel_continuation_in(db, run_id)?;
                     crate::chats::continuation::cancel_for_run(db, run_id)?;
                     let run = required(db.run_state(run_id)?, "Run not found")?;
                     if run.status.is_active() {
@@ -285,6 +286,7 @@ impl Worker {
 }
 
 fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
+    crate::environment_expiration::cancel_continuation_in(db, id)?;
     crate::chats::coding_agent::cancel_in(db, id)?;
     let run = required(db.run_state(id)?, "Run not found")?;
     let waiting = crate::chats::continuation::cancel_for_run(db, id)?;

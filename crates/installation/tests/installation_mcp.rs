@@ -4518,6 +4518,13 @@ async fn backend_migration_tools_match_and_recheck_management_grants() {
             Value::Null
         };
         s.store.save_conversation_boundary(current).await.unwrap();
+        s.store
+            .update_run_boundary_fixture(
+                &run,
+                json!({ "environmentState": if expired { json!("expired") } else { Value::Null } }),
+            )
+            .await
+            .unwrap();
         if expired {
             common::set_checkpoint(&s.store, &run, json!({ "completed": true })).await;
         }

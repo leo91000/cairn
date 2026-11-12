@@ -568,15 +568,29 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await expect(move.getByRole('spinbutton')).toHaveCount(0)
   // Omission preserves existing tag constraints; an explicit [] would clear them.
   const movePath = `**/nodes/placement/${detail.run.id}/move`
+  let expiredChoice = false
   await page.route(movePath, async (route) => {
     expect(route.request().postDataJSON()).not.toHaveProperty('requiredTags')
-    expect(route.request().postDataJSON().discardWorkingFiles).toBe(true)
+    if (expiredChoice)
+      expect(route.request().postDataJSON()).not.toHaveProperty('discardWorkingFiles')
+    else
+      expect(route.request().postDataJSON().discardWorkingFiles).toBe(true)
     await route.fulfill({ json: { status: 'moving', nodeId: destinationNode.nodeId } })
   })
   await expect(move).toContainText('This conversation\'s working files will be lost. Its history, attachments and artifacts are kept.')
   await page.screenshot({ path: 'test-results/node-change-confirm.png' })
   await move.getByRole('button', { name: 'Move now' }).click()
   await expect(move).toHaveCount(0)
+  expiredChoice = true
+  workspace.service.store.updateRun(detail.run.id, { environmentState: 'expired', environmentExpiredAt: Date.now(), environmentExpirationCause: 'node-change' } as any)
+  await heartbeat()
+  await panel.getByRole('button', { name: 'Move…' }).click()
+  await expect(move).toContainText('The previous environment expired')
+  await expect(move).not.toContainText('working files will be lost')
+  await page.screenshot({ path: 'test-results/expired-node-choice.png' })
+  await move.getByRole('button', { name: 'Move now' }).click()
+  await expect(move).toHaveCount(0)
+  workspace.service.store.updateRun(detail.run.id, { environmentState: null } as any)
   await page.unroute(movePath)
   await page.screenshot({ path: 'test-results/execution-phone.png' })
   await page.mouse.click(5, 5)

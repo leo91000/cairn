@@ -3,6 +3,8 @@ import type { AgentProvider } from './AgentProvider'
 import type { ChatExecution } from './ChatExecution'
 import type { ChatWakeup } from './ChatWakeup'
 import type { ContextUsage } from './ContextUsage'
+import type { ConversationEnvironmentState } from './ConversationEnvironmentState'
+import type { EnvironmentExpirationCause } from './EnvironmentExpirationCause'
 import type { ExclusiveReservation } from './ExclusiveReservation'
 import type { ExecutionResources } from './ExecutionResources'
 import type { OutcomeDismissal } from './OutcomeDismissal'
@@ -39,6 +41,9 @@ export interface Run {
   backup?: import('../../run-boundaries').RunBackup | null
   storage?: import('../../run-boundaries').RunStorage | null
   executionBackend?: 'firecracker' | 'native' | null
+  environmentState?: ConversationEnvironmentState | null
+  environmentExpiredAt?: number | null
+  environmentExpirationCause?: EnvironmentExpirationCause | null
   nodeId?: string | null
   nodeState?: string | null
   pinnedNodeId?: string | null

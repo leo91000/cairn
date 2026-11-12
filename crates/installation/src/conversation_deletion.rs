@@ -194,21 +194,31 @@ async fn delete_disks(s: &Service, run: &str) -> Result<()> {
     if run.is_empty() {
         return Ok(());
     }
-    let volumes = s
+    let run_id = run.to_owned();
+    let mut nodes = s
+        .store
+        .read(move |db| crate::environment_expiration::retiring_nodes(db, &run_id))
+        .await?;
+    for volume in s
         .store
         .list("node-volumes")
         .await?
         .into_iter()
         .filter(|v| v["runId"] == run)
-        .collect::<Vec<_>>();
-    if volumes.is_empty() {
+    {
+        let node = text(&volume, "nodeId").to_owned();
+        if !nodes.contains(&node) {
+            nodes.push(node);
+        }
+    }
+    if nodes.is_empty() {
         if s.store.run(run).await?["environmentState"] == "expired" {
             return Ok(());
         }
         return delete_disk_for_purge(s, run, None).await;
     }
-    for volume in volumes {
-        delete_disk_for_purge(s, run, Some(text(&volume, "nodeId"))).await?;
+    for node in nodes {
+        delete_disk_for_purge(s, run, Some(&node)).await?;
     }
     Ok(())
 }

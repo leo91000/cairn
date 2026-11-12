@@ -12,10 +12,56 @@ use axum::{
 };
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
-use std::{path::Path, sync::Arc};
+use std::{path::Path, sync::Arc, time::Duration};
 
 fn ready() -> Value {
     json!({ "ready": true })
+}
+
+/// Same-node storage qualification still exercises generic S3 restoration. Node
+/// changes and backend migrations never call this path or reuse a published disk.
+pub async fn start(s: &Service, run: &Value, node: &str, backup: &Value) -> Result<()> {
+    let _operation = s.node_backup_operation.lock(text(run, "id")).await;
+    if super::owner_node(run) != node {
+        return Err(Error::conflict(
+            "Restoration cannot change the environment's node.",
+        ));
+    }
+    let record = s.node_boundary(node).await?;
+    let manifest = super::publication::manifest(s, backup).await?;
+    let native_disk = manifest["kind"] == "native-ext4-v1";
+    if native_disk != crate::native::policy::node_native(&record) {
+        return Err(Error::conflict(
+            "Restoration cannot change the environment's backend.",
+        ));
+    }
+    let grant = super::disk_grants::issue(s, run, node, backup).await?;
+    let secret = super::runner_secret(s).await?;
+    let response = s
+        .http
+        .post(format!(
+            "{}/disks/{}/restore",
+            super::controller_url(s, node),
+            text(run, "id")
+        ))
+        .bearer_auth(secret)
+        .json(&json!({
+            "manifest": manifest,
+            "master": s.config.public_url,
+            "grant": grant,
+            "backupId": backup["id"],
+            "policy": crate::storage::policy::for_node(&record["storage"])?
+        }))
+        .timeout(Duration::from_secs(120))
+        .send()
+        .await
+        .map_err(|_| Error::unavailable("Disk restore connection interrupted."))?;
+    if !response.status().is_success() {
+        return Err(Error::unavailable(
+            "The node could not restore this environment's disk.",
+        ));
+    }
+    Ok(())
 }
 
 pub async fn handle(State(app): State<App>, request: Request) -> Result<Response> {
