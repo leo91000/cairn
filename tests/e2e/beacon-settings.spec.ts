@@ -361,6 +361,11 @@ test('conversation retention defaults to seven days, confirms changes and persis
 })
 
 test('task storage limit is installation-wide, revision-guarded and preserves invalid drafts', async ({ page, workspace }) => {
+  const obsoleteRequests: string[] = []
+  page.on('request', (request) => {
+    if (/\/settings\/storage(?:\/check)?(?:\?|$)/.test(request.url()))
+      obsoleteRequests.push(request.url())
+  })
   await page.goto(workspacePath('/'))
   await signIn(page)
   await page.goto(workspacePath('/settings/installation'))
@@ -395,6 +400,10 @@ test('task storage limit is installation-wide, revision-guarded and preserves in
   await page.reload()
   await expect(maximum).toHaveValue('200')
   await expectSingleScroll(page)
+  await expect(page.getByRole('heading', { name: 'Conversation storage', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Configure external S3', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Check storage', exact: true })).toHaveCount(0)
+  expect(obsoleteRequests).toEqual([])
   const section = page.locator('section').filter({ has: page.getByRole('heading', { name: 'Storage per task', exact: true }) })
   await section.scrollIntoViewIfNeeded()
   await test.info().attach('task-storage-limit', { body: await section.screenshot(), contentType: 'image/png' })

@@ -1855,7 +1855,10 @@ abstract class NodePlacementCases {
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            compose.onNodeWithText("Intervalle (secondes)").performTextReplacement("30")
+            capture("installation-timing")
+            compose.onNodeWithText("Budget du cache de publication (Gio)").performScrollTo()
+            capture("installation-cache")
+            compose.onNodeWithText("Intervalle (secondes)").performScrollTo().performTextReplacement("30")
             compose.onNodeWithText("Enregistrer").performClick()
             compose.waitUntil(10000) {
                 writes.any { it.first == "/api/installations/fixture/api/nodes/settings" } &&

@@ -56,6 +56,7 @@ class WorkspaceJourneyTest {
     fun `owner signs in creates a task and follows its execution through native screens`() {
         MockWebServer().use { server ->
             val mutations = CopyOnWriteArrayList<Pair<String, String>>()
+            val obsoleteRequests = CopyOnWriteArrayList<String>()
             var created = false
             var launched = false
             val existingTask =
@@ -80,6 +81,7 @@ class WorkspaceJourneyTest {
                 object : Dispatcher() {
                     override fun dispatch(request: RecordedRequest): MockResponse {
                         val path = request.path.orEmpty().substringBefore('?')
+                        if (path.contains("/settings/storage")) obsoleteRequests += path
                         if (
                             request.method == "POST" &&
                                 path !in setOf("/api/account/verify", "/api/account/email-code")
@@ -265,6 +267,12 @@ class WorkspaceJourneyTest {
                                         )
                                 "/api/installations/fixture/api/settings" ->
                                     """{"publicUrl":"https://cairn.example.com","mcpUrl":"https://cairn.example.com/mcp","workspaceRoots":["/workspace"],"home":"/home/cairn","concurrency":1,"protocol":"2026-07-28","version":"0.19.0","commit":"development"}"""
+                                "/api/installations/fixture/api/settings/task-storage" ->
+                                    """{"maxDiskGiB":150,"revision":"fixture"}"""
+                                "/api/installations/fixture/api/settings/chat-plan" ->
+                                    """{"enabled":false,"revision":"fixture"}"""
+                                "/api/installations/fixture/api/settings/conversations" ->
+                                    """{"inactivityDays":30}"""
                                 "/api/installations/fixture/api/overview" ->
                                     """{"runsByStatus":{},"agents":1,"projects":1,"missions":0,"concurrency":1}"""
                                 "/api/installations/fixture/api/tasks" ->
@@ -416,6 +424,18 @@ class WorkspaceJourneyTest {
             }
             compose.waitForIdle()
             screenshot("settings-dark")
+            compose.onNodeWithText("Configuration des agents de code").performScrollTo()
+            compose.waitForIdle()
+            screenshot("settings-installation")
+            compose.onNodeWithText("Stockage par tâche").performScrollTo()
+            compose.waitForIdle()
+            screenshot("settings-task-storage")
+            compose.onNodeWithText("Enregistrer la limite").performScrollTo()
+            compose.waitForIdle()
+            screenshot("settings-task-limit")
+            compose.onAllNodesWithText("Configurer un S3 externe").assertCountEquals(0)
+            compose.onAllNodesWithText("Vérifier le stockage").assertCountEquals(0)
+            assertTrue(obsoleteRequests.isEmpty())
             compose.onNodeWithContentDescription("Retour").performClick()
             compose.onNodeWithContentDescription("Fil").performClick()
             compose.waitForIdle()

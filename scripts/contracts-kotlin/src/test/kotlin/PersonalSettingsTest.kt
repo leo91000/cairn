@@ -33,10 +33,6 @@ class PersonalSettingsTest {
         roundTrip<InstallationSettings>(corpus.getValue("settings"))
         roundTrip<InstallationOverview>(corpus.getValue("overviews"))
         roundTrip<ListAuditOutput>(corpus.getValue("audits"))
-        roundTrip<StorageSettings>(corpus.getValue("storageViews"))
-        corpus.getValue("storageInputs").jsonArray.forEach {
-            json.decodeFromJsonElement<SaveStorageSettingsInput>(it)
-        }
         corpus.getValue("invalidAsides").jsonArray.forEach {
             assertFails(it.toString()) { json.decodeFromJsonElement<SetOutcomeAsideInput>(it) }
         }
@@ -44,11 +40,6 @@ class PersonalSettingsTest {
         // remains authoritative for list sizes.
         corpus.getValue("invalidMarks").jsonArray.drop(1).forEach {
             assertFails(it.toString()) { json.decodeFromJsonElement<MarkReadInput>(it) }
-        }
-        corpus.getValue("invalidStorageInputs").jsonArray.take(3).forEach {
-            assertFails(it.toString()) {
-                json.decodeFromJsonElement<SaveStorageSettingsInput>(it)
-            }
         }
     }
 }

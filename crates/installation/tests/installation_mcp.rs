@@ -1613,13 +1613,10 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "save_coding_agent_configuration",
         "get_installation_overview",
         "list_audit",
-        "get_storage_settings",
-        "save_storage_settings",
         "get_task_storage_limits",
         "save_task_storage_limits",
         "get_chat_plan_settings",
         "save_chat_plan_settings",
-        "check_storage",
         "import_project",
         "list_source_projects",
         "list_skills",
@@ -7341,10 +7338,10 @@ async fn side_questions_are_asked_withdrawn_and_answered_beside_the_running_repl
     assert_eq!(stored[0].1["status"], "failed", "{stored:?}");
 }
 
-/// Settings, overview, audit and redacted storage read the same on HTTP and both tools.
-/// Credentials stay owner-only in the apps and never appear in any output.
+/// Settings, overview and audit read the same on HTTP and both tools.
+/// Removed S3 settings cannot be read, written or probed on any surface.
 #[tokio::test]
-async fn installation_settings_audit_and_storage_match_on_every_surface() {
+async fn installation_settings_and_audit_match_and_s3_settings_are_removed_on_every_surface() {
     let root = TempDir::new().unwrap();
     let s = service(&root).await;
     let main = enabled_main(&s).await;
@@ -7400,7 +7397,6 @@ async fn installation_settings_audit_and_storage_match_on_every_surface() {
         ("get_installation_settings", "/api/settings"),
         ("get_installation_overview", "/api/overview"),
         ("list_audit", "/api/audit"),
-        ("get_storage_settings", "/api/settings/storage"),
     ] {
         let (status, expected) = http(&owner, "GET", path, Value::Null).await;
         assert_eq!(status, StatusCode::OK, "{path}: {expected}");
@@ -7422,79 +7418,38 @@ async fn installation_settings_audit_and_storage_match_on_every_surface() {
     let latest = &audit["entries"][0];
     assert_eq!(latest["action"], "conversation.retention.updated");
     assert_eq!(latest["detail"], json!({ "inactivityDays": 9 }).to_string());
-    let (_, storage) = http(&owner, "GET", "/api/settings/storage", Value::Null).await;
+    let saved = std::fs::read(s.config.data_dir.join("storage-s3.json")).unwrap();
+    for (name, method, path) in [
+        ("get_storage_settings", "GET", "/api/settings/storage"),
+        ("save_storage_settings", "PUT", "/api/settings/storage"),
+        ("check_storage", "POST", "/api/settings/storage/check"),
+    ] {
+        let arguments = json!({
+            "bucket": "other-disks",
+            "endpoint": "https://s3.other.test",
+            "region": "eu-west-3",
+            "accessKeyId": "fixture-replacement-key",
+            "secretAccessKey": "fixture-replacement-secret",
+        });
+        let (status, body) = http(&owner, method, path, arguments.clone()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
+        assert!(!body.to_string().contains("fixture-secret-key"));
+        let (status, _) = http(&member, method, path, arguments.clone()).await;
+        assert!(status.is_client_error(), "{path}: {status}");
+
+        for response in [
+            call(&s, &configuration, name, arguments.clone()).await,
+            public_call(name, arguments).await,
+        ] {
+            assert_eq!(response["result"]["isError"], true, "{response}");
+            assert!(response.to_string().contains("Unknown operation"), "{response}");
+            assert!(!response.to_string().contains("fixture-secret-key"));
+        }
+    }
     assert_eq!(
-        storage,
-        json!({
-            "configured": true, "integrated": false, "environmentManaged": false,
-            "bucket": "cairn-disks", "endpoint": "https://s3.example.test", "region": "eu-west-3",
-        })
-    );
-
-    // Storage credentials are configured only by the human owner, in the apps.
-    let replacement = json!({
-        "bucket": "other-disks", "endpoint": "https://s3.example.test", "region": "eu-west-3",
-        "accessKeyId": "agent-key", "secretAccessKey": "agent-secret",
-    });
-    for refused in [
-        call(
-            &s,
-            &configuration,
-            "save_storage_settings",
-            replacement.clone(),
-        )
-        .await,
-        public_call("save_storage_settings", replacement.clone()).await,
-    ] {
-        assert_eq!(refused["result"]["isError"], true, "{refused}");
-        assert!(
-            refused.to_string().contains("Only the installation owner"),
-            "{refused}"
-        );
-        // An actor refusal is not a missing scope: the client is not asked to step up.
-        assert!(
-            refused["result"]["_meta"]["mcp/www_authenticate"].is_null(),
-            "{refused}"
-        );
-    }
-    let (status, _) = http(&member, "PUT", "/api/settings/storage", replacement.clone()).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    // The owner's writes still pass the server's bucket and HTTPS checks before any probe.
-    for (field, value) in [
-        ("bucket", "Cairn_Disks"),
-        ("endpoint", "http://s3.example.test"),
-    ] {
-        let mut invalid = replacement.clone();
-        invalid[field] = value.into();
-        let (status, body) = http(&owner, "PUT", "/api/settings/storage", invalid).await;
-        assert!(status.is_client_error(), "{field}: {status} {body}");
-        assert!(!body.to_string().contains("agent-secret"));
-    }
-    let saved: Value =
-        serde_json::from_slice(&std::fs::read(s.config.data_dir.join("storage-s3.json")).unwrap())
-            .unwrap();
-    assert_eq!(saved["bucket"], "cairn-disks");
-
-    // A read-only grant neither probes storage nor changes personal state.
-    let readonly = common::relay_fixture::grant(&s, &["read"]).await;
-    let request = common::request("POST", "/mcp")
-        .header("authorization", format!("Bearer {readonly}"))
-        .header("content-type", "application/json")
-        .body(Body::from(
-            json!({
-                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                "params": common::mcp_arguments("check_storage", &json!({})),
-            })
-            .to_string(),
-        ))
-        .unwrap();
-    let denied = common::read_json(common::send(&app, request).await).await;
-    assert_eq!(denied["result"]["isError"], true, "{denied}");
-    assert!(
-        denied["result"]["_meta"]["mcp/www_authenticate"]
-            .as_str()
-            .unwrap()
-            .contains("manage")
+        std::fs::read(s.config.data_dir.join("storage-s3.json")).unwrap(),
+        saved,
+        "Removed settings must preserve the operator's existing storage configuration"
     );
 }
 

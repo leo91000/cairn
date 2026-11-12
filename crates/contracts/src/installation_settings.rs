@@ -1,5 +1,4 @@
-//! Installation settings, storage, audit and overview views. Storage views are
-//! redacted: S3 credentials are accepted on write and never returned.
+//! Installation settings, task storage limits, audit and overview views.
 use crate::*;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -66,63 +65,6 @@ pub struct InstallationSettings {
     pub version: String,
     pub commit: String,
     pub protocol: String,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(deny_unknown_fields)]
-pub struct GetStorageSettingsInput {}
-
-/// The default S3 storage for new disks, without its credentials.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct StorageSettings {
-    pub configured: bool,
-    pub integrated: bool,
-    pub environment_managed: bool,
-    pub bucket: String,
-    pub endpoint: String,
-    pub region: String,
-}
-
-/// Credentials are written to the installation's private storage file only.
-#[derive(Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SaveStorageSettingsInput {
-    #[schemars(length(min = 1, max = 63), pattern("^[a-z0-9.-]+$"))]
-    pub bucket: String,
-    #[schemars(length(min = 9, max = 2048), pattern("^https://"))]
-    pub endpoint: String,
-    #[schemars(length(min = 1, max = 100))]
-    pub region: String,
-    #[schemars(length(min = 1, max = 256))]
-    pub access_key_id: String,
-    #[schemars(length(min = 1, max = 256))]
-    pub secret_access_key: String,
-    /// Required for Cloudflare R2: public domains and bucket locks are disabled.
-    #[serde(default)]
-    pub private_bucket_confirmed: bool,
-}
-
-impl std::fmt::Debug for SaveStorageSettingsInput {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SaveStorageSettingsInput")
-            .field("bucket", &self.bucket)
-            .field("endpoint", &self.endpoint)
-            .field("region", &self.region)
-            .field("private_bucket_confirmed", &self.private_bucket_confirmed)
-            .finish_non_exhaustive()
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(deny_unknown_fields)]
-pub struct CheckStorageInput {}
-
-/// A completed write, read and deletion of a probe object. Failures are errors.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct StorageCheck {
-    pub ok: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, TS)]

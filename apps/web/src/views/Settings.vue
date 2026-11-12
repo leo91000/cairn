@@ -26,7 +26,6 @@ import ChatPlanSettings from '../components/ChatPlanSettings.vue'
 import ConversationRetentionSettings from '../components/ConversationRetentionSettings.vue'
 import Icon from '../components/Icon.vue'
 import Modal from '../components/Modal.vue'
-import StorageSettings from '../components/StorageSettings.vue'
 import TaskStorageSettings from '../components/TaskStorageSettings.vue'
 import ThemeControl from '../components/ThemeControl.vue'
 import UiAlert from '../components/UiAlert.vue'
@@ -198,7 +197,6 @@ async function copy(value: string) {
         </slot>
         <slot name="installation" />
         <template v-if="settings && installationSettingsAvailable">
-          <StorageSettings />
           <section class="border-b border-line py-7">
             <h2 class="text-lg font-heading">
               Coding agent defaults

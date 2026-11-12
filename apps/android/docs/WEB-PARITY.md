@@ -658,16 +658,20 @@ Personal read state and installation settings (B4, #419): both apps mark Fil ite
 read and set blocked mission outcomes aside with the generated `markRead` and
 `setOutcomeAside` calls; read marks keep the finish of the work seen and each account
 keeps its own state. Settings and the audit list use `getInstallationSettings` and
-`listAudit`. Android now shows the owner's conversation storage section (S3 status,
-« Configurer un S3 externe », « Vérifier le stockage ») with the same redacted view,
-R2 privacy confirmation and save/check commands as the web; credentials are entered
-once, kept out of saved state and never displayed. Web keeps English copy and Android
-French Material controls; the web audit list shows 20 actions while Android shows
-the 100 returned entries with their details, as before. Public MCP and
-`cairn_installation` expose the same commands: personal state follows the account
-that authorized a public grant, executions without an account delegation are refused
-and see no personal state, and storage credentials can only be saved by the human
-owner in the apps.
+`listAudit`. Web keeps English copy and Android French Material controls; the web
+audit list shows 20 actions while Android shows the 100 returned entries with their
+details, as before. Personal state follows the account that authorized a public
+grant; executions without an account delegation are refused and see no personal
+state.
+
+Local conversation disks (ADR-0083): both apps remove the owner's S3 configuration
+and probe section. HTTP, public MCP and `cairn_installation` also remove
+`get_storage_settings`, `save_storage_settings` and `check_storage`, including their
+generated clients and schemas. The per-task storage limit and local node resource
+policies remain available with their existing authorization. No platform difference:
+web retains the installation settings sections and Android the native settings
+panels surrounding the removed section. Browser and native Compose settings
+journeys cover the retained task limit and absence of S3 controls.
 
 B3 preparations (project source pages/import, skill import/source status/update)
 use the same bounded manager operations on web, Android and both tools. The apps
