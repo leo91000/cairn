@@ -25,6 +25,8 @@ CREATE TABLE records(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind NOT IN ('
 CREATE INDEX records_kind ON records(kind,updated_at DESC);
 CREATE INDEX records_node_backups_run ON records(json_extract(data,'$.runId')) WHERE kind='node-backups';
 ALTER TABLE nodes ADD COLUMN exclusive_reservation TEXT;
+DROP TABLE agent_account_access;
+DELETE FROM kv WHERE key='agent-access-rollout';
 PRAGMA user_version=18;").unwrap();
     Db(&db).put_node_fixture(&json!({"id":NODE})).unwrap();
     crate::runs::projections::upgrade(&mut db).unwrap();
@@ -375,7 +377,7 @@ async fn qualify_previous_manager_database(allowance: Option<u64>) {
                     .join(",");
                 let filter = match table.as_str() {
                     "records" => " WHERE kind NOT IN ('node-attempts','node-exclusive-requests')",
-                    "kv" => " WHERE key NOT IN ('exclusive-epoch','exclusive-request-order')",
+                    "kv" => " WHERE key NOT IN ('exclusive-epoch','exclusive-request-order','agent-access-rollout')",
                     _ => "",
                 };
                 let rows = db

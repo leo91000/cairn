@@ -343,7 +343,14 @@ abstract class PlanTurnCases {
             compose.onNodeWithTag("plan-toggle").assertIsEnabled().performClick()
             compose.onNodeWithTag("plan-toggle").assertIsSelected()
             compose.onNode(hasSetTextAction()).performTextInput("Et pour les tests ?")
-            compose.onNodeWithTag("conversation-send").performClick()
+            // Text input can precede recomposition of the enabled send action on a device.
+            compose.waitUntil(20_000) {
+                compose
+                    .onAllNodes(hasTestTag("conversation-send") and isEnabled())
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag("conversation-send").assertIsEnabled().performClick()
             compose.waitUntil(20000) { calls.size == 2 }
             val question = wireJson.parseToJsonElement(calls[1]).jsonObject
             assertEquals(true, question["plan"]?.jsonPrimitive?.boolean)

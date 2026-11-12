@@ -385,6 +385,7 @@ abstract class SkillWorkbenchCases {
                     }
                     path == "$api/plugins" -> json(wireJson.encodeToString(catalog))
                     path == "$api/overview" -> json(installationOverviewFixture())
+                    path == "$api/usable-agents" -> json("""{"agentIds":[]}""")
                     path.endsWith("/models") -> json("""{"models":[]}""")
                     else ->
                         json(

@@ -17,6 +17,7 @@ const props = defineProps<{
   quota?: ChatQuota | null
   progress?: { provider: Provider, error: string | null } | null
   canManage: boolean
+  readOnly?: boolean
   busy?: boolean
 }>()
 const emit = defineEmits<{ resume: [], switched: [provider: Provider] }>()
@@ -177,6 +178,7 @@ async function cancel() {
     v-if="shownQuota"
     :quota="shownQuota"
     :can-manage="canManage"
+    :read-only="readOnly"
     :busy="busy || sending"
     :loading="loading"
     :choices="options?.choices"

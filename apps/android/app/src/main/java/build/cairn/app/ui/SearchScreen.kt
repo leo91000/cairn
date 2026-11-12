@@ -89,19 +89,22 @@ internal fun searchWorkspace(query: String, chats: List<Chat>, state: Workspace)
                             it.agentId,
                         )
         }
-    state.agents.forEach {
-        if (it.name.hit() || it.description.hit())
-            hits +=
-                (if (it.name.hit()) 0 else 1) to
-                    SearchHit(
-                        SearchKind.AGENT,
-                        it.id,
-                        it.name,
-                        listOf(providerLabel(it.provider), it.description)
-                            .filter { d -> d.isNotBlank() }
-                            .joinToString(" · "),
-                    )
-    }
+    // Members start conversations only with the agents they may use.
+    state.agents
+        .filter { canUseAgent(state.usableAgents, it.id) }
+        .forEach {
+            if (it.name.hit() || it.description.hit())
+                hits +=
+                    (if (it.name.hit()) 0 else 1) to
+                        SearchHit(
+                            SearchKind.AGENT,
+                            it.id,
+                            it.name,
+                            listOf(providerLabel(it.provider), it.description)
+                                .filter { d -> d.isNotBlank() }
+                                .joinToString(" · "),
+                        )
+        }
     state.projects.forEach {
         if (it.name.hit() || it.description.hit())
             hits +=
@@ -143,7 +146,11 @@ fun SearchScreen(
             searchWorkspace(query, live.state?.chats.orEmpty(), state)
         }
     val shown = hits.filter { scope == null || it.kind.name == scope }
-    val topMission = hits.firstOrNull { it.kind == SearchKind.MISSION }
+    // Launching by hand needs access to the mission's agent.
+    val topMission = hits.firstOrNull {
+        it.kind == SearchKind.MISSION &&
+            canUseAgent(state.usableAgents, state.tasks.find { task -> task.id == it.id }?.agentId)
+    }
     val topAgent = hits.firstOrNull { it.kind == SearchKind.AGENT }
     fun launch(taskId: String) = vm.perform {
         openRun(api.runMission(RunMissionInput(taskId)).id)

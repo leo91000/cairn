@@ -213,6 +213,7 @@ internal fun buildFeed(
     tasks: List<Task>,
     read: Map<String, Long> = emptyMap(),
     now: Long = System.currentTimeMillis(),
+    usable: List<String>? = null,
 ): Feed {
     fun unreadNow(key: String, finishedAt: Long?) =
         (read[key] ?: Long.MIN_VALUE) < (finishedAt ?: 0)
@@ -266,6 +267,12 @@ internal fun buildFeed(
                 )
             val wait = chatWaitNotice(chat.run)
             when {
+                chat.pendingQuestions > 0 && !canDirectChat(usable, chat, chats) ->
+                    waiting +=
+                        item(
+                            FeedKind.WAITING_CHAT,
+                            "En attente d’une personne ayant accès à l’agent",
+                        )
                 chat.pendingQuestions > 0 ->
                     forYou +=
                         item(
@@ -642,7 +649,8 @@ fun FilScreen(
     }
     val trash = rememberConversationTrash(vm)
     val chats = live.state?.chats?.filter { it.id !in trash.hidden }
-    val feed = buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads, now)
+    val feed =
+        buildFeed(chats.orEmpty(), activity, state.tasks, vm.localReads, now, state.usableAgents)
     var selectedView by rememberSaveable { mutableIntStateOf(0) }
     var unfolded by rememberSaveable { mutableStateOf(listOf<String>()) }
     // A finished result previewed by a long press, without opening or reading it.
@@ -766,7 +774,10 @@ fun FilScreen(
             FeedRow(
                 item,
                 { open(item) },
-                onDelete = item.chatId?.let { id -> { trash.trash(id) } },
+                onDelete =
+                    item.chatId
+                        ?.takeIf { canUseAgent(state.usableAgents, item.agentKey) }
+                        ?.let { id -> { trash.trash(id) } },
                 now = now,
                 nested = nested,
                 onPeek = item.preview?.ifBlank { null }?.let { { peeked = item } },
@@ -775,7 +786,12 @@ fun FilScreen(
                     item,
                     !state.busy,
                     { open(item) },
-                    { retry(item) },
+                    { retry(item) }.takeIf {
+                        canUseAgent(
+                            state.usableAgents,
+                            state.tasks.find { it.id == item.taskId }?.agentId ?: item.agentKey,
+                        )
+                    },
                     { vm.markRead(listOf(item.read)) },
                     dismiss = { setAside(item) },
                     snooze = { setAside(item, tomorrowMorning(now)) },
@@ -1094,7 +1110,7 @@ internal fun FilRowActions(
     item: FeedItem,
     enabled: Boolean,
     open: () -> Unit,
-    retry: () -> Unit,
+    retry: (() -> Unit)?,
     markRead: () -> Unit,
     dismiss: () -> Unit = {},
     snooze: () -> Unit = {},
@@ -1146,7 +1162,7 @@ internal fun FilRowActions(
                         snooze()
                     },
                 )
-            if (item.taskId != null) {
+            if (retry != null) {
                 DropdownMenuItem(
                     text = { Text("Relancer") },
                     enabled = enabled,
@@ -1155,6 +1171,8 @@ internal fun FilRowActions(
                         retry()
                     },
                 )
+            }
+            if (item.taskId != null) {
                 DropdownMenuItem(
                     text = { Text("Archiver la mission") },
                     enabled = enabled,

@@ -41,7 +41,7 @@ pub struct TaskAuthorGrant {
     pub access_id: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct TaskAuthorPolicy {
     pub owner: TaskAuthorGrant,
     pub members: Vec<TaskAuthorGrant>,
@@ -89,6 +89,26 @@ pub struct NotificationEvent {
     pub chat_id: String,
     #[serde(flatten)]
     pub kind: NotificationKind,
+    /// Legacy recipient restriction used by alerts. Alerts retain their existing
+    /// audience when this is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members: Option<Vec<String>>,
+    /// Membership-bound question audience captured when the question enters the
+    /// outbox. Beacon intersects this snapshot with current membership before delivery.
+    /// Missing evidence (including events persisted by older installations) fails closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_recipients: Option<Vec<NotificationMember>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct NotificationMember {
+    pub account_id: String,
+    pub access_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct NotificationRecipients {
+    pub members: Vec<NotificationMember>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

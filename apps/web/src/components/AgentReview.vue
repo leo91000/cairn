@@ -21,6 +21,7 @@ const kinds: Record<ReviewLine['kind'], [ChipTone, string]> = {
   power: ['power', 'Power'],
   secret: ['granted', 'Access'],
   reduction: ['unavailable', 'Reduction'],
+  audience: ['none', 'Recipients'],
 }
 </script>
 
