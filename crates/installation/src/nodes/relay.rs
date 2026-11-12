@@ -5,7 +5,6 @@ use crate::{
     validation::text,
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
@@ -215,16 +214,6 @@ fn route(method: &str, path: &str) -> Result<()> {
         ["health"] => method == "GET",
         ["exclusive"] => method == "GET",
         ["exclusive", "acquire" | "release"] => method == "POST",
-        ["snapshots", id, hash] => {
-            uuid(id)
-                && ((method == "GET" && super::snapshots::valid_hash(hash))
-                    || (method == "POST"
-                        && matches!(
-                            *hash,
-                            "blocks" | "publication" | "direct-upload" | "direct-reader"
-                        ))
-                    || (method == "DELETE" && matches!(*hash, "discard" | "direct-reader")))
-        }
         ["runs", id] => uuid(id) && ["POST", "DELETE"].contains(&method),
         ["runs", id, operation] => {
             uuid(id)
@@ -233,7 +222,6 @@ fn route(method: &str, path: &str) -> Result<()> {
                     ("GET", "logs" | "administrative-pause")
                         | ("POST", "wait")
                         | ("POST", "artifact")
-                        | ("POST", "snapshot")
                 )
         }
         ["runs", id, "projects", project] => method == "POST" && uuid(id) && uuid(project),
@@ -241,18 +229,7 @@ fn route(method: &str, path: &str) -> Result<()> {
         ["disks", id, operation] => {
             method == "POST"
                 && uuid(id)
-                && [
-                    "delete",
-                    "prune",
-                    "restore",
-                    "snapshot",
-                    "snapshot-completed",
-                    "published",
-                    "publication-fence",
-                    "storage-status",
-                    "evict",
-                ]
-                .contains(operation)
+                && ["delete", "prune", "storage-status"].contains(operation)
         }
         _ => false,
     };
@@ -264,25 +241,13 @@ fn route(method: &str, path: &str) -> Result<()> {
 
 /// How long the controller may take to answer, by operation.
 fn controller_timeout(method: &str, path: &str, native: bool) -> Duration {
-    if method == "POST" && path.ends_with("/direct-reader") {
-        return super::snapshots::DIRECT_PUBLICATION_STARTUP;
-    }
     if native && crate::nodes::is_project_import_request(method, path) {
         return crate::nodes::PROJECT_OPEN_RELAY_TIMEOUT;
     }
-    Duration::from_secs(if method == "POST" && path.ends_with("/direct-upload") {
-        crate::storage::direct::TRANSFER_SECONDS + 60
-    } else if method == "POST" && path.ends_with("/publication") {
-        super::snapshots::PUBLICATION_STARTUP.as_secs()
-    } else if path.ends_with("/restore") {
-        120
-    } else if method == "POST" && matches!(path, "/exclusive/acquire" | "/exclusive/release") {
-        // Match the manager's acknowledgement window: suspension and memory
-        // reclamation can legitimately exceed the ordinary control deadline.
+    let seconds = if method == "POST" && matches!(path, "/exclusive/acquire" | "/exclusive/release")
+    {
         150
-    } else if path.ends_with("/evict")
-        || path.ends_with("snapshot")
-        || path.ends_with("snapshot-completed")
+    } else if path.starts_with("/prepare/")
         || native
             && method == "DELETE"
             && path.starts_with("/runs/")
@@ -291,7 +256,8 @@ fn controller_timeout(method: &str, path: &str, native: bool) -> Duration {
         300
     } else {
         25
-    })
+    };
+    Duration::from_secs(seconds)
 }
 
 async fn forward(
@@ -359,17 +325,6 @@ async fn forward(
         content_type: &content_type,
     };
     master.send(&head).await?;
-    // Bulk data uses one continuous, backpressured request. Keep control/log
-    // frames and old masters on the existing protocol (including /wait's result).
-    let streams_snapshot_body = path.starts_with("/snapshots/")
-        && (method == "GET"
-            || (method == "POST" && (path.ends_with("/blocks") || path.ends_with("/publication"))));
-    // Reader heartbeats stay on acknowledged control frames. A lost manager
-    // must end their ownership within the control round-trip deadline, rather
-    // than buffering tiny heartbeat bytes in a long bulk upload.
-    if command["streamBody"] == true && streams_snapshot_body {
-        return stream_body(master, id, response).await;
-    }
     let mut sequence = 1u64;
     while let Some(bytes) = response
         .chunk()
@@ -413,25 +368,11 @@ async fn call_controller(
     let method = text(command, "method");
     let path = text(command, "path");
     route(method, path)?;
-    let mut bytes = STANDARD
+    let bytes = STANDARD
         .decode(text(command, "body"))
         .map_err(|_| Error::bad("Invalid execution payload."))?;
-    let limit = if path.ends_with("/restore") || path.ends_with("/publication") {
-        super::snapshots::MAX_MANIFEST_BYTES
-    } else {
-        MAX_PAYLOAD_BYTES
-    };
-    if bytes.len() > limit {
+    if bytes.len() > MAX_PAYLOAD_BYTES {
         return Err(Error::bad("Execution payload exceeds limit."));
-    }
-
-    if method == "POST" && path.starts_with("/disks/") && path.ends_with("/restore") {
-        let mut body: Value = serde_json::from_slice(&bytes)?;
-        let restore = body
-            .as_object_mut()
-            .ok_or_else(|| Error::bad("Invalid disk restore request."))?;
-        restore.insert("master".into(), master.url.as_str().into());
-        bytes = serde_json::to_vec(&body)?;
     }
 
     executor
@@ -458,107 +399,9 @@ async fn call_controller(
         .map_err(|_| Error::unavailable("Local VM controller unavailable."))
 }
 
-/// Uploads the whole response body to the master in one streaming request.
-async fn stream_body(master: &Master<'_>, id: &str, response: reqwest::Response) -> Result<()> {
-    let (progress, observed) = tokio::sync::watch::channel(0u64);
-    let chunks = futures_util::stream::try_unfold(
-        (response.bytes_stream(), progress),
-        |(mut stream, progress)| async move {
-            match tokio::time::timeout(Duration::from_secs(60), stream.next()).await {
-                Ok(Some(Ok(bytes))) => {
-                    if !bytes.is_empty() {
-                        progress.send_modify(|total| *total += bytes.len() as u64);
-                    }
-                    Ok(Some((bytes, (stream, progress))))
-                }
-                Ok(None) => Ok(None),
-                _ => Err(std::io::Error::other("VM response interrupted")),
-            }
-        },
-    );
-    let upload = master
-        .client
-        .post(
-            master
-                .url
-                .join(&format!("internal/nodes/stream/{id}"))
-                .map_err(Error::internal)?,
-        )
-        .bearer_auth(master.token)
-        .header("content-type", "application/octet-stream")
-        .body(reqwest::Body::wrap_stream(chunks))
-        .send();
-    let uploaded = progressing_upload(
-        async {
-            upload
-                .await
-                .map_err(|_| Error::unavailable("Master upload interrupted."))
-        },
-        observed,
-    )
-    .await?;
-    if !uploaded.status().is_success() {
-        return Err(Error::conflict("Execution stream rejected."));
-    }
-    Ok(())
-}
-
-async fn progressing_upload<T>(
-    upload: impl std::future::Future<Output = Result<T>>,
-    mut observed: tokio::sync::watch::Receiver<u64>,
-) -> Result<T> {
-    tokio::pin!(upload);
-    // A whole-publication response may legitimately exceed two minutes. Bound
-    // stalled uploads and the final acknowledgement while allowing progress.
-    loop {
-        tokio::select! {
-            response = &mut upload => {
-                return response;
-            }
-            progress = tokio::time::timeout(Duration::from_secs(120), observed.changed()) => {
-                match progress {
-                    Ok(Ok(())) => {},
-                    Ok(Err(_)) => {
-                        return tokio::time::timeout(Duration::from_secs(120), &mut upload)
-                            .await
-                            .map_err(|_| Error::unavailable("Master upload interrupted."))?;
-                    }
-                    Err(_) => return Err(Error::unavailable("Master upload stalled.")),
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn storage_pressure_publication_can_open_a_large_stopped_journal() {
-        let path = format!("/snapshots/{}/publication", crate::config::id());
-        assert!(controller_timeout("POST", &path, true) >= Duration::from_secs(120));
-        assert_eq!(
-            controller_timeout("POST", "/storage-policy", true),
-            Duration::from_secs(25)
-        );
-    }
-
-    #[test]
-    fn idle_cache_eviction_reaches_the_controller_only_with_a_canonical_run_and_post() {
-        let path = format!("/disks/{}/evict", crate::config::id());
-        route("POST", &path).unwrap();
-        assert_eq!(
-            controller_timeout("POST", &path, true),
-            Duration::from_secs(300)
-        );
-        for method in ["GET", "PUT", "DELETE"] {
-            assert!(route(method, &path).is_err());
-        }
-        for path in ["/disks/not-a-run/evict", "/disks/../evict", "/disks/evict"] {
-            assert!(route("POST", path).is_err());
-        }
-    }
 
     #[test]
     fn exclusive_commands_cross_the_outbound_relay_with_their_acknowledgement_deadline() {
@@ -657,44 +500,6 @@ mod tests {
         server.await.unwrap();
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn publication_upload_allows_progress_beyond_the_old_deadline() {
-        let (progress, observed) = tokio::sync::watch::channel(0);
-        let work = async move {
-            for value in 1..=3 {
-                tokio::time::sleep(Duration::from_secs(59)).await;
-                progress.send(value).unwrap();
-            }
-            Ok(())
-        };
-        assert!(progressing_upload(work, observed).await.is_ok());
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn publication_upload_rejects_a_stall_and_a_missing_final_response() {
-        for closed in [false, true] {
-            let (progress, observed) = tokio::sync::watch::channel(0);
-            let held = (!closed).then_some(progress);
-            let started = tokio::time::Instant::now();
-            let result: Result<()> = progressing_upload(std::future::pending(), observed).await;
-            assert_eq!(result.unwrap_err().status, 503);
-            assert_eq!(started.elapsed(), Duration::from_secs(120));
-            drop(held);
-        }
-    }
-
-    #[test]
-    fn completed_generation_capture_is_authorized_through_the_outbound_relay() {
-        let path = format!("/disks/{}/snapshot-completed", crate::config::id());
-        assert!(route("POST", &path).is_ok());
-        assert!(route("GET", &path).is_err());
-        assert!(route("POST", "/disks/not-a-conversation/snapshot-completed").is_err());
-        assert_eq!(
-            controller_timeout("POST", &path, false),
-            Duration::from_secs(300)
-        );
-    }
-
     #[test]
     fn native_stop_allows_the_stopped_checkpoint_to_finish_before_relay_timeout() {
         let path = format!("/runs/{}", crate::config::id());
@@ -710,14 +515,6 @@ mod tests {
             controller_timeout("POST", &format!("{path}/lease"), true),
             Duration::from_secs(25)
         );
-    }
-
-    #[test]
-    fn publication_reader_is_authorized_through_the_outbound_relay() {
-        let path = format!("/snapshots/{}/publication", crate::config::id());
-        assert!(route("POST", &path).is_ok());
-        assert!(route("GET", &path).is_err());
-        assert!(route("POST", "/snapshots/invalid/publication").is_err());
     }
 }
 

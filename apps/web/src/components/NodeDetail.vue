@@ -439,20 +439,14 @@ const reserve = computed(() => {
                 {{ formatBytes(node.diskAccounting.poolReserveBytes) }}
               </dd>
               <dt class="text-muted">
-                Reclaimable, at least
+                Awaiting consolidation
               </dt>
               <dd class="text-right tabular-nums">
-                {{ formatBytes(node.diskAccounting.reclaimableBytes) }}
-              </dd>
-              <dt class="text-muted">
-                Not yet synchronized
-              </dt>
-              <dd class="text-right tabular-nums">
-                {{ formatBytes(node.diskAccounting.unsynchronizedBytes) }}
+                {{ formatBytes(node.diskAccounting.unconsolidatedBytes) }}
               </dd>
             </dl>
             <p class="mt-3 text-xs text-muted">
-              These figures overlap. Reclaimable space comes from synchronized inactive conversations; unsynchronized journal data is kept until it is published. Under pressure, inactive copies are freed without the one-hour delay, and waiting conversations take priority over further growth.
+              These figures overlap. Disks remain on this node. Local journal consolidation, environment expiration and deletion release space; waiting conversations take priority over further growth.
             </p>
           </section>
           <section v-if="node.staleDisks?.count" class="flex items-center justify-between gap-3 border-b border-line px-6.5 py-4 text-sm phone:px-5">

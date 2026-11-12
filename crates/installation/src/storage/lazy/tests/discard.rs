@@ -1,25 +1,7 @@
 use super::*;
-use std::{
-    collections::HashMap,
-    os::unix::fs::{FileExt, MetadataExt},
-    sync::Mutex,
-};
+use std::os::unix::fs::{FileExt, MetadataExt};
 
-#[derive(Default)]
-struct Published(Mutex<HashMap<String, Vec<u8>>>);
-
-impl BlockSource for Published {
-    fn fetch(&self, hash: &str) -> io::Result<Vec<u8>> {
-        self.0
-            .lock()
-            .unwrap()
-            .get(hash)
-            .cloned()
-            .ok_or_else(|| failure("Missing published test block"))
-    }
-}
-
-fn fixture(root: &Path, source: Arc<Published>) -> LazyDisk {
+fn fixture(root: &Path) -> LazyDisk {
     LazyDisk::create(
         root,
         &serde_json::json!({
@@ -32,7 +14,6 @@ fn fixture(root: &Path, source: Arc<Published>) -> LazyDisk {
                 "hash": null
             })).collect::<Vec<_>>()
         }),
-        source,
     )
     .unwrap()
 }
@@ -40,8 +21,8 @@ fn fixture(root: &Path, source: Arc<Published>) -> LazyDisk {
 #[test]
 fn discard_preserves_neighbours_new_writes_and_sealed_generations_across_reopen() {
     let root = tempfile::tempdir().unwrap();
-    let source = Arc::new(Published::default());
-    let disk = fixture(root.path(), source.clone());
+
+    let disk = fixture(root.path());
     disk.write_at(0, &vec![0x3a; 2 * BLOCK as usize]).unwrap();
     let old = disk.seal_completed().unwrap();
     disk.discard(512, 2 * BLOCK as usize - 1024).unwrap();
@@ -58,7 +39,7 @@ fn discard_preserves_neighbours_new_writes_and_sealed_generations_across_reopen(
             .all(|byte| *byte == 0x3a)
     );
     drop(disk);
-    let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
+    let disk = LazyDisk::open(root.path()).unwrap();
     let mut actual = vec![0; 2 * BLOCK as usize];
     disk.read_at(0, &mut actual).unwrap();
     let mut expected = vec![0; 2 * BLOCK as usize];
@@ -86,13 +67,12 @@ fn discard_preserves_neighbours_new_writes_and_sealed_generations_across_reopen(
     );
     disk.read_at(0, &mut actual).unwrap();
     assert!(actual.iter().all(|byte| *byte == 0));
-    assert!(source.0.lock().unwrap().is_empty());
 }
 
 #[test]
 fn repeated_discard_and_sparse_tail_do_not_append_more_frames() {
     let root = tempfile::tempdir().unwrap();
-    let disk = fixture(root.path(), Arc::new(Published::default()));
+    let disk = fixture(root.path());
     disk.discard(0, disk.size() as usize).unwrap();
     assert_eq!(disk.accounting().unwrap()["journalBytes"], 0);
     disk.write_at(1024, b"deleted").unwrap();
@@ -112,8 +92,8 @@ fn repeated_discard_and_sparse_tail_do_not_append_more_frames() {
 #[test]
 fn invalid_discard_does_not_change_any_prefix_and_sparse_payload_is_authenticated() {
     let root = tempfile::tempdir().unwrap();
-    let source = Arc::new(Published::default());
-    let disk = fixture(root.path(), source.clone());
+
+    let disk = fixture(root.path());
     disk.write_at(0, b"kept").unwrap();
     assert!(disk.discard(disk.size() - 1, 2).is_err());
     assert!(disk.discard(u64::MAX, 1).is_err());
@@ -129,16 +109,16 @@ fn invalid_discard_does_not_change_any_prefix_and_sparse_payload_is_authenticate
     file.write_all_at(b"corruption", 112 + 4 + 112 + 512)
         .unwrap();
     file.sync_all().unwrap();
-    let disk = LazyDisk::open(root.path(), source).unwrap();
+    let disk = LazyDisk::open(root.path()).unwrap();
     assert!(disk.read_at(0, &mut kept).is_err());
-    let generation = disk.seal().unwrap();
-    assert!(disk.capture(generation).is_err());
+    disk.seal().unwrap();
+    assert!(disk.consolidate().is_err());
 }
 
 #[test]
 fn discard_sync_failure_is_not_acknowledged() {
     let root = tempfile::tempdir().unwrap();
-    let disk = fixture(root.path(), Arc::new(Published::default()));
+    let disk = fixture(root.path());
     disk.write_at(0, b"deleted").unwrap();
     disk.commit_failure.store(true, Ordering::Relaxed);
     assert!(disk.discard(0, 4096).is_err());
@@ -150,7 +130,7 @@ fn discard_sync_failure_is_not_acknowledged() {
 fn acknowledged_discard_survives_process_kill() {
     use std::io::BufRead;
     let root = tempfile::tempdir().unwrap();
-    let disk = fixture(root.path(), Arc::new(Published::default()));
+    let disk = fixture(root.path());
     disk.write_at(0, &vec![0x6b; BLOCK as usize]).unwrap();
     drop(disk);
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -165,7 +145,7 @@ fn acknowledged_discard_survives_process_kill() {
     let _ = child.kill();
     child.wait().unwrap();
     assert!(acknowledged);
-    let disk = LazyDisk::open(root.path(), Arc::new(Published::default())).unwrap();
+    let disk = LazyDisk::open(root.path()).unwrap();
     let mut actual = vec![1; BLOCK as usize];
     disk.read_at(0, &mut actual).unwrap();
     assert!(actual.iter().all(|byte| *byte == 0));
@@ -176,7 +156,7 @@ fn discard_crash_child() {
     let Some(root) = std::env::var_os("CAIRN_DISCARD_CRASH_FIXTURE") else {
         return;
     };
-    let disk = LazyDisk::open(Path::new(&root), Arc::new(Published::default())).unwrap();
+    let disk = LazyDisk::open(Path::new(&root)).unwrap();
     disk.discard(0, BLOCK as usize).unwrap();
     println!("DISCARD_ACKNOWLEDGED");
     std::io::Write::flush(&mut std::io::stdout()).unwrap();
@@ -192,7 +172,7 @@ fn discarding_damaged_base_bytes_never_reads_them_and_keeps_live_neighbours() {
     let manifest = local_base(root.path(), &[Some(bytes.clone())]);
     let file = root.path().join("cache").join(block_digest(&bytes));
     std::fs::write(&file, vec![0x4b; BLOCK as usize]).unwrap();
-    let disk = LazyDisk::create(root.path(), &manifest, Arc::new(Published::default())).unwrap();
+    let disk = LazyDisk::create(root.path(), &manifest).unwrap();
     disk.discard(1024, 4096).unwrap();
     let mut discarded = [1; 4096];
     disk.read_at(1024, &mut discarded).unwrap();
@@ -216,7 +196,7 @@ fn no_op_discard_waits_for_a_staged_zero_write_to_be_durable() {
         time::{Duration, Instant},
     };
     let root = tempfile::tempdir().unwrap();
-    let disk = Arc::new(fixture(root.path(), Arc::new(Published::default())));
+    let disk = Arc::new(fixture(root.path()));
     let commit = disk.commit.lock().unwrap();
     let (send, receive) = mpsc::channel();
     std::thread::scope(|scope| {

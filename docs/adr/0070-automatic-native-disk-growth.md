@@ -128,4 +128,4 @@ Qualification extends the disposable native runtime fixture with live growth,
 unchanged workload PID, writes beyond the former device boundary, and rejected
 shrink replies. Existing reference/native read/write/CPU and encoded S3 measurements
 are retained. These are synthetic loopback-S3 measurements, not production network
-latency. See [storage measurements](../STORAGE-COMPRESSION.md).
+latency. See [local storage measurements](../JOURNAL-RECOVERY.md#qualification).

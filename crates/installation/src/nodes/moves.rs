@@ -56,7 +56,6 @@ pub fn list_tool() -> Value {
 #[serde(rename_all = "camelCase")]
 struct NodeSummary<'a> {
     backend: &'a Value,
-    vm_disks: bool,
     id: &'a Value,
     name: &'a Value,
     tags: Vec<&'a Value>,
@@ -93,7 +92,6 @@ pub async fn list(s: &Service, run: &Value) -> Result<Value> {
         .map(|node| {
             serde_json::to_value(NodeSummary {
                 backend: &node["capabilities"]["backend"],
-                vm_disks: node["capabilities"]["vmDisks"] == true,
                 id: &node["id"],
                 name: &node["name"],
                 tags: super::node_tags(node).collect(),
@@ -501,12 +499,6 @@ pub(crate) async fn node_ready_for_attempt(
         ));
     }
     if !run["cancelRequestedAt"].is_null() {
-        return Ok(true);
-    }
-    // Keep the authoritative journal on its source until every coalesced final
-    // publication is acknowledged. Same-node work may continue in the meantime.
-    if super::publication::requested(run) {
-        s.node_publication_notify.notify_one();
         return Ok(true);
     }
     let checkpoint = super::checkpoint(s, run_id).await?;

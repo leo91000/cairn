@@ -130,7 +130,7 @@ async fn storage_accounting_preserves_unsigned_saturation_and_scope() {
     }).await.unwrap();
     let inventory = nodes::typed_inventory(&service).await.unwrap();
     assert_eq!(
-        serde_json::to_value(&inventory[0]).unwrap()["diskAccounting"]["unsynchronizedBytes"],
+        serde_json::to_value(&inventory[0]).unwrap()["diskAccounting"]["unconsolidatedBytes"],
         6
     );
     service
@@ -143,7 +143,7 @@ async fn storage_accounting_preserves_unsigned_saturation_and_scope() {
         .unwrap();
     let inventory = nodes::typed_inventory(&service).await.unwrap();
     assert_eq!(
-        serde_json::to_value(&inventory[0]).unwrap()["diskAccounting"]["unsynchronizedBytes"],
+        serde_json::to_value(&inventory[0]).unwrap()["diskAccounting"]["unconsolidatedBytes"],
         u64::MAX
     );
     service.shutdown.cancel();
@@ -196,7 +196,7 @@ async fn inventory_by_saved_execution_size() {
             assert_eq!(node.stale_disks.count, 60);
             assert_eq!(node.stale_disks.disk_mi_b, 60 * 1024);
             let wire = serde_json::to_value(node).unwrap();
-            assert_eq!(wire["diskAccounting"]["unsynchronizedBytes"], 45150);
+            assert_eq!(wire["diskAccounting"]["unconsolidatedBytes"], 45150);
             response_bytes = serde_json::to_vec(&inventory).unwrap().len();
         }
         println!(

@@ -468,7 +468,7 @@ describe('native CI dependency setup', () => {
   })
 
   it('uses the same bounded installer in all native dependency callers with the same package set', () => {
-    for (const name of ['rust-check', 'backend', 'cli-qualification', 'backend-migration-qualification', 'node-checks']) {
+    for (const name of ['rust-check', 'backend', 'cli-qualification', 'node-checks']) {
       const step = workflow.jobs[name].steps.find(step => step.name === 'Install native test dependencies')
       expect(step.run).toBe('node scripts/install-native-ci-dependencies.mjs')
       expect(step['timeout-minutes']).toBe(10)

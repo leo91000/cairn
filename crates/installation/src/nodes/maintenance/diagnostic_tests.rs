@@ -3,7 +3,6 @@ use crate::{
     attempt_fixture::{DbAttemptFixture, StoreAttemptFixture},
     config::{Config, id},
     node_fixture::StoreNodeFixture,
-    object_storage::tests::fixture_storage_at,
     run_fixture::DbRunFixture,
 };
 use axum::{Router, http::StatusCode, response::IntoResponse};
@@ -105,7 +104,7 @@ impl Write for BlockedWriter {
 }
 
 #[tokio::test]
-async fn maintenance_reports_local_drain_without_remote_capture() {
+async fn maintenance_reports_local_close_and_preserves_ownership() {
     for child in [
         "nodes::maintenance::diagnostic_tests::native_capture_retry_report_child",
         "nodes::maintenance::diagnostic_tests::event_only_filter_report_child",
@@ -302,7 +301,6 @@ async fn actual_drain_reports(
                 return axum::Json(json!({
                     "status": "ok",
                     "nodeProtocol": 2,
-                    "directStorageProtocol": 1,
                 }))
                 .into_response();
             }
@@ -338,18 +336,6 @@ async fn actual_drain_reports(
     .await
     .unwrap();
     let (run, attempt, node) = add_attempt(&service, "native", true, false).await;
-    let logical = "https://maintenance-storage.example";
-    std::fs::write(
-        service.config.data_dir.join("storage-s3.json"),
-        json!({
-            "bucket": "fixture",
-            "endpoint": logical,
-            "region": "us-east-1",
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let _storage = fixture_storage_at(&url, logical, "fixture", service.hot_s3.clone()).await;
     let reply = request(&service, &node, &json!({ "action": "drain" }))
         .await
         .unwrap();
@@ -473,18 +459,13 @@ async fn actual_drain_reports(
     let report = &reports[0]["fields"];
     assert_eq!(report["outcome"], "completed");
     assert_eq!(report["pause_requests"], 1);
-    assert_eq!(report["capture_calls"], 0);
-    assert_eq!(report["capture_waits"], 0);
-    assert_eq!(report["capture_failures"], 0);
     assert_eq!(report["placement_releases"], 1);
-    assert_eq!(report["capture_wait_ms"], 0);
     let encoded = reports[0].to_string();
     for (index, private) in [
         run.as_str(),
         attempt.as_str(),
         node.as_str(),
         url.as_str(),
-        logical,
         "private-session",
         "private-context-must-not-escape",
     ]
@@ -519,7 +500,6 @@ async fn actual_drain_reports(
         assert_eq!(report["outcome"], "completed");
         assert_eq!(report["pause_requests"], 1);
         assert_eq!(report["placement_releases"], 1);
-        assert_eq!(report["capture_calls"], 0);
     }
 
     capture.0.lock().unwrap().clear();
@@ -617,8 +597,6 @@ fn drain_report(capture: &Capture) -> Value {
         "inventory_ms",
         "preparation_ms",
         "pause_request_ms",
-        "capture_ms",
-        "capture_wait_ms",
         "placement_release_ms",
     ]
     .into_iter()

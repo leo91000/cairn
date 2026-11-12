@@ -29,7 +29,7 @@ pub(crate) async fn prepare_native(
 }
 
 /// Build an anonymous, entirely local disk without minting or borrowing any
-/// conversation's S3 authority. Only prepared environments may use this path.
+/// conversation's ownership. Only prepared environments may use this path.
 pub async fn prepare_unassigned(
     directory: &Path,
     size: u64,
@@ -311,7 +311,7 @@ mod tests {
         volume.read_at(1080, &mut signature).unwrap();
         assert_eq!(signature, [0x53, 0xef]);
         assert!(!directory.join("data.ext4").exists());
-        assert!(volume.source.grant_id().is_err());
+        assert!(volume.assignment.assigned().unwrap().is_none());
         assert!(!volume.disk.has_base_blocks().unwrap());
         let context = super::super::LazyDisk::context(&directory.join("lazy")).unwrap();
         assert!(context.get("master").is_none() && context.get("grant").is_none());
@@ -329,7 +329,7 @@ mod tests {
         volume.read_at(1080, &mut signature).unwrap();
         assert_eq!(signature, [0x53, 0xef]);
         assert_eq!(
-            volume.source.grant_id().unwrap(),
+            volume.assignment.assigned().unwrap().unwrap(),
             crate::auth::digest("real-owner-fixture")
         );
         assert_eq!(
@@ -364,7 +364,7 @@ mod tests {
             .unwrap();
         volume.disk.sync().unwrap();
         let before = volume.seal().await.unwrap();
-        let original_grant = volume.source.grant_id().unwrap();
+        let original_grant = volume.assignment.assigned().unwrap().unwrap();
         drop(volume);
         crate::skills::atomic_write(&directory.join("bootstrap.pending"), b"resizing")
             .await
@@ -382,7 +382,10 @@ mod tests {
             .await
             .unwrap();
         let volume = super::super::runtime::load(&directory).await.unwrap();
-        assert_eq!(volume.source.grant_id().unwrap(), original_grant);
+        assert_eq!(
+            volume.assignment.assigned().unwrap().unwrap(),
+            original_grant
+        );
         assert!(volume.seal().await.unwrap() > before);
         let mut saved = [0; 13];
         volume.disk.read_at(33 * 1024 * 1024, &mut saved).unwrap();

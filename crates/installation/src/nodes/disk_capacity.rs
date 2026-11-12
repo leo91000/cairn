@@ -37,7 +37,7 @@ fn observation(node: &Value) -> Option<Observation> {
     (value.protocol == 1 && (0..=30_000).contains(&age)).then_some(value)
 }
 
-/// Current physical capacity and separately reported unpublished append history.
+/// Current physical capacity and separately reported unconsolidated append history.
 /// These are overlapping measurements, not pieces of an additive pie chart.
 pub(super) fn accounting(
     db: &Db<'_>,
@@ -52,10 +52,10 @@ pub(super) fn accounting(
     let dirty_bytes = db.json_rows(
         "SELECT coalesce(boundary -> '$.storage.dirtyBytes','null') FROM runs
          WHERE placement_node_id=?
-         AND json_extract(boundary,'$.storage.mode')='on-demand'",
+         AND json_extract(boundary,'$.storage.mode') IN ('on-demand','native')",
         [text(node, "id")],
     )?;
-    let unsynchronized = dirty_bytes.iter().fold(0u64, |total, bytes| {
+    let unconsolidated = dirty_bytes.iter().fold(0u64, |total, bytes| {
         total.saturating_add(bytes.as_u64().unwrap_or(0))
     });
     let limit = node["limits"]["diskMiB"]
@@ -75,9 +75,7 @@ pub(super) fn accounting(
         "hostFreeBytes": sample.free_bytes,
         "hostReserveBytes": reserve,
         "poolReserveBytes": pool_reserve(limit),
-        // Local environments are never evicted to reclaim their backing.
-        "reclaimableBytes": 0,
-        "unsynchronizedBytes": unsynchronized
+        "unconsolidatedBytes": unconsolidated
     }))
 }
 

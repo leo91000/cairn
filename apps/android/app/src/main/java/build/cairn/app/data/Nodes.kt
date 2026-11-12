@@ -121,8 +121,6 @@ fun NodeAlert.localized(): Pair<String, String> =
     }
 
 /** Reply to a revocation. */
-typealias NodeBackup = build.cairn.boundary.NodeBackup
-
 typealias NodeRuntimeSettings = build.cairn.contracts.NodeRuntimeSettings
 
 fun formatMiB(value: Long): String {

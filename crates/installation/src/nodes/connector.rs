@@ -79,41 +79,6 @@ pub(crate) fn master(input: &str) -> Result<url::Url> {
     Ok(value)
 }
 
-/// The manager's own origin, recorded in the `DATA_DIR` it shares with its local runner.
-const MANAGER_ORIGIN_FILE: &str = "manager-origin";
-
-/// Lets the installation's own runner read disks through the manager's private
-/// origin, such as `http://manager:4310` on the Compose network. Only the
-/// manager writes this record, from its own configuration; no node or request
-/// supplies it, and a remote node's data root has none.
-pub async fn record_manager_origin(config: &crate::config::Config) -> Result<()> {
-    crate::skills::atomic_write(
-        &config.data_dir.join(MANAGER_ORIGIN_FILE),
-        config.public_url.as_bytes(),
-    )
-    .await
-}
-
-/// The origin a controller reads disks from. Remote nodes keep the HTTPS rule of
-/// [`master`]; the one exception is the exact origin of the manager sharing this
-/// controller's data root.
-pub(crate) fn disk_master(input: &str) -> Result<url::Url> {
-    master(input).or_else(|refused| {
-        let recorded =
-            std::fs::read_to_string(super::node_data_dir().join(MANAGER_ORIGIN_FILE)).ok();
-        recorded_manager_origin(input, recorded.as_deref()).ok_or(refused)
-    })
-}
-
-fn recorded_manager_origin(input: &str, recorded: Option<&str>) -> Option<url::Url> {
-    let recorded = url::Url::parse(recorded?.trim()).ok()?;
-    let value = url::Url::parse(input).ok()?;
-
-    // Only the bare origin matches: no path, query or credentials.
-    let origin = recorded.origin().ascii_serialization();
-    (value == recorded && input.trim_end_matches('/') == origin).then_some(value)
-}
-
 fn client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -228,7 +193,7 @@ pub fn capabilities(path: &Path) -> Result<Value> {
         },
         kvm,
         ublk: device_opens("/dev/ublk-control").is_some(),
-        vm_disks: crate::native::enabled() && crate::native::idmap::supported(),
+        vm_disks: false,
         native_mode_protocol: u32::from(crate::native::enabled()),
         cpu: u32::try_from(cpu).unwrap_or(u32::MAX),
         memory_mi_b: memory,
@@ -809,38 +774,4 @@ mod capacity_tests {
 }
 
 #[cfg(test)]
-mod origin_tests {
-    use super::*;
-
-    #[test]
-    fn only_the_recorded_manager_origin_relaxes_the_https_rule() {
-        let recorded = Some("http://manager:4310");
-        for input in ["http://manager:4310", "http://manager:4310/"] {
-            assert!(
-                recorded_manager_origin(input, recorded).is_some(),
-                "{input}"
-            );
-        }
-        for input in [
-            "http://manager:4311",
-            "http://manager.evil:4310",
-            "http://10.0.0.2:4310",
-            "http://manager:4310/internal",
-            "http://user@manager:4310",
-            "http://manager:4310/?q",
-        ] {
-            assert!(
-                recorded_manager_origin(input, recorded).is_none(),
-                "{input}"
-            );
-        }
-        // A remote node's data root has no record.
-        assert!(recorded_manager_origin("http://manager:4310", None).is_none());
-        assert!(
-            recorded_manager_origin("http://manager:4310", Some("http://manager:4310/x")).is_none()
-        );
-        // Remote nodes enroll and connect with the unchanged rule.
-        assert!(master("http://manager:4310").is_err());
-        assert!(master("https://manager.example").is_ok());
-    }
-}
+mod origin_tests {}

@@ -402,7 +402,7 @@ pnpm test:backend -p cairn-installation --test node_inventory_performance -- --i
 ```
 
 It varies saved snapshots and checkpoints across 300 materialized volumes and
-checks stale-disk and unsynchronized-byte results. Measurements are local reads
+checks stale-disk and local unconsolidated-journal results. Measurements are local reads
 through the shipped inventory function, not production HTTP or disk-transfer
 measurements. Keep raw measurements outside tracked files and include the
 reference comparison and host conditions in the PR description.
@@ -413,12 +413,10 @@ To qualify native storage accounting with retained workspaces, run:
 pnpm test:backend -p cairn-installation --test native_inventory_performance -- --ignored --nocapture --test-threads=1
 ```
 
-This fixture reports 100 clean retained native caches with acknowledged S3
-publication metadata and released execution leases. It checks the actual
-`reclaimableBytes` result while varying frozen snapshots and prepared checkpoints.
-The ordinary regression also checks active work, pending recovery, moves,
-changed checkpoint ownership, dirty bytes, requested publications and clean
-queued resumes. No workspace is opened, uploaded or evicted by these tests.
+This fixture reports retained local native environments with released execution
+leases while varying frozen snapshots and prepared checkpoints. It checks local
+accounting and stale ownership. No environment can be reclaimed by eviction;
+consolidation, expiration and explicit deletion release its backing.
 
 ## VM import timings
 
@@ -520,15 +518,14 @@ It aggregates the whole episode without logging individual attempts or retries.
 phase entered. Both fields use fixed labels.
 
 `elapsed_ms` and the phase totals use a monotonic clock. The phase totals are
-`inventory_ms`, `preparation_ms`, `pause_request_ms`, `capture_ms`,
-`capture_wait_ms` and `placement_release_ms`. `capture_ms` includes the existing
-archive synchronization/publication call; `capture_wait_ms` includes the existing
-100 ms waits after native 425 responses. These are wall times, not CPU times.
+`inventory_ms`, `preparation_ms`, `pause_request_ms` and `placement_release_ms`.
+The controller closes and flushes its local environment before the placement is
+released. These are wall times, not CPU times.
 Integer millisecond rounding can make the summed phase totals slightly smaller
 than the elapsed duration.
 
 Counters distinguish `attempts`, `stale_attempts`, `pause_requests`,
-`pause_failures`, `capture_calls`, `capture_waits`, `capture_failures`,
+`pause_failures`,
 `placement_releases` and `placement_failures`. Requests and release calls are
 counted when entered; failures count completed error results. An interrupted
 request therefore need not increment its failure counter. Stale checkpoint
@@ -537,8 +534,8 @@ ownership is skipped as before. A failed native archive capture retains placemen
 The summary captures preparation before the readiness database write. Delivery
 is asynchronous and can follow that write. It is not proof that readiness
 was persisted, the controller stopped, the node updated, or real work completed.
-`cancelled` means the manager's preparation future was dropped; a separately owned
-publication task may continue. Abrupt process termination cannot emit a summary.
+`cancelled` means the manager's preparation future was dropped; an already issued
+controller stop may still finish. Abrupt process termination cannot emit a summary.
 Concurrent node drains remain separate records without a node/run identifier.
 The event contains no identifiers, URLs, error strings or inherited private spans.
 One dedicated logging worker uses the captured subscriber with an empty

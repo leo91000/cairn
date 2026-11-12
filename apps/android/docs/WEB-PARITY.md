@@ -830,6 +830,15 @@ The wait commands, cancellation and public MCP/agent tool contracts are unchange
 `chat-wait.test.ts`, `ChatWaitTest`, the scheduled-wait browser journeys and
 `BackgroundWaitCases` cover this ordering on both platforms.
 
+### Local conversation disk reporting (ADR-0083)
+
+Web and Android show disk usage and durable journal bytes awaiting local
+consolidation. Neither app shows S3 publication age/errors, overdue remote sync,
+or space reclaimable by evicting an inactive environment. The node and run
+responses used by public MCP and `cairn_installation` expose the same local
+accounting (`unconsolidatedBytes`) and omit the obsolete backup view. Android
+uses native French labels; web uses its execution panel and node capacity details.
+
 ## Expiring conversation links
 
 Owners can create, inspect, replace and revoke an unlisted live conversation link from

@@ -118,8 +118,10 @@ pub async fn downloads(State(app): State<App>, request: Request) -> Result<Respo
 /// The current release and configured shutdown deadline.
 async fn advertise(s: &Service) -> Result<String> {
     let mut release = release()?;
-    release.shutdown_timeout_seconds =
-        super::publication::settings(s).await?["shutdownTimeoutSeconds"].clone();
+    release.shutdown_timeout_seconds = super::settings::current(s)
+        .await?
+        .shutdown_timeout_seconds
+        .into();
     Ok(serde_json::to_value(release)?.to_string())
 }
 
@@ -159,9 +161,9 @@ async fn start_drain(s: &Service, node: &str) -> Result<Value> {
     if !s.node_maintenance_tasks.lock().await.insert(node.clone()) {
         return s.node_boundary(&node).await;
     }
-    let timeout = super::publication::settings(s).await?["shutdownTimeoutSeconds"]
-        .as_u64()
-        .unwrap_or(300)
+    let timeout = super::settings::current(s)
+        .await?
+        .shutdown_timeout_seconds
         .saturating_sub(20)
         .max(10);
     let generation = crate::config::id();

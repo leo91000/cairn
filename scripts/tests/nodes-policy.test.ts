@@ -68,7 +68,7 @@ it('formats node sizes, recovery ages and blocking reasons for people', () => {
     capabilities: {
       backend: 'firecracker',
       ublk: false,
-      vmDisks: false,
+
       nativeModeProtocol: 0,
       diskTotalMiB: 0,
       os: 'linux',

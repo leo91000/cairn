@@ -38,7 +38,7 @@ serves the initial screen and remains the fallback.
    relay meanwhile.
 
 Storage is unchanged: conversations, projects, files, secrets and disks stay on
-the installation, its nodes and their S3. The Beacon persists account
+the manager and its execution nodes. The Beacon persists account
 metadata, sessions, roles, attachments and audit entries, never relayed or
 direct conversation content.
 

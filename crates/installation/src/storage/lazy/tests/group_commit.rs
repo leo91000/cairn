@@ -27,13 +27,7 @@ fn one_caller_batches_ordered_writes_behind_one_durable_barrier() {
     assert_eq!(disk.performance()["committedFrames"], 3);
     assert_eq!(disk.performance()["write"]["count"], 3);
     drop(disk);
-    let reopened = LazyDisk::open(
-        root.path(),
-        Arc::new(Source {
-            reads: AtomicUsize::new(0),
-        }),
-    )
-    .unwrap();
+    let reopened = LazyDisk::open(root.path()).unwrap();
     let mut bytes = [0; 20];
     reopened.read_at(0, &mut bytes).unwrap();
     assert_eq!(&bytes, b"\0\0\0\0aaaabbccbbbb\0\0\0\0");
@@ -62,16 +56,7 @@ fn invalid_later_write_rejects_the_batch_before_any_append() {
 }
 
 fn disk(root: &Path) -> Arc<LazyDisk> {
-    Arc::new(
-        LazyDisk::create(
-            root,
-            &single_block(BLOCK, BLOCK, &Value::Null),
-            Arc::new(Source {
-                reads: AtomicUsize::new(0),
-            }),
-        )
-        .unwrap(),
-    )
+    Arc::new(LazyDisk::create(root, &single_block(BLOCK, BLOCK, &Value::Null)).unwrap())
 }
 
 fn wait_for_staged(disk: &LazyDisk, next: i64) {
@@ -124,13 +109,7 @@ fn concurrent_writes_share_one_durable_barrier_before_acknowledgement() {
     let generation = disk.seal().unwrap();
     assert_eq!(generation, 1);
     drop(disk);
-    let reopened = LazyDisk::open(
-        root.path(),
-        Arc::new(Source {
-            reads: AtomicUsize::new(0),
-        }),
-    )
-    .unwrap();
+    let reopened = LazyDisk::open(root.path()).unwrap();
     for index in 0..4 {
         let mut bytes = [0; 4096];
         reopened.read_at(index * 4096, &mut bytes).unwrap();
@@ -169,13 +148,7 @@ fn failed_group_rejects_every_waiter_and_fences_until_recovery() {
     assert_eq!(disk.performance()["committedFrames"], 0);
     assert_eq!(disk.performance()["journalCommit"]["errors"], 1);
     drop(disk);
-    let reopened = LazyDisk::open(
-        root.path(),
-        Arc::new(Source {
-            reads: AtomicUsize::new(0),
-        }),
-    )
-    .unwrap();
+    let reopened = LazyDisk::open(root.path()).unwrap();
     reopened.write_at(0, b"recovered").unwrap();
     reopened.sync().unwrap();
 }
@@ -211,12 +184,11 @@ fn sync_and_seal_wait_for_staged_write_acknowledgements() {
 }
 
 #[test]
-fn publication_waits_for_pending_writes_and_keeps_their_newer_generation() {
+fn consolidation_waits_for_pending_writes_and_keeps_their_newer_generation() {
     let root = tempfile::tempdir().unwrap();
     let disk = disk(root.path());
     disk.write_at(0, b"old base").unwrap();
-    let generation = disk.seal().unwrap();
-    disk.capture(generation).unwrap();
+    disk.seal().unwrap();
     let commit = disk.commit.lock().unwrap();
     let (started, running) = mpsc::channel();
     let (send, receive) = mpsc::channel();
@@ -228,8 +200,7 @@ fn publication_waits_for_pending_writes_and_keeps_their_newer_generation() {
         let publisher = disk.clone();
         scope.spawn(move || {
             started.send(()).unwrap();
-            send.send(publisher.commit_published(generation, "receipt"))
-                .unwrap();
+            send.send(publisher.consolidate()).unwrap();
         });
         running.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(receive.recv_timeout(Duration::from_millis(50)).is_err());
@@ -244,13 +215,7 @@ fn publication_waits_for_pending_writes_and_keeps_their_newer_generation() {
     assert_eq!(&bytes, b"new pending");
     disk.sync().unwrap();
     drop(disk);
-    let reopened = LazyDisk::open(
-        root.path(),
-        Arc::new(Source {
-            reads: AtomicUsize::new(0),
-        }),
-    )
-    .unwrap();
+    let reopened = LazyDisk::open(root.path()).unwrap();
     reopened.read_at(0, &mut bytes).unwrap();
     assert_eq!(&bytes, b"new pending");
 }
@@ -294,13 +259,7 @@ fn acknowledged_prefix_survives_crash_before_and_after_group_sync() {
         child.wait().unwrap();
         reader.join().unwrap();
         ready.unwrap();
-        let reopened = LazyDisk::open(
-            root.path(),
-            Arc::new(Source {
-                reads: AtomicUsize::new(0),
-            }),
-        )
-        .unwrap();
+        let reopened = LazyDisk::open(root.path()).unwrap();
         let mut bytes = [0; 12];
         reopened.read_at(0, &mut bytes).unwrap();
         assert_eq!(&bytes, b"acknowledged");
@@ -318,15 +277,7 @@ fn acknowledged_prefix_survives_crash_before_and_after_group_sync() {
 #[ignore = "subprocess crash helper"]
 fn crash_group_writer() {
     let root = std::env::var_os("CAIRN_JOURNAL_CRASH_DIR").unwrap();
-    let disk = Arc::new(
-        LazyDisk::open(
-            Path::new(&root),
-            Arc::new(Source {
-                reads: AtomicUsize::new(0),
-            }),
-        )
-        .unwrap(),
-    );
+    let disk = Arc::new(LazyDisk::open(Path::new(&root)).unwrap());
     let commit = disk.commit.lock().unwrap();
     std::thread::scope(|scope| {
         for index in 1..5 {
@@ -382,13 +333,7 @@ fn grouped_journal_performance() {
         disk.sync().unwrap();
         let metrics = disk.performance();
         drop(disk);
-        let reopened = LazyDisk::open(
-            root.path(),
-            Arc::new(Source {
-                reads: AtomicUsize::new(0),
-            }),
-        )
-        .unwrap();
+        let reopened = LazyDisk::open(root.path()).unwrap();
         for worker in 0..WORKERS {
             let mut bytes = vec![0; WRITES as usize * 4096];
             reopened

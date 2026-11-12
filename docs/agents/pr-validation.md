@@ -57,7 +57,7 @@ affected code and the full qualification workflows for specialist coverage:
   use the commands and environment in `.github/workflows/ci.yaml`.
 - Native storage, process ownership, installation and update changes require
   the `node-checks` and `native-runtime` qualifications in that workflow, plus
-  [storage measurements](../STORAGE-COMPRESSION.md#qualification) when applicable.
+  [storage measurements](../JOURNAL-RECOVERY.md#qualification) when applicable.
 - Firecracker changes require `scripts/test-firecracker-discard.sh` where
   relevant. Container/release changes require the corresponding image smoke
   tests. Use disposable infrastructure with the required KVM/ublk capabilities.

@@ -116,7 +116,7 @@ pub(super) async fn refresh_with_status(
     status: impl Future<Output = Result<Value>>,
 ) -> Result<()> {
     let id = text(run, "id");
-    let _refresh = s.node_backup_operation.storage_refresh(id).await;
+    let _refresh = s.node_storage_operation.storage_refresh(id).await;
     let status = status.await?;
     let observed_at = crate::config::now();
     if status["mode"] == "native" {

@@ -239,8 +239,7 @@ struct RunnerPlan<'a> {
 
 #[derive(Serialize)]
 struct RunnerStorage<'a> {
-    master: &'a str,
-    grant: String,
+    owner: &'a str,
     policy: Policy,
 }
 
@@ -1205,7 +1204,6 @@ impl Execution<'_> {
                 .clone()
         };
         let storage_policy = crate::storage::policy::for_node(&node_storage)?;
-        let grant = nodes::disk_grants::new_disk(s, self.run, storage_node).await?;
         s.store
             .update_run_boundary(&self.id, json!({ "storage": { "mode": "on-demand" } }))
             .await?;
@@ -1233,8 +1231,7 @@ impl Execution<'_> {
             backend: &prepared["backend"],
             runtime_id: &placement["runtimeId"],
             storage: RunnerStorage {
-                master: &s.config.public_url,
-                grant,
+                owner: &self.id,
                 policy: storage_policy,
             },
             chat,

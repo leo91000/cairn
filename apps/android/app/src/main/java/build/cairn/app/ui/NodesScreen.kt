@@ -243,13 +243,10 @@ fun NodesScreen(
                                     "${formatBytes(disk.hostFreeBytes)} libres sur l’hôte · ${formatBytes(disk.hostReserveBytes)} réservés à l’hôte · ${formatBytes(disk.poolReserveBytes)} de réserve du pool"
                                 )
                                 Text(
-                                    "Au moins ${formatBytes(disk.reclaimableBytes)} récupérables sur les conversations inactives synchronisées"
+                                    "${formatBytes(disk.unconsolidatedBytes)} de journal durable en attente de consolidation locale."
                                 )
                                 Text(
-                                    "${formatBytes(disk.unsynchronizedBytes)} de journal non synchronisé au dernier relevé ; conservés jusqu’à la réussite de la synchronisation."
-                                )
-                                Text(
-                                    "Ces mesures se recoupent. Sous pression, les copies inactives synchronisées sont libérées sans attendre une heure ; les conversations en attente passent avant un nouvel agrandissement.",
+                                    "Ces mesures se recoupent. Les disques restent sur cette node ; consolidation, expiration et suppression libèrent de l’espace. Les conversations en attente passent avant un nouvel agrandissement.",
                                     style = MaterialTheme.typography.bodySmall,
                                 )
                             }

@@ -535,10 +535,6 @@
         "ublk": {
           "default": false,
           "type": "boolean"
-        },
-        "vmDisks": {
-          "default": false,
-          "type": "boolean"
         }
       },
       "required": [
@@ -578,12 +574,7 @@
           "minimum": 0,
           "type": "integer"
         },
-        "reclaimableBytes": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "unsynchronizedBytes": {
+        "unconsolidatedBytes": {
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -601,8 +592,7 @@
         "hostFreeBytes",
         "hostReserveBytes",
         "poolReserveBytes",
-        "reclaimableBytes",
-        "unsynchronizedBytes"
+        "unconsolidatedBytes"
       ],
       "type": "object"
     },

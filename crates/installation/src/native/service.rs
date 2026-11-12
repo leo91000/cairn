@@ -11,7 +11,6 @@ use crate::runner::exclusive::{Ledger, Reservations};
 use crate::{
     error::{Error, Result},
     microvm::{plan::Plan, protocol::Event, wire},
-    nodes::snapshots,
     skills::private_dir,
     storage,
     validation::{text, uuid},
@@ -30,7 +29,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    future::Future,
     os::unix::fs::{FileTypeExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::Arc,
@@ -1208,22 +1206,11 @@ impl Controller {
         private_dir(&temporary).await?;
         workspace::own_tree(&temporary, identity.uid(), identity.gid()).await?;
         let stage = self.data.join("runs").join(text(plan, "runId"));
-        let bindings = if view.mapped {
-            view.prepare(identity.uid(), identity.gid()).await?;
-            let bindings = super::home::prepare(
-                &stage.join("home"),
-                &view.home,
-                identity.uid(),
-                identity.gid(),
-            )
-            .await?;
-            super::workspace::own_tree(&stage.join("home"), identity.uid(), identity.gid()).await?;
-            bindings
-        } else {
-            super::home::prepare_for_identity(&stage.join("home"), &data, &identity, &trace).await?
-        };
+        let bindings =
+            super::home::prepare_for_identity(&stage.join("home"), &data, &identity, &trace)
+                .await?;
         // Keep the existing prepared-base admission marker. The authoritative
-        // ownership mapping now travels inside the published filesystem.
+        // ownership mapping is stored inside the local filesystem.
         atomic_write(
             &root.join("file-owner.json"),
             &serde_json::to_vec(&identity)?,
@@ -1233,16 +1220,7 @@ impl Controller {
         let docker_data = view.docker_data()?;
         // Only namespace root may access raw daemon metadata. Engine access is
         // exclusively through the mandatory authorization plugin.
-        if view.mapped {
-            block::directory_beneath(
-                &data,
-                &docker_data,
-                Some((identity.root_uid, identity.root_gid)),
-            )
-            .await?;
-        } else {
-            tokio::fs::create_dir_all(&docker_data).await?;
-        }
+        tokio::fs::create_dir_all(&docker_data).await?;
         std::os::unix::fs::lchown(
             &docker_data,
             Some(identity.root_uid),
@@ -1855,51 +1833,6 @@ impl Controller {
         .await
     }
 
-    async fn stopped_snapshot(&self, run: &str, force: bool) -> Result<Value> {
-        self.stopped_snapshot_with(run, force, block::exists(&self.state, run))
-            .await
-    }
-
-    async fn stopped_snapshot_with(
-        &self,
-        run: &str,
-        force: bool,
-        journal_exists: impl Future<Output = Result<bool>>,
-    ) -> Result<Value> {
-        let _disk = disk::lock(&self.state).await?;
-        if journal_exists.await? {
-            let root = workspace::directory(&self.state, run)?;
-            if !root.join("block-initialized").exists() {
-                return Err(Error::conflict(
-                    "Native block initialization must finish before publication.",
-                ));
-            }
-            if !force {
-                return crate::nodes::checkpoint::capture_completed(
-                    &self.state,
-                    run,
-                    CancellationToken::new(),
-                )
-                .await;
-            }
-            return crate::nodes::checkpoint::capture(
-                &self.state,
-                run,
-                None,
-                Arc::default(),
-                CancellationToken::new(),
-                "",
-                storage::checkpoint::Consistency::Filesystem,
-            )
-            .await;
-        }
-        Err(Error::coded(
-            409,
-            crate::native::MISSING_NATIVE_JOURNAL_CODE,
-            "Conversation has no native journal.",
-        ))
-    }
-
     async fn abort_disk(&self, id: &str) -> Result<()> {
         let run = self
             .active
@@ -2409,141 +2342,16 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
             )
                 .into_response());
         }
+        ("POST", ["disks", run, "publication-fence"]) => {
+            uuid(run)?;
+            let value = input(request, 16384).await?;
+            let publication = text(&value, "backupId");
+            crate::storage::legacy_fences::fence(&controller.state, run, publication).await?;
+            json!({ "fenced": publication })
+        }
         ("POST", ["disks", run, "storage-status"]) => {
             uuid(run)?;
             block::status(&controller.state, run).await?
-        }
-        ("POST", ["disks", run, "published"]) => {
-            uuid(run)?;
-            let receipt = input(request, 16384).await?;
-            block::published(&controller.state, run, &receipt).await?
-        }
-        ("POST", ["disks", run, "publication-fence"]) => {
-            uuid(run)?;
-            let receipt = input(request, 16384).await?;
-            let publication = text(&receipt, "backupId");
-            uuid(publication)?;
-            crate::storage::runtime::fence_publication(&controller.state, run, publication).await?;
-            json!({"fenced":publication})
-        }
-        ("POST", ["disks", run, "snapshot-completed"]) => {
-            uuid(run)?;
-            controller.stopped_snapshot(run, false).await?
-        }
-        ("POST", ["disks", run, "snapshot"]) => {
-            uuid(run)?;
-            controller.stopped_snapshot(run, true).await?
-        }
-        ("POST", ["runs", id, "snapshot"]) => {
-            uuid(id)?;
-            let active = {
-                controller
-                    .active
-                    .lock()
-                    .await
-                    .get(*id)
-                    .map(|attempt| (attempt.run.clone(), attempt.stop.clone()))
-            };
-            if let Some((run, stop)) = active
-                && block::exists(&controller.state, &run).await?
-            {
-                let value = input(request, 16384).await?;
-                let mounted = controller
-                    .mounted
-                    .lock()
-                    .await
-                    .get(&run)
-                    .cloned()
-                    .ok_or_else(|| Error::conflict("Native filesystem is not mounted."))?;
-                return Ok(Json(
-                    block::capture_active(
-                        &controller.state,
-                        &run,
-                        mounted,
-                        value["consistency"] != "crash",
-                        if value["consistency"] == "crash" {
-                            CancellationToken::new()
-                        } else {
-                            stop
-                        },
-                    )
-                    .await?,
-                )
-                .into_response());
-            }
-            if controller.active.lock().await.contains_key(*id) {
-                return Err(Error::conflict(
-                    "Native checkpoints require the workload to stop.",
-                ));
-            }
-            let run = tokio::fs::read_to_string(controller.file(id, "run")).await?;
-            controller.stopped_snapshot(&run, false).await?
-        }
-        (_, ["snapshots", snapshot, operation]) => {
-            uuid(snapshot)?;
-            let directory = controller.state.join("snapshots").join(snapshot);
-            match (method.as_str(), *operation) {
-                ("POST", "direct-reader") => {
-                    let value = input(request, 4096).await?;
-                    return Ok(
-                        snapshots::direct_reader(&directory, &serde_json::to_vec(&value)?)
-                            .await?
-                            .into_response(),
-                    );
-                }
-                ("DELETE", "direct-reader") => {
-                    snapshots::close_direct_reader(&directory).await?;
-                    json!({ "closed": true })
-                }
-                ("POST", "direct-upload") => {
-                    let value = input(request, 131_072).await?;
-                    return Ok(Json(
-                        crate::nodes::snapshots::upload_direct(
-                            &directory,
-                            &serde_json::to_vec(&value)?,
-                        )
-                        .await?,
-                    )
-                    .into_response());
-                }
-                ("DELETE", "discard") => {
-                    snapshots::discard(&directory).await?;
-                    json!({ "ok": true })
-                }
-                ("POST", "blocks" | "publication") => {
-                    let value = input(request, snapshots::MAX_MANIFEST_BYTES).await?;
-                    let hashes = serde_json::from_value(value["hashes"].clone())?;
-                    let diagnostic = value
-                        .get("diagnostic")
-                        .and_then(|value| serde_json::from_value(value.clone()).ok());
-                    let (length, body) = snapshots::served_publication_observed(
-                        &directory, hashes, diagnostic, snapshot,
-                    )
-                    .await?;
-                    return Ok(([("content-length", length.to_string())], body).into_response());
-                }
-                ("GET", hash) => {
-                    return Ok(snapshots::served(&directory, hash).await?.into_response());
-                }
-                _ => {
-                    return Err(Error::method_not_allowed(
-                        "Invalid native snapshot operation.",
-                    ));
-                }
-            }
-        }
-        ("POST", ["disks", _, "evict"]) => {
-            // Local base blocks are the conversation disk itself. An older
-            // manager may still request eviction; nothing is ever evicted.
-            return Err(Error::conflict(
-                "Native conversation disks are local and are never evicted.",
-            ));
-        }
-        ("POST", ["disks", run, "restore"]) => {
-            let _disk = disk::lock(&controller.state).await?;
-            uuid(run)?;
-            let request = input(request, snapshots::MAX_MANIFEST_BYTES).await?;
-            block::restore(&controller.state, run, request).await?
         }
         ("POST", ["disks", run, action @ ("delete" | "prune")]) => {
             let _disk = disk::lock(&controller.state).await?;
@@ -2570,11 +2378,6 @@ async fn route(controller: Controller, request: Request) -> Result<Response> {
                 &root.join("owner.lock"),
                 "Native workspace is active.",
             )?;
-            if root.join("block-restore.pending.json").exists() && *action == "prune" {
-                return Err(Error::conflict(
-                    "Finish native restore before pruning retained local work.",
-                ));
-            }
             let retired_grants = block::action(&controller.state, run, *action == "delete").await?;
             let mut entries = tokio::fs::read_dir(&root).await?;
             while let Some(entry) = entries.next_entry().await? {
@@ -2978,40 +2781,6 @@ pub(crate) mod tests {
         server.abort();
         let _ = server.await;
         result.unwrap()
-    }
-
-    #[tokio::test]
-    async fn stopped_snapshot_tags_a_missing_native_journal() {
-        let (_fixture, controller) = fixture().await;
-        let run = crate::config::id();
-
-        let error = controller.stopped_snapshot(&run, false).await.unwrap_err();
-
-        assert_eq!(error.status, 409);
-        assert_eq!(
-            error.code.as_deref(),
-            Some(crate::native::MISSING_NATIVE_JOURNAL_CODE)
-        );
-        assert_eq!(error.message, "Conversation has no native journal.");
-    }
-
-    #[tokio::test]
-    async fn stopped_snapshot_propagates_native_journal_metadata_errors() {
-        let (_fixture, controller) = fixture().await;
-        let run = crate::config::id();
-        let metadata_error = std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "journal metadata is inaccessible",
-        );
-        let journal_exists = block::exists_from_metadata(std::future::ready(Err(metadata_error)));
-
-        let error = controller
-            .stopped_snapshot_with(&run, false, journal_exists)
-            .await
-            .unwrap_err();
-
-        assert_eq!(error.status, 500);
-        assert_eq!(error.code, None);
     }
 
     #[tokio::test]

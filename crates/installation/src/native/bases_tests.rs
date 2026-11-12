@@ -160,7 +160,7 @@ async fn prepared_ext4_base_adopts_private_authority_and_preserves_existing_conv
     );
     let volume = storage::runtime::load(&directory).await.unwrap();
     assert_eq!(
-        volume.source.grant_id().unwrap(),
+        volume.assignment.assigned().unwrap().unwrap(),
         crate::auth::digest("first-owner")
     );
     // Read the real ext4 image through the production journal, without a mount.

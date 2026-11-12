@@ -1,10 +1,8 @@
 //! Content identities for immutable blocks.
 
 pub fn block(bytes: &[u8]) -> String {
-    let sample =
-        crate::performance::publication::start(crate::performance::publication::Stage::Hash);
     let identity = format!("b3-{}", blake3::hash(bytes).to_hex());
-    sample.finish(bytes.len());
+
     identity
 }
 

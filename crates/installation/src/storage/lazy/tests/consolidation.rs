@@ -1,12 +1,6 @@
 use super::*;
 use std::collections::BTreeSet;
 
-fn source() -> Arc<Source> {
-    Arc::new(Source {
-        reads: AtomicUsize::new(0),
-    })
-}
-
 fn block_files(directory: &Path) -> BTreeSet<String> {
     match std::fs::read_dir(directory.join("cache")) {
         Ok(entries) => entries
@@ -50,9 +44,9 @@ fn read(disk: &LazyDisk, offset: u64, length: usize) -> Vec<u8> {
 fn consolidation_folds_sealed_generations_into_a_durable_local_base() {
     use std::os::unix::fs::MetadataExt;
     let root = tempfile::tempdir().unwrap();
-    let source = source();
+
     let manifest = local_base(root.path(), &[None, None, None]);
-    let disk = LazyDisk::create(root.path(), &manifest, source.clone()).unwrap();
+    let disk = LazyDisk::create(root.path(), &manifest).unwrap();
     for value in 1..=3 {
         disk.write_at(0, &vec![value; BLOCK as usize]).unwrap();
     }
@@ -85,18 +79,17 @@ fn consolidation_folds_sealed_generations_into_a_durable_local_base() {
     assert!(std::fs::metadata(&file).unwrap().blocks() * 512 < 1024 * 1024);
 
     drop(disk);
-    let disk = LazyDisk::open(root.path(), source.clone()).unwrap();
+    let disk = LazyDisk::open(root.path()).unwrap();
     assert_eq!(read(&disk, 0, 4096), vec![3; 4096]);
     assert_eq!(read(&disk, BLOCK + 16, 9), b"\0partial\0");
     assert_eq!(read(&disk, 2 * BLOCK, 4096), vec![0; 4096]);
-    assert_eq!(source.reads.load(Ordering::SeqCst), 0);
 }
 
 #[test]
 fn consolidation_keeps_writes_after_its_seal_in_the_journal() {
     let root = tempfile::tempdir().unwrap();
     let manifest = local_base(root.path(), &[None, None]);
-    let disk = LazyDisk::create(root.path(), &manifest, source()).unwrap();
+    let disk = LazyDisk::create(root.path(), &manifest).unwrap();
     disk.write_at(0, b"sealed").unwrap();
     let generation = disk.seal_completed().unwrap();
     disk.write_at(2, b"NEWER").unwrap();
@@ -109,7 +102,7 @@ fn consolidation_keeps_writes_after_its_seal_in_the_journal() {
     assert_eq!(disk.completed().unwrap().unwrap()["generation"], generation);
     drop(disk);
 
-    let disk = LazyDisk::open(root.path(), source()).unwrap();
+    let disk = LazyDisk::open(root.path()).unwrap();
     assert_eq!(read(&disk, 0, 7), b"seNEWER");
     let next = disk.seal().unwrap();
     assert_eq!(disk.consolidate().unwrap(), Some(next));
@@ -128,15 +121,10 @@ fn consolidation_retires_only_blocks_no_base_references() {
     let disk = LazyDisk::create(
         &first,
         &local_base(&first, &[Some(original.clone()), Some(unchanged.clone())]),
-        source(),
     )
     .unwrap();
-    let neighbour = LazyDisk::create(
-        &second,
-        &local_base(&second, &[Some(original.clone())]),
-        source(),
-    )
-    .unwrap();
+    let neighbour =
+        LazyDisk::create(&second, &local_base(&second, &[Some(original.clone())])).unwrap();
     let obsolete = format!("b3-{}", "a".repeat(64));
     std::fs::write(first.join("cache").join(&obsolete), b"orphan").unwrap();
     std::fs::write(first.join("cache").join(".block-interrupted"), b"temp").unwrap();
@@ -164,7 +152,7 @@ fn consolidation_retires_only_blocks_no_base_references() {
 #[test]
 fn missing_or_corrupt_base_block_is_an_integrity_error() {
     let root = tempfile::tempdir().unwrap();
-    let source = source();
+
     let directory = root.path().join("disk");
     let bytes = vec![8; BLOCK as usize];
     let manifest = local_base(&directory, &[Some(bytes.clone())]);
@@ -172,21 +160,19 @@ fn missing_or_corrupt_base_block_is_an_integrity_error() {
 
     // A base never refers to a block the node does not hold.
     std::fs::remove_file(&file).unwrap();
-    let error = LazyDisk::create(&directory, &manifest, source.clone())
-        .err()
-        .unwrap();
+    let error = LazyDisk::create(&directory, &manifest).err().unwrap();
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     std::fs::write(&file, &bytes).unwrap();
-    let disk = LazyDisk::create(&directory, &manifest, source.clone()).unwrap();
+    let disk = LazyDisk::create(&directory, &manifest).unwrap();
     disk.write_at(4, b"journal").unwrap();
     drop(disk);
     std::fs::remove_file(&file).unwrap();
-    let error = LazyDisk::open(&directory, source.clone()).err().unwrap();
+    let error = LazyDisk::open(&directory).err().unwrap();
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
 
     // Same size, different content: reads fail rather than return other bytes.
     std::fs::write(&file, vec![9; BLOCK as usize]).unwrap();
-    let disk = LazyDisk::open(&directory, source.clone()).unwrap();
+    let disk = LazyDisk::open(&directory).unwrap();
     assert_eq!(read(&disk, 4, 7), b"journal");
     let mut neighbour = [0; 8];
     let error = disk.read_at(64, &mut neighbour).unwrap_err();
@@ -195,14 +181,13 @@ fn missing_or_corrupt_base_block_is_an_integrity_error() {
     let generation = disk.seal().unwrap();
     assert!(disk.consolidate().is_err());
     assert!(disk.has_sealed(generation).unwrap());
-    assert_eq!(source.reads.load(Ordering::SeqCst), 0);
 }
 
 #[test]
 fn concurrent_cold_reads_verify_one_local_block_once() {
     let root = tempfile::tempdir().unwrap();
     let manifest = local_base(root.path(), &[Some(vec![7; BLOCK as usize])]);
-    let disk = Arc::new(LazyDisk::create(root.path(), &manifest, source()).unwrap());
+    let disk = Arc::new(LazyDisk::create(root.path(), &manifest).unwrap());
     let gate = Arc::new(std::sync::Barrier::new(8));
     std::thread::scope(|scope| {
         for _ in 0..8 {
@@ -222,7 +207,7 @@ fn failed_reconstruction_never_commits_a_base_and_can_retry() {
     let base = vec![1; BLOCK as usize];
     let manifest = local_base(root.path(), &[Some(base.clone()), Some(base.clone())]);
     let file = root.path().join("cache").join(block_digest(&base));
-    let disk = LazyDisk::create(root.path(), &manifest, source()).unwrap();
+    let disk = LazyDisk::create(root.path(), &manifest).unwrap();
     for index in 0..2u64 {
         disk.write_at(index * BLOCK + 17, &[index as u8 + 2])
             .unwrap();
@@ -248,7 +233,7 @@ fn failed_reconstruction_never_commits_a_base_and_can_retry() {
 fn a_new_owner_interrupts_consolidation_before_its_commit() {
     let root = tempfile::tempdir().unwrap();
     let manifest = local_base(root.path(), &[None, None]);
-    let disk = LazyDisk::create(root.path(), &manifest, source()).unwrap();
+    let disk = LazyDisk::create(root.path(), &manifest).unwrap();
     disk.write_at(0, b"work").unwrap();
     disk.write_at(BLOCK, b"more").unwrap();
     let generation = disk.seal().unwrap();
@@ -259,7 +244,7 @@ fn a_new_owner_interrupts_consolidation_before_its_commit() {
     assert!(base_hashes(&disk).is_empty());
     drop(disk);
 
-    let disk = LazyDisk::open(root.path(), source()).unwrap();
+    let disk = LazyDisk::open(root.path()).unwrap();
     assert!(disk.sealed_pending());
     assert_eq!(disk.consolidate().unwrap(), Some(generation));
     assert_eq!(read(&disk, 0, 4), b"work");
@@ -287,12 +272,8 @@ fn consolidation_survives_process_crashes_at_every_step() {
     let replaced = vec![7; BLOCK as usize];
     for phase in CRASH_PHASES {
         let root = tempfile::tempdir().unwrap();
-        let disk = LazyDisk::create(
-            root.path(),
-            &local_base(root.path(), &[None, None, None]),
-            source(),
-        )
-        .unwrap();
+        let disk =
+            LazyDisk::create(root.path(), &local_base(root.path(), &[None, None, None])).unwrap();
         disk.write_at(0, &old).unwrap();
         disk.write_at(BLOCK, &unchanged).unwrap();
         let first = disk.seal().unwrap();
@@ -314,7 +295,7 @@ fn consolidation_survives_process_crashes_at_every_step() {
         child.wait().unwrap();
         assert!(reached, "missing injection: {phase}");
 
-        let disk = LazyDisk::open(root.path(), source()).unwrap();
+        let disk = LazyDisk::open(root.path()).unwrap();
         let committed = !matches!(
             phase,
             "consolidation_block_written"
@@ -350,7 +331,7 @@ fn consolidation_survives_process_crashes_at_every_step() {
         );
         check(&disk);
         drop(disk);
-        check(&LazyDisk::open(root.path(), source()).unwrap());
+        check(&LazyDisk::open(root.path()).unwrap());
     }
 }
 
@@ -364,7 +345,7 @@ fn crash_consolidation_writer() {
     {
         return;
     }
-    let disk = LazyDisk::open(Path::new(&root), source()).unwrap();
+    let disk = LazyDisk::open(Path::new(&root)).unwrap();
     // Several full segments make the unlink injection meaningful.
     for _ in 0..17 {
         disk.write_at(0, &vec![7; BLOCK as usize]).unwrap();
@@ -379,7 +360,7 @@ fn crash_consolidation_writer() {
 fn local_bases_larger_than_former_cache_budget_are_never_evicted() {
     let root = tempfile::tempdir().unwrap();
     let manifest = local_base(root.path(), &vec![None; 12]);
-    let disk = LazyDisk::create(root.path(), &manifest, source()).unwrap();
+    let disk = LazyDisk::create(root.path(), &manifest).unwrap();
     for index in 0..12 {
         disk.write_at(index * BLOCK, &vec![index as u8 + 1; BLOCK as usize])
             .unwrap();
@@ -388,7 +369,7 @@ fn local_bases_larger_than_former_cache_budget_are_never_evicted() {
     }
     assert_eq!(block_files(root.path()).len(), 12);
     drop(disk);
-    let disk = LazyDisk::open(root.path(), source()).unwrap();
+    let disk = LazyDisk::open(root.path()).unwrap();
     for index in 0..12 {
         assert_eq!(
             read(&disk, index * BLOCK, 4096),
@@ -403,7 +384,7 @@ fn consolidation_counts_journal_and_base_together_against_the_node_budget() {
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("disks/owned/lazy");
     let manifest = local_base(&directory, &[None]);
-    let disk = LazyDisk::create(&directory, &manifest, source()).unwrap();
+    let disk = LazyDisk::create(&directory, &manifest).unwrap();
     disk.write_at(0, &vec![7; BLOCK as usize]).unwrap();
     disk.seal().unwrap();
     let policy = super::super::super::policy::Policy {

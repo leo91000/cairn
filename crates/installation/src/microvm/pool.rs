@@ -602,35 +602,6 @@ impl Pool {
         Ok(())
     }
 
-    pub async fn capture_retained(&self, run: &str) -> Result<Option<serde_json::Value>> {
-        let _admission = self.admission.lock().await;
-        let retained = self
-            .slots
-            .lock()
-            .await
-            .retained
-            .iter()
-            .find(|idle| idle.run == run)
-            .and_then(|idle| {
-                Some((
-                    idle.reservation.owner.clone()?,
-                    idle.reservation.idle_control.clone(),
-                    idle.reservation.idle_stop.child_token(),
-                ))
-            });
-        let Some((owner, control, stop)) = retained else {
-            return Ok(None);
-        };
-        let capture = control
-            .try_lock_owned()
-            .map_err(|_| Error::conflict("A retained disk capture is already in progress."))?;
-        drop(_admission);
-        let snapshot =
-            crate::nodes::checkpoint::capture_paused(&self.state, run, &owner, stop, capture)
-                .await?;
-        Ok(Some(snapshot))
-    }
-
     async fn retention_budget(&self, expected: Option<&Budget>) -> Option<Budget> {
         let budget = self.budget().await?;
         if self.stop.is_cancelled() || expected != Some(&budget) {
@@ -912,7 +883,7 @@ impl Reservation {
             );
             if !plan.storage().is_object() {
                 return Err(Error::conflict(
-                    "S3-backed storage is required for VM execution.",
+                    "A local journal is required for VM execution.",
                 ));
             }
             let budget = execution_budget.clone();
@@ -988,7 +959,7 @@ impl Reservation {
             }
             let volume = crate::storage::runtime::load(&disk).await?;
             attempt_stop.bind(&volume)?;
-            if volume.source.authorization()?.is_none() {
+            if volume.assignment.assigned()?.is_none() {
                 // A controller crash may leave ownership durable before its
                 // authorization was attached. Bind before any user import.
                 volume

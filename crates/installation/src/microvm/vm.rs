@@ -478,7 +478,7 @@ impl Vm {
     }
 
     async fn wait_for_guest(&mut self) -> Result<GuestStatus> {
-        let mut deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         loop {
             if self
                 .mounted
@@ -499,10 +499,6 @@ impl Vm {
                     Err(error) if error.status == 502 => return Err(error),
                     Err(_) => {}
                 }
-            }
-            // A remote disk read is still waiting; guest boot has not stalled.
-            if self.volume.as_ref().is_some_and(|v| v.source.waiting()) {
-                deadline = tokio::time::Instant::now() + Duration::from_secs(60);
             }
             if tokio::time::Instant::now() > deadline {
                 return Err(Error::unavailable("Guest startup timed out."));
@@ -528,10 +524,7 @@ impl Vm {
     pub async fn shutdown(&mut self) {
         let id = self.id().to_owned();
         let mut timing = Operation::new("vm_shutdown", &id, "guest_shutdown");
-        let blocked = self
-            .volume
-            .as_ref()
-            .is_some_and(|volume| volume.source.waiting() || volume.paused())
+        let blocked = self.volume.as_ref().is_some_and(|volume| volume.paused())
             || super::suspension::inspect_jail(&self.jail)
                 .await
                 .map_or(true, |status| {
@@ -778,8 +771,8 @@ impl Vm {
             .volume
             .as_ref()
             .unwrap()
-            .source
-            .authorization()?
+            .assignment
+            .assigned()?
             .is_some()
         {
             return Err(Error::conflict("Only an anonymous VM can prewarm Codex."));

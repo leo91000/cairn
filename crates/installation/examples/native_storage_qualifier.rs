@@ -1,5 +1,5 @@
-//! Test-only manager for the disposable native-runtime/S3 qualification.
-//! JSONL stays on private pipes: responses include synthetic scoped read grants.
+//! Test-only manager for the disposable local native-runtime qualification.
+//! JSONL stays on private pipes, with synthetic local ownership and credentials.
 use run_fixture::DbRunFixture;
 
 #[path = "../tests/common/agent_fixture.rs"]
@@ -14,13 +14,12 @@ use cairn_installation::{
     config::{Config, id, now},
     error::{Error, Result},
     http, nodes,
-    nodes::{disk_grants, publication},
     service::Service,
-    storage::{self, Disk, LazyDisk, remote::RemoteSource},
+    storage::{self, Disk, LazyDisk},
 };
 use serde_json::{Value, json};
 use std::{
-    io::{Read, Write},
+    io::Write,
     path::PathBuf,
     sync::{
         Arc,
@@ -28,19 +27,8 @@ use std::{
     },
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio_util::sync::CancellationToken;
 
 const TRUSTED: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
-
-struct LocalBlocks;
-
-impl storage::BlockSource for LocalBlocks {
-    fn fetch(&self, _: &str) -> std::io::Result<Vec<u8>> {
-        Err(std::io::Error::other(
-            "Remote reads are forbidden by local disk qualification.",
-        ))
-    }
-}
 
 async fn inspect_stopped_journal<T: Send + 'static>(
     directory: PathBuf,
@@ -52,7 +40,7 @@ async fn inspect_stopped_journal<T: Send + 'static>(
         // with the normal cross-process lock and no possible remote reads.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         let disk = loop {
-            match LazyDisk::open(&directory.join("lazy"), Arc::new(LocalBlocks)) {
+            match LazyDisk::open(&directory.join("lazy")) {
                 Ok(disk) => break disk,
                 Err(_) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -97,12 +85,9 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
                     move |db| db.add_run_fixture(&run, None)
                 })
                 .await?;
-            let grant = disk_grants::new_disk(s, &run, nodes::LOCAL_NODE_ID).await?;
-            Ok(
-                json!({ "master": s.config.public_url, "grant": grant, "policy": {
+            Ok(json!({ "owner": run["id"], "policy": {
                 "memoryCacheMiB": 4, "reserveMiB": 64, "reservePercent": 1
-            } }),
-            )
+            } }))
         }
         "checkpoint" => {
             s.store.save_checkpoint_boundary(run_id, json!({
@@ -110,66 +95,6 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
                 "prepared": { "backend": "native", "isolated": true, "diskFormat": if command["vm"] == true { json!("vm") } else { Value::Null } }, "runtimeId": "synthetic"
             })).await?;
             Ok(json!({ "ok": true }))
-        }
-        "seed-vm" => {
-            let root = s.config.data_dir.parent().unwrap();
-            let raw = root.join(format!("{run_id}.ext4"));
-            let state = root.join("state");
-            let directory = storage::environment::directory(&state, run_id)?;
-            tokio::fs::create_dir_all(&directory).await?;
-            let size = tokio::fs::metadata(&raw).await?.len();
-            if size != 256 * 1024 * 1024 {
-                return Err(Error::bad("Expected a 256 MiB fixture disk."));
-            }
-            let manifest = json!({
-                "version": 1,
-                "size": size, "blockSize": nodes::snapshots::BLOCK,
-                "blocks": (0..64).map(|i| json!({ "offset": i * nodes::snapshots::BLOCK, "size": nodes::snapshots::BLOCK, "hash": null })).collect::<Vec<_>>()
-            });
-            let context = command["context"].clone();
-            let remote = Arc::new(RemoteSource::new(
-                &context,
-                tokio::runtime::Handle::current(),
-                CancellationToken::new(),
-            )?);
-            let journal = LazyDisk::create(&directory.join("lazy"), &manifest, remote)?;
-            journal.set_context(&context)?;
-            tokio::task::spawn_blocking(move || -> Result<()> {
-                let mut source = std::fs::File::open(raw)?;
-                let mut bytes = vec![0; nodes::snapshots::BLOCK as usize];
-                for i in 0..64 {
-                    source.read_exact(&mut bytes)?;
-                    if bytes.iter().any(|byte| *byte != 0) {
-                        journal.write_at(i * nodes::snapshots::BLOCK, &bytes)?;
-                    }
-                }
-                journal.sync()?;
-                Ok(())
-            })
-            .await
-            .map_err(Error::internal)??;
-            let runtime = json!({ "backend": "native", "storage": "ublk-rootless-v1", "os": "linux", "arch": "x86_64", "runtimeId": "synthetic", "disk": "vm", "vmRuntimeId": "fixture-vm" });
-            tokio::fs::write(
-                directory.join("runtime.json"),
-                serde_json::to_vec(&runtime)?,
-            )
-            .await?;
-            let native = state.join("native").join(run_id);
-            tokio::fs::create_dir_all(&native).await?;
-            tokio::fs::write(native.join("block-initialized"), b"1").await?;
-            tokio::fs::write(native.join("runtime.json"), serde_json::to_vec(&runtime)?).await?;
-            Ok(json!({ "ok": true }))
-        }
-        "export-vm" => {
-            let root = s.config.data_dir.parent().unwrap();
-            let directory = storage::environment::directory(&root.join("state"), run_id)?;
-            let volume = storage::runtime::load(&directory).await?;
-            let target = root.join(format!("{run_id}-export.ext4"));
-            let path = target.clone();
-            tokio::task::spawn_blocking(move || storage::export(volume.as_ref(), &path))
-                .await
-                .map_err(Error::internal)??;
-            Ok(json!({ "path": target }))
         }
         "consolidate" => {
             let root = s.config.data_dir.parent().unwrap();
@@ -181,17 +106,19 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
             inspect_stopped_journal(directory, move |disk| {
                 let generation = disk.seal_completed()?;
                 disk.consolidate()?;
-                let verify = disk.seal()?;
-                let manifest = disk.capture(verify)?;
                 let secret = b"synthetic-generated-secret-never-persist";
-                for block in manifest["blocks"].as_array().into_iter().flatten() {
-                    let Some(hash) = block["hash"].as_str() else {
-                        continue;
-                    };
-                    let bytes = disk.captured_block(verify, hash)?;
-                    if bytes.windows(secret.len()).any(|window| window == secret) {
-                        return Err(Error::bad("Generated secret reached a local base block."));
+                let mut offset = 0;
+                let mut bytes = vec![0; nodes::snapshots::BLOCK as usize];
+                while offset < disk.size() {
+                    let length = (disk.size() - offset).min(bytes.len() as u64) as usize;
+                    disk.read_at(offset, &mut bytes[..length])?;
+                    if bytes[..length]
+                        .windows(secret.len())
+                        .any(|window| window == secret)
+                    {
+                        return Err(Error::bad("Generated secret reached a local disk block."));
                     }
+                    offset += length as u64;
                 }
                 disk.consolidate()?;
                 let mut status = disk.accounting()?;
@@ -204,58 +131,6 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
                 }))
             })
             .await
-        }
-        "publish" | "live-publish" => {
-            if command["op"] == "live-publish" {
-                s.store
-                    .change_run(
-                        run_id,
-                        cairn_installation::runs::RunChanges {
-                            status: Some(cairn_contracts::RunStatus::Running),
-                            ..Default::default()
-                        },
-                    )
-                    .await?;
-            } else {
-                s.store
-                    .change_run(
-                        run_id,
-                        cairn_installation::runs::RunChanges {
-                            status: Some(cairn_contracts::RunStatus::Succeeded),
-                            ..Default::default()
-                        },
-                    )
-                    .await?;
-                publication::request(s, run_id).await?;
-            }
-            let published = publication::capture(s, &s.store.run(run_id).await?).await?;
-            // Capture returns public metadata; decoded-block inspection needs
-            // the encrypted manifest retained in the manager's private record.
-            let point = s
-                .get("node-backups", published["id"].as_str().unwrap_or(""))
-                .await?;
-            let manifest = publication::manifest(s, &point).await?;
-            if (manifest["kind"] != "native-ext4-v1" && manifest["runtime"]["disk"] != "vm")
-                || manifest["onDemand"] != true
-            {
-                return Err(Error::bad("Expected a native journal recovery point."));
-            }
-            // Inspect decoded real S3 blocks, not just the file view: generated
-            // credentials must never appear in a persistent journal generation.
-            let secret = b"synthetic-generated-secret-never-persist";
-            for block in manifest["blocks"].as_array().into_iter().flatten() {
-                let Some(hash) = block["hash"].as_str() else {
-                    continue;
-                };
-                let bytes = publication::read_block(s, &point, hash).await?;
-                if bytes.windows(secret.len()).any(|window| window == secret) {
-                    return Err(Error::bad("Generated secret reached persistent blocks."));
-                }
-            }
-            Ok(
-                json!({ "backupId": point["id"], "generation": point["diskGeneration"],
-                "manifestBytes": serde_json::to_vec(&manifest)?.len(), "point": point }),
-            )
         }
         "restore" => Err(Error::conflict(
             "Conversation disks are local; remote restore is no longer supported.",
@@ -279,7 +154,16 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
             Ok(json!({ "ok": true }))
         }
         "purge" => {
-            publication::purge(s, run_id).await?;
+            // Local fixture cleanup: no bucket or remote manifest exists.
+            s.store
+                .change_run(
+                    run_id,
+                    cairn_installation::runs::RunChanges {
+                        status: Some(cairn_contracts::RunStatus::Succeeded),
+                        ..Default::default()
+                    },
+                )
+                .await?;
             Ok(json!({ "ok": true }))
         }
         _ => Err(Error::bad("Unknown fixture command.")),
@@ -297,7 +181,6 @@ async fn main() -> Result<()> {
     let bridge = std::env::args()
         .nth(2)
         .ok_or_else(|| Error::bad("Missing loopback controller."))?;
-    let endpoint = std::env::var("CAIRN_NODE_TEST_S3_ENDPOINT").map_err(Error::internal)?;
     let loopback = |value: &str| {
         url::Url::parse(value)
             .is_ok_and(|url| url.scheme() == "http" && url.host_str() == Some("127.0.0.1"))
@@ -305,11 +188,9 @@ async fn main() -> Result<()> {
     if std::env::var("CAIRN_NATIVE_DISPOSABLE_HOST").as_deref() != Ok("1")
         || !root.join("disposable-fixture").is_file()
         || !loopback(&bridge)
-        || !loopback(&endpoint)
-        || std::env::var("AWS_ACCESS_KEY_ID").as_deref() != Ok("node-fixture")
     {
         return Err(Error::forbidden(
-            "Requires an isolated disposable fixture and synthetic loopback S3.",
+            "Requires an isolated disposable fixture and a loopback controller.",
         ));
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -350,7 +231,6 @@ async fn main() -> Result<()> {
                 capabilities: NodeCapabilities {
                     backend: NodeBackend::Native,
                     ublk: true,
-                    vm_disks: true,
                     native_mode_protocol: 1,
                     os: "linux".into(),
                     arch: "x86_64".into(),
@@ -432,7 +312,6 @@ mod tests {
                 "version": 1, "size": 4096, "blockSize": 4194304,
                 "blocks": [{ "offset": 0, "size": 4096, "hash": null }]
             }),
-            Arc::new(LocalBlocks),
         )
         .unwrap();
         disk.set_context(&json!({
@@ -444,12 +323,15 @@ mod tests {
         drop(disk);
         let inspected = inspect_stopped_journal(directory, |disk| {
             let generation = disk.seal_completed()?;
-            let manifest = disk.capture(generation)?;
             // Real Docker inspections exceed the Volume monitor's five-second
             // interval. Keep the captured generation through that same window.
             std::thread::sleep(std::time::Duration::from_secs(7));
-            let hash = manifest["blocks"][0]["hash"].as_str().unwrap();
-            Ok(disk.captured_block(generation, hash)?)
+            if !disk.has_sealed(generation)? {
+                return Err(Error::bad("Inspection generation was retired concurrently."));
+            }
+            let mut bytes = vec![0; 4];
+            disk.read_at(0, &mut bytes)?;
+            Ok(bytes)
         })
         .await;
         assert!(

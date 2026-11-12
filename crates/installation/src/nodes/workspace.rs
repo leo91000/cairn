@@ -168,7 +168,7 @@ pub async fn handle(State(app): State<App>, request: Request) -> Result<Response
 /// Extends the attempt's lease and returns its duration.
 async fn renew_lease(s: &Service, attempt: &str) -> Result<u64> {
     let id = attempt.to_owned();
-    let lease_ms = super::publication::lease_ms(s).await?;
+    let lease_ms = super::settings::lease_ms(s).await?;
     s.store
         .transaction(move |db| {
             let mut record = db

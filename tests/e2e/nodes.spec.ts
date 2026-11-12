@@ -90,7 +90,7 @@ test('shows disk accounting and keeps the storage draft revision through invento
     capabilities: {
       backend: 'firecracker',
       ublk: false,
-      vmDisks: false,
+
       nativeModeProtocol: 0,
       diskTotalMiB: 0,
       cpu: 8,
@@ -113,8 +113,7 @@ test('shows disk accounting and keeps the storage draft revision through invento
     hostFreeBytes: 90 * 1024 ** 3,
     hostReserveBytes: 20 * 1024 ** 3,
     poolReserveBytes: 5 * 1024 ** 3,
-    reclaimableBytes: 16 * 1024 ** 3,
-    unsynchronizedBytes: 8 * 1024 ** 3,
+    unconsolidatedBytes: 8 * 1024 ** 3,
   }
   node.exclusiveReservation = {
     id: 'reservation',
@@ -154,9 +153,9 @@ test('shows disk accounting and keeps the storage draft revision through invento
   await expect(panel).toBeVisible()
   const details = panel.getByRole('region', { name: 'Disk capacity details' })
   await expect(figure(details, 'Stored locally')).toHaveText('80 GiB')
-  await expect(figure(details, 'Reclaimable, at least')).toHaveText('16 GiB')
-  await expect(figure(details, 'Not yet synchronized')).toHaveText('8 GiB')
-  await expect(details).toContainText('without the one-hour delay')
+  await expect(details).not.toContainText('Reclaimable, at least')
+  await expect(figure(details, 'Awaiting consolidation')).toHaveText('8 GiB')
+  await expect(details).toContainText('Disks remain on this node')
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(details).toBeVisible()
   expect(await details.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
@@ -337,7 +336,7 @@ test('registers, configures and revokes a node through the owner interface', asy
   await expect(node.getByRole('button', { name: 'Configure' })).toHaveCount(0)
 })
 
-test('conversation placement distinguishes a preference from a strict pin and shows synchronization age', async ({ page, workspace }) => {
+test('conversation placement distinguishes a preference from a strict pin and shows local disk consolidation', async ({ page, workspace }) => {
   test.setTimeout(60000)
   await useRelayForHttpMocks(page)
   const chat = await workspace.api('/api/chats', 'POST', {})
@@ -403,11 +402,11 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   const nodeAction = page.getByRole('menu', { name: 'Chat details', exact: true }).getByRole('menuitem', { name: 'Execution node', exact: true })
   await details.click()
   await expect(nodeAction).toHaveAccessibleDescription(/^Recovery server · /)
-  await expect(nodeAction).toHaveAccessibleDescription('Recovery server · Synced 2 min ago', { timeout: 30000 })
+  await expect(nodeAction).toHaveAccessibleDescription('Recovery server · Local disk', { timeout: 30000 })
   await expect(chip).toHaveCount(0)
   await nodeAction.click()
   const panel = page.getByRole('dialog', { name: 'Execution node', exact: true })
-  await expect(panel).toContainText('Disk synchronized 2 min ago')
+  await expect(panel).toContainText('Local workspace storage')
   // The placement choices share the panel's full width.
   const placement = panel.getByRole('group', { name: 'Placement', exact: true })
   const group = (await placement.boundingBox())!
@@ -435,11 +434,11 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   } as any)
   await heartbeat()
   await details.click()
-  await expect(nodeAction).toHaveAccessibleDescription(/Local work · saved when execution stops/, { timeout: 15000 })
+  await expect(nodeAction).toHaveAccessibleDescription(/Local disk/, { timeout: 15000 })
   // A running native ublk conversation synchronizes like a VM: its last sync stays visible.
   workspace.service.store.updateRun(detail.run.id, { storage: { mode: 'on-demand', localBytes: 191392768, dirtyBytes: 0 } } as any)
   await heartbeat()
-  await expect(nodeAction).toHaveAccessibleDescription(/Synced 2 min ago/, { timeout: 15000 })
+  await expect(nodeAction).toHaveAccessibleDescription(/Local disk/, { timeout: 15000 })
   await expect(chip).toHaveCount(0)
   const nativePlacement = await workspace.api(`/api/nodes/placement/${detail.run.id}`)
   let privilegeStatus = 'pending'
@@ -484,26 +483,26 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   } as any)
   await heartbeat()
   await details.click()
-  await expect(nodeAction).toHaveAccessibleDescription(/Saving…/, { timeout: 15000 })
+  await expect(nodeAction).toHaveAccessibleDescription(/awaiting consolidation/, { timeout: 15000 })
   await nodeAction.click()
   await expect(panel).toContainText('182.5 MiB on this node')
-  await expect(panel).toContainText('175.4 MiB not yet saved')
+  await expect(panel).toContainText('175.4 MiB awaiting consolidation')
   workspace.service.store.updateRun(detail.run.id, {
     storage: {
       mode: 'on-demand',
       localBytes: 191392768,
       dirtyBytes: 183890000,
       dirtySince: Date.now() - 600000,
-      backupDegraded: true,
+      waitingFor: 'disk-space',
     },
   } as any)
   await heartbeat()
   // Overdue synchronization needs a look: the header names it, without the node.
-  await expect(chip).toHaveText('Sync overdue', { timeout: 15000 })
-  await expect(chip).toHaveAccessibleName('Execution node: Sync overdue')
+  await expect(chip).toHaveText('Disk full', { timeout: 15000 })
+  await expect(chip).toHaveAccessibleName('Execution node: Disk full')
   // The chip appears already filled, so the header's mounted live region announces it.
-  await expect(page.locator('.chat-header .sr-only[role="status"]')).toHaveText('Sync overdue')
-  await expect(panel).toContainText('Work can continue while local storage is safe')
+  await expect(page.locator('.chat-header .sr-only[role="status"]')).toHaveText('Disk full')
+  await expect(panel).toContainText('The journal is durable on this node')
   await page.screenshot({ path: 'test-results/execution-desktop.png' })
   await page.keyboard.press('Escape')
   await expect(details).toBeFocused()
@@ -518,15 +517,15 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await page.setViewportSize({ width: 1280, height: 720 })
   // A node problem already there when the conversation opens is not news.
   await page.reload()
-  await expect(chip).toHaveText('Sync overdue')
+  await expect(chip).toHaveText('Disk full')
   await page.waitForTimeout(1500)
   await expect(page.locator('.chat-header .sr-only[role="status"]')).toHaveText('')
   // Opened from the chip, the panel keeps it until it closes; focus then falls back to ⋯ once it is gone.
   await chip.click()
   await expect(panel).toBeVisible()
-  workspace.service.store.updateRun(detail.run.id, { storage: { backupDegraded: false } } as any)
+  workspace.service.store.updateRun(detail.run.id, { storage: { waitingFor: null } } as any)
   await heartbeat()
-  await expect(chip).toHaveAccessibleName('Execution node: Saving…', { timeout: 15000 })
+  await expect(chip).toHaveAccessibleName('Execution node: 175.4 MiB awaiting consolidation', { timeout: 15000 })
   await page.keyboard.press('Escape')
   await expect(panel).toHaveCount(0)
   await expect(chip).toHaveCount(0)
@@ -596,12 +595,12 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await page.mouse.click(5, 5)
   await expect(panel).toHaveCount(0)
   await expect(header).toBeFocused()
-  workspace.service.store.updateRun(detail.run.id, { backup: { capturedAt: Date.now() - 120000, status: 'ready', error: 'Upload timed out' } } as any)
+  workspace.service.store.updateRun(detail.run.id, { storage: { mode: 'on-demand', waitingFor: 'integrity' } } as any)
   await heartbeat()
-  await expect(header).toContainText('Sync failed', { timeout: 15000 })
+  await expect(header).toContainText('Disk needs attention', { timeout: 15000 })
   await page.emulateMedia({ colorScheme: 'dark' })
   await header.click()
-  await expect(panel).toContainText('Upload timed out')
+  await expect(panel).toContainText('Paused: disk integrity needs attention')
   await page.screenshot({ path: 'test-results/execution-phone-error-dark.png' })
   await page.keyboard.press('Escape')
   await connection.getByRole('button', { name: 'Close dialog', exact: true }).click()
@@ -939,7 +938,7 @@ for (const { automatic, expired } of [{ automatic: false, expired: false }, { au
     const chat = await workspace.api('/api/chats', 'POST', { agentId: agent.id })
     await workspace.api(`/api/chats/${chat.id}/messages`, 'POST', { id: randomUUID(), text: 'Keep this conversation' })
     await expect.poll(async () => (await workspace.api(`/api/chats/${chat.id}`)).run?.status, { timeout: 20000 }).toBe('succeeded')
-    await page.route('**/nodes/placement/*', route => route.fulfill({ json: { nodes: [{ id: 'native-fixture', name: 'Desktop GPU', capabilities: { backend: 'native', vmDisks: true } }], pinnedNodeId: null, preferredNodeId: null } }))
+    await page.route('**/nodes/placement/*', route => route.fulfill({ json: { nodes: [{ id: 'native-fixture', name: 'Desktop GPU', capabilities: { backend: 'native' } }], pinnedNodeId: null, preferredNodeId: null } }))
     let phase = 'ready'
     let requestBody: unknown
     await page.route('**/nodes/placement/*/backend-migration', async (route) => {

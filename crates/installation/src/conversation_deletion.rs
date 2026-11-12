@@ -485,10 +485,51 @@ pub async fn purge(s: &Service, chat: Value) -> Result<()> {
         s.accounts.recover_run(s, &s.store.run(&run).await?).await?;
     }
     delete_disks(s, &run).await?;
-    crate::nodes::publication::purge(s, &run).await?;
+    retire_disk_metadata(s, &run).await?;
     s.purge_retired_resources(&run).await?;
     files(s, &chat).await?;
     s.store.transaction(move |db| forget(db, &cid, &run)).await
+}
+
+/// Forget legacy disk metadata locally. Expiration never contacts an old bucket.
+pub(crate) async fn retire_disk_metadata(s: &Service, run: &str) -> Result<()> {
+    if run.is_empty() {
+        return Ok(());
+    }
+    crate::validation::uuid(run)?;
+    crate::nodes::retired_publications::retire_run(s, run).await?;
+    remove(&s.config.data_dir.join("node-backups").join(run)).await?;
+
+    let run = run.to_owned();
+    s.store
+        .transaction(move |db| {
+            for point in db.node_backups_for_run(&run)? {
+                db.remove("node-backups", text(&point, "id"))?;
+            }
+
+            for grant in db.list("node-disk-grants")? {
+                if grant["runId"] == run {
+                    db.remove("node-disk-grants", text(&grant, "id"))?;
+                }
+            }
+
+            db.0.execute(
+                "DELETE FROM direct_journal_acknowledgements WHERE run_id=?1",
+                [&run],
+            )?;
+            db.0.execute(
+                "DELETE FROM shared_references WHERE publication IN \
+                 (SELECT id FROM shared_publications WHERE run_id=?1)",
+                [&run],
+            )?;
+            db.0.execute("DELETE FROM shared_publications WHERE run_id=?1", [&run])?;
+            db.0.execute(
+                "DELETE FROM direct_read_authorizations WHERE run_id=?1",
+                [&run],
+            )?;
+            Ok(())
+        })
+        .await
 }
 
 #[cfg(test)]

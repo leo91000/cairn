@@ -7,6 +7,5 @@ export interface NodeDiskAccounting {
   hostFreeBytes: number
   hostReserveBytes: number
   poolReserveBytes: number
-  reclaimableBytes: number
-  unsynchronizedBytes: number
+  unconsolidatedBytes: number
 }

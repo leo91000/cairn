@@ -206,11 +206,6 @@ pub struct Run {
     #[ts(optional = nullable)]
     pub suspended_by_exclusive: Option<crate::ExclusiveReservation>,
     #[serde(default)]
-    #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "NodeBackup"))]
-    #[ts(optional = nullable)]
-    #[ts(type = "import('../../run-boundaries').RunBackup | null")]
-    pub backup: Option<serde_json::Value>,
-    #[serde(default)]
     #[schemars(with = "Option<std::collections::BTreeMap<String, serde_json::Value>>", extend("x-kotlin-type" = "RunStorage"))]
     #[ts(optional = nullable)]
     #[ts(type = "import('../../run-boundaries').RunStorage | null")]

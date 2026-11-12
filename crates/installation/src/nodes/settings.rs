@@ -32,3 +32,11 @@ pub(crate) fn save(db: &Db<'_>, settings: NodeRuntimeSettings) -> Result<NodeRun
 
     Ok(settings)
 }
+
+pub(crate) async fn current(s: &crate::service::Service) -> Result<NodeRuntimeSettings> {
+    s.store.read(|db| view(db)).await
+}
+
+pub(crate) async fn lease_ms(s: &crate::service::Service) -> Result<u64> {
+    Ok(current(s).await?.disconnect_timeout_seconds * 1000)
+}

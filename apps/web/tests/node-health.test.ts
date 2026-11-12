@@ -28,7 +28,7 @@ function node(overrides: Partial<ExecutionNode> = {}): ExecutionNode {
     capabilities: {
       backend: 'firecracker',
       ublk: false,
-      vmDisks: false,
+
       nativeModeProtocol: 1,
       diskTotalMiB: 0,
       cpu: 8,

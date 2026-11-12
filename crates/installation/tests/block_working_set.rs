@@ -1,14 +1,6 @@
-use cairn_installation::storage::{BlockSource, Disk, LazyDisk};
+use cairn_installation::storage::{Disk, LazyDisk};
 use serde_json::json;
-use std::{collections::HashMap, io, sync::Arc};
-
-struct Offline;
-
-impl BlockSource for Offline {
-    fn fetch(&self, _: &str) -> io::Result<Vec<u8>> {
-        panic!("A local disk must never fetch remote blocks")
-    }
-}
+use std::{collections::HashMap, io};
 
 fn local_block(directory: &std::path::Path, hash: &str, bytes: &[u8]) {
     std::fs::create_dir_all(directory.join("cache")).unwrap();
@@ -16,7 +8,7 @@ fn local_block(directory: &std::path::Path, hash: &str, bytes: &[u8]) {
 }
 
 #[test]
-fn publishing_a_foreground_block_keeps_its_verified_new_identity_local() {
+fn consolidating_a_foreground_block_keeps_its_verified_new_identity_local() {
     const BLOCK: u64 = 4 * 1024 * 1024;
     let root = tempfile::tempdir().unwrap();
     let directory = root.path().join("disks/conversation/lazy");
@@ -24,41 +16,34 @@ fn publishing_a_foreground_block_keeps_its_verified_new_identity_local() {
         "version": 1, "size": BLOCK, "blockSize": BLOCK,
         "blocks": [{ "offset": 0, "size": BLOCK, "hash": null }]
     });
-    let disk = LazyDisk::create(&directory, &manifest, Arc::new(Offline)).unwrap();
+    let disk = LazyDisk::create(&directory, &manifest).unwrap();
     disk.write_at(0, &[37; 4096]).unwrap();
     let mut bytes = [0; 4096];
     disk.read_at(0, &mut bytes).unwrap();
     assert_eq!(bytes, [37; 4096]);
 
     // Final saves can reconstruct after the VM closes its mounted disk.
-    let owner = LazyDisk::create(
-        &root.path().join("disks/cache-owner/lazy"),
-        &manifest,
-        Arc::new(Offline),
-    )
-    .unwrap();
+    let owner = LazyDisk::create(&root.path().join("disks/cache-owner/lazy"), &manifest).unwrap();
     drop(disk);
-    let disk = LazyDisk::open(&directory, Arc::new(Offline)).unwrap();
+    let disk = LazyDisk::open(&directory).unwrap();
 
     let generation = disk.seal().unwrap();
-    disk.capture(generation).unwrap();
-    disk.commit_published(generation, "published-backup")
-        .unwrap();
+    assert_eq!(disk.consolidate().unwrap(), Some(generation));
     disk.read_at(0, &mut bytes)
-        .expect("Publication must not download a block just read and uploaded on this node");
+        .expect("Consolidation preserves the local foreground bytes");
     assert_eq!(bytes, [37; 4096]);
 
     // Reopening the disk models the next VM while the same controller is alive.
     drop(disk);
-    let resumed = LazyDisk::open(&directory, Arc::new(Offline)).unwrap();
+    let resumed = LazyDisk::open(&directory).unwrap();
     resumed.read_at(0, &mut bytes).unwrap();
     assert_eq!(bytes, [37; 4096]);
-    assert_eq!(resumed.performance()["remoteFetch"]["count"], 0);
+
     drop(owner);
 }
 
 #[test]
-fn repeated_publications_keep_hot_bytes_and_later_writes_without_admitting_cold_scans() {
+fn repeated_consolidations_keep_hot_bytes_and_later_writes_without_admitting_cold_scans() {
     const BLOCK: u64 = 4 * 1024 * 1024;
     let root = tempfile::tempdir().unwrap();
     let manifest = json!({
@@ -68,7 +53,7 @@ fn repeated_publications_keep_hot_bytes_and_later_writes_without_admitting_cold_
             { "offset": BLOCK, "size": BLOCK, "hash": null }
         ]
     });
-    let disk = LazyDisk::create(root.path(), &manifest, Arc::new(Offline)).unwrap();
+    let disk = LazyDisk::create(root.path(), &manifest).unwrap();
     let mut bytes = [0; 4096];
     disk.write_at(BLOCK, &[91; 4096]).unwrap();
 
@@ -77,33 +62,32 @@ fn repeated_publications_keep_hot_bytes_and_later_writes_without_admitting_cold_
         disk.read_at(0, &mut bytes).unwrap();
         assert_eq!(bytes, [value; 4096]);
         let generation = disk.seal().unwrap();
-        let point = disk.capture(generation).unwrap();
+        disk.write_at(2048, &[113; 1024]).unwrap();
+        assert_eq!(disk.consolidate().unwrap(), Some(generation));
+        let point = local_manifest(root.path());
         let hot = point["blocks"][0]["hash"].as_str().unwrap();
         let cold = point["blocks"][1]["hash"].as_str().unwrap();
         assert_eq!(
-            &disk.captured_block(generation, hot).unwrap()[..4096],
+            &std::fs::read(root.path().join("cache").join(hot)).unwrap()[..4096],
             &[value; 4096]
         );
         // Upload scans must not populate the foreground cache.
         if value == 1 {
             assert_eq!(
-                &disk.captured_block(generation, cold).unwrap()[..4096],
+                &std::fs::read(root.path().join("cache").join(cold)).unwrap()[..4096],
                 &[91; 4096]
             );
         }
         assert_eq!(disk.performance()["blockCache"]["entries"], value);
 
-        disk.write_at(2048, &[113; 1024]).unwrap();
-        disk.commit_published(generation, &format!("backup-{generation}"))
-            .unwrap();
         disk.read_at(0, &mut bytes).unwrap();
         assert_eq!(&bytes[..2048], &[value; 2048]);
         assert_eq!(&bytes[2048..3072], &[113; 1024]);
         assert_eq!(&bytes[3072..], &[value; 1024]);
     }
-    assert_eq!(disk.performance()["remoteFetch"]["count"], 0);
-    // Simulate missing backing to isolate RAM admission. Production never
-    // evicts these local base files.
+
+    // Optional published disk bytes may survive; evict them to isolate the RAM
+    // admission guarantee exercised by this test.
     std::fs::remove_dir_all(root.path().join("cache")).unwrap();
     assert!(
         disk.read_at(BLOCK, &mut bytes).is_err(),
@@ -112,7 +96,7 @@ fn repeated_publications_keep_hot_bytes_and_later_writes_without_admitting_cold_
 }
 
 #[test]
-fn publication_after_a_smaller_cache_policy_retains_the_most_recent_extent() {
+fn consolidation_after_a_smaller_cache_policy_retains_the_most_recent_extent() {
     const BLOCK: u64 = 4 * 1024 * 1024;
     let root = tempfile::tempdir().unwrap();
     let manifest = json!({
@@ -123,7 +107,7 @@ fn publication_after_a_smaller_cache_policy_retains_the_most_recent_extent() {
             { "offset": 2 * BLOCK, "size": BLOCK, "hash": null }
         ]
     });
-    let disk = LazyDisk::create(root.path(), &manifest, Arc::new(Offline)).unwrap();
+    let disk = LazyDisk::create(root.path(), &manifest).unwrap();
     for index in 0..3 {
         disk.write_at(index * BLOCK, &[index as u8 + 1; 4096])
             .unwrap();
@@ -133,8 +117,7 @@ fn publication_after_a_smaller_cache_policy_retains_the_most_recent_extent() {
     disk.set_context(&json!({"policy": {"memoryCacheMiB": 4}}))
         .unwrap();
     let generation = disk.seal().unwrap();
-    disk.capture(generation).unwrap();
-    disk.commit_published(generation, "smaller-budget").unwrap();
+    assert_eq!(disk.consolidate().unwrap(), Some(generation));
     assert_eq!(disk.performance()["blockCache"]["bytes"], BLOCK);
     std::fs::remove_dir_all(root.path().join("cache")).unwrap();
     let mut bytes = [0; 4096];
@@ -169,7 +152,7 @@ async fn controller_retains_verified_blocks_between_conversations_and_releases_t
     });
     let first_directory = root.path().join("disks/first/lazy");
     local_block(&first_directory, &hash, &bytes);
-    let first = LazyDisk::create(&first_directory, &manifest, Arc::new(Offline)).unwrap();
+    let first = LazyDisk::create(&first_directory, &manifest).unwrap();
     let file = first_directory.join("cache").join(&hash);
     let mut buffer = [0; 4096];
     first.read_at(0, &mut buffer).unwrap();
@@ -179,7 +162,7 @@ async fn controller_retains_verified_blocks_between_conversations_and_releases_t
 
     let second_directory = root.path().join("disks/second/lazy");
     local_block(&second_directory, &hash, &bytes);
-    let second = LazyDisk::create(&second_directory, &manifest, Arc::new(Offline)).unwrap();
+    let second = LazyDisk::create(&second_directory, &manifest).unwrap();
     std::fs::remove_file(second_directory.join("cache").join(&hash)).unwrap();
     second.read_at(0, &mut buffer).unwrap();
     assert_eq!(buffer, [37; 4096]);
@@ -189,7 +172,7 @@ async fn controller_retains_verified_blocks_between_conversations_and_releases_t
 
     let after_directory = root.path().join("disks/after-shutdown/lazy");
     local_block(&after_directory, &hash, &bytes);
-    let after_shutdown = LazyDisk::create(&after_directory, &manifest, Arc::new(Offline)).unwrap();
+    let after_shutdown = LazyDisk::create(&after_directory, &manifest).unwrap();
     std::fs::remove_file(after_directory.join("cache").join(&hash)).unwrap();
     assert_eq!(
         after_shutdown.read_at(0, &mut buffer).unwrap_err().kind(),
@@ -216,7 +199,7 @@ fn small_interleaved_reads_reuse_verified_blocks_across_conversation_disks() {
     for (hash, bytes) in &data {
         local_block(&directory, hash, bytes);
     }
-    let first = LazyDisk::create(&directory, &manifest, Arc::new(Offline)).unwrap();
+    let first = LazyDisk::create(&directory, &manifest).unwrap();
     let mut buffer = [0; 4096];
     for _ in 0..64 {
         for index in 0..9 {
@@ -235,7 +218,7 @@ fn small_interleaved_reads_reuse_verified_blocks_across_conversation_disks() {
     for (hash, bytes) in &data {
         local_block(&second_directory, hash, bytes);
     }
-    let second = LazyDisk::create(&second_directory, &manifest, Arc::new(Offline)).unwrap();
+    let second = LazyDisk::create(&second_directory, &manifest).unwrap();
     for index in 0..9 {
         second.read_at(index * BLOCK, &mut buffer).unwrap();
         assert!(buffer.iter().all(|&byte| byte == index as u8 + 1));
@@ -244,12 +227,7 @@ fn small_interleaved_reads_reuse_verified_blocks_across_conversation_disks() {
 
     let unrelated = tempfile::tempdir().unwrap();
     assert!(
-        LazyDisk::create(
-            &unrelated.path().join("disks/third/lazy"),
-            &manifest,
-            Arc::new(Offline),
-        )
-        .is_err(),
+        LazyDisk::create(&unrelated.path().join("disks/third/lazy"), &manifest,).is_err(),
         "Another node cannot mount a base it does not hold"
     );
 
@@ -261,7 +239,7 @@ fn small_interleaved_reads_reuse_verified_blocks_across_conversation_disks() {
     let hash = wrong_extent["blocks"][0]["hash"].as_str().unwrap();
     local_block(&malformed_directory, hash, &data[hash]);
     assert!(
-        LazyDisk::create(&malformed_directory, &wrong_extent, Arc::new(Offline)).is_err(),
+        LazyDisk::create(&malformed_directory, &wrong_extent).is_err(),
         "A memory cache hit cannot bypass owned-base extent verification"
     );
 }
@@ -275,17 +253,26 @@ fn a_missing_local_base_is_refused_without_blocking_another_owned_disk() {
         "version": 1, "size": 4096, "blockSize": 4 * 1024 * 1024,
         "blocks": [{ "offset": 0, "size": 4096, "hash": hash }]
     });
-    let missing = LazyDisk::create(
-        &root.path().join("disks/missing/lazy"),
-        &manifest,
-        Arc::new(Offline),
-    );
+    let missing = LazyDisk::create(&root.path().join("disks/missing/lazy"), &manifest);
     assert_eq!(missing.err().unwrap().kind(), io::ErrorKind::InvalidData);
     let directory = root.path().join("disks/available/lazy");
     local_block(&directory, &hash, &bytes);
-    let owned = LazyDisk::create(&directory, &manifest, Arc::new(Offline)).unwrap();
+    let owned = LazyDisk::create(&directory, &manifest).unwrap();
     let mut buffer = [0; 4096];
     owned.read_at(0, &mut buffer).unwrap();
     assert_eq!(buffer, [7; 4096]);
-    assert_eq!(owned.performance()["remoteFetch"]["count"], 0);
+}
+
+fn local_manifest(directory: &std::path::Path) -> serde_json::Value {
+    let db = rusqlite::Connection::open_with_flags(
+        directory.join("journal-v2.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let encoded: String = db
+        .query_row("SELECT manifest FROM state WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    serde_json::from_str(&encoded).unwrap()
 }
