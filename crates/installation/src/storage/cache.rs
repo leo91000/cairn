@@ -93,7 +93,9 @@ pub(super) fn retire(
 
 /// Shared admission for journal writes and base block files on this controller.
 pub(crate) fn admission() -> io::Result<MutexGuard<'static, ()>> {
-    ADMISSION.lock().map_err(|e| io::Error::other(e.to_string()))
+    ADMISSION
+        .lock()
+        .map_err(|e| io::Error::other(e.to_string()))
 }
 
 #[cfg(test)]
@@ -111,11 +113,9 @@ mod tests {
     #[ignore = "executes recovery fixture children while this process holds admission"]
     fn recovery_fixtures_isolation_child() {
         let _held = admission().unwrap();
-        for test in [
+        crate::test_process::run_ignored(
             "native::bases_tests::background_preparation_yields_to_foreground_intent_and_then_finishes_child",
-        ] {
-            crate::test_process::run_ignored(test);
-        }
+        );
     }
 
     #[test]

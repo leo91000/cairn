@@ -15,7 +15,7 @@ driver, render/video device permissions and application libraries must already
 work. Cairn does not install GPU drivers, detach a GPU or close a graphical session.
 Enrollment loads the existing ublk storage module and checks its control device;
 unsupported kernels must be provisioned before native execution can start.
-The installation manager and its S3 storage must be configured normally.
+The installation manager must be configured; conversation disks require no S3 storage.
 
 As the installation owner, open Nodes, add a machine and choose Native process.
 Use the generated installer on that node and enter the single-use code when asked.
@@ -125,9 +125,8 @@ Conversations use their own lazy [rootless Docker enclave](NATIVE-DOCKER.md) for
 builds, containers and Compose. Published ports are private to that conversation's
 network; GPU containers and privileged Docker features are unavailable. Images,
 build cache and named volumes follow the durable environment's native storage.
-On a VM-created disk, the native rootless store is separate from the VM's rootful
-Docker store. Both are lost when changing nodes; each backend sees its own images, cache
-and named volumes.
+Changing nodes or execution backend expires the environment, including its Docker
+images, build cache and named volumes. Push images or export data that must survive.
 Graphics tests must use headless/offscreen APIs. Cairn bundles the coding engines,
 including Codex's `codex-code-mode-host` companion beside its executable, Node.js
 and `gh`; other toolchains use this node's installed binaries/libraries or
@@ -154,35 +153,26 @@ explicitly declare permanent conversation deletion. A manager-owned run namespac
 is never erased as native node staging, and its marker is excluded from remote
 seeds.
 
-The native controller mounts ext4 directly on ublk, using the same local journal,
-scoped S3 block reads, encrypted immutable publications and cache as a VM. There
-is no guest kernel. Same-node resume reopens that disk and loads missing blocks on
-demand; it does not restore the current workspace from a complete file archive
-or replace it with the original project checkout. The remote connector still
-transfers the original checkout in attempt staging, as it does for VM nodes; an
-initialized disk does not consume that seed. Lazy disk resume therefore does not
-mean total startup traffic consists only of demanded blocks.
+The native controller mounts ext4 directly on ublk using the same durable local
+journal and immutable local base blocks as a VM. There is no guest kernel and no
+remote disk source. Same-node resume reopens that disk; it does not replace it
+with the original project checkout. Transfer staging still carries the original
+checkout, but an initialized disk does not consume that seed.
 
-Periodic live checkpoints are crash consistent. Completed turns fence their
-processes and flush/unmount the filesystem before sealing their completed journal
-prefix. Final S3 publication can finish asynchronously while a later turn starts.
-A controller or machine crash can lose unflushed kernel pages; committed local
-journal writes remain recoverable. Missing or unauthorized S3 bytes never become
-zero-filled files. Unavailable storage can delay I/O and shutdown until recovery;
-keep the node available for synchronization. Sync errors retain the journal and
-surface in the execution-node details.
+Completed turns fence their processes and flush/unmount the filesystem before
+sealing the journal. Local background consolidation reconstructs durable base
+blocks and retires sealed segments. While mounted, journal pressure triggers
+crash-consistent seals without freezing the filesystem. A controller or machine
+crash can lose unflushed kernel pages; acknowledged journal writes remain local.
+Missing base blocks prevent mount and corrupt blocks fail authentication on read.
 
-After one idle hour, Cairn automatically reclaims a terminal conversation's clean
-local block cache and obsolete generated attempt files. The sweep checks bounded
-batches every minute, so reclamation can occur later than the one-hour threshold.
-It requires the exact latest acknowledged S3 generation and no active attempt,
-pending publication or movement. Unpublished journal writes are never evicted. The
-journal metadata, base manifest and scoped grant remain, so the
-next execution can read its files from S3 on demand. Chat history, published
-artifacts and shared engine/tool bundles remain available.
+Cairn never reclaims inactive environment blocks for cache pressure or idle age.
+The complete disk stays on its node until expiration or deletion. Loss or
+revocation of that node loses the working files. History, attachments and published
+artifacts remain on the manager. See [local disk operations](CONVERSATION-STORAGE-OPERATIONS.md).
 
 Root-private data is under `/var/lib/cairn-native`. Transfer staging is in `data/`;
-journals and clean cache are in `state/disks/<run>/lazy/`. The mounted conversation
+journals and local base blocks are in `state/disks/<run>/lazy/`. The mounted conversation
 filesystem is `state/native/<run>/data/` under the root-private state directory,
 in the system manager's mount namespace. The unprivileged workload gets only its
 selected directory binds; the ublk backend has a separate private namespace that
@@ -194,7 +184,7 @@ The root-private controller socket is `state/controller.sock`. Do not mount the
 disk elsewhere or delete ownership/active markers to force a second writer.
 
 The conversation filesystem size enforces its workspace capacity. The shared node
-budget charges retained journals, caches, migration copies, staging, logs and
+budget charges retained journals, local base blocks, staging, logs and
 artifacts; the mounted view is not charged a second time. Temporary files and
 other host-side copies remain monitored limits rather than hard host filesystem
 quotas. Physical free-space reserves and journal admission still apply. First-time
@@ -218,7 +208,7 @@ apply in addition to ordinary application dependencies.
 
 Revoke the node in Cairn first, then stop/disable `cairn-native-node.service` on its
 host. Removing `/opt/cairn-native` and `/var/lib/cairn-native` deletes binaries and
-all retained local work; save any needed files before confirming revocation.
+all retained local work; push commits and export files to keep before confirming revocation.
 First confirm with `findmnt` that no conversation disk is still mounted below
 `/var/lib/cairn-native` after a failed stop. If one remains, start
 `sudo systemctl start cairn-native-node` so its recovery releases the disks it owns,

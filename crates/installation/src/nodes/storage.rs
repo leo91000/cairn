@@ -1,5 +1,4 @@
-//! Storage status reconciles mounted journals with their published S3 state.
-use super::publication::{BackupStatus, PublishedPointer};
+//! Observe local environment usage without scheduling disk publications.
 use crate::{
     error::{Error, Result},
     service::Service,
@@ -48,8 +47,6 @@ pub async fn monitor(s: Arc<Service>) {
             () = s.shutdown.cancelled() => return,
             () = tokio::time::sleep(Duration::from_secs(5)) => {}
         }
-        // Cache pressure is retried on the next tick.
-        let _ = super::publication::maintain_local_cache(&s).await;
         let Ok(runs) = s.store.read(monitored_runs).await else {
             continue;
         };
@@ -67,15 +64,15 @@ pub async fn monitor(s: Arc<Service>) {
     }
 }
 
-/// Retained VMs can write filesystem metadata after the completed-turn boundary.
-/// Their journals still pin physical slots even when the last published status was clean.
+/// Observe running and unconsolidated disks, including stopped native environments.
 fn monitored_runs(db: &mut Db<'_>) -> Result<Vec<Value>> {
     let mut runs = db.active()?;
     let mut seen: std::collections::HashSet<String> =
         runs.iter().map(|run| text(run, "id").to_owned()).collect();
-    // Completed native disks need reconciliation even after their VM is gone.
-    // A durable node receipt can outlive the HTTP response that acknowledged it.
-    for run in db.json_rows(super::publication::SYNC_CANDIDATES, [])? {
+    for run in db.json_rows(
+        "SELECT data FROM run_views WHERE json_extract(boundary,'$.storage.mode') IN ('on-demand','native')
+         AND json_extract(boundary,'$.storage.dirtyBytes')>0", [],
+    )? {
         if seen.insert(text(&run, "id").to_owned()) {
             runs.push(run);
         }
@@ -105,7 +102,7 @@ fn monitored_runs(db: &mut Db<'_>) -> Result<Vec<Value>> {
     Ok(runs)
 }
 
-/// Records the node's journal status, and the publication it has acknowledged.
+/// Records local journal and base-block usage.
 pub async fn refresh(s: &Service, run: &Value) -> Result<()> {
     let id = text(run, "id");
     let request = json!({});
@@ -148,23 +145,17 @@ pub(super) async fn refresh_with_status(
         );
         return s
             .store
-            .transaction(move |db| record_status(db, &id, &node, &status, None, 0))
+            .transaction(move |db| record_status(db, &id, &node, &status))
             .await;
     }
     if status["mode"] != super::ON_DEMAND {
         return Ok(());
     }
 
-    let point = acknowledged_point(s, run, &status).await;
-    if let Some(point) = &point {
-        super::disk_grants::acknowledged(s, text(&status, "grantId"), point).await?;
-    }
-
     let id = id.to_owned();
     let node = super::owner_node(run).to_owned();
-    let revision = run["backup"]["requestedRevision"].as_u64().unwrap_or(0);
     s.store
-        .transaction(move |db| record_status(db, &id, &node, &status, point.as_ref(), revision))
+        .transaction(move |db| record_status(db, &id, &node, &status))
         .await
 }
 
@@ -198,71 +189,14 @@ fn storage_with_missing_native_journal(current: &Value, status: &Value, observed
     Value::Object(storage)
 }
 
-/// The publication the node reports as mounted, if it belongs to this run and node.
-async fn acknowledged_point(s: &Service, run: &Value, status: &Value) -> Option<Value> {
-    let backup = status["published"]["backupId"].as_str()?;
-    let point = s.store.get("node-backups", backup).await.ok().flatten()?;
-    let same_owner =
-        point["runId"] == run["id"] && super::owner_node(&point) == super::owner_node(run);
-    same_owner.then_some(point)
-}
-
-fn record_status(
-    db: &Db<'_>,
-    id: &str,
-    node: &str,
-    status: &Value,
-    point: Option<&Value>,
-    observed_revision: u64,
-) -> Result<()> {
+fn record_status(db: &Db<'_>, id: &str, node: &str, status: &Value) -> Result<()> {
     let Some(current) = db.run(id)? else {
         return Ok(());
     };
     if super::owner_node(&current) != node {
         return Ok(());
     }
-    let mut patch = json!({ "storage": status });
-    let captured_at = |value: &Value| value["capturedAt"].as_i64().unwrap_or(0);
-    if status["dirtyBytes"] == 0
-        && let Some(point) = point
-        && captured_at(point) >= captured_at(&current["backup"])
-    {
-        let completed = status["completedGeneration"].as_i64();
-        let published = status["published"]["generation"].as_i64();
-        let covers_completed = completed.is_some_and(|generation| {
-            generation > 0
-                && published.is_some_and(|published| published >= generation)
-                && published == point["diskGeneration"].as_i64()
-        });
-        let requested = current["backup"]["requestedRevision"].as_u64().unwrap_or(0);
-        let acknowledged = current["backup"]["acknowledgedRevision"]
-            .as_u64()
-            .unwrap_or(0);
-        let acknowledged = if covers_completed {
-            acknowledged.max(observed_revision.min(requested))
-        } else {
-            acknowledged
-        };
-        let pointer = serde_json::to_value(PublishedPointer {
-            id: &point["id"],
-            snapshot_id: &point["snapshotId"],
-            captured_at: &point["capturedAt"],
-            uploaded_bytes: None,
-            status: if requested > acknowledged {
-                BackupStatus::Pending
-            } else {
-                BackupStatus::Ready
-            },
-            error: None,
-        })?;
-        let mut backup = current["backup"].as_object().cloned().unwrap_or_default();
-        backup.extend(pointer.as_object().unwrap().clone());
-        if covers_completed {
-            backup.insert("acknowledgedRevision".into(), acknowledged.into());
-        }
-        patch["backup"] = backup.into();
-    }
-    db.update_run_boundary(id, &patch)?;
+    db.update_run_boundary(id, &json!({ "storage": status }))?;
     record_volume(db, id, node, status)?;
     Ok(())
 }

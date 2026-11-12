@@ -47,7 +47,7 @@ pub struct LazyDisk {
     base: Mutex<Arc<Value>>,
     source: Arc<dyn BlockSource>,
     consolidating: Mutex<()>,
-    yield_requested: AtomicBool,
+    consolidation_stop: tokio_util::sync::CancellationToken,
     sealed_pending: AtomicBool,
     journal_bytes: AtomicU64,
     blocks: Arc<memory::BlockCache>,
@@ -120,8 +120,10 @@ fn check_base_blocks(directory: &Path, manifest: &Value) -> io::Result<()> {
         let Some(hash) = block["hash"].as_str() else {
             continue;
         };
-        let complete = std::fs::symlink_metadata(directory.join("cache").join(hash))
-            .is_ok_and(|metadata| metadata.is_file() && Some(metadata.len()) == block["size"].as_u64());
+        let complete =
+            std::fs::symlink_metadata(directory.join("cache").join(hash)).is_ok_and(|metadata| {
+                metadata.is_file() && Some(metadata.len()) == block["size"].as_u64()
+            });
         if !complete {
             return Err(missing_block());
         }
@@ -248,6 +250,24 @@ impl LazyDisk {
             .query_row("SELECT EXISTS(SELECT 1 FROM sealed)", [], |row| row.get(0))
             .map_err(failure)?;
         let journal = journal::Journal::open(directory, &db, size)?;
+        let captures = db
+            .prepare("SELECT manifest FROM sealed WHERE manifest IS NOT NULL")
+            .map_err(failure)?
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(failure)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(failure)?
+            .iter()
+            .map(|manifest| serde_json::from_str::<Value>(manifest).map_err(failure))
+            .collect::<io::Result<Vec<_>>>()?;
+        let needed = std::iter::once(&manifest)
+            .chain(&captures)
+            .flat_map(|manifest| manifest["blocks"].as_array().unwrap())
+            .filter_map(|block| block["hash"].as_str())
+            .collect();
+        if let Err(error) = super::cache::retire(&directory.join("cache"), &needed) {
+            tracing::warn!(kind = ?error.kind(), "Could not retire orphan local blocks");
+        }
         let mut accounting = journal.stats();
         let journal_bytes = accounting["journalBytes"].as_u64().unwrap_or(0);
         accounting["published"] = journal::published(&db)?;
@@ -267,7 +287,7 @@ impl LazyDisk {
             base: Mutex::new(Arc::new(manifest)),
             source,
             consolidating: Mutex::new(()),
-            yield_requested: AtomicBool::new(false),
+            consolidation_stop: tokio_util::sync::CancellationToken::new(),
             sealed_pending: AtomicBool::new(sealed_pending),
             journal_bytes: AtomicU64::new(journal_bytes),
             blocks,
@@ -402,10 +422,12 @@ impl LazyDisk {
     fn persist_block(&self, hash: &str, bytes: &[u8], reserve: Option<u64>) -> io::Result<()> {
         use std::os::unix::fs::FileExt;
         if self.stored_block(hash, bytes.len()).is_ok() {
+            File::open(self.directory.join("cache").join(hash))?.sync_all()?;
             return Ok(());
         }
         let directory = self.directory.join("cache");
         std::fs::create_dir_all(&directory)?;
+        File::open(&self.directory)?.sync_all()?;
         let _headroom = self.admit_block(bytes.len() as u64, reserve)?;
         let file = tempfile::Builder::new()
             .prefix(super::cache::TEMPORARY_BLOCK)
@@ -418,7 +440,8 @@ impl LazyDisk {
             match (run, zero) {
                 (None, false) => run = Some(start),
                 (Some(from), true) => {
-                    file.as_file().write_all_at(&bytes[from..start], from as u64)?;
+                    file.as_file()
+                        .write_all_at(&bytes[from..start], from as u64)?;
                     run = None;
                 }
                 _ => {}
@@ -427,8 +450,14 @@ impl LazyDisk {
         if let Some(from) = run {
             file.as_file().write_all_at(&bytes[from..], from as u64)?;
         }
+        #[cfg(test)]
+        journal::crash_point(&self.directory, "consolidation_block_written");
         file.as_file().sync_all()?;
+        #[cfg(test)]
+        journal::crash_point(&self.directory, "consolidation_block_synced");
         file.persist(directory.join(hash)).map_err(failure)?;
+        #[cfg(test)]
+        journal::crash_point(&self.directory, "consolidation_block_renamed");
         Ok(())
     }
 

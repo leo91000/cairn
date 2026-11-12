@@ -172,7 +172,9 @@ fn missing_or_corrupt_base_block_is_an_integrity_error() {
 
     // A base never refers to a block the node does not hold.
     std::fs::remove_file(&file).unwrap();
-    let error = LazyDisk::create(&directory, &manifest, source.clone()).err().unwrap();
+    let error = LazyDisk::create(&directory, &manifest, source.clone())
+        .err()
+        .unwrap();
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     std::fs::write(&file, &bytes).unwrap();
     let disk = LazyDisk::create(&directory, &manifest, source.clone()).unwrap();
@@ -222,7 +224,8 @@ fn failed_reconstruction_never_commits_a_base_and_can_retry() {
     let file = root.path().join("cache").join(block_digest(&base));
     let disk = LazyDisk::create(root.path(), &manifest, source()).unwrap();
     for index in 0..2u64 {
-        disk.write_at(index * BLOCK + 17, &[index as u8 + 2]).unwrap();
+        disk.write_at(index * BLOCK + 17, &[index as u8 + 2])
+            .unwrap();
     }
     let generation = disk.seal().unwrap();
     std::fs::write(&file, vec![0; BLOCK as usize]).unwrap();
@@ -263,13 +266,17 @@ fn a_new_owner_interrupts_consolidation_before_its_commit() {
     assert_eq!(read(&disk, BLOCK, 4), b"more");
 }
 
-const CRASH_PHASES: [&str; 6] = [
+const CRASH_PHASES: [&str; 10] = [
+    "consolidation_block_written",
+    "consolidation_block_synced",
+    "consolidation_block_renamed",
     "consolidation_blocks_written",
     "consolidation_blocks_durable",
     "consolidation_transaction",
     "consolidation_committed",
     "reclamation",
     "consolidation_reclaimed",
+    "consolidation_blocks_retired",
 ];
 
 #[test]
@@ -280,8 +287,12 @@ fn consolidation_survives_process_crashes_at_every_step() {
     let replaced = vec![7; BLOCK as usize];
     for phase in CRASH_PHASES {
         let root = tempfile::tempdir().unwrap();
-        let disk = LazyDisk::create(root.path(), &local_base(root.path(), &[None, None, None]), source())
-            .unwrap();
+        let disk = LazyDisk::create(
+            root.path(),
+            &local_base(root.path(), &[None, None, None]),
+            source(),
+        )
+        .unwrap();
         disk.write_at(0, &old).unwrap();
         disk.write_at(BLOCK, &unchanged).unwrap();
         let first = disk.seal().unwrap();
@@ -306,7 +317,10 @@ fn consolidation_survives_process_crashes_at_every_step() {
         let disk = LazyDisk::open(root.path(), source()).unwrap();
         let committed = !matches!(
             phase,
-            "consolidation_blocks_written"
+            "consolidation_block_written"
+                | "consolidation_block_synced"
+                | "consolidation_block_renamed"
+                | "consolidation_blocks_written"
                 | "consolidation_blocks_durable"
                 | "consolidation_transaction"
         );
@@ -314,7 +328,11 @@ fn consolidation_survives_process_crashes_at_every_step() {
         assert_eq!(disk.sealed_pending(), !committed, "{phase}");
         let check = |disk: &LazyDisk| {
             assert_eq!(read(disk, 0, BLOCK as usize), replaced, "{phase}");
-            assert_eq!(read(disk, BLOCK, 14), b"\x02\x02\x02\x02\x02\x02\x02\x02after!", "{phase}");
+            assert_eq!(
+                read(disk, BLOCK, 14),
+                b"\x02\x02\x02\x02\x02\x02\x02\x02after!",
+                "{phase}"
+            );
             assert_eq!(read(disk, 2 * BLOCK + 4, 7), b"\0third\0", "{phase}");
         };
         check(&disk);
@@ -326,7 +344,10 @@ fn consolidation_survives_process_crashes_at_every_step() {
         assert_eq!(disk.accounting().unwrap()["dirtyBytes"], 0, "{phase}");
         assert_eq!(segments(root.path()), 0, "{phase}");
         assert_eq!(block_files(root.path()), base_hashes(&disk), "{phase}");
-        assert!(base_hashes(&disk).contains(&block_digest(&replaced)), "{phase}");
+        assert!(
+            base_hashes(&disk).contains(&block_digest(&replaced)),
+            "{phase}"
+        );
         check(&disk);
         drop(disk);
         check(&LazyDisk::open(root.path(), source()).unwrap());
@@ -338,7 +359,9 @@ fn crash_consolidation_writer() {
     let Some(root) = std::env::var_os("CAIRN_JOURNAL_CRASH_DIR") else {
         return;
     };
-    if !std::env::var("CAIRN_JOURNAL_CRASH_PHASE").is_ok_and(|phase| CRASH_PHASES.contains(&phase.as_str())) {
+    if !std::env::var("CAIRN_JOURNAL_CRASH_PHASE")
+        .is_ok_and(|phase| CRASH_PHASES.contains(&phase.as_str()))
+    {
         return;
     }
     let disk = LazyDisk::open(Path::new(&root), source()).unwrap();
@@ -350,4 +373,27 @@ fn crash_consolidation_writer() {
     disk.seal().unwrap();
     disk.write_at(BLOCK + 8, b"after!").unwrap();
     disk.consolidate().unwrap();
+}
+
+#[test]
+fn local_bases_larger_than_former_cache_budget_are_never_evicted() {
+    let root = tempfile::tempdir().unwrap();
+    let manifest = local_base(root.path(), &vec![None; 12]);
+    let disk = LazyDisk::create(root.path(), &manifest, source()).unwrap();
+    for index in 0..12 {
+        disk.write_at(index * BLOCK, &vec![index as u8 + 1; BLOCK as usize])
+            .unwrap();
+        disk.seal().unwrap();
+        disk.consolidate().unwrap();
+    }
+    assert_eq!(block_files(root.path()).len(), 12);
+    drop(disk);
+    let disk = LazyDisk::open(root.path(), source()).unwrap();
+    for index in 0..12 {
+        assert_eq!(
+            read(&disk, index * BLOCK, 4096),
+            vec![index as u8 + 1; 4096]
+        );
+    }
+    assert_eq!(block_files(root.path()).len(), 12);
 }

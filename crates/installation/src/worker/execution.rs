@@ -1867,7 +1867,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopped_native_turns_retain_final_publication_demand_for_every_outcome() {
+    async fn completed_turns_never_request_remote_publication() {
         let root = tempfile::tempdir().unwrap();
         let service = Service::new(crate::config::Config {
             data_dir: root.path().join("data"),
@@ -1887,15 +1887,15 @@ mod tests {
         })
         .await
         .unwrap();
-        for (backend, status, fenced, expected) in [
-            ("native", "succeeded", true, true),
-            ("native", "failed", true, true),
-            ("native", "cancelled", true, true),
-            ("native", "queued", true, true),
-            ("firecracker", "waiting", true, true),
-            ("native", "failed", false, false),
-            ("firecracker", "failed", true, false),
-            ("firecracker", "cancelled", true, false),
+        for (backend, status, fenced) in [
+            ("native", "succeeded", true),
+            ("native", "failed", true),
+            ("native", "cancelled", true),
+            ("native", "queued", true),
+            ("firecracker", "waiting", true),
+            ("native", "failed", false),
+            ("firecracker", "failed", true),
+            ("firecracker", "cancelled", true),
         ] {
             let run = crate::config::id();
             service
@@ -1928,18 +1928,11 @@ mod tests {
             checkpoint.persist().await.unwrap();
             release(&service, &checkpoint, None, fenced).await.unwrap();
             let current = service.store.run(&run).await.unwrap();
-            assert_eq!(
-                crate::nodes::publication::requested(&current),
-                expected,
+            assert!(
+                !crate::nodes::publication::requested(&current),
                 "{backend}/{status}/fenced={fenced}: {current}",
             );
-            if expected {
-                // Every current disk retains demand for the publication scheduler.
-                assert_eq!(current["backup"]["requestedRevision"], 1);
-                assert_eq!(current["backup"]["status"], "pending");
-            } else {
-                assert!(current["backup"].is_null());
-            }
+            assert!(current["backup"].is_null());
         }
         service.shutdown.cancel();
     }

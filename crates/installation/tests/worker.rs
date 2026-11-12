@@ -2887,12 +2887,6 @@ async fn node_slots_exceed_manager_concurrency_without_overpreparing_the_queue()
     tokio::fs::write(home.join("auth.json"), "{}")
         .await
         .unwrap();
-    tokio::fs::write(
-        fixture.service.config.data_dir.join("storage-s3.json"),
-        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-    )
-    .await
-    .unwrap();
     cairn_installation::nodes::refresh_local(&fixture.service)
         .await
         .unwrap();
@@ -3082,12 +3076,6 @@ async fn vm_agents_call_workspace_tools_through_their_run_channel_without_a_publ
     tokio::fs::write(home.join("auth.json"), "{}")
         .await
         .unwrap();
-    tokio::fs::write(
-        fixture.service.config.data_dir.join("storage-s3.json"),
-        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-    )
-    .await
-    .unwrap();
     cairn_installation::nodes::refresh_local(&fixture.service)
         .await
         .unwrap();
@@ -3237,15 +3225,6 @@ async fn paid_recovery_survives_confirmed_capacity_rejection_and_restart() {
         tokio::fs::write(home.join("auth.json"), "{}")
             .await
             .unwrap();
-        tokio::fs::write(
-            service.config.data_dir.join("storage-s3.json"),
-            json!({
-                "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1"
-            })
-            .to_string(),
-        )
-        .await
-        .unwrap();
         let run = fixture
             .enqueue("Preserve paid admission after refusal")
             .await;
@@ -3396,12 +3375,6 @@ async fn transferred_paid_move_launches_once_without_resetting_controller_count(
     tokio::fs::write(home.join("auth.json"), "{}")
         .await
         .unwrap();
-    tokio::fs::write(
-        service.config.data_dir.join("storage-s3.json"),
-        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-    )
-    .await
-    .unwrap();
     let run = fixture.enqueue("Resume paid move").await;
     let id = text(&run, "id").to_owned();
     fixture.start().await;
@@ -3846,12 +3819,6 @@ async fn controller_capacity_rejection_waits_and_retries_without_an_agent_sessio
         tokio::fs::write(home.join("auth.json"), "{}")
             .await
             .unwrap();
-        tokio::fs::write(
-            s.config.data_dir.join("storage-s3.json"),
-            json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-        )
-        .await
-        .unwrap();
         let run = fixture.enqueue("Wait for an available VM slot").await;
         let run_id = text(&run, "id");
         fixture.start().await;
@@ -4024,16 +3991,6 @@ async fn failed_provider_startup_can_retry_without_replaying_an_uncertain_launch
         tokio::fs::write(home.join("auth.json"), "{}")
             .await
             .unwrap();
-        tokio::fs::write(
-            s.config.data_dir.join("storage-s3.json"),
-            json!({
-                "bucket": "fixture-storage",
-                "endpoint": "https://127.0.0.1:1",
-            })
-            .to_string(),
-        )
-        .await
-        .unwrap();
         fixture.start().await;
 
         let original = message("Keep the existing workspace and decisions.");
@@ -4171,12 +4128,6 @@ async fn controller_interruptions_resume_saved_threads_and_stop_after_three_reco
         tokio::fs::write(home.join("auth.json"), "{}")
             .await
             .unwrap();
-        tokio::fs::write(
-            fixture.service.config.data_dir.join("storage-s3.json"),
-            json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-        )
-        .await
-        .unwrap();
         fixture.start().await;
         let run = fixture.enqueue("Inspect the VM fixture").await;
         let run_id = text(&run, "id");
@@ -4250,12 +4201,6 @@ async fn controller_evidence_is_reconciled_before_replay_or_terminal_failure() {
         tokio::fs::write(home.join("auth.json"), "{}")
             .await
             .unwrap();
-        tokio::fs::write(
-            fixture.service.config.data_dir.join("storage-s3.json"),
-            json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-        )
-        .await
-        .unwrap();
         let run = fixture
             .enqueue("Reconcile only this disposable controller attempt")
             .await;
@@ -4320,12 +4265,6 @@ async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn
         tokio::fs::write(home.join("auth.json"), "{}")
             .await
             .unwrap();
-        tokio::fs::write(
-            fixture.service.config.data_dir.join("storage-s3.json"),
-            json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-        )
-        .await
-        .unwrap();
         let run = fixture.enqueue("Test interrupted controller output").await;
         let run_id = text(&run, "id").to_owned();
         let wait_returned = Arc::new(AtomicBool::new(false));
@@ -4533,12 +4472,6 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
     tokio::fs::write(home.join("auth.json"), "{}")
         .await
         .unwrap();
-    tokio::fs::write(
-        fixture.service.config.data_dir.join("storage-s3.json"),
-        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-    )
-    .await
-    .unwrap();
     let run = fixture
         .enqueue("Test expiry during controller result persistence")
         .await;
@@ -4650,12 +4583,6 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
         tokio::fs::write(home.join("auth.json"), "{}")
             .await
             .unwrap();
-        tokio::fs::write(
-            fixture.service.config.data_dir.join("storage-s3.json"),
-            json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-        )
-        .await
-        .unwrap();
         let run = fixture
             .enqueue("Stop only this disposable manager after turn.completed")
             .await;
@@ -4802,12 +4729,6 @@ async fn managed_provider_retries_do_not_spend_controller_recoveries() {
         tokio::fs::write(home.join("auth.json"), "{}")
             .await
             .unwrap();
-        tokio::fs::write(
-            fixture.service.config.data_dir.join("storage-s3.json"),
-            json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-        )
-        .await
-        .unwrap();
         fixture.start().await;
         let chat = fixture
             .start_chat(message("Exercise a confirmed provider retry"))
@@ -4929,12 +4850,6 @@ async fn confirmed_provider_failure_survives_later_output_truncation_and_restart
         tokio::fs::write(home.join("auth.json"), "{}")
             .await
             .unwrap();
-        tokio::fs::write(
-            fixture.service.config.data_dir.join("storage-s3.json"),
-            json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-        )
-        .await
-        .unwrap();
         fixture.start().await;
         let chat = fixture
             .start_chat(message("Retry after a confirmed provider failure"))
@@ -5071,12 +4986,6 @@ async fn native_failed_flush_after_provider_failure_never_replays_with_intact_lo
     tokio::fs::write(home.join("auth.json"), "{}")
         .await
         .unwrap();
-    tokio::fs::write(
-        fixture.service.config.data_dir.join("storage-s3.json"),
-        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-    )
-    .await
-    .unwrap();
     fixture.start().await;
     let chat = fixture
         .start_chat(message("Do not replay a failed flush"))
@@ -5163,12 +5072,6 @@ async fn controller_evidence_is_reconciled_before_replay_or_terminal_failure_rec
         tokio::fs::write(home.join("auth.json"), "{}")
             .await
             .unwrap();
-        tokio::fs::write(
-            fixture.service.config.data_dir.join("storage-s3.json"),
-            json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-        )
-        .await
-        .unwrap();
         let run = fixture
             .enqueue("Reconcile only this disposable controller attempt")
             .await;
@@ -5233,12 +5136,6 @@ async fn interrupted_controller_output_after_healthy_exit_never_replays_the_turn
         tokio::fs::write(home.join("auth.json"), "{}")
             .await
             .unwrap();
-        tokio::fs::write(
-            fixture.service.config.data_dir.join("storage-s3.json"),
-            json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-        )
-        .await
-        .unwrap();
         let run = fixture.enqueue("Test interrupted controller output").await;
         let run_id = text(&run, "id").to_owned();
         let wait_returned = Arc::new(AtomicBool::new(false));
@@ -5447,12 +5344,6 @@ async fn active_observation_expiring_during_result_persistence_fails_without_rep
     tokio::fs::write(home.join("auth.json"), "{}")
         .await
         .unwrap();
-    tokio::fs::write(
-        fixture.service.config.data_dir.join("storage-s3.json"),
-        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-    )
-    .await
-    .unwrap();
     let run = fixture
         .enqueue("Test expiry during controller result persistence")
         .await;
@@ -5565,12 +5456,6 @@ async fn manager_shutdown_between_turn_completion_and_wait_preserves_same_attemp
         tokio::fs::write(home.join("auth.json"), "{}")
             .await
             .unwrap();
-        tokio::fs::write(
-            fixture.service.config.data_dir.join("storage-s3.json"),
-            json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-        )
-        .await
-        .unwrap();
         let run = fixture
             .enqueue("Stop only this disposable manager after turn.completed")
             .await;
@@ -5697,12 +5582,6 @@ async fn vm_chat_protocol_runs_receive_one_frame_with_plugin_instructions() {
     let server = common::serve(listener, app);
     let s = fixture.service.clone();
     claude_account(&s, 4).await;
-    tokio::fs::write(
-        s.config.data_dir.join("storage-s3.json"),
-        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-    )
-    .await
-    .unwrap();
     let agent = s
         .agent_fixture(json!({ "name": "Claude", "provider": "claude" }), None)
         .await
@@ -5925,12 +5804,6 @@ async fn manual_resume_cancels_a_staged_switch_during_worker_fencing() {
     tokio::fs::write(home.join("auth.json"), "{}")
         .await
         .unwrap();
-    tokio::fs::write(
-        s.config.data_dir.join("storage-s3.json"),
-        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-    )
-    .await
-    .unwrap();
     cairn_installation::nodes::refresh_local(&s).await.unwrap();
     s.store
         .set(
@@ -6234,12 +6107,6 @@ async fn chat_resume_selection_resolves_opencode_catalog_default_before_adapter_
     .await;
     let s = fixture.service.clone();
     let server = common::serve(listener, app);
-    tokio::fs::write(
-        s.config.data_dir.join("storage-s3.json"),
-        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-    )
-    .await
-    .unwrap();
     let account = s
         .accounts
         .connect_api_key(
@@ -6501,12 +6368,6 @@ async fn opencode_hidden_auto_resume_rejects_omission_and_selection_but_keeps_pi
     .await;
     let s = fixture.service.clone();
     let server = common::serve(listener, runner);
-    tokio::fs::write(
-        s.config.data_dir.join("storage-s3.json"),
-        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-    )
-    .await
-    .unwrap();
     s.accounts
         .connect_api_key(
             &s,
@@ -6833,12 +6694,6 @@ async fn chat_resume_selection_keeps_saved_identity_and_reaches_the_worker_plan(
     tokio::fs::write(home.join("auth.json"), "{}")
         .await
         .unwrap();
-    tokio::fs::write(
-        s.config.data_dir.join("storage-s3.json"),
-        json!({ "bucket": "fixture-storage", "endpoint": "https://127.0.0.1:1" }).to_string(),
-    )
-    .await
-    .unwrap();
     cairn_installation::nodes::refresh_local(&s).await.unwrap();
     s.store
         .set(

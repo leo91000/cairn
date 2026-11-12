@@ -2244,7 +2244,7 @@ mod capture_policy_tests {
     }
 
     #[tokio::test]
-    async fn expiration_never_queues_a_prefix_that_can_erase_the_next_environment() {
+    async fn expiration_retires_only_detached_references_without_remote_deletions() {
         let root = tempfile::tempdir().unwrap();
         let service = fixture_service(root.path()).await;
         tokio::fs::write(
@@ -2285,7 +2285,6 @@ mod capture_policy_tests {
         retire_detached_environment(&service, &run, &retired, &root.path().join("retired"))
             .await
             .unwrap();
-        let old_key = manifest_key(&run, &old);
         service
             .store
             .read(move |db| {
@@ -2295,7 +2294,7 @@ mod capture_policy_tests {
                         Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
                     })?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
-                assert_eq!(queued, vec![(old_key, false)]);
+                assert!(queued.is_empty());
                 Ok(())
             })
             .await

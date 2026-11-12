@@ -303,7 +303,7 @@ fn monitor_consolidation(volume: &Arc<Volume>) {
             if !volume.disk.sealed_pending() {
                 continue;
             }
-            let disk = Arc::downgrade(&volume.disk);
+            let disk = volume.disk.clone();
             drop(volume);
             if !consolidate(disk).await {
                 wait = CONSOLIDATION_RETRY;
@@ -314,12 +314,14 @@ fn monitor_consolidation(volume: &Arc<Volume>) {
 
 /// Run one consolidation without retaining the volume, so its release and a
 /// later reopen never wait for it. Returns false when it should be retried later.
-async fn consolidate(disk: Weak<LazyDisk>) -> bool {
-    let Ok(_permit) = CONSOLIDATIONS.acquire().await else {
-        return false;
-    };
-    let Some(disk) = disk.upgrade() else {
-        return true;
+async fn consolidate(disk: Arc<LazyDisk>) -> bool {
+    let stop = disk.consolidation_stop();
+    let _permit = tokio::select! {
+        () = stop.cancelled() => return true,
+        permit = CONSOLIDATIONS.acquire() => match permit {
+            Ok(permit) => permit,
+            Err(_) => return false,
+        }
     };
     let identity = disk.performance_identity();
     match tokio::task::spawn_blocking(move || disk.consolidate()).await {
@@ -631,7 +633,7 @@ impl Volume {
         if self.consolidates()
             && let Ok(runtime) = tokio::runtime::Handle::try_current()
         {
-            runtime.spawn(consolidate(Arc::downgrade(&self.disk)));
+            runtime.spawn(consolidate(self.disk.clone()));
         }
         Ok(generation)
     }
@@ -1338,12 +1340,11 @@ mod tests {
             "grant": "fixture",
             "policy": context["policy"],
         });
-        let disk = create(&physical.join("lazy"), &remote, &authorized)
-            .await
-            .unwrap();
-        disk.set_context(&context).unwrap();
-        drop(disk);
-        assert!(load(&physical).await.is_err());
+        assert!(
+            create(&physical.join("lazy"), &remote, &authorized)
+                .await
+                .is_err()
+        );
         let legacy = state.path().join("disks").join(crate::config::id());
         drop(
             create_prepared(&legacy.join("lazy"), &prepared_manifest(), &context)
@@ -1386,7 +1387,12 @@ mod tests {
         let status = volume.inspect().await.unwrap();
         assert!(status["dirtyBytes"].as_u64().unwrap() > 0);
         assert_eq!(status["waitingFor"], Value::Null);
-        for removed in ["backupDegraded", "backupUrgent", "backupSeconds", "maxDirtySeconds"] {
+        for removed in [
+            "backupDegraded",
+            "backupUrgent",
+            "backupSeconds",
+            "maxDirtySeconds",
+        ] {
             assert!(status.get(removed).is_none(), "{removed} is still reported");
         }
         volume.pressure.store(true, Ordering::SeqCst);
@@ -1623,92 +1629,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_remote_block_requires_resolution_and_preserves_local_work() {
-        permanent_remote_failure_preserves_local_work(axum::http::StatusCode::CONFLICT).await;
+    async fn corrupt_local_base_pauses_io_and_preserves_newer_journal_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let (volume, _, _) = controller_fixture(root.path()).await;
+        volume.disk.write_at(0, &[7; 4096]).unwrap();
+        volume.disk.seal().unwrap();
+        volume.disk.consolidate().unwrap();
+        volume.disk.write_at(0, b"local work").unwrap();
+        let cache = volume.directory.join("lazy/cache");
+        let block = std::fs::read_dir(&cache)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::write(block, [8; 4096]).unwrap();
+        assert_eq!(
+            volume.read_at(1024, &mut [0; 8]).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(volume.status().unwrap()["waitingFor"], "integrity");
+        assert!(volume.needs_pause().await.unwrap());
+        let mut saved = [0; 10];
+        volume.read_at(0, &mut saved).unwrap();
+        assert_eq!(&saved, b"local work");
+        assert_eq!(volume.status().unwrap()["waitingFor"], "integrity");
     }
 
     #[tokio::test]
-    async fn refused_remote_read_requires_resolution_and_preserves_local_work() {
-        permanent_remote_failure_preserves_local_work(axum::http::StatusCode::FAILED_DEPENDENCY)
-            .await;
-    }
-
-    async fn permanent_remote_failure_preserves_local_work(status: axum::http::StatusCode) {
-        use axum::{Router, routing::get};
-        use std::{sync::atomic::AtomicUsize, time::Duration};
-        let requests = Arc::new(AtomicUsize::new(0));
-        let count = requests.clone();
-        let server = Router::new().route(
-            "/internal/node-restore/{hash}",
-            get(move || {
-                count.fetch_add(1, Ordering::SeqCst);
-                async move { status }
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let origin = format!("http://{}/", listener.local_addr().unwrap());
-        let serving = tokio::spawn(async { axum::serve(listener, server).await.unwrap() });
+    async fn completed_turn_consolidates_after_the_volume_is_released() {
         let root = tempfile::tempdir().unwrap();
-        let directory = root.path().join("disks/conversation");
-        let policy = Policy {
-            reserve_mi_b: 64,
-            reserve_percent: 1,
-            ..Default::default()
-        };
-        let context = json!({
-            "master": origin,
-            "grant": "fixture",
-            "policy": policy
-        });
-        let source = Arc::new(
-            RemoteSource::new(
-                &context,
-                tokio::runtime::Handle::current(),
-                CancellationToken::new(),
-            )
-            .unwrap(),
-        );
-        let disk = LazyDisk::create(
-            &directory.join("lazy"),
-            &json!({
-                "version": 1,
-                "size": 4096,
-                "blockSize": 4194304,
-                "blocks": [{"offset": 0,"size": 4096,"hash": format!("b3-{}", "a".repeat(64))}]
-            }),
-            source,
-        )
-        .unwrap();
-        disk.set_context(&context).unwrap();
-        disk.write_at(0, b"unsaved work").unwrap();
-        drop(disk);
-        let volume = open(&directory).unwrap();
-        let reading = volume.clone();
-        let mut read = tokio::task::spawn_blocking(move || reading.read_at(1024, &mut [0; 8]));
-        let result = tokio::time::timeout(Duration::from_secs(2), &mut read).await;
-        // A regression must fail promptly instead of retaining a blocked test thread.
-        if result.is_err() {
-            volume.stop.cancel();
-            let _ = read.await;
-        }
-        assert_eq!(
-            result.unwrap().unwrap().unwrap_err().kind(),
-            io::ErrorKind::InvalidData
-        );
-        assert_eq!(requests.load(Ordering::SeqCst), 1);
-        assert!(!volume.source.waiting());
-        assert_eq!(volume.status().unwrap()["waitingFor"], "integrity");
-        assert!(volume.needs_pause().await.unwrap());
-        let mut saved = [0; 12];
-        volume.read_at(0, &mut saved).unwrap();
-        assert_eq!(&saved, b"unsaved work");
-        // A subsequent successful local read must not silently clear the fault.
-        assert_eq!(volume.status().unwrap()["waitingFor"], "integrity");
+        let (volume, _, _) = controller_fixture(root.path()).await;
+        volume.disk.write_at(0, b"completed").unwrap();
+        let disk = volume.disk.clone();
+        let generation = volume.seal_completed().await.unwrap();
         drop(volume);
-        let reopened = open(&directory).unwrap();
-        reopened.read_at(0, &mut saved).unwrap();
-        assert_eq!(&saved, b"unsaved work");
-        serving.abort();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while disk.sealed_pending() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(disk.accounting().unwrap()["dirtyBytes"], 0);
+        assert_eq!(
+            disk.accounting().unwrap()["published"]["generation"],
+            generation
+        );
+        let mut saved = [0; 9];
+        disk.read_at(0, &mut saved).unwrap();
+        assert_eq!(&saved, b"completed");
     }
 
     #[tokio::test]

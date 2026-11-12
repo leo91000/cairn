@@ -10,7 +10,7 @@ irreversible loss of working files before saving.
 
 Expiration removes the conversation's working environment: local run files,
 managed worktrees (including unpushed changes), tools stored in the environment, native provider
-session, node disks and published disk references. It retains the conversation,
+session, node disks and local base blocks. It retains the conversation,
 messages, activity, uploaded attachments, all published artifact versions and
 public artifact links. These remain readable without starting an environment.
 Explicit conversation deletion still removes all of them and revokes shared links.
@@ -99,9 +99,10 @@ with revocable installation grants rechecked at the database boundary.
 `list_chats` / `get_chat` expose `environmentState`, `environmentExpiredAt`,
 `environmentExpirationCause` and `environmentError`; normal chat and artifact tools keep their authorization.
 
-Remote retirement queues exact old manifest keys rather than a run-wide prefix:
-a delayed cleanup must never erase a newly created environment's publications.
-Shared immutable blocks keep their existing ownership-aware collection.
+Working disks have no remote copy. Expiration and conversation deletion remove no
+S3 object, including objects whose deletion was queued before the local-disk
+upgrade. Only local consolidation, environment expiration and explicit deletion
+release environment backing. See [local disk operations](CONVERSATION-STORAGE-OPERATIONS.md).
 
 Expiration metadata uses the existing `records` store: `environment-expirations`
 holds the detached environment while its interrupted worker finishes stopping;
@@ -140,4 +141,4 @@ The synthetic workload measures 100 inactive chats, 50 warm/fresh-connection rea
 and writes, and 20 cleanup passes. A fresh connection still has a warm OS page
 cache. Record reference/candidate SHAs, encoded bytes, median latency, CPU and host
 conditions in the PR; commit no measurement artifacts. These are local SQLite and
-filesystem measurements, not production node/S3 network latency.
+filesystem measurements, not production network latency.

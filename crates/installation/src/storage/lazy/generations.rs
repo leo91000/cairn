@@ -64,7 +64,11 @@ impl LazyDisk {
     /// stops before its next block and releases the disk; the next owner
     /// consolidates the same sealed generations again.
     pub(crate) fn yield_consolidation(&self) {
-        self.yield_requested.store(true, Ordering::Release);
+        self.consolidation_stop.cancel();
+    }
+
+    pub(crate) fn consolidation_stop(&self) -> tokio_util::sync::CancellationToken {
+        self.consolidation_stop.clone()
     }
 
     /// Fold every sealed generation into a new local base, then retire its
@@ -86,7 +90,6 @@ impl LazyDisk {
             .query_row("SELECT MAX(generation) FROM sealed", [], |row| row.get(0))
             .map_err(failure)?;
         let Some(generation) = generation else {
-            self.sealed_pending.store(false, Ordering::Release);
             return Ok(None);
         };
         let mut timing = crate::performance::Operation::new(
@@ -156,7 +159,7 @@ impl LazyDisk {
         let changed_blocks = changed.len();
         let mut retained_blocks = 0;
         let reconstruct = |index: u64| -> io::Result<_> {
-            if self.yield_requested.load(Ordering::Acquire) {
+            if self.consolidation_stop.is_cancelled() {
                 return Err(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "Journal reconstruction yielded to a new disk owner",
@@ -219,7 +222,6 @@ impl LazyDisk {
         tracing::info!(target: "cairn_performance", operation = "journal_rebuild", generation, changed_blocks, retained_blocks);
         Ok(manifest)
     }
-
 
     /// Durable completed-turn boundary, including after controller restart.
     pub fn completed(&self) -> io::Result<Option<Value>> {
@@ -361,6 +363,17 @@ impl LazyDisk {
         nonblocking: bool,
         guard: impl FnOnce() -> io::Result<G>,
     ) -> io::Result<()> {
+        let _consolidation = if nonblocking {
+            self.consolidating.try_lock().map_err(|error| match error {
+                TryLockError::WouldBlock => io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Journal consolidation is in progress",
+                ),
+                error => failure(error),
+            })?
+        } else {
+            self.consolidating.lock().map_err(failure)?
+        };
         let mut timing =
             crate::performance::Operation::new("journal_publish", backup_id, "reader_lock");
         let publication = if nonblocking {
@@ -394,8 +407,7 @@ impl LazyDisk {
             let already_published = previous
                 .as_ref()
                 .is_some_and(|p| serde_json::from_str::<Value>(p).is_ok_and(|p| p == receipt));
-            if already_published
-                && self.accounting.lock().map_err(failure)?["published"] == receipt
+            if already_published && self.accounting.lock().map_err(failure)?["published"] == receipt
             {
                 timing.finish();
                 return Ok(());
@@ -477,10 +489,10 @@ impl LazyDisk {
         #[cfg(test)]
         journal::crash_point(&self.directory, &format!("{phase}_committed"));
         let retired = journal.retire(generation);
-        self.sealed_pending
-            .store(sealed_remaining, Ordering::Release);
         self.update_accounting(&journal)?;
         self.accounting.lock().map_err(failure)?["published"] = receipt;
+        self.sealed_pending
+            .store(sealed_remaining, Ordering::Release);
         drop(base);
         drop(db);
         drop(journal);
@@ -508,6 +520,8 @@ impl LazyDisk {
                 tracing::warn!(target: "cairn_performance", operation = "block_retire_failed", id = Self::identity(&self.directory), kind = ?error.kind());
             }
         }
+        #[cfg(test)]
+        journal::crash_point(&self.directory, &format!("{phase}_blocks_retired"));
         timing.finish();
         Ok(())
     }

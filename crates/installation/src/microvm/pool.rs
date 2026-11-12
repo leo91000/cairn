@@ -696,12 +696,7 @@ impl Pool {
                 // Evicting a retained VM drains its backend and ownership; its
                 // durable journal stays on this node for the next attempt.
                 let index = exited.unwrap_or(0);
-                (
-                    slots.retained.remove(index),
-                    reason,
-                    bytes,
-                    count,
-                )
+                (slots.retained.remove(index), reason, bytes, count)
             };
             let Some(mut idle) = idle else { return Ok(()) };
             tracing::info!(target: "cairn_performance", operation = "vm_retention", event = "evicted", run_id = crate::performance::identity(&idle.run), reason, pressure = pressure.unwrap_or("none"), node_memory_mi_b = memory_mi_b, budget_memory_mi_b = budget.limits.memory_mi_b, retained_bytes, retained_count);

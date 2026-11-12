@@ -1,52 +1,79 @@
 # Conversation storage operations
 
-## Current disk publication
+Conversation working disks live only on their execution node. The manager needs
+no S3 bucket or credentials to launch a conversation. History, uploaded attachments
+and published artifacts remain on the manager and have their own retention.
+Losing or revoking a node loses the working files of its environments. Push commits
+and export files that must survive that loss; machine backups are the operator's
+responsibility.
 
-Conversation disks synchronize to S3 in the background. Acknowledged writes are durable in the local journal; the default remote publication target is 60 seconds. After five minutes of unsynchronized work the execution reports overdue synchronization and continues while its local disk is safe. Integrity, free-space and unavailable cold-read protections remain active. This is not synchronous remote durability: losing the node can lose its unpublished work. See [direct storage transfers](DIRECT-STORAGE-TRANSFERS.md).
+## Local journal and consolidation
 
-Configure `STORAGE_S3_BUCKET`, optionally `STORAGE_S3_ENDPOINT` (HTTPS) and `STORAGE_S3_REGION`, or a server-owned `DATA_DIR/storage-s3.json` with `bucket`, `endpoint`, and `region`. Credentials remain server-side via AWS configuration or a workload role. `AWS_*`, `STORAGE_S3_*` and legacy `ARCHIVE_*` variables are removed from agent subprocesses.
+Both VM and native environments use a durable segmented journal and immutable
+local base blocks under `lazy/cache/<hash>`. Despite the directory name, these
+blocks are the disk itself: Cairn never evicts them to make room. A missing block
+prevents mounting the disk; a corrupt block fails authentication when read. No
+remote download replaces missing or damaged data.
 
-Use a private bucket without lifecycle rules or Object Lock. Current disk blocks must remain immediately readable and deletable. S3-compatible providers without public access blocks are checked through their ACL and bucket policy. Bucket inspection and object read/write/delete permissions are required, including version and multipart deletion. The optional server-only `awsBinary` configuration chooses the CLI used for bucket administration and purge; block reads and verified writes use the persistent SDK client.
+Completed turns seal a durable generation after filesystem synchronization. The
+node consolidates it in the background, outside guest I/O and turn completion.
+While the environment is mounted, a five-second check also seals a crash-consistent
+prefix once the journal reaches 1 GiB. Two background consolidations can run on a
+node at once. Space failures retry after a minute; they never discard the journal.
+Prepared environments remain journal-backed until assigned to a conversation.
 
-Only the latest published state is retained. Mounted disks and unfinished publication acknowledgements pin their required generations until they can safely release them. These references protect live reads; they are not restore history. Cleanup runs after publication and periodically for idle disks. Missing or damaged referenced manifests prevent destructive collection.
+Consolidation reconstructs changed 4 MiB blocks while newer writes continue in a
+new generation. Each new block file is synchronized, followed by its directory,
+before a SQLite transaction replaces the base and removes the old segment
+references. Segment files and obsolete block files are removed afterwards. A
+process crash before the transaction retains the previous base and journal; after
+it, recovery removes orphan segments, and a later consolidation retires obsolete
+block files. Newer writes remain owned throughout. This establishes process-crash
+recovery, not a physical power-loss qualification.
 
-## Provider encryption and transfer concurrency
+The journal's `dirtyBytes` measures unconsolidated writes, not remote backup lag.
+It returns to zero when all writes have been consolidated. Stopping a retained VM
+releases RAM while preserving its disk, irrespective of this counter. Disk deletion
+after expiration or explicit conversation deletion likewise needs no publication.
 
-`STORAGE_S3_SERVER_SIDE_ENCRYPTION=none` omits the S3 server-side encryption request
-header. `AES256` explicitly requests SSE-S3; other nonempty values are refused.
-When unset, R2 endpoints omit this unsupported header and other S3 providers keep
-the existing AES256 request. This setting does not disable application AES-256-GCM
-encryption of disk blocks or HTTPS transport. R2 encrypts objects at rest itself.
+## Capacity and integrity
 
-Recovery transfers share sixteen upload slots and sixteen read slots across the
-manager. The guest virtqueue also batches independent reads through sixteen shared
-workers, bounded to 8 MiB per batch. Single requests stay on the existing direct
-path; reads drain before a following write or flush. Each PUT includes a `Content-MD5` transfer checksum and holds its upload slot until
-the provider acknowledges the checksum-validated upload. A rejected or failed PUT
-keeps the local publication pending. Uploads do not download the object again;
-recovery reads retain their existing content-hash and authenticated-decryption checks.
-The provider must enforce `Content-MD5`; compatibility checks and periodic restore
-tests should include intentionally incorrect checksums and complete reads.
-This bounds memory while allowing independent block transfers to overlap; an
-individual missing block still waits for its own transfer. Sealed journals also
-reconstruct up to sixteen independent blocks together, preserving generation
-fences and the existing foreground cache admission order. Direct local publications
-use one journal reader for the full stream; remote requests remain bounded to
-32 MiB to fit reverse-proxy deadlines. A local cold journal has up to 30 minutes
-to initialize, with the existing 120-second idle deadline for every streamed block. R2 requires a private
-dedicated bucket without public domains, locks or enabled lifecycle rules, with
-`STORAGE_S3_PRIVATE_BUCKET_CONFIRMED=true` after those provider controls are checked.
+The node budget and physical free-space reserve cover the complete local
+environment, including journal, base blocks and managed temporary files. Native
+automatic growth stays bounded by the installation's per-task allowance. Old
+sealed generations are consolidated before growth changes the disk geometry.
+Consolidation needs temporary room for replacement blocks before retiring old
+segments, and may use half the configured reserve; ordinary guest writes preserve
+the full reserve. No other environment is evicted for admission or growth.
 
-## Environment expiration and deletion
+A full node waits for space. Consolidating overwritten journal history, expiring
+environments and deleting conversations are the ways Cairn releases disk backing.
+Disabling automatic expiration means an operator must arrange explicit cleanup.
+Integrity and space protection continue to stop unsafe I/O; synchronization errors
+and backup-lag states no longer describe local disks.
 
-After the configured inactivity delay (7 days by default), only the working environment expires. History, uploaded attachments, published artifacts and shared artifact links remain available. A new message recreates an environment and warns the agent about the lost working files. See [conversation retention](CONVERSATION-RETENTION.md).
+## Expiration, deletion and upgrades
 
-Conversation archival, archive restoration and cold transitions have been removed. Before deploying this change, finish the owner-authorized deletion of existing archived conversations and their objects using the prior release or an explicitly scoped maintenance procedure. Never empty a bucket referenced by active on-demand disks.
+See [conversation retention](CONVERSATION-RETENTION.md) for inactivity expiration.
+Expiration detaches the old environment immediately and removes its disk in the
+background. History, attachments and artifacts remain. Cleanup on an unavailable
+node retries; a revoked node's disk is forgotten. The next environment on the same
+node waits for the old writer to stop and its disk to be removed.
 
-Deleting a conversation immediately revokes public links, cancels pending work and removes the ability to restore it. There is no 30-day retention window for new deletions. Deletion wakes the cleanup worker immediately; it also checks every 15 seconds and removes one eligible conversation per pass after its agent stops: conversation files, disk instances, S3 publications and database records. Unavailable nodes and other failures remain visible and retryable. Existing trash keeps its original recovery deadline; this change does not accelerate previously promised retention. See [ADR-0041](adr/0041-immediate-conversation-deletion.md).
+Deleting a conversation remains irreversible and revokes its artifact links. Cairn
+removes the manager's conversation data and reachable node disks, but never deletes
+remote disk objects, including previously queued deletions. The publication,
+restore and remote collection workers no longer run.
 
-## Recovery prerequisites
+Existing environments that depend on S3, and environments on already revoked
+nodes, expire at the local-disk upgrade. Never-published environments on nodes that
+have not been revoked remain usable. Pending moves, recoveries and backend
+migrations are cancelled. No blocks are downloaded for migration.
 
-Protect the application database and `DATA_DIR/mcp-encryption-key` separately. Remote disk objects alone cannot recreate the application or decrypt its data. The key is never uploaded alongside disk blocks. Keep configuration and persisted object keys stable while disks reference them.
-
-See [ADR-0008](adr/0008-current-disk-publication-without-archives.md).
+The upgrade leaves the bucket, credentials, `storage-s3.json`, `STORAGE_S3_*` and
+Garage data untouched. Operators may remove them once no rollback is contemplated.
+A rollback requires an operator database backup taken **before** the upgrade and
+the matching bucket; the supervisor does not take that backup. Restored files only
+reach their last published generation. Continue to protect the application database
+and `DATA_DIR/mcp-encryption-key` separately. Agent and engine subprocesses continue
+to exclude `AWS_*`, `STORAGE_S3_*` and `ARCHIVE_*` variables.
