@@ -951,6 +951,7 @@ pub(crate) fn parse_edit(input: Value) -> Result<Value> {
     Ok(values)
 }
 
+#[cfg(test)]
 pub(crate) fn edit(
     db: &Db<'_>,
     chat_id: &str,
@@ -984,6 +985,12 @@ pub(crate) fn edit_as(
         return Err(Error::conflict("This message is already being sent."));
     }
     let Some(mut values) = values else {
+        // Withdrawing a queued message is an entry of whoever withdraws it.
+        crate::conversation_writers::record_entry(
+            db,
+            chat_id,
+            &crate::conversation_writers::EntryWriter::of(origin),
+        )?;
         return withdraw(db, chat_id, &current);
     };
     if current.question_id.is_some() {

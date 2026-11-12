@@ -757,6 +757,10 @@ where
 {
     actor.require_scope("manage")?;
     actor.recheck().await?;
+    let _authors = match &actor {
+        Actor::Installation(..) => Some(s.missions.authors.lock().await),
+        _ => None,
+    };
     let eligibility = match &actor {
         Actor::Installation(..) if agent == AgentChange::Refused => {
             return Err(Error::forbidden(
@@ -969,6 +973,10 @@ pub(crate) async fn duplicate(
 pub(crate) async fn delete(s: &Service, input: HookRuleInput, actor: Actor) -> Result<()> {
     actor.require_scope("manage")?;
     actor.recheck().await?;
+    let _authors = match &actor {
+        Actor::Installation(..) => Some(s.missions.authors.lock().await),
+        _ => None,
+    };
     let author = match &actor {
         Actor::Installation(bearer, _) => Some(Author::Agent(
             bearer.clone(),
@@ -1368,10 +1376,12 @@ pub(crate) async fn install_template(
             for (index, (id, definition)) in ids.iter().zip(definitions).enumerate() {
                 fresh_identity(db, id)?;
                 let mut row = new_row(id.clone(), &writer, !input.enabled);
-                save_version(db, &mut row, definition.clone(), &writer, &known).map_err(|mut error| {
-                    error.message = format!("Rule {}: {}", index + 1, error.message);
-                    error
-                })?;
+                save_version(db, &mut row, definition.clone(), &writer, &known).map_err(
+                    |mut error| {
+                        error.message = format!("Rule {}: {}", index + 1, error.message);
+                        error
+                    },
+                )?;
                 warn_open(db, &author, &writer, id, &definition)?;
             }
             if retry_requested {

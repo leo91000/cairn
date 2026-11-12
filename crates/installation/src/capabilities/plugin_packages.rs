@@ -514,6 +514,7 @@ impl PluginPackageOperation {
         member: bool,
     ) -> Result<Value> {
         let owner = matches!(context, ResumeContext::Human(_)) && !member;
+        let writer = crate::conversation_writers::EntryWriter::of_context(&context);
         let human_account = match &context {
             ResumeContext::Human(account) => Some(account.clone()),
             _ => None,
@@ -683,6 +684,7 @@ impl PluginPackageOperation {
                 }
                 let service = s.clone();
                 let auth = authority.clone();
+                let writer = writer.clone();
                 s.plugins
                     .operations
                     .start(s.clone(), operations::Audience::Owner, async move {
@@ -692,6 +694,7 @@ impl PluginPackageOperation {
                             &input.version,
                             &input.digest,
                             auth,
+                            writer,
                         )
                         .await?;
                         Ok(PluginOperationResult::Package {
@@ -703,6 +706,7 @@ impl PluginPackageOperation {
                 let input: ActivatePluginPackageInput = decode(input)?;
                 let service = s.clone();
                 let auth = authority.clone();
+                let writer = writer.clone();
                 s.plugins.operations.start(
                     s.clone(),
                     operations::Audience::from_bearer(authority.bearer.as_deref(), owner),
@@ -712,6 +716,7 @@ impl PluginPackageOperation {
                             &input.plugin_id,
                             &input.version,
                             auth,
+                            writer,
                         )
                         .await?;
                         Ok(PluginOperationResult::Package {

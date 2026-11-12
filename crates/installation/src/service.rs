@@ -274,8 +274,15 @@ impl Service {
             crate::coding_agent_configuration::validate_profile(db, &agent)?;
             crate::agent_grants::validate(db, &agent, &accepts_agents)?;
             let before = current.as_ref().map(|profile| profile.settings.instructions.clone()).unwrap_or_default();
+            let plugin_instruction_digests =
+                crate::conversation_writers::plugin_instruction_digests(db)?;
             let agent = crate::agent_grants::save_profile(db, agent, owner_review, &review.native_node_reviews)?;
             crate::conversation_writers::record_instructions(db, &agent.id.to_string(), &before, &agent.settings.instructions, &writer)?;
+            crate::conversation_writers::record_plugin_instruction_changes(
+                db,
+                &plugin_instruction_digests,
+                &writer,
+            )?;
             for connection in &review.reapprove_delegations {
                 crate::plugins::connections::reapprove(db, connection, &agent, &origin)?;
             }

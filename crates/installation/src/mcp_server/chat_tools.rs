@@ -639,7 +639,7 @@ pub(crate) async fn invoke(
                     let message = chats::parse_edit(message)?;
                     chats::edit_as(db, id, text(&args, "messageId"), Some(message), &origin)
                 }
-                "delete_chat_message" => chats::edit(db, id, text(&args, "messageId"), None),
+                "delete_chat_message" => chats::edit_as(db, id, text(&args, "messageId"), None, &origin),
                 "set_chat_paused" => chats::pause_in(db, id, args["paused"] == true),
                 "rename_chat" => {
                     let title = text(&args, "title").trim();

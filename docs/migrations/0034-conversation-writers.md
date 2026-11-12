@@ -7,7 +7,8 @@ règles » and « Sans migration »).
 One immediate transaction creates five empty tables and advances `user_version`:
 
 - `conversation_writers`: who created each conversation (a person, or no one), its
-  agent, the plugin instructions it followed, and when another writer first reached it.
+  agent, the current person's plugin-instruction baseline, and the first other writer
+  to reach it, including the person's account or the reaching rule's identifier.
 - `conversation_entry_writers`: who wrote each message as it is stored now, with a
   digest of its content: messages, steers, answers and edits.
 - `conversation_turn_entries`: the message that started each turn and the first launch

@@ -372,6 +372,7 @@ pub(crate) async fn replace(
     input: cairn_contracts::ReplaceAgentPluginGrantsInput,
     authority: crate::capabilities::plugin_packages::Authority,
     reduce_only: bool,
+    writer: crate::conversation_writers::EntryWriter,
 ) -> Result<AgentPluginGrants> {
     use std::collections::BTreeSet;
     let id = input.agent_id.to_string();
@@ -574,6 +575,16 @@ pub(crate) async fn replace(
         }
     }
     authority.recheck(s).await?;
+    // The person of an eligible conversation, observed before publication is held.
+    let bearer = authority.bearer.clone();
+    let authors = match &bearer {
+        Some(_) if reduce_only => Some(s.missions.authors.lock().await),
+        _ => None,
+    };
+    let eligibility = match &authors {
+        Some(_) => Some(crate::conversation_writers::Eligibility::observe(s).await?),
+        None => None,
+    };
     let _publication = s.plugins.package_publication.lock().await;
     for (_, package) in packages.values() {
         let Some(package) = package else {
@@ -599,14 +610,11 @@ pub(crate) async fn replace(
         })?;
         reduction.recheck(s, package, instance, &authority).await?;
     }
-    let bearer = authority.bearer.clone();
-    let eligibility = match &bearer {
-        Some(_) if reduce_only => Some(crate::conversation_writers::Eligibility::observe(s).await?),
-        _ => None,
-    };
     s.store
         .transaction(move |db| {
             authority.authorize(db)?;
+            let plugin_instruction_digests =
+                crate::conversation_writers::plugin_instruction_digests(db)?;
             let before = db.agent_plugin_grants(&id)?;
 
             if before.revision != input.revision {
@@ -657,6 +665,12 @@ pub(crate) async fn replace(
                     }
                 }
             }
+
+            crate::conversation_writers::record_plugin_instruction_changes(
+                db,
+                &plugin_instruction_digests,
+                &writer,
+            )?;
 
             db.0.execute("UPDATE plugin_credential_suppliers SET instance_id=NULL WHERE agent_id=?", [&id])?;
             for grant in &input.grants {
@@ -1087,7 +1101,16 @@ mod migration_tests {
             });
         let publication = f.s.plugins.package_publication.lock().await;
         let service = f.s.clone();
-        let change = tokio::spawn(async move { replace(&service, input, authority, true).await });
+        let change = tokio::spawn(async move {
+            replace(
+                &service,
+                input,
+                authority,
+                true,
+                crate::conversation_writers::EntryWriter::Unknown,
+            )
+            .await
+        });
         tokio::time::timeout(std::time::Duration::from_secs(10), checked.notified())
             .await
             .unwrap();
@@ -1178,7 +1201,16 @@ mod migration_tests {
         });
         let publication = f.s.plugins.package_publication.lock().await;
         let service = f.s.clone();
-        let change = tokio::spawn(async move { replace(&service, input, authority, true).await });
+        let change = tokio::spawn(async move {
+            replace(
+                &service,
+                input,
+                authority,
+                true,
+                crate::conversation_writers::EntryWriter::Unknown,
+            )
+            .await
+        });
         tokio::time::timeout(std::time::Duration::from_secs(10), checked.notified())
             .await
             .unwrap();
@@ -1301,6 +1333,7 @@ mod migration_tests {
                     "manage",
                 ),
                 false,
+                crate::conversation_writers::EntryWriter::Unknown,
             )
             .await
         });

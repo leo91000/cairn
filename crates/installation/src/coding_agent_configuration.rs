@@ -1009,10 +1009,27 @@ pub(crate) fn view(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn edit(
     db: &Db<'_>,
     input: &EditCodingAgentConfigurationInput,
     save: bool,
+) -> Result<CodingAgentConfiguration> {
+    edit_by(
+        db,
+        input,
+        save,
+        &crate::conversation_writers::EntryWriter::Unknown,
+    )
+}
+
+/// Edits the configuration, recording `writer` as the author of changed agent
+/// instructions.
+pub(crate) fn edit_by(
+    db: &Db<'_>,
+    input: &EditCodingAgentConfigurationInput,
+    save: bool,
+    writer: &crate::conversation_writers::EntryWriter,
 ) -> Result<CodingAgentConfiguration> {
     if input.changes.len() > 200
         || input.inherit_paths.len() > 1000
@@ -1199,7 +1216,19 @@ pub(crate) fn edit(
     }
     capture_legacy_defaults(db, provider, input.agent_id)?;
     if let Some(agent) = changed_agent {
-        crate::agent_grants::save_profile(db, agent, false, &[])?;
+        let id = agent.id.to_string();
+        let before = db
+            .agent(&id)?
+            .map(|profile| profile.settings.instructions)
+            .unwrap_or_default();
+        let saved = crate::agent_grants::save_profile(db, agent, false, &[])?;
+        crate::conversation_writers::record_instructions(
+            db,
+            &id,
+            &before,
+            &saved.settings.instructions,
+            writer,
+        )?;
     }
     let scope = input.agent_id.map(|id| id.to_string());
     if mapped_profile {

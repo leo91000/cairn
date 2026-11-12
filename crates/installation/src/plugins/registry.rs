@@ -535,6 +535,7 @@ async fn set_active(
     version: &str,
     reviewed_digest: Option<&str>,
     authority: crate::capabilities::plugin_packages::Authority,
+    writer: crate::conversation_writers::EntryWriter,
 ) -> Result<PackageVersion> {
     if builtin(id).is_some() {
         return Err(Error::bad("Built-in plugins are updated with Cairn."));
@@ -573,6 +574,8 @@ async fn set_active(
     s.store
         .transaction(move |db| {
             authority.authorize(db)?;
+            let plugin_instruction_digests =
+                crate::conversation_writers::plugin_instruction_digests(db)?;
             let current = db.plugin_package(&plugin)?;
             if current.revision != expected.revision {
                 return Err(Error::conflict(
@@ -583,6 +586,11 @@ async fn set_active(
                 return Err(Error::forbidden("This version is no longer approved."));
             }
             db.activate_plugin_version(&plugin, &version, &digest, approve)?;
+            crate::conversation_writers::record_plugin_instruction_changes(
+                db,
+                &plugin_instruction_digests,
+                &writer,
+            )?;
             if !has_run_credentials {
                 db.clear_plugin_credential_suppliers(&plugin)?;
             }
@@ -610,6 +618,7 @@ pub async fn approve(s: &Service, id: &str, version: &str, digest: &str) -> Resu
         version,
         Some(digest),
         crate::capabilities::plugin_packages::Authority::default(),
+        crate::conversation_writers::EntryWriter::Unknown,
     )
     .await
 }
@@ -620,8 +629,9 @@ pub(crate) async fn approve_authorized(
     version: &str,
     digest: &str,
     authority: crate::capabilities::plugin_packages::Authority,
+    writer: crate::conversation_writers::EntryWriter,
 ) -> Result<PackageVersion> {
-    set_active(s, id, version, Some(digest), authority).await
+    set_active(s, id, version, Some(digest), authority, writer).await
 }
 
 /// Switches to another previously approved version, e.g. to roll back an update.
@@ -632,6 +642,7 @@ pub async fn activate(s: &Service, id: &str, version: &str) -> Result<PackageVer
         version,
         None,
         crate::capabilities::plugin_packages::Authority::default(),
+        crate::conversation_writers::EntryWriter::Unknown,
     )
     .await
 }
@@ -641,8 +652,9 @@ pub(crate) async fn activate_authorized(
     id: &str,
     version: &str,
     authority: crate::capabilities::plugin_packages::Authority,
+    writer: crate::conversation_writers::EntryWriter,
 ) -> Result<PackageVersion> {
-    set_active(s, id, version, None, authority).await
+    set_active(s, id, version, None, authority, writer).await
 }
 
 pub async fn uninstall(s: &Service, id: &str) -> Result<Value> {

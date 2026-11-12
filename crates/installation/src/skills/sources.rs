@@ -372,6 +372,7 @@ pub(crate) async fn import(
     input: &cairn_contracts::ImportSkillInput,
     project: Option<&Path>,
     authority: Authority,
+    writer: &crate::conversation_writers::EntryWriter,
 ) -> Result<Value> {
     let cairn_contracts::ImportSkillInput::Plugin {
         plugin_id,
@@ -459,6 +460,7 @@ pub(crate) async fn import(
     };
     let _mutation = s.skills.mutations.lock().await;
     origin.authority.recheck(s).await?;
+    crate::conversation_writers::record_skill_intent(s, scope, &skill, writer).await?;
     let source_scope = scope.to_owned();
     let source_name = skill.clone();
     let auth = origin.authority.clone();

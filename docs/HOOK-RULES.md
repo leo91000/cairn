@@ -318,7 +318,6 @@ as written by the importer). Every message must carry an attestation of the pers
 matching its current content: a write that skipped the record makes the conversation
 ineligible. Conversations, instructions and skills written before this record never
 qualify.
-
 Reading another conversation, run or task through `cairn_installation` (`list_chats`,
 `get_chat`, `read_chat_content`, `list_runs`, `get_run`, `read_run_content`, `get_task`)
 and delegating a task, whose report the conversation reads, count as agent entries.
