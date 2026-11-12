@@ -37,7 +37,7 @@ on:
         type: string
         default: ''
       backend-qualification:
-        description: Run physical backend migration in a separate job after the backend suite
+        description: Run confirmed backend change regression in a separate job after the backend suite
         type: choice
         options: [none, backend-migration]
         default: none
@@ -478,16 +478,14 @@ jobs:
       - name: Install native test dependencies
         timeout-minutes: 10
         run: node scripts/install-native-ci-dependencies.mjs
-      - name: Qualify physical backend migration from this commit
+      - name: Qualify confirmed backend changes from this commit
         run: |
           set -o pipefail
-          python3 -m venv .node-s3-test
-          .node-s3-test/bin/pip install 'moto[server]==5.2.3' awscli blake3==1.0.8
-          PATH="$PWD/.node-s3-test/bin:$PATH" .node-s3-test/bin/python scripts/tests/node_s3_test.py --case backend_migration_keeps_chat_and_files_both_directions_and_preserves_source_on_failure 2>&1 | tee backend-migration-tests.log
+          pnpm test:backend -p cairn-installation --test native_nodes both_backend_change_routes_require_file_loss_confirmation_and_expire_without_conversion -- --exact 2>&1 | tee backend-migration-tests.log
           python3 - <<'PYTHON'
           import pathlib, re
           result = pathlib.Path('backend-migration-tests.log').read_text()
-          assert re.search(r'^test result: ok\. 1 passed; 0 failed; 0 ignored;', result, re.MULTILINE), 'Expected exactly one passing physical backend migration test'
+          assert re.search(r'^test result: ok\. 1 passed; 0 failed; 0 ignored;', result, re.MULTILINE), 'Expected exactly one passing confirmed backend change test'
           PYTHON
   node-checks:
     services:

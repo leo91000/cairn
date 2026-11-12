@@ -1079,7 +1079,13 @@ async fn expiration_restores_a_live_missions_settled_wait_but_explicit_stop_canc
         assert_eq!(change.retirements().await.len(), 1);
         change.owner.service.retire_environments().await.unwrap();
         let attempt = id();
-        placement::reserve(&change.owner.service, &queued, &attempt)
+        assert!(
+            placement::reserve(&change.owner.service, &queued, &id())
+                .await
+                .is_err()
+        );
+        let current = change.owner.run(&change.run).await;
+        placement::reserve(&change.owner.service, &current, &attempt)
             .await
             .unwrap();
         assert!(change.owner.run(&change.run).await["environmentState"].is_null());

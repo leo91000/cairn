@@ -22,6 +22,17 @@ use serde_json::{Value, json};
 pub const WARNING: &str = "This conversation's working files will be lost. Its history, attachments and artifacts are kept.";
 pub const NODE_WARNING: &str = "The working files of this node's conversations will be lost. Their history, attachments and artifacts are kept.";
 
+/// A fresh placement choice invalidates any preparation that captured its predecessor.
+pub(crate) fn require_admission_revision(run: &Value, expected: &Value) -> Result<()> {
+    if run["environmentAdmissionRevision"] != *expected {
+        return Err(Error::unavailable(format!(
+            "{} can admit the previous placement selection: it changed during preparation. Retrying the current destination.",
+            crate::nodes::placement::NO_CAPACITY
+        )));
+    }
+    Ok(())
+}
+
 /// Expirations waiting for the previous execution to stop, keyed by run.
 const PENDING: &str = "environment-expirations";
 /// Detached environments whose physical cleanup has not finished.
@@ -247,6 +258,7 @@ pub(crate) fn request_in(
             "environmentState": "expired",
             "environmentExpiredAt": expired_at,
             "environmentExpirationCause": expiration.cause,
+            "environmentAdmissionRevision": id(),
         }),
     )?;
     db.revoke_mcp_run(run_id)?;
@@ -790,5 +802,59 @@ mod tests {
             assert_eq!(db.list(RETIREMENTS)?.len(), 1);
             Ok(())
         }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn late_engine_session_events_keep_history_without_reattaching_the_expired_environment() {
+        use crate::worker::checkpoint::{Checkpoint, EventChanges};
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(root.path()).unwrap();
+        let run = id();
+        let saved = RunCheckpoint {
+            completed: Some(false),
+            ..Default::default()
+        };
+        let (owner, checkpoint) = (run.clone(), saved.clone());
+        store.transaction(move |db| {
+            db.add_run_fixture(&json!({ "id": owner, "taskId": "chat", "trigger": "chat", "status": "running", "createdAt": 0, "sessionId": "old-session" }), None)?;
+            db.save_conversation_boundary(&json!({ "id": "chat", "runId": owner }))?;
+            checkpoint.store_in(db, &owner)?;
+            request_in(db, &owner, &Expiration::new(Cause::NodeChange), true)
+        }).await.unwrap();
+        let checkpoint = Checkpoint::new(store.clone(), run.clone(), saved);
+        checkpoint
+            .record_event(
+                EventKind::Status,
+                "Late engine metadata".into(),
+                json!({}),
+                EventChanges {
+                    run: Some(crate::runs::RunChanges {
+                        session_id: Some(Some("late-session".into())),
+                        resume_available: Some(true),
+                        ..Default::default()
+                    }),
+                    completed: false,
+                    failure: None,
+                    progress_complete: true,
+                    last_message: None,
+                },
+            )
+            .await
+            .unwrap();
+        let current = store.run(&run).await.unwrap();
+        assert!(current["sessionId"].is_null());
+        assert_eq!(current["resumeAvailable"], false);
+        store
+            .read(move |db| {
+                let recorded: i64 = db.0.query_row(
+                    "SELECT COUNT(*) FROM events WHERE run_id=? AND text='Late engine metadata'",
+                    [run],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(recorded, 1);
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 }

@@ -4885,6 +4885,54 @@ async fn both_backend_change_routes_require_file_loss_confirmation_and_expire_wi
                 .unwrap();
             assert!(checkpoint["prepared"].is_null());
             assert!(checkpoint["runnerId"].is_null());
+            let fresh = json!({ "completed": false, "launched": false, "turnPending": true, "remainingMs": 123000 });
+            common::set_checkpoint(&f.service.store, &run_id, fresh.clone()).await;
+            f.service
+                .store
+                .change_run(
+                    &run_id,
+                    cairn_installation::runs::RunChanges {
+                        status: Some(cairn_contracts::RunStatus::Queued),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let stale = f.service.store.run(&run_id).await.unwrap();
+            let (status, replaced) = f
+                .owner_call(
+                    "POST",
+                    &format!("/api/nodes/placement/{run_id}/backend-migration"),
+                    json!({ "nodeId": source["id"], "backend": from, "confirm": true }),
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{replaced}");
+            assert_eq!(
+                f.service
+                    .store
+                    .checkpoint_boundary(&run_id)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                fresh
+            );
+            let current = f.service.store.run(&run_id).await.unwrap();
+            assert_eq!(current["status"], "queued");
+            assert_eq!(current["targetNodeId"], source["id"]);
+            assert_eq!(current["snapshot"]["agent"]["access"]["backend"], from);
+            assert_ne!(
+                current["environmentAdmissionRevision"],
+                stale["environmentAdmissionRevision"]
+            );
+            f.service.retire_environments().await.unwrap();
+            let error = placement::reserve(&f.service, &stale, &id())
+                .await
+                .unwrap_err();
+            assert!(placement::is_no_capacity(&error), "{error:?}");
+            assert!(
+                error.message.contains("changed during preparation"),
+                "{error:?}"
+            );
             assert_eq!(
                 f.service
                     .conversation_boundary(text(&chat, "id"))

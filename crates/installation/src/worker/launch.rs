@@ -77,6 +77,7 @@ async fn execute_inner(
         provider: Provider::of_run(run)?,
         directory: s.config.data_dir.join("runs").join(&id),
         id,
+        admission_revision: run["environmentAdmissionRevision"].clone(),
         run,
         account: &mut admission.account,
         preparation: admission.preparation.take(),
@@ -137,6 +138,7 @@ struct Execution<'a> {
     s: &'a Arc<Service>,
     id: String,
     run: &'a mut Value,
+    admission_revision: Value,
     account: &'a mut Option<Lease>,
     preparation: Option<tokio::sync::OwnedMutexGuard<()>>,
     cancel: &'a CancellationToken,
@@ -228,11 +230,15 @@ impl Execution<'_> {
     /// the concrete backend shares the atomic admission transaction, so retries
     /// cannot turn an already-created environment into another execution kind.
     async fn resolve_backend(&mut self) -> Result<()> {
-        if policy(&self.run["snapshot"]["agent"])["backend"] != "auto" {
+        let automatic = policy(&self.run["snapshot"]["agent"])["backend"] == "auto";
+        let fresh_environment = self.run["environmentState"] == "expired";
+        if !automatic && !fresh_environment {
             return Ok(());
         }
         let runner = crate::config::id();
-        let placement = placement::reserve(self.s, self.run, &runner).await?;
+        let mut admission = self.run.clone();
+        admission["environmentAdmissionRevision"] = self.admission_revision.clone();
+        let placement = placement::reserve(self.s, &admission, &runner).await?;
         *self.run = self.s.store.run(&self.id).await?;
         if !execution::uses_vm(self.run, &self.s.config) {
             // Development's shared process has no controller or retained node disk.
@@ -341,14 +347,23 @@ impl Execution<'_> {
         let current_policy = policy(&current);
         self.run["snapshot"]["agent"]["access"]["nodes"] = current_policy["nodes"].clone();
         let snapshot = serde_json::from_value(self.run["snapshot"].clone())?;
+        let revision = self.admission_revision.clone();
+        let id = self.id.clone();
         s.store
-            .change_run(
-                &self.id,
-                crate::runs::RunChanges {
-                    snapshot: Some(snapshot),
-                    ..Default::default()
-                },
-            )
+            .transaction(move |db| {
+                let current = db
+                    .run(&id)?
+                    .ok_or_else(|| Error::not_found("Run not found"))?;
+                crate::environment_expiration::require_admission_revision(&current, &revision)?;
+                db.change_run(
+                    &id,
+                    crate::runs::RunChanges {
+                        snapshot: Some(snapshot),
+                        ..Default::default()
+                    },
+                )?;
+                Ok(())
+            })
             .await?;
         Ok(())
     }
@@ -375,7 +390,18 @@ impl Execution<'_> {
             ),
             ..Default::default()
         };
-        s.store.change_run(&self.id, patch).await?;
+        let revision = self.admission_revision.clone();
+        let id = self.id.clone();
+        s.store
+            .transaction(move |db| {
+                let current = db
+                    .run(&id)?
+                    .ok_or_else(|| Error::not_found("Run not found"))?;
+                crate::environment_expiration::require_admission_revision(&current, &revision)?;
+                db.change_run(&id, patch)?;
+                Ok(())
+            })
+            .await?;
         *self.run = s.store.run(&self.id).await?;
         timing.next("environment");
         let mut env = self
@@ -911,8 +937,9 @@ impl Execution<'_> {
             Some(reservation) => reservation,
             None => {
                 let runner = crate::config::id();
-                let placement =
-                    placement::reserve(s, &s.store.run(&self.id).await?, &runner).await?;
+                let mut admission = s.store.run(&self.id).await?;
+                admission["environmentAdmissionRevision"] = self.admission_revision.clone();
+                let placement = placement::reserve(s, &admission, &runner).await?;
                 (runner, placement)
             }
         };
@@ -1636,6 +1663,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_stale_preparation_cannot_overwrite_a_new_backend_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let (service, mut run) = preparation_fixture(root.path()).await;
+        let id = text(&run, "id").to_owned();
+        run["environmentAdmissionRevision"] = "old-selection".into();
+        let mut snapshot = run["snapshot"].clone();
+        snapshot["agent"]["access"]["backend"] = "native".into();
+        service.store.change_run(&id, crate::runs::RunChanges {
+            snapshot: Some(serde_json::from_value(snapshot.clone()).unwrap()),
+            boundary: Some(json!({ "environmentState": "expired", "environmentAdmissionRevision": "new-selection" })),
+            ..Default::default()
+        }).await.unwrap();
+        let checkpoint = Checkpoint::new(
+            service.store.clone(),
+            id.clone(),
+            RunCheckpoint::fresh(Some(60_000)),
+        );
+        let cancel = CancellationToken::new();
+        let mut account = None;
+        let sensitive = History::default();
+        let mut execution = Execution {
+            s: &service,
+            id: id.clone(),
+            admission_revision: "old-selection".into(),
+            run: &mut run,
+            account: &mut account,
+            preparation: None,
+            cancel: &cancel,
+            checkpoint: &checkpoint,
+            sensitive: &sensitive,
+            observation: None,
+            provider: Provider::Codex,
+            directory: root.path().into(),
+            attempt_id: String::new(),
+            reservation: None,
+            output_probe: None,
+        };
+        let error = execution.refresh_access().await.unwrap_err();
+        assert!(placement::is_no_capacity(&error), "{error:?}");
+        assert_eq!(service.store.run(&id).await.unwrap()["snapshot"], snapshot);
+        assert!(service.store.attempts().await.unwrap().is_empty());
+        service.shutdown.cancel();
+    }
+
+    #[tokio::test]
     async fn initial_preparation_rechecks_revocation_between_remote_lookup_and_clone() {
         use axum::{Router, routing::get};
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1783,6 +1855,7 @@ mod tests {
         let mut execution = Execution {
             s: &service,
             id,
+            admission_revision: run["environmentAdmissionRevision"].clone(),
             run: &mut run,
             account: &mut account,
             preparation: None,
@@ -1877,6 +1950,7 @@ mod tests {
                 let execution = Execution {
                     s: &service,
                     id: id.clone(),
+                    admission_revision: run["environmentAdmissionRevision"].clone(),
                     run: &mut run,
                     account: &mut account,
                     preparation: None,

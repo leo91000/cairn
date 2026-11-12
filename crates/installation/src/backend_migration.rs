@@ -224,6 +224,7 @@ fn change_expired_backend(
     let run_id = text(&chat, "runId");
     let mut boundary = json!({
         "requiredRuntime": node["runtimeId"],
+        "environmentAdmissionRevision": crate::config::id(),
         // No disk exists yet: constrain fresh placement without recording a
         // materialized checkpoint. The owner can still change this preference.
         "isolated": false,
@@ -257,14 +258,6 @@ fn change_expired_backend(
             ..Default::default()
         },
     )?;
-
-    if !crate::environment_expiration::pending(db, run_id)? {
-        crate::worker::checkpoint::RunCheckpoint {
-            completed: Some(true),
-            ..Default::default()
-        }
-        .store_in(db, run_id)?;
-    }
 
     db.event(
         run_id,

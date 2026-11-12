@@ -74,6 +74,17 @@ def configure_native_s3():
         resource.setrlimit(resource.RLIMIT_NOFILE, (NATIVE_S3_OPEN_FILES, hard))
 
 
+def run_case(repo, env, case):
+    result = subprocess.run(['pnpm', 'test:backend', '-p', 'cairn-installation', '--test', 'nodes', case,
+                             '--', '--ignored', '--nocapture'], cwd=repo, env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    print(result.stdout, end='', flush=True)
+    result.check_returncode()
+    import re
+    if not re.search(r'^test result: ok\. [1-9][0-9]* passed; 0 failed;', result.stdout, re.MULTILINE):
+        raise RuntimeError(f'No passing S3 qualification selected by {case!r}')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--native-runtime', type=Path)
@@ -121,8 +132,7 @@ def main():
             return
         if args.case:
             # Keep isolated installation fixtures on the same dependency feature graph.
-            subprocess.run(['pnpm', 'test:backend', '-p', 'cairn-installation', '--test', 'nodes', args.case,
-                            '--', '--ignored', '--nocapture'], cwd=args.repo, env=env, check=True)
+            run_case(args.repo, env, args.case)
             return
         if args.benchmark:
             for _ in range(args.repeat):
@@ -136,13 +146,11 @@ def main():
                                 'master_reuses_unchanged_blocks', '--', '--ignored', '--nocapture', '--test-threads=1'],
                                cwd=args.repo, env=env, check=True)
             return
-        subprocess.run(['pnpm', 'test:backend', '--test', 'nodes', 'encrypted_recovery_points', '--', '--ignored'],
-                       cwd=Path(__file__).resolve().parents[2], env=env, check=True)
+        run_case(args.repo, env, 'encrypted_recovery_points')
         remaining = client.list_objects_v2(Bucket='cairn-node-test')
         assert remaining.get('KeyCount', 0) == 0, 'Conversation purge must remove all remote recovery objects'
-        for case in ['idle_conversations_move_twice', 'queued_capacity_transfer', 'active_captures_name', 'obsolete_object_collection', 'interrupted_first_publication', 'shared_publications', 'compressed_publications', 'coalesced_final_publication', 'backend_migration']:
-            subprocess.run(['pnpm', 'test:backend', '--test', 'nodes', case, '--', '--ignored'],
-                           cwd=Path(__file__).resolve().parents[2], env=env, check=True)
+        for case in ['active_captures_name', 'obsolete_object_collection', 'interrupted_first_publication', 'shared_publications', 'compressed_publications', 'coalesced_final_publication']:
+            run_case(args.repo, env, case)
 
     finally:
         server.stop()

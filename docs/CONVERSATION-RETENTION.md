@@ -81,7 +81,8 @@ Expiration metadata uses the existing `records` store: `environment-expirations`
 holds the detached environment while its interrupted worker finishes stopping;
 `environment-retirements` holds captured attempt/process/node identities, worktrees,
 projects and retry progress. No SQLite schema/version change is needed. The run
-boundary records `environmentExpirationCause` alongside `environmentExpiredAt`.
+boundary records an `environmentAdmissionRevision` to reject stale preparations
+when the first destination/backend is replaced, and `environmentExpirationCause` alongside `environmentExpiredAt`.
 An interrupted worker's checkpoint is retained only for fencing until it stops;
 then it is replaced by a fresh checkpoint. The queue removes manager/provider files
 and retires exact old S3 references before admission, so a delayed cleanup cannot

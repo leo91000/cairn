@@ -445,6 +445,12 @@ async fn requested(
                 ..Default::default()
             },
         )?;
+        if expired {
+            db.update_run_boundary(
+                &owner,
+                &json!({ "environmentAdmissionRevision": crate::config::id() }),
+            )?;
+        }
         let name = record["name"].as_str().unwrap_or("another node");
         // The owner sees in the conversation that the agent moved itself.
         let message = if continue_turn {

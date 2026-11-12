@@ -487,6 +487,12 @@ fn reserve_in(db: &Db<'_>, run: &Value, attempt: &str, configured: bool) -> Resu
     // A fresh environment may have received another explicit destination/backend
     // while preparation was waiting. Admission uses that latest writer decision.
     let persisted = db.run(text(run, "id"))?;
+    if let Some(current) = &persisted {
+        crate::environment_expiration::require_admission_revision(
+            current,
+            &run["environmentAdmissionRevision"],
+        )?;
+    }
     let awaiting_environment = persisted
         .as_ref()
         .is_some_and(|run| run["environmentState"] == "expired");
@@ -984,6 +990,12 @@ fn configure_in(db: &Db<'_>, run: &str, input: Option<Value>) -> Result<Value> {
                 ..Default::default()
             },
         )?;
+        if record["environmentState"] == "expired" {
+            db.update_run_boundary(
+                run,
+                &json!({ "environmentAdmissionRevision": crate::config::id() }),
+            )?;
+        }
         db.audit(
             "node.placement.configured",
             &json!({

@@ -262,6 +262,7 @@ async fn historical_rotation_fixture(aggregate: bool) {
         let mut execution = Execution {
             s: &service,
             id: id.clone(),
+            admission_revision: run["environmentAdmissionRevision"].clone(),
             run: &mut run,
             account: &mut held,
             preparation: None,
