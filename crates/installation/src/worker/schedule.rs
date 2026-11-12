@@ -56,6 +56,13 @@ impl Worker {
                 && state.recovery_pending
                 && !active.contains(run_id)
             {
+                let key = run_id.to_owned();
+                if s.store
+                    .read(move |db| crate::environment_expiration::pending(db, &key))
+                    .await?
+                {
+                    continue;
+                }
                 let preparation = self.run_preparation_lock(run_id).await;
                 let _preparation = preparation.lock().await;
                 recover_or_wait(s, &s.store.run(run_id).await?).await?;

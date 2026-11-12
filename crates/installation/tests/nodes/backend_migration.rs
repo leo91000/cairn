@@ -1236,3 +1236,82 @@ async fn revocation_sees_a_fresh_admission_before_its_checkpoint_is_persisted() 
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn a_pending_expiration_holds_a_due_mission_wakeup_until_detachment() {
+    let change = Change::new(RunStatus::Waiting).await;
+    let wakeup = json!({ "id": id(), "messageId": "original-turn", "seconds": 1, "createdAt": now() - 2000, "wakeAt": now() - 1000, "reason": "Continue after the condition" });
+    let (run, chat, wake) = (change.run.clone(), change.chat.clone(), wakeup.clone());
+    change
+        .owner
+        .service
+        .store
+        .transaction(move |db| {
+            db.0.execute("DELETE FROM conversations WHERE id=?", [chat])?;
+            db.change_run(
+                &run,
+                cairn_installation::runs::RunChanges {
+                    trigger: Some("manual".into()),
+                    wakeup: Some(Some(serde_json::from_value(wake)?)),
+                    ..Default::default()
+                },
+            )?;
+            db.update_run_boundary(
+                &run,
+                &json!({ "chatExecution": null, "missionTurnId": "original-turn" }),
+            )
+        })
+        .await
+        .unwrap();
+    change
+        .owner
+        .service
+        .worker
+        .active
+        .lock()
+        .await
+        .insert(change.run.clone(), CancellationToken::new());
+    let (status, moved) = change
+        .move_to(json!({ "nodeId": change.destination, "discardWorkingFiles": true }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    change
+        .owner
+        .service
+        .worker
+        .active
+        .lock()
+        .await
+        .remove(&change.run);
+    // The scheduler wins the wakeup race against the retirement task.
+    change
+        .owner
+        .service
+        .worker
+        .tick(&change.owner.service)
+        .await
+        .unwrap();
+    let held = change.owner.run(&change.run).await;
+    assert_eq!(held["status"], RunStatus::Waiting);
+    assert_eq!(held["missionTurnId"], "original-turn");
+    assert_eq!(held["wakeup"], wakeup);
+    change
+        .owner
+        .service
+        .detach_stopped_environments()
+        .await
+        .unwrap();
+    let detached = change.owner.run(&change.run).await;
+    assert_eq!(detached["wakeup"]["messageId"], detached["missionTurnId"]);
+    change
+        .owner
+        .service
+        .worker
+        .tick(&change.owner.service)
+        .await
+        .unwrap();
+    let continued = change.owner.run(&change.run).await;
+    assert_eq!(continued["status"], RunStatus::Queued);
+    assert_eq!(continued["missionTurnId"], wakeup["id"]);
+    assert!(continued["wakeup"].is_null());
+}

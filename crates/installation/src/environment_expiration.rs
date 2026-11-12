@@ -272,7 +272,7 @@ pub(crate) fn request_in(
     if !live {
         return detach_in(db, run_id, &expiration, expired_at);
     }
-    if executing && run["cancelRequestedAt"].is_null() {
+    if run["cancelRequestedAt"].is_null() {
         db.change_run(
             run_id,
             crate::runs::RunChanges {
