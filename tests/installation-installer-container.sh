@@ -11,6 +11,8 @@ cleanup() {
   rm -rf "$fixture"
 }
 trap cleanup EXIT
+# Claim, relay and update checks execute both current binaries in the fixture.
+cargo build --locked --bin cairn --bin cairn-beacon
 docker build -t cairn-installer-fixture -f tests/Dockerfile.installation-installer .
 docker network create "$name" >/dev/null
 docker run -d --name "$name-postgres" --network "$name" --network-alias postgres \
