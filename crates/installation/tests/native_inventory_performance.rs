@@ -81,7 +81,7 @@ async fn seed_retained_caches(service: &Service, kib: usize, count: u32) {
 }
 
 #[tokio::test]
-async fn retained_cache_accounting_preserves_eviction_fences_and_queued_resumes() {
+async fn retained_environment_accounting_never_marks_backing_reclaimable() {
     let root = tempfile::tempdir().unwrap();
     common::managed_codex_home(&root.path().join("home"));
     let service = Service::new(common::config(root.path())).await.unwrap();
@@ -89,7 +89,7 @@ async fn retained_cache_accounting_preserves_eviction_fences_and_queued_resumes(
     let inventory = nodes::typed_inventory(&service).await.unwrap();
     assert_eq!(
         serde_json::to_value(&inventory[0]).unwrap()["diskAccounting"]["reclaimableBytes"],
-        9 * 1_048_576
+        0
     );
     service.store.transaction(|db| {
         common::run_fixture::change_run_fixture(db, "run-0", &json!({ "status": "running", "finishedAt": null }))?;
@@ -117,9 +117,9 @@ async fn retained_cache_accounting_preserves_eviction_fences_and_queued_resumes(
     }).await.unwrap();
     let inventory = nodes::typed_inventory(&service).await.unwrap();
     let node = serde_json::to_value(&inventory[0]).unwrap();
-    // Only run-7 and the clean queued resume still qualify. Every changed or
-    // unproven owner stays protected, even though the inventory never deletes it.
-    assert_eq!(node["diskAccounting"]["reclaimableBytes"], 2 * 1_048_576);
+    // Retained environments remain owned through queued resumes and state
+    // changes. Their backing is never eligible for cache reclamation.
+    assert_eq!(node["diskAccounting"]["reclaimableBytes"], 0);
     assert_eq!(node["diskAccounting"]["unsynchronizedBytes"], 1);
     assert_eq!(node["staleDisks"]["count"], 1);
     service.shutdown.cancel();
@@ -140,7 +140,7 @@ async fn inventory_with_clean_retained_native_caches() {
             elapsed.push(started.elapsed().as_micros());
             let node = serde_json::to_value(&inventory[0]).unwrap();
             assert_eq!(node["diskAccounting"]["unsynchronizedBytes"], 0);
-            assert_eq!(node["diskAccounting"]["reclaimableBytes"], 104_857_600);
+            assert_eq!(node["diskAccounting"]["reclaimableBytes"], 0);
             assert_eq!(node["staleDisks"]["count"], 0);
         }
         println!(
