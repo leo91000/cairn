@@ -474,6 +474,7 @@ async fn packages_declare_only_templates_using_their_own_hooks_and_tools() {
     );
 
     let mut formula = template("Support replies");
+    formula["rules"][1]["name"] = json!({ "$parameter": "greeting" });
     formula["rules"][1]["steps"][0]["action"]["prompt"] =
         json!({ "type": "formula", "expression": "missing_field" });
     manifest["ruleTemplates"] = json!([formula]);
