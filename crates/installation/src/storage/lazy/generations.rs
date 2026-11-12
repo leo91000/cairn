@@ -484,7 +484,10 @@ impl LazyDisk {
             .collect::<io::Result<Vec<_>>>()?;
         #[cfg(test)]
         journal::crash_point(&self.directory, &format!("{phase}_transaction"));
-        tx.commit().map_err(failure)?;
+        if let Err(error) = tx.commit() {
+            journal.fail();
+            return Err(failure(error));
+        }
         *base = next_base.clone();
         #[cfg(test)]
         journal::crash_point(&self.directory, &format!("{phase}_committed"));

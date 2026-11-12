@@ -472,8 +472,12 @@ impl LazyDisk {
             return Ok(None);
         };
         let admission = super::cache::admission()?;
-        let (_, free) = super::policy::space(&self.directory)?;
-        if free <= (reserve / 2).saturating_add(bytes) {
+        let (total, free) = super::policy::space(&self.directory)?;
+        let (_, quota_free) = crate::microvm::budget::disk_space(&self.directory, total, u64::MAX)?;
+        let quota_required = reserve
+            .saturating_add(super::cache::pending_write_bytes())
+            .saturating_add(bytes);
+        if free <= (reserve / 2).saturating_add(bytes) || quota_free <= quota_required {
             return Err(io::Error::new(
                 io::ErrorKind::StorageFull,
                 "Journal consolidation is waiting for disk space",

@@ -113,6 +113,7 @@ impl Service {
         });
         crate::chats::questions::retire_native(&service).await?;
         service.bootstrap_main_agent().await?;
+        crate::storage_migration::apply(&service).await?;
         service.avatars.recover(&service).await?;
         service.reconcile_attachments().await?;
         tokio::spawn(crate::artifacts::preview::recover(service.clone()));

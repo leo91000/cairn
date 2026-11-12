@@ -187,22 +187,17 @@ The conversation filesystem size enforces its workspace capacity. The shared nod
 budget charges retained journals, local base blocks, staging, logs and
 artifacts; the mounted view is not charged a second time. Temporary files and
 other host-side copies remain monitored limits rather than hard host filesystem
-quotas. Physical free-space reserves and journal admission still apply. First-time
-Exceptional filesystem growth can need
-extra temporary capacity. Ordinary remounts keep demand loading.
+quotas. Physical free-space reserves and journal admission still apply. Exceptional
+filesystem growth can need extra temporary capacity. Ordinary remounts reopen the
+local journal and base blocks.
 
 Generated runtime configuration, account credentials and frozen skills are bound
 from per-attempt staging instead of being copied into persisted blocks. Provider
 session files, user tools and workspace/output files stay on the journal-backed
 filesystem. This does not detect secrets deliberately written into arbitrary user
-files. A different workload UID on a destination can require a one-time ownership
-reconciliation of filesystem metadata.
-
-Native conversations keep a distinct identity and subordinate ID range. The
-mapping travels with the disk and preserves container UID/GID ownership during
-reconciliation. Native-to-VM conversion refuses initialized Docker metadata rather
-than discarding it; [export and compatibility limits](NATIVE-DOCKER.md#persistence-and-compatibility)
-apply in addition to ordinary application dependencies.
+files. Native conversations keep a distinct identity and subordinate ID range on
+their node. Changing nodes or backends starts an empty environment; existing
+container stores are not converted or transferred.
 
 ## Updates and removal
 

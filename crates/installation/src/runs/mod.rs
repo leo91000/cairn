@@ -628,6 +628,7 @@ impl Db<'_> {
 }
 
 impl Store {
+    #[cfg(test)]
     pub(crate) async fn run_record(&self, id: &str) -> Result<RunRecord> {
         let id = id.to_owned();
         self.read(move |db| required(db.run_record(&id)?, "Run not found"))

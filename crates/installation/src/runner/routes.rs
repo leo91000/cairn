@@ -417,6 +417,7 @@ async fn disk_action(
         crate::storage::environment::lock(&broker.state, run, "The workspace is still in use.")
             .await?;
     let directory = &lease.directory;
+    let _replacement = crate::storage::runtime::replacement(directory).await?;
     if action == "prune" {
         let retired_grants = prune_stale_disks(directory).await?;
         return json_response(json!({ "pruned": true, "retiredGrants": retired_grants }));

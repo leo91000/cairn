@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Disposable real systemd/ublk/ext4/S3 qualification; never a personal host.
+"""Disposable real systemd/ublk/ext4/local-disk qualification; never a personal host.
 
 Invoked through node_s3_test.py so credentials, bucket and network are synthetic.
 The loopback bridge exists only in this fixture; production remains Unix-only.
@@ -68,15 +68,17 @@ def require_finalization_failure(path, wait_result):
     return proof
 
 
-def completed_snapshot(api, run, vm=False):
-    snapshot = api('/disks/' + run + '/snapshot-completed')
-    manifest = snapshot['manifest']
-    assert manifest.get('kind') == (None if vm else 'native-ext4-v1')
-    assert manifest['runtime']['backend'] == 'native'
-    assert (manifest['runtime'].get('disk') == 'vm') == vm
-    assert isinstance(manifest['blocks'], list)
-    assert manifest['onDemand'] is True
-    return snapshot
+def completed_local_disk(api, manager, run):
+    def consolidated():
+        status = api('/disks/' + run + '/storage-status')
+        return status['dirtyBytes'] == 0 and status.get('published', {}).get('local') is True and status.get('completedGeneration', 0) > 0
+    eventually(consolidated, timeout=120)
+    result = manager('consolidate', run=run)
+    status = result['status']
+    assert status['dirtyBytes'] == 0
+    assert status['published']['local'] is True
+    assert status['completedGeneration'] > 0
+    return result
 
 
 def fixture_garbage_inventory(root):
@@ -192,8 +194,8 @@ def main():
                                    keyBufferBytes=int(os.environ['MOTO_S3_DEFAULT_KEY_BUFFER_SIZE']),
                                    openFileLimits=resource.getrlimit(resource.RLIMIT_NOFILE),
                                    backing='SpooledTemporaryFile; larger payloads and version-list copies spill to local disk.'),
-                   conditions='Disposable hosted Linux VM; loopback Moto S3 with 64KiB per-key memory buffers, synthetic credentials; no WAN latency. '
-                              'Cold file reads use advisory POSIX_FADV_DONTNEED; post-eviction controller restart clears userspace cache.',
+                   conditions='Disposable hosted Linux VM; local disks, synthetic S3 only to verify old objects are retained; no WAN latency. '
+                              'Cold file reads use advisory POSIX_FADV_DONTNEED; controller restart clears userspace cache.',
                    workload='Seeded random42 8MiB asset +128 fsynced 4KiB text writes, per-process wall/CPU milliseconds.',
                    resources=dict(nativeCpu=1, nativeMemoryMiB=512, nativeDiskMiB=256,
                                   reference='Host root process without workload cgroup limits',
@@ -370,17 +372,6 @@ def main():
             runs.append(run)
             progress('fixture-create-before')
             contexts[run] = manager('create', run=run)
-            # Warm local blocks can hide a missing current node acknowledgement.
-            # Exercise the real cold-read authorization before mounting any disk.
-            context = contexts[run]
-            request = urllib.request.Request(
-                context['master'].rstrip('/') + '/internal/node-restore/renew',
-                data=b'{}',
-                headers={'Authorization': 'Bearer ' + context['grant'], 'Content-Type': 'application/json'},
-                method='POST',
-            )
-            with host.HTTP.open(request, timeout=30) as response:
-                assert json.load(response)['renewed'] is True, 'Native fixture disk grant is not authorized.'
             seed(run)
             progress('fixture-create-complete')
             return run
@@ -702,7 +693,7 @@ def main():
             active = command('systemctl', 'show', 'cairn-native-' + attempt + '.service', '--property=ActiveState', '--value').stdout.strip()
             assert active not in ('active', 'activating'), 'Descendant escaped cgroup fencing.'
             assert not (state / 'native' / run / 'data/workspaces/seed').exists(), 'Stopped conversation filesystem is still mounted.'
-            return completed_snapshot(api, run, vm=run in vm_runs)
+            return completed_local_disk(api, manager, run)
 
         command('useradd', '--system', '--no-create-home', '--shell', '/usr/sbin/nologin', user)
         try:
@@ -741,7 +732,7 @@ def main():
             api('/runs/' + readonly_attempt, method='DELETE')
             readonly_snapshot = fenced(readonly_run, readonly_attempt, expect_flush_failure=True)
             assert not (state / 'native-block' / readonly_run / 'root/disk.blk').exists()
-            assert readonly_snapshot['manifest']['kind'] == 'native-ext4-v1'
+            assert readonly_snapshot['status']['published']['local'] is True
             # Resume the same local journal and confirm the acknowledged bytes.
             readonly_resume = start(readonly_run)
             assert durable.read_bytes() == b'kept across read-only close'
@@ -751,38 +742,35 @@ def main():
             stopped_health = retained_health(api, run)
             assert stopped_health['usage']['diskBytes'] > 0
             assert stopped_health['diskGrowth']['retainedBytes'][run] > 0, 'Stopped journal lost its measured admission credit.'
-            point = manager('publish', run=run)
+            consolidated = manager('consolidate', run=run)
             s3 = boto3.client('s3', endpoint_url=os.environ['CAIRN_NODE_TEST_S3_ENDPOINT'])
-            first_objects = [obj for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', [])]
-            metrics['firstPointEncodedS3Bytes'] = sum(obj['Size'] for obj in first_objects)
-            metrics['firstPointEncodedS3Objects'] = len(first_objects)
+            initial_objects = {obj['Key']: obj['Size'] for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', [])}
+            metrics['localConsolidatedBytes'] = consolidated['allocatedBytes']
             metrics['referenceRawBytes'] = len(asset) + 128 * 4096
             status = api('/disks/' + run + '/storage-status')
             assert status['dirtyBytes'] == 0
-            receipt = dict(attempt=first, backupId=point['backupId'], generation=point['generation'], grantId=status['grantId'])
+            receipt = dict(attempt=first)
             try:
-                api('/disks/' + run + '/evict', dict(receipt, generation=point['generation'] + 1))
+                api('/disks/' + run + '/evict', receipt)
             except urllib.error.HTTPError as error:
                 assert error.code == 409
             else:
-                raise AssertionError('Eviction accepted a stale/mismatched S3 receipt.')
+                raise AssertionError('Local environment data was evicted.')
             prepare_base(other)
             second_run_attempt = start(other)
-            assert not (data / 'runs' / other / ('native-base-' + second_run_attempt + '.pin')).exists(), 'Completed clone retained its cache pin.'
+            assert not (data / 'runs' / other / ('native-base-' + second_run_attempt + '.pin')).exists(), 'Completed clone retained its preparation pin.'
             api('/runs/' + second_run_attempt, method='DELETE')
             fenced(other, second_run_attempt)
             other_before = api('/disks/' + other + '/storage-status')
-            evicted = api('/disks/' + run + '/evict', receipt)
-            assert evicted['evictedBytes'] > 0, 'No real clean block cache reclaimed.'
             assert api('/disks/' + other + '/storage-status')['localBytes'] == other_before['localBytes']
-            metrics['evictedBytes'] = evicted['evictedBytes']
+            metrics['environmentEvictionRefused'] = True
             # A stale private inode with a different rdev must not block the next
             # allocation. This creates only an unopened test inode, not a device.
             os.mknod(state / 'native-block' / run / 'root/disk.blk', stat.S_IFBLK | 0o600, os.makedev(7, 65535))
             command('systemctl', 'stop', supervisor)
             start_controller()
-            resumed = start(run, measure='nativeEvicted')
-            assert metrics['nativeEvicted']['readTriggeredRemoteRequests'] > 0, 'Payload did not use demand-paged S3 reads.'
+            resumed = start(run, measure='nativeLocalRestart')
+            assert metrics['nativeLocalRestart']['readTriggeredRemoteRequests'] == 0, 'Local resume requested remote blocks.'
             # Real journal -> live ublk -> online ext4 growth. The workload
             # process and namespace stay alive; no whole-disk materialization.
             growth_health = api('/health', method='GET')
@@ -833,29 +821,20 @@ def main():
                 live = api('/runs/' + resumed + '/snapshot', dict(consistency=consistency))
                 assert live['manifest']['consistency'] == consistency
                 assert live['manifest']['kind'] == 'native-ext4-v1'
-            # The current writer and an unacknowledged generation cannot be evicted.
+            # No local environment can be evicted, including a current writer.
             try:
                 api('/disks/' + run + '/evict', dict(receipt, attempt=resumed))
             except urllib.error.HTTPError as error:
                 assert error.code == 409
             else:
                 raise AssertionError('Eviction removed an active writer cache.')
-            # Upload lag is visible while safe local work continues.
-            policy = dict(contexts[run]['policy'], backupSeconds=5, maxDirtySeconds=5)
-            storage_policy(policy)
-            eventually(lambda: api('/disks/' + run + '/storage-status')['backupDegraded'] is True, timeout=25)
-            assert api('/disks/' + run + '/storage-status')['paused'] is False
+            # Local work has no backup-lag state or remote dependency.
+            status = api('/disks/' + run + '/storage-status')
+            assert 'backupDegraded' not in status and 'backupUrgent' not in status
+            assert status['paused'] is False
             descendant = managed(run) / 'descendant'
             size = descendant.stat().st_size
             eventually(lambda: descendant.stat().st_size > size)
-            # Acknowledgement retires the earlier point; restore the current
-            # retained publication rather than requesting a collected history.
-            point = manager('live-publish', run=run)
-            eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is False)
-            eventually(lambda: descendant.stat().st_size > size)
-            status = api('/disks/' + run + '/storage-status')
-            receipt = dict(attempt=resumed, backupId=point['backupId'], generation=point['generation'], grantId=status['grantId'])
-            storage_policy(contexts[run]['policy'])
             # Real disk-reserve pressure must still stop every descendant CPU.
             # The maximum supported reserve exceeds this disposable host's free
             # space without allocating a pressure file or exhausting its disk.
@@ -869,7 +848,7 @@ def main():
             storage_policy(contexts[run]['policy'])
             eventually(lambda: api('/disks/' + run + '/storage-status')['paused'] is False)
             eventually(lambda: descendant.stat().st_size > size)
-            (managed(run) / 'persisted').write_text('unpublished mutation')
+            (managed(run) / 'persisted').write_text('local mutation')
             # Stopping a protected workload must thaw its owned unit before
             # systemd can deliver termination signals. No manual thaw in this test.
             storage_policy(pressure_policy)
@@ -895,25 +874,19 @@ def main():
             if stop_errors:
                 raise stop_errors[0]
             fenced(run, resumed)
-            assert api('/disks/' + run + '/storage-status')['dirtyBytes'] > 0
+            assert api('/disks/' + run + '/storage-status')['dirtyBytes'] == 0
             try:
                 api('/disks/' + run + '/evict', receipt)
             except urllib.error.HTTPError as error:
                 assert error.code == 409
             else:
-                raise AssertionError('Eviction removed unpublished journal writes.')
+                raise AssertionError('Eviction removed local journal writes.')
             progress('storage-growth-pressure-complete')
-            manager('restore', run=run, backupId=point['backupId'])
-            restored = start(run)
-            # The next start expects the retained 'changed' value. A no-op
-            # second restore would leave this distinct mutation and fail it.
-            (managed(run) / 'persisted').write_text('second unpublished mutation')
+            restored = start(run, expected='local mutation')
+            (managed(run) / 'persisted').write_text('second local mutation')
             api('/runs/' + restored, method='DELETE')
             fenced(run, restored)
-            # Restore idempotence must be invalidated by later writes, even for
-            # exactly the same backup ID.
-            manager('restore', run=run, backupId=point['backupId'])
-            guardian = start(run)
+            guardian = start(run, expected='second local mutation')
             command('systemctl', 'kill', '--signal=SIGKILL', '--kill-who=main', 'cairn-native-guardian-' + guardian + '.service')
             fenced(run, guardian)
             crashed = start(run)
@@ -925,7 +898,7 @@ def main():
             final = start(run, long=False)
             fenced(run, final)
             assert read_controller_result(state / (final + '.exit'))['StatusCode'] == 0
-            progress('restore-crash-recovery-complete')
+            progress('local-crash-recovery-complete')
             # Close the earlier disk while a later backend remains runnable.
             # CLONE_NEWNS alone copies the earlier mount into that backend,
             # causing DEL_DEV to block and retain every physical slot.
@@ -950,82 +923,6 @@ def main():
             else:
                 raise AssertionError('Completed attempt restarted.')
             progress('concurrent-retirement-complete')
-            # Simulated guest-written flat ext4, using the real controller,
-            # protected enclave, ublk transport, publication and remote restore.
-            # Main retired paired disks; no retired format is reintroduced.
-            vm_run = create()
-            vm_runs.add(vm_run)
-            system_tree = root / (vm_run + '-vm-tree')
-            guest_workspace = str(data / 'runs' / vm_run / 'workspace').lstrip('/')
-            workspace = system_tree / 'upper' / guest_workspace
-            workspace.mkdir(parents=True)
-            (workspace / 'seed').write_text('initial project')
-            (workspace / 'asset').write_bytes(asset)
-            home = system_tree / 'upper/home/node'
-            (home / '.codex/sessions').mkdir(parents=True)
-            (home / '.codex/sessions/keep').write_text('retained VM session')
-            for path in [system_tree, *system_tree.rglob('*')]:
-                os.chown(path, 1000, 1000)
-            root_owned = home / 'root-owned'
-            root_owned.write_text('guest root retained')
-            root_owned.chmod(0o444)
-            os.chown(root_owned, 0, 0)
-            # Preserve the incompatible rootful daemon's private metadata.
-            rootful = system_tree / 'docker/containers/private'
-            rootful.mkdir(parents=True)
-            (rootful / 'config.v2.json').write_text('VM rootful daemon metadata')
-            for path in [system_tree / 'docker', *(system_tree / 'docker').rglob('*')]:
-                os.chown(path, 0, 0)
-                path.chmod(0o700 if path.is_dir() else 0o600)
-            raw = root / (vm_run + '.ext4')
-            with raw.open('wb') as output:
-                output.truncate(256 * 1024 * 1024)
-            command('mkfs.ext4', '-q', '-F', '-d', str(system_tree), str(raw))
-            manager('seed-vm', run=vm_run, context=contexts[vm_run])
-            first_vm = start(vm_run, measure='vmFlatRetained')
-            vm_identity = json.loads((state / 'native' / vm_run / 'file-owner.json').read_text())
-            engine_uid = vm_identity.get('host_engine', [vm_identity['subuid'] + 999])[0]
-            assert engine_uid != 1000, 'VM qualification requires a nonidentity engine UID.'
-            assert (managed(vm_run) / 'persisted').stat().st_uid == engine_uid
-            vm_view = json.loads((state / 'native' / vm_run / 'view.json').read_text())
-            assert (Path(vm_view['home']) / 'root-owned').stat().st_uid == 0
-            api('/runs/' + first_vm, method='DELETE')
-            fenced(vm_run, first_vm)
-            s3 = boto3.client('s3', endpoint_url=os.environ['CAIRN_NODE_TEST_S3_ENDPOINT'])
-            before_vm_objects = {obj['Key'] for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', [])}
-            point = manager('publish', run=vm_run)
-            vm_objects = [obj for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', []) if obj['Key'] not in before_vm_objects]
-            status = api('/disks/' + vm_run + '/storage-status')
-            receipt = dict(attempt=first_vm, backupId=point['backupId'], generation=point['generation'], grantId=status['grantId'])
-            assert api('/disks/' + vm_run + '/evict', receipt)['evictedBytes'] > 0
-            command('systemctl', 'stop', supervisor)
-            start_controller()
-            manager('restore', run=vm_run, backupId=point['backupId'])
-            resumed_vm = start(vm_run, measure='vmFlatRemote')
-            api('/runs/' + resumed_vm, method='DELETE')
-            fenced(vm_run, resumed_vm)
-            exported = Path(manager('export-vm', run=vm_run)['path'])
-            guest_file = '/upper/' + guest_workspace + '/persisted'
-            ownership = command('debugfs', '-R', 'stat ' + guest_file, str(exported)).stdout
-            assert 'User:  1000' in ownership and 'Group:  1000' in ownership, ownership
-            assert 'changed' in command('debugfs', '-R', 'cat ' + guest_file, str(exported)).stdout
-            root_ownership = command('debugfs', '-R', 'stat /upper/home/node/root-owned', str(exported)).stdout
-            assert 'User:     0' in root_ownership, root_ownership
-            daemon_ownership = command('debugfs', '-R', 'stat /docker', str(exported)).stdout
-            assert 'User:     0' in daemon_ownership, daemon_ownership
-            private_daemon = command('debugfs', '-R', 'stat /docker/containers/private/config.v2.json', str(exported)).stdout
-            assert 'User:     0' in private_daemon, private_daemon
-            assert 'VM rootful daemon metadata' in command('debugfs', '-R', 'cat /docker/containers/private/config.v2.json', str(exported)).stdout
-            native_daemon = command('debugfs', '-R', 'stat /.cairn-native-docker', str(exported)).stdout
-            assert '65537' in native_daemon, native_daemon
-            metrics['vmDisks'] = [dict(layout='flat', mappedEngineUid=engine_uid,
-                nativeWritesStoredAsUid=1000, namespaceRuntimeStoredAsUid=65537, rootfulDockerMetadataPreserved=True,
-                encodedNewS3Bytes=sum(obj['Size'] for obj in vm_objects), encodedNewS3Objects=len(vm_objects),
-                retained=metrics.pop('vmFlatRetained'), remote=metrics.pop('vmFlatRemote'),
-                conditions='Guest layout simulated by mkfs; real protected native controller/ext4/idmap/ublk and loopback S3. Ownership inspected offline; no Firecracker guest boot.')]
-            manager('purge', run=vm_run)
-            api('/disks/' + vm_run + '/delete', {'permanentlyDeleted': True})
-
             # Real host administration and both directions of a multi-conversation
             # transition. This runs only on the disposable CI VM guarded above.
             api('/node-budget', dict(limits=dict(diskMiB=4096, cpu=2, memoryMiB=1024), slots=2))
@@ -1082,7 +979,7 @@ def main():
                 protectedAfterAdministrator=True, filesPreserved=True, hostChangesRetained=True,
                 pendingCrashFailsClosed=True, generationRetry=True)
             progress('native-mode-transition-complete')
-            manager('publish', run=run)
+            manager('consolidate', run=run)
             if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
                 import socket
                 api('/node-budget', dict(limits=dict(diskMiB=8192, cpu=2, memoryMiB=2048), slots=2))
@@ -1162,7 +1059,7 @@ def main():
                 auth_target.chmod(0o600)
                 # Model a crash between directory creation and metadata save,
                 # alongside an individually corrupt container. Healthy saved
-                # binds, cache and volumes must survive both resume and restore.
+                # binds, cache and volumes must survive local resume and controller restart.
                 # Seed while the disk is mounted: fencing below unmounts it.
                 containers = docker_data / 'docker/containers'
                 owner = containers.stat()
@@ -1177,8 +1074,8 @@ def main():
                         os.chown(host_config, owner.st_uid, owner.st_gid)
                 api('/runs/' + fresh, method='DELETE')
                 fenced(docker_run, fresh)
-                progress('docker-publish-resume')
-                point = manager('publish', run=docker_run)
+                progress('docker-consolidate-resume')
+                manager('consolidate', run=docker_run)
                 resumed_docker = start(docker_run, lease=300000, docker_script=docker_script('resume'))
                 assert stat.S_IMODE(pinned_target.stat().st_mode) == 0o640, 'Pending inode metadata was not replayed before home refresh.'
                 assert auth_target.stat().st_ino != pinned_target.stat().st_ino
@@ -1190,21 +1087,9 @@ def main():
                 metrics['dockerPartialMetadataRecovered'] = True
                 api('/runs/' + resumed_docker, method='DELETE')
                 fenced(docker_run, resumed_docker)
-                progress('docker-restore-remap')
-                manager('restore', run=docker_run, backupId=point['backupId'])
-                # Emulate a destination with unavailable source IDs on this
-                # disposable host. No controller/workload is using this account.
-                command('userdel', owner_a['user'])
-                blocker = 'cairn-test-' + identifier[:8]
-                command('useradd', '--system', '--user-group', '--no-create-home', '--no-log-init', '--uid', str(owner_a['root_uid']), blocker)
-                reserved_users.append(blocker)
-                command('usermod', '--add-subuids', str(owner_a['subuid']) + '-' + str(owner_a['subuid'] + 65535), '--add-subgids', str(owner_a['subgid']) + '-' + str(owner_a['subgid'] + 65535), blocker)
+                progress('docker-local-reopen')
                 restored_docker = start(docker_run, lease=300000, docker_script=docker_script('resume'))
-                metrics['dockerRestored'] = docker_result(docker_run)
-                destination = json.loads((state / 'native' / docker_run / 'data/.cairn-identity.json').read_text())
-                assert destination['root_uid'] != owner_a['root_uid']
-                assert destination['subuid'] != owner_a['subuid']
-                metrics['dockerIdentityMove'] = dict(source=owner_a, destination=destination, conditions='Different host IDs emulated on the same disposable host; same kernel/tools, loopback S3, not a physical two-node/WAN measurement.')
+                metrics['dockerLocalReopen'] = docker_result(docker_run)
                 progress('docker-controller-fencing')
                 command('systemctl', 'kill', '--signal=SIGKILL', '--kill-who=main', supervisor)
                 eventually(lambda: command('systemctl', 'show', supervisor, '--property=LoadState', '--value').stdout.strip() == 'not-found')
@@ -1225,12 +1110,9 @@ def main():
                 progress('docker-readonly')
                 readonly_docker = start(docker_run, long=False, lease=300000, sandbox='read-only', docker_script=docker_script('readonly'))
                 fenced(docker_run, readonly_docker)
-                manager('publish', run=docker_run)
-            # Publication checks every decoded S3 block for generated secrets.
-            s3 = boto3.client('s3', endpoint_url=os.environ['CAIRN_NODE_TEST_S3_ENDPOINT'])
-            objects = [obj for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', [])]
-            metrics['encodedS3Bytes'] = sum(obj['Size'] for obj in objects)
-            metrics['encodedS3Objects'] = len(objects)
+                manager('consolidate', run=docker_run)
+            # Consolidation verifies generated secrets never entered local base blocks.
+            assert manager('metrics')['remoteRequests'] == 0, 'A local environment requested remote disk data.'
             progress('purge-start')
             for index, current in enumerate(runs):
                 progress('purge-' + str(index + 1) + '-of-' + str(len(runs)))
@@ -1243,10 +1125,10 @@ def main():
                     assert not docker_runtime_path.exists() and not docker_runtime_path.is_symlink(), 'Permanent deletion retained Docker runtime state.'
             if os.environ.get('CAIRN_NATIVE_DOCKER_QUALIFY') == '1':
                 metrics['dockerRuntimeCleanupVerified'] = True
-            metrics['garbageBeforeFinalSweep'] = advance_fixture_garbage_clock(root)
-            manager('purge', run=runs[-1])
-            metrics['garbageAfterFinalSweep'] = fixture_garbage_inventory(root)
-            metrics['s3ObjectsAfterPurge'] = s3.list_objects_v2(Bucket='cairn-node-test').get('KeyCount', 0)
+            metrics['remoteGarbageAfterCleanup'] = fixture_garbage_inventory(root)
+            remaining = {obj['Key']: obj['Size'] for page in s3.get_paginator('list_objects_v2').paginate(Bucket='cairn-node-test') for obj in page.get('Contents', [])}
+            assert remaining == initial_objects, 'Local disk cleanup changed the old S3 objects.'
+            metrics['retainedRemoteObjects'] = len(remaining)
             progress('purge-completed')
             metrics['harnessCpuSeconds'] = resource.getrusage(resource.RUSAGE_SELF).ru_utime
             metrics['host']['loadAverageEnd'] = os.getloadavg()
@@ -1255,7 +1137,7 @@ def main():
             evidence.mkdir(parents=True, exist_ok=True)
             (evidence / 'native-storage.json').write_text(json.dumps(metrics, indent=2) + '\n')
             print('PASS: real ublk/ext4, unprivileged runner-entry, read-only runtime secrets/skills, '
-                  'S3 publish/ack, conditional clean eviction, unrelated conversation retained, lazy remote resume, repeated restore, '
+                  'local consolidation, environment eviction refusal, unrelated conversation retained, same-node resume without remote reads, '
                   'lease/descendant/guardian/controller fencing, crash recovery, concurrent disk retirement, final checkpoint, retry tombstone.')
         finally:
             # An impossible test reserve must not keep kernel writeback blocked

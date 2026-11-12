@@ -14,14 +14,13 @@ use cairn_installation::{
     config::{Config, id, now},
     error::{Error, Result},
     http, nodes,
-    nodes::{disk_grants, publication, restore},
+    nodes::{disk_grants, publication},
     service::Service,
     storage::{self, Disk, LazyDisk, remote::RemoteSource},
 };
 use serde_json::{Value, json};
 use std::{
     io::{Read, Write},
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{
         Arc,
@@ -139,6 +138,50 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
                 .map_err(Error::internal)??;
             Ok(json!({ "path": target }))
         }
+        "consolidate" => {
+            let root = s.config.data_dir.parent().unwrap();
+            let directory = storage::environment::directory(&root.join("state"), run_id)?;
+            // The caller has already observed the controller's full physical
+            // close. Its detached background consolidation may still own the
+            // journal briefly; never bypass that exclusive file lock.
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+            let volume = loop {
+                match storage::runtime::load(&directory).await {
+                    Ok(volume) => break volume,
+                    Err(error) if tokio::time::Instant::now() < deadline => {
+                        let _ = error;
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
+            let disk = volume.disk.clone();
+            let summary = tokio::task::spawn_blocking(move || -> Result<Value> {
+                let generation = disk.seal_completed()?;
+                disk.consolidate()?;
+                let verify = disk.seal()?;
+                let manifest = disk.capture(verify)?;
+                let secret = b"synthetic-generated-secret-never-persist";
+                for block in manifest["blocks"].as_array().into_iter().flatten() {
+                    let Some(hash) = block["hash"].as_str() else {
+                        continue;
+                    };
+                    let bytes = disk.captured_block(verify, hash)?;
+                    if bytes.windows(secret.len()).any(|window| window == secret) {
+                        return Err(Error::bad("Generated secret reached a local base block."));
+                    }
+                }
+                disk.consolidate()?;
+                Ok(json!({ "generation": generation, "logicalBytes": disk.size() }))
+            })
+            .await
+            .map_err(Error::internal)??;
+            let mut result = summary;
+            result["status"] = volume.inspect().await?;
+            result["allocatedBytes"] =
+                cairn_installation::microvm::budget::allocated(&directory)?.into();
+            Ok(result)
+        }
         "publish" | "live-publish" => {
             if command["op"] == "live-publish" {
                 s.store
@@ -191,14 +234,9 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
                 "manifestBytes": serde_json::to_vec(&manifest)?.len(), "point": point }),
             )
         }
-        "restore" => {
-            let run = s.store.run(run_id).await?;
-            let point = s
-                .get("node-backups", command["backupId"].as_str().unwrap_or(""))
-                .await?;
-            restore::start(s, &run, nodes::LOCAL_NODE_ID, &point).await?;
-            Ok(json!({ "ok": true }))
-        }
+        "restore" => Err(Error::conflict(
+            "Conversation disks are local; remote restore is no longer supported.",
+        )),
         "metrics" => Ok(json!({ "remoteRequests": requests.load(Ordering::SeqCst) })),
         "archive-hash" => {
             let path = PathBuf::from(
@@ -219,19 +257,6 @@ async fn dispatch(s: &Arc<Service>, requests: &AtomicU64, command: &Value) -> Re
         }
         "purge" => {
             publication::purge(s, run_id).await?;
-            // Advance only this isolated fixture's GC grace and issued PUT expiry.
-            // Production must retain objects while a capability can recreate them.
-            s.store
-                .transaction(|db| {
-                    db.0.execute(
-                        "UPDATE shared_objects SET unused_at=0 WHERE unused_at IS NOT NULL",
-                        [],
-                    )?;
-                    db.0.execute("UPDATE direct_storage_grants SET expires_at=0", [])?;
-                    Ok(())
-                })
-                .await?;
-            while nodes::shared_blocks::collect(s).await? > 0 {}
             Ok(json!({ "ok": true }))
         }
         _ => Err(Error::bad("Unknown fixture command.")),
@@ -269,20 +294,6 @@ async fn main() -> Result<()> {
     let data = root.join("manager");
     tokio::fs::create_dir_all(&data).await?;
     tokio::fs::copy(root.join("data/runner-secret"), data.join("runner-secret")).await?;
-    // The CLI transport also uses only the fixture endpoint. The hot SDK
-    // transport reads AWS_ENDPOINT_URL_S3 from the isolated parent environment.
-    let wrapper = root.join("aws-fixture");
-    let script = format!(
-        "#!/usr/bin/env python3\nimport subprocess,sys\nsys.exit(subprocess.run(['aws','--endpoint-url',{}]+sys.argv[1:]).returncode)\n",
-        serde_json::to_string(&endpoint)?
-    );
-    tokio::fs::write(&wrapper, script).await?;
-    tokio::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).await?;
-    tokio::fs::write(
-        data.join("storage-s3.json"),
-        serde_json::to_vec(&json!({ "bucket": "cairn-node-test", "awsBinary": wrapper }))?,
-    )
-    .await?;
     let s = Service::new(Config {
         data_dir: data,
         home: root.join("manager-home"),

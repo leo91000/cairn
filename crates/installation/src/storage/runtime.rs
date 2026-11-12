@@ -257,7 +257,7 @@ fn open_volume(directory: &Path) -> Result<Arc<Volume>> {
         transition: Mutex::new(None),
     });
     volume.health()?;
-    monitor_consolidation(&volume);
+    monitor_consolidation(&volume, CONSOLIDATE_JOURNAL_BYTES);
     Ok(volume)
 }
 
@@ -273,7 +273,7 @@ static CONSOLIDATIONS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_ne
 /// While a volume is open, fold sealed generations into its local base and
 /// seal a crash-consistent boundary once the journal exceeds its bound, as
 /// a periodic capture did. The guest keeps running; the task ends with the volume.
-fn monitor_consolidation(volume: &Arc<Volume>) {
+fn monitor_consolidation(volume: &Arc<Volume>, journal_threshold: u64) {
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
         return;
     };
@@ -293,7 +293,7 @@ fn monitor_consolidation(volume: &Arc<Volume>) {
                 continue;
             }
             if !volume.disk.sealed_pending()
-                && volume.disk.journal_bytes() >= CONSOLIDATE_JOURNAL_BYTES
+                && volume.disk.journal_bytes() >= journal_threshold
                 && let Err(error) = volume.seal().await
             {
                 tracing::warn!(target: "cairn_performance", operation = "journal_consolidation", phase = "seal", message = %error.message);
@@ -367,7 +367,7 @@ impl Drop for Replacement {
 }
 
 pub async fn replacement(directory: &Path) -> Result<Replacement> {
-    // A background consolidation yields within one block; an owner does not.
+    // A background consolidation yields after its current batch; an owner does not.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let path = directory.to_owned();
@@ -1654,6 +1654,28 @@ mod tests {
         volume.read_at(0, &mut saved).unwrap();
         assert_eq!(&saved, b"local work");
         assert_eq!(volume.status().unwrap()["waitingFor"], "integrity");
+    }
+
+    #[tokio::test]
+    async fn running_journal_pressure_consolidates_without_guest_control_or_turn_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let (volume, _, _) = controller_fixture(root.path()).await;
+        volume.disk.write_at(0, b"running").unwrap();
+        monitor_consolidation(&volume, 4096);
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while volume.disk.accounting().unwrap()["dirtyBytes"] != 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!volume.paused());
+        assert!(!volume.stop.is_cancelled());
+        assert!(volume.disk.completed().unwrap().is_none());
+        volume.write_at(7, b"new").unwrap();
+        let mut bytes = [0; 10];
+        volume.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"runningnew");
     }
 
     #[tokio::test]

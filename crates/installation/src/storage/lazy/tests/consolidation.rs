@@ -397,3 +397,44 @@ fn local_bases_larger_than_former_cache_budget_are_never_evicted() {
     }
     assert_eq!(block_files(root.path()).len(), 12);
 }
+
+#[test]
+fn consolidation_counts_journal_and_base_together_against_the_node_budget() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("disks/owned/lazy");
+    let manifest = local_base(&directory, &[None]);
+    let disk = LazyDisk::create(&directory, &manifest, source()).unwrap();
+    disk.write_at(0, &vec![7; BLOCK as usize]).unwrap();
+    disk.seal().unwrap();
+    let policy = super::super::super::policy::Policy {
+        reserve_mi_b: 64,
+        reserve_percent: 1,
+        ..Default::default()
+    };
+    std::fs::write(
+        root.path().join("storage-policy.json"),
+        serde_json::to_vec(&policy).unwrap(),
+    )
+    .unwrap();
+    let budget = crate::microvm::budget::Budget {
+        slots: 1,
+        limits: crate::nodes::Resources {
+            cpu: 1,
+            memory_mi_b: 2048,
+            disk_mi_b: 4,
+        },
+    };
+    std::fs::write(
+        root.path().join(crate::microvm::budget::FILE),
+        serde_json::to_vec(&budget).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        disk.consolidate().unwrap_err().kind(),
+        io::ErrorKind::StorageFull
+    );
+    assert!(disk.sealed_pending());
+    assert_eq!(read(&disk, 0, 4096), vec![7; 4096]);
+    assert!(base_hashes(&disk).is_empty());
+    assert!(disk.accounting().unwrap()["journalBytes"].as_u64().unwrap() > 0);
+}
