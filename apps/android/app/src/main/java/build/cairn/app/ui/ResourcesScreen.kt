@@ -12,17 +12,23 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import build.cairn.app.data.*
+import build.cairn.contracts.AgentInput
 import build.cairn.contracts.CreateProjectInput
 import build.cairn.contracts.ImportProjectInput
 import build.cairn.contracts.ListPluginPackagesInput
+import build.cairn.contracts.PluginGrantAccess
 import build.cairn.contracts.ProjectInput
 import build.cairn.contracts.ProjectSettings
 import build.cairn.contracts.ReplaceProjectInput
 import build.cairn.contracts.createProject
 import build.cairn.contracts.deleteProject
+import build.cairn.contracts.getAgentPluginGrants
 import build.cairn.contracts.importProject
 import build.cairn.contracts.listPluginPackages
 import build.cairn.contracts.replaceProject
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.*
 import kotlinx.serialization.json.decodeFromJsonElement
 
@@ -39,6 +45,32 @@ fun ResourcesScreen(
     var deleting by rememberSaveable { mutableStateOf<String?>(null) }
     var query by rememberSaveable { mutableStateOf("") }
     val kind = if (agents) "agents" else "projects"
+    var selectedPluginAccess by remember { mutableStateOf<Map<String, Boolean?>>(emptyMap()) }
+    LaunchedEffect(agents, state.isOwner, state.agents) {
+        if (!agents || !state.isOwner) {
+            selectedPluginAccess = emptyMap()
+            return@LaunchedEffect
+        }
+
+        val currentAgents = state.agents
+        selectedPluginAccess = currentAgents.associate { it.id to null }
+        val summaries = coroutineScope {
+            currentAgents
+                .map { agent ->
+                    async {
+                        agent.id to
+                            runCatching {
+                                vm.api.getAgentPluginGrants(AgentInput(agent.id)).grants.any {
+                                    it.access is PluginGrantAccess.B
+                                }
+                            }
+                                .getOrNull()
+                    }
+                }
+                .awaitAll()
+        }
+        selectedPluginAccess = summaries.toMap()
+    }
     Page {
         Heading(
             if (agents) "Vos agents" else "Vos projets",
@@ -90,7 +122,12 @@ fun ResourcesScreen(
                             }
                             if (agent.description.isNotBlank()) Text(agent.description)
                             Text(
-                                agentAccessSummary(agent),
+                                agentAccessSummary(
+                                    agent,
+                                    selectedPluginAccess =
+                                        if (state.isOwner) selectedPluginAccess[agent.id]
+                                        else false,
+                                ),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )

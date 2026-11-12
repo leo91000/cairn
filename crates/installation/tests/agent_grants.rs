@@ -21,7 +21,10 @@ use cairn_installation::{
     service::{Service, covers, policy},
     validation::text,
 };
-use common::{RelayContext, relay_fixture::router};
+use common::{
+    RelayContext,
+    relay_fixture::{native_authority_unavailable, router},
+};
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 use tempfile::TempDir;
@@ -473,6 +476,7 @@ async fn preview_counts_work_that_reduced_access_would_stop() {
         .await;
     assert_eq!(status, StatusCode::OK, "{preview}");
     assert_eq!(preview["runs"], json!({ "queued": 0, "running": 0 }));
+    assert!(preview.get("accounts").is_none());
 
     let mut narrower = agent.clone();
     narrower["access"]["sandbox"] = "read-only".into();
@@ -487,6 +491,24 @@ async fn preview_counts_work_that_reduced_access_would_stop() {
         owner.stored("agents", text(&agent, "id")).await["access"]["sandbox"],
         "yolo"
     );
+}
+
+#[tokio::test]
+async fn preview_keeps_profile_edits_available_when_beacon_audience_is_unavailable() {
+    let owner = Owner::new().await;
+    let agent = owner.create_agent("Profile edit").await;
+    native_authority_unavailable(&owner.service).await;
+
+    let mut profile = agent.clone();
+    profile["description"] = "A harmless profile change".into();
+    let (status, preview) = owner
+        .send("POST", &format!("{}/preview", path(&agent)), profile)
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert!(preview.get("accounts").is_none());
+    assert_eq!(preview["runs"], json!({ "queued": 0, "running": 0 }));
+    assert_eq!(preview["delegations"], json!([]));
 }
 
 #[tokio::test]

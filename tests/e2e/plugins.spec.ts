@@ -75,7 +75,7 @@ async function discordForm(route: Route) {
 }
 
 test('Discord bots are set up through the package’s own form and keep the token private', async ({ page, workspace }) => {
-  test.setTimeout(90000)
+  test.setTimeout(120000)
   const helper = await workspace.api('/api/agents', 'POST', {
     name: 'Discord helper',
     access: {
@@ -246,6 +246,104 @@ test('Discord bots are set up through the package’s own form and keep the toke
   await review.getByRole('button', { name: 'Save', exact: true }).click()
   expect((await checked).postDataJSON().review.reapproveDelegations).toEqual([botId])
   await expect(review).toHaveCount(0)
+
+  // A grant-only edit still honors a deliberate reapproval of an earlier suspension.
+  await page.unroute(`**/api/agents/${helper.id}/preview`)
+  const prepare = async (path: string, body: unknown) => {
+    const started = await workspace.api(path, 'POST', body)
+    if (!started.operation)
+      return started
+    let operation: any
+    await expect.poll(async () => {
+      operation = await workspace.api(`/api/plugins/packages/operations/${started.operation}`)
+      return operation.state
+    }, { timeout: 30000 }).toBe('completed')
+    return operation.result.kind === 'package' ? operation.result.version : operation.result.output.instance
+  }
+
+  const notes = await prepare('/api/plugins/packages', {
+    manifest: {
+      id: 'review-notes',
+      name: 'Review notes',
+      version: '1',
+      apiVersion: 2,
+      capabilities: [],
+      agentAccess: { description: 'Read notes.' },
+      instructions: 'Read notes carefully.',
+    },
+    manifestFormat: 'json',
+    source: 'return {}',
+    modules: {},
+  })
+  await prepare('/api/plugins/packages/review-notes/approve', { pluginId: 'review-notes', version: '1', digest: notes.digest })
+  const notesInstance = (await prepare('/api/plugins/manage', {
+    kind: 'save',
+    pluginId: 'review-notes',
+    instanceId: null,
+    data: {
+      name: 'Reference',
+      enabled: true,
+      settings: {},
+      agentId: '',
+      projectId: null,
+      accessMode: 'allowlist',
+      userIds: [],
+      people: [],
+      maxMessagesPerHour: 100,
+      maxPerPersonPerHour: 50,
+    },
+  })).instance.id
+  const beforeGrant = await workspace.api(`/api/agents/${helper.id}`)
+  await workspace.api(`/api/agents/${helper.id}`, 'PUT', { ...beforeGrant, access: { ...beforeGrant.access, skills: null } })
+  const botEffect = async () => {
+    const current = await workspace.api(`/api/agents/${helper.id}`)
+    const preview = await workspace.api(`/api/agents/${helper.id}/preview`, 'POST', {
+      // The fixture projects a public agent into the strict settings/review command.
+      ...current,
+    })
+    return preview.delegations.find((item: any) => item.id === botId)
+  }
+
+  expect(await botEffect()).toMatchObject({ suspended: true, alreadySuspended: true })
+  await page.goto(workspacePath(`/agents/${helper.id}?section=plugins`))
+  const profileWrites: any[] = []
+  const grantWrites: any[] = []
+  page.on('request', (request) => {
+    if (request.method() !== 'PUT')
+      return
+    const path = new URL(request.url()).pathname
+    if (path.endsWith(`/agents/${helper.id}`))
+      profileWrites.push(request.postDataJSON())
+    if (path.endsWith(`/agents/${helper.id}/plugin-grants`))
+      grantWrites.push(request.postDataJSON())
+  })
+  await page.getByRole('combobox', { name: 'Access to Reference', exact: true }).selectOption('full')
+  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(earlier).not.toBeChecked()
+  await review.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.getByRole('region', { name: 'Unsaved changes' })).toHaveCount(0)
+  expect(profileWrites).toHaveLength(0)
+  expect(grantWrites).toHaveLength(1)
+  expect(await botEffect()).toMatchObject({ suspended: true, alreadySuspended: true })
+
+  await page.getByRole('combobox', { name: 'Access to Reference', exact: true }).selectOption('selected')
+  await page.getByRole('checkbox', { name: 'instructions Reference', exact: true }).check()
+  const reviewRevision = (await workspace.api(`/api/agents/${helper.id}`)).revision
+  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(earlier).not.toBeChecked()
+  await earlier.check()
+  await expect(earlier).toBeChecked()
+  await review.getByRole('button', { name: 'Save', exact: true }).click()
+  await expect(page.getByRole('region', { name: 'Unsaved changes' })).toHaveCount(0)
+  expect(profileWrites).toHaveLength(1)
+  expect(profileWrites[0]).toMatchObject({ revision: reviewRevision, review: { reapproveDelegations: [botId] } })
+  expect(grantWrites).toHaveLength(2)
+  expect(grantWrites[1].revision).not.toBe(reviewRevision)
+  expect((await workspace.api(`/api/agents/${helper.id}/plugin-grants`)).grants).toContainEqual({
+    instanceId: notesInstance,
+    access: { type: 'selected', contributions: [{ kind: 'instructions', name: '', resources: [] }] },
+  })
+  expect(await botEffect()).toMatchObject({ suspended: false, alreadySuspended: false })
   await page.goto(workspacePath('/plugins/discord'))
 
   await bot.getByRole('button', { name: 'Delete #support on Acme' }).click()

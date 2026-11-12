@@ -69,7 +69,7 @@ abstract class InstallationAccessCases {
                                     "/api/installations/fixture/api/agents/$MAIN_AGENT_ID/accounts" ->
                                     """{"agentId":"$MAIN_AGENT_ID","accounts":[{"accountId":"member-1","accessId":"access-1","grantedAt":1}]}"""
                                 path.endsWith("/preview") ->
-                                    """{"runs":{"queued":0,"running":0},"delegations":[]}"""
+                                    """{"runs":{"queued":0,"running":0},"delegations":[],"accounts":[{"email":"owner@example.test"},{"email":"member@example.test"}]}"""
                                 path == "/api/installations/fixture/api/agents" ->
                                     wireJson.encodeToString(
                                         build.cairn.contracts.ListAgentsOutput(listOf(agent.get()))
