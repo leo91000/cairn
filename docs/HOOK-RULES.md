@@ -35,7 +35,10 @@ never computed by a formula.
 Formulas read `payload` (the event), each top-level payload field by its own name
 (`threadId`), `steps`, `values` (the rule's remembered values), `event` (`id`, `hook`,
 `instanceId`, `receivedAt`), `now` and the item of each enclosing loop. They call the
-CEL standard library, the strings and lists extensions and these Cairn functions:
+CEL standard library, the lists extension, the string functions of the strings
+extension (`charAt`, `indexOf`, `lastIndexOf`, `lowerAscii`, `upperAscii`, `replace`,
+`split`, `join`, `substring`, `trim`), which Cairn implements with size checks, and these
+Cairn functions:
 `truncate(text, length)`, `chunks(text, size)`, `formatDate(time, format, timezone?)`,
 `lower(text)`, `upper(text)`, `toJson(value)` and `fromJson(text)`. A formula is pure
 and its cost is bounded. Saving checks it: at most 2,000 characters and 300 nodes, no
@@ -76,11 +79,14 @@ instance and hook, when nothing blocks the rule and the execution agent's hook g
 covers every resource the payload designates. The triggering keeps the rule version it
 started with. Once every listening rule has its triggering, the event leaves the queue;
 an event no rule may receive is dropped, so a quiet queue never blocks later events.
+When the plugin cannot resolve the payload's resources for a moment, the event stays
+queued and is tried again for ten minutes.
 The same event is never triggered twice for one rule.
 
 The engine walks the tree in order. Before every action it checks the rule again: a
 disabled, paused, rights-lost or ended rule stops its triggerings, while an exhausted
-budget lets those already counted finish. A member's triggering acts only once their
+budget lets those already counted finish. A rule blocked while some of its triggerings
+wait stops them. A member's triggering acts only once their
 membership was verified within the last minute, and again after each wait; while the
 Beacon cannot confirm it, the triggering waits, and fails after seven days.
 
@@ -89,7 +95,7 @@ Variables:
 | Variable | Value |
 | --- | --- |
 | `payload` and each top-level payload field | the event |
-| `steps.<id>` | the result of an earlier action: the tool's answer, the stored value, or `{resumesAt}` for a wait |
+| `steps.<id>` | the result of an earlier action: the tool's answer, the stored value, or `{resumesAt}` for a wait; null for an action of the tree that did not run |
 | `values.<name>` | the rule's remembered values |
 | `event` | `id`, `hook`, `instanceId`, `receivedAt` |
 | `now` | when the triggering started, as a CEL timestamp |
@@ -108,7 +114,8 @@ Actions:
   stops before the answer, the action is never run again and the triggering fails, as
   the action may have taken effect. A tool that answers exactly `{retryAfter: seconds}`
   (optionally with `error`) tells Cairn the service did nothing: only that action runs
-  again, after the larger of that delay and an exponential backoff, at most five times.
+  again, after the larger of that delay and an exponential backoff, for at most five
+  attempts in all.
   Any other error ends the triggering with its message.
 - `storeValue` with the rule scope keeps up to 64 KiB.
 - `wait` resumes the next steps later; a rule keeps at most 20 triggerings waiting.
@@ -129,8 +136,9 @@ Every member sees the state of every triggering of every rule
 (`list_hook_rule_triggerings`, newest first, 50 per page, with the number of
 triggerings without effect in the last 24 hours). The event payload, each action's
 input, result and error (`get_hook_rule_triggering`) are visible to the creator, the
-owner and members with access to the execution agent. Cairn keeps the newest 200
-finished triggerings of each rule.
+owner and members with access to the execution agent of the version that triggering
+ran with. Cairn keeps the 200 newest triggerings of each rule, and every one still
+running, waiting or retrying.
 
 ## Versions
 
@@ -196,7 +204,7 @@ and `cairn_installation`:
 | `get_hook_rule` | `GET /hook-rules/{ruleId}` | read |
 | `list_hook_rule_versions` | `GET /hook-rules/{ruleId}/versions` | read |
 | `get_hook_rule_catalog` | `GET /hook-rules/catalog?agentId` | read |
-| `list_hook_rule_triggerings` | `GET /hook-rules/{ruleId}/triggerings?before` | read |
+| `list_hook_rule_triggerings` | `GET /hook-rules/{ruleId}/triggerings?cursor` | read |
 | `get_hook_rule_triggering` | `GET /hook-rule-triggerings/{triggeringId}` | read |
 | `validate_hook_rule` | `POST /hook-rules/validate` | read |
 | `create_hook_rule` | `POST /hook-rules` | manage |

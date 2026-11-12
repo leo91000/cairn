@@ -1,7 +1,7 @@
 //! The tree interpreter. It walks a pinned rule version between actions, evaluating
 //! conditions and loops, and stops at each action so that the engine can persist its
 //! position before any effect. Its whole state is the serializable [`Cursor`].
-use super::evaluate::{self, Variables};
+use super::evaluate::Evaluator;
 use cairn_contracts::{RuleCondition, RuleNode, RuleOperator, RuleValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as Json};
@@ -84,24 +84,26 @@ fn block<'a>(steps: &'a [RuleNode], path: &[Branch]) -> Option<&'a [RuleNode]> {
 }
 
 impl Cursor {
-    /// The variables at the current position: the base ones, step results and the
-    /// item of each enclosing loop.
-    pub(crate) fn variables(&self, base: &Variables) -> Variables {
-        let mut variables = base.clone();
-        variables.insert("steps", Json::Object(self.steps.clone()));
+    /// The results of the actions that ran. Every other action of the tree reads as
+    /// null, so that a branch not taken can be tested with `absent`.
+    pub(crate) fn steps(&self, actions: &[String]) -> Json {
+        let mut steps = self.steps.clone();
+        for action in actions {
+            steps.entry(action.clone()).or_insert(Json::Null);
+        }
+        Json::Object(steps)
+    }
+
+    /// The item of each enclosing loop.
+    pub(crate) fn items(&self) -> Map<String, Json> {
+        let mut items = Map::new();
         for frame in &self.frames {
             if let Some(iteration) = &frame.iteration {
-                variables.insert(
-                    &iteration.name,
-                    iteration
-                        .items
-                        .get(iteration.index)
-                        .cloned()
-                        .unwrap_or(Json::Null),
-                );
+                let item = iteration.items.get(iteration.index).cloned();
+                items.insert(iteration.name.clone(), item.unwrap_or(Json::Null));
             }
         }
-        variables
+        items
     }
 
     fn count(&mut self) -> Result<(), String> {
@@ -119,7 +121,7 @@ impl Cursor {
     pub(crate) fn advance<'a>(
         &mut self,
         steps: &'a [RuleNode],
-        base: &Variables,
+        evaluator: &Evaluator,
     ) -> Result<Option<&'a RuleNode>, String> {
         loop {
             let Some(frame) = self.frames.last_mut() else {
@@ -146,7 +148,7 @@ impl Cursor {
             self.count()?;
             match node {
                 RuleNode::If { condition, .. } => {
-                    let holds = self::condition(condition, &self.variables(base))?;
+                    let holds = self::condition(condition, evaluator, &self.items())?;
                     let branch = if holds {
                         Branch::Then(position)
                     } else {
@@ -161,7 +163,7 @@ impl Cursor {
                 RuleNode::ForEach {
                     items, item_name, ..
                 } => {
-                    let items = match evaluate::value(items, &self.variables(base))? {
+                    let items = match evaluator.value(items, &self.items())? {
                         Json::Array(items) => items,
                         Json::Null => Vec::new(),
                         _ => return Err(format!("{} does not hold a list.", node.id())),
@@ -190,10 +192,16 @@ impl Cursor {
     }
 }
 
-/// A value, where a missing field reads as null rather than failing.
-fn lenient(value: &RuleValue, variables: &Variables) -> Result<Json, String> {
-    match evaluate::value(value, variables) {
-        Err(error) if error.contains("No such key") => Ok(Json::Null),
+/// A value, where a missing field, or a field of a missing value, reads as null.
+fn lenient(
+    value: &RuleValue,
+    evaluator: &Evaluator,
+    items: &Map<String, Json>,
+) -> Result<Json, String> {
+    match evaluator.value(value, items) {
+        Err(error) if error.contains("No such key") || error.contains("(null_type, ") => {
+            Ok(Json::Null)
+        }
         result => result,
     }
 }
@@ -257,11 +265,15 @@ fn compare(left: &Json, operator: RuleOperator, right: &Json) -> Result<bool, St
 }
 
 /// Evaluates a condition. Conditions about conversation keys belong to them.
-pub(crate) fn condition(condition: &RuleCondition, variables: &Variables) -> Result<bool, String> {
+pub(crate) fn condition(
+    condition: &RuleCondition,
+    evaluator: &Evaluator,
+    items: &Map<String, Json>,
+) -> Result<bool, String> {
     match condition {
         RuleCondition::All { conditions } => {
             for condition in conditions {
-                if !self::condition(condition, variables)? {
+                if !self::condition(condition, evaluator, items)? {
                     return Ok(false);
                 }
             }
@@ -269,31 +281,31 @@ pub(crate) fn condition(condition: &RuleCondition, variables: &Variables) -> Res
         }
         RuleCondition::Any { conditions } => {
             for condition in conditions {
-                if self::condition(condition, variables)? {
+                if self::condition(condition, evaluator, items)? {
                     return Ok(true);
                 }
             }
             Ok(false)
         }
-        RuleCondition::Not { condition } => Ok(!self::condition(condition, variables)?),
+        RuleCondition::Not { condition } => Ok(!self::condition(condition, evaluator, items)?),
         RuleCondition::Compare {
             left,
             operator,
             right,
         } => {
-            let left = lenient(left, variables)?;
+            let left = lenient(left, evaluator, items)?;
             let right = match right {
-                Some(right) => lenient(right, variables)?,
+                Some(right) => lenient(right, evaluator, items)?,
                 None => Json::Null,
             };
             compare(&left, *operator, &right)
         }
-        RuleCondition::Formula { expression } => match evaluate::formula(expression, variables)? {
+        RuleCondition::Formula { expression } => match evaluator.formula(expression, items)? {
             Json::Bool(holds) => Ok(holds),
             _ => Err("This formula does not evaluate to true or false.".into()),
         },
         RuleCondition::AuthorIn { author, people } => {
-            let author = lenient(author, variables)?;
+            let author = lenient(author, evaluator, items)?;
             Ok(author
                 .as_str()
                 .is_some_and(|author| people.iter().any(|person| person.id == author)))
@@ -309,16 +321,18 @@ pub(crate) fn condition(condition: &RuleCondition, variables: &Variables) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules::evaluate::Variables;
     use serde_json::json;
 
-    fn base() -> Variables {
+    fn evaluator(author: &str) -> Evaluator {
         let mut variables = Variables::default();
         variables.insert(
             "payload",
             json!({ "author": "alice", "items": ["a", "b"], "n": 3 }),
         );
-        variables.insert("author", json!("alice"));
-        variables
+        variables.insert("author", json!(author));
+        variables.insert("steps", json!({ "post": null }));
+        Evaluator::new(&variables).unwrap()
     }
 
     fn tree() -> Vec<RuleNode> {
@@ -344,11 +358,11 @@ mod tests {
     #[test]
     fn walks_branches_and_loops_and_resumes_from_a_serialized_cursor() {
         let steps = tree();
-        let base = base();
+        let base = evaluator("alice");
         let mut cursor = Cursor::default();
         let first = cursor.advance(&steps, &base).unwrap().unwrap();
         assert_eq!(first.id(), "post");
-        assert_eq!(cursor.variables(&base).0["entry"], json!("a"));
+        assert_eq!(cursor.items()["entry"], json!("a"));
         cursor.steps.insert("post".into(), json!({ "ok": 1 }));
 
         // The position survives persistence between actions.
@@ -356,12 +370,11 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&cursor).unwrap()).unwrap();
         let second = cursor.advance(&steps, &base).unwrap().unwrap();
         assert_eq!(second.id(), "post");
-        assert_eq!(cursor.variables(&base).0["entry"], json!("b"));
+        assert_eq!(cursor.items()["entry"], json!("b"));
         assert_eq!(cursor.advance(&steps, &base).unwrap().unwrap().id(), "last");
         assert!(cursor.advance(&steps, &base).unwrap().is_none());
 
-        let mut stranger = base.clone();
-        stranger.insert("author", json!("mallory"));
+        let stranger = evaluator("mallory");
         let mut cursor = Cursor::default();
         assert_eq!(
             cursor.advance(&steps, &stranger).unwrap().unwrap().id(),
@@ -371,7 +384,7 @@ mod tests {
 
     #[test]
     fn operators_compare_values_and_missing_fields_read_as_null() {
-        let v = base();
+        let v = evaluator("alice");
         let cases = [
             (
                 json!({ "type": "compare", "left": { "type": "formula", "expression": "payload.n" }, "operator": "greaterThan", "right": { "type": "literal", "value": 2.5 } }),
@@ -383,6 +396,10 @@ mod tests {
             ),
             (
                 json!({ "type": "compare", "left": { "type": "formula", "expression": "payload.missing" }, "operator": "absent" }),
+                true,
+            ),
+            (
+                json!({ "type": "compare", "left": { "type": "formula", "expression": "steps.post.messageId" }, "operator": "absent" }),
                 true,
             ),
             (
@@ -407,7 +424,11 @@ mod tests {
         ];
         for (condition, expected) in cases {
             let parsed: RuleCondition = serde_json::from_value(condition.clone()).unwrap();
-            assert_eq!(super::condition(&parsed, &v), Ok(expected), "{condition}");
+            assert_eq!(
+                super::condition(&parsed, &v, &Map::new()),
+                Ok(expected),
+                "{condition}"
+            );
         }
         let looping: Vec<RuleNode> = serde_json::from_value(json!([
             { "type": "forEach", "id": "each", "itemName": "entry",

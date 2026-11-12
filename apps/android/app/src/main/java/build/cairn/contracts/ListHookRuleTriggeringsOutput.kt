@@ -7,12 +7,11 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class ListHookRuleTriggeringsOutput(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
-    val nextBefore: Long? = null,
+    val nextCursor: String? = null,
     val triggerings: List<HookRuleTriggering>,
     val withoutEffect: Long,
 ) {
     init {
-        nextBefore?.let { require(it in 0L..9007199254740991L) }
         require(withoutEffect >= 0L)
     }
 }

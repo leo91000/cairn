@@ -636,7 +636,7 @@ fn main() {
         { "name": "validateHookRule", "input": "ValidateHookRuleInput", "output": "ValidateHookRuleOutput", "method": "POST", "path": "/hook-rules/validate" },
         { "name": "getHookRule", "input": "HookRuleInput", "output": "HookRule", "method": "GET", "path": "/hook-rules/{ruleId}" },
         { "name": "listHookRuleVersions", "input": "HookRuleInput", "output": "ListHookRuleVersionsOutput", "method": "GET", "path": "/hook-rules/{ruleId}/versions" },
-        { "name": "listHookRuleTriggerings", "input": "ListHookRuleTriggeringsInput", "output": "ListHookRuleTriggeringsOutput", "method": "GET", "path": "/hook-rules/{ruleId}/triggerings", "query": ["before"], "optionalQuery": ["before"] },
+        { "name": "listHookRuleTriggerings", "input": "ListHookRuleTriggeringsInput", "output": "ListHookRuleTriggeringsOutput", "method": "GET", "path": "/hook-rules/{ruleId}/triggerings", "query": ["cursor"], "optionalQuery": ["cursor"] },
         { "name": "getHookRuleTriggering", "input": "HookRuleTriggeringInput", "output": "HookRuleTriggering", "method": "GET", "path": "/hook-rule-triggerings/{triggeringId}" },
         { "name": "createHookRule", "input": "CreateHookRuleInput", "output": "HookRule", "method": "POST", "path": "/hook-rules" },
         { "name": "replaceHookRule", "input": "ReplaceHookRuleInput", "output": "HookRule", "method": "PUT", "path": "/hook-rules/{ruleId}" },

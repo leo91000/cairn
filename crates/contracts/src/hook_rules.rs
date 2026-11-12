@@ -880,11 +880,11 @@ pub struct HookRuleTriggering {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ListHookRuleTriggeringsInput {
     pub rule_id: HookRuleId,
-    /// Only triggerings created before this time, for the next page.
+    /// The `nextCursor` of the previous page.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 0, max = 9007199254740991_i64))]
-    #[ts(optional = nullable, type = "number")]
-    pub before: Option<i64>,
+    #[schemars(length(min = 1, max = 200))]
+    #[ts(optional = nullable)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]
@@ -895,10 +895,10 @@ pub struct ListHookRuleTriggeringsOutput {
     /// Triggerings that ended without any action in the last 24 hours. They are not
     /// kept and do not count against the hourly caps.
     pub without_effect: u32,
+    /// Present when older triggerings remain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 0, max = 9007199254740991_i64))]
-    #[ts(optional = nullable, type = "number")]
-    pub next_before: Option<i64>,
+    #[ts(optional = nullable)]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema, TS)]

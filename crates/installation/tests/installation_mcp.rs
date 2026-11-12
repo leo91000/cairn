@@ -1622,6 +1622,8 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "list_hook_rules",
         "get_hook_rule",
         "list_hook_rule_versions",
+        "list_hook_rule_triggerings",
+        "get_hook_rule_triggering",
         "get_hook_rule_catalog",
         "validate_hook_rule",
         "create_hook_rule",

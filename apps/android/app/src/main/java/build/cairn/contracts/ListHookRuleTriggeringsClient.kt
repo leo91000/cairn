@@ -8,7 +8,7 @@ suspend fun CairnApi.listHookRuleTriggerings(
     input: ListHookRuleTriggeringsInput
 ): ListHookRuleTriggeringsOutput {
     val query =
-        listOfNotNull(input.before?.let { "before" to it.toString() }).joinToString("&") {
+        listOfNotNull(input.cursor?.let { "cursor" to it.toString() }).joinToString("&") {
             (key, value) ->
             "$key=${segment(value)}"
         }

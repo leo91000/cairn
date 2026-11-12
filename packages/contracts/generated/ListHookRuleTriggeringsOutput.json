@@ -189,12 +189,10 @@
     }
   },
   "properties": {
-    "nextBefore": {
-      "format": "int64",
-      "maximum": 9007199254740991,
-      "minimum": 0,
+    "nextCursor": {
+      "description": "Present when older triggerings remain.",
       "type": [
-        "integer",
+        "string",
         "null"
       ]
     },

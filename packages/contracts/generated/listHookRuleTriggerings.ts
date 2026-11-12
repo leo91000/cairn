@@ -3,6 +3,6 @@ import type { ListHookRuleTriggeringsInput } from './typescript/ListHookRuleTrig
 import type { ListHookRuleTriggeringsOutput } from './typescript/ListHookRuleTriggeringsOutput'
 
 export function listHookRuleTriggerings(request: <T>(path: string, options: RequestInit) => Promise<T>, input: ListHookRuleTriggeringsInput): Promise<ListHookRuleTriggeringsOutput> {
-  const query = new URLSearchParams({ ...(input.before == null ? {} : { before: String(input.before) }) }).toString()
+  const query = new URLSearchParams({ ...(input.cursor == null ? {} : { cursor: String(input.cursor) }) }).toString()
   return request<ListHookRuleTriggeringsOutput>(`/hook-rules/${encodeURIComponent(input.ruleId)}/triggerings${query ? `?${query}` : ''}`, { method: 'GET' })
 }

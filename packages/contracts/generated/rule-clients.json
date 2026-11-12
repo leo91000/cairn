@@ -53,12 +53,12 @@
     "method": "GET",
     "name": "listHookRuleTriggerings",
     "optionalQuery": [
-      "before"
+      "cursor"
     ],
     "output": "ListHookRuleTriggeringsOutput",
     "path": "/hook-rules/{ruleId}/triggerings",
     "query": [
-      "before"
+      "cursor"
     ]
   },
   {

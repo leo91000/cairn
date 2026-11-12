@@ -4,7 +4,7 @@ import type { HookRuleId } from './HookRuleId'
 export interface ListHookRuleTriggeringsInput {
   ruleId: HookRuleId
   /**
-   * Only triggerings created before this time, for the next page.
+   * The `nextCursor` of the previous page.
    */
-  before?: number
+  cursor?: string | null
 }

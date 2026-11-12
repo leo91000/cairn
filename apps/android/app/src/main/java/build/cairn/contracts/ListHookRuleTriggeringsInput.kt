@@ -7,11 +7,10 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class ListHookRuleTriggeringsInput(
     @kotlinx.serialization.EncodeDefault(kotlinx.serialization.EncodeDefault.Mode.NEVER)
-    val before: Long? = null,
+    val cursor: String? = null,
     val ruleId: String,
 ) {
     init {
-        before?.let { require(it in 0L..9007199254740991L) }
         java.util.UUID.fromString(ruleId)
     }
 }

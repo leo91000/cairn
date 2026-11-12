@@ -5960,13 +5960,12 @@
     "ListHookRuleTriggeringsInput": {
       "additionalProperties": false,
       "properties": {
-        "before": {
-          "description": "Only triggerings created before this time, for the next page.",
-          "format": "int64",
-          "maximum": 9007199254740991,
-          "minimum": 0,
+        "cursor": {
+          "description": "The `nextCursor` of the previous page.",
+          "maxLength": 200,
+          "minLength": 1,
           "type": [
-            "integer",
+            "string",
             "null"
           ]
         },
@@ -5983,12 +5982,10 @@
     "ListHookRuleTriggeringsOutput": {
       "additionalProperties": false,
       "properties": {
-        "nextBefore": {
-          "format": "int64",
-          "maximum": 9007199254740991,
-          "minimum": 0,
+        "nextCursor": {
+          "description": "Present when older triggerings remain.",
           "type": [
-            "integer",
+            "string",
             "null"
           ]
         },

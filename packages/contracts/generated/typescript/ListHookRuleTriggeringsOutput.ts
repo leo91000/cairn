@@ -11,6 +11,9 @@ export interface ListHookRuleTriggeringsOutput {
    * kept and do not count against the hourly caps.
    */
   withoutEffect: number
-  nextBefore?: number
+  /**
+   * Present when older triggerings remain.
+   */
+  nextCursor?: string | null
 
 }

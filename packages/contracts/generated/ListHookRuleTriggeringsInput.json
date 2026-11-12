@@ -2,13 +2,12 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "properties": {
-    "before": {
-      "description": "Only triggerings created before this time, for the next page.",
-      "format": "int64",
-      "maximum": 9007199254740991,
-      "minimum": 0,
+    "cursor": {
+      "description": "The `nextCursor` of the previous page.",
+      "maxLength": 200,
+      "minLength": 1,
       "type": [
-        "integer",
+        "string",
         "null"
       ]
     },

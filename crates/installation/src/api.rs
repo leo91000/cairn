@@ -337,10 +337,7 @@ async fn rule_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Resul
         }
         ("GET", ["hook-rules", id, "triggerings"]) => (
             "list_hook_rule_triggerings",
-            json!({
-                "ruleId": id,
-                "before": query("before").as_str().and_then(|before| before.parse::<i64>().ok()),
-            }),
+            json!({ "ruleId": id, "cursor": query("cursor") }),
         ),
         ("GET", ["hook-rule-triggerings", id]) => {
             ("get_hook_rule_triggering", json!({ "triggeringId": id }))

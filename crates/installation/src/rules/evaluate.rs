@@ -13,6 +13,7 @@ use cel::{
     common::ast::{CallExpr, EntryExpr, Expr, IdedExpr},
     extractors::This,
 };
+use serde_json::Map;
 use serde_json::Value as Json;
 use std::{cell::Cell, collections::BTreeMap, sync::Arc};
 
@@ -443,10 +444,25 @@ fn index_of(
 ) -> Result<Value, ExecutionError> {
     let text = text(this, ftx)?;
     let needle = self::text(argument(ftx, arguments, 0)?, ftx)?;
+    let characters = text.chars().count();
+    // The optional offset counts characters, like the result.
+    let offset = match rest(ftx, arguments).get(1) {
+        Some(offset) => usize::try_from(int(offset, ftx)?)
+            .ok()
+            .filter(|offset| *offset <= characters)
+            .ok_or_else(|| ftx.error("index out of range"))?,
+        None if last => characters,
+        None => 0,
+    };
+    let byte = text
+        .char_indices()
+        .nth(offset)
+        .map_or(text.len(), |(byte, _)| byte);
     let found = if last {
-        text.rfind(needle.as_str())
+        let end = (byte + needle.len()).min(text.len());
+        text.get(..end).and_then(|head| head.rfind(needle.as_str()))
     } else {
-        text.find(needle.as_str())
+        text[byte..].find(needle.as_str()).map(|found| byte + found)
     };
     Ok(Value::Int(
         found.map_or(-1, |byte| text[..byte].chars().count() as i64),
@@ -564,22 +580,52 @@ fn call(id: u64, function: &str, inner: IdedExpr) -> IdedExpr {
     }
 }
 
+/// Calls whose result can be larger than their arguments. Comparisons, logic, `type`,
+/// `size`, indexing and other fixed-size results are left as they are, so that their
+/// values (a `type`, for instance) keep their own kind.
+const GROWING: &[&str] = &[
+    "_+_",
+    "string",
+    "bytes",
+    "replace",
+    "join",
+    "split",
+    "chunks",
+    "toJson",
+    "fromJson",
+    "lower",
+    "upper",
+    "lowerAscii",
+    "upperAscii",
+    "substring",
+    "trim",
+    "truncate",
+    "formatDate",
+    "flatten",
+    "sort",
+    "distinct",
+    "reverse",
+    "slice",
+];
+
 /// Rewrites a checked formula so that macro ranges count against the iteration
-/// budget and every call, list, map and macro result is size-checked.
+/// budget and every value that can grow is size-checked and counted.
 fn instrument(node: IdedExpr) -> IdedExpr {
     let id = node.id;
     match node.expr {
         Expr::Call(mut call) => {
             call.target = call.target.map(|target| Box::new(instrument(*target)));
             call.args = call.args.into_iter().map(instrument).collect();
-            self::call(
+            let growing = GROWING.contains(&call.func_name.as_str());
+            let node = IdedExpr {
                 id,
-                BOUND,
-                IdedExpr {
-                    id,
-                    expr: Expr::Call(call),
-                },
-            )
+                expr: Expr::Call(call),
+            };
+            if growing {
+                self::call(id, BOUND, node)
+            } else {
+                node
+            }
         }
         Expr::Comprehension(mut comprehension) => {
             // Only the range and the step hold the formula's own code. The macro's
@@ -635,8 +681,8 @@ fn instrument(node: IdedExpr) -> IdedExpr {
     }
 }
 
-/// A macro's step: its accumulating operators and appended list stay as they are,
-/// their operands are instrumented.
+/// A macro's step: its accumulating operators and appended list stay as they are.
+/// Each appended item is copied into the result, so it counts against the budgets.
 fn step(node: IdedExpr) -> IdedExpr {
     let id = node.id;
     match node.expr {
@@ -651,7 +697,14 @@ fn step(node: IdedExpr) -> IdedExpr {
             }
         }
         Expr::List(mut list) => {
-            list.elements = list.elements.into_iter().map(instrument).collect();
+            list.elements = list
+                .elements
+                .into_iter()
+                .map(|element| {
+                    let id = element.id;
+                    self::call(id, BOUND, instrument(element))
+                })
+                .collect();
             IdedExpr {
                 id,
                 expr: Expr::List(list),
@@ -661,60 +714,77 @@ fn step(node: IdedExpr) -> IdedExpr {
     }
 }
 
-fn scope(variables: &Variables) -> formula::Scope {
-    formula::Scope {
-        names: variables.0.keys().cloned().collect(),
-        steps: variables
-            .0
-            .get("steps")
-            .and_then(Json::as_object)
-            .map(|steps| steps.keys().cloned().collect())
-            .unwrap_or_default(),
-    }
+/// Evaluates the values of one place of a triggering. Its variables are converted
+/// once; loop items join them in a child scope for each evaluation.
+pub(crate) struct Evaluator {
+    context: Context<'static, 'static>,
+    scope: formula::Scope,
 }
 
-/// Evaluates one formula. Checking it again guards against a version saved under
-/// earlier, looser limits.
-pub(crate) fn formula(source: &str, variables: &Variables) -> Outcome<Json> {
-    let expression = formula::check(source, &scope(variables))?;
-    let program = instrument(expression);
-    let context = context(variables)?;
-    ITERATIONS.with(|used| used.set(0));
-    PRODUCED.with(|produced| produced.set(0));
-    let value = Value::resolve(&program, &context).map_err(|error| error.to_string())?;
-    let json = value.json().map_err(|error| error.to_string())?;
-    if serde_json::to_vec(&json).map_or(true, |bytes| bytes.len() > MAX_BYTES) {
-        return Err(too_large().to_string());
-    }
-    Ok(json)
-}
-
-/// The text of a template, each `{{expression}}` replaced by its result.
-pub(crate) fn template(text: &str, variables: &Variables) -> Outcome<Json> {
-    let mut rendered = String::new();
-    for part in formula::template(text)? {
-        match part {
-            Part::Text(text) => rendered.push_str(&text),
-            Part::Expression(source) => match formula(&source, variables)
-                .map_err(|error| format!("In {{{{{source}}}}}: {error}"))?
-            {
-                Json::String(text) => rendered.push_str(&text),
-                Json::Null => {}
-                value => rendered.push_str(&value.to_string()),
+impl Evaluator {
+    pub(crate) fn new(variables: &Variables) -> Outcome<Self> {
+        Ok(Self {
+            context: context(variables)?,
+            scope: formula::Scope {
+                names: variables.0.keys().cloned().collect(),
+                steps: variables
+                    .0
+                    .get("steps")
+                    .and_then(Json::as_object)
+                    .map(|steps| steps.keys().cloned().collect())
+                    .unwrap_or_default(),
             },
+        })
+    }
+
+    /// Evaluates one formula. Checking it again guards against a version saved under
+    /// earlier, looser limits.
+    pub(crate) fn formula(&self, source: &str, items: &Map<String, Json>) -> Outcome<Json> {
+        let mut scope = self.scope.clone();
+        scope.names.extend(items.keys().cloned());
+        let program = instrument(formula::check(source, &scope)?);
+        let mut context = self.context.new_inner_scope();
+        for (name, value) in items {
+            context.add_variable_from_value(name.clone(), to_cel(value));
         }
-        if rendered.len() > MAX_BYTES {
+        ITERATIONS.with(|used| used.set(0));
+        PRODUCED.with(|produced| produced.set(0));
+        let value = Value::resolve(&program, &context).map_err(|error| error.to_string())?;
+        let json = value.json().map_err(|error| error.to_string())?;
+        if serde_json::to_vec(&json).map_or(true, |bytes| bytes.len() > MAX_BYTES) {
             return Err(too_large().to_string());
         }
+        Ok(json)
     }
-    Ok(Json::String(rendered))
-}
 
-pub(crate) fn value(value: &RuleValue, variables: &Variables) -> Outcome<Json> {
-    match value {
-        RuleValue::Literal { value } => Ok(value.clone()),
-        RuleValue::Template { text } => template(text, variables),
-        RuleValue::Formula { expression } => formula(expression, variables),
+    /// The text of a template, each `{{expression}}` replaced by its result.
+    pub(crate) fn template(&self, text: &str, items: &Map<String, Json>) -> Outcome<Json> {
+        let mut rendered = String::new();
+        for part in formula::template(text)? {
+            match part {
+                Part::Text(text) => rendered.push_str(&text),
+                Part::Expression(source) => match self
+                    .formula(&source, items)
+                    .map_err(|error| format!("In {{{{{source}}}}}: {error}"))?
+                {
+                    Json::String(text) => rendered.push_str(&text),
+                    Json::Null => {}
+                    value => rendered.push_str(&value.to_string()),
+                },
+            }
+            if rendered.len() > MAX_BYTES {
+                return Err(too_large().to_string());
+            }
+        }
+        Ok(Json::String(rendered))
+    }
+
+    pub(crate) fn value(&self, value: &RuleValue, items: &Map<String, Json>) -> Outcome<Json> {
+        match value {
+            RuleValue::Literal { value } => Ok(value.clone()),
+            RuleValue::Template { text } => self.template(text, items),
+            RuleValue::Formula { expression } => self.formula(expression, items),
+        }
     }
 }
 
@@ -722,6 +792,18 @@ pub(crate) fn value(value: &RuleValue, variables: &Variables) -> Outcome<Json> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn formula(source: &str, variables: &Variables) -> Outcome<Json> {
+        Evaluator::new(variables)?.formula(source, &Map::new())
+    }
+
+    fn template(text: &str, variables: &Variables) -> Outcome<Json> {
+        Evaluator::new(variables)?.template(text, &Map::new())
+    }
+
+    fn value(value: &RuleValue, variables: &Variables) -> Outcome<Json> {
+        Evaluator::new(variables)?.value(value, &Map::new())
+    }
 
     fn variables() -> Variables {
         let mut variables = Variables::default();
@@ -747,6 +829,13 @@ mod tests {
         let v = variables();
         let cases = [
             ("payload.author == 'alice'", json!(true)),
+            (
+                "type(payload.items) == list && type(1) != string",
+                json!(true),
+            ),
+            ("'abcabc'.indexOf('a', 1)", json!(3)),
+            ("'abcabc'.lastIndexOf('a')", json!(3)),
+            ("'abcabc'.lastIndexOf('a', 2)", json!(0)),
             ("steps.post.messageId", json!("m1")),
             ("payload.items.map(i, i * 2)", json!([2, 4, 6])),
             ("truncate(payload.content, 9)", json!("Hello wo…")),
@@ -790,6 +879,23 @@ mod tests {
     }
 
     #[test]
+    fn loop_items_join_the_variables_of_one_evaluation() {
+        let evaluator = Evaluator::new(&variables()).unwrap();
+        let mut items = Map::new();
+        items.insert("entry".into(), json!({ "name": "x" }));
+        assert_eq!(
+            evaluator.formula("entry.name + thread", &items),
+            Ok(json!("x42"))
+        );
+        assert!(
+            evaluator
+                .formula("entry", &Map::new())
+                .unwrap_err()
+                .contains("Unknown variable")
+        );
+    }
+
+    #[test]
     fn growth_and_iterations_stop_at_their_limits() {
         let mut v = variables();
         v.insert("big", json!((0..30_000).collect::<Vec<_>>()));
@@ -807,6 +913,8 @@ mod tests {
         v.insert("long", json!("y".repeat(200_000)));
         v.insert("mid", json!((0..200).collect::<Vec<_>>()));
         let error = formula("mid.map(x, long + 'z').size()", &v).unwrap_err();
+        assert!(error.contains("produced more than"), "{error}");
+        let error = formula("mid.map(x, long).size()", &v).unwrap_err();
         assert!(error.contains("produced more than"), "{error}");
         assert_eq!(
             formula("payload.items.filter(x, x > 1)", &v),
