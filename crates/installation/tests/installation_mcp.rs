@@ -1619,6 +1619,18 @@ async fn installation_tools_schedule_inspect_update_run_and_cancel_missions() {
         "get_skill_source_status",
         "update_skill_source",
         "forget_skill_source",
+        "list_hook_rules",
+        "get_hook_rule",
+        "list_hook_rule_versions",
+        "get_hook_rule_catalog",
+        "validate_hook_rule",
+        "create_hook_rule",
+        "replace_hook_rule",
+        "set_hook_rule_enabled",
+        "set_hook_rule_emergency_pause",
+        "lift_hook_rule_budget",
+        "duplicate_hook_rule",
+        "delete_hook_rule",
     ]);
     assert_eq!(installed_names, public_names);
     assert!(tools.iter().all(|tool| tool.get("_meta").is_none()));
