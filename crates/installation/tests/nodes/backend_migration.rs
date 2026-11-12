@@ -608,7 +608,13 @@ async fn an_active_mission_resumes_on_the_destination() {
         .await;
     assert_eq!(status, StatusCode::OK, "{moved}");
     let resumed = change.owner.run(&change.run).await;
-    assert_eq!(resumed["status"], RunStatus::Queued, "error={}, summary={}", resumed["error"], resumed["summary"]);
+    assert_eq!(
+        resumed["status"],
+        RunStatus::Queued,
+        "error={}, summary={}",
+        resumed["error"],
+        resumed["summary"]
+    );
     assert_eq!(resumed["targetNodeId"], change.destination);
     assert!(resumed["sessionHandoff"].is_string());
     assert_eq!(resumed["environmentExpirationCause"], "node-change");
@@ -847,7 +853,13 @@ async fn a_waiting_mission_keeps_its_wakeup_when_changing_node() {
         .await
         .unwrap();
     let resumed = change.owner.run(&change.run).await;
-    assert_eq!(resumed["status"], RunStatus::Queued, "error={}, summary={}", resumed["error"], resumed["summary"]);
+    assert_eq!(
+        resumed["status"],
+        RunStatus::Queued,
+        "error={}, summary={}",
+        resumed["error"],
+        resumed["summary"]
+    );
     assert!(resumed["wakeup"].is_null());
     let checkpoint = change
         .owner
@@ -1052,7 +1064,13 @@ async fn expiration_restores_a_live_missions_settled_wait_but_explicit_stop_canc
             .await
             .unwrap();
         let queued = change.owner.run(&change.run).await;
-        assert_eq!(queued["status"], RunStatus::Queued, "error={}, summary={}", queued["error"], queued["summary"]);
+        assert_eq!(
+            queued["status"],
+            RunStatus::Queued,
+            "error={}, summary={}",
+            queued["error"],
+            queued["summary"]
+        );
         assert_eq!(queued["environmentState"], "expired");
         let (status, selected) = change
             .move_to(json!({ "nodeId": change.destination }))
@@ -1123,7 +1141,13 @@ async fn queued_messages_and_active_missions_can_reselect_before_first_admission
                 .unwrap();
         }
         let queued = change.owner.run(&change.run).await;
-        assert_eq!(queued["status"], RunStatus::Queued, "error={}, summary={}", queued["error"], queued["summary"]);
+        assert_eq!(
+            queued["status"],
+            RunStatus::Queued,
+            "error={}, summary={}",
+            queued["error"],
+            queued["summary"]
+        );
         assert_eq!(queued["environmentState"], "expired");
         let (status, selected) = change.move_to(json!({ "nodeId": change.source })).await;
         assert_eq!(status, StatusCode::OK, "{selected}");
