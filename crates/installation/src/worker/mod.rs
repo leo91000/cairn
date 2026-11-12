@@ -209,6 +209,7 @@ async fn schedule_tasks(s: Arc<Service>) {
 /// Recovers executions and unfinished cleanup from the previous worker process.
 fn restore_after_restart(db: &mut Db<'_>) -> Result<()> {
     db.restore_chat_summaries(None)?;
+    crate::nodes::placement::release_unclaimed(db, None)?;
     // Earlier versions removed an expired environment before the next message
     // and moved environments between nodes. Neither survives an update.
     crate::environment_expiration::finish_legacy_cleaning(db)?;
@@ -317,6 +318,26 @@ async fn audit(store: &Store, action: &str, detail: Value) {
 mod tests {
     use super::*;
     use crate::{mission_fixture::MissionFixture, validation::text};
+
+    #[tokio::test]
+    async fn restart_releases_an_unclaimed_fresh_environment_reservation_but_keeps_execution_proofs()
+     {
+        use crate::{attempt_fixture::DbAttemptFixture, run_fixture::DbRunFixture};
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::open(root.path()).unwrap();
+        store.transaction(|db| {
+            db.add_run_fixture(&json!({ "id": "run", "taskId": "task", "status": "succeeded", "createdAt": 0, "environmentExpiredAt": 1 }), None)?;
+            checkpoint::RunCheckpoint { runner_id: Some(Some("bound".into())), ..Default::default() }.store_in(db, "run")?;
+            for (attempt, leased) in [("unclaimed", false), ("bound", false), ("leased", true)] {
+                db.put_attempt_fixture(&json!({ "id": attempt, "runId": "run", "released": false, "leaseRequired": leased, "diskMaterialized": false }))?;
+            }
+            restore_after_restart(db)?;
+            assert_eq!(db.attempt_fixture("unclaimed")?.unwrap()["released"], true);
+            assert_eq!(db.attempt_fixture("bound")?.unwrap()["released"], false);
+            assert_eq!(db.attempt_fixture("leased")?.unwrap()["released"], false);
+            Ok(())
+        }).await.unwrap();
+    }
 
     #[tokio::test]
     async fn committed_work_and_deployment_release_wake_the_scheduler() {

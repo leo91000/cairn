@@ -769,6 +769,15 @@ fn admit(
     db.save_attempt(&record)?;
     db.put("node-volumes", &volume)?;
     if run["environmentState"] == "expired" && !request.moving {
+        // Publish ownership with admission, before a preparing worker can save
+        // its checkpoint: revocation must see this environment in that gap.
+        db.update_run_placement(
+            request.run_id(),
+            super::run_placement::PlacementChanges {
+                node_id: Some(Some(id.to_owned())),
+                ..Default::default()
+            },
+        )?;
         db.update_run_boundary(request.run_id(), &json!({ "environmentState": null }))?;
     }
     if run["targetNodeId"].is_string() && !request.moving {
@@ -854,6 +863,34 @@ pub(crate) async fn renew_preparation(s: &Service, run: &str, attempt: &str) -> 
             Ok(())
         })
         .await
+}
+
+/// A reservation without disk materialization or an execution lease cannot have
+/// reached a controller. Release it after worker loss unless a checkpoint owns it.
+pub(crate) fn release_unclaimed(db: &Db<'_>, run: Option<&str>) -> Result<()> {
+    for attempt in db.attempts()? {
+        if attempt.released
+            || attempt.role != AttemptRole::Execution
+            || attempt.disk_materialized
+            || attempt.lease_required
+            || run.is_some_and(|run| run != attempt.run_id)
+            || crate::environment_expiration::admission_blocked(db, &attempt.run_id)?
+        {
+            continue;
+        }
+        if run.is_none()
+            && db
+                .run(&attempt.run_id)?
+                .is_none_or(|owner| !owner["environmentExpiredAt"].is_number())
+        {
+            continue;
+        }
+        let checkpoint = crate::worker::checkpoint::RunCheckpoint::load_in(db, &attempt.run_id)?;
+        if checkpoint.as_ref().and_then(|saved| saved.runner_id()) != Some(attempt.id.as_str()) {
+            release_in(db, &attempt.id)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn release_in(db: &Db<'_>, attempt: &str) -> Result<()> {

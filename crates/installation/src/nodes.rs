@@ -1094,7 +1094,7 @@ pub(crate) async fn revoke_live(
         .filter(|run| !active.contains_key(*run))
         .cloned()
         .collect::<std::collections::HashSet<_>>();
-    let revoked = s
+    let (revoked, expired) = s
         .store
         .transaction(move |db| {
             authorize.authorize(db)?;
@@ -1144,15 +1144,15 @@ pub(crate) async fn revoke_live(
 
             db.audit(
                 "node.revoked",
-                &json!({ "nodeId": node, "releasedPlacements": released, "expiredEnvironments": expired }),
+                &json!({ "nodeId": node, "releasedPlacements": released, "expiredEnvironments": expired.len() }),
             )?;
-            Ok(serde_json::to_value(cairn_contracts::NodeRevocation {
+            Ok((serde_json::to_value(cairn_contracts::NodeRevocation {
                 node: serde_json::from_value(public(record)?)?,
                 released_placements: released as u32,
-            })?)
+            })?, expired))
         })
         .await?;
-    for run in &hosted {
+    for run in &expired {
         if let Some(cancel) = active.get(run) {
             cancel.cancel();
         }

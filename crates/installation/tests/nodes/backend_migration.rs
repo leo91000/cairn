@@ -1166,3 +1166,73 @@ async fn queued_messages_and_active_missions_can_reselect_before_first_admission
         assert_eq!(change.retirements().await.len(), 1);
     }
 }
+
+#[tokio::test]
+async fn revocation_sees_a_fresh_admission_before_its_checkpoint_is_persisted() {
+    let change = Change::new(RunStatus::Succeeded).await;
+    let (status, moved) = change
+        .move_to(json!({ "nodeId": change.destination, "discardWorkingFiles": true }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{moved}");
+    change.owner.service.retire_environments().await.unwrap();
+    let run = change.owner.run(&change.run).await;
+    let attempt = id();
+    placement::reserve(&change.owner.service, &run, &attempt)
+        .await
+        .unwrap();
+    let admitted = change.owner.run(&change.run).await;
+    assert_eq!(admitted["nodeId"], change.destination);
+    assert!(admitted["environmentState"].is_null());
+    let checkpoint = change
+        .owner
+        .service
+        .store
+        .checkpoint_boundary(&change.run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        checkpoint["nodeId"].is_null(),
+        "the worker has not bound its checkpoint yet"
+    );
+    let token = CancellationToken::new();
+    change
+        .owner
+        .service
+        .worker
+        .active
+        .lock()
+        .await
+        .insert(change.run.clone(), token.clone());
+    let (status, revoked) = change
+        .owner
+        .send(
+            "POST",
+            &format!("/api/nodes/{}/revoke", change.destination),
+            json!({ "discardWorkingFiles": true }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{revoked}");
+    assert!(token.is_cancelled());
+    let expired = change.owner.run(&change.run).await;
+    assert_eq!(expired["environmentState"], "expired");
+    assert_eq!(expired["environmentExpirationCause"], "node-revocation");
+    assert!(expired["nodeId"].is_null());
+    change
+        .owner
+        .service
+        .worker
+        .active
+        .lock()
+        .await
+        .remove(&change.run);
+    change
+        .owner
+        .service
+        .detach_stopped_environments()
+        .await
+        .unwrap();
+    placement::release(&change.owner.service, &attempt)
+        .await
+        .unwrap();
+}

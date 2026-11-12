@@ -31,6 +31,7 @@ pub(super) async fn execute(
     cancel: CancellationToken,
 ) -> Result<()> {
     let run_id = text(&run, "id").to_owned();
+    let admission_revision = run["environmentAdmissionRevision"].clone();
     let saved = RunCheckpoint::load(&s.store, &run_id).await?;
     let existing = saved.is_some();
     let state = saved
@@ -55,7 +56,15 @@ pub(super) async fn execute(
     )
     .await;
     if let Err(error) = result {
-        record_failure(s, &checkpoint, &cancel, &error, &sensitive.snapshot()).await?;
+        record_failure_for_revision(
+            s,
+            &checkpoint,
+            &cancel,
+            &error,
+            &sensitive.snapshot(),
+            Some(admission_revision),
+        )
+        .await?;
     }
     let fenced = fence(s, &checkpoint).await?;
     stop_heartbeat.cancel();
@@ -210,12 +219,24 @@ pub(super) async fn record_failure_fixture(
     record_failure(s, checkpoint, cancel, error, sensitive).await
 }
 
+#[cfg(test)]
 async fn record_failure(
     s: &Service,
     checkpoint: &Checkpoint,
     cancel: &CancellationToken,
     error: &Error,
     sensitive: &[String],
+) -> Result<()> {
+    record_failure_for_revision(s, checkpoint, cancel, error, sensitive, None).await
+}
+
+async fn record_failure_for_revision(
+    s: &Service,
+    checkpoint: &Checkpoint,
+    cancel: &CancellationToken,
+    error: &Error,
+    sensitive: &[String],
+    admission_revision: Option<Value>,
 ) -> Result<()> {
     let run_id = checkpoint.id.as_str();
     reconcile(s, checkpoint, cancel).await?;
@@ -269,7 +290,10 @@ async fn record_failure(
                 .ok_or_else(|| Error::not_found("Run not found"))?;
             let cancelled = cancel.is_cancelled() || run.state.cancel_requested_at.is_some();
             let expired = matches!(saved.remaining_ms, Some(Some(i64::MIN..=0)));
-            if capacity && !cancelled && !expired && !shutdown.is_cancelled() {
+            let selection_replaced = admission_revision.as_ref().is_some_and(|revision| run.boundary["environmentAdmissionRevision"] != *revision)
+                && run.boundary["environmentState"] == "expired"
+                && !crate::environment_expiration::pending(db, &id)?;
+            if (capacity || selection_replaced) && !cancelled && !expired && !shutdown.is_cancelled() {
                 let mut restored_retry = None;
                 if saved.start_rejected == Some(true)
                     && let Some(mut paid) = saved.pending_paid_admission.take()
@@ -306,7 +330,8 @@ async fn record_failure(
                         ..Default::default()
                     },
                 )?;
-                return Ok(true);
+                let detail = if selection_replaced { "The destination or backend changed during preparation. Retrying its first admission.".to_owned() } else { capacity_detail };
+                return Ok(Some(detail));
             }
             let recover_controller = can_recover_controller(
                 saved,
@@ -349,12 +374,12 @@ async fn record_failure(
             };
             db.change_run(&id, patch)?;
             db.event(&id, &kind, message, None)?;
-            Ok(false)
+            Ok(None)
         })
         .await?;
-    if capacity_wait {
+    if let Some(detail) = capacity_wait {
         let run = s.store.run_state(run_id).await?;
-        super::schedule::report_capacity_wait(s, &run, &capacity_detail).await?;
+        super::schedule::report_capacity_wait(s, &run, &detail).await?;
     }
     Ok(())
 }
@@ -550,6 +575,55 @@ use crate::run_fixture::DbRunFixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_superseded_preparation_error_retries_the_current_choice_unless_stopped() {
+        let root = tempfile::tempdir().unwrap();
+        let service = Service::new(
+            serde_json::from_value(json!({
+                "dataDir": root.path().join("data"), "home": root.path().join("home"),
+                "workspaceRoots": [root.path()], "publicUrl": "http://localhost:4310",
+                "host": "127.0.0.1", "port": 0, "codexBin": "unused", "concurrency": 1, "runnerUrl": "", "workerEnabled": false, "logger": false,
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        for stopped in [false, true] {
+            let id = crate::config::id();
+            let owner = id.clone();
+            service.store.transaction(move |db| {
+                db.add_run_fixture(&json!({ "id": owner, "taskId": owner, "status": "running", "createdAt": now(), "environmentState": "expired", "environmentAdmissionRevision": "new-selection" }), None)?;
+                Ok(())
+            }).await.unwrap();
+            let checkpoint = Checkpoint::new(
+                service.store.clone(),
+                id.clone(),
+                RunCheckpoint::fresh(Some(60_000)),
+            );
+            checkpoint.persist().await.unwrap();
+            let cancel = CancellationToken::new();
+            if stopped {
+                cancel.cancel();
+            }
+            record_failure_for_revision(
+                &service,
+                &checkpoint,
+                &cancel,
+                &Error::forbidden("The calling execution ended or changed."),
+                &[],
+                Some(json!("old-selection")),
+            )
+            .await
+            .unwrap();
+            let run = service.store.run(&id).await.unwrap();
+            assert_eq!(run["status"], if stopped { "cancelled" } else { "queued" });
+            assert_eq!(run["environmentAdmissionRevision"], "new-selection");
+            assert_eq!(run["environmentState"], "expired");
+            assert!(checkpoint.snapshot().await.remaining_ms.flatten().unwrap() > 0);
+        }
+        service.shutdown.cancel();
+    }
 
     #[tokio::test]
     async fn provider_failure_with_lost_terminal_result_never_replays() {

@@ -90,25 +90,34 @@ async fn execute_inner(
         #[cfg(test)]
         output_probe: None,
     };
-    execution.mark_running().await?;
-    timing.next("access");
-    execution.refresh_access().await?;
-    execution.resolve_backend().await?;
-    timing.next("workspace");
-    let mut workspace = execution.prepare(existing).await?;
-    timing.next("session_lookup");
-    let mut resume = execution.resume_session(&workspace).await?;
-    timing.finish();
-    let mut log_total = 0;
-    loop {
-        match execution
-            .attempt(&mut workspace, resume.as_deref(), &mut log_total)
-            .await?
-        {
-            Attempt::Finished => return Ok(()),
-            Attempt::Resume(session) => resume = Some(session),
+    let result = async {
+        execution.mark_running().await?;
+        timing.next("access");
+        execution.refresh_access().await?;
+        execution.resolve_backend().await?;
+        timing.next("workspace");
+        let mut workspace = execution.prepare(existing).await?;
+        timing.next("session_lookup");
+        let mut resume = execution.resume_session(&workspace).await?;
+        timing.finish();
+        let mut log_total = 0;
+        loop {
+            match execution
+                .attempt(&mut workspace, resume.as_deref(), &mut log_total)
+                .await?
+            {
+                Attempt::Finished => return Ok(()),
+                Attempt::Resume(session) => resume = Some(session),
+            }
         }
     }
+    .await;
+    if let Some((runner, _)) = execution.reservation.take() {
+        // No controller received this reserved attempt; workspace preparation
+        // stopped before prepare_runner claimed it.
+        placement::release(s, &runner).await?;
+    }
+    result
 }
 
 /// A controller may have accepted a first attempt before its engine created a
@@ -334,6 +343,15 @@ impl Execution<'_> {
     /// including whether execution needs a VM.
     async fn refresh_access(&mut self) -> Result<()> {
         let s = self.s;
+        let (id, revision) = (self.id.clone(), self.admission_revision.clone());
+        s.store
+            .read(move |db| {
+                let current = db
+                    .run(&id)?
+                    .ok_or_else(|| Error::not_found("Run not found"))?;
+                crate::environment_expiration::require_admission_revision(&current, &revision)
+            })
+            .await?;
         let current = s
             .agent_snapshot(text(&self.run["snapshot"]["agent"], "id"))
             .await?;
@@ -595,8 +613,13 @@ impl Execution<'_> {
             ..Default::default()
         };
         let id = self.id.clone();
+        let revision = self.admission_revision.clone();
         s.store
             .transaction(move |db| {
+                let current = db
+                    .run(&id)?
+                    .ok_or_else(|| Error::not_found("Run not found"))?;
+                crate::environment_expiration::require_admission_revision(&current, &revision)?;
                 db.change_run(&id, patch)?;
                 db.event(
                     &id,
@@ -984,6 +1007,7 @@ impl Execution<'_> {
         timing.next("placement_commit");
         let publication = workspace.authorization.clone();
         let run_id = self.id.clone();
+        let revision = self.admission_revision.clone();
         let changes = crate::nodes::run_placement::PlacementChanges {
             node_id: Some(serde_json::from_value(placement["nodeId"].clone())?),
             resources: Some(serde_json::from_value(placement["resources"].clone())?),
@@ -993,6 +1017,10 @@ impl Execution<'_> {
         };
         s.store
             .transaction(move |db| {
+                let current = db
+                    .run(&run_id)?
+                    .ok_or_else(|| Error::not_found("Run not found"))?;
+                crate::environment_expiration::require_admission_revision(&current, &revision)?;
                 publication.authorize_in(db)?;
                 db.update_run_placement(&run_id, changes)
             })

@@ -3508,6 +3508,44 @@ async fn chat_file_tools_read_private_artifacts_and_attachments_in_bounded_chunk
     assert_eq!(result(&detail)["chat"]["environmentState"], "expired");
     let detail = public_call(&s, &["read"], "get_chat", json!({ "chatId": chat_id })).await;
     assert_eq!(result(&detail)["chat"]["environmentState"], "expired");
+    for cause in [
+        "inactivity",
+        "node-change",
+        "node-revocation",
+        "storage-migration",
+    ] {
+        s.store
+            .update_run_boundary_fixture(
+                text(&target, "id"),
+                json!({ "environmentExpirationCause": cause }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            s.chat_detail(chat_id).await.unwrap()["environmentExpirationCause"],
+            cause
+        );
+        for public in [false, true] {
+            let detail = if public {
+                public_call(&s, &["read"], "get_chat", json!({ "chatId": chat_id })).await
+            } else {
+                call(&s, &configuration, "get_chat", json!({ "chatId": chat_id })).await
+            };
+            assert_eq!(result(&detail)["chat"]["environmentExpirationCause"], cause);
+            let list = if public {
+                public_call(&s, &["read"], "list_chats", json!({})).await
+            } else {
+                call(&s, &configuration, "list_chats", json!({})).await
+            };
+            let chat = result(&list)["chats"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|chat| chat["id"] == chat_id)
+                .unwrap();
+            assert_eq!(chat["environmentExpirationCause"], cause);
+        }
+    }
     let listed = call(
         &s,
         &configuration,

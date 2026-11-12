@@ -355,6 +355,7 @@ impl Db<'_> {
                 'accountWaitReason',account_wait_reason, 'accountRequired',account_required,
                 'snapshot',json_object('agent',json_object('provider',provider)),
                 'contextUsage',json(boundary -> '$.contextUsage'),
+                'environmentExpirationCause',json(boundary -> '$.environmentExpirationCause'),
                 'suspendedByExclusive',json(placement_suspended_by_exclusive),
                 'restoredAt',json(boundary -> '$.restoredAt'),
                 'cancelRequestedAt',cancel_requested_at,

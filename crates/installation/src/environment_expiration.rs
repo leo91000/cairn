@@ -154,8 +154,8 @@ pub(crate) fn expire_node_in(
     db: &Db<'_>,
     node: &str,
     idle: &std::collections::HashSet<String>,
-) -> Result<u64> {
-    let mut expired = 0;
+) -> Result<Vec<String>> {
+    let mut expired = Vec::new();
     for run in runs_on_node(db, node)? {
         if db.get(PENDING, &run)?.is_some()
             || crate::conversation_lifecycle::require_active_run(db, &run).is_err()
@@ -168,7 +168,7 @@ pub(crate) fn expire_node_in(
             &Expiration::new(Cause::NodeRevocation),
             !idle.contains(&run),
         )?;
-        expired += 1;
+        expired.push(run);
     }
     Ok(expired)
 }
@@ -386,6 +386,7 @@ fn detach_environment_in(
     let Some(run) = db.run(run_id)? else {
         return Ok(());
     };
+    crate::nodes::placement::release_unclaimed(db, Some(run_id))?;
     let environment = environment
         .filter(Value::is_object)
         .unwrap_or_else(|| run.clone());

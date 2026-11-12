@@ -1224,8 +1224,12 @@ fn continue_run(
     let provider = Provider::of_run(snapshot)?;
     let expired = chat.environment_state == Some(EnvironmentState::Expired)
         || run["environmentState"] == "expired";
-    let restart_requested =
-        expired || chat.session_restart_requested || checkpoint.fresh_session == Some(true);
+    let fresh_environment_without_session =
+        run["environmentExpiredAt"].is_number() && !run["sessionId"].is_string();
+    let restart_requested = expired
+        || fresh_environment_without_session
+        || chat.session_restart_requested
+        || checkpoint.fresh_session == Some(true);
     if provider != Provider::of_run(run)? || restart_requested {
         if !expired && run["sessionId"].is_string() {
             checkpoint.workspace_initialized = Some(true);
