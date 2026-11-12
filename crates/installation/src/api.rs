@@ -220,6 +220,9 @@ async fn record_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Res
         };
         return Ok(Some(result));
     }
+    if let Some(result) = rule_routes(s, input, route).await? {
+        return Ok(Some(result));
+    }
     let result = match route {
         ("POST", ["projects", "import"]) => {
             crate::capabilities::resource_operation("import_project")
@@ -301,6 +304,65 @@ async fn run_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result
         _ => return Ok(None),
     };
     Ok(Some(result))
+}
+
+/// Hook rules. Every member reaches them; the rule domain decides who may do what.
+async fn rule_routes(s: &Arc<Service>, input: &Input, route: Route<'_>) -> Result<Option<Value>> {
+    let query = |field: &str| {
+        input
+            .query
+            .get(field)
+            .map_or(Value::Null, |value| Value::String(value.clone()))
+    };
+    let same = |field: &str, id: &str| {
+        if input.body[field] != *id {
+            return Err(Error::bad("Rule identity does not match the path."));
+        }
+        Ok(input.body.clone())
+    };
+    let (name, body) = match route {
+        ("GET", ["hook-rules"]) => (
+            "list_hook_rules",
+            json!({ "agentId": query("agentId"), "instanceId": query("instanceId") }),
+        ),
+        ("GET", ["hook-rules", "catalog"]) => (
+            "get_hook_rule_catalog",
+            json!({ "agentId": query("agentId") }),
+        ),
+        ("POST", ["hook-rules", "validate"]) => ("validate_hook_rule", input.body.clone()),
+        ("POST", ["hook-rules"]) => ("create_hook_rule", input.body.clone()),
+        ("GET", ["hook-rules", id]) => ("get_hook_rule", json!({ "ruleId": id })),
+        ("GET", ["hook-rules", id, "versions"]) => {
+            ("list_hook_rule_versions", json!({ "ruleId": id }))
+        }
+        ("PUT", ["hook-rules", id]) => ("replace_hook_rule", same("ruleId", id)?),
+        ("POST", ["hook-rules", id, "enabled"]) => ("set_hook_rule_enabled", same("ruleId", id)?),
+        ("POST", ["hook-rules", id, "emergency-pause"]) => {
+            ("set_hook_rule_emergency_pause", same("ruleId", id)?)
+        }
+        ("POST", ["hook-rules", id, "budget"]) => ("lift_hook_rule_budget", same("ruleId", id)?),
+        ("POST", ["hook-rules", id, "duplicate"]) => ("duplicate_hook_rule", same("ruleId", id)?),
+        ("DELETE", ["hook-rules", id]) => ("delete_hook_rule", json!({ "ruleId": id })),
+        _ => return Ok(None),
+    };
+    // Optional filters arrive as nulls; the contracts omit them instead.
+    let body = match body {
+        Value::Object(mut fields) => {
+            fields.retain(|_, value| !value.is_null());
+            Value::Object(fields)
+        }
+        body => body,
+    };
+    let identity = input
+        .identity
+        .as_ref()
+        .ok_or_else(|| Error::unauthorized("A verified identity is required."))?;
+    let operation = crate::rules::rule_operation(name).expect("rule operation");
+    Ok(Some(
+        operation
+            .invoke_as(s, body, crate::rules::Actor::from_identity(identity))
+            .await?,
+    ))
 }
 
 /// Queued messages only, with answers to secret questions redacted.

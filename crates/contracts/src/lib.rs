@@ -231,9 +231,11 @@ mod projects;
 pub use projects::*;
 
 mod agents;
+mod hook_rules;
 mod plugin_grants;
 
 pub use agents::*;
+pub use hook_rules::*;
 pub use plugin_grants::*;
 
 mod missions;

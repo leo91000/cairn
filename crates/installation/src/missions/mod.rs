@@ -446,7 +446,10 @@ impl Missions {
                     }
                 }
 
-                // Account access to agents follows the same memberships.
+                // Rules and account access to agents follow the same memberships.
+                if let Some(policy) = &observed {
+                    crate::rules::reconcile(db, policy)?;
+                }
                 crate::agent_access::reconcile(db, observed.as_ref())
             })
             .await?;

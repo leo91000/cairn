@@ -1186,9 +1186,9 @@ admission/review, instance validation and completion handler remain unchanged.
 
 These declarations are additive to API v2. Existing `inbound` and conversation
 capabilities keep their behavior until the later removal ticket. Resource-restricted
-contribution grants and the delivery authorization seam are available. Hook rules
-and their engine ship in later tickets; declaring a hook grants nobody permission
-to act on it, and nothing consumes the hook queue yet.
+contribution grants and the delivery authorization seam are available. People write
+[hook rules](HOOK-RULES.md) on the hooks their agents hold; declaring a hook grants
+nobody permission to act on it.
 
 ```toml
 # Add "hooks" to capabilities and declare agentAccess for agents' future hook grants.
@@ -1408,13 +1408,12 @@ them. Completing the work does not turn its private results into an unguarded ca
 Ticket F must call `plugins::grant_authorization::authorize_hook_delivery` with
 the execution agent, instance, declared hook name and payload before delivery; a
 refusal means no delivery. It does not consume or recreate A's durable queue.
-Ticket E/F must implement `plugins::grants::rule_uses` from their canonical rule
-store, returning the tools/hooks and resource restrictions each rule uses on its
-execution agent, regardless of rule state or budget. The reduction guard protects
-those uses. Until the full ADR-0075 conversation provenance is established, every
-current account's rule is protected; E's provenance integration may exclude only
-the eligible conversation's own account. No rule-writing, emergency-pause or
-budget authority is introduced here.
+`plugins::grants::rule_uses` reads the hook rule store: the tools and hooks each
+rule of a current membership uses on its execution agent, with the resources the
+agent holds now, regardless of rule state or budget. The reduction guard protects
+those uses. Until Cairn records who writes each conversation entry, every current
+account's rule is protected; an eligible conversation may later exclude only its own
+account's rules ([hook rules](HOOK-RULES.md)).
 
 Transfers returned by tools retain the producing contribution, resource inputs and
 transitive transfer dependencies. Every later read, attachment use or MIME
