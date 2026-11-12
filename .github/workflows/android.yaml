@@ -23,7 +23,7 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 jobs:
   resolve:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 47
     permissions:
       contents: read
@@ -48,7 +48,7 @@ jobs:
         task: [testDebugUnitTest, lintDebug]
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
@@ -85,7 +85,7 @@ jobs:
   build:
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7.0.1
@@ -129,8 +129,8 @@ jobs:
       contents: read
       actions: read
     # Set CAIRN_ANDROID_DEVICE_RUNNER to a larger runner label to move device tests
-    # off the free runners; fork pull requests always stay on ubuntu-latest.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CAIRN_ANDROID_DEVICE_RUNNER || 'ubuntu-latest' }}
+    # off the free runners; fork pull requests always stay on ubuntu-24.04.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CAIRN_ANDROID_DEVICE_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 25
     strategy:
       fail-fast: false
@@ -184,7 +184,7 @@ jobs:
   device-report:
     needs: [resolve, device]
     if: always() && !cancelled() && needs.resolve.outputs.reuse != 'true' && needs.device.result != 'skipped'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7.0.1
@@ -211,7 +211,7 @@ jobs:
   release:
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7.0.1
@@ -282,7 +282,7 @@ jobs:
   publish:
     needs: [resolve, check, device, device-report, release]
     if: always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.resolve.result == 'success' && (needs.resolve.outputs.reuse == 'true' || (needs.check.result == 'success' && needs.device.result == 'success' && needs.device-report.result == 'success' && needs.release.result == 'success'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     concurrency:
       group: android-stable-publication
