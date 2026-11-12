@@ -725,6 +725,20 @@ async fn legacy_full_grant_sync_clears_supplier_across_package_without_run_crede
         .await
         .unwrap();
 
+    let current = f.api("GET", json!({})).await.unwrap();
+    assert_eq!(current["runCredentialInstances"], json!([]));
+    f.api(
+        "PUT",
+        json!({
+            "agentId": MAIN_AGENT_ID,
+            "revision": current["revision"],
+            "grants": current["grants"],
+            "runCredentialInstances": [f.instance],
+        }),
+    )
+    .await
+    .unwrap();
+
     let selected = cairn_installation::plugins::run_credentials::for_run(&f.s, MAIN_AGENT_ID, &[])
         .await
         .unwrap();
@@ -894,6 +908,20 @@ async fn legacy_full_grant_sync_preserves_supplier_while_package_is_unavailable(
     f.s.agent_fixture(profile.clone(), Some(MAIN_AGENT_ID))
         .await
         .unwrap();
+
+    let current = f.api("GET", json!({})).await.unwrap();
+    assert_eq!(current["runCredentialInstances"], json!([]));
+    f.api(
+        "PUT",
+        json!({
+            "agentId": MAIN_AGENT_ID,
+            "revision": current["revision"],
+            "grants": current["grants"],
+            "runCredentialInstances": [f.instance],
+        }),
+    )
+    .await
+    .unwrap();
 
     let path = f.s.config.data_dir.join("plugins/grant-probe/1/main.luau");
     let original = std::fs::read(&path).unwrap();

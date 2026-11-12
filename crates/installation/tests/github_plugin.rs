@@ -290,6 +290,44 @@ async fn each_agent_runs_with_one_account_and_tokens_are_masked() {
     f.s.agent_fixture(edited, Some(text(&agent, "id")))
         .await
         .unwrap();
+    let agent_id = text(&agent, "id");
+    let path = format!("/api/agents/{agent_id}/plugin-grants");
+    let current = common::owner_api_route(&f.s, "GET", &path, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(current["runCredentialInstances"], json!([]));
+    assert!(
+        run_credentials::for_run(&f.s, agent_id, &[])
+            .await
+            .unwrap()
+            .files
+            .is_empty(),
+        "a profile save must not choose a credential supplier"
+    );
+    common::owner_api_route(
+        &f.s,
+        "PUT",
+        &path,
+        json!({
+            "agentId": agent_id,
+            "revision": current["revision"],
+            // Deliberately change the profile projection order while choosing the first
+            // account's credentials: supplier choice must not depend on grant order.
+            "grants": [
+                {
+                    "instanceId": second,
+                    "access": { "type": "full" },
+                },
+                {
+                    "instanceId": first,
+                    "access": { "type": "full" },
+                },
+            ],
+            "runCredentialInstances": [first],
+        }),
+    )
+    .await
+    .unwrap();
     let credentials = run_credentials::for_run(&f.s, text(&agent, "id"), &[])
         .await
         .unwrap();
@@ -306,6 +344,16 @@ async fn each_agent_runs_with_one_account_and_tokens_are_masked() {
             .any(|(_, content)| content.contains("fixture-second"))
     );
     // Existing instance editors must use a revision-guarded profile command.
+    // Compare with the accepted explicit replacement, not the earlier profile's order.
+    let before_refused = f.s.agent_snapshot(agent_id).await.unwrap();
+    let grants_before_refused = common::owner_api_route(&f.s, "GET", &path, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(before_refused["plugins"], json!([second, first]));
+    assert_eq!(
+        grants_before_refused["runCredentialInstances"],
+        json!([first])
+    );
     let refused = common::save_plugin(
         &f.s,
         "github",
@@ -316,9 +364,12 @@ async fn each_agent_runs_with_one_account_and_tokens_are_masked() {
     .unwrap_err();
     assert_eq!(refused.status, 400);
     assert!(refused.message.contains("current revision"));
+    assert_eq!(f.s.agent_snapshot(agent_id).await.unwrap(), before_refused);
     assert_eq!(
-        f.s.agent_snapshot(text(&agent, "id")).await.unwrap()["plugins"],
-        json!([first, second])
+        common::owner_api_route(&f.s, "GET", &path, json!({}))
+            .await
+            .unwrap(),
+        grants_before_refused
     );
 
     // Long display names are cut on character boundaries.

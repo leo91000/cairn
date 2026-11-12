@@ -60,6 +60,10 @@
   --color-on-brand: light-dark(#ffffff, #0f0f14);
   --color-brand-hover: light-dark(#204b78, #a4c9ee);
   --color-brand-edge: light-dark(#16151d, #346aa3);
+  /* Filled primary buttons: the pale dark-theme brand reads as disabled on a dark surface. */
+  --color-primary: light-dark(#14365a, #2f6ec7);
+  --color-on-primary: #ffffff;
+  --color-primary-hover: light-dark(#204b78, #3a7bd5);
   --color-danger: light-dark(#b53d22, var(--dark-danger));
   --color-danger-surface: light-dark(#fbe6df, var(--dark-danger-surface));
   --color-warning: light-dark(#66501c, #ffdf88);

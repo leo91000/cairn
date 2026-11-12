@@ -569,6 +569,7 @@ it('opens the review only for what this edit does', () => {
   expect(needsReview(reduction, { ...preview, delegations: [{ ...delegation, blocked: 'Too broad' }] })).toBe(false)
   expect(needsReview(reduction, { ...preview, delegations: [{ ...delegation, blocked: 'Too broad', alreadySuspended: false }] })).toBe(true)
   expect(needsReview(reduction, { ...preview, runs: { queued: 1, running: 0 } })).toBe(true)
+  expect(needsReview([{ ...reduction[0]!, requiresReview: true }], null)).toBe(true)
   expect(needsReview([{ ...reduction[0]!, kind: 'secret' }], null)).toBe(true)
 })
 
