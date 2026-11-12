@@ -159,19 +159,33 @@ if 'exec' in args:
                 result = subprocess.run(command, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 installation = root / 'installation'
-                config = json.loads((installation / 'data/storage-s3.json').read_text())
-                self.assertEqual(config['endpoint'], 'http://garage:3900')
-                self.assertEqual(config['bucket'], 'cairn-disks')
-                self.assertEqual((installation / 'data/storage-s3.json').stat().st_mode & 0o777, 0o600)
+                self.assertFalse((installation / 'data/storage-s3.json').exists())
+                self.assertFalse((installation / 'garage.env').exists())
+                self.assertFalse((installation / 'garage.toml').exists())
+                self.assertFalse((installation / 'garage').exists())
                 compose = json.loads((installation / 'compose.json').read_text())
+                self.assertEqual(set(compose['services']), {'manager', 'runner'})
+                self.assertEqual(set(compose['services']['manager']['depends_on']), {'runner'})
                 self.assertFalse(any('ports' in service for service in compose['services'].values()))
                 self.assertFalse((installation / 'claim.env').exists())
                 identity = (installation / 'data/installation-relay/identity.json').read_bytes()
-                credentials = (installation / 'garage.env').read_bytes()
+                # Reinstalling an older installation retains operator-owned S3
+                # configuration and data, even if they can no longer be parsed.
+                legacy = {
+                    'garage.env': b'legacy environment',
+                    'garage.toml': b'legacy configuration',
+                    'garage/data/block': b'legacy object',
+                    'data/storage-s3.json': b'legacy storage configuration',
+                }
+                for name, contents in legacy.items():
+                    path = installation / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(contents)
                 result = subprocess.run(command, env=env, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual((installation / 'data/installation-relay/identity.json').read_bytes(), identity)
-                self.assertEqual((installation / 'garage.env').read_bytes(), credentials)
+                for name, contents in legacy.items():
+                    self.assertEqual((installation / name).read_bytes(), contents)
                 self.assertNotIn('a' * 64, result.stdout + result.stderr)
             finally:
                 server.shutdown()

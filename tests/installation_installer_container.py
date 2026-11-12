@@ -1,16 +1,14 @@
 """Public shell installer in a disposable Linux container, without KVM.
 
 Docker lifecycle commands and loopback download transport are adapted. The real
-Compose parser validates the generated configuration on the controller. Claiming,
-relay and S3 use real binaries, Postgres and Garage; no VM is booted.
+Compose parser validates the generated configuration on the controller. Claiming and
+relay use real binaries and Postgres; no VM is booted.
 """
 import http.server
-import http.client
 import json
 import os
 from pathlib import Path
 import signal
-import ssl
 import stat
 import subprocess
 import sys
@@ -23,7 +21,6 @@ ROOT = Path('/fixture/installation')
 ORIGIN = 'http://127.0.0.1:48151'
 IMAGE = 'ghcr.io/leo91000/cairn@sha256:' + '1' * 64
 MAIL = []
-R2_HOST = '1' * 32 + '.r2.cloudflarestorage.com'
 
 
 def request(route, body=None, cookie='', csrf='', method=None):
@@ -82,10 +79,9 @@ def main(mode):
             '-f', str(ROOT / 'compose.json'), 'config', '--format', 'json',
         ], env={**os.environ, 'CAIRN_INSTALLATION_CLAIM_CODE': 'a' * 64}))
         services = config['services']
-        assert services['garage']['healthcheck']['test'] == ['CMD', '/garage', 'bucket', 'info', 'cairn-disks']
+        assert set(services) == {'manager', 'runner'}
         assert services['manager']['environment']['CAIRN_INSTALLATION_CLAIM_CODE'] == 'a' * 64
         assert services['manager']['user'] == '1000:1000'
-        assert services['manager']['depends_on']['garage']['condition'] == 'service_healthy'
         assert services['manager']['depends_on']['runner']['condition'] == 'service_healthy'
         assert not any(service.get('ports') for service in services.values())
         for name in ('data', 'home', 'workspaces'):
@@ -230,34 +226,19 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
             assert (ROOT / 'node-host.py').read_bytes() == Path('deploy/nodes/host.py').read_bytes()
             assert 'OnUnitActiveSec=5min' in Path('/etc/systemd/system/cairn-installation-update.timer').read_text()
             assert '--update' in Path('/etc/systemd/system/cairn-installation-update.service').read_text()
-            os.chown(ROOT / 'data/storage-s3.json', 0, 0)
+            assert not (ROOT / 'data/storage-s3.json').exists()
+            assert not (ROOT / 'garage.env').exists()
+            assert not (ROOT / 'garage.toml').exists()
+            assert not (ROOT / 'garage').exists()
             result = run_installer()
             assert result.returncode == 0, result.stderr
-            assert (ROOT / 'data/storage-s3.json').stat().st_uid == 1000, 'Rerun must repair an interrupted storage chown'
-            print('Container: KVM/TUN diagnostics, automatic private Garage configuration passed')
+            print('Container: KVM/TUN diagnostics, manager and local runner configuration passed')
         finally:
             server.shutdown()
         return
 
     mailbox = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Mailbox)
     threading.Thread(target=mailbox.serve_forever, daemon=True).start()
-    tls_extensions = Path('/fixture/external.ext')
-    tls_extensions.write_text(f'basicConstraints=critical,CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:localhost,DNS:{R2_HOST}\n')
-    for command in [
-        ['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
-         '-keyout', '/fixture/ca.key', '-out', '/usr/local/share/ca-certificates/cairn-fixture.crt',
-         '-days', '1', '-subj', '/CN=Cairn fixture CA', '-addext', 'basicConstraints=critical,CA:TRUE'],
-        ['openssl', 'req', '-new', '-newkey', 'rsa:2048', '-nodes',
-         '-keyout', '/fixture/external.key', '-out', '/fixture/external.csr', '-subj', '/CN=localhost'],
-        ['openssl', 'x509', '-req', '-in', '/fixture/external.csr',
-         '-CA', '/usr/local/share/ca-certificates/cairn-fixture.crt', '-CAkey', '/fixture/ca.key',
-         '-CAserial', '/fixture/ca.srl', '-CAcreateserial', '-out', '/fixture/external.crt',
-         '-days', '1', '-extfile', str(tls_extensions)],
-    ]:
-        subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(['update-ca-certificates'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    with open('/etc/hosts', 'a') as hosts:
-        hosts.write(f'\n127.0.0.1 {R2_HOST}\n')
     env = {**os.environ,
            'CAIRN_BEACON_DATABASE_URL': os.environ['CAIRN_BEACON_TEST_DATABASE_URL'],
            'CAIRN_BEACON_ORIGIN': ORIGIN, 'CAIRN_BEACON_LISTEN': '127.0.0.1:48151',
@@ -265,7 +246,6 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
            'CAIRN_BEACON_EMAIL_FROM': 'fixture@example.test', 'CAIRN_BEACON_EMAIL_KEY': 'fixture-only',
            'CAIRN_BEACON_EMAIL_ENDPOINT': f'http://127.0.0.1:{mailbox.server_port}/emails'}
     os.environ['INSTALLER_VERIFY'] = '1'
-    os.environ['AWS_CA_BUNDLE'] = '/etc/ssl/certs/ca-certificates.crt'
     beacon = subprocess.Popen(['/repo/target/debug/cairn-beacon'], env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
@@ -274,8 +254,6 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
             raise RuntimeError('Fixture Beacon exited: ' + beacon.communicate()[1].decode())
         return request('/api/account/options')[0] is not None
 
-    external = None
-    proxy = None
     try:
         wait_for(beacon_ready)
         challenge, _ = request('/api/account/email-code', {'email': 'installer@example.test'})
@@ -292,123 +270,16 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
         installation = session['installations'][0]['id']
         base = f'/api/installations/{installation}/api'
         wait_for(lambda: request(base + '/chats', cookie=cookie)[0] == [])
-        storage, _ = request(base + '/settings/storage', cookie=cookie)
-        assert storage['configured'] and storage['integrated']
-        assert 'secretAccessKey' not in storage and 'accessKeyId' not in storage
         print('Container: real claim and relay passed', flush=True)
-        # This uses the real SDK and integrated credentials, including write/read/delete.
-        checked, _ = request(base + '/settings/storage/check', {}, cookie, csrf)
-        assert checked == {'ok': True}
-        print('Container: Garage write/read/delete passed', flush=True)
-        (ROOT / 'data/storage-s3.json.integrated').write_bytes((ROOT / 'data/storage-s3.json').read_bytes())
-        # External providers are replaced at their S3 HTTP seam, behind valid TLS.
-        from moto.server import ThreadedMotoServer
-        import boto3
-        external = ThreadedMotoServer(ip_address='127.0.0.1', port=0, verbose=False)
-        external.start()
-        host, port = external.get_host_and_port()
-        external_client = boto3.client('s3', endpoint_url=f'http://{host}:{port}',
-                                      region_name='us-east-1', aws_access_key_id='external-fixture',
-                                      aws_secret_access_key='external-fixture-secret')
-        external_client.create_bucket(Bucket='cairn-external')
-        external_client.put_public_access_block(Bucket='cairn-external', PublicAccessBlockConfiguration={
-            'BlockPublicAcls': True, 'IgnorePublicAcls': True,
-            'BlockPublicPolicy': True, 'RestrictPublicBuckets': True})
-
-        class ExternalS3(http.server.BaseHTTPRequestHandler):
-            def forward(self):
-                r2 = self.headers.get('Host', '').startswith(R2_HOST)
-                unsupported = any(query in self.path for query in ('?acl', '?publicAccessBlock', '?object-lock', '?versions'))
-                if r2 and (unsupported or self.headers.get('x-amz-server-side-encryption')):
-                    self.send_response(501)
-                    self.send_header('Content-Type', 'application/xml')
-                    self.end_headers()
-                    self.wfile.write(b'<Error><Code>NotImplemented</Code></Error>')
-                    return
-                upstream = http.client.HTTPConnection(host, port)
-                body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
-                # Moto derives bucket routing from Host; the TLS proxy owns provider hostnames.
-                headers = {name: value for name, value in self.headers.items() if name.lower() != 'host'}
-                headers['Host'] = f'{host}:{port}'
-                upstream.request(self.command, self.path, body=body, headers=headers)
-                response = upstream.getresponse()
-                data = response.read()
-                self.send_response(response.status)
-                for name, value in response.getheaders():
-                    if name.lower() not in ('transfer-encoding', 'connection', 'server', 'date', 'content-length'):
-                        self.send_header(name, value)
-                self.send_header('Content-Length', str(len(data)))
-                self.end_headers()
-                if self.command != 'HEAD':
-                    self.wfile.write(data)
-                upstream.close()
-
-            do_GET = do_PUT = do_DELETE = do_POST = do_HEAD = forward
-
-            def log_message(self, *_):
-                pass
-
-        proxy = http.server.ThreadingHTTPServer(('127.0.0.1', 0), ExternalS3)
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.load_cert_chain('/fixture/external.crt', '/fixture/external.key')
-        proxy.socket = context.wrap_socket(proxy.socket, server_side=True)
-        threading.Thread(target=proxy.serve_forever, daemon=True).start()
-        endpoint = f'https://localhost:{proxy.server_port}'
-        saved, _ = request(base + '/settings/storage', {
-            'bucket': 'cairn-external', 'endpoint': endpoint, 'region': 'us-east-1',
-            'accessKeyId': 'external-fixture', 'secretAccessKey': 'external-fixture-secret',
-        }, cookie, csrf, method='PUT')
-        assert saved['endpoint'] == endpoint and not saved['integrated']
-        assert 'secretAccessKey' not in saved and 'accessKeyId' not in saved
-        checked, _ = request(base + '/settings/storage/check', {}, cookie, csrf)
-        assert checked == {'ok': True}
-        # Legacy encrypted objects remain on their original Garage after the
-        # default changes to HTTPS S3 and their local references are purged.
-        storage_test = Path('/fixture/storage-continuity')
-        assert storage_test.is_file() and os.access(storage_test, os.X_OK), 'Mount the executable identified by Cargo'
-        completed = subprocess.run([str(storage_test), '--ignored', '--exact',
-                        'legacy_disk_objects_survive_local_reference_purge_on_original_storage',
-                        '--nocapture'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env={
-                            **os.environ,
-                            'DATA_DIR': str(ROOT / 'data'),
-                            'CAIRN_INSTALLER_TEST_STORAGE_CONFIG': str(ROOT / 'data/storage-s3.json.integrated'),
-                            'CAIRN_INSTALLER_TEST_EXTERNAL_ENDPOINT': endpoint,
-                        })
-        print(completed.stdout, end='', flush=True)
-        completed.check_returncode()
-        assert 'test result: ok. 1 passed; 0 failed; 0 ignored;' in completed.stdout, 'Expected one executed storage retention test'
-        print('Container: legacy remote objects preserved after local reference purge passed', flush=True)
-        r2_endpoint = f'https://{R2_HOST}:{proxy.server_port}'
-        r2_settings = {
-            'bucket': 'cairn-external', 'endpoint': r2_endpoint, 'region': 'auto',
-            'accessKeyId': 'external-fixture', 'secretAccessKey': 'external-fixture-secret',
-        }
-        try:
-            request(base + '/settings/storage', r2_settings, cookie, csrf, method='PUT')
-            raise AssertionError('R2 must require confirmation of provider-side privacy and retention')
-        except AssertionError as error:
-            assert 'HTTP 400' in str(error) and 'Confirm' in str(error), str(error)
-        r2_settings['privateBucketConfirmed'] = True
-        saved, _ = request(base + '/settings/storage', r2_settings, cookie, csrf, method='PUT')
-        assert saved['endpoint'] == r2_endpoint
-        checked, _ = request(base + '/settings/storage/check', {}, cookie, csrf)
-        assert checked == {'ok': True}
-        endpoint = r2_endpoint
         identity = (ROOT / 'data/installation-relay/identity.json').read_bytes()
-        credentials = (ROOT / 'garage.env').read_bytes()
-        # Simulate an interruption between the atomic S3 write and its chown.
-        os.chown(ROOT / 'data/storage-s3.json', 0, 0)
         result = run_installer(claim['code'])
         assert result.returncode == 0, result.stderr
         assert identity == (ROOT / 'data/installation-relay/identity.json').read_bytes()
-        assert credentials == (ROOT / 'garage.env').read_bytes()
         assert not (ROOT / 'claim.env').exists()
-        assert (ROOT / 'data/storage-s3.json').stat().st_mode & 0o777 == 0o600
-        assert (ROOT / 'data/storage-s3.json').stat().st_uid == 1000
         session, _ = request('/api/account/session', cookie=cookie)
         assert len(session['installations']) == 1
-        wait_for(lambda: request(base + '/settings/storage', cookie=cookie)[0]['endpoint'] == endpoint)
-        print('Container: real claim, relay, Garage write/read/delete, external S3/R2 settings and idempotent rerun passed')
+        wait_for(lambda: request(base + '/chats', cookie=cookie)[0] == [])
+        print('Container: real claim, relay and idempotent rerun passed')
         # The Docker lifecycle adapter replaces only container orchestration.
         # The supervisor executes real Node health/lease calls against the manager.
         for digit, fail in [('b', False), ('c', True)]:
@@ -442,11 +313,8 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
             health = json.loads(urllib.request.urlopen('http://127.0.0.1:48152/health').read())
             assert health['runtimeId'] == digit * 64 and not health['maintenance']
             assert identity == (ROOT / 'data/installation-relay/identity.json').read_bytes()
-            assert credentials == (ROOT / 'garage.env').read_bytes()
-            wait_for(lambda: request(base + '/settings/storage', cookie=cookie)[0]['endpoint'] == endpoint)
-            checked, _ = request(base + '/settings/storage/check', {}, cookie, csrf)
-            assert checked == {'ok': True}
-        print('Container: approved update, wrong-runtime candidate retry, real deployment lease, retained identity and S3 passed')
+            wait_for(lambda: request(base + '/chats', cookie=cookie)[0] == [])
+        print('Container: approved update, wrong-runtime candidate retry, real deployment lease and retained identity passed')
     finally:
         pid = ROOT / 'manager.pid'
         if pid.exists():
@@ -454,11 +322,6 @@ sys.exit(subprocess.run(['/usr/bin/curl', *args]).returncode)
         beacon.terminate()
         beacon.wait(timeout=15)
         mailbox.shutdown()
-        if proxy:
-            proxy.shutdown()
-            proxy.server_close()
-        if external:
-            external.stop()
 
 
 if __name__ == '__main__':

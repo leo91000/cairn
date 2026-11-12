@@ -8,7 +8,7 @@ Creating an authorized stable release tag starts production preparation and
 deployment automatically. Routine releases require no additional approval click;
 failed recovery preparation or validation prevents deployment.
 
-For the beacon installation flow (one machine, integrated S3, no
+For the beacon installation flow (one machine, local conversation disks, no
 incoming ports), see [One-command installation](INSTALLATION.md).
 
 ## Additional execution nodes
@@ -379,7 +379,7 @@ Other Codex and MCP requests retain
 their 20-second deadline. Closing the session or canceling the conversation
 interrupts this wait immediately. Slow and failed RPC calls log the method,
 elapsed time and deadline, without request parameters or response contents.
-This does not change disk validation, synchronization or VM suspension deadlines.
+This does not change disk validation or VM suspension deadlines.
 
 ### Local Intel qualification
 

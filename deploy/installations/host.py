@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path
 import re
-import secrets
 import stat
 import uuid
 import shlex
@@ -19,7 +18,6 @@ import urllib.parse
 import urllib.request
 
 ROOT = Path(os.environ.get('CAIRN_INSTALLATION_ROOT', '/var/lib/cairn-installation'))
-GARAGE_IMAGE = 'dxflrs/garage@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690'
 IMAGE = re.compile(r'^ghcr\.io/leo91000/cairn@sha256:[a-f0-9]{64}$')
 COMPOSE_WAIT_TIMEOUT = 240
 COMPOSE_COMMAND_TIMEOUT = 300
@@ -151,22 +149,10 @@ def compose(image, origin):
     deployment = {
         'name': 'cairn-installation',
         'services': {
-            'garage': {
-                'image': GARAGE_IMAGE, 'restart': 'unless-stopped',
-                'command': ['/garage', 'server', '--single-node', '--default-bucket'],
-                'env_file': ['garage.env'],
-                'volumes': ['./garage.toml:/etc/garage.toml:ro', './garage:/var/lib/garage'],
-                'healthcheck': {
-                    'test': ['CMD', '/garage', 'bucket', 'info', 'cairn-disks'],
-                    'interval': '5s', 'timeout': '5s', 'retries': 24,
-                },
-                'logging': logs,
-            },
             'manager': {
                 'image': image, 'user': '1000:1000', 'init': True, 'restart': 'unless-stopped',
                 'stop_grace_period': '60s',
                 'depends_on': {
-                    'garage': {'condition': 'service_healthy'},
                     'runner': {'condition': 'service_healthy'},
                 },
                 'environment': {
@@ -248,41 +234,11 @@ def install(origin, code):
     if not IMAGE.fullmatch(image):
         raise RuntimeError('Invalid saved installation image.')
 
-    for name in ('data', 'home', 'workspaces', 'runner-state', 'garage'):
+    for name in ('data', 'home', 'workspaces', 'runner-state'):
         directory = ROOT / name
         directory.mkdir(exist_ok=True, mode=0o700)
         if name in ('data', 'home', 'workspaces') and os.getuid() == 0:
             os.chown(directory, 1000, 1000)
-
-    garage_env = ROOT / 'garage.env'
-    if not garage_env.exists():
-        access = 'GK' + secrets.token_hex(16)
-        secret = secrets.token_hex(32)
-        atomic(garage_env, f'GARAGE_DEFAULT_ACCESS_KEY={access}\nGARAGE_DEFAULT_SECRET_KEY={secret}\nGARAGE_DEFAULT_BUCKET=cairn-disks\n')
-    values = dict(line.split('=', 1) for line in garage_env.read_text().splitlines())
-    garage_config = ROOT / 'garage.toml'
-    if not garage_config.exists():
-        atomic(garage_config, f'''metadata_dir = "/var/lib/garage/meta"
-data_dir = "/var/lib/garage/data"
-db_engine = "sqlite"
-replication_factor = 1
-rpc_bind_addr = "127.0.0.1:3901"
-rpc_public_addr = "127.0.0.1:3901"
-rpc_secret = "{secrets.token_hex(32)}"
-[s3_api]
-s3_region = "garage"
-api_bind_addr = "0.0.0.0:3900"
-''')
-    storage = ROOT / 'data/storage-s3.json'
-    if not storage.exists():
-        atomic(storage, json.dumps({
-            'bucket': 'cairn-disks', 'endpoint': 'http://garage:3900', 'region': 'garage',
-            'integrated': True,
-            'accessKeyId': values['GARAGE_DEFAULT_ACCESS_KEY'],
-            'secretAccessKey': values['GARAGE_DEFAULT_SECRET_KEY'],
-        }))
-    if os.getuid() == 0:
-        os.chown(storage, 1000, 1000)
 
     atomic(ROOT / 'compose.json', json.dumps(compose(image, origin), indent=2))
     claim_file = ROOT / 'claim.env'
@@ -290,11 +246,11 @@ api_bind_addr = "0.0.0.0:3900"
     # Always replace a claim left by an interrupted install with the current code.
     atomic(claim_file, 'CAIRN_INSTALLATION_CLAIM_CODE=' + (code if not claimed else '') + '\n')
     docker = ['docker', 'compose', '--project-directory', str(ROOT), '--env-file', str(claim_file), '-f', str(ROOT / 'compose.json')]
-    print('Downloading Cairn and Garage images…', flush=True)
+    print('Downloading Cairn images…', flush=True)
     startup_attempted = False
     try:
         run(docker + ['pull'], timeout=1200)
-        print('Starting the manager, local runner and private S3 storage…', flush=True)
+        print('Starting the manager and local runner…', flush=True)
         startup_attempted = True
         run(docker + ['up', '-d'], timeout=360)
         health = "fetch('http://127.0.0.1:4310/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
