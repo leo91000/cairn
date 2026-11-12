@@ -31,6 +31,7 @@ use storage::{RuleRow, VersionRow};
 use validation::{Creator, Instances};
 
 /// Who asks. Constructed by authenticated transport adapters, never from command JSON.
+#[derive(Clone)]
 pub(crate) enum Actor {
     /// A person in the web or Android app.
     Person(InstallationIdentity),
@@ -172,6 +173,19 @@ async fn writer(s: &Service, actor: &Actor) -> Result<(Writer, Option<TaskAuthor
         },
         policy,
     ))
+}
+
+/// Rule creation, whether direct or through a template, uses the same provenance gate.
+async fn creation_writer(s: &Service, actor: &Actor) -> Result<Writer> {
+    match actor {
+        Actor::Installation(bearer, _) => {
+            let bearer = bearer.clone();
+            s.store
+                .read(move |db| installation_writer(db, &bearer))
+                .await
+        }
+        _ => writer(s, actor).await.map(|(writer, _)| writer),
+    }
 }
 
 /// The instances a definition names, with their active manifests, read before the
@@ -555,18 +569,7 @@ pub(crate) async fn create(
     refresh_native(s, &input.definition).await?;
     let _authors = s.missions.authors.lock().await;
     actor.recheck().await?;
-    let (writer, _) = match &actor {
-        Actor::Installation(bearer, _) => {
-            let bearer = bearer.clone();
-            (
-                s.store
-                    .read(move |db| installation_writer(db, &bearer))
-                    .await?,
-                None,
-            )
-        }
-        _ => writer(s, &actor).await?,
-    };
+    let writer = creation_writer(s, &actor).await?;
     let viewer = Viewer {
         account: Some(writer.creator.account.clone()),
         owner: writer.creator.owner,
@@ -1038,6 +1041,41 @@ pub(crate) async fn list_templates(
     Ok(ListHookRuleTemplatesOutput { templates })
 }
 
+/// Retry identity only: no package or template reference is retained.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TemplateCreation {
+    creator_account_id: String,
+    rule_ids: Vec<String>,
+}
+
+fn template_creation(
+    db: &Db<'_>,
+    key: &str,
+    viewer: &Viewer,
+) -> Result<Option<InstallHookRuleTemplateOutput>> {
+    let Some(creation) = db.kv_as::<TemplateCreation>(key)? else {
+        return Ok(None);
+    };
+    if viewer.account.as_ref() != Some(&creation.creator_account_id) {
+        return Err(Error::conflict(
+            "This creation identity belongs to another account.",
+        ));
+    }
+    let mut rules = Vec::new();
+    for id in creation.rule_ids {
+        let row = db.hook_rule(&id)?.ok_or_else(|| {
+            Error::conflict("Some installed rules were deleted since. Install the template again with a new creation identity.")
+        })?;
+        if row.creator_account_id != creation.creator_account_id {
+            return Err(Error::conflict(
+                "This creation identity belongs to another account.",
+            ));
+        }
+        rules.push(view(db, &id, viewer)?);
+    }
+    Ok(Some(InstallHookRuleTemplateOutput { rules }))
+}
+
 /// Creates one ordinary rule per template rule, all or none, through the same checks as
 /// [`create`]. The rules belong to the installer and keep no link to the template.
 pub(crate) async fn install_template(
@@ -1047,7 +1085,32 @@ pub(crate) async fn install_template(
 ) -> Result<InstallHookRuleTemplateOutput> {
     actor.require_scope("manage")?;
     actor.recheck().await?;
+    let retry_requested = input.creation_id.is_some();
     let creation = creation_id(input.creation_id)?;
+    let creation_key = format!("hook-rule-template-creation:{creation}");
+    // Completed retries do not depend on a template that may since have changed or
+    // disappeared. Membership and the rule-write provenance gate still apply.
+    if retry_requested {
+        let _authors = s.missions.authors.lock().await;
+        actor.recheck().await?;
+        let writer = creation_writer(s, &actor).await?;
+        let viewer = Viewer {
+            account: Some(writer.creator.account),
+            owner: writer.creator.owner,
+        };
+        let retry_actor = actor.clone();
+        let retry_key = creation_key.clone();
+        let existing = s
+            .store
+            .read(move |db| {
+                retry_actor.authorize(db)?;
+                template_creation(db, &retry_key, &viewer)
+            })
+            .await?;
+        if let Some(existing) = existing {
+            return Ok(existing);
+        }
+    }
     let instance = input.instance_id.to_string();
     // Like the listing, only instances on which an agent the caller may use holds a grant.
     let offered = offered_instances(s, &actor).await?;
@@ -1075,33 +1138,11 @@ pub(crate) async fn install_template(
         known.0.extend(instances(s, definition).await?.0);
         refresh_native(s, definition).await?;
     }
-    // Retrying with the same creation identity finds the same rules.
-    let ids = (0..definitions.len())
-        .map(|index| {
-            use sha2::{Digest, Sha256};
-            let digest = Sha256::digest(format!("hook-rule-template\n{creation}\n{index}"));
-            let mut bytes = [0; 16];
-            bytes.copy_from_slice(&digest[..16]);
-            uuid::Builder::from_random_bytes(bytes)
-                .into_uuid()
-                .to_string()
-        })
-        .collect::<Vec<_>>();
+    let ids = (0..definitions.len()).map(|_| id()).collect::<Vec<_>>();
 
     let _authors = s.missions.authors.lock().await;
     actor.recheck().await?;
-    let (mut writer, _) = match &actor {
-        Actor::Installation(bearer, _) => {
-            let bearer = bearer.clone();
-            (
-                s.store
-                    .read(move |db| installation_writer(db, &bearer))
-                    .await?,
-                None,
-            )
-        }
-        _ => writer(s, &actor).await?,
-    };
+    let mut writer = creation_writer(s, &actor).await?;
     writer.source = HookRuleSource::Template;
     let viewer = Viewer {
         account: Some(writer.creator.account.clone()),
@@ -1113,25 +1154,8 @@ pub(crate) async fn install_template(
             if let Actor::Installation(bearer, _) = &actor {
                 installation_writer(db, bearer)?;
             }
-            let mut existing = Vec::new();
-            for id in &ids {
-                existing.extend(db.hook_rule(id)?);
-            }
-            if !existing.is_empty() {
-                if existing.len() != ids.len()
-                    || existing
-                        .iter()
-                        .any(|rule| rule.creator_account_id != writer.creator.account)
-                {
-                    return Err(Error::conflict(
-                        "This creation identity belongs to other rules, or some were deleted since. Install the template again with a new one.",
-                    ));
-                }
-                let rules = ids
-                    .iter()
-                    .map(|id| view(db, id, &viewer))
-                    .collect::<Result<_>>()?;
-                return Ok(InstallHookRuleTemplateOutput { rules });
+            if let Some(existing) = template_creation(db, &creation_key, &viewer)? {
+                return Ok(existing);
             }
             templates::authorize_agents(db, &writer.creator, &template, &values)?;
             for (index, (id, definition)) in ids.iter().zip(definitions).enumerate() {
@@ -1141,6 +1165,16 @@ pub(crate) async fn install_template(
                     error.message = format!("Rule {}: {}", index + 1, error.message);
                     error
                 })?;
+            }
+            if retry_requested {
+                db.set_as(
+                    &creation_key,
+                    &TemplateCreation {
+                        creator_account_id: writer.creator.account.clone(),
+                        rule_ids: ids.clone(),
+                    },
+                    None,
+                )?;
             }
             db.audit(
                 "hook_rule.template_installed",

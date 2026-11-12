@@ -249,7 +249,10 @@ pub(crate) fn values(
         let value = given
             .get(&parameter.name)
             .filter(|value| !value.is_null())
-            .filter(|value| value.as_array().is_none_or(|items| !items.is_empty()))
+            .filter(|value| {
+                parameter.kind != ParameterKind::Resources
+                    || value.as_array().is_none_or(|items| !items.is_empty())
+            })
             .or(parameter.default.as_ref());
         let Some(value) = value else {
             if parameter.required {
@@ -462,6 +465,8 @@ mod tests {
             json!({ "agent": "not-an-id" }),
             json!({ "agent": agent, "other": 1 }),
             json!({ "agent": agent, "greeting": 3 }),
+            json!({ "agent": agent, "greeting": [] }),
+            json!({ "agent": [] }),
             json!({ "agent": agent, "channels": [{ "resourceType": "server", "id": "a" }] }),
             json!({ "agent": agent, "channels": [{ "resourceType": "channel", "id": " " }] }),
             json!({ "agent": agent, "channels": { "resourceType": "channel", "id": "a" } }),

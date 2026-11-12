@@ -132,8 +132,10 @@ the caller may use holds a grant, with their parameters and rules.
 
 `install_hook_rule_template` takes the instance, the template's name, the parameter
 values and optionally `enabled` (default `true`) and `creationId` (retrying returns
-the same rules). It checks the values (unknown, missing or ill-typed ones are
-refused, and the installer must have access to every agent they name), then creates
+the same rules, even after the template changes or disappears; deleting one of the
+installed rules requires a new creation identity). It checks the values (unknown,
+missing or ill-typed ones are refused, and the installer must have access to every
+agent they name), then creates
 one rule per template rule through the same validation and authority as
 `create_hook_rule`, all or none: a rule that fails names its position (`Rule 2: …`).
 The rules belong to the installer, record the `template` source and keep no link to

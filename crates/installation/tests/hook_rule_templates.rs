@@ -170,6 +170,22 @@ async fn installing_a_template_creates_ordinary_rules_that_updates_never_change(
     for (given, expected) in [
         (json!({ "agent": MAIN_AGENT_ID }), "Enter Channel."),
         (
+            {
+                let mut given = parameters(MAIN_AGENT_ID);
+                given["greeting"] = json!([]);
+                given
+            },
+            "takes a text",
+        ),
+        (
+            {
+                let mut given = parameters(MAIN_AGENT_ID);
+                given["hourly"] = json!([]);
+                given
+            },
+            "takes a number",
+        ),
+        (
             json!({ "agent": MAIN_AGENT_ID, "channel": { "resourceType": "thread", "id": "x" }, "people": [] }),
             "type channel",
         ),
@@ -274,6 +290,27 @@ async fn installing_a_template_creates_ordinary_rules_that_updates_never_change(
     assert_eq!(kept["definition"], rules[0]["definition"]);
     let (_, listed) = call(&f, OWNER, "GET", "/api/hook-rules/templates", Value::Null).await;
     assert_eq!(listed["templates"][0]["pluginVersion"], "3");
+
+    // Retrying recovers the original set even when the template shrinks, changes its
+    // parameters, or disappears. It never depends on the current manifest.
+    let mut changed = template("One rule now");
+    changed["rules"].as_array_mut().unwrap().pop();
+    changed["parameters"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|parameter| !matches!(parameter["name"].as_str(), Some("greeting" | "hourly")));
+    for (version, templates) in [("4", json!([changed])), ("5", json!([]))] {
+        let mut manifest = f.manifest.clone();
+        manifest["version"] = version.into();
+        manifest["ruleTemplates"] = templates;
+        f.publish(&manifest).await.unwrap();
+        let (status, retried) = call(&f, OWNER, "POST", INSTALL, body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{retried}");
+        let retried = retried["rules"].as_array().unwrap();
+        assert_eq!(retried.len(), 2);
+        assert_eq!(retried[0]["id"], rules[0]["id"]);
+        assert_eq!(retried[1]["id"], rules[1]["id"]);
+    }
 
     // Once one of its rules is deleted, the creation identity no longer installs.
     let (status, _) = call(
