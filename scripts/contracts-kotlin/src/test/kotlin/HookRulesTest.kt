@@ -46,10 +46,12 @@ class HookRulesTest {
         val branch = assertIs<RuleNode.A>(decoded.definition.steps.single())
         val group = assertIs<RuleCondition.A>(branch.condition)
         assertIs<RuleCondition.F>(json.decodeFromJsonElement<RuleCondition>(group.conditions[0]))
-        val action = assertIs<RuleNode.C>(json.decodeFromJsonElement<RuleNode>(branch.then.single()))
+        val action =
+            assertIs<RuleNode.C>(json.decodeFromJsonElement<RuleNode>(branch.then.single()))
         assertIs<RuleAction.A>(action.action)
         assertEquals(wire, json.encodeToJsonElement(decoded))
-        val invalid = wire.toString().replace("\"forEach\"", "\"while\"").replace("\"if\"", "\"while\"")
+        val invalid =
+            wire.toString().replace("\"forEach\"", "\"while\"").replace("\"if\"", "\"while\"")
         assertFails { json.decodeFromString<CreateHookRuleInput>(invalid) }
     }
 }
