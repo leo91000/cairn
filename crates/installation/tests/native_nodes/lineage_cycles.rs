@@ -552,8 +552,9 @@ async fn fresh_environment_cannot_reserve_materialize_or_read_after_a_back_edge(
                 .is_some()
         );
 
-        let response = send(&f, &descendant, &director, &id()).await;
-        assert_ne!(response["result"]["isError"], true, "{response}");
+        // Model a legacy/corrupted ancestry change after admission. Current
+        // directing operations correctly refuse to commit this back edge.
+        f.service.store.update_run_boundary_fixture(text(&director.run, "id"), json!({ "nativeParentRunId": descendant.run["id"], "nativeParentAccess": "installation" })).await.unwrap();
         let changed = f
             .service
             .store

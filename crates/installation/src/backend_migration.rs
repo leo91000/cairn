@@ -219,6 +219,7 @@ fn change_expired_backend(
     mut chat: Value,
     proposed: &Value,
     node: &Value,
+    required_tags: &Value,
 ) -> Result<()> {
     let run_id = text(&chat, "runId");
     let mut boundary = json!({
@@ -240,6 +241,7 @@ fn change_expired_backend(
             workspace: Some(None),
             recovery_pending: Some(false),
             placement: Some(Box::new(nodes::run_placement::PlacementChanges {
+                required_tags: Some(serde_json::from_value(required_tags.clone())?),
                 node_id: Some(None),
                 pinned_node_id: Some(None),
                 target_node_id: Some(serde_json::from_value(node["id"].clone())?),
@@ -420,21 +422,10 @@ impl Service {
                 WARNING,
             )?;
         }
-        let required_tags = input
-            .get("requiredTags")
-            .filter(|tags| !tags.is_null())
-            .unwrap_or(&retained["requiredTags"])
-            .clone();
-        if required_tags
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|tag| !nodes::node_tags(&chosen).any(|present| present == tag))
-        {
-            return Err(Error::conflict("Destination lacks required tags."));
-        }
         let (args, who) = (input.clone(), source.clone());
-        let prepare = move |db: &Db<'_>, expected_expired: bool| -> Result<(Value, Value, Value)> {
+        let prepare = move |db: &Db<'_>,
+                            expected_expired: bool|
+              -> Result<(Value, Value, Value, Value)> {
             authorize.authorize(db)?;
             let (chat, run, agent, _) = chat_run(db, text(&args, "chatId"))?;
             if backend(&agent) != text(&args, "backend")
@@ -453,19 +444,32 @@ impl Service {
                 db.node_boundary(text(&args, "nodeId"))?,
                 "Destination node not found",
             )?;
+            let required_tags = args
+                .get("requiredTags")
+                .filter(|tags| !tags.is_null())
+                .unwrap_or(&run["requiredTags"])
+                .clone();
+            if required_tags
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|tag| !nodes::node_tags(&node).any(|present| present == tag))
+            {
+                return Err(Error::conflict("Destination lacks required tags."));
+            }
             let proposed = prospective(db, &run, &agent, &who)?;
             if !allowed(db, &proposed, &node)? || !nodes::valid_runtime(text(&node, "runtimeId")) {
                 return Err(Error::forbidden(
                     "Destination is not authorized for this backend.",
                 ));
             }
-            Ok((chat, proposed, node))
+            Ok((chat, proposed, node, required_tags))
         };
         if expired {
             self.store
                 .transaction(move |db| {
-                    let (chat, proposed, node) = prepare(db, true)?;
-                    change_expired_backend(db, chat, &proposed, &node)
+                    let (chat, proposed, node, tags) = prepare(db, true)?;
+                    change_expired_backend(db, chat, &proposed, &node, &tags)
                 })
                 .await?;
             self.worker.notify();
@@ -479,8 +483,8 @@ impl Service {
             continue_turn: matches!(&source, Origin::Run(id) if *id == run_id),
         };
         self.expire_environment(&run_id, expiration, move |db| {
-            let (chat, proposed, node) = prepare(db, false)?;
-            change_backend(db, chat, &proposed, &node, &required_tags)
+            let (chat, proposed, node, tags) = prepare(db, false)?;
+            change_backend(db, chat, &proposed, &node, &tags)
         })
         .await?;
         Ok(json!({ "status": "migrated", "chatId": chat_id, "nodeId": node_id }))

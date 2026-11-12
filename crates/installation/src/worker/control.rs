@@ -291,7 +291,7 @@ fn request_cancel(db: &Db<'_>, id: &str, is_active: bool) -> Result<()> {
     let run = required(db.run_state(id)?, "Run not found")?;
     let waiting = crate::chats::continuation::cancel_for_run(db, id)?;
     if !run.status.is_active() {
-        if waiting {
+        if waiting || crate::environment_expiration::pending(db, id)? {
             return db.audit("run.wakeup.cancelled", &json!({ "id": id }));
         }
         return Err(Error::conflict("This run has already finished."));

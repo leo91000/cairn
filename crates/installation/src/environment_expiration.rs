@@ -71,6 +71,8 @@ struct Pending {
     /// Detached environment metadata while the interrupted worker finishes fencing.
     #[serde(default)]
     environment: Value,
+    #[serde(default)]
+    cancelled: bool,
 }
 
 /// What the retired environment still occupies, captured when it was detached.
@@ -164,6 +166,7 @@ pub(crate) fn expire_node_in(
 pub(crate) fn cancel_continuation_in(db: &Db<'_>, run: &str) -> Result<()> {
     if let Some(mut pending) = db.get(PENDING, run)? {
         pending["continueTurn"] = false.into();
+        pending["cancelled"] = true.into();
         db.put(PENDING, &pending)?;
     }
     Ok(())
@@ -284,6 +287,7 @@ pub(crate) fn request_in(
         expired_at,
         expiration: expiration.clone(),
         environment: run,
+        cancelled: false,
     };
     db.change_run(
         run_id,
@@ -314,6 +318,35 @@ fn detach_pending_in(db: &Db<'_>, run_id: &str) -> Result<()> {
     let pending: Pending = serde_json::from_value(pending)?;
     let current = crate::error::required(db.run(run_id)?, "Run not found")?;
     let mut expiration = pending.expiration;
+    if pending.cancelled {
+        expiration.continue_turn = false;
+    } else if current["trigger"] != "chat" && pending.environment["wakeup"].is_object() {
+        // Expiration interrupts the worker, whose ordinary cancellation settlement
+        // clears its wait. Restore that continuation once this worker has stopped.
+        db.change_run(
+            run_id,
+            crate::runs::RunChanges {
+                status: Some(RunStatus::Waiting),
+                wakeup: Some(Some(serde_json::from_value(
+                    pending.environment["wakeup"].clone(),
+                )?)),
+                cancel_requested_at: Some(None),
+                ..Default::default()
+            },
+        )?;
+    } else if db
+        .conversation_for_run(run_id)?
+        .is_some_and(|chat| chat.wakeup.is_some())
+    {
+        db.change_run(
+            run_id,
+            crate::runs::RunChanges {
+                status: Some(RunStatus::Succeeded),
+                cancel_requested_at: Some(None),
+                ..Default::default()
+            },
+        )?;
+    }
     expiration.destination = current["targetNodeId"].as_str().map(str::to_owned);
     detach_environment_in(
         db,
@@ -417,7 +450,7 @@ fn detach_environment_in(
     let keep_pins = expiration.cause == Cause::NodeRevocation;
 
     let mut boundary = json!({
-        "environmentState": if resume { Value::Null } else { "expired".into() },
+        "environmentState": "expired",
         "environmentExpiredAt": expired_at,
         "environmentExpirationCause": expiration.cause,
         // The retirement fences the old execution. Recovery must not contact

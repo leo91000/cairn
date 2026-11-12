@@ -572,7 +572,7 @@ test('conversation placement distinguishes a preference from a strict pin and sh
   await page.route(movePath, async (route) => {
     expect(route.request().postDataJSON()).not.toHaveProperty('requiredTags')
     if (expiredChoice)
-      expect(route.request().postDataJSON()).not.toHaveProperty('discardWorkingFiles')
+      expect(route.request().postDataJSON().discardWorkingFiles).toBe(false)
     else
       expect(route.request().postDataJSON().discardWorkingFiles).toBe(true)
     await route.fulfill({ json: { status: 'moving', nodeId: destinationNode.nodeId } })
@@ -917,10 +917,11 @@ test('switching a machine to native enrolls it again and retires the previous no
   await expect(retire).toContainText('Agents allowed on the previous node: Main agent.')
   await expect(retire).toContainText('Conversations fixed to or preferring the previous node return to automatic placement.')
   await expect(retire.getByLabel('Previous runtime uninstall command')).toContainText('sudo docker rm -f cairn-execution-node')
+  await expect(retire).toContainText("This conversation's working files will be lost. Its history, attachments and artifacts are kept.")
   await page.screenshot({ path: 'test-results/node-switch-retire.png' })
   const revoking = page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname.endsWith(`/nodes/${vm}/revoke`))
   await retire.getByRole('button', { name: 'Revoke previous node', exact: true }).click()
-  expect((await revoking).postDataJSON()).toEqual({ nodeId: vm, releasePlacements: true })
+  expect((await revoking).postDataJSON()).toEqual({ nodeId: vm, releasePlacements: true, discardWorkingFiles: true })
   await expect(retire).toHaveCount(0)
   await expect(page.getByText('Workstation revoked; 1 conversation returns to automatic placement')).toBeVisible()
   const nodes = await workspace.api('/api/nodes')

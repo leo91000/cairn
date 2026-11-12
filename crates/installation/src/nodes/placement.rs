@@ -484,18 +484,20 @@ fn reserve_in(db: &Db<'_>, run: &Value, attempt: &str, configured: bool) -> Resu
             "Waiting for the previous environment to stop and release its local files.",
         ));
     }
-    // Moves deliberately supply a prospective environment. Automatic admission
-    // reads the latest persisted run so stale callers cannot rebind its backend.
-    let persisted;
+    // A fresh environment may have received another explicit destination/backend
+    // while preparation was waiting. Admission uses that latest writer decision.
+    let persisted = db.run(text(run, "id"))?;
+    let awaiting_environment = persisted
+        .as_ref()
+        .is_some_and(|run| run["environmentState"] == "expired");
     let run = if run["placementTransition"] == true
-        || policy(&run["snapshot"]["agent"])["backend"] != "auto"
+        || (!awaiting_environment && policy(&run["snapshot"]["agent"])["backend"] != "auto")
     {
         run
     } else {
-        persisted = db
-            .run(text(run, "id"))?
-            .ok_or_else(|| Error::not_found("Conversation removed."))?;
-        &persisted
+        persisted
+            .as_ref()
+            .ok_or_else(|| Error::not_found("Conversation removed."))?
     };
     let automatic = without_stale_target(db, run)?;
     let run = automatic.as_ref().unwrap_or(run);
@@ -760,6 +762,9 @@ fn admit(
     };
     db.save_attempt(&record)?;
     db.put("node-volumes", &volume)?;
+    if run["environmentState"] == "expired" && !request.moving {
+        db.update_run_boundary(request.run_id(), &json!({ "environmentState": null }))?;
+    }
     if run["targetNodeId"].is_string() && !request.moving {
         // The imposed destination applies only to this first admission.
         db.update_run_placement(

@@ -258,7 +258,7 @@ function move() {
     await moveConversationToNode(api, {
       runId: props.run.id,
       nodeId: destination.value,
-      ...(props.run.environmentState !== 'expired' && { discardWorkingFiles: true }),
+      discardWorkingFiles: props.run.environmentState !== 'expired',
     })
     moving.value = false
     saved.value = 'Move requested.'

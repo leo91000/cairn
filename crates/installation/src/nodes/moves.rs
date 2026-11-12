@@ -374,11 +374,10 @@ async fn requested(
             .unwrap_or_else(crate::native::policy::origin)
     };
     let continue_turn = by_agent || matches!(&source, Origin::Run(id) if *id == run_id);
-    let required_tags = args
+    let supplied_tags = args
         .get("requiredTags")
         .filter(|tags| !tags.is_null())
-        .unwrap_or(&run["requiredTags"])
-        .clone();
+        .cloned();
     let expiration = Expiration {
         cause: EnvironmentExpirationCause::NodeChange,
         destination: Some(node.clone()),
@@ -397,6 +396,10 @@ async fn requested(
                 "The working environment changed. Review the node change again.",
             ));
         }
+        let required_tags = supplied_tags
+            .as_ref()
+            .unwrap_or(&current["requiredTags"])
+            .clone();
         let grant = if crossing {
             let mut agent = db
                 .agent_snapshot(super::run_agent(&current))?

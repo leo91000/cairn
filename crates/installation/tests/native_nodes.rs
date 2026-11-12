@@ -1089,7 +1089,7 @@ async fn expired_conversations_explicitly_change_backend_without_recovering_dele
             .unwrap()
             .unwrap();
         assert!(checkpoint["prepared"].is_null());
-        assert_eq!(migrated["pinnedNodeId"], destination["id"]);
+        assert!(migrated["pinnedNodeId"].is_null());
         // No disk has been created, so the existing preference control can
         // change this choice without trying to transfer a deleted environment.
         let placement_path = format!("/api/nodes/placement/{run_id}");
@@ -1132,7 +1132,7 @@ async fn expired_conversations_explicitly_change_backend_without_recovering_dele
         f.service.chat_tick(&HashSet::new()).await.unwrap();
         let continued = f.service.store.run(&run_id).await.unwrap();
         assert_eq!(continued["status"], "queued");
-        assert!(continued["environmentState"].is_null());
+        assert_eq!(continued["environmentState"], "expired");
         assert_eq!(
             continued["snapshot"]["agent"]["access"]["backend"],
             destination_backend
@@ -4901,7 +4901,9 @@ async fn expired_backend_override_replaces_a_pending_destination_without_pinning
  {
     for pending in [false, true] {
         let mut f = Fixture::new().await;
-        let vm = f.vm_node().await;
+        let mut vm = f.vm_node().await;
+        vm["tags"] = json!(["vm-only"]);
+        f.service.store.put_node_fixture(vm.clone()).await.unwrap();
         f.node["nativeAccounts"] = json!([TRUSTED, OTHER]);
         f.service
             .store
@@ -4944,7 +4946,7 @@ async fn expired_backend_override_replaces_a_pending_destination_without_pinning
             .owner_call(
                 "POST",
                 &format!("/api/nodes/placement/{rid}/move"),
-                json!({ "nodeId": vm["id"], "discardWorkingFiles": true }),
+                json!({ "nodeId": vm["id"], "discardWorkingFiles": true, "requiredTags": ["vm-only"] }),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{moved}");
@@ -4952,7 +4954,7 @@ async fn expired_backend_override_replaces_a_pending_destination_without_pinning
             .owner_call(
                 "POST",
                 &format!("/api/nodes/placement/{rid}/backend-migration"),
-                json!({ "nodeId": replacement["id"], "backend": "native", "confirm": true }),
+                json!({ "nodeId": replacement["id"], "backend": "native", "confirm": true, "requiredTags": [] }),
             )
             .await;
         assert_eq!(status, StatusCode::OK, "{replaced}");
@@ -4960,7 +4962,19 @@ async fn expired_backend_override_replaces_a_pending_destination_without_pinning
         assert_eq!(changed["targetNodeId"], replacement["id"]);
         assert!(changed["nodeId"].is_null());
         assert!(changed["pinnedNodeId"].is_null());
+        assert_eq!(changed["requiredTags"], json!([]));
         if pending {
+            f.service
+                .store
+                .change_run(
+                    &rid,
+                    cairn_installation::runs::RunChanges {
+                        status: Some(cairn_contracts::RunStatus::Cancelled),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
             f.service.worker.active.lock().await.remove(&rid);
             f.service.detach_stopped_environments().await.unwrap();
         }
@@ -4981,6 +4995,7 @@ async fn expired_backend_override_replaces_a_pending_destination_without_pinning
         let admitted = f.service.store.run(&rid).await.unwrap();
         assert!(admitted["targetNodeId"].is_null());
         assert!(admitted["pinnedNodeId"].is_null());
+        assert!(admitted["environmentState"].is_null());
         placement::release(&f.service, &attempt).await.unwrap();
     }
 }

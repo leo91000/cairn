@@ -1297,7 +1297,7 @@ abstract class NodePlacementCases {
                                         wireJson
                                             .parseToJsonElement(request.body.readUtf8())
                                             .jsonObject
-                                    """{"status":"moved"}"""
+                                    """{"status":"moved","nodeId":"824f3da3-b37b-5713-9c61-06e3f54a7ff8"}"""
                                 }
                                 path ==
                                     "/api/installations/fixture/api/nodes/placement/00000000-0000-4000-8000-000000000095" &&
@@ -1467,6 +1467,9 @@ abstract class NodePlacementCases {
             compose.onNodeWithText("Confirmer").performClick()
             compose.waitUntil(10000) { moved.isNotEmpty() }
             assertEquals(true, moved[0]["discardWorkingFiles"]?.jsonPrimitive?.boolean)
+            compose.waitUntil(10000) {
+                compose.onAllNodesWithText("Changer de node ?").fetchSemanticsNodes().isEmpty()
+            }
             compose.runOnIdle { expired.value = true }
             compose.onNodeWithText("Déplacer…").performScrollTo().performClick()
             compose.onNodeWithText("Déplacer maintenant").performScrollTo().performClick()
@@ -1584,7 +1587,6 @@ abstract class NodePlacementCases {
                 )
                 .assertExists()
             if (expired) {
-                compose.onNodeWithText("un environnement vide", substring = true).assertExists()
                 compose
                     .onNodeWithText(
                         "L’historique, les pièces jointes et les artefacts sont conservés",

@@ -1027,7 +1027,9 @@ pub(super) fn finish_recovery(
                 message => message,
             };
             let waiting = current.trigger != "chat" && record.wakeup.is_some();
-            if waiting && current.session_id.is_none() {
+            let fresh_wait = record.boundary["environmentState"] == "expired"
+                && record.boundary["sessionHandoff"].is_string();
+            if waiting && current.session_id.is_none() && !fresh_wait {
                 db.change_run(id,crate::runs::RunChanges {
                     status: Some(RunStatus::Failed),
                     finished_at: Some(Some(now())),

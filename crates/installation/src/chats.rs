@@ -1222,7 +1222,8 @@ fn continue_run(
         None => return Err(Error::conflict("Run checkpoint not found")),
     };
     let provider = Provider::of_run(snapshot)?;
-    let expired = chat.environment_state == Some(EnvironmentState::Expired);
+    let expired = chat.environment_state == Some(EnvironmentState::Expired)
+        || run["environmentState"] == "expired";
     let restart_requested =
         expired || chat.session_restart_requested || checkpoint.fresh_session == Some(true);
     if provider != Provider::of_run(run)? || restart_requested {
@@ -1291,7 +1292,7 @@ fn continue_run(
         recovery_pending: Some(true),
         boundary: Some(json!({
             "chatExecution": serde_json::to_value(execution)?,
-            "environmentState": null,
+            "environmentState": if expired { json!("expired") } else { run["environmentState"].clone() },
             // The next turn's adapter announces again whether it can answer side questions.
             "sideQuestions": null,
             "sideQuestionsCompacting": null,
