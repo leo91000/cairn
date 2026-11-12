@@ -1,4 +1,4 @@
-> Statut : Remplacée par [ADR-0084](0084-local-conversation-disks-without-s3.md) : les disques de travail restent locaux à leur node, sans S3.
+> Statut : Remplacée par [ADR-0084](0084-local-conversation-disks-without-s3.md) : les disques de travail restent locaux à leur node, sans S3. Le journal local comme seul format de disque, sans image locale ni dm-era, reste applicable.
 
 # Disques S3 obligatoires sur toutes les nodes
 

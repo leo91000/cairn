@@ -1,3 +1,5 @@
+> Statut : [ADR-0084](0084-local-conversation-disks-without-s3.md) retire les objets publiés : la suppression efface les disques locaux et les enregistrements de la conversation.
+
 # Immediate permanent conversation deletion
 
 New conversation deletions have no recovery window, as requested by the owner. This supersedes the 30-day trash policy for new deletions in ADR-0008 and the historical conversation lifecycle proposal. Web and Android require confirmation before sending the deletion request; Android no longer offers Undo.

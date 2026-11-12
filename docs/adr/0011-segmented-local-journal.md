@@ -1,3 +1,5 @@
+> Statut : [ADR-0084](0084-local-conversation-disks-without-s3.md) remplace la libération des segments par une publication S3 par une consolidation locale du journal ; le journal segmenté reste applicable.
+
 # Journal local segmenté et transitions de protection confirmées
 
 Date : 2026-09-29.

@@ -5,7 +5,7 @@ Cairn permet de conduire des conversations avec des agents et de retrouver leur 
 ## Language
 
 **Placement automatique** :
-Le choix d’un node autorisé et disponible pour un nouvel environnement de travail, qu’il exécute des VM ou des processus natifs. Il ne déplace jamais une conversation existante : seul un changement de node confirmé la fait repartir ailleurs.
+Le choix d’une node autorisée et disponible pour un nouvel environnement de travail, qu’elle exécute des VM ou des processus natifs. Il ne fait jamais changer de node une conversation existante : seul un changement de node confirmé la fait repartir ailleurs.
 
 **Priorité de nodes d’un agent** :
 L’ordre de préférence propre à un agent pour placer ses nouvelles conversations. Un node prioritaire indisponible laisse la place au suivant, puis aux autres nodes autorisés. Une préférence ne donne aucun droit d’accès.
@@ -108,10 +108,10 @@ Démarrage d’une même conversation sur une autre node d’exécution, confirm
 _Avoid_ : déplacement (qui laisse croire que les fichiers suivent)
 
 **Environnement de travail d’une conversation** :
-Ensemble des fichiers, outils installés et données conservés pour le travail d’une conversation. Il comprend les modifications non publiées des projets et les données nécessaires à leur reprise, au-delà du seul historique des messages. Il n’existe que sur la node d’exécution de la conversation.
+Ensemble des fichiers, outils installés et données conservés pour le travail d’une conversation. Il comprend les modifications non poussées des projets et les données nécessaires à leur reprise, au-delà du seul historique des messages. Il n’existe que sur la node d’exécution de la conversation.
 
 **Expiration de l’environnement** :
-Suppression de l’environnement de travail d’une conversation, après inactivité, lors d’un changement de node ou d’une migration du stockage. La conversation conserve son historique, ses pièces jointes et ses artefacts ; son prochain message démarre un environnement vide.
+Suppression de l’environnement de travail d’une conversation, après inactivité ou lors d’un changement de node. La conversation conserve son historique, ses pièces jointes et ses artefacts ; son prochain tour démarre un environnement vide.
 
 **Conversation à la corbeille** :
 Une conversation supprimée par l’utilisateur, masquée pendant l’effacement définitif de ses données associées. Les nouvelles suppressions sont irréversibles immédiatement ; seules les conversations déjà à la corbeille avant ce changement conservent leur délai de récupération initial.
