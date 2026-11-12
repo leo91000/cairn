@@ -1,4 +1,4 @@
-> Statut : Mise à jour par [ADR-0084](0084-local-conversation-disks-without-s3.md) : après un changement de node, une attente planifiée reprend sur la destination à son échéance, dans un environnement vide et une nouvelle session.
+> Statut : Mise à jour par [ADR-0084](0084-local-conversation-disks-without-s3.md) : après un changement de node, une attente planifiée est conservée et reprend sur la destination à son échéance, dans un environnement vide et une nouvelle session.
 
 # Durable conversation wakeups
 

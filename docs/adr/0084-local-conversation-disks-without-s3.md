@@ -87,20 +87,24 @@ et distinct, exigé par toute opération qui change la node d’un environnement
 existant : l’opération `move_to_node` du MCP public et de `cairn_installation`,
 utilisée aussi par le web et Android, l’outil `move_to_node` de l’espace de travail
 d’un agent et `migrate_chat_backend`. Le `confirm: true` existant de
-`migrate_chat_backend` ne suffit plus. Une demande sans la nouvelle confirmation est
-refusée avec cet avertissement. `get_chat_backend_migration` reste un aperçu en
-lecture seule qui le présente.
+`migrate_chat_backend` ne suffit plus lorsque l’environnement existe encore. Une
+demande sans la nouvelle confirmation est refusée avec cet avertissement.
+`get_chat_backend_migration` reste un aperçu en lecture seule qui le présente.
 
 La destination et les autorisations sont vérifiées avant l’expiration, qui est
 irréversible. Le changement interrompt ensuite le tour en cours et clôt les
 questions ouvertes. La première admission du nouvel environnement est imposée sur la
 destination et attend la capacité de cette node tant qu’elle reste autorisée et non
 révoquée ; si elle cesse de l’être, le placement automatique choisit la node. La
-conversation n’est pas fixée à cette node. Sauf lorsque l’agent change lui-même la
-node de sa propre conversation, celle-ci attend ensuite son prochain message ; les
-messages en file démarrent sur la destination, les attentes planifiées, y compris
-celles d’une mission, y reprennent à leur échéance, et une mission active y reprend
-automatiquement.
+conversation n’est pas fixée à cette node. Tant que cette première admission attend,
+un nouveau choix explicite (changement de node, `migrate_chat_backend` ou choix de
+placement) remplace la destination imposée, sans avertissement ; un placement fixé
+sur une autre node est retiré par le changement de node. Sauf lorsque l’agent change
+lui-même la node de sa propre conversation, celle-ci attend ensuite son prochain
+message ; les messages en file démarrent sur la destination, et les attentes
+planifiées ou conditionnelles (`wait_for`), y compris celles d’une mission, y sont
+conservées et reprennent à leur échéance ou dès que leur condition est remplie. Une
+mission active qui n’attend rien y reprend automatiquement.
 
 Un agent peut aussi changer sa propre conversation de node, avec l’outil
 `move_to_node` de son espace de travail ou avec `cairn_installation`, à condition de
@@ -164,7 +168,9 @@ génération publiée. La mise à jour n’efface ni `storage-s3.json`, ni les v
 `STORAGE_S3_*` de l’environnement, ni la configuration et les données de Garage. Les
 nouvelles installations n’embarquent plus Garage ; le superviseur déjà installé ne
 retire pas ce service, que l’exploitant arrête et retire, avec le bucket et ses
-identifiants, quand aucun retour arrière n’est envisagé.
+identifiants, quand aucun retour arrière n’est envisagé. Tant que ces valeurs
+peuvent subsister, les processus des agents et des moteurs continuent d’exclure les
+variables `AWS_*`, `STORAGE_S3_*` et `ARCHIVE_*`.
 
 ## Conséquences
 
