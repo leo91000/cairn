@@ -1821,7 +1821,8 @@ abstract class NodePlacementCases {
                     .second
             assertEquals("fixture", storage["revision"]!!.jsonPrimitive.content)
             val policy = storage["storage"]!!.jsonObject
-            assertEquals(setOf("memoryCacheMiB", "reserveMiB", "reservePercent"), policy.keys)
+            // Generated contracts omit unchanged policy defaults from the request.
+            assertEquals(setOf("memoryCacheMiB"), policy.keys)
             assertEquals(1024, policy["memoryCacheMiB"]!!.jsonPrimitive.int)
             // Agent access is read-only here: it is set on each agent's page.
             compose.onNodeWithText("Choisir les agents").assertDoesNotExist()
