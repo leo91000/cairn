@@ -19,8 +19,9 @@ Cette dualité se paie dans tout le code. Les attentes durables existent en deux
 variantes ([MISSION-WAITS](../MISSION-WAITS.md),
 [ADR-0065](0065-durable-conversation-wakeups.md)). L’autorité native, la migration
 de mode d’exécution, les déplacements de node et la reprise traitent chacun les deux
-cas (environ 25 tests de `trigger` contre `"chat"` dans `crates/installation`). Web, Android, le MCP public et
-`cairn_installation` ont chacun leurs écrans et outils de missions. Une partie de ce
+cas (environ 25 tests de `trigger` contre `"chat"` dans `crates/installation`).
+Web, Android, le MCP public et `cairn_installation` ont chacun leurs écrans et
+outils de missions. Une partie de ce
 que les missions portaient a d’ailleurs déjà migré vers les conversations : la
 délégation passe par des tâches déléguées
 ([ADR-0059](0059-delegated-tasks.md)), et les règles de hook démarrent des
@@ -31,8 +32,8 @@ Il reste deux besoins propres aux missions : faire travailler un agent à heure 
 et l’administrer comme un objet durable, avec son auteur, son historique et sa pause.
 ADR-0075 donne déjà aux règles de hook un créateur dont l’autorité est revérifiée à
 chaque action, des empêchements (désactivée, pause d’urgence, budget épuisé, droits
-perdus, adhésion terminée), un historique des déclenchements, des versions, la duplication
-et un éditeur sans code. Seul un déclencheur horaire manque.
+perdus, adhésion terminée), un historique des déclenchements, des versions, la
+duplication et un éditeur sans code. Seul un déclencheur horaire manque.
 
 ## Décision
 
@@ -42,13 +43,13 @@ et un éditeur sans code. Seul un déclencheur horaire manque.
 
 - Cairn émet un hook **Horloge**, paramétré par la règle qui l’écoute : un cron à
   cinq champs ou une date unique, dans un fuseau IANA. Sa payload porte la date
-  prévue et la date d’émission. Elle s’ajoute aux hooks de Cairn d’ADR-0075, mais
-  n’est liée à aucune clé ni conversation et n’exige aucun droit d’agent : la règle
+  prévue et la date d’émission. L’Horloge s’ajoute aux hooks de Cairn d’ADR-0075,
+  mais n’est liée à aucune clé ni conversation et n’exige aucun droit d’agent : la règle
   désigne tout de même un agent d’exécution, que son créateur doit pouvoir utiliser.
 - Une **programmation** est une règle de hook ordinaire qui écoute l’Horloge et
   démarre un agent avec un brief. Ce n’est pas une entité à part : elle a le créateur,
-  l’autorité, les états, l’historique, les versions, la duplication et le budget de
-  toute règle. L’UI l’appelle « Programmation ».
+  l’autorité, les empêchements, l’historique, les versions, la duplication et le
+  budget de toute règle. L’UI l’appelle « Programmation ».
 - Chaque déclenchement ouvre **une nouvelle conversation**, sans session ni espace de
   travail partagé avec la précédente. Il n’y a pas de mode « même fil ».
 - Cette conversation est **ordinaire** : l’agent peut poser des questions, et une
