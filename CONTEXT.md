@@ -272,10 +272,10 @@ _Avoid_ : transport natif
 **Hook** :
 Un événement qu’un plugin déclare pouvoir émettre, avec ce qu’il transporte : par
 exemple un message écrit dans un salon Discord, avec son auteur et son fil. Cairn émet
-aussi les siens pour les conversations rattachées à une clé (réponse prête, question,
-progression, fin). Un hook ne fait rien seul ; ce sont les règles de hook qui y
-réagissent. Le hook d’un plugin s’accorde à un agent ; ceux de Cairn suivent l’accès à
-l’agent de la conversation.
+aussi les siens : ceux des conversations rattachées à une clé (réponse prête,
+question, progression, fin) et l’Horloge. Un hook ne fait rien seul ; ce sont les
+règles de hook qui y réagissent. Le hook d’un plugin s’accorde à un agent ; ceux d’une
+conversation suivent l’accès à son agent, et l’Horloge n’exige aucun droit.
 _Avoid_ : webhook (le mécanisme HTTP), trigger
 
 **Règle de hook** :
@@ -295,6 +295,17 @@ _Avoid_ : template, recette
 Le traitement d’un événement par une règle de hook, de sa première condition à sa
 dernière action, avec la version de la règle en vigueur à son début.
 _Avoid_ : exécution, run (réservés au travail d’un agent)
+
+**Horloge** :
+Le hook que Cairn émet à heure fixe pour une règle qui l’écoute, selon un cron ou une
+date unique dans un fuseau donné. Après une interruption, les créneaux manqués ne
+donnent qu’un déclenchement.
+_Avoid_ : cron (la syntaxe), timer, planificateur
+
+**Programmation** :
+Une règle de hook qui écoute l’Horloge et démarre un agent avec un brief. Chaque
+déclenchement ouvre une nouvelle conversation ordinaire, dont elle est l’origine.
+_Avoid_ : mission, tâche planifiée, routine
 
 **Agent d’exécution d’une règle** :
 L’agent dont les droits encadrent le hook de plugin qu’une règle écoute et les outils
