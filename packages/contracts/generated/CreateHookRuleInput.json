@@ -1,0 +1,751 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "HookRuleDefinition": {
+      "additionalProperties": false,
+      "description": "Everything its creator writes. A saved definition becomes an immutable version.",
+      "properties": {
+        "description": {
+          "default": "",
+          "maxLength": 2000,
+          "type": "string"
+        },
+        "executionAgentId": {
+          "description": "Its rights frame the plugin hook the rule listens to and the tools it calls.",
+          "format": "uuid",
+          "type": "string"
+        },
+        "limits": {
+          "$ref": "#/definitions/HookRuleLimits"
+        },
+        "name": {
+          "maxLength": 100,
+          "minLength": 1,
+          "type": "string"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/definitions/RuleNode"
+          },
+          "maxItems": 100,
+          "type": "array"
+        },
+        "trigger": {
+          "$ref": "#/definitions/HookRuleTrigger"
+        }
+      },
+      "required": [
+        "name",
+        "trigger",
+        "executionAgentId",
+        "steps",
+        "limits"
+      ],
+      "type": "object"
+    },
+    "HookRuleLimits": {
+      "additionalProperties": false,
+      "description": "Hourly caps that stop a loop by itself. Cairn fixes their maximum.",
+      "properties": {
+        "conversationsPerHour": {
+          "format": "uint32",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "triggeringsPerHour": {
+          "format": "uint32",
+          "maximum": 600,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "triggeringsPerHour",
+        "conversationsPerHour"
+      ],
+      "type": "object"
+    },
+    "HookRuleTrigger": {
+      "description": "What a rule listens to.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A hook a plugin instance emits. The execution agent must hold it.",
+          "properties": {
+            "hook": {
+              "maxLength": 40,
+              "minLength": 1,
+              "type": "string"
+            },
+            "instanceId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "plugin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "instanceId",
+            "hook"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A Cairn hook for conversations bound to the creator's keys.",
+          "properties": {
+            "hook": {
+              "pattern": "^(replyReady|questionAsked|progress|ended)$",
+              "type": "string"
+            },
+            "type": {
+              "const": "cairn",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "hook"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PluginResourceRef": {
+      "additionalProperties": false,
+      "description": "A resource identity is scoped to a plugin instance and a declared type.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "resourceType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "resourceType",
+        "id"
+      ],
+      "type": "object"
+    },
+    "RuleAction": {
+      "description": "One effect. Each action does one thing; the tree chooses between alternatives.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Call a plugin tool through the execution agent's grants. Never a Cairn tool.",
+          "properties": {
+            "input": {
+              "additionalProperties": {
+                "$ref": "#/definitions/RuleValue"
+              },
+              "type": "object"
+            },
+            "instanceId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "tool": {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": {
+              "const": "callTool",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "instanceId",
+            "tool",
+            "input"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Start a conversation with an agent the creator may use, optionally bound to a key.\nFails when the key is already bound.",
+          "properties": {
+            "agentId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "key": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/RuleValue"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "projectId": {
+              "format": "uuid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "prompt": {
+              "$ref": "#/definitions/RuleValue"
+            },
+            "type": {
+              "const": "startAgent",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "agentId",
+            "prompt"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Send a message to the conversation bound to a key.",
+          "properties": {
+            "key": {
+              "$ref": "#/definitions/RuleValue"
+            },
+            "message": {
+              "$ref": "#/definitions/RuleValue"
+            },
+            "type": {
+              "const": "steerConversation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "key",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Cancel the current turn of the conversation bound to a key.",
+          "properties": {
+            "key": {
+              "$ref": "#/definitions/RuleValue"
+            },
+            "type": {
+              "const": "cancelConversation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "key"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Answer the pending question of the conversation bound to a key.",
+          "properties": {
+            "answer": {
+              "$ref": "#/definitions/RuleValue"
+            },
+            "key": {
+              "$ref": "#/definitions/RuleValue"
+            },
+            "type": {
+              "const": "answerQuestion",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "key",
+            "answer"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Remember a value for later triggerings.",
+          "properties": {
+            "key": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/RuleValue"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The conversation key, for conversation values."
+            },
+            "name": {
+              "maxLength": 40,
+              "minLength": 1,
+              "pattern": "^[a-zA-Z][a-zA-Z0-9_]*$",
+              "type": "string"
+            },
+            "scope": {
+              "pattern": "^(rule|conversation)$",
+              "type": "string"
+            },
+            "type": {
+              "const": "storeValue",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/definitions/RuleValue"
+            }
+          },
+          "required": [
+            "type",
+            "scope",
+            "name",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Wait, then resume the remaining steps (at most seven days).",
+          "properties": {
+            "seconds": {
+              "$ref": "#/definitions/RuleValue"
+            },
+            "type": {
+              "const": "wait",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "seconds"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RuleCondition": {
+      "description": "A structured condition: nested AND/OR groups, comparisons, formulas and Cairn\npredicates. External people are only payload data that conditions examine.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Every condition holds (AND).",
+          "properties": {
+            "conditions": {
+              "items": {
+                "$ref": "#/definitions/RuleCondition"
+              },
+              "maxItems": 50,
+              "type": "array"
+            },
+            "type": {
+              "const": "all",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "conditions"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "At least one condition holds (OR).",
+          "properties": {
+            "conditions": {
+              "items": {
+                "$ref": "#/definitions/RuleCondition"
+              },
+              "maxItems": 50,
+              "type": "array"
+            },
+            "type": {
+              "const": "any",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "conditions"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "condition": {
+              "$ref": "#/definitions/RuleCondition"
+            },
+            "type": {
+              "const": "not",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "condition"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "`left operator right`, usually a payload field against a value.",
+          "properties": {
+            "left": {
+              "$ref": "#/definitions/RuleValue"
+            },
+            "operator": {
+              "pattern": "^(equals|notEquals|contains|startsWith|endsWith|matches|in|present|absent|greaterThan|lessThan)$",
+              "type": "string"
+            },
+            "right": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/RuleValue"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": {
+              "const": "compare",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "left",
+            "operator"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A CEL expression evaluating to a boolean.",
+          "properties": {
+            "expression": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": {
+              "const": "formula",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "expression"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The author is one of the chosen people.",
+          "properties": {
+            "author": {
+              "$ref": "#/definitions/RuleValue"
+            },
+            "people": {
+              "items": {
+                "$ref": "#/definitions/PluginResourceRef"
+              },
+              "maxItems": 200,
+              "minItems": 1,
+              "type": "array"
+            },
+            "type": {
+              "const": "authorIn",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "author",
+            "people"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The author started the conversation bound to this key.",
+          "properties": {
+            "author": {
+              "$ref": "#/definitions/RuleValue"
+            },
+            "key": {
+              "$ref": "#/definitions/RuleValue"
+            },
+            "type": {
+              "const": "authorStartedConversation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "author",
+            "key"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A conversation is bound to this key.",
+          "properties": {
+            "key": {
+              "$ref": "#/definitions/RuleValue"
+            },
+            "type": {
+              "const": "conversationExists",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "key"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The author triggered this rule fewer than `limit` times in the window.",
+          "properties": {
+            "author": {
+              "$ref": "#/definitions/RuleValue"
+            },
+            "limit": {
+              "format": "uint32",
+              "maximum": 10000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "type": {
+              "const": "authorQuota",
+              "type": "string"
+            },
+            "windowMinutes": {
+              "format": "uint32",
+              "maximum": 10080,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type",
+            "author",
+            "limit",
+            "windowMinutes"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RuleNode": {
+      "description": "A block of the tree. Every node has an identifier, unique in the rule; an action's\nresult is available to later steps as `steps.<id>`.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "condition": {
+              "$ref": "#/definitions/RuleCondition"
+            },
+            "id": {
+              "maxLength": 40,
+              "minLength": 1,
+              "pattern": "^[a-z][a-zA-Z0-9_]*$",
+              "type": "string"
+            },
+            "otherwise": {
+              "default": [],
+              "items": {
+                "$ref": "#/definitions/RuleNode"
+              },
+              "maxItems": 100,
+              "type": "array"
+            },
+            "then": {
+              "items": {
+                "$ref": "#/definitions/RuleNode"
+              },
+              "maxItems": 100,
+              "type": "array"
+            },
+            "type": {
+              "const": "if",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "condition",
+            "then"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Repeat the body for each item of a list.",
+          "properties": {
+            "body": {
+              "items": {
+                "$ref": "#/definitions/RuleNode"
+              },
+              "maxItems": 100,
+              "type": "array"
+            },
+            "id": {
+              "maxLength": 40,
+              "minLength": 1,
+              "pattern": "^[a-z][a-zA-Z0-9_]*$",
+              "type": "string"
+            },
+            "itemName": {
+              "description": "The variable holding the current item in the body.",
+              "maxLength": 40,
+              "minLength": 1,
+              "pattern": "^[a-z][a-zA-Z0-9_]*$",
+              "type": "string"
+            },
+            "items": {
+              "$ref": "#/definitions/RuleValue"
+            },
+            "type": {
+              "const": "forEach",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "items",
+            "itemName",
+            "body"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "$ref": "#/definitions/RuleAction"
+            },
+            "id": {
+              "maxLength": 40,
+              "minLength": 1,
+              "pattern": "^[a-z][a-zA-Z0-9_]*$",
+              "type": "string"
+            },
+            "label": {
+              "description": "Shown in the editor and the history instead of the identifier.",
+              "maxLength": 100,
+              "type": "string"
+            },
+            "type": {
+              "const": "action",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "action"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RuleValue": {
+      "description": "Any value of an action or a condition.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A fixed JSON value.",
+          "properties": {
+            "type": {
+              "const": "literal",
+              "type": "string"
+            },
+            "value": true
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Text where each `{{expression}}` inserts the result of a CEL expression.",
+          "properties": {
+            "text": {
+              "maxLength": 10000,
+              "type": "string"
+            },
+            "type": {
+              "const": "template",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A CEL expression.",
+          "properties": {
+            "expression": {
+              "maxLength": 2000,
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": {
+              "const": "formula",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "expression"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "creationId": {
+      "description": "A random UUID: retrying returns the same rule.",
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "definition": {
+      "$ref": "#/definitions/HookRuleDefinition"
+    },
+    "enabled": {
+      "default": true,
+      "description": "A new rule triggers at once unless it starts disabled.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "definition"
+  ],
+  "title": "CreateHookRuleInput",
+  "type": "object"
+}

@@ -1,0 +1,423 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "HookRuleLimits": {
+      "additionalProperties": false,
+      "description": "Hourly caps that stop a loop by itself. Cairn fixes their maximum.",
+      "properties": {
+        "conversationsPerHour": {
+          "format": "uint32",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "triggeringsPerHour": {
+          "format": "uint32",
+          "maximum": 600,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "triggeringsPerHour",
+        "conversationsPerHour"
+      ],
+      "type": "object"
+    },
+    "HookRuleTrigger": {
+      "description": "What a rule listens to.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A hook a plugin instance emits. The execution agent must hold it.",
+          "properties": {
+            "hook": {
+              "maxLength": 40,
+              "minLength": 1,
+              "type": "string"
+            },
+            "instanceId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "plugin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "instanceId",
+            "hook"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A Cairn hook for conversations bound to the creator's keys.",
+          "properties": {
+            "hook": {
+              "pattern": "^(replyReady|questionAsked|progress|ended)$",
+              "type": "string"
+            },
+            "type": {
+              "const": "cairn",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "hook"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PluginResourceField": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "JSON Pointer through properties; `*` traverses array items.",
+          "type": "string"
+        },
+        "resourceType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "resourceType"
+      ],
+      "type": "object"
+    },
+    "RuleCatalogAction": {
+      "additionalProperties": false,
+      "description": "An action kind and the JSON Schema of its fields.",
+      "properties": {
+        "conversation": {
+          "description": "Whether the action starts or steers a conversation, which counts against the\nhourly conversation cap.",
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string"
+        },
+        "inputSchema": true,
+        "kind": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "title",
+        "description",
+        "inputSchema",
+        "conversation"
+      ],
+      "type": "object"
+    },
+    "RuleCatalogAgent": {
+      "additionalProperties": false,
+      "description": "An agent the caller may designate.",
+      "properties": {
+        "agentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "native": {
+          "description": "Whether the agent may run natively, which needs native authority.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "agentId",
+        "name",
+        "native"
+      ],
+      "type": "object"
+    },
+    "RuleCatalogEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "title",
+        "description"
+      ],
+      "type": "object"
+    },
+    "RuleCatalogFunction": {
+      "additionalProperties": false,
+      "description": "A Cairn function available in formulas, besides the CEL standard library.",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "example": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "signature": {
+          "description": "For example `truncate(text: string, length: int) -> string`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "signature",
+        "description",
+        "example"
+      ],
+      "type": "object"
+    },
+    "RuleCatalogHook": {
+      "additionalProperties": false,
+      "description": "A hook a rule can listen to.",
+      "properties": {
+        "agentIds": {
+          "description": "Usable execution agents that hold this hook. Every agent receives Cairn hooks.",
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": "string"
+        },
+        "instanceName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "payloadSchema": true,
+        "pluginId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resourceFields": {
+          "items": {
+            "$ref": "#/definitions/PluginResourceField"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        },
+        "trigger": {
+          "$ref": "#/definitions/HookRuleTrigger"
+        }
+      },
+      "required": [
+        "trigger",
+        "title",
+        "description",
+        "payloadSchema",
+        "resourceFields",
+        "agentIds"
+      ],
+      "type": "object"
+    },
+    "RuleCatalogLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "defaultLimits": {
+          "$ref": "#/definitions/HookRuleLimits"
+        },
+        "maxConversationsPerHour": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxNodes": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxSteps": {
+          "description": "Blocks and iterations one triggering may run, waits excluded.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxToolCalls": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxTriggeringsPerHour": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "maxWaitSeconds": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "defaultLimits",
+        "maxTriggeringsPerHour",
+        "maxConversationsPerHour",
+        "maxWaitSeconds",
+        "maxSteps",
+        "maxToolCalls",
+        "maxNodes"
+      ],
+      "type": "object"
+    },
+    "RuleCatalogTool": {
+      "additionalProperties": false,
+      "description": "A plugin tool a rule can call.",
+      "properties": {
+        "agentIds": {
+          "description": "Usable execution agents that hold this tool.",
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "type": "string"
+        },
+        "inputSchema": true,
+        "instanceId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "instanceName": {
+          "type": "string"
+        },
+        "pluginId": {
+          "type": "string"
+        },
+        "resourceFields": {
+          "items": {
+            "$ref": "#/definitions/PluginResourceField"
+          },
+          "type": "array"
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "instanceId",
+        "instanceName",
+        "pluginId",
+        "tool",
+        "description",
+        "inputSchema",
+        "resourceFields",
+        "agentIds"
+      ],
+      "type": "object"
+    },
+    "RuleCatalogVariable": {
+      "additionalProperties": false,
+      "description": "A variable formulas can read.",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "actions": {
+      "items": {
+        "$ref": "#/definitions/RuleCatalogAction"
+      },
+      "type": "array"
+    },
+    "agents": {
+      "items": {
+        "$ref": "#/definitions/RuleCatalogAgent"
+      },
+      "type": "array"
+    },
+    "conditions": {
+      "items": {
+        "$ref": "#/definitions/RuleCatalogEntry"
+      },
+      "type": "array"
+    },
+    "functions": {
+      "items": {
+        "$ref": "#/definitions/RuleCatalogFunction"
+      },
+      "type": "array"
+    },
+    "hooks": {
+      "items": {
+        "$ref": "#/definitions/RuleCatalogHook"
+      },
+      "type": "array"
+    },
+    "limits": {
+      "$ref": "#/definitions/RuleCatalogLimits"
+    },
+    "operators": {
+      "items": {
+        "$ref": "#/definitions/RuleCatalogEntry"
+      },
+      "type": "array"
+    },
+    "tools": {
+      "items": {
+        "$ref": "#/definitions/RuleCatalogTool"
+      },
+      "type": "array"
+    },
+    "variables": {
+      "items": {
+        "$ref": "#/definitions/RuleCatalogVariable"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "hooks",
+    "tools",
+    "actions",
+    "conditions",
+    "operators",
+    "functions",
+    "variables",
+    "agents",
+    "limits"
+  ],
+  "title": "HookRuleCatalog",
+  "type": "object"
+}

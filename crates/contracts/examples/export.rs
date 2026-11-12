@@ -19,6 +19,26 @@ fn export<T: JsonSchema + TS + 'static>(
     generator.subschema_for::<T>();
 }
 
+fn opaque_self_references(schema: &mut serde_json::Value, reference: &str) {
+    match schema {
+        serde_json::Value::Object(fields) => {
+            if fields.get("$ref").and_then(serde_json::Value::as_str) == Some(reference) {
+                *schema = serde_json::json!({ "type": "object", "x-cairn-json-object": true });
+                return;
+            }
+            for value in fields.values_mut() {
+                opaque_self_references(value, reference);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                opaque_self_references(value, reference);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn main() {
     let root = std::env::args().nth(1).expect("output directory");
     let root = Path::new(&root);
@@ -589,6 +609,37 @@ fn main() {
     export::<AgentAccountInput>(root, &mut generator, Contract::Deserialize);
     export::<ListAgentAccountsOutput>(root, &mut generator, Contract::Serialize);
     export::<UsableAgentsOutput>(root, &mut generator, Contract::Serialize);
+    export::<HookRule>(root, &mut generator, Contract::Serialize);
+    export::<HookRuleSummary>(root, &mut generator, Contract::Serialize);
+    export::<HookRuleVersion>(root, &mut generator, Contract::Serialize);
+    export::<HookRuleCatalog>(root, &mut generator, Contract::Serialize);
+    export::<ListHookRulesInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListHookRulesOutput>(root, &mut generator, Contract::Serialize);
+    export::<HookRuleInput>(root, &mut generator, Contract::Deserialize);
+    export::<CreateHookRuleInput>(root, &mut generator, Contract::Deserialize);
+    export::<ReplaceHookRuleInput>(root, &mut generator, Contract::Deserialize);
+    export::<SetHookRuleEnabledInput>(root, &mut generator, Contract::Deserialize);
+    export::<SetHookRuleEmergencyPauseInput>(root, &mut generator, Contract::Deserialize);
+    export::<DuplicateHookRuleInput>(root, &mut generator, Contract::Deserialize);
+    export::<DeleteHookRuleOutput>(root, &mut generator, Contract::Serialize);
+    export::<ListHookRuleVersionsOutput>(root, &mut generator, Contract::Serialize);
+    export::<ValidateHookRuleInput>(root, &mut generator, Contract::Deserialize);
+    export::<ValidateHookRuleOutput>(root, &mut generator, Contract::Serialize);
+    export::<GetHookRuleCatalogInput>(root, &mut generator, Contract::Deserialize);
+    fs::write(root.join("rule-clients.json"), serde_json::to_string_pretty(&serde_json::json!([
+        { "name": "listHookRules", "input": "ListHookRulesInput", "output": "ListHookRulesOutput", "method": "GET", "path": "/hook-rules", "query": ["agentId", "instanceId"], "optionalQuery": ["agentId", "instanceId"] },
+        { "name": "getHookRuleCatalog", "input": "GetHookRuleCatalogInput", "output": "HookRuleCatalog", "method": "GET", "path": "/hook-rules/catalog", "query": ["agentId"], "optionalQuery": ["agentId"] },
+        { "name": "validateHookRule", "input": "ValidateHookRuleInput", "output": "ValidateHookRuleOutput", "method": "POST", "path": "/hook-rules/validate" },
+        { "name": "getHookRule", "input": "HookRuleInput", "output": "HookRule", "method": "GET", "path": "/hook-rules/{ruleId}" },
+        { "name": "listHookRuleVersions", "input": "HookRuleInput", "output": "ListHookRuleVersionsOutput", "method": "GET", "path": "/hook-rules/{ruleId}/versions" },
+        { "name": "createHookRule", "input": "CreateHookRuleInput", "output": "HookRule", "method": "POST", "path": "/hook-rules" },
+        { "name": "replaceHookRule", "input": "ReplaceHookRuleInput", "output": "HookRule", "method": "PUT", "path": "/hook-rules/{ruleId}" },
+        { "name": "setHookRuleEnabled", "input": "SetHookRuleEnabledInput", "output": "HookRule", "method": "POST", "path": "/hook-rules/{ruleId}/enabled" },
+        { "name": "setHookRuleEmergencyPause", "input": "SetHookRuleEmergencyPauseInput", "output": "HookRule", "method": "POST", "path": "/hook-rules/{ruleId}/emergency-pause" },
+        { "name": "liftHookRuleBudget", "input": "HookRuleInput", "output": "HookRule", "method": "POST", "path": "/hook-rules/{ruleId}/budget" },
+        { "name": "duplicateHookRule", "input": "DuplicateHookRuleInput", "output": "HookRule", "method": "POST", "path": "/hook-rules/{ruleId}/duplicate" },
+        { "name": "deleteHookRule", "input": "HookRuleInput", "output": "DeleteHookRuleOutput", "method": "DELETE", "path": "/hook-rules/{ruleId}" }
+    ])).unwrap() + "\n").unwrap();
     export::<CreateMissionInput>(root, &mut generator, Contract::Deserialize);
     export::<ReplaceMissionInput>(root, &mut generator, Contract::Deserialize);
     export::<MissionStateInput>(root, &mut generator, Contract::Deserialize);
@@ -1289,6 +1340,13 @@ fn main() {
                 | "Cause"
         ) {
             definitions.insert(name, schema);
+        }
+    }
+    // The Kotlin generator refuses recursive references. A rule's nested steps and
+    // conditions stay typed in Rust, TypeScript and MCP; Kotlin decodes them on demand.
+    for name in ["RuleNode", "RuleCondition"] {
+        if let Some(definition) = definitions.get_mut(name) {
+            opaque_self_references(definition, &format!("#/definitions/{name}"));
         }
     }
     let schema = serde_json::json!({

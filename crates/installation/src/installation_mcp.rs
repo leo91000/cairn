@@ -263,6 +263,15 @@ pub(crate) async fn operation(
             )
             .await;
     }
+    if let Some(op) = crate::rules::rule_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Installation(bearer.to_owned()),
+            )
+            .await;
+    }
     if let Some(op) = crate::capabilities::agent_operation(name) {
         return op
             .invoke(

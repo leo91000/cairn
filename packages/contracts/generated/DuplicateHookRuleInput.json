@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "creationId": {
+      "description": "A random UUID: retrying returns the same duplicate.",
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ruleId": {
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "ruleId"
+  ],
+  "title": "DuplicateHookRuleInput",
+  "type": "object"
+}

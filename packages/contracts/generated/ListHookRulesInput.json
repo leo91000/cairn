@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "agentId": {
+      "description": "Rules that use this agent, as execution agent or started agent.",
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "instanceId": {
+      "description": "Rules that listen to this instance or call its tools.",
+      "format": "uuid",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "ListHookRulesInput",
+  "type": "object"
+}

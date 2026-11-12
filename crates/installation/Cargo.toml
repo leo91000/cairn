@@ -83,6 +83,12 @@ regex = "1"
 chrono = { version = "0.4", features = [ "serde" ] }
 chrono-tz = "0.10"
 croner = "4"
+# Rule formulas (ADR-0075). Only the CEL standard library, strings and lists extensions.
+cel = { version = "0.15", default-features = false, features = [
+  "regex",
+  "chrono",
+  "json"
+] }
 libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [

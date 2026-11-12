@@ -314,9 +314,9 @@ fn resources_cover(current: &[PluginResourceRef], proposed: &[PluginResourceRef]
             })
 }
 
-/// Ticket E/F supplies the rule usage lookup here, in the same publication
-/// transaction. Until provenance has been established, every current account's
-/// use is protected, including the owner's and disabled/blocked rules.
+/// Rules are read in the same publication transaction. Until Cairn records who writes
+/// conversations, no agent writes for an eligible person: every current account's use
+/// is protected, including the owner's and disabled or blocked rules.
 pub(crate) fn protect_rule_uses(
     db: &Db<'_>,
     agent: &str,
@@ -345,10 +345,9 @@ pub(crate) struct RuleGrantUse {
     pub contribution: PluginContributionGrant,
 }
 
-pub(crate) fn rule_uses(_db: &Db<'_>, _agent: &str) -> Result<Vec<RuleGrantUse>> {
-    // Rules do not exist before ticket E. Its canonical rule store replaces this
-    // empty lookup; do not infer absence from rule state or budget.
-    Ok(Vec::new())
+pub(crate) fn rule_uses(db: &Db<'_>, agent: &str) -> Result<Vec<RuleGrantUse>> {
+    // Rule state and budget never lift the protection; only an ended membership does.
+    crate::rules::grant_uses(db, agent, None)
 }
 
 struct ResourceReduction {

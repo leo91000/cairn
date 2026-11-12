@@ -574,6 +574,11 @@ pub(crate) fn operations() -> Vec<Value> {
             .map(crate::capabilities::MissionOperation::descriptor),
     );
     operations.extend(
+        crate::rules::RULE_OPERATIONS
+            .iter()
+            .map(crate::rules::RuleOperation::descriptor),
+    );
+    operations.extend(
         crate::capabilities::PERSONAL_OPERATIONS
             .iter()
             .map(crate::capabilities::personal::PersonalOperation::descriptor),
@@ -665,6 +670,18 @@ pub(crate) async fn operation(
             .await;
     }
     if let Some(op) = crate::capabilities::mission_operation(name) {
+        return op
+            .invoke(
+                s,
+                args,
+                crate::capabilities::ResumeContext::Public(
+                    scopes.to_vec(),
+                    credential.map(str::to_owned),
+                ),
+            )
+            .await;
+    }
+    if let Some(op) = crate::rules::rule_operation(name) {
         return op
             .invoke(
                 s,

@@ -1,0 +1,216 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+    "HookRuleAllowed": {
+      "additionalProperties": false,
+      "description": "What the person viewing the rule may do with it.",
+      "properties": {
+        "delete": {
+          "type": "boolean"
+        },
+        "disable": {
+          "type": "boolean"
+        },
+        "duplicate": {
+          "type": "boolean"
+        },
+        "edit": {
+          "type": "boolean"
+        },
+        "emergencyPause": {
+          "type": "boolean"
+        },
+        "enable": {
+          "type": "boolean"
+        },
+        "liftBudget": {
+          "type": "boolean"
+        },
+        "viewDetails": {
+          "description": "Whether the triggering history shows payloads and action results.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "edit",
+        "enable",
+        "disable",
+        "duplicate",
+        "delete",
+        "emergencyPause",
+        "liftBudget",
+        "viewDetails"
+      ],
+      "type": "object"
+    },
+    "HookRuleBlock": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "pattern": "^(disabled|emergencyPaused|budgetExhausted|rightsLost|membershipEnded)$",
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "since": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "HookRuleSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {
+          "$ref": "#/definitions/HookRuleAllowed"
+        },
+        "blocks": {
+          "items": {
+            "$ref": "#/definitions/HookRuleBlock"
+          },
+          "type": "array"
+        },
+        "creatorAccountId": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "executionAgentId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "startedAgentIds": {
+          "description": "Agents the rule starts, besides its execution agent.",
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "toolInstanceIds": {
+          "description": "Plugin instances whose tools the rule calls.",
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "trigger": {
+          "$ref": "#/definitions/HookRuleTrigger"
+        },
+        "updatedAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "description",
+        "creatorAccountId",
+        "revision",
+        "version",
+        "trigger",
+        "executionAgentId",
+        "startedAgentIds",
+        "toolInstanceIds",
+        "blocks",
+        "allowed",
+        "updatedAt"
+      ],
+      "type": "object"
+    },
+    "HookRuleTrigger": {
+      "description": "What a rule listens to.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "A hook a plugin instance emits. The execution agent must hold it.",
+          "properties": {
+            "hook": {
+              "maxLength": 40,
+              "minLength": 1,
+              "type": "string"
+            },
+            "instanceId": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "type": {
+              "const": "plugin",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "instanceId",
+            "hook"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A Cairn hook for conversations bound to the creator's keys.",
+          "properties": {
+            "hook": {
+              "pattern": "^(replyReady|questionAsked|progress|ended)$",
+              "type": "string"
+            },
+            "type": {
+              "const": "cairn",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "hook"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "rules": {
+      "items": {
+        "$ref": "#/definitions/HookRuleSummary"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "rules"
+  ],
+  "title": "ListHookRulesOutput",
+  "type": "object"
+}

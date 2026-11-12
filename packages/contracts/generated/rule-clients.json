@@ -1,0 +1,100 @@
+[
+  {
+    "input": "ListHookRulesInput",
+    "method": "GET",
+    "name": "listHookRules",
+    "optionalQuery": [
+      "agentId",
+      "instanceId"
+    ],
+    "output": "ListHookRulesOutput",
+    "path": "/hook-rules",
+    "query": [
+      "agentId",
+      "instanceId"
+    ]
+  },
+  {
+    "input": "GetHookRuleCatalogInput",
+    "method": "GET",
+    "name": "getHookRuleCatalog",
+    "optionalQuery": [
+      "agentId"
+    ],
+    "output": "HookRuleCatalog",
+    "path": "/hook-rules/catalog",
+    "query": [
+      "agentId"
+    ]
+  },
+  {
+    "input": "ValidateHookRuleInput",
+    "method": "POST",
+    "name": "validateHookRule",
+    "output": "ValidateHookRuleOutput",
+    "path": "/hook-rules/validate"
+  },
+  {
+    "input": "HookRuleInput",
+    "method": "GET",
+    "name": "getHookRule",
+    "output": "HookRule",
+    "path": "/hook-rules/{ruleId}"
+  },
+  {
+    "input": "HookRuleInput",
+    "method": "GET",
+    "name": "listHookRuleVersions",
+    "output": "ListHookRuleVersionsOutput",
+    "path": "/hook-rules/{ruleId}/versions"
+  },
+  {
+    "input": "CreateHookRuleInput",
+    "method": "POST",
+    "name": "createHookRule",
+    "output": "HookRule",
+    "path": "/hook-rules"
+  },
+  {
+    "input": "ReplaceHookRuleInput",
+    "method": "PUT",
+    "name": "replaceHookRule",
+    "output": "HookRule",
+    "path": "/hook-rules/{ruleId}"
+  },
+  {
+    "input": "SetHookRuleEnabledInput",
+    "method": "POST",
+    "name": "setHookRuleEnabled",
+    "output": "HookRule",
+    "path": "/hook-rules/{ruleId}/enabled"
+  },
+  {
+    "input": "SetHookRuleEmergencyPauseInput",
+    "method": "POST",
+    "name": "setHookRuleEmergencyPause",
+    "output": "HookRule",
+    "path": "/hook-rules/{ruleId}/emergency-pause"
+  },
+  {
+    "input": "HookRuleInput",
+    "method": "POST",
+    "name": "liftHookRuleBudget",
+    "output": "HookRule",
+    "path": "/hook-rules/{ruleId}/budget"
+  },
+  {
+    "input": "DuplicateHookRuleInput",
+    "method": "POST",
+    "name": "duplicateHookRule",
+    "output": "HookRule",
+    "path": "/hook-rules/{ruleId}/duplicate"
+  },
+  {
+    "input": "HookRuleInput",
+    "method": "DELETE",
+    "name": "deleteHookRule",
+    "output": "DeleteHookRuleOutput",
+    "path": "/hook-rules/{ruleId}"
+  }
+]
