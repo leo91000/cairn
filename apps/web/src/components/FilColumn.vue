@@ -12,6 +12,7 @@ import {
 import { useRouter } from 'vue-router'
 import { runMission as queueMission } from '../../../../packages/contracts/generated/runMission'
 import { setMissionState } from '../../../../packages/contracts/generated/setMissionState'
+import { canUseAgent } from '../agent-use'
 import {
   api,
   notify,
@@ -74,7 +75,7 @@ const tab = activeFilView
 const now = ref(Date.now())
 const clock = setInterval(() => now.value = Date.now(), 30000)
 onBeforeUnmount(() => clearInterval(clock))
-const views = computed(() => filViews(filOf(props.chats, state.tasks, runs.value, localReads, now.value)))
+const views = computed(() => filViews(filOf(props.chats, state.tasks, runs.value, localReads, now.value, state.usableAgents)))
 const tabs = computed(() => [
   { key: 'unread' as const, label: 'À lire', count: views.value.unread.length },
   { key: 'ongoing' as const, label: 'En cours', count: views.value.ongoing.length },
@@ -614,7 +615,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', key))
                 <Icon :name="Clock" :size="16" />Remind me tomorrow
               </button>
               <button
-                v-if="item.taskId"
+                v-if="item.taskId && canUseAgent(state.usableAgents, state.tasks.find(task => task.id === item.taskId)?.agentId ?? item.agentKey)"
                 type="button"
                 role="menuitem"
                 tabindex="-1"

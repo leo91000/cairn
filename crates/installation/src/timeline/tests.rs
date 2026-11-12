@@ -65,8 +65,13 @@ fn tables(db: &Connection) -> BTreeMap<String, Vec<String>> {
                 } else {
                     "*".to_owned()
                 };
+            let filter = if name == "kv" {
+                " WHERE key!='agent-access-rollout'"
+            } else {
+                ""
+            };
             let mut statement = db
-                .prepare(&format!("SELECT {projection} FROM \"{name}\""))
+                .prepare(&format!("SELECT {projection} FROM \"{name}\"{filter}"))
                 .unwrap();
             let columns = statement.column_count();
             let mut rows = statement
@@ -114,6 +119,7 @@ fn assert_preserved_tables(db: &Connection, before: &BTreeMap<String, Vec<String
         "plugin_contribution_grants",
         "plugin_grant_resources",
         "plugin_credential_suppliers",
+        "agent_account_access",
     ] {
         assert!(
             after.remove(table).is_some(),

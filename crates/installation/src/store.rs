@@ -36,7 +36,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 29;
+pub(crate) const DATABASE_VERSION: i64 = 30;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -241,13 +241,17 @@ impl Store {
                 if !has_capability {
                     tx.execute_batch("ALTER TABLE nodes ADD COLUMN vm_disks INTEGER NOT NULL DEFAULT 0 CHECK(vm_disks IN (0,1));")?;
                 }
-                tx.pragma_update(None, "user_version", DATABASE_VERSION)?;
-            } else if current != DATABASE_VERSION {
+                tx.pragma_update(None, "user_version", 29)?;
+            } else if !(29..=DATABASE_VERSION).contains(&current) {
                 return Err(Error::bad(
                     "Unexpected database version during native VM disk capability upgrade.",
                 ));
             }
             tx.commit()?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 29 {
+            crate::agent_access::upgrade(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;
@@ -278,6 +282,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::nodes::attempts::SCHEMA)?;
             tx.execute_batch(crate::nodes::exclusive_state::SCHEMA)?;
             tx.execute_batch(crate::agents::SCHEMA)?;
+            tx.execute_batch(crate::agent_access::SCHEMA)?;
             tx.execute_batch(crate::coding_agent_configuration::SCHEMA)?;
             tx.execute_batch(crate::mcps::sql::SCHEMA)?;
             tx.execute_batch(crate::plugins::instances::SCHEMA)?;
@@ -1399,7 +1404,7 @@ mod schema_tests {
             let connection = Connection::open(root.path().join("manager.db")).unwrap();
             connection
                 .execute_batch(&format!(
-                    "ALTER TABLE nodes DROP COLUMN vm_disks; PRAGMA user_version={version};"
+                    "DROP TABLE agent_account_access; ALTER TABLE nodes DROP COLUMN vm_disks; PRAGMA user_version={version};"
                 ))
                 .unwrap();
             if version == 27 {
@@ -1592,7 +1597,7 @@ mod schema_tests {
         let root = tempfile::tempdir().unwrap();
         drop(Store::open(root.path()).unwrap());
         let db = Connection::open(root.path().join("manager.db")).unwrap();
-        db.execute_batch("DROP INDEX events_turn_boundaries; PRAGMA user_version=27;")
+        db.execute_batch("DROP TABLE agent_account_access; DROP INDEX events_turn_boundaries; PRAGMA user_version=27;")
             .unwrap();
         drop(db);
 
@@ -1809,7 +1814,7 @@ mod schema_tests {
     #[test]
     fn startup_steps_accept_a_database_upgraded_by_another_startup() {
         type Upgrade = fn(&mut Connection) -> Result<()>;
-        let steps: [(&str, Upgrade); 9] = [
+        let steps: [(&str, Upgrade); 10] = [
             ("accounts", crate::accounts::migration::upgrade),
             ("conversations", crate::chats::migration::upgrade),
             ("questions", crate::chats::question_migration::upgrade),
@@ -1819,6 +1824,7 @@ mod schema_tests {
             ("timeline", crate::timeline::migration::upgrade),
             ("placement", crate::nodes::attempts_migration::upgrade),
             ("deliverables", crate::artifacts::migration::upgrade),
+            ("agent access", crate::agent_access::upgrade),
         ];
         let root = tempfile::tempdir().unwrap();
         drop(Store::open(root.path()).unwrap());

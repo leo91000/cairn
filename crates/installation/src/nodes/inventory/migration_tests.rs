@@ -181,8 +181,9 @@ async fn version11_startup_conserves_inventory_credentials_and_references() {
     .unwrap();
     assert_preserved(&local, &local_after);
     assert!(agent.list("nodes").await.unwrap().is_empty());
+    // The last upgrade only adds the account access rollout of the existing agents.
     let after: Vec<(String, String, Option<i64>)> = db
-        .prepare("SELECT * FROM kv ORDER BY key")
+        .prepare("SELECT * FROM kv WHERE key<>'agent-access-rollout' ORDER BY key")
         .unwrap()
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         .unwrap()

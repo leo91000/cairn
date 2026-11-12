@@ -1,4 +1,5 @@
 pub mod accounts;
+pub(crate) mod agent_access;
 pub mod agent_avatars;
 pub mod agent_grants;
 mod agent_merge;
@@ -98,7 +99,8 @@ pub(crate) mod plugin_grant_fixture;
 
 #[cfg(test)]
 pub(crate) use common::{
-    account_fixture, agent_fixture, attempt_fixture, mission_fixture, node_fixture, run_fixture,
+    account_fixture, agent_fixture, attempt_fixture, mission_fixture, node_fixture, relay_fixture,
+    run_fixture,
 };
 
 #[cfg(test)]

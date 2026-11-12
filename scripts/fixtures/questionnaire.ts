@@ -13,6 +13,16 @@ addFormats(ajv)
 const validate = ajv.compile<ChatQuestion>(questionSchema)
 const questions = shallowRef<ChatQuestion[]>([])
 const history = shallowRef<TimelineEntry[]>([])
+const readOnly = shallowRef(false)
+const highlighted = shallowRef<string>()
+window.questionnaireAccess = (value: boolean) => {
+  readOnly.value = value
+}
+
+window.questionnaireHighlight = (id?: string) => {
+  highlighted.value = id
+}
+
 window.questionnaireHistory = (text: string) => {
   // The server's card for the person's answer, as the conversation receives it.
   history.value = [{
@@ -68,6 +78,8 @@ createApp({
   render: () => h('main', [h(ChatQuestions, {
     questions: questions.value,
     active: false,
+    readOnly: readOnly.value,
+    highlighted: highlighted.value,
     onAnswered: () => {
       questions.value = []
     },
@@ -84,5 +96,11 @@ createApp({
   })]),
 }).mount('#app')
 declare global {
-  interface Window { questionnaireRaw: (fields: unknown) => void, questionnaireHistory: (text: string) => void, questionnaire: (fields: unknown) => void }
+  interface Window {
+    questionnaireRaw: (fields: unknown) => void
+    questionnaireHistory: (text: string) => void
+    questionnaire: (fields: unknown) => void
+    questionnaireAccess: (readOnly: boolean) => void
+    questionnaireHighlight: (id?: string) => void
+  }
 }

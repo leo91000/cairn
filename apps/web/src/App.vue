@@ -15,6 +15,7 @@ import { useAgentPortraits } from './agent-avatars'
 import {
   ownerPage,
   refresh,
+  refreshUsableAgents,
   signOut,
   state,
 } from './api'
@@ -134,13 +135,23 @@ const selectedChatId = computed(() => {
   return chats.value.find(chat => chat.id === id || chat.slug === id)?.id ?? id
 })
 const runs = useMissionRuns({ eager: false })
-const fil = computed(() => filOf(chats.value, state.tasks, runs.value, localReads))
+const fil = computed(() => filOf(chats.value, state.tasks, runs.value, localReads, undefined, state.usableAgents))
 const toRead = computed(() => filViews(fil.value).unread.length)
 const needsYou = computed(() => 0)
 // The Fil's badge: coral when something needs the user, the accent when work only waits to be read.
 const filBadge = computed(() => needsYou.value || toRead.value)
 const filBadgeLabel = computed(() => [needsYou.value ? `${needsYou.value} need you` : '', toRead.value ? `${toRead.value} to read` : ''].filter(Boolean).join(' · '))
 const missionRunning = computed(() => fil.value.live.some(item => item.taskId && item.kind === 'running'))
+
+// The owner may give or remove access to agents at any time: a member's open tab follows
+// within a short delay, and at once when it comes back into view.
+const USABLE_REFRESH_MS = 30_000
+let usableTimer = 0
+
+function visible() {
+  if (!document.hidden && state.authenticated)
+    void refreshUsableAgents()
+}
 
 onMounted(async () => {
   try {
@@ -153,8 +164,15 @@ onMounted(async () => {
   }
 
   document.addEventListener('keydown', key)
+  document.addEventListener('visibilitychange', visible)
+  usableTimer = window.setInterval(visible, USABLE_REFRESH_MS)
 })
-onBeforeUnmount(() => document.removeEventListener('keydown', key))
+onBeforeUnmount(() => {
+  document.removeEventListener('keydown', key)
+  document.removeEventListener('visibilitychange', visible)
+  window.clearInterval(usableTimer)
+})
+
 watch(() => route.fullPath, () => {
   paletteOpen.value = false
 })

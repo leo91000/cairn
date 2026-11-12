@@ -383,6 +383,37 @@ test('agents start unlimited and retain an optional limit after saving', async (
   expect((await workspace.api('/api/agents')).find((agent: { id: string }) => agent.id === id).timeoutMinutes).toBe(0)
 })
 
+test('the privilege review names every account that can use the agent', async ({ page, workspace }, testInfo) => {
+  await useRelayForHttpMocks(page)
+  await signIn(page)
+  const agent = await workspace.api('/api/agents', 'POST', { name: 'Shared agent' })
+  const memberId = 'a0e2e55c-d22b-4fc2-b6dc-ed917663ac16'
+  await page.route('**/api/installations/*/sharing', route => route.fulfill({
+    json: {
+      members: [{ id: memberId, email: 'member@example.test', accessId: 'member-1' }],
+      invitations: [],
+    },
+  }))
+  await page.route(`**/api/agents/${agent.id}/accounts`, route => route.fulfill({
+    json: {
+      agentId: agent.id,
+      accounts: [{ accountId: memberId, accessId: 'member-1', grantedAt: 1 }],
+    },
+  }))
+  await page.route(`**/api/agents/${agent.id}/preview`, route => route.fulfill({
+    json: { runs: { queued: 0, running: 0 }, delegations: [] },
+  }))
+  await page.goto(workspacePath(`/agents/${agent.id}`))
+  await openAgentSection(page, 'Elevated rights')
+  await page.getByRole('switch', { name: 'Installation management', exact: true }).check()
+  await page.getByRole('region', { name: 'Unsaved changes' }).getByRole('button', { name: 'Save', exact: true }).click()
+
+  const review = page.getByRole('dialog', { name: 'Review before saving' })
+  await expect(review).toContainText('Added: installation management.')
+  await expect(review).toContainText('These new rights apply to: Installation owner, member@example.test. Hook rules that can use this agent: none configured.')
+  await review.screenshot({ path: testInfo.outputPath('agent-rights-review-audience.png'), animations: 'disabled' })
+})
+
 test('installation management is a reviewed power, and the main agent keeps its fixed access', async ({ page, workspace }, testInfo) => {
   await signIn(page)
   await page.goto(workspacePath('/agents/new'))
@@ -394,7 +425,9 @@ test('installation management is a reviewed power, and the main agent keeps its 
   await page.getByRole('button', { name: 'Create agent', exact: true }).click()
   const review = page.getByRole('dialog', { name: 'Review before saving' })
   await expect(review).toContainText('Added: installation management.')
+  await expect(review).toContainText('These new rights apply to: Installation owner. Hook rules that can use this agent: none configured.')
   await expect(review.getByText('Power', { exact: true })).toBeVisible()
+  await review.screenshot({ path: testInfo.outputPath('agent-rights-review-audience.png'), animations: 'disabled' })
   await review.getByRole('button', { name: 'Save', exact: true }).click()
   await expect(page).toHaveURL(/\/agents\/[0-9a-f-]{36}$/)
   const agent = (await workspace.api('/api/agents')).find((item: { name: string }) => item.name === 'Installation helper')
@@ -431,6 +464,8 @@ test('installation management is a reviewed power, and the main agent keeps its 
 
 test('exclusive reservation is granted per node from the agent page once the agent may run there', async ({ page, workspace }, testInfo) => {
   test.setTimeout(90000)
+  // The shared application retains data; this multi-viewport journey needs its own request budget.
+  await workspace.restart()
   const gpu = await enroll(page, workspace, 'gpu-box', true)
   await enroll(page, workspace, 'old-box', false)
   const agent = await workspace.api('/api/agents', 'POST', { name: 'Release engineer', description: 'Publishes web and Android releases' })

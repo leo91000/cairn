@@ -278,6 +278,7 @@ class ContextCompactionJourneyTest {
                     vault,
                     beaconOrigin = "",
                 )
+            var accessRevoked by mutableStateOf(false)
             compose.setContent {
                 val workspace by vm.state.collectAsStateWithLifecycle()
                 LaunchedEffect(Unit) {
@@ -287,7 +288,16 @@ class ContextCompactionJourneyTest {
                 if (workspace.session.authenticated)
                     CairnTheme("light") {
                         Surface(Modifier.fillMaxWidth().height(915.dp)) {
-                            ChatScreen(vm, workspace, chatId, openChat = {}, openRun = {})
+                            ChatScreen(
+                                vm,
+                                workspace.copy(
+                                    usableAgents =
+                                        if (accessRevoked) emptyList() else workspace.usableAgents
+                                ),
+                                chatId,
+                                openChat = {},
+                                openRun = {},
+                            )
                         }
                     }
             }
@@ -422,6 +432,43 @@ class ContextCompactionJourneyTest {
                 assertEquals("Notes de version", rename["title"]!!.jsonPrimitive.content)
                 assertEquals(chat.revision, rename["revision"]!!.jsonPrimitive.content)
                 assertEquals(chatId, rename["chatId"]!!.jsonPrimitive.content)
+
+                // Revoking access retires an open directing confirmation without sending it.
+                compose.onNodeWithContentDescription("Options de la conversation").performClick()
+                compose.onNodeWithText("Compacter le contexte").assertIsEnabled().performClick()
+                waitText("Compacter le contexte de l’agent ?")
+                compose.runOnIdle { accessRevoked = true }
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Compacter le contexte de l’agent ?")
+                        .fetchSemanticsNodes()
+                        .isEmpty()
+                }
+                assertEquals(1, calls.count { it.second.endsWith("/compact") })
+
+                // Read-only members can still rename, but the menu cannot start compaction.
+                compose.onNodeWithContentDescription("Options de la conversation").performClick()
+                compose.onNodeWithText("Compacter le contexte").assertDoesNotExist()
+                compose.onNodeWithText("Renommer").assertIsEnabled().performClick()
+                waitText("Renommer la conversation")
+                compose.onNodeWithTag("rename-title").performTextReplacement("Titre du membre")
+                compose.onNodeWithText("Enregistrer").assertIsEnabled().performClick()
+                compose.waitUntil(10000) {
+                    compose
+                        .onAllNodesWithText("Renommer la conversation")
+                        .fetchSemanticsNodes()
+                        .isEmpty()
+                }
+                assertEquals(5, renames.size)
+                assertEquals(
+                    "Titre du membre",
+                    wireJson
+                        .parseToJsonElement(renames.last())
+                        .jsonObject["title"]!!
+                        .jsonPrimitive
+                        .content,
+                )
+                assertEquals(1, calls.count { it.second.endsWith("/compact") })
             } finally {
                 vm.api.closeStreams()
             }

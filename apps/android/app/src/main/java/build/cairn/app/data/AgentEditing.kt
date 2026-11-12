@@ -28,6 +28,7 @@ enum class AgentSection(val title: String) {
     Identity("Identité & instructions"),
     Engine("Moteur & modèle"),
     Advanced("Avancé"),
+    People("Qui peut l’utiliser"),
 }
 
 /** Sections the server fixes for the main agent: always everything, including future ones. */
@@ -615,9 +616,15 @@ enum class ReviewKind(val label: String) {
     Power("Pouvoir"),
     Access("Accès"),
     Reduction("Réduction"),
+    Audience("Bénéficiaires"),
 }
 
 data class ReviewLine(val kind: ReviewKind, val text: String)
+
+data class AgentReviewAudience(
+    val accounts: List<String>,
+    val hookRules: List<String> = emptyList(),
+)
 
 private val sandboxStrictness = mapOf("yolo" to 0, "workspace-write" to 1, "read-only" to 2)
 
@@ -755,6 +762,7 @@ fun agentReview(
     edited: Agent,
     resources: AgentResources,
     preview: AgentPreview?,
+    audience: AgentReviewAudience? = null,
 ): List<ReviewLine> = buildList {
     val before = original.access
     val after = edited.access
@@ -819,6 +827,17 @@ fun agentReview(
     } else if (affected)
         // The server reports work the change stops even when nothing listed here is removed.
         add(ReviewLine(ReviewKind.Reduction, "Accès modifié. ${runsSentence(runs)}"))
+    if (audience != null && any { it.kind == ReviewKind.Power || it.kind == ReviewKind.Access }) {
+        val accounts = audience.accounts.joinToString(", ")
+        val rules =
+            audience.hookRules.takeIf { it.isNotEmpty() }?.joinToString(", ") ?: "aucune configurée"
+        add(
+            ReviewLine(
+                ReviewKind.Audience,
+                "Ces nouveaux droits s’appliquent à : $accounts. Règles de hook pouvant utiliser cet agent : $rules.",
+            )
+        )
+    }
 }
 
 /** Delegations the save would suspend: these get a reapproval checkbox. */

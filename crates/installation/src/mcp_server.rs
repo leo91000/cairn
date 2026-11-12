@@ -722,6 +722,7 @@ pub(crate) async fn operation(
                     scopes.to_vec(),
                     credential.map(str::to_owned),
                 ),
+                None,
             )
             .await;
     }
@@ -770,6 +771,7 @@ pub(crate) async fn operation(
                     scopes.to_vec(),
                     credential.map(str::to_owned),
                 ),
+                None,
             )
             .await;
     }
@@ -804,7 +806,7 @@ pub(crate) async fn operation(
             credential.map(str::to_owned),
         );
         let output = crate::capabilities::RESUME_RUN
-            .invoke(s, input, context)
+            .invoke(s, input, context, None)
             .await?;
         return Ok(serde_json::to_value(output)?);
     }

@@ -102,6 +102,6 @@ internal fun MissionOutcomeActions(
 internal fun rememberOutcomeItem(vm: CairnViewModel, state: Workspace, runId: String): FeedItem? {
     val chats = rememberFilConversations(vm, state).state?.chats.orEmpty()
     val activity = rememberFilActivity(vm).orEmpty()
-    val feed = buildFeed(chats, activity, state.tasks, vm.localReads)
+    val feed = buildFeed(chats, activity, state.tasks, vm.localReads, usable = state.usableAgents)
     return (feed.forYou + feed.waiting + feed.recent).find { it.runId == runId }
 }

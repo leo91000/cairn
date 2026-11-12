@@ -1283,6 +1283,7 @@ async fn version_twenty_four_upgrade_preserves_profiles_and_reopens_with_native_
              DROP TABLE artifact_versions;
              DROP TABLE artifacts;
              DROP TABLE coding_agent_configurations;
+             DROP TABLE agent_account_access;
              PRAGMA user_version=24;",
         )
         .unwrap();

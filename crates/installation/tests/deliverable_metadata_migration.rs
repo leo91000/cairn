@@ -132,7 +132,7 @@ async fn real_previous_database_preserves_versions_links_sources_and_unrelated_d
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .unwrap(),
-        29
+        30
     );
     let after = snapshot(&db);
     let after_schema = schema(&db);
