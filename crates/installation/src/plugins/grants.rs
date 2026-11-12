@@ -303,13 +303,17 @@ fn resources_cover(current: &[PluginResourceRef], proposed: &[PluginResourceRef]
 /// Rules are read in the same publication transaction. Until Cairn records who writes
 /// conversations, no agent writes for an eligible person: every current account's use
 /// is protected, including the owner's and disabled or blocked rules.
+/// An agent never reduces a grant that a rule of a current account uses on this agent,
+/// whatever the rule's state. In an eligible conversation, the rules of its own person
+/// are no longer protected; those of every other current account stay protected.
 pub(crate) fn protect_rule_uses(
     db: &Db<'_>,
     agent: &str,
-    _before: &AgentPluginGrants,
+    person: Option<&str>,
     after: &cairn_contracts::ReplaceAgentPluginGrantsInput,
 ) -> Result<()> {
-    for usage in rule_uses(db, agent)? {
+    // Rule state and budget never lift the protection; only an ended membership does.
+    for usage in crate::rules::grant_uses(db, agent, person)? {
         let proposed = after
             .grants
             .iter()
@@ -329,11 +333,6 @@ pub(crate) fn protect_rule_uses(
 pub(crate) struct RuleGrantUse {
     pub instance_id: PluginInstanceId,
     pub contribution: PluginContributionGrant,
-}
-
-pub(crate) fn rule_uses(db: &Db<'_>, agent: &str) -> Result<Vec<RuleGrantUse>> {
-    // Rule state and budget never lift the protection; only an ended membership does.
-    crate::rules::grant_uses(db, agent, None)
 }
 
 struct ResourceReduction {
@@ -600,6 +599,11 @@ pub(crate) async fn replace(
         })?;
         reduction.recheck(s, package, instance, &authority).await?;
     }
+    let bearer = authority.bearer.clone();
+    let eligibility = match &bearer {
+        Some(_) if reduce_only => Some(crate::conversation_writers::Eligibility::observe(s).await?),
+        _ => None,
+    };
     s.store
         .transaction(move |db| {
             authority.authorize(db)?;
@@ -617,7 +621,12 @@ pub(crate) async fn replace(
                 for snapshot in &reduction_snapshots {
                     snapshot.authorize(db)?;
                 }
-                protect_rule_uses(db, &id, &before, &input)?;
+                // Any doubt about the conversation keeps every account's rules protected.
+                let person = match (&eligibility, bearer.as_deref()) {
+                    (Some(eligibility), Some(bearer)) => eligibility.check(db, bearer).ok().map(|eligible| eligible.account),
+                    _ => None,
+                };
+                protect_rule_uses(db, &id, person.as_deref(), &input)?;
             }
 
             let mut agent = required(db.agent(&id)?, "Agent not found")?;

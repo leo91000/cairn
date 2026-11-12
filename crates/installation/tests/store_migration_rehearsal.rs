@@ -23,7 +23,7 @@ fn rehearsal_upgrades_only_the_private_copy_and_is_stable_on_reopen() {
         result,
         json!({
             "versionBefore": 15,
-            "versionAfter": 33,
+            "versionAfter": 34,
             "quickCheck": "ok",
             "foreignKeyCheck": "ok",
         })
@@ -45,8 +45,8 @@ fn rehearsal_upgrades_only_the_private_copy_and_is_stable_on_reopen() {
     }
     drop(migrated);
     let reopened = store_migration::upgrade_copy(copy.path()).unwrap();
-    assert_eq!(reopened["versionBefore"], 33);
-    assert_eq!(reopened["versionAfter"], 33);
+    assert_eq!(reopened["versionBefore"], 34);
+    assert_eq!(reopened["versionAfter"], 34);
 }
 
 #[test]

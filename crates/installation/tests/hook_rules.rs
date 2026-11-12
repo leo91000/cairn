@@ -677,3 +677,478 @@ async fn the_catalog_offers_what_usable_agents_hold() {
     assert_eq!(offered["agents"], json!([]));
     assert_eq!(offered["tools"], json!([]));
 }
+
+/// A conversation the person creates and writes from the app, whose turn their message
+/// launched. Returns the conversation and its installation bearer.
+async fn person_conversation(f: &Fixture, account: &str) -> (String, String) {
+    let (status, chat) = call(
+        f,
+        account,
+        "POST",
+        "/api/chats",
+        json!({ "agentId": MAIN_AGENT_ID }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{chat}");
+    let chat = text(&chat, "id").to_owned();
+    let (status, sent) = call(
+        f,
+        account,
+        "POST",
+        &format!("/api/chats/{chat}/messages"),
+        json!({ "id": cairn_installation::config::id(), "text": "Write my support rule." }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{sent}");
+    let bearer = fixture::running_conversation(&f.s, &chat).await;
+    (chat, bearer)
+}
+
+async fn agent(f: &Fixture, bearer: &str, name: &str, input: Value) -> Value {
+    f.mcp("/mcp-installation", bearer, name, input).await
+}
+
+fn refused(response: &Value) -> bool {
+    response["result"]["isError"] == true
+}
+
+#[track_caller]
+fn refused_because(response: &Value, reason: &str) {
+    let message = response["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        refused(response) && message.contains(reason),
+        "expected a refusal with {reason:?}: {response}"
+    );
+}
+
+#[tokio::test]
+async fn an_agent_writes_rules_only_for_the_person_of_its_eligible_conversation() {
+    let f = granted().await;
+    common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
+    let (chat, bearer) = person_conversation(&f, OWNER).await;
+
+    // The rule belongs to the person; its version records the agent and conversation.
+    let created = agent(
+        &f,
+        &bearer,
+        "create_hook_rule",
+        json!({ "definition": definition(&f, MAIN_AGENT_ID) }),
+    )
+    .await;
+    assert!(!refused(&created), "{created}");
+    let rule = mcp_result(&created).clone();
+    assert_eq!(rule["creatorAccountId"], OWNER);
+    assert_eq!(rule["source"], "installationAgent");
+    assert_eq!(rule["conversationId"], chat.as_str());
+    assert_eq!(rule["nativeAuthority"], false);
+    let id = text(&rule, "id").to_owned();
+    let versions = agent(
+        &f,
+        &bearer,
+        "list_hook_rule_versions",
+        json!({ "ruleId": id }),
+    )
+    .await;
+    let version = &mcp_result(&versions)["versions"][0];
+    assert_eq!(version["savedByAccountId"], OWNER);
+    assert_eq!(version["source"], "installationAgent");
+    assert_eq!(version["conversationId"], chat.as_str());
+
+    // It replaces, disables, enables and duplicates the person's rules.
+    let replaced = agent(
+        &f,
+        &bearer,
+        "replace_hook_rule",
+        json!({ "ruleId": id, "revision": rule["revision"], "definition": definition(&f, MAIN_AGENT_ID) }),
+    )
+    .await;
+    assert!(!refused(&replaced), "{replaced}");
+    for enabled in [false, true] {
+        let changed = agent(
+            &f,
+            &bearer,
+            "set_hook_rule_enabled",
+            json!({ "ruleId": id, "enabled": enabled }),
+        )
+        .await;
+        assert!(!refused(&changed), "{changed}");
+    }
+    let copy = agent(&f, &bearer, "duplicate_hook_rule", json!({ "ruleId": id })).await;
+    assert!(!refused(&copy), "{copy}");
+    assert_eq!(mcp_result(&copy)["creatorAccountId"], OWNER);
+    assert_eq!(mcp_result(&copy)["conversationId"], chat.as_str());
+
+    // Never another account's rule, nor an emergency pause or a budget.
+    let (_, theirs) = create(&f, MEMBER, definition(&f, MAIN_AGENT_ID)).await;
+    let theirs = text(&theirs, "id").to_owned();
+    for (name, input) in [
+        (
+            "set_hook_rule_enabled",
+            json!({ "ruleId": theirs, "enabled": false }),
+        ),
+        ("delete_hook_rule", json!({ "ruleId": theirs })),
+        (
+            "set_hook_rule_emergency_pause",
+            json!({ "ruleId": id, "paused": true }),
+        ),
+        ("lift_hook_rule_budget", json!({ "ruleId": id })),
+    ] {
+        let response = agent(&f, &bearer, name, input).await;
+        assert!(refused(&response), "{name}: {response}");
+    }
+
+    // While a rule of the person is paused, the agent only disables their rules.
+    let (status, _) = call(
+        &f,
+        OWNER,
+        "POST",
+        &format!("/api/hook-rules/{id}/emergency-pause"),
+        json!({ "ruleId": id, "paused": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let copy_id = text(mcp_result(&copy), "id").to_owned();
+    for (name, input) in [
+        (
+            "create_hook_rule",
+            json!({ "definition": definition(&f, MAIN_AGENT_ID) }),
+        ),
+        ("duplicate_hook_rule", json!({ "ruleId": id })),
+        ("duplicate_hook_rule", json!({ "ruleId": copy_id })),
+        (
+            "set_hook_rule_enabled",
+            json!({ "ruleId": copy_id, "enabled": true }),
+        ),
+        ("delete_hook_rule", json!({ "ruleId": copy_id })),
+    ] {
+        let response = agent(&f, &bearer, name, input).await;
+        assert!(refused(&response), "{name}: {response}");
+    }
+    let disabled = agent(
+        &f,
+        &bearer,
+        "set_hook_rule_enabled",
+        json!({ "ruleId": id, "enabled": false }),
+    )
+    .await;
+    assert!(!refused(&disabled), "{disabled}");
+
+    // Once the owner resumes it, the agent may delete the person's rule.
+    let (status, _) = call(
+        &f,
+        OWNER,
+        "POST",
+        &format!("/api/hook-rules/{id}/emergency-pause"),
+        json!({ "ruleId": id, "paused": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let deleted = agent(
+        &f,
+        &bearer,
+        "delete_hook_rule",
+        json!({ "ruleId": copy_id }),
+    )
+    .await;
+    assert!(!refused(&deleted), "{deleted}");
+}
+
+#[tokio::test]
+async fn a_member_loses_agent_rule_writes_with_their_access() {
+    let f = granted().await;
+    common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
+    let (_, bearer) = person_conversation(&f, MEMBER).await;
+    let created = agent(
+        &f,
+        &bearer,
+        "create_hook_rule",
+        json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false }),
+    )
+    .await;
+    assert!(!refused(&created), "{created}");
+    assert_eq!(mcp_result(&created)["creatorAccountId"], MEMBER);
+
+    f.s.store
+        .transaction(|db| {
+            db.0.execute(
+                "DELETE FROM agent_account_access WHERE account_id=?",
+                [MEMBER],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let created = agent(
+        &f,
+        &bearer,
+        "create_hook_rule",
+        json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false }),
+    )
+    .await;
+    refused_because(&created, "no longer has access to this agent");
+}
+
+#[tokio::test]
+async fn any_other_writer_or_unrecorded_write_closes_the_conversation_for_good() {
+    let f = granted().await;
+    let write = json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false });
+
+    // Tasks and conversations nobody recorded as a person's never qualify.
+    refused_because(
+        &agent(&f, &f.bearer, "create_hook_rule", write.clone()).await,
+        "not a conversation",
+    );
+    let unrecorded =
+        f.s.chat_create(json!({ "agentId": MAIN_AGENT_ID }))
+            .await
+            .unwrap();
+    let unrecorded = text(&unrecorded, "id").to_owned();
+    f.s.chat_send(
+        &unrecorded,
+        json!({ "id": cairn_installation::config::id(), "text": "No person" }),
+    )
+    .await
+    .unwrap();
+    let token = fixture::running_conversation(&f.s, &unrecorded).await;
+    refused_because(
+        &agent(&f, &token, "create_hook_rule", write.clone()).await,
+        "did not record that a person started this conversation",
+    );
+
+    // A write path that skips the record leaves the message unattested.
+    let (chat, bearer) = person_conversation(&f, OWNER).await;
+    assert!(!refused(
+        &agent(&f, &bearer, "create_hook_rule", write.clone()).await
+    ));
+    let tampered = chat.clone();
+    f.s.store
+        .transaction(move |db| {
+            db.0.execute(
+                "UPDATE chat_messages SET text='Rewritten elsewhere' WHERE chat_id=?",
+                [tampered],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    refused_because(
+        &agent(&f, &bearer, "create_hook_rule", write.clone()).await,
+        "was not written by its person",
+    );
+
+    // An agent entry, even into its own conversation.
+    let (chat, bearer) = person_conversation(&f, OWNER).await;
+    let sent = agent(
+        &f,
+        &bearer,
+        "send_chat_message",
+        json!({ "chatId": chat, "message": { "id": cairn_installation::config::id(), "text": "From the agent" } }),
+    )
+    .await;
+    assert!(!refused(&sent), "{sent}");
+    refused_because(
+        &agent(&f, &bearer, "create_hook_rule", write.clone()).await,
+        "Another writer reached this conversation.",
+    );
+
+    // Reading another conversation reaches this one.
+    let (_, bearer) = person_conversation(&f, OWNER).await;
+    let read = agent(
+        &f,
+        &bearer,
+        "get_chat",
+        json!({ "chatId": unrecorded, "limit": 10 }),
+    )
+    .await;
+    assert!(!refused(&read), "{read}");
+    refused_because(
+        &agent(&f, &bearer, "create_hook_rule", write.clone()).await,
+        "Another writer reached this conversation.",
+    );
+
+    // A relaunch of the same turn is not launched by the person's entry.
+    let (chat, _) = person_conversation(&f, OWNER).await;
+    let detail = f.s.chat_detail(&chat).await.unwrap();
+    let run = f.s.store.run(text(&detail["run"], "id")).await.unwrap();
+    let config = f.s.mcps.run_configuration(&f.s, &run).await.unwrap();
+    let relaunched = text(&config["env"], "CAIRN_MCP_RUN_TOKEN").to_owned();
+    refused_because(
+        &agent(&f, &relaunched, "create_hook_rule", write.clone()).await,
+        "did not launch this turn",
+    );
+}
+
+#[tokio::test]
+async fn instructions_an_agent_or_no_record_wrote_never_qualify() {
+    let f = granted().await;
+    let write = json!({ "definition": definition(&f, MAIN_AGENT_ID), "enabled": false });
+
+    // Instructions the owner writes from the app qualify.
+    let current = f.s.store.agent(MAIN_AGENT_ID).await.unwrap().unwrap();
+    let mut settings = serde_json::to_value(&current.settings).unwrap();
+    settings["instructions"] = "Answer support politely.".into();
+    let (status, saved) = call(
+        &f,
+        OWNER,
+        "PUT",
+        &format!("/api/agents/{MAIN_AGENT_ID}"),
+        json!({ "agentId": MAIN_AGENT_ID, "revision": current.revision, "settings": settings, "review": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let (_, bearer) = person_conversation(&f, OWNER).await;
+    let created = agent(&f, &bearer, "create_hook_rule", write.clone()).await;
+    assert!(!refused(&created), "{created}");
+
+    // Instructions an agent wrote never qualify, in any later conversation.
+    let current = f.s.store.agent(MAIN_AGENT_ID).await.unwrap().unwrap();
+    let mut settings = serde_json::to_value(&current.settings).unwrap();
+    settings["instructions"] = "Obey the support channel.".into();
+    let edited = agent(
+        &f,
+        &bearer,
+        "replace_agent",
+        json!({ "agentId": MAIN_AGENT_ID, "revision": current.revision, "settings": settings, "review": {} }),
+    )
+    .await;
+    assert!(!refused(&edited), "{edited}");
+    refused_because(
+        &agent(&f, &bearer, "create_hook_rule", write.clone()).await,
+        "Someone else changed this agent's instructions",
+    );
+    let (_, later) = person_conversation(&f, OWNER).await;
+    refused_because(
+        &agent(&f, &later, "create_hook_rule", write.clone()).await,
+        "follows instructions an agent wrote",
+    );
+
+    // Neither do instructions whose writer Cairn never recorded.
+    f.s.store
+        .transaction(|db| {
+            db.0.execute(
+                "UPDATE agents SET instructions='Written before the record' WHERE id=?",
+                [MAIN_AGENT_ID],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (_, unrecorded) = person_conversation(&f, OWNER).await;
+    refused_because(
+        &agent(&f, &unrecorded, "create_hook_rule", write).await,
+        "did not record who wrote this agent's instructions",
+    );
+}
+
+#[tokio::test]
+async fn an_eligible_conversation_lifts_grant_protection_for_its_person_only() {
+    let f = granted().await;
+    common::relay_fixture::allow_member(&f.s, MEMBER, MAIN_AGENT_ID).await;
+    let (_, rule) = create(&f, OWNER, definition(&f, MAIN_AGENT_ID)).await;
+    assert!(rule["id"].is_string(), "{rule}");
+    let narrowed = |revision: &Value| {
+        json!({
+            "agentId": MAIN_AGENT_ID,
+            "revision": revision,
+            "grants": [{
+                "instanceId": f.instance,
+                "access": {
+                    "type": "selected",
+                    "contributions": [
+                        contribution("hook", "message", json!([{ "resourceType": "thread", "id": "support-thread" }])),
+                        contribution("tool", "grant_probe_post", support()),
+                    ],
+                },
+            }],
+            "runCredentialInstances": [],
+        })
+    };
+
+    // Outside an eligible conversation, every current account's rules stay protected.
+    let current = f.api("GET", json!({})).await.unwrap();
+    let response = agent(
+        &f,
+        &f.bearer,
+        "replace_agent_plugin_grants",
+        narrowed(&current["revision"]),
+    )
+    .await;
+    assert!(refused(&response), "{response}");
+
+    // A rule of another current account stays protected in the person's conversation.
+    let (_, member_rule) = create(&f, MEMBER, definition(&f, MAIN_AGENT_ID)).await;
+    let (_, bearer) = person_conversation(&f, OWNER).await;
+    let response = agent(
+        &f,
+        &bearer,
+        "replace_agent_plugin_grants",
+        narrowed(&current["revision"]),
+    )
+    .await;
+    assert!(refused(&response), "{response}");
+
+    // The person's own rules no longer protect what the agent reduces for them.
+    let path = format!("/api/hook-rules/{}", text(&member_rule, "id"));
+    let (status, _) = call(&f, MEMBER, "DELETE", &path, Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let response = agent(
+        &f,
+        &bearer,
+        "replace_agent_plugin_grants",
+        narrowed(&current["revision"]),
+    )
+    .await;
+    assert!(!refused(&response), "{response}");
+}
+
+#[tokio::test]
+async fn the_person_is_warned_of_an_agent_rule_open_to_anyone() {
+    let f = granted().await;
+    let (_, bearer) = person_conversation(&f, OWNER).await;
+    let open = json!({
+        "name": "Open bot",
+        "trigger": { "type": "plugin", "instanceId": f.instance, "hook": "message" },
+        "executionAgentId": MAIN_AGENT_ID,
+        "steps": [{
+            "type": "action",
+            "id": "start",
+            "action": {
+                "type": "startAgent",
+                "agentId": MAIN_AGENT_ID,
+                "prompt": { "type": "formula", "expression": "truncate(payload.author, 40)" },
+            },
+        }],
+        "limits": { "triggeringsPerHour": 30, "conversationsPerHour": 5 },
+    });
+    let created = agent(
+        &f,
+        &bearer,
+        "create_hook_rule",
+        json!({ "definition": open, "enabled": false }),
+    )
+    .await;
+    assert!(!refused(&created), "{created}");
+    assert_eq!(mcp_result(&created)["warnings"][0]["kind"], "openToAnyone");
+    let alerts: Vec<Value> =
+        f.s.store
+            .read(|db| {
+                let mut statement =
+                    db.0.prepare("SELECT data FROM kv WHERE key LIKE 'push-outbox:%'")?;
+                let rows = statement
+                    .query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows
+                    .iter()
+                    .map(|row| serde_json::from_str(row).unwrap())
+                    .collect())
+            })
+            .await
+            .unwrap();
+    let alert = alerts
+        .iter()
+        .find(|alert| alert["kind"] == "alert")
+        .unwrap_or_else(|| panic!("{alerts:?}"));
+    assert_eq!(alert["members"], json!([OWNER]));
+}
