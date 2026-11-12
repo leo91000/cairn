@@ -510,13 +510,20 @@ impl AgentOperation {
             "get_agent_plugin_grants" | "replace_agent_plugin_grants"
         ) {
             let reduce_only = matches!(&context, ResumeContext::Installation(_));
+            let writer = crate::conversation_writers::EntryWriter::of_context(&context);
             let authority =
                 crate::capabilities::plugin_packages::Authority::for_grants(s, context, self.scope)
                     .await?;
             if self.name == "replace_agent_plugin_grants" {
                 return Ok(serde_json::to_value(
-                    crate::plugins::grants::replace(s, decode(input)?, authority, reduce_only)
-                        .await?,
+                    crate::plugins::grants::replace(
+                        s,
+                        decode(input)?,
+                        authority,
+                        reduce_only,
+                        writer,
+                    )
+                    .await?,
                 )?);
             }
             let input: AgentInput = decode(input)?;

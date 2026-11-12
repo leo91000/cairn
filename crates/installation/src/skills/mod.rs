@@ -15,6 +15,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use bundle::{Base, Change};
 use serde_json::{Value, json};
 use std::{
+    future::Future,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::LazyLock,
@@ -689,14 +690,19 @@ impl Skills {
     }
 
     /// Creates a skill from a staged `.zip` or `.skill` archive.
-    pub(crate) async fn import_archive(
+    pub(crate) async fn import_archive<F, Fut>(
         &self,
         scope: &str,
         upload: &str,
         requested: Option<&str>,
         project: Option<&Path>,
+        before_write: F,
         authorization: bundle::Authorization<'_>,
-    ) -> Result<Value> {
+    ) -> Result<Value>
+    where
+        F: FnOnce(String) -> Fut + Send,
+        Fut: Future<Output = Result<()>> + Send,
+    {
         let archive = self.upload(upload).await?;
         let entries = zip::entries(&archive)?;
         let visible = entries
@@ -734,6 +740,7 @@ impl Skills {
         }
 
         let skill = imported_name(&changes)?;
+        before_write(skill.clone()).await?;
         let saved = self
             .apply_authorized(&skill, None, &changes, project, Some(authorization))
             .await?;

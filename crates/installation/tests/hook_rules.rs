@@ -968,6 +968,40 @@ async fn any_other_writer_or_unrecorded_write_closes_the_conversation_for_good()
         "Another writer reached this conversation.",
     );
 
+    // So does any operation that may return another conversation, run or task.
+    let (_, bearer) = person_conversation(&f, OWNER).await;
+    let runs = agent(&f, &bearer, "list_runs", json!({})).await;
+    assert!(!refused(&runs), "{runs}");
+    refused_because(
+        &agent(&f, &bearer, "create_hook_rule", write.clone()).await,
+        "Another writer reached this conversation.",
+    );
+
+    // Withdrawing the person's queued message is an entry of whoever withdraws it.
+    let (chat, bearer) = person_conversation(&f, OWNER).await;
+    let queued = cairn_installation::config::id();
+    let (status, _) = call(
+        &f,
+        OWNER,
+        "POST",
+        &format!("/api/chats/{chat}/messages"),
+        json!({ "id": queued, "text": "Do not create that rule." }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let withdrawn = agent(
+        &f,
+        &bearer,
+        "delete_chat_message",
+        json!({ "chatId": chat, "messageId": queued }),
+    )
+    .await;
+    assert!(!refused(&withdrawn), "{withdrawn}");
+    refused_because(
+        &agent(&f, &bearer, "create_hook_rule", write.clone()).await,
+        "Another writer reached this conversation.",
+    );
+
     // A relaunch of the same turn is not launched by the person's entry.
     let (chat, _) = person_conversation(&f, OWNER).await;
     let detail = f.s.chat_detail(&chat).await.unwrap();

@@ -57,30 +57,140 @@ pub(crate) fn authorize_in(db: &Db<'_>, bearer: &str) -> Result<Value> {
     Ok(run)
 }
 
-/// Reading another conversation or run through these tools is an agent entry in the
-/// caller's own conversation (ADR-0075): its content now reaches this conversation.
+/// Operations that return no content of another conversation, run or task. Any other
+/// operation, including one added later, reaches the caller's conversation unless it
+/// only targets that conversation or its run.
+const OUTSIDE_CONVERSATIONS: &[&str] = &[
+    // Hook rules
+    "list_hook_rules",
+    "get_hook_rule",
+    "list_hook_rule_versions",
+    "get_hook_rule_catalog",
+    "list_hook_rule_templates",
+    "validate_hook_rule",
+    "create_hook_rule",
+    "install_hook_rule_template",
+    "replace_hook_rule",
+    "set_hook_rule_enabled",
+    "set_hook_rule_emergency_pause",
+    "lift_hook_rule_budget",
+    "duplicate_hook_rule",
+    "delete_hook_rule",
+    // Agents
+    "list_agents",
+    "get_agent",
+    "get_agent_plugin_grants",
+    "replace_agent_plugin_grants",
+    "save_agent",
+    "replace_agent",
+    "preview_agent",
+    "merge_agents",
+    "delete_agent",
+    "set_agent_avatar",
+    "generate_agent_avatar",
+    "get_agent_avatar_configuration",
+    "list_agent_accounts",
+    "create_chat",
+    // Projects and skills
+    "list_projects",
+    "get_project",
+    "save_project",
+    "replace_project",
+    "delete_project",
+    "import_project",
+    "list_source_projects",
+    "list_skills",
+    "read_skill",
+    "save_skill",
+    "edit_skill_files",
+    "stage_skill_upload",
+    "import_skill",
+    "delete_skill",
+    "export_skill_archive",
+    "get_skill_source_status",
+    "update_skill_source",
+    "forget_skill_source",
+    // Models, accounts and settings
+    "list_models",
+    "list_coding_agent_accounts",
+    "get_coding_agent_account_sign_in",
+    "list_coding_agent_account_providers",
+    "replace_coding_agent_account",
+    "order_coding_agent_accounts",
+    "refresh_coding_agent_accounts",
+    "connect_coding_agent_account",
+    "reconnect_coding_agent_account",
+    "replace_coding_agent_account_key",
+    "submit_coding_agent_account_code",
+    "cancel_coding_agent_account_sign_in",
+    "delete_coding_agent_account",
+    "get_installation_settings",
+    "get_coding_agent_configuration",
+    "preview_coding_agent_configuration",
+    "save_coding_agent_configuration",
+    "get_storage_settings",
+    "save_storage_settings",
+    "check_storage",
+    "get_task_storage_limits",
+    "save_task_storage_limits",
+    "get_chat_plan_settings",
+    "save_chat_plan_settings",
+    "get_conversation_retention",
+    "set_conversation_retention",
+    // MCP connections and plugins
+    "list_mcps",
+    "create_mcp",
+    "update_mcp",
+    "test_mcp",
+    "disconnect_mcp",
+    "delete_mcp",
+    "begin_mcp_connection",
+    "mcp_connection_status",
+    "cancel_mcp_connection",
+    "manage_plugin",
+    "list_plugins",
+    "list_plugin_resources",
+    "resolve_plugin_resource",
+    "install_plugin_package",
+    "approve_plugin_package",
+    "activate_plugin_package",
+    "delete_plugin_package",
+    "list_plugin_programs",
+    "prepare_plugin_program",
+    "get_plugin_operation",
+    "get_plugin_resource_operation",
+    "cancel_plugin_operation",
+    // Nodes
+    "list_nodes",
+    "list_native_callers",
+    "create_node_enrollment",
+    "update_node",
+    "change_native_node_mode",
+    "update_node_storage",
+    "revoke_node",
+];
+
+/// Reading another conversation, run or task through these tools (a delegated task's
+/// report included) is an agent entry in the caller's own conversation (ADR-0075): that
+/// content now reaches it.
 async fn record_reading(s: &Service, run: &Value, name: &str, args: &Value) -> Result<()> {
-    let target = match name {
-        "list_chats" => None,
-        "get_chat" | "read_chat_content" => Some(("chat", text(args, "chatId").to_owned())),
-        "get_run" | "read_run_history" | "read_run_timeline" | "read_run_content"
-        | "list_run_artifacts" | "read_run_artifact" => {
-            Some(("run", text(args, "runId").to_owned()))
-        }
-        _ => return Ok(()),
-    };
+    if OUTSIDE_CONVERSATIONS.contains(&name) {
+        return Ok(());
+    }
     let run_id = text(run, "id").to_owned();
+    let (chat, target_run) = (
+        args["chatId"].as_str().map(str::to_owned),
+        args["runId"].as_str().map(str::to_owned),
+    );
     s.store
         .transaction(move |db| {
             let Some(own) = db.conversation_for_run(&run_id)? else {
                 return Ok(());
             };
-            let other = match &target {
-                Some(("chat", chat)) => *chat != own.id,
-                Some((_, run)) => *run != run_id,
-                None => true,
-            };
-            if other {
+            let only_own = (chat.is_some() || target_run.is_some())
+                && chat.as_ref().is_none_or(|chat| *chat == own.id)
+                && target_run.as_ref().is_none_or(|run| *run == run_id);
+            if !only_own {
                 crate::conversation_writers::record_entry(
                     db,
                     &own.id,

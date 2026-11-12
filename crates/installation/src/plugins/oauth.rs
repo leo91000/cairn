@@ -673,6 +673,7 @@ where
         .and_then(|c| c.oauth.as_ref())
         .ok_or_else(|| Error::bad("This plugin has no OAuth account."))?;
     let connection = connections::get(s, plugin, instance).await?;
+    let writer = crate::conversation_writers::EntryWriter::of(&crate::native::policy::origin());
     let lock = s.plugins.oauth_flows.lock(instance);
     let guard = loop {
         let guard = lock.lock().await;
@@ -752,11 +753,18 @@ where
     }
     s.store
         .transaction(move |db| {
+            let plugin_instruction_digests =
+                crate::conversation_writers::plugin_instruction_digests(db)?;
             let mut current = check(db)?;
             current.enabled = false;
             current.revision = id();
             current.updated_at = now();
             db.save_plugin_instance(&current)?;
+            crate::conversation_writers::record_plugin_instruction_changes(
+                db,
+                &plugin_instruction_digests,
+                &writer,
+            )?;
             db.delete(&format!(
                 "mcp-secret:{}",
                 connections::credential_key(&current.id)
