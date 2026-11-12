@@ -104,7 +104,7 @@ Pour le disque natif compatible, le manager protège aussi la capacité accordé
 Plafond d’agrandissement d’un environnement de travail, commun aux conversations et aux exécutions de mission d’une installation, fixé par son propriétaire. Une baisse conserve les capacités déjà accordées ; un agent ne peut pas relever cette limite.
 
 **Changement de node d’une conversation** :
-Démarrage d’une même conversation sur une autre node d’exécution, confirmé explicitement par la personne, le client MCP ou l’agent qui le demande. Son environnement de travail expire : elle conserve son historique, ses pièces jointes et ses artefacts, pas ses fichiers de travail.
+Passage sur une autre node d’exécution d’une conversation dont l’environnement de travail existe encore, confirmé explicitement par la personne, le client MCP ou l’agent qui le demande. Son environnement de travail expire : elle conserve son historique, ses pièces jointes et ses artefacts, pas ses fichiers de travail.
 _Avoid_ : déplacement (qui laisse croire que les fichiers suivent)
 
 **Environnement de travail d’une conversation** :

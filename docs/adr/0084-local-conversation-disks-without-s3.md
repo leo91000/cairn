@@ -19,7 +19,7 @@ ADR partiellement concernées indiquent ce qui reste applicable.
 
 ## Contexte
 
-Depuis l’ADR-0009, le disque de travail d’une conversation est un journal local
+Depuis l’[ADR-0009](0009-s3-backed-disks-required-on-every-node.md), le disque de travail d’une conversation est un journal local
 durable dont les générations sont publiées sur S3. La reprise sur une autre node,
 l’éviction du cache, la récupération après la perte d’une node et la migration entre
 VM et natif reposent sur ces publications. Cela impose au manager un bucket et ses
@@ -35,9 +35,11 @@ L’environnement de travail d’une conversation est purement local à sa node
 d’exécution. Il n’en existe aucune copie distante : la perte ou la révocation d’une
 node entraîne la perte des fichiers de travail des conversations qui s’y trouvent.
 Leur historique, leurs pièces jointes et leurs artefacts restent conservés.
-Révoquer une node fait donc expirer les environnements qu’elle contient, et sa
-confirmation l’indique. L’environnement d’une conversation dont la node est
-simplement perdue expire lors de la révocation de cette node.
+Révoquer une node fait donc expirer les environnements qu’elle contient.
+L’environnement d’une conversation dont la node est simplement perdue expire lors
+de la révocation de cette node. Sur le web, Android, le MCP public et
+`cairn_installation`, la révocation présente cet avertissement et exige une
+confirmation explicite ; `revoke_node` refuse une demande qui n’en contient pas.
 
 Le disque garde son format : le journal local durable
 ([ADR-0007](0007-demand-paged-disks-with-durable-local-journal.md),
@@ -68,22 +70,27 @@ les messages ni un changement de node : la node le supprime quand elle est
 joignable, et il est oublié si elle est révoquée. Une node supprime l’ancien disque
 d’une conversation avant d’admettre son nouvel environnement. La suppression d’une
 conversation garde le comportement de
-l’[ADR-0041](0041-immediate-conversation-deletion.md).
+l’[ADR-0041](0041-immediate-conversation-deletion.md), sans effacer d’objet
+distant ; un disque resté sur une node révoquée est oublié.
 
-Avant ce changement, le web et Android affichent, et le MCP public et
+Avant un changement de node, le web et Android affichent, et le MCP public et
 `cairn_installation` renvoient, un avertissement du type : « Les fichiers de travail de cette conversation seront
 perdus. L’historique, les pièces jointes et les artefacts sont conservés. » Toute
 opération qui change la node d’un environnement existant exige une confirmation
 explicite et refuse une demande qui n’en contient pas : l’opération `move_to_node`
 du MCP public et de `cairn_installation`, utilisée aussi par le web et Android,
 l’outil `move_to_node` de l’espace de travail d’un agent et `migrate_chat_backend`.
+Le refus d’une demande sans confirmation renvoie cet avertissement.
 `get_chat_backend_migration` reste un aperçu en lecture seule qui présente cet
 avertissement. Un environnement déjà expiré n’a plus de fichiers à perdre : choisir
 sa prochaine node ne demande pas cet avertissement.
 
-La destination et les autorisations sont vérifiées avant l’expiration, qui est
-irréversible. Le changement interrompt alors le tour en cours et clôt les questions
-ouvertes ; la destination est fixée pour le nouvel environnement. Sauf lorsque
+La destination et les autorisations sont vérifiées, et la capacité de la
+destination est réservée, avant l’expiration, qui est irréversible : une attente de
+capacité annulée ou échue conserve l’environnement. Le changement interrompt ensuite
+le tour en cours et clôt les questions ouvertes ; la destination est imposée à la
+première admission du nouvel environnement, sans fixer la conversation à cette
+node. Sauf lorsque
 l’agent change lui-même la node de sa propre conversation, celle-ci attend ensuite
 son prochain message ; les messages en file et les attentes planifiées démarrent sur la
 destination, et une mission active y reprend automatiquement.
@@ -94,15 +101,16 @@ confirmer explicitement la perte de ses fichiers. Son tour s’arrête, l’envi
 expire, puis la conversation reprend automatiquement sur la destination dans un
 environnement vide, avec l’avertissement d’expiration décrit plus haut.
 
-Le placement automatique ([ADR-0073](0073-automatic-agent-placement.md)) choisit
-toujours la node d’un nouvel environnement, mais ne change jamais la node d’un
-environnement existant. La relocalisation faute de capacité et la reprise
+Le placement automatique ([ADR-0073](0073-automatic-agent-placement.md)) continue
+de choisir la node d’un nouvel environnement lorsqu’aucune destination n’est
+imposée, mais ne change jamais la node d’un environnement existant. La relocalisation faute de capacité et la reprise
 automatique sur une autre node après une indisponibilité sont supprimées. Une conversation dont la node
 est saturée, en maintenance ou hors ligne attend cette node. Une conversation dont
 l’agent n’a plus accès à la node de son environnement reste arrêtée jusqu’au retour
 de cet accès ou à un changement de node confirmé. Après une révocation, le prochain
-tour démarre un environnement vide par le placement automatique ; libérer les choix
-de node (`releasePlacements`) garde son rôle pour les préférences et fixations.
+tour démarre un environnement vide par le placement automatique, sauf pour une
+conversation fixée à cette node : elle attend que ce choix soit libéré
+(`releasePlacements`) ou remplacé.
 
 Une node n’exécute qu’un backend : faire passer une machine de VM à natif, ou
 l’inverse, enrôle une seconde node avec son propre stockage
@@ -110,7 +118,8 @@ l’inverse, enrôle une seconde node avec son propre stockage
 conversation entre VM et exécution native est donc un changement de node : même
 confirmation, même expiration, environnement vide sur le backend de destination.
 Ses vérifications d’autorisation et d’autorité native restent celles des
-ADR-0054 et ADR-0082. Le montage natif d’un disque créé en VM et la conversion
+[ADR-0054](0054-explicit-conversation-backend-migration.md) et
+[ADR-0082](0082-move-vm-disks-between-execution-backends.md). Le montage natif d’un disque créé en VM et la conversion
 physique d’un disque créé en natif n’ont plus de source à lire ; ils sont retirés.
 
 ## Conversations existantes
@@ -120,7 +129,9 @@ disque dépend d’une publication S3, avec la cause « migration du stockage »
 bloc n’est rapatrié. Le travail en cours de ces conversations est interrompu ; leur
 prochain message, ou la reprise d’une mission active, démarre un environnement vide.
 Un environnement qui n’a jamais été publié est déjà entièrement local et reste
-utilisable.
+utilisable. La migration annule aussi les déplacements, relocalisations, reprises et
+migrations de backend en attente, sans en conserver la destination : un changement
+de node doit être redemandé avec la nouvelle confirmation.
 
 Cairn n’efface plus aucun objet distant, y compris les suppressions encore en
 attente : après la mise à jour, supprimer une conversation ne retire plus ses
@@ -153,7 +164,10 @@ que leurs tests et leur documentation.
 La durabilité d’un environnement se limite désormais au disque de sa node. Une
 sauvegarde de la machine reste à la charge de son exploitant. Une node conserve
 chacun de ses environnements en entier : son espace n’est libéré que par
-l’expiration de leur environnement ou la suppression d’une conversation.
+l’expiration d’un environnement ou la suppression d’une conversation.
 Si l’expiration automatique est désactivée, rien ne libère l’espace d’une node
 pleine sans action explicite. La réserve disque de la node et la limite de stockage
 par tâche s’appliquent à ce volume complet ; une admission sans espace attend.
+
+Les guides d’exploitation, le code et les interfaces sont mis à jour par les
+changements qui appliquent cette décision.
