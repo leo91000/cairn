@@ -26,6 +26,16 @@ pub(crate) const RULE_OPERATIONS: &[RuleOperation] = &[
         description: "List a rule's immutable versions, newest first, with who saved each one, from where, in which conversation and with which native authority.",
     },
     RuleOperation {
+        name: "list_hook_rule_triggerings",
+        scope: "read",
+        description: "List a rule's triggerings, newest first, with how many ended without any action in the last day. Every member sees their state; the event, actions and errors only its creator, the owner and members with access to its execution agent.",
+    },
+    RuleOperation {
+        name: "get_hook_rule_triggering",
+        scope: "read",
+        description: "Read one triggering: its state and, for those who may see them, its event payload, each action's input, result and error.",
+    },
+    RuleOperation {
         name: "get_hook_rule_catalog",
         scope: "read",
         description: "What a rule may use: hooks with payload schemas, plugin tools with input schemas, action kinds, conditions, operators, Cairn CEL functions, variables, designatable agents and limits.",
@@ -90,6 +100,14 @@ impl RuleOperation {
             "list_hook_rule_versions" => (
                 schema_for::<HookRuleInput>(Contract::Deserialize),
                 schema_for::<ListHookRuleVersionsOutput>(Contract::Serialize),
+            ),
+            "list_hook_rule_triggerings" => (
+                schema_for::<ListHookRuleTriggeringsInput>(Contract::Deserialize),
+                schema_for::<ListHookRuleTriggeringsOutput>(Contract::Serialize),
+            ),
+            "get_hook_rule_triggering" => (
+                schema_for::<HookRuleTriggeringInput>(Contract::Deserialize),
+                schema_for::<HookRuleTriggering>(Contract::Serialize),
             ),
             "get_hook_rule_catalog" => (
                 schema_for::<GetHookRuleCatalogInput>(Contract::Deserialize),
@@ -175,6 +193,12 @@ impl RuleOperation {
             }
             "get_hook_rule_catalog" => {
                 serde_json::to_value(catalog(s, decode(input)?, actor).await?)?
+            }
+            "list_hook_rule_triggerings" => {
+                serde_json::to_value(triggerings(s, decode(input)?, actor).await?)?
+            }
+            "get_hook_rule_triggering" => {
+                serde_json::to_value(triggering(s, decode(input)?, actor).await?)?
             }
             "validate_hook_rule" => {
                 serde_json::to_value(validate(s, decode(input)?, actor).await?)?

@@ -60,6 +60,30 @@ pub fn enqueue_alert(db: &Db<'_>, alert: &Value) -> Result<()> {
     )
 }
 
+/// An alert for one account only, such as the creator of a rule that reached its limit.
+pub(crate) fn enqueue_rule_alert(
+    db: &Db<'_>,
+    account: &str,
+    title: &str,
+    body: &str,
+) -> Result<()> {
+    let id = uuid::Uuid::new_v4().to_string();
+    enqueue_event(
+        db,
+        &NotificationEvent {
+            id: id.clone(),
+            chat_id: String::new(),
+            kind: NotificationKind::Alert {
+                alert_id: id,
+                title: title.chars().take(120).collect(),
+                body: body.chars().take(300).collect(),
+            },
+            members: Some(vec![account.to_owned()]),
+            question_recipients: None,
+        },
+    )
+}
+
 /// Questions answered while offline are discarded before they enter the relay.
 pub async fn pending(
     service: &Service,

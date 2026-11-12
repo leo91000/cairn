@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "triggeringId": {
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "triggeringId"
+  ],
+  "title": "HookRuleTriggeringInput",
+  "type": "object"
+}

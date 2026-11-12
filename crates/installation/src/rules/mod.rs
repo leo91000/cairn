@@ -7,7 +7,10 @@
 //! belongs to a membership and stops for good when that membership ends.
 mod capability;
 mod catalog;
+pub mod engine;
+pub(crate) mod evaluate;
 pub(crate) mod formula;
+pub(crate) mod interpreter;
 pub(crate) mod storage;
 pub(crate) mod validation;
 
@@ -662,6 +665,12 @@ where
             actor.authorize(db)?;
             let mut row = required(db.hook_rule(&rule)?, "Rule not found")?;
             let action = change(db, &mut row, &viewer)?;
+            if row.disabled_at.is_some() {
+                engine::stop_rule(db, &row.id, "The rule was disabled.")?;
+            }
+            if row.emergency_paused_at.is_some() {
+                engine::stop_rule(db, &row.id, "The owner paused the rule in an emergency.")?;
+            }
             row.revision = id();
             row.updated_at = now();
             db.save_hook_rule(&row)?;
@@ -948,6 +957,39 @@ pub(crate) async fn validate(
         .await
 }
 
+/// Every member sees the state of every triggering; its details only who may see them.
+pub(crate) async fn triggerings(
+    s: &Service,
+    input: ListHookRuleTriggeringsInput,
+    actor: Actor,
+) -> Result<ListHookRuleTriggeringsOutput> {
+    actor.require_scope("read")?;
+    actor.recheck().await?;
+    let viewer = actor.viewer();
+    s.store
+        .read(move |db| {
+            actor.authorize(db)?;
+            engine::list(db, &input, &viewer)
+        })
+        .await
+}
+
+pub(crate) async fn triggering(
+    s: &Service,
+    input: HookRuleTriggeringInput,
+    actor: Actor,
+) -> Result<HookRuleTriggering> {
+    actor.require_scope("read")?;
+    actor.recheck().await?;
+    let viewer = actor.viewer();
+    s.store
+        .read(move |db| {
+            actor.authorize(db)?;
+            engine::get(db, &input.triggering_id.to_string(), &viewer)
+        })
+        .await
+}
+
 pub(crate) async fn catalog(
     s: &Service,
     input: GetHookRuleCatalogInput,
@@ -988,6 +1030,7 @@ pub(crate) fn reconcile(db: &Db<'_>, policy: &TaskAuthorPolicy) -> Result<()> {
             row.revision = id();
             row.updated_at = now();
             db.save_hook_rule(&row)?;
+            engine::stop_rule(db, &row.id, "The rule's creator left the installation.")?;
             db.audit("hook_rule.membership_ended", &json!({ "ruleId": row.id }))?;
         }
     }

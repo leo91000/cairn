@@ -49,6 +49,26 @@
     "path": "/hook-rules/{ruleId}/versions"
   },
   {
+    "input": "ListHookRuleTriggeringsInput",
+    "method": "GET",
+    "name": "listHookRuleTriggerings",
+    "optionalQuery": [
+      "before"
+    ],
+    "output": "ListHookRuleTriggeringsOutput",
+    "path": "/hook-rules/{ruleId}/triggerings",
+    "query": [
+      "before"
+    ]
+  },
+  {
+    "input": "HookRuleTriggeringInput",
+    "method": "GET",
+    "name": "getHookRuleTriggering",
+    "output": "HookRuleTriggering",
+    "path": "/hook-rule-triggerings/{triggeringId}"
+  },
+  {
     "input": "CreateHookRuleInput",
     "method": "POST",
     "name": "createHookRule",

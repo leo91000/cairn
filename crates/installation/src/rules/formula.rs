@@ -2,8 +2,8 @@
 //!
 //! A formula is pure and its cost is bounded before it runs: its size, its number of
 //! nodes and the nesting of its macros are limited, it only calls the CEL standard
-//! library, the strings and lists extensions and the Cairn functions below, and it
-//! only reads the variables of its place in the rule.
+//! library, the lists extension, string functions and the Cairn functions below, and
+//! it only reads the variables of its place in the rule. Evaluation bounds the rest.
 use cel::common::ast::{EntryExpr, Expr, IdedExpr, operators};
 use std::collections::BTreeSet;
 use std::sync::{Arc, OnceLock};
@@ -102,7 +102,8 @@ pub(crate) const FUNCTIONS: &[Function] = &[
     },
 ];
 
-/// The CEL standard library and the strings and lists extensions. Namespaced
+/// The CEL standard library, the lists extension and the string functions of the
+/// CEL strings extension, which Cairn implements with size checks. Namespaced
 /// functions (`strings.quote`, `lists.range`) are not offered.
 const STANDARD: &[&str] = &[
     "size",
@@ -133,7 +134,6 @@ const STANDARD: &[&str] = &[
     "getSeconds",
     "getMilliseconds",
     "charAt",
-    "format",
     "indexOf",
     "join",
     "lastIndexOf",
@@ -193,9 +193,8 @@ pub(crate) fn environment() -> Arc<cel::Env> {
     static ENVIRONMENT: OnceLock<Arc<cel::Env>> = OnceLock::new();
     ENVIRONMENT
         .get_or_init(|| {
+            // The string functions are Cairn's, which check the size of what they build.
             let mut env = cel::Env::stdlib().with_optional_support(false);
-            env.add_extension(cel::extensions::strings)
-                .expect("strings extension");
             env.add_extension(cel::extensions::lists)
                 .expect("lists extension");
             Arc::new(env)

@@ -179,6 +179,7 @@ impl Fixture {
                 "thread": { "type": "string" },
                 "server": { "type": "string" },
                 "author": { "type": "string" },
+                "retry": { "type": "boolean" },
                 "instance": { "type": "string" },
                 "items": {
                     "type": "array",
@@ -283,6 +284,9 @@ return {
             local original = cairn.files.read({instance=input.instances[1].id,id=input.input.consume})
             cairn.http.request({instance=input.instances[1].id,url="https://service.example.test/hold"})
             return cairn.http.request({instance=input.instances[1].id,method="POST",url="https://service.example.test/upload",body=original.data})
+        end
+        if input.input.retry and input.instances[1].settings.marker ~= "accept" then
+            return {retryAfter=1}
         end
         if input.input.download then
             return cairn.http.request({instance=input.instances[1].id,url="https://service.example.test/effect",responseFile={name="private.txt"}})

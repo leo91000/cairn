@@ -5073,6 +5073,63 @@
       ],
       "type": "object"
     },
+    "HookRuleStep": {
+      "additionalProperties": false,
+      "description": "One action a triggering ran.",
+      "properties": {
+        "attempts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "finishedAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "input": true,
+        "kind": {
+          "description": "The action kind, such as `callTool`.",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "nodeId": {
+          "type": "string"
+        },
+        "result": true,
+        "startedAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "pattern": "^(running|completed|failed|retrying|waiting)$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "nodeId",
+        "label",
+        "kind",
+        "status",
+        "attempts",
+        "startedAt"
+      ],
+      "type": "object"
+    },
     "HookRuleSummary": {
       "additionalProperties": false,
       "properties": {
@@ -5201,6 +5258,147 @@
           "type": "object"
         }
       ]
+    },
+    "HookRuleTriggering": {
+      "additionalProperties": false,
+      "description": "A triggering of a rule. Every member sees its state; the event, the actions and\nthe error are shown only to the creator, the owner and members with access to the\nexecution agent.",
+      "properties": {
+        "actions": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "createdAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "detailsVisible": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "event": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HookRuleTriggeringEvent"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "finishedAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "resumesAt": {
+          "description": "When a waiting or retrying triggering resumes.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ruleId": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "status": {
+          "pattern": "^(running|waiting|retrying|completed|failed|stopped)$",
+          "type": "string"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/definitions/HookRuleStep"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "version": {
+          "description": "The rule version this triggering keeps.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "ruleId",
+        "version",
+        "status",
+        "actions",
+        "createdAt",
+        "updatedAt",
+        "detailsVisible"
+      ],
+      "type": "object"
+    },
+    "HookRuleTriggeringEvent": {
+      "additionalProperties": false,
+      "description": "The event a triggering started from.",
+      "properties": {
+        "hook": {
+          "type": "string"
+        },
+        "instanceId": {
+          "format": "uuid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "payload": true,
+        "receivedAt": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "hook",
+        "payload",
+        "receivedAt"
+      ],
+      "type": "object"
+    },
+    "HookRuleTriggeringInput": {
+      "additionalProperties": false,
+      "properties": {
+        "triggeringId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "triggeringId"
+      ],
+      "type": "object"
     },
     "HookRuleVersion": {
       "additionalProperties": false,
@@ -5756,6 +5954,61 @@
         "chats",
         "nextOffset",
         "hasMore"
+      ],
+      "type": "object"
+    },
+    "ListHookRuleTriggeringsInput": {
+      "additionalProperties": false,
+      "properties": {
+        "before": {
+          "description": "Only triggerings created before this time, for the next page.",
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ruleId": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ruleId"
+      ],
+      "type": "object"
+    },
+    "ListHookRuleTriggeringsOutput": {
+      "additionalProperties": false,
+      "properties": {
+        "nextBefore": {
+          "format": "int64",
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "triggerings": {
+          "description": "Newest first, without their details.",
+          "items": {
+            "$ref": "#/definitions/HookRuleTriggering"
+          },
+          "type": "array"
+        },
+        "withoutEffect": {
+          "description": "Triggerings that ended without any action in the last 24 hours. They are not\nkept and do not count against the hourly caps.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "triggerings",
+        "withoutEffect"
       ],
       "type": "object"
     },

@@ -626,12 +626,18 @@ fn main() {
     export::<ValidateHookRuleInput>(root, &mut generator, Contract::Deserialize);
     export::<ValidateHookRuleOutput>(root, &mut generator, Contract::Serialize);
     export::<GetHookRuleCatalogInput>(root, &mut generator, Contract::Deserialize);
+    export::<HookRuleTriggering>(root, &mut generator, Contract::Serialize);
+    export::<ListHookRuleTriggeringsInput>(root, &mut generator, Contract::Deserialize);
+    export::<ListHookRuleTriggeringsOutput>(root, &mut generator, Contract::Serialize);
+    export::<HookRuleTriggeringInput>(root, &mut generator, Contract::Deserialize);
     fs::write(root.join("rule-clients.json"), serde_json::to_string_pretty(&serde_json::json!([
         { "name": "listHookRules", "input": "ListHookRulesInput", "output": "ListHookRulesOutput", "method": "GET", "path": "/hook-rules", "query": ["agentId", "instanceId"], "optionalQuery": ["agentId", "instanceId"] },
         { "name": "getHookRuleCatalog", "input": "GetHookRuleCatalogInput", "output": "HookRuleCatalog", "method": "GET", "path": "/hook-rules/catalog", "query": ["agentId"], "optionalQuery": ["agentId"] },
         { "name": "validateHookRule", "input": "ValidateHookRuleInput", "output": "ValidateHookRuleOutput", "method": "POST", "path": "/hook-rules/validate" },
         { "name": "getHookRule", "input": "HookRuleInput", "output": "HookRule", "method": "GET", "path": "/hook-rules/{ruleId}" },
         { "name": "listHookRuleVersions", "input": "HookRuleInput", "output": "ListHookRuleVersionsOutput", "method": "GET", "path": "/hook-rules/{ruleId}/versions" },
+        { "name": "listHookRuleTriggerings", "input": "ListHookRuleTriggeringsInput", "output": "ListHookRuleTriggeringsOutput", "method": "GET", "path": "/hook-rules/{ruleId}/triggerings", "query": ["before"], "optionalQuery": ["before"] },
+        { "name": "getHookRuleTriggering", "input": "HookRuleTriggeringInput", "output": "HookRuleTriggering", "method": "GET", "path": "/hook-rule-triggerings/{triggeringId}" },
         { "name": "createHookRule", "input": "CreateHookRuleInput", "output": "HookRule", "method": "POST", "path": "/hook-rules" },
         { "name": "replaceHookRule", "input": "ReplaceHookRuleInput", "output": "HookRule", "method": "PUT", "path": "/hook-rules/{ruleId}" },
         { "name": "setHookRuleEnabled", "input": "SetHookRuleEnabledInput", "output": "HookRule", "method": "POST", "path": "/hook-rules/{ruleId}/enabled" },

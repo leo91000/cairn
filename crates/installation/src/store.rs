@@ -36,7 +36,7 @@ struct Pool {
 /// cover the live streams of several open tabs without queueing behind one page.
 const READERS: usize = 4;
 
-pub(crate) const DATABASE_VERSION: i64 = 31;
+pub(crate) const DATABASE_VERSION: i64 = 32;
 
 /// Connections that take their next job from one queue. A slow read occupies
 /// only its own connection: the next job goes to whichever is free.
@@ -256,6 +256,10 @@ impl Store {
         }
         if !fresh && version == 30 {
             crate::rules::storage::upgrade(&mut writer)?;
+            version = writer.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        }
+        if !fresh && version == 31 {
+            crate::rules::engine::upgrade(&mut writer)?;
         }
         if fresh {
             let tx = writer.transaction()?;
@@ -298,6 +302,7 @@ CREATE INDEX IF NOT EXISTS events_messages ON events(run_id,json_extract(payload
             tx.execute_batch(crate::plugins::grants::SCHEMA)?;
             tx.execute_batch(crate::missions::SCHEMA)?;
             tx.execute_batch(crate::rules::SCHEMA)?;
+            tx.execute_batch(crate::rules::engine::SCHEMA)?;
             tx.execute_batch(crate::chats::storage::SCHEMA)?;
             tx.execute_batch(crate::chats::question_storage::SCHEMA)?;
             tx.execute_batch(crate::attachments::sql::SCHEMA)?;

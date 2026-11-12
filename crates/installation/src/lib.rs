@@ -61,7 +61,7 @@ pub mod recovery;
 pub mod relay;
 mod resume_selection;
 pub mod rpc;
-pub(crate) mod rules;
+pub mod rules;
 mod run_limits;
 pub mod run_output;
 pub mod run_retry;

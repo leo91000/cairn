@@ -307,7 +307,7 @@ mod tests {
 
     fn tables(connection: &Connection) -> Vec<String> {
         connection
-            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'hook_rule%' ORDER BY name")
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('hook_rules','hook_rule_versions','hook_rule_uses') ORDER BY name")
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()
@@ -336,7 +336,7 @@ mod tests {
         let version: i64 = connection
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 31);
+        assert_eq!(version, crate::store::DATABASE_VERSION);
         upgrade(&mut connection).unwrap();
         connection.pragma_update(None, "user_version", 29).unwrap();
         assert!(upgrade(&mut connection).is_err());

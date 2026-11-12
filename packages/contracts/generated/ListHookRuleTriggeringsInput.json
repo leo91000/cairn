@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "properties": {
+    "before": {
+      "description": "Only triggerings created before this time, for the next page.",
+      "format": "int64",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "ruleId": {
+      "format": "uuid",
+      "type": "string"
+    }
+  },
+  "required": [
+    "ruleId"
+  ],
+  "title": "ListHookRuleTriggeringsInput",
+  "type": "object"
+}

@@ -227,11 +227,13 @@ pub(crate) fn check(db: &Db<'_>, request: &Request<'_>) -> Result<Checked> {
                     db,
                     request,
                     &mut checker,
-                    &path,
-                    &agent,
-                    &instance,
-                    tool,
-                    input,
+                    &ToolCall {
+                        path: &path,
+                        agent: &agent,
+                        instance: &instance,
+                        tool,
+                        input,
+                    },
                 )?;
             }
             RuleAction::StartAgent {
@@ -404,17 +406,28 @@ fn trigger_payload(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// A `callTool` action, located in its rule.
+struct ToolCall<'a> {
+    path: &'a str,
+    agent: &'a str,
+    instance: &'a str,
+    tool: &'a str,
+    input: &'a BTreeMap<String, RuleValue>,
+}
+
 fn check_tool(
     db: &Db<'_>,
     request: &Request<'_>,
     checker: &mut Checker,
-    path: &str,
-    agent: &str,
-    instance: &str,
-    tool: &str,
-    input: &BTreeMap<String, RuleValue>,
+    call: &ToolCall<'_>,
 ) -> Result<()> {
+    let ToolCall {
+        path,
+        agent,
+        instance,
+        tool,
+        input,
+    } = *call;
     let Some((connection, manifest)) = request.instances.manifest(instance) else {
         checker.problem(
             &format!("{path}/instanceId"),
