@@ -396,6 +396,7 @@ impl Vm {
                 "VM disk size does not match its S3-backed journal.",
             ));
         }
+        volume.limit_backing(resources.disk_mi_b * 1024 * 1024)?;
         let jail = state.join("jails/firecracker").join(&id).join("root");
         let mut vm = Self {
             socket: jail.join("v.sock"),

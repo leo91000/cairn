@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock, RwLock, TryLockError, Weak,
-        atomic::{AtomicBool, AtomicI64, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
     },
 };
 use tokio_util::sync::CancellationToken;
@@ -124,6 +124,8 @@ pub struct Volume {
     pub stop: CancellationToken,
     directory: PathBuf,
     policy: RwLock<Policy>,
+    task_limit: AtomicU64,
+    task_usage: Mutex<Option<(std::time::Instant, u64)>>,
     active_since: AtomicI64,
     active_attempt: Mutex<String>,
     pressure: AtomicBool,
@@ -170,6 +172,14 @@ fn try_open_with(
     directory: &Path,
     open: impl FnOnce(&Path) -> Result<Arc<Volume>>,
 ) -> Result<Option<Arc<Volume>>> {
+    try_open_with_intent(directory, open, true)
+}
+
+fn try_open_with_intent(
+    directory: &Path,
+    open: impl FnOnce(&Path) -> Result<Arc<Volume>>,
+    yield_background: bool,
+) -> Result<Option<Arc<Volume>>> {
     let entry = entry(directory)?;
     // Do not occupy the bounded I/O pool while another task opens this disk.
     // The async loader retries without delaying any other conversation.
@@ -190,7 +200,9 @@ fn try_open_with(
             // Volume is gone. Ask it to yield; its exclusive lock then drains
             // and the reopened volume consolidates the same generations.
             if let Some(disk) = disk.upgrade() {
-                disk.yield_consolidation();
+                if yield_background {
+                    disk.yield_consolidation();
+                }
                 return Ok(None);
             }
         }
@@ -248,6 +260,8 @@ fn open_volume(directory: &Path) -> Result<Arc<Volume>> {
         stop,
         directory: directory.to_owned(),
         policy: RwLock::new(policy),
+        task_limit: AtomicU64::new(u64::MAX),
+        task_usage: Mutex::new(None),
         active_since: AtomicI64::new(0),
         active_attempt: Mutex::new(String::new()),
         pressure: AtomicBool::new(false),
@@ -277,6 +291,15 @@ fn monitor_consolidation(volume: &Arc<Volume>, journal_threshold: u64) {
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
         return;
     };
+    if volume.consolidates()
+        && volume.disk.sealed_pending()
+        && volume
+            .disk
+            .completed()
+            .is_ok_and(|completed| completed.is_some())
+    {
+        runtime.spawn(consolidate(volume.disk.clone()));
+    }
     let volume = Arc::downgrade(volume);
     runtime.spawn(async move {
         let mut wait = CONSOLIDATION_CHECK;
@@ -293,7 +316,10 @@ fn monitor_consolidation(volume: &Arc<Volume>, journal_threshold: u64) {
                 continue;
             }
             if !volume.disk.sealed_pending()
-                && volume.disk.journal_bytes() >= journal_threshold
+                && (volume.disk.journal_bytes() >= journal_threshold
+                    || (volume.disk.journal_bytes() > 0
+                        && (volume.pressure.load(Ordering::Acquire)
+                            || volume.space_pressure.load(Ordering::Acquire))))
                 && let Err(error) = volume.seal().await
             {
                 tracing::warn!(target: "cairn_performance", operation = "journal_consolidation", phase = "seal", message = %error.message);
@@ -316,26 +342,44 @@ fn monitor_consolidation(volume: &Arc<Volume>, journal_threshold: u64) {
 /// later reopen never wait for it. Returns false when it should be retried later.
 async fn consolidate(disk: Arc<LazyDisk>) -> bool {
     let stop = disk.consolidation_stop();
-    let _permit = tokio::select! {
+    let _background = tokio::select! {
         () = stop.cancelled() => return true,
-        permit = CONSOLIDATIONS.acquire() => match permit {
-            Ok(permit) => permit,
-            Err(_) => return false,
-        }
+        guard = disk.background_consolidation() => guard,
     };
-    let identity = disk.performance_identity();
-    match tokio::task::spawn_blocking(move || disk.consolidate()).await {
-        Ok(Ok(_)) => true,
-        Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => true,
-        Ok(Err(error)) => {
-            tracing::warn!(target: "cairn_performance", operation = "journal_consolidation", id = identity, kind = ?error.kind(), message = %error);
-            false
-        }
-        Err(error) => {
-            tracing::warn!(target: "cairn_performance", operation = "journal_consolidation", id = identity, message = %error);
-            false
+    // Completion may seal a newer generation while reconstruction is running.
+    // Retain the disk and drain that demand even after its Volume is released.
+    while disk.sealed_pending() {
+        let permit = tokio::select! {
+            () = stop.cancelled() => return true,
+            permit = CONSOLIDATIONS.acquire() => match permit {
+                Ok(permit) => permit,
+                Err(_) => return false,
+            }
+        };
+        let identity = disk.performance_identity();
+        let worker = disk.clone();
+        let result = tokio::task::spawn_blocking(move || worker.consolidate()).await;
+        drop(permit);
+        let retry = match result {
+            Ok(Ok(_)) => std::time::Duration::from_millis(20),
+            Ok(Err(error)) if error.kind() == io::ErrorKind::Interrupted => return true,
+            Ok(Err(error)) => {
+                tracing::warn!(target: "cairn_performance", operation = "journal_consolidation", id = identity, kind = ?error.kind(), message = %error);
+                CONSOLIDATION_RETRY
+            }
+            Err(error) => {
+                tracing::warn!(target: "cairn_performance", operation = "journal_consolidation", id = identity, message = %error);
+                CONSOLIDATION_RETRY
+            }
+        };
+        if disk.sealed_pending() {
+            tokio::select! {
+                () = stop.cancelled() => return true,
+                () = tokio::time::sleep(retry) => {}
+            }
         }
     }
+    true
 }
 
 /// A durable fence excludes detached acknowledgements even after transport loss
@@ -426,15 +470,31 @@ async fn blocking<T: Send + 'static>(
     .map_err(Error::internal)?
 }
 
+fn try_inspect(directory: &Path) -> Result<Option<Arc<Volume>>> {
+    try_open_with_intent(directory, open_volume, false)
+}
+
+pub async fn load_for_inspection(directory: &Path) -> Result<Arc<Volume>> {
+    load_with_opener(directory, std::time::Duration::from_secs(60), try_inspect).await
+}
+
 pub async fn load(directory: &Path) -> Result<Arc<Volume>> {
     load_with_wait(directory, std::time::Duration::from_secs(60)).await
 }
 
 async fn load_with_wait(directory: &Path, wait: std::time::Duration) -> Result<Arc<Volume>> {
+    load_with_opener(directory, wait, try_open).await
+}
+
+async fn load_with_opener(
+    directory: &Path,
+    wait: std::time::Duration,
+    opener: fn(&Path) -> Result<Option<Arc<Volume>>>,
+) -> Result<Arc<Volume>> {
     let deadline = tokio::time::Instant::now() + wait;
     loop {
         let path = directory.to_owned();
-        if let Some(volume) = blocking(move || try_open(&path)).await? {
+        if let Some(volume) = blocking(move || opener(&path)).await? {
             return Ok(volume);
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -886,6 +946,47 @@ impl Disk for Volume {
 }
 
 impl Volume {
+    /// The VM's issued disk allowance covers its complete local backing. Native
+    /// supervision also includes its separate managed temporary filesystem.
+    pub(crate) fn limit_backing(&self, bytes: u64) -> Result<()> {
+        if bytes == 0 {
+            return Err(Error::bad("Disk allowance must be positive."));
+        }
+        self.task_limit.store(bytes, Ordering::Release);
+        *self.task_usage.lock().map_err(Error::internal)? = None;
+        Ok(())
+    }
+
+    fn task_has_room(&self, incoming: u64) -> io::Result<bool> {
+        let limit = self.task_limit.load(Ordering::Acquire);
+        if limit == u64::MAX {
+            return Ok(true);
+        }
+        let mut sample = self
+            .task_usage
+            .lock()
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let refresh = sample
+            .as_ref()
+            .is_none_or(|(at, _)| at.elapsed() >= std::time::Duration::from_secs(1));
+        if refresh {
+            *sample = Some((std::time::Instant::now(), allocated(&self.directory)?));
+        }
+        Ok(sample.as_ref().unwrap().1.saturating_add(incoming) <= limit)
+    }
+
+    fn charge_task(&self, incoming: u64) -> io::Result<()> {
+        if let Some((_, used)) = self
+            .task_usage
+            .lock()
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .as_mut()
+        {
+            *used = used.saturating_add(incoming);
+        }
+        Ok(())
+    }
+
     fn admit_write(
         &self,
         bytes: usize,
@@ -903,11 +1004,13 @@ impl Volume {
             }
             let guard = super::cache::admission()?;
             let (total, free) = super::policy::space(&self.directory)?;
-            if free
-                > self
-                    .policy()?
-                    .reserve(total)
-                    .saturating_add(bytes as u64 * 4 + 1024 * 1024)
+            let incoming = bytes as u64 * 4 + frames as u64 * 4096;
+            if self.task_has_room(incoming)?
+                && free
+                    > self
+                        .policy()?
+                        .reserve(total)
+                        .saturating_add(bytes as u64 * 4 + 1024 * 1024)
             {
                 self.pressure.store(false, Ordering::SeqCst);
                 self.space_pressure.store(false, Ordering::Release);
@@ -918,10 +1021,8 @@ impl Volume {
                     .ok_or_else(|| io::Error::other("Invalid disk path"))?;
                 let _headroom =
                     super::cache::reserve_write(&guard, bytes as u64 * 4 + 1024 * 1024)?;
-                crate::microvm::budget::charge_disk(
-                    state,
-                    bytes as u64 * 4 + frames as u64 * 4096,
-                )?;
+                crate::microvm::budget::charge_disk(state, incoming)?;
+                self.charge_task(incoming)?;
                 drop(guard);
                 let result = write();
                 if result.is_err() {
@@ -1678,6 +1779,140 @@ mod tests {
         let mut bytes = [0; 10];
         volume.read_at(0, &mut bytes).unwrap();
         assert_eq!(&bytes, b"runningnew");
+    }
+
+    #[tokio::test]
+    async fn task_backing_pressure_counts_journal_history_and_consolidates_before_resuming_writes()
+    {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("disks/conversation");
+        let block = 4 * 1024 * 1024u64;
+        let manifest = json!({
+            "version": 1, "size": 4 * block, "blockSize": block,
+            "blocks": (0..4).map(|index| json!({ "offset": index * block, "size": block, "hash": null })).collect::<Vec<_>>()
+        });
+        let disk = create(
+            &directory.join("lazy"),
+            &manifest,
+            &json!({
+                "master": "http://127.0.0.1:1/", "grant": "local-task",
+                "policy": { "reserveMiB": 64, "reservePercent": 1 }
+            }),
+        )
+        .await
+        .unwrap();
+        for value in 1..=3 {
+            disk.write_at(0, &vec![value; block as usize]).unwrap();
+        }
+        drop(disk);
+        let volume = load(&directory).await.unwrap();
+        volume.limit_backing(8 * 1024 * 1024).unwrap();
+        let writer = volume.clone();
+        let writer = tokio::task::spawn_blocking(move || writer.write_at(0, b"new"));
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !volume.pressure.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!writer.is_finished());
+        assert!(volume.disk.journal_bytes() < CONSOLIDATE_JOURNAL_BYTES);
+        tokio::time::timeout(std::time::Duration::from_secs(15), writer)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(allocated(&directory).unwrap() < 8 * 1024 * 1024);
+        let mut bytes = [0; 3];
+        volume.read_at(0, &mut bytes).unwrap();
+        assert_eq!(&bytes, b"new");
+    }
+
+    fn hold_consolidation(
+        disk: &LazyDisk,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered, wait) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        disk.on_consolidation_start(Box::new(move || {
+            let _ = entered.send(());
+            held.recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+        }));
+        (wait, release)
+    }
+
+    #[tokio::test]
+    async fn a_completed_seal_during_consolidation_is_drained_after_volume_release() {
+        let root = tempfile::tempdir().unwrap();
+        let (volume, _, _) = controller_fixture(root.path()).await;
+        let disk = volume.disk.clone();
+        disk.write_at(0, b"first").unwrap();
+        disk.seal().unwrap();
+        let (entered, release) = hold_consolidation(&disk);
+        let active = tokio::spawn(consolidate(disk.clone()));
+        entered.await.unwrap();
+        disk.write_at(0, b"completed").unwrap();
+        let generation = volume.seal_completed().await.unwrap();
+        drop(volume);
+        let mut queued = tokio::spawn(consolidate(disk.clone()));
+        let completed_early =
+            tokio::time::timeout(std::time::Duration::from_millis(500), &mut queued)
+                .await
+                .is_ok();
+        release.send(()).unwrap();
+        active.await.unwrap();
+        if !completed_early {
+            queued.await.unwrap();
+        }
+        assert!(
+            !completed_early,
+            "a busy journal was incorrectly reported consolidated"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while disk.sealed_pending() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("completed generation was abandoned after contention");
+        assert_eq!(disk.accounting().unwrap()["dirtyBytes"], 0);
+        assert!(
+            disk.accounting().unwrap()["published"]["generation"]
+                .as_i64()
+                .unwrap()
+                >= generation
+        );
+    }
+
+    #[tokio::test]
+    async fn status_inspection_never_cancels_detached_consolidation() {
+        let root = tempfile::tempdir().unwrap();
+        let (volume, _, _) = controller_fixture(root.path()).await;
+        let directory = volume.directory.clone();
+        let disk = volume.disk.clone();
+        disk.write_at(0, b"completed").unwrap();
+        let (entered, release) = hold_consolidation(&disk);
+        volume.seal_completed().await.unwrap();
+        entered.await.unwrap();
+        drop(volume);
+        let inspected = try_inspect(&directory).unwrap();
+        let cancelled = disk.consolidation_stop().is_cancelled();
+        release.send(()).unwrap();
+        assert!(
+            inspected.is_none(),
+            "inspection must wait for the detached owner"
+        );
+        assert!(
+            !cancelled,
+            "status observation cancelled local consolidation"
+        );
+        drop(disk);
+        let volume = load_for_inspection(&directory).await.unwrap();
+        assert_eq!(volume.inspect().await.unwrap()["dirtyBytes"], 0);
     }
 
     #[tokio::test]

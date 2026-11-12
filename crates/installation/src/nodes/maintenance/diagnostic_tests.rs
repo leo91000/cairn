@@ -105,7 +105,7 @@ impl Write for BlockedWriter {
 }
 
 #[tokio::test]
-async fn maintenance_reports_actual_native_capture_retries_and_preserves_ownership() {
+async fn maintenance_reports_local_drain_without_remote_capture() {
     for child in [
         "nodes::maintenance::diagnostic_tests::native_capture_retry_report_child",
         "nodes::maintenance::diagnostic_tests::event_only_filter_report_child",
@@ -435,8 +435,8 @@ async fn actual_drain_reports(
         drained.is_ok(),
         "Diagnostic filter failure must preserve readiness and task cleanup"
     );
-    assert_eq!(captures.load(Ordering::SeqCst), 3);
-    assert_ne!(
+    assert_eq!(captures.load(Ordering::SeqCst), 0);
+    assert_eq!(
         service
             .store
             .attempt_fixture(&attempt)
@@ -460,7 +460,7 @@ async fn actual_drain_reports(
         assert!(reports.is_empty());
         let current = service.node_boundary(&node).await.unwrap();
         assert_eq!(current["maintenance"], "ready-to-update");
-        assert!(current["maintenanceError"].is_string());
+        assert!(current["maintenanceError"].is_null());
         service.shutdown.cancel();
         peer.abort();
         return;
@@ -471,13 +471,13 @@ async fn actual_drain_reports(
         "Actual maintenance must report its bounded phase accounting"
     );
     let report = &reports[0]["fields"];
-    assert_eq!(report["outcome"], "error");
+    assert_eq!(report["outcome"], "completed");
     assert_eq!(report["pause_requests"], 1);
-    assert_eq!(report["capture_calls"], 3);
-    assert_eq!(report["capture_waits"], 2);
-    assert_eq!(report["capture_failures"], 1);
-    assert_eq!(report["placement_releases"], 0);
-    assert!(report["capture_wait_ms"].as_u64().unwrap() >= 200);
+    assert_eq!(report["capture_calls"], 0);
+    assert_eq!(report["capture_waits"], 0);
+    assert_eq!(report["capture_failures"], 0);
+    assert_eq!(report["placement_releases"], 1);
+    assert_eq!(report["capture_wait_ms"], 0);
     let encoded = reports[0].to_string();
     for (index, private) in [
         run.as_str(),

@@ -99,8 +99,8 @@ impl Fixture {
         volume.disk.read_at(0, &mut bytes).unwrap();
         assert_eq!(bytes.as_slice(), &Contents::Sparse.block(0)[..4096]);
         let status = volume.disk.accounting().unwrap();
-        assert!(status["dirtyBytes"].as_u64().unwrap() > 0);
-        assert!(status["published"].is_null());
+        assert!(status["dirtyBytes"].as_u64().unwrap() > 0 || status["published"]["local"] == true);
+        assert!(status["published"]["backupId"].is_null());
     }
 
     async fn grant_counts(&self) -> (i64, i64) {

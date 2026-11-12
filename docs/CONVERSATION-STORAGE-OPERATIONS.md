@@ -18,7 +18,8 @@ remote download replaces missing or damaged data.
 Completed turns seal a durable generation after filesystem synchronization. The
 node consolidates it in the background, outside guest I/O and turn completion.
 While the environment is mounted, a five-second check also seals a crash-consistent
-prefix once the journal reaches 1 GiB. Two background consolidations can run on a
+prefix once the journal reaches 1 GiB, or when journal backing causes space or
+task-allowance pressure. Two background consolidations can run on a
 node at once. Space failures retry after a minute; they never discard the journal.
 Prepared environments remain journal-backed until assigned to a conversation.
 
@@ -32,7 +33,9 @@ block files. Newer writes remain owned throughout. This establishes process-cras
 recovery, not a physical power-loss qualification.
 
 The journal's `dirtyBytes` measures unconsolidated writes, not remote backup lag.
-It returns to zero when all writes have been consolidated. Stopping a retained VM
+It returns to zero when all writes have been consolidated. Completed-turn demand
+is drained after volume release, including overlapping seals and retries; status
+observation never interrupts that work. Stopping a retained VM
 releases RAM while preserving its disk, irrespective of this counter. Disk deletion
 after expiration or explicit conversation deletion likewise needs no publication.
 

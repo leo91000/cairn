@@ -333,10 +333,11 @@ async fn disk_storage(
     if !crate::storage::runtime::exists(&directory) {
         return Err(Error::conflict("Conversation has no S3-backed journal."));
     }
-    let volume = crate::storage::runtime::load(&directory).await?;
     if operation == "storage-status" {
+        let volume = crate::storage::runtime::load_for_inspection(&directory).await?;
         return Ok(Json(volume.inspect().await?).into_response());
     }
+    let volume = crate::storage::runtime::load(&directory).await?;
     let bytes = body(request, 16384, "Invalid publication receipt.").await?;
     let receipt: Publication = decode(&bytes, "Missing generation.")?;
     let generation = receipt

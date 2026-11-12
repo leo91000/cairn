@@ -977,7 +977,7 @@ pub async fn status(state: &Path, run: &str) -> Result<Value> {
         Err(error) => return Err(error.into()),
     }
 
-    let volume = storage::runtime::load(&directory).await?;
+    let volume = storage::runtime::load_for_inspection(&directory).await?;
     let mut status = volume.inspect().await?;
     status["paused"] = volume.paused().into();
     Ok(status)

@@ -1983,15 +1983,10 @@ mod tests {
         .expect("A completed turn must release its scheduler slot before S3 acknowledgement")
         .unwrap();
         let current = service.store.run(&run).await.unwrap();
-        assert_eq!(current["backup"]["status"], "pending");
-        assert_eq!(current["backup"]["requestedRevision"], 1);
-        // Repeated completed turns coalesce to one durable demand rather than
-        // enqueueing one upload task for each response.
+        assert!(current["backup"].is_null());
+        // Repeated completion never creates obsolete publication demand.
         release(&service, &checkpoint, None, true).await.unwrap();
-        assert_eq!(
-            service.store.run(&run).await.unwrap()["backup"]["requestedRevision"],
-            2
-        );
+        assert!(service.store.run(&run).await.unwrap()["backup"].is_null());
         drop(publication);
         service.shutdown.cancel();
     }

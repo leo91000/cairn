@@ -9,9 +9,7 @@ use axum::{Json, Router, body::to_bytes, extract::Request, response::IntoRespons
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
-async fn lost_ack_is_fenced_before_purge_or_expiry_releases_its_dependencies() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
+async fn retirement_releases_obsolete_ack_pins_without_fencing_or_remote_deletion() {
     for permanently_deleted in [true, false] {
         let root = tempfile::tempdir().unwrap();
         let run = id();
@@ -56,26 +54,23 @@ async fn lost_ack_is_fenced_before_purge_or_expiry_releases_its_dependencies() {
         });
         let (controller, controller_task) = peer(controller).await;
         let s = service_with_runner(root.path(), controller).await;
-        let (saved_run, saved_publication, saved_object, saved_chat) = (
-            run.clone(),
-            publication.clone(),
-            object.clone(),
-            chat.clone(),
-        );
-        s.store.transaction(move |db| {
-            db.add_run_fixture(&json!({
-                "id": saved_run, "taskId": id(), "status": "succeeded", "createdAt": 0
-            }), None)?;
-            db.save_conversation_boundary(&saved_chat)?;
-            db.save_checkpoint_boundary(&saved_run, &json!({"nodeId": super::super::LOCAL_NODE_ID}))?;
-            db.0.execute("INSERT INTO shared_publications VALUES(?1,?2)", rusqlite::params![saved_publication, saved_run])?;
-            db.0.execute("INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES(?1,'fixture',?2,4096,'{}','ready')", rusqlite::params![saved_object, digest::block(&[4;4096])])?;
-            db.0.execute("INSERT INTO shared_references VALUES(?1,?2)", rusqlite::params![saved_publication, saved_object])?;
-            db.0.execute("INSERT INTO direct_journal_acknowledgements(publication,run_id,node_id) VALUES(?1,?2,?3)", rusqlite::params![saved_publication, saved_run, super::super::LOCAL_NODE_ID])?;
-            Ok(())
+        s.store.transaction({
+            let (run, publication, object, chat) = (run.clone(), publication.clone(), object.clone(), chat.clone());
+            move |db| {
+                db.add_run_fixture(&json!({ "id": run, "taskId": id(), "status": "succeeded", "createdAt": 0 }), None)?;
+                db.save_conversation_boundary(&chat)?;
+                db.save_checkpoint_boundary(&run, &json!({ "nodeId": super::super::LOCAL_NODE_ID }))?;
+                db.0.execute("INSERT INTO shared_publications VALUES(?1,?2)", rusqlite::params![publication, run])?;
+                db.0.execute("INSERT INTO shared_objects(id,destination,hash,size,location,state) VALUES(?1,'fixture',?2,4096,'{}','ready')", rusqlite::params![object, digest::block(&[4;4096])])?;
+                db.0.execute("INSERT INTO shared_references VALUES(?1,?2)", rusqlite::params![publication, object])?;
+                db.0.execute("INSERT INTO direct_journal_acknowledgements(publication,run_id,node_id) VALUES(?1,?2,?3)", rusqlite::params![publication, run, super::super::LOCAL_NODE_ID])?;
+                Ok(())
+            }
         }).await.unwrap();
-
-        if !permanently_deleted {
+        if permanently_deleted {
+            crate::conversation_deletion::purge(&s, chat).await.unwrap();
+            assert!(s.store.run(&run).await.is_err());
+        } else {
             s.expire_environment(
                 &run,
                 crate::environment_expiration::Expiration::new(
@@ -85,35 +80,12 @@ async fn lost_ack_is_fenced_before_purge_or_expiry_releases_its_dependencies() {
             )
             .await
             .unwrap();
+            s.retire_environments().await.unwrap();
+            assert_eq!(
+                s.store.run(&run).await.unwrap()["environmentState"],
+                "expired"
+            );
         }
-        let retire = || async {
-            if permanently_deleted {
-                return crate::conversation_deletion::purge(&s, chat.clone()).await;
-            }
-            // Each attempt is due immediately; the retry delay is not under test.
-            s.store
-                .transaction(|db| {
-                    for mut retirement in db.list("environment-retirements")? {
-                        retirement["retryAfter"] = Value::Null;
-                        db.put("environment-retirements", &retirement)?;
-                    }
-                    Ok(())
-                })
-                .await?;
-            s.retire_environments().await?;
-            match s.store.list("environment-retirements").await?.first() {
-                Some(retirement) => Err(crate::error::Error::unavailable(
-                    retirement["error"]
-                        .as_str()
-                        .unwrap_or("Retirement pending."),
-                )),
-                None => Ok(()),
-            }
-        };
-        // Even a successful disk DELETE does not prove that a detached ACK has
-        // finished. Failed fencing must preserve both the run and its pins.
-        assert!(retire().await.is_err());
-        assert!(s.store.run(&run).await.is_ok());
         s.store
             .read(|db| {
                 assert_eq!(
@@ -186,7 +158,7 @@ async fn lost_ack_is_fenced_before_purge_or_expiry_releases_its_dependencies() {
                     db.0.query_row(
                         "SELECT count(*) FROM shared_objects WHERE unused_at IS NOT NULL",
                         [],
-                        |r| r.get::<_, i64>(0)
+                        |row| row.get::<_, i64>(0)
                     )?,
                     1
                 );

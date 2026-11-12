@@ -71,6 +71,15 @@ impl LazyDisk {
         self.consolidation_stop.clone()
     }
 
+    pub(crate) async fn background_consolidation(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.background.lock().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn on_consolidation_start(&self, hook: Box<dyn FnOnce() + Send>) {
+        *self.consolidation_hook.lock().unwrap() = Some(hook);
+    }
+
     /// Fold every sealed generation into a new local base, then retire its
     /// journal segments and the block files no base references. Each block
     /// file and its directory are durable before the base names it. A crash
@@ -92,6 +101,13 @@ impl LazyDisk {
         let Some(generation) = generation else {
             return Ok(None);
         };
+        #[cfg(test)]
+        {
+            let hook = self.consolidation_hook.lock().map_err(failure)?.take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
         let mut timing = crate::performance::Operation::new(
             "journal_consolidate",
             Self::identity(&self.directory),

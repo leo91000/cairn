@@ -47,6 +47,9 @@ pub struct LazyDisk {
     base: Mutex<Arc<Value>>,
     source: Arc<dyn BlockSource>,
     consolidating: Mutex<()>,
+    background: tokio::sync::Mutex<()>,
+    #[cfg(test)]
+    consolidation_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     consolidation_stop: tokio_util::sync::CancellationToken,
     sealed_pending: AtomicBool,
     journal_bytes: AtomicU64,
@@ -287,6 +290,9 @@ impl LazyDisk {
             base: Mutex::new(Arc::new(manifest)),
             source,
             consolidating: Mutex::new(()),
+            background: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            consolidation_hook: Mutex::new(None),
             consolidation_stop: tokio_util::sync::CancellationToken::new(),
             sealed_pending: AtomicBool::new(sealed_pending),
             journal_bytes: AtomicU64::new(journal_bytes),
