@@ -62,7 +62,7 @@ concurrency:
 jobs:
   resolve:
     if: inputs.backend-only != true && (inputs.ci-diagnostic == 'none' || inputs.ci-diagnostic == '')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 42
     permissions:
       contents: read
@@ -111,7 +111,7 @@ jobs:
     # Browser tests need only these binaries and the frontend, not the whole quality job.
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -165,7 +165,7 @@ jobs:
   quality:
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7.0.1
@@ -195,7 +195,7 @@ jobs:
   rust-check:
     needs: resolve
     if: always() && !cancelled() && (inputs.ci-diagnostic == 'none' || inputs.ci-diagnostic == '') && (inputs.backend-only == true || needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -236,7 +236,7 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     needs: resolve
     if: always() && !cancelled() && inputs.ci-diagnostic != 'native' && (inputs.ci-diagnostic == 'backend' || inputs.backend-only == true || (needs.resolve.result == 'success' && (inputs.backend-qualification == 'backend-migration' || needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main')))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -336,7 +336,7 @@ jobs:
   cli-qualification:
     needs: [resolve, backend]
     if: always() && !cancelled() && (inputs.ci-diagnostic == 'none' || inputs.ci-diagnostic == '') && inputs.backend-only != true && needs.resolve.result == 'success' && needs.backend.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -457,7 +457,7 @@ jobs:
   backend-migration-qualification:
     needs: [backend, cli-qualification]
     if: always() && !cancelled() && inputs.backend-qualification == 'backend-migration' && needs.backend.result == 'success' && (inputs.backend-only == true || needs.cli-qualification.result == 'success')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       CARGO_PROFILE_DEV_DEBUG: '0'
@@ -496,7 +496,7 @@ jobs:
           --health-interval 5s --health-timeout 5s --health-retries 10
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true' || github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Hosted Ubuntu package downloads can consume over 20 minutes before fixtures run.
     timeout-minutes: 45
     env:
@@ -551,7 +551,7 @@ jobs:
     name: Native Linux ublk storage and process ownership (CPU workload)
     needs: [resolve, build]
     if: always() && !cancelled() && (inputs.ci-diagnostic == 'native' || (inputs.ci-diagnostic != 'backend' && needs.resolve.result == 'success' && needs.build.result == 'success' && needs.resolve.outputs.reuse != 'true'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Allow slow kernel-module installation and the complete native qualification.
     timeout-minutes: 90
     permissions:
@@ -768,7 +768,7 @@ jobs:
     name: browser (${{ matrix.group }})
     needs: [resolve, build]
     if: needs.resolve.outputs.reuse != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Preparation and evidence upload must not consume the shard's test budget.
     timeout-minutes: 25
     container:
@@ -858,7 +858,7 @@ jobs:
     name: direct-relay network bench (${{ matrix.group }})
     needs: [resolve, build]
     if: needs.resolve.outputs.reuse != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -933,7 +933,7 @@ jobs:
   android-direct-build:
     needs: resolve
     if: needs.resolve.outputs.reuse != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
@@ -964,7 +964,7 @@ jobs:
     name: Android direct-relay device bench (${{ matrix.scenario }})
     needs: [resolve, build, android-direct-build]
     if: needs.resolve.outputs.reuse != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -1050,7 +1050,7 @@ jobs:
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       published: ${{ env.PUBLISH }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -1280,7 +1280,7 @@ jobs:
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       published: ${{ env.PUBLISH }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -1345,7 +1345,7 @@ jobs:
     needs: resolve
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.resolve.outputs.reuse == 'true'
     continue-on-error: true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -1389,7 +1389,7 @@ jobs:
     # before releases when Android or runner changes need it (docs/DEPLOYMENT.md) and does not gate CI.
     needs: [resolve, build, quality, rust-check, backend, cli-qualification, backend-migration-qualification, node-checks, browser, network-bench, native-runtime, android-direct-build, android-direct, image, beacon-image]
     if: always() && !cancelled() && inputs.validation-only != true && needs.resolve.outputs.reuse != 'true' && needs.quality.result == 'success' && needs.rust-check.result == 'success' && needs.backend.result == 'success' && needs.cli-qualification.result == 'success' && (inputs.backend-qualification != 'backend-migration' || needs.backend-migration-qualification.result == 'success') && needs.node-checks.result == 'success' && needs.build.result == 'success' && needs.browser.result == 'success' && needs.network-bench.result == 'success' && needs.native-runtime.result == 'success' && needs.android-direct-build.result == 'success' && needs.android-direct.result == 'success' && needs.image.result == 'success' && needs.image.outputs.published == 'true' && needs.beacon-image.result == 'success' && needs.beacon-image.outputs.published == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -1438,7 +1438,7 @@ jobs:
   promote:
     needs: [resolve, backend-migration-qualification]
     if: always() && !cancelled() && inputs.validation-only != true && needs.resolve.outputs.reuse == 'true' && (inputs.backend-qualification != 'backend-migration' || needs.backend-migration-qualification.result == 'success')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -1459,7 +1459,7 @@ jobs:
     needs: [resolve, image, beacon-image, publish, promote]
     permissions:
       contents: read
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment:
       name: production
@@ -1506,7 +1506,7 @@ jobs:
   plan-storage:
     name: Plan storage layout and version fence
     if: github.event_name == 'workflow_dispatch' && (inputs.ci-diagnostic == 'none' || inputs.ci-diagnostic == '') && inputs.plan-storage-reference != ''
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7.0.1
